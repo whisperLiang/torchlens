@@ -391,6 +391,7 @@ _WEAK_SUBJECT_TABLES = frozenset(
         # entries die with the trace.
         ("torchlens/backends/torch/tensor_tracking.py", "_IMPLICIT_BACKWARD_TASK_IDS"),
         ("torchlens/backends/torch/wrappers.py", "_COW_STATE_PTRS_CACHE"),
+        ("torchlens/capture/structure_only.py", "_DISCHARGE_REGISTRY"),
         ("torchlens/data_classes/_compaction.py", "_COMPACTED_TRACES"),
         ("torchlens/data_classes/_nonfinite.py", "_MEMOS"),
         # Per-trace grad_fn-call ordinal index (fix/walkers f399c63a, linear
@@ -1097,6 +1098,7 @@ _WEAKLY_HELD = frozenset(
         ("torchlens/backends/torch/model_prep.py", "_source_line_cache"),
         ("torchlens/backends/torch/tensor_tracking.py", "_IMPLICIT_BACKWARD_TASK_IDS"),
         ("torchlens/backends/torch/wrappers.py", "_COW_STATE_PTRS_CACHE"),
+        ("torchlens/capture/structure_only.py", "_DISCHARGE_REGISTRY"),
         ("torchlens/data_classes/_compaction.py", "_COMPACTED_TRACES"),
         ("torchlens/data_classes/_nonfinite.py", "_MEMOS"),
         ("torchlens/data_classes/grad_fn_call.py", "_ORDINAL_POSITIONS_CACHE"),

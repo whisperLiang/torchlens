@@ -646,12 +646,9 @@ def _capture_backward_aten(trace: Any, pass_index: int) -> Iterator[None]:
         capture_phase="backward",
         backward_epoch_index=pass_index,
     )
-    prior_armed = _state._aten_recording_armed
     marker_token = _ACTIVE_BACKWARD_GRAD_FN_REFS.set(())
-    _state._aten_recording_armed = True
     try:
-        with _CompletenessDispatchMode(state):
+        with _state.aten_recording(), _CompletenessDispatchMode(state):
             yield
     finally:
-        _state._aten_recording_armed = prior_armed
         _ACTIVE_BACKWARD_GRAD_FN_REFS.reset(marker_token)

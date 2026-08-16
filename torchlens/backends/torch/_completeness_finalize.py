@@ -407,40 +407,37 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
         capture_phase="forward",
     )
     mode_context = _CompletenessDispatchMode(state)
-    prior_aten_armed = _state._aten_recording_armed
-    _state._aten_recording_armed = prior_aten_armed or record_aten
-    # A runnable capture additionally observes census-INVISIBLE ``.tolist()`` /
-    # ``.numpy()`` / ``__array__`` escapes via a scoped method patch so every escape
-    # mechanism feeds one uniform source-witness pass. The patch is a pure observer,
-    # restored unconditionally, and is skipped entirely for the non-runnable census path.
-    if record_escapes:
-        # r35 I2: arm wrapper ownership tokens so raised / host-returning dispatch
-        # events can be attributed to their exact wrapper owner (the ledger's
-        # owner-accounted discharge rule) even with both shadow modes off.
-        prior_ledger_armed = _state._runnable_ledger_armed
-        _state._runnable_ledger_armed = True
-        # r43: publish the witness state so the wrappers.py string-hook interception can
-        # classify owner vs non-owner (the ONE place a non-owner thread must not flip the
-        # global ``pause_logging`` toggle). Cleared FIRST on exit.
-        global _ACTIVE_WITNESS_STATE
-        prior_active_state = _ACTIVE_WITNESS_STATE
-        _ACTIVE_WITNESS_STATE = state
-        try:
-            with _observe_invisible_host_escapes(state), mode_context:
-                try:
-                    yield
-                finally:
-                    if mode == "shadow":
-                        _finalize_census(state)
-                    else:
-                        _finalize_input_semantics_without_census(trace)
-                    _finalize_runnable_ledger(state)
-        finally:
-            _ACTIVE_WITNESS_STATE = prior_active_state
-            _state._runnable_ledger_armed = prior_ledger_armed
-            _state._aten_recording_armed = prior_aten_armed
-        return
-    try:
+    with _state.aten_recording(record_aten):
+        # A runnable capture additionally observes census-INVISIBLE ``.tolist()`` /
+        # ``.numpy()`` / ``__array__`` escapes via a scoped method patch so every escape
+        # mechanism feeds one uniform source-witness pass. The patch is a pure observer,
+        # restored unconditionally, and is skipped entirely for the non-runnable census path.
+        if record_escapes:
+            # r35 I2: arm wrapper ownership tokens so raised / host-returning dispatch
+            # events can be attributed to their exact wrapper owner (the ledger's
+            # owner-accounted discharge rule) even with both shadow modes off.
+            prior_ledger_armed = _state._runnable_ledger_armed
+            _state._runnable_ledger_armed = True
+            # r43: publish the witness state so wrappers.py string-hook interception can
+            # classify owner vs non-owner (the ONE place a non-owner thread must not flip
+            # the global ``pause_logging`` toggle). Cleared FIRST on exit.
+            global _ACTIVE_WITNESS_STATE
+            prior_active_state = _ACTIVE_WITNESS_STATE
+            _ACTIVE_WITNESS_STATE = state
+            try:
+                with _observe_invisible_host_escapes(state), mode_context:
+                    try:
+                        yield
+                    finally:
+                        if mode == "shadow":
+                            _finalize_census(state)
+                        else:
+                            _finalize_input_semantics_without_census(trace)
+                        _finalize_runnable_ledger(state)
+            finally:
+                _ACTIVE_WITNESS_STATE = prior_active_state
+                _state._runnable_ledger_armed = prior_ledger_armed
+            return
         with mode_context:
             try:
                 yield
@@ -449,8 +446,6 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
                     _finalize_census(state)
                 else:
                     _finalize_input_semantics_without_census(trace)
-    finally:
-        _state._aten_recording_armed = prior_aten_armed
 
 
 def _collect_authorized_internal_caller_modules() -> None:

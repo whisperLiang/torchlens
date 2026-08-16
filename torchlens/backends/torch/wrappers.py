@@ -123,12 +123,7 @@ def _diagnostic_edge_armed() -> bool:
         ``True`` when a shared one-shot token is required.
     """
 
-    return (
-        _state._escape_detector_mode == "shadow"
-        or _state._completeness_witness_mode == "shadow"
-        or _state._runnable_ledger_armed
-        or _state._aten_recording_armed
-    )
+    return _state.diagnostic_observer_armed()
 
 
 @dataclass(frozen=True)

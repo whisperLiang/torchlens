@@ -1104,6 +1104,48 @@ def pause_logging() -> _PauseLogging:
     return _PauseLogging()
 
 
+@contextmanager
+def aten_recording(enabled: bool = True) -> Iterator[None]:
+    """Arm the primitive-op wrapper edge for one nested capture window.
+
+    Parameters
+    ----------
+    enabled:
+        Whether this window requests primitive-op ownership tokens. A false
+        nested request preserves an already-armed outer window.
+
+    Yields
+    ------
+    None
+        The caller runs with the requested ATen edge state installed.
+    """
+
+    global _aten_recording_armed
+    previous = _aten_recording_armed
+    _aten_recording_armed = previous or enabled
+    try:
+        yield
+    finally:
+        _aten_recording_armed = previous
+
+
+def diagnostic_observer_armed() -> bool:
+    """Return whether any wrapper-edge diagnostic observer is armed.
+
+    Returns
+    -------
+    bool
+        ``True`` when wrappers must mint an exact ownership token.
+    """
+
+    return (
+        _escape_detector_mode == "shadow"
+        or _completeness_witness_mode == "shadow"
+        or _runnable_ledger_armed
+        or _aten_recording_armed
+    )
+
+
 def active_capture() -> "tuple[Trace | None, bool]":
     """Return one coherent ``(active trace, logging enabled)`` snapshot.
 
