@@ -90,7 +90,13 @@ class BundleStreamWriter:
         Streaming bundles are always strict. Passing ``False`` is rejected.
     """
 
-    def __init__(self, path: str | Path, *, strict: bool = True) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        strict: bool = True,
+        include_custom_attributes: bool = True,
+    ) -> None:
         """Create the temp bundle directory used for streaming writes.
 
         Parameters
@@ -99,6 +105,9 @@ class BundleStreamWriter:
             Final bundle directory path.
         strict:
             Streaming bundles are always strict. Passing ``False`` is rejected.
+        include_custom_attributes:
+            Whether harvested module attributes are persisted in the streamed
+            bundle (the tl.save opt-out, mirrored for streaming -- R62).
 
         Raises
         ------
@@ -109,6 +118,7 @@ class BundleStreamWriter:
         if not strict:
             raise TorchLensIOError("Streaming out save is always strict.")
 
+        self.include_custom_attributes = include_custom_attributes
         self.final_path = Path(path)
         if self.final_path.is_symlink():
             raise TorchLensIOError(f"Refusing symlinked save target: {self.final_path}.")
@@ -485,10 +495,14 @@ class BundleStreamWriter:
         n_layers = len(layer_list) if isinstance(layer_list, list) else 0
         # Disclose the harvested module-attribute channel (R62): the documented
         # invariant is that EVERY save writes a custom_attributes_disclosure
-        # entry, but the streaming writer shipped the channel with none. The
-        # streaming path persists custom_attributes with the same default as
-        # tl.save (include_custom_attributes=True), so it is reported included.
-        from .bundle import _custom_attributes_disclosure
+        # entry, and the streaming path now honors the same opt-out and emits
+        # the same embedding warning as tl.save (the reopened hf_token class:
+        # a canary token used to ship in the streamed bundle with zero
+        # warnings and no way to withhold it).
+        from .bundle import _custom_attributes_disclosure, _warn_custom_attribute_embedding
+
+        disclosure = _custom_attributes_disclosure(trace, included=self.include_custom_attributes)
+        _warn_custom_attribute_embedding(disclosure)
 
         return Manifest(
             tlspec_version=TLSPEC_VERSION,
@@ -509,7 +523,7 @@ class BundleStreamWriter:
             n_auxiliary_blobs=n_auxiliary_blobs,
             tensors=tensor_entries,
             unsupported_tensors=unsupported,
-            custom_attributes_disclosure=_custom_attributes_disclosure(trace, included=True),
+            custom_attributes_disclosure=disclosure,
         )
 
     def _ensure_writable(self) -> None:

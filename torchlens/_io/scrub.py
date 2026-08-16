@@ -29,6 +29,7 @@ import torch
 from ..constants import MODEL_LOG_FIELD_ORDER
 from ..data_classes._state_adapter import state_items, state_new, state_restore
 from ..data_classes.trace import Trace, _scrubbed_transform_repr
+from ..errors._base import TorchLensWarning
 from . import TLSPEC_VERSION, BlobRef, FieldPolicy, TorchLensIOError
 from .payload_codec import PayloadCodec, get_payload_codec
 
@@ -706,7 +707,7 @@ def _disclose_container_downgrade(
     warnings.warn(
         f"{message.format(name=key)} The saved bundle stays loadable; only the "
         "container's original type is not preserved.",
-        UserWarning,
+        TorchLensWarning,
         stacklevel=2,
     )
 

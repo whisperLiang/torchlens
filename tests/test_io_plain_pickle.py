@@ -509,6 +509,21 @@ def test_plain_pickle_survives_a_lambda_activation_transform() -> None:
     assert restored.layer_list[0].activation_transform is None
 
 
+def test_plain_pickle_survives_a_lambda_input_transform() -> None:
+    """R10-7b: the MODERN ``transform=`` spelling must not crash pickle either.
+
+    Fail-before: the R10-7 fix nulled ``activation_transform``/
+    ``grad_transform``/``_output_transform`` in ``__getstate__`` but missed
+    ``_transform`` -- the field the public ``tl.trace(..., transform=...)``
+    kwarg populates -- so ``pickle.dumps`` raised ``PicklingError: Can't
+    pickle <lambda>`` while ``tl.save`` succeeded on the same trace.
+    """
+
+    log = trace_fn(_PlainPickleModel(), torch.ones(1, 3), transform=lambda a: a * 2)
+    restored = pickle.loads(pickle.dumps(log))
+    assert restored._transform is None
+
+
 def test_plain_pickle_survives_a_fast_run_session() -> None:
     """R10-6: run(fast=True) must not make pickle/deepcopy crash on weakrefs.
 

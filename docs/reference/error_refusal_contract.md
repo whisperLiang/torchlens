@@ -37,6 +37,7 @@ add names to the top-level `torchlens` namespace:
 | `artifact_kind_mismatch` | Specialized loader received another artifact kind | Use the matching loader or generic `io.load` |
 | `artifact_save_level_invalid` | `.tlspec` save level is unknown | Choose a documented save level |
 | `artifact_save_level_unsupported` | Artifact kind cannot provide the requested save level | Choose a level supported by that kind |
+| `artifact_version_above_runtime` | Bundle `tlspec_version` is newer than this runtime supports | Upgrade torchlens to the release that wrote the artifact (or newer) |
 | `artifact_version_below_floor` | Artifact predates the rehydration floor (`tlspec_version` < 6 / torchlens < 2.33) | Load and re-save it with a torchlens release that still reads it |
 | `ambiguous_op_lookup` | Accessor key matches multiple pass-qualified objects | Use a full address, pass label, or call index |
 | `auto_environment_unsupported` | `TORCHLENS_AUTO=1` requested implicit capture | Unset it and call `auto_capture()` |
@@ -46,15 +47,17 @@ add names to the top-level `torchlens` namespace:
 | `batch_items_invalid` | Export batch-items count is negative | Pass a non-negative integer |
 | `batch_render_invalid` | Batch render policy is unknown or malformed | Choose a documented batch_render policy |
 | `backend_ambiguity` | Auto-resolution found multiple equal backend matches | Pass `backend=` explicitly |
-| `backend_capability_conformance` | Advertised backend capability has no implementation | Disable it or register its implementation |
+| `backend_capability_conformance` | Advertised backend capability has no implementation (`BackendCapabilityConformanceError`, dual `ValueError` + `NotImplementedError` lineage) | Disable it or register its implementation |
 | `backend_error` | Base-class default of the backend registry family — never raised directly; every live registry refusal carries one of the specific `backend_*`/`unknown_backend` codes below | Branch on the specific backend codes; this row exists only so an unmigrated future subclass is still documented |
 | `backend_mismatch` | Explicit backend cannot handle the model or inputs | Select the owning backend |
 | `bundle_load_failed` | Bundle load failed on torch/codec drift or a missing dependency | Inspect the chained cause; restore the missing dependency or re-save |
 | `bundle_metadata_integrity_refused` | Bundle metadata pickle is denylisted, corrupt, or truncated | Treat as tamper/corruption; re-save from the source capture |
+| `bundle_producer_unverifiable` | Current-schema bundle's recorded `torchlens_version` does not parse under PEP 440 | Re-save the artifact with a released torchlens |
+| `bundle_torch_incompatible` | Bundle's recorded torch version is major-incompatible with (or unparseable against) the runtime torch | Load under a torch runtime with the recorded major version |
 | `bundle_save_failed` | Bundle save failed; the staging dir was marked PARTIAL and any pre-overwrite bundle restored | Fix the chained cause named in the message and re-save |
-| `backend_payload_unsupported` | Backend payload has no supported codec | Save metadata only or use another backend |
+| `backend_payload_unsupported` | Backend payload has no supported codec (`BackendPayloadUnsupportedError`, dual `ValueError` + `NotImplementedError` lineage) | Save metadata only or use another backend |
 | `backend_runtime_compatibility` | Runtime cannot materialize serialized backend data | Install a compatible runtime or analyze only |
-| `backend_unsupported` | Backend does not implement the requested capability | Omit it or use another backend |
+| `backend_unsupported` | Backend does not implement the requested capability (`BackendUnsupportedError`, dual `ValueError` + `NotImplementedError` lineage; the TF site-reachability subclass shares it) | Omit it or use another backend |
 | `buffer_visibility_invalid` | Unsupported `show_buffers` value | Choose a documented visibility policy |
 | `bundle_member_payload_missing` | Bundle member retained no tensor at this node | Query a node with stored tensors |
 | `bundle_member_unknown` | Bundle member name is not in the bundle | Pass a known member name |
@@ -139,7 +142,9 @@ add names to the top-level `torchlens` namespace:
 | `fastlog_index_too_large` | Fastlog recovery index exceeds the byte ceiling | Treat as a hostile/implausible bundle; re-record |
 | `manifest_missing` | Bundle directory has no `manifest.json` | Pass the bundle directory produced by `tl.save()` |
 | `manifest_not_json_object` | Manifest root parses but is not a JSON object | Re-save the artifact; do not hand-edit the manifest |
+| `manifest_schema_invalid` | Manifest parses as a JSON object but violates the bundle schema (missing/mistyped field, forged entry, count mismatch) | Re-save the artifact with `tl.save()`; do not hand-edit the manifest |
 | `manifest_unreadable` | Manifest cannot be read or does not parse within bounds | Check permissions/integrity; re-save if truncated |
+| `manifest_write_failed` | `manifest.json` could not be written during save | Check disk space and directory permissions, then re-save |
 | `metadata_object_count_exceeded` | `metadata.pkl` opcode count exceeds the allocation ceiling | Treat as a hostile/implausible artifact; re-save from source |
 | `metadata_payload_not_a_mapping` | `metadata.pkl` payload is not a metadata mapping | The artifact is corrupt or hand-edited; re-save with `tl.save()` |
 | `model_type_unsupported` | Torch capture model is not an `nn.Module` | Pass a module or select its backend |
@@ -192,6 +197,7 @@ add names to the top-level `torchlens` namespace:
 | `run_legacy_options_conflict` | Unified run received legacy rerun options | Drop the legacy options |
 | `run_source_model_collected` | Live model reference is no longer retained | Pass the model to `trace.run(model, input)` |
 | `output_sink_conflict` | Disk storage and callback sink were both configured | Choose one sink |
+| `save_budget_invalid` | `save_budget` is not `'auto'`, a float in `(0, 1]`, an int byte cap, or `None` (`InvalidArgumentError`, `ValueError` lineage) | Pass one of the documented spellings |
 | `save_mode_invalid` | Activation save mode is unknown | Choose a documented save mode |
 | `save_predicate_type_invalid` | `save=` is neither SaveOptions, predicate, selector, nor `None` (`save='all'` lands here) | Pass a predicate or SaveOptions; use `layers_to_save='all'` for exhaustive saves |
 | `save_payload_level_conflict` | Optional payload family requires runnable level | Use runnable level or omit that family |

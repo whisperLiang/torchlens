@@ -9,6 +9,7 @@ by partial saves. The bundle format is intentionally a plain directory with
 
 from __future__ import annotations
 
+import contextlib
 import glob
 import json
 import os
@@ -87,15 +88,42 @@ REASON_SENTINEL = "REASON.txt"
 # this, so the cap only refuses an absurd artifact; it is deliberately generous
 # to avoid refusing a real save.
 _MAX_METADATA_PKL_BYTES = 512 * 1024**2
+
+# THE single authority for the load-provenance transient family (R50-2): every
+# attribute _io/bundle attaches to a LOADED trace that must never persist into
+# a re-save. One conceptual family used to have four declaration stories and a
+# function-local strip tuple as its only complete inventory; the strip pass in
+# ``scrub_for_save``'s caller and the exemption ledger in
+# ``data_classes/_trace_components.py`` both key off this constant's members.
+LOAD_PROVENANCE_TRANSIENT_ATTRS: tuple[str, ...] = (
+    "_loaded_from_bundle",
+    "_source_bundle_manifest_sha256",
+    "_source_bundle_path",
+    "_source_bundle_created_at",
+    "_source_bundle_provenance",
+    "_source_bundle_model_fingerprint",
+    "payload_load_status",
+    "_validation_replay_status",
+)
 # Object-count ceiling for ``metadata.pkl`` (R60/F6): the byte cap alone does not
-# bound allocation -- a pickle of tiny values expands ~5x its byte size into RSS
-# BEFORE any structural check can refuse it (measured: 76 MiB of ints -> ~390 MiB;
-# the old 4 GiB byte cap projected to ~20 GiB). This is the same lesson the JSON
+# bound allocation -- a pickle of tiny values expands its byte size into RSS
+# BEFORE any structural check can refuse it. This is the same lesson the JSON
 # boundary's ``_MAX_JSON_NODES`` prescan already encodes, carried to the sibling
 # pickle boundary. The prescan walks the opcode stream (pickletools.genops, no
-# object allocation) with an early stop, so its own worst case is bounded CPU
-# (~0.6 us/opcode, <1 min at the ceiling), never unbounded memory.
-_MAX_METADATA_PKL_OPCODES = 64_000_000
+# object allocation) with an early stop, so its own worst case is bounded CPU,
+# never unbounded memory.
+#
+# CALIBRATION (r6 R60-F1 recalibration): the original 64M value was derived
+# from a ~5x bytes->RSS expansion assumption, but the measured worst case for
+# dict-of-tiny-dict payloads is 22-26x -- about 70 BYTES OF RSS PER OPCODE --
+# so a within-ceiling hostile artifact still projected to ~2.8 GiB of RSS and
+# minutes of CPU inside ``tl.load()``. The ceiling is now derived from that
+# measured per-opcode cost against a ~1.6 GiB worst-case allocation budget:
+# 24M opcodes x ~70 B/opcode ~= 1.6 GiB, with in-ceiling wall time under a
+# minute. Still far above any honest save: structural metadata at this opcode
+# count would be a multi-hundred-MB pickle, an order of magnitude beyond the
+# largest real traces (tensor payloads live in separate safetensors blobs).
+_MAX_METADATA_PKL_OPCODES = 24_000_000
 # Prescan only files large enough to matter: below this, worst-case expansion is
 # a few hundred MiB and the prescan would tax every real load for nothing.
 _METADATA_PKL_PRESCAN_BYTES = 8 * 1024**2
@@ -649,15 +677,11 @@ def save(
                 # The replacement is already installed atomically. A stale backup
                 # is recoverable cleanup debris, not a failed save.
                 pass
-    except TorchLensIOError:
-        _mark_partial(tmp_path)
-        if backup_path is not None and not bundle_path.exists() and backup_path.exists():
-            _restore_backup(backup_path, bundle_path)
+    except TorchLensIOError as exc:
+        _run_save_recovery(tmp_path, backup_path, bundle_path, primary=exc)
         raise
-    except BackendPayloadUnsupportedError:
-        _mark_partial(tmp_path)
-        if backup_path is not None and not bundle_path.exists() and backup_path.exists():
-            _restore_backup(backup_path, bundle_path)
+    except BackendPayloadUnsupportedError as exc:
+        _run_save_recovery(tmp_path, backup_path, bundle_path, primary=exc)
         raise
     except (ImportError, OSError, TypeError, ValueError, pickle.PickleError) as exc:
         # ``TypeError`` is caught alongside the other serialization failure
@@ -668,9 +692,7 @@ def save(
         # the ``PARTIAL`` sentinel (leaving the ``.tmp`` dir un-sweepable by
         # ``cleanup_tmp()``) and the backup restore (permanently losing the
         # pre-overwrite bundle under an undocumented ``.bak.<uuid>`` name).
-        _mark_partial(tmp_path, reason=type(exc).__name__)
-        if backup_path is not None and not bundle_path.exists() and backup_path.exists():
-            _restore_backup(backup_path, bundle_path)
+        _run_save_recovery(tmp_path, backup_path, bundle_path, primary=exc)
         raise TorchLensIOError(
             f"Failed to save bundle at {bundle_path}: {type(exc).__name__}: {exc}. "
             "Remedy: the staging directory was marked PARTIAL (sweepable by "
@@ -698,9 +720,7 @@ def save(
         # unwinding mid-write; those are re-raised unwrapped below so control
         # flow semantics are preserved, while ordinary exceptions are wrapped
         # in ``TorchLensIOError`` to match the sibling branch above.
-        _mark_partial(tmp_path, reason=type(exc).__name__)
-        if backup_path is not None and not bundle_path.exists() and backup_path.exists():
-            _restore_backup(backup_path, bundle_path)
+        _run_save_recovery(tmp_path, backup_path, bundle_path, primary=exc)
         if isinstance(exc, Exception):
             raise TorchLensIOError(
                 f"Failed to save bundle at {bundle_path}: {type(exc).__name__}: {exc}. "
@@ -1466,7 +1486,7 @@ def _warn_nonpersistent_buffer_disclosure_once() -> None:
         "declared state the artifact cannot replay without, and they are written "
         "even with include_weights/include_activations false. Review the buffers "
         "before sharing the artifact if they may hold sensitive data.",
-        UserWarning,
+        TorchLensWarning,
         stacklevel=3,
     )
 
@@ -1497,7 +1517,7 @@ def _warn_unattestable_activation_archive_once() -> None:
         "input. Numeric attestation on a later .run() will report not_applicable for that "
         "reason -- not because the inputs changed. Capture the model input alongside the "
         "selected activations if byte-exact attestation is wanted.",
-        UserWarning,
+        TorchLensWarning,
         stacklevel=3,
     )
 
@@ -1945,6 +1965,11 @@ def _preflight_unified_trace_manifest(
     try:
         validate_tlspec(bundle_path, allow_unsupported_runnable_versions=True)
     except ValueError as exc:
+        # Never launder an already-typed refusal (R65-4): re-wrapping a
+        # ValueError-lineage TorchLens error here stripped its stable code and
+        # structured fields into one content-free message.
+        if isinstance(getattr(exc, "fields", None), dict) and exc.fields.get("code"):  # type: ignore[attr-defined]
+            raise
         raise TorchLensIOError(f"Invalid unified trace manifest: {exc}") from exc
 
     schema_version = manifest.get("schema_version", 1)
@@ -2611,7 +2636,7 @@ def cleanup_tmp(path: str | Path, *, force: bool = False) -> list[Path]:
             continue
         warnings.warn(
             f"Leaving non-partial temp directory {candidate} in place; pass force=True to remove it.",
-            UserWarning,
+            TorchLensWarning,
             stacklevel=2,
         )
 
@@ -2629,7 +2654,7 @@ def cleanup_tmp(path: str | Path, *, force: bool = False) -> list[Path]:
                 warnings.warn(
                     f"Leaving orphaned backup directory {candidate} in place; "
                     "restoring it onto the missing bundle path failed.",
-                    UserWarning,
+                    TorchLensWarning,
                     stacklevel=2,
                 )
             continue
@@ -2643,7 +2668,7 @@ def cleanup_tmp(path: str | Path, *, force: bool = False) -> list[Path]:
             warnings.warn(
                 f"Force-removed backup directory {candidate} whose contents differ "
                 f"from the live bundle at {bundle_path}; it was not provably redundant.",
-                UserWarning,
+                TorchLensWarning,
                 stacklevel=2,
             )
             continue
@@ -2651,7 +2676,7 @@ def cleanup_tmp(path: str | Path, *, force: bool = False) -> list[Path]:
             f"Leaving backup directory {candidate} in place; its contents differ from "
             f"the live bundle at {bundle_path} and it is not provably redundant. "
             "Pass force=True to remove it anyway.",
-            UserWarning,
+            TorchLensWarning,
             stacklevel=2,
         )
     return removed
@@ -2735,16 +2760,7 @@ def _scrub_trace_for_bundle(
     """
 
     transient_attrs = {}
-    for attr_name in (
-        "_loaded_from_bundle",
-        "_source_bundle_manifest_sha256",
-        "_source_bundle_path",
-        "_source_bundle_created_at",
-        "_source_bundle_provenance",
-        "_source_bundle_model_fingerprint",
-        "payload_load_status",
-        "_validation_replay_status",
-    ):
+    for attr_name in LOAD_PROVENANCE_TRANSIENT_ATTRS:
         if hasattr(trace, attr_name):
             transient_attrs[attr_name] = getattr(trace, attr_name)
             delattr(trace, attr_name)
@@ -3882,7 +3898,7 @@ def _check_unknown_blob_entries(manifest: Manifest, blobs_path: Path) -> None:
     if extra_names:
         warnings.warn(
             f"Bundle contains unreferenced extra files in blobs/: {', '.join(extra_names)}.",
-            UserWarning,
+            TorchLensWarning,
             stacklevel=2,
         )
 
@@ -4127,6 +4143,49 @@ def _mark_partial(tmp_path: Path, *, reason: str | None = None) -> None:
         return
 
 
+def _run_save_recovery(
+    tmp_path: Path,
+    backup_path: Path | None,
+    bundle_path: Path,
+    *,
+    primary: BaseException,
+) -> None:
+    """Run the failed-save bookkeeping without ever masking ``primary`` (R63).
+
+    The PARTIAL mark and the backup restore are the two contracts the save
+    handlers exist to guarantee, but running them unguarded meant a
+    rollback-time failure (e.g. ENOSPC while writing the sentinel) replaced
+    the primary exception -- a Ctrl-C was reported as an ordinary I/O error --
+    AND skipped the backup restore, stranding the pre-overwrite bundle under
+    its ``.bak.<uuid>`` name. Each step is independently best-effort;
+    recovery failures are disclosed via warning (and ``add_note`` where the
+    runtime has it), never raised over the primary.
+    """
+
+    def _disclose(step: str, failure: BaseException) -> None:
+        detail = (
+            f"bundle-save recovery step '{step}' itself failed "
+            f"({type(failure).__name__}: {failure}); the primary error is re-raised "
+            f"unchanged. Recovery debris may remain next to {bundle_path}."
+        )
+        note = getattr(primary, "add_note", None)  # py3.11+; 3.10 floor lacks it
+        if callable(note):
+            with contextlib.suppress(Exception):
+                note(detail)
+        with contextlib.suppress(Exception):
+            warnings.warn(detail, TorchLensWarning, stacklevel=3)
+
+    try:
+        _mark_partial(tmp_path, reason=type(primary).__name__)
+    except Exception as failure:
+        _disclose("mark-partial", failure)
+    try:
+        if backup_path is not None and not bundle_path.exists() and backup_path.exists():
+            _restore_backup(backup_path, bundle_path)
+    except Exception as failure:
+        _disclose("backup-restore", failure)
+
+
 def _reanchor_visualizer_paths(trace: Trace, bundle_path: Path) -> None:
     """Contain every loaded ``visualizer_path`` inside the bundle's own directory.
 
@@ -4252,7 +4311,7 @@ def _restore_backup(backup_path: Path, bundle_path: Path, *, warn_on_failure: bo
                 f"Could not restore the previous bundle from its backup after a failed "
                 f"save ({exc}). Your prior artifact is NOT lost: it remains at "
                 f"{backup_path}. Move it back to {bundle_path} to recover it.",
-                UserWarning,
+                TorchLensWarning,
                 stacklevel=2,
             )
         return False

@@ -41,6 +41,7 @@ from torch.overrides import TorchFunctionMode
 
 from ... import _state
 from ..._errors import OutputAttributionError, TorchLensCaptureGapWarning
+from ...errors._base import TorchLensWarning
 from ...utils.display import user_stacklevel
 from ...utils.rng import log_current_rng_states, set_rng_from_saved_states
 
@@ -54,11 +55,12 @@ __all__ = [
 ]
 
 
-class CaptureAttemptFailedWarning(RuntimeWarning):
+class CaptureAttemptFailedWarning(RuntimeWarning, TorchLensWarning):
     """Warning category for the one capture-attempt-failed advisory.
 
     A dedicated category (still a ``RuntimeWarning``, so user filters keep
-    matching) lets the rescue driver DEFER the advisory while a rescue re-run
+    matching; also a ``TorchLensWarning`` so the documented root category
+    covers it -- R64-1) lets the rescue driver DEFER the advisory while a rescue re-run
     is still possible: the warning tells the user diagnostics ride the
     exception (``exc.partial_log``), which is only truthful when that
     exception actually propagates. A successful rescue swallows the failure,

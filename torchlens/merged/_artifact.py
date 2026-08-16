@@ -47,6 +47,22 @@ __all__ = ["canonical_json_bytes", "load_merged", "save_merged", "tree_hash"]
 
 _TREE_HASH_CHUNK_BYTES = 1 << 20
 
+_EXC_TEXT_LIMIT = 300
+
+
+def _bounded_exc(exc: BaseException) -> str:
+    """Bounded ``TypeName: text`` rendering of a chained cause (R65-14).
+
+    Artifact-controlled exception strings are interpolated into refusal
+    messages; without a cap a hostile artifact chooses the message size.
+    """
+
+    text = f"{type(exc).__name__}: {exc}"
+    if len(text) > _EXC_TEXT_LIMIT:
+        text = text[: _EXC_TEXT_LIMIT - 3] + "..."
+    return text
+
+
 CANONICAL_ENCODING = "torchlens-canonical-json-v1"
 """UTF-8, sorted keys, no NaN/Infinity, LF, no insignificant whitespace."""
 
@@ -75,6 +91,7 @@ def tree_hash(root: Path) -> str:
                 f"Symlink {candidate} inside a rank core; merged artifacts "
                 "reject symlinks at hash time.",
                 code=MergedErrorCode.MERGED_SCHEMA_INVALID,
+                remedy="remove the symlink from the rank core and re-save",
             )
         if not candidate.is_file():
             continue
@@ -256,15 +273,22 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
     """
 
     root = Path(path)
+    # ``reason`` disambiguates the frozen MERGE_INPUT_INVALID code (R65-4):
+    # bad merge EVIDENCE and save-target FILESYSTEM conditions shared the one
+    # code with nothing but message text to tell them apart.
     if root.is_symlink():
         raise MergedArtifactError(
             f"Refusing symlinked merged artifact target: {root}.",
             code=MergedErrorCode.MERGE_INPUT_INVALID,
+            reason="save_target_symlink",
+            remedy="pass the resolved real path as the save target",
         )
     if root.exists() and not overwrite:
         raise MergedArtifactError(
             f"{root} already exists; pass overwrite=True to replace it.",
             code=MergedErrorCode.MERGE_INPUT_INVALID,
+            reason="save_target_exists",
+            remedy="pass overwrite=True or choose a fresh target path",
         )
     # Re-verify derivation-vs-members BEFORE writing anything (deep-hunt F12):
     # a live input trace whose distributed annotations were mutated between
@@ -289,6 +313,8 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
             "would produce an artifact every future load refuses as tampered; "
             "re-merge the current inputs and save that result instead.",
             code=MergedErrorCode.MERGE_INPUT_INVALID,
+            reason="derivation_drift",
+            remedy="re-merge the current inputs and save that result",
         )
 
     staging_root = root.parent / f"{root.name}.tmp.{uuid.uuid4().hex}"
@@ -323,6 +349,8 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
                     raise MergedArtifactError(
                         f"Rank {rank} core path {source} is not a bundle directory.",
                         code=MergedErrorCode.MERGE_INPUT_INVALID,
+                        reason="member_path_not_directory",
+                        remedy="point the rank handle at its .tlspec bundle directory",
                     )
             else:
                 from .._io.bundle import save as save_bundle
@@ -395,6 +423,8 @@ def save_merged(merged: MergedTrace, path: str | Path, *, overwrite: bool = Fals
                     f"{root} was created by another writer during the save; "
                     "pass overwrite=True to replace it.",
                     code=MergedErrorCode.MERGE_INPUT_INVALID,
+                    reason="save_target_exists",
+                    remedy="pass overwrite=True or choose a fresh target path",
                 )
             backup_root = root.parent / f"{root.name}.bak.{uuid.uuid4().hex}"
             root.rename(backup_root)
@@ -740,7 +770,7 @@ def load_merged(path: str | Path) -> MergedTrace:
         # before the ceiling applied, so the byte limit was advisory only here.
         manifest = _json.read_bounded(manifest_path)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise _schema_refusal(f"root manifest does not parse ({exc})") from exc
+        raise _schema_refusal(f"root manifest does not parse ({_bounded_exc(exc)})") from exc
     if not isinstance(manifest, dict):
         raise _schema_refusal("root manifest is not a JSON object")
     if manifest.get("bundle_format") != MERGED_BUNDLE_FORMAT:
@@ -763,14 +793,14 @@ def load_merged(path: str | Path) -> MergedTrace:
     try:
         descriptor_bytes = _json.read_bytes_bounded(descriptor_path)
     except json.JSONDecodeError as exc:
-        raise _schema_refusal(f"descriptor does not parse ({exc})") from exc
+        raise _schema_refusal(f"descriptor does not parse ({_bounded_exc(exc)})") from exc
     recorded_sha = manifest.get("descriptor_sha256")
     if hashlib.sha256(descriptor_bytes).hexdigest() != recorded_sha:
         raise _tamper("descriptor bytes do not match the root-manifest checksum")
     try:
         descriptor = _json.loads_bounded(descriptor_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise _schema_refusal(f"descriptor does not parse ({exc})") from exc
+        raise _schema_refusal(f"descriptor does not parse ({_bounded_exc(exc)})") from exc
     if not isinstance(descriptor, dict):
         raise _schema_refusal("descriptor is not a JSON object")
     if descriptor.get("descriptor_kind") != MERGED_DESCRIPTOR_KIND:
@@ -877,7 +907,7 @@ def load_merged(path: str | Path) -> MergedTrace:
             if _is_bundle_integrity_refusal(exc):
                 raise _tamper(
                     f"rank {declared_rank} member core {str(member_path)!r} failed "
-                    f"a bundle-integrity check ({exc}); a guarded-unpickler denylist "
+                    f"a bundle-integrity check ({_bounded_exc(exc)}); a guarded-unpickler denylist "
                     "refusal or corrupt pickle stream is a tampered artifact, never "
                     "a runtime degradation to be laundered into a partial merge"
                 ) from exc
@@ -886,7 +916,7 @@ def load_merged(path: str | Path) -> MergedTrace:
             # effective alignment at partial but is never a tamper.
             load_degradations.append(
                 f"rank {declared_rank} core {str(member_path)!r} no longer parses on "
-                f"this runtime: {type(exc).__name__}: {exc}"
+                f"this runtime: {_bounded_exc(exc)}"
             )
             continue
         # A member that loads as a bundle but is NOT a valid rank core (no
@@ -900,7 +930,7 @@ def load_merged(path: str | Path) -> MergedTrace:
         except MergeInputError as exc:
             raise _tamper(
                 f"rank {declared_rank} member core loaded but carries no coherent "
-                f"rank-core evidence ({exc}); a member that parses yet is not a "
+                f"rank-core evidence ({_bounded_exc(exc)}); a member that parses yet is not a "
                 "valid rank capture is a tampered artifact, never a runtime "
                 "degradation"
             ) from exc

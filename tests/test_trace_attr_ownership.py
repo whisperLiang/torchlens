@@ -59,6 +59,10 @@ _TRACE_IDENTIFIERS = frozenset(
         "target_trace",
         "source_trace",
         "refreshed",
+        # R50-1: `_io/bundle.py`'s load path binds the trace as `loaded_trace`;
+        # the write of `_source_bundle_model_fingerprint` survived three rounds
+        # of review purely because this spelling was missing here.
+        "loaded_trace",
     }
 )
 

@@ -94,14 +94,15 @@ def test_overwrite_failure_preserves_existing_bundle(
     real_replace = os.replace
 
     def failing_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
-        # Fail ONLY the forward swap ``tmp.<hex> -> target``; allow the
-        # recovery restore ``tmp.bak.<hex> -> target`` so the transient error
-        # does not also block rollback.
+        # Fail ONLY the forward swap ``{target}.tmp.<hex> -> target``; allow
+        # the recovery restore ``{target}.bak.<hex> -> target`` so the
+        # transient error does not also block rollback. (Staging/backup names
+        # are target-PREFIXED since the R38+R59 discoverability fix.)
         src_name = os.path.basename(os.fspath(src))  # type: ignore[arg-type]
         if (
             os.fspath(dst) == os.fspath(target)  # type: ignore[arg-type]
-            and src_name.startswith("tmp.")
-            and not src_name.startswith("tmp.bak.")
+            and f"{target.name}.tmp." in src_name
+            and ".bak." not in src_name
         ):
             raise OSError("injected final rename failure")
         return real_replace(src, dst, *args, **kwargs)  # type: ignore[arg-type]

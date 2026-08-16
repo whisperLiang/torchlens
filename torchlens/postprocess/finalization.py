@@ -1644,6 +1644,7 @@ def _finalize_streamed_bundle(self: "Trace") -> None:
             include_grads=_has_retained_gradient_payloads(self),
             include_saved_args=self.save_arg_values,
             include_rng_states=self.save_rng_states,
+            include_custom_attributes=getattr(writer, "include_custom_attributes", True),
         )
         scrubbed_state, blob_specs = _reuse_streamed_blob_ids(
             self,

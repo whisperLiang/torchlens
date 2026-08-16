@@ -52,6 +52,7 @@ from typing import Any
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
 
+from ..errors._base import TorchLensWarning
 from ._torch_symbols import torch_attr
 
 __all__ = [
@@ -1494,14 +1495,15 @@ def restore_capability_probes(snapshot: dict[str, object]) -> None:
     globals().update(snapshot)
 
 
-class TorchCapabilityWarning(UserWarning):
+class TorchCapabilityWarning(TorchLensWarning):
     """Graceful torch-capability degradation warning (r-b4 R26-6d).
 
     A dedicated subclass so CI suppression can key on the CATEGORY instead of
     the message text (``pyproject.toml`` matched the literal message string, so
     editing the wording would have turned every legitimate matrix degradation
     into a suite-wide error under ``error::UserWarning:torchlens``). Subclasses
-    ``UserWarning``, so existing category filters keep matching.
+    ``TorchLensWarning`` (itself a ``UserWarning``), so existing category
+    filters keep matching and the documented root covers it (R64-1).
     """
 
 

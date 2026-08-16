@@ -284,7 +284,13 @@ def load_bounded(
     if raw_handle is not None:
         raw = _bounded_read_bytes(raw_handle, max_bytes)
         encoding = getattr(handle, "encoding", None) or "utf-8"
-        text = raw.decode(encoding)
+        try:
+            text = raw.decode(encoding)
+        except UnicodeDecodeError as exc:
+            # A non-decodable byte is the same does-not-parse class as broken
+            # JSON; the raw UnicodeDecodeError used to leak through every
+            # JSON-boundary handler untyped (R73 fuzz find, 2026-08-15).
+            raise _refuse(f"manifest bytes are not valid {encoding}: {exc}", "") from exc
     else:
         # Text handle with no binary buffer: read one char past the fd size (or the
         # ceiling if it cannot be stat'd) rather than the whole ceiling.
@@ -340,9 +346,13 @@ def read_bounded(
 
     with path.open("rb") as handle:
         data = _bounded_read_bytes(handle, max_bytes)
-    return loads_bounded(
-        data.decode(encoding), max_depth=max_depth, max_bytes=max_bytes, max_nodes=max_nodes
-    )
+    try:
+        text = data.decode(encoding)
+    except UnicodeDecodeError as exc:
+        # Same does-not-parse class as broken JSON (R73): route through the
+        # one channel every JSON-boundary handler already catches.
+        raise _refuse(f"manifest bytes are not valid {encoding}: {exc}", "") from exc
+    return loads_bounded(text, max_depth=max_depth, max_bytes=max_bytes, max_nodes=max_nodes)
 
 
 def read_bytes_bounded(path: Path, *, max_bytes: int = _MAX_JSON_BYTES) -> bytes:

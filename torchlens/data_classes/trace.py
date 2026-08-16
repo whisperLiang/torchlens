@@ -2859,6 +2859,10 @@ class Trace(
         state["activation_transform"] = None
         state["grad_transform"] = None
         state["_output_transform"] = None
+        # R10-7b: the MODERN tl.trace(..., transform=...) kwarg populates
+        # `_transform`, a fourth raw-callable holder the original fix missed
+        # (it covered only the deprecated activation_transform= spelling).
+        state["_transform"] = None
         state.pop("_raw_graph_ws", None)
         state.pop("_module_capture_ws", None)
         state.pop("_wrapper_runtime_ws", None)

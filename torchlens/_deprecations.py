@@ -5,6 +5,8 @@ from __future__ import annotations
 import warnings
 from typing import Final
 
+from .errors._base import TorchLensWarning
+
 
 class MissingType:
     """Sentinel type used to detect explicitly supplied public kwargs.
@@ -24,11 +26,14 @@ class MissingType:
         return "MISSING"
 
 
-class TorchLensDeprecationWarning(DeprecationWarning):
+class TorchLensDeprecationWarning(DeprecationWarning, TorchLensWarning):
     """Warning category for TorchLens's own public-API deprecations.
 
     A ``DeprecationWarning`` subclass, so every user-side filter keyed on
-    ``DeprecationWarning`` keeps working unchanged. The dedicated subclass
+    ``DeprecationWarning`` keeps working unchanged -- and a
+    ``TorchLensWarning`` so the documented root category silences it and the
+    shared ``severity``/``fields`` payload contract holds (R64-1: it was one
+    of three registered warnings escaping the root). The dedicated subclass
     exists so tooling can separate "TorchLens deprecated one of its own
     spellings" from "some other library, or torch, emitted a deprecation" --
     which a message-shape filter cannot do.

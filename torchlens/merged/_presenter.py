@@ -283,18 +283,35 @@ class MergedTrace:
         self._handles = dict(handles)
         self._load_degradations = tuple(load_degradations)
         self._source_path: str | None = None
+        self._released = False
 
     def release(self) -> None:
         """Drop every rank-trace handle so the member traces can be reclaimed.
 
         The counterpart of ``Trace.cleanup()`` for the presenter (R37 /
-        b2:B20): the derivation record, verdict properties, findings, and
-        ``load_degradations`` stay readable, but member access
-        (``merged.rank(...)`` and anything that resolves a member trace)
-        raises ``KeyError`` afterwards. Idempotent.
+        b2:B20, contract section 8): the derivation record, verdict
+        properties, findings, and ``load_degradations`` stay readable, but
+        every surface that resolves a member trace (``ranks``,
+        ``__getitem__``, ``super_op()``, ``join_ops()``, ``save()``) refuses
+        typed with ``fields["code"] = "merged_member_released"`` afterwards
+        -- never a bare ``KeyError``, and never a zero-member presence lie.
+        Idempotent.
         """
 
         self._handles.clear()
+        self._released = True
+
+    def _require_members(self, surface: str) -> None:
+        """Refuse typed when ``surface`` needs member traces after release()."""
+
+        if self._released:
+            raise MergedSurfaceUnsupportedError(
+                f"MergedTrace.{surface} needs the member rank traces, but "
+                "release() dropped them. Re-merge (or re-load) the rank cores "
+                "to access members again; the derivation verdicts remain "
+                "readable on this presenter.",
+                code=MergedErrorCode.MERGED_MEMBER_RELEASED,
+            )
 
     # ------------------------------------------------------------------
     # Verdicts (3.2): stored vs effective are DISTINCT properties.
@@ -350,6 +367,7 @@ class MergedTrace:
     def ranks(self) -> Mapping[int, Any]:
         """Lazy ``rank -> Trace`` mapping (structural access authority)."""
 
+        self._require_members("ranks")
         return _RankMapping(self._handles)
 
     @property
@@ -393,6 +411,7 @@ class MergedTrace:
     # ------------------------------------------------------------------
 
     def __getitem__(self, item: Any) -> Any:
+        self._require_members("__getitem__")
         if not isinstance(item, str):
             raise MergedSurfaceUnsupportedError(
                 "Merged-level selectors are not supported in this release; "
@@ -414,7 +433,12 @@ class MergedTrace:
                 # result.
                 continue
         if not hits:
-            raise KeyError(item)
+            raise KeyError(
+                f"{item!r} resolves on none of ranks {list(self.rank_ids)}; "
+                f"use a rank-qualified spelling (r{{rank}}/label, e.g. "
+                f"r{self.rank_ids[0] if self.rank_ids else 0}/{item}) or query "
+                "one rank core directly (merged.ranks[r][label])."
+            )
         if len(hits) > 1:
             from .._errors import AmbiguousOpLookupError
 
@@ -452,6 +476,7 @@ class MergedTrace:
             where the label does not resolve are absent.
         """
 
+        self._require_members("super_op()")
         fan: dict[int, Any] = {}
         for rank_id in self.rank_ids:
             try:
@@ -463,7 +488,10 @@ class MergedTrace:
                 # a defect in the rank core and must surface, not shrink the fan.
                 continue
         if not fan:
-            raise KeyError(label)
+            raise KeyError(
+                f"{label!r} resolves on none of ranks {list(self.rank_ids)}; "
+                "super_op takes an unqualified rank-core op/layer label."
+            )
         return fan
 
     def join_ops(self, join: CollectiveJoin) -> dict[int, tuple[Any, ...]]:
@@ -487,6 +515,7 @@ class MergedTrace:
             recorded.
         """
 
+        self._require_members("join_ops()")
         resolved: dict[int, tuple[Any, ...]] = {}
         for rank in join.presence:
             trace = self.ranks[rank]
@@ -522,7 +551,11 @@ class MergedTrace:
 
         joins = {join.key: join for join in self.joins}
         if left not in joins or right not in joins:
-            raise KeyError("happens_before takes keys of existing joins")
+            missing = [key for key in (left, right) if key not in joins]
+            raise KeyError(
+                f"happens_before takes keys of existing joins; {missing!r} "
+                f"not among the {len(joins)} join key(s) (see merged.joins)."
+            )
         successors: dict[JoinKey, set[JoinKey]] = {key: set() for key in joins}
         per_rank_sequence: dict[int, list[tuple[int, JoinKey]]] = {}
         for key, join in joins.items():
@@ -698,6 +731,7 @@ class MergedTrace:
     def save(self, path: str | Path, *, overwrite: bool = False) -> None:
         """Save the merged artifact as a ``merged-directory`` bundle."""
 
+        self._require_members("save()")
         from ._artifact import save_merged
 
         save_merged(self, path, overwrite=overwrite)

@@ -136,3 +136,43 @@ def test_default_save_canaries_present_in_bundle_bytes(tmp_path: Path) -> None:
     tl.save(trace, bundle, overwrite=True)
     raw = _bundle_bytes(bundle)
     assert _CANARY_TOKEN.encode() in raw
+
+
+def test_streaming_save_warns_and_discloses(tmp_path: Path) -> None:
+    """R62 REOPEN: streaming to_disk goes through the same belt as tl.save.
+
+    Fail-before (sol, round 6): ``storage=tl.to_disk(...)`` hardcoded
+    ``included=True``, emitted ZERO warnings, and offered no opt-out -- the
+    canary token shipped in the streamed bundle silently, reopening the exact
+    class the round-5 tl.save fix closed.
+    """
+
+    from torchlens.errors._base import TorchLensWarning
+
+    bundle = tmp_path / "streamed.tl"
+    with pytest.warns(TorchLensWarning, match="custom module attribute"):
+        tl.trace(_AttrModel().eval(), torch.randn(2, 4), storage=tl.to_disk(bundle))
+
+    disclosure = _manifest_disclosure(bundle)
+    assert disclosure["included"] is True
+    assert "api_token" in disclosure["top_level_keys"]
+    assert _CANARY_TOKEN.encode() in _bundle_bytes(bundle)
+
+
+def test_streaming_optout_withholds_values(tmp_path: Path) -> None:
+    """``to_disk(..., include_custom_attributes=False)`` withholds the channel."""
+
+    bundle = tmp_path / "held.tl"
+    tl.trace(
+        _AttrModel().eval(),
+        torch.randn(2, 4),
+        storage=tl.to_disk(bundle, include_custom_attributes=False),
+    )
+
+    raw = _bundle_bytes(bundle)
+    for canary in (_CANARY_TOKEN, _CANARY_PATH, _CANARY_OWNER):
+        assert canary.encode() not in raw, f"canary {canary!r} leaked past the streaming opt-out"
+
+    disclosure = _manifest_disclosure(bundle)
+    assert disclosure["included"] is False
+    assert "api_token" in disclosure["top_level_keys"]

@@ -111,8 +111,12 @@ def test_float_resolves_to_a_fraction_and_int_to_absolute_bytes() -> None:
 def test_invalid_budget_raises_rather_than_silently_disabling(value: object) -> None:
     """A malformed budget must fail loudly; silently unguarding is the bug."""
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as excinfo:
         resolve_save_budget(value)  # type: ignore[arg-type]
+    # R64-2: the door is typed now -- stable code + remedy on fields, while
+    # the historical `except ValueError` catchability is preserved above.
+    assert excinfo.value.fields.get("code") == "save_budget_invalid"
+    assert excinfo.value.fields.get("remedy")
 
 
 def test_format_bytes_is_readable_at_every_scale() -> None:

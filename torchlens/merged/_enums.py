@@ -104,6 +104,7 @@ class MergedErrorCode(str, Enum):
     MERGE_RUN_UNSUPPORTED = "merge_run_unsupported"
     MERGED_SELECTOR_UNSUPPORTED = "merged_selector_unsupported"
     MERGED_SURFACE_UNSUPPORTED = "merged_surface_unsupported"
+    MERGED_MEMBER_RELEASED = "merged_member_released"
 
 
 MERGE_FINDING_KINDS: Final[tuple[str, ...]] = (

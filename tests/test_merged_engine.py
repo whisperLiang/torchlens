@@ -9,6 +9,7 @@ widening, determinism, and the contract-doc lockstep gates.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -30,7 +31,12 @@ from torchlens.merged import (
     derive_merge,
 )
 from torchlens.merged._errors import MergeInputError
-from torchlens.merged._evidence import RankEvidence, extract_rank_evidence
+from torchlens.merged._evidence import (
+    P2P_KINDS,
+    TENSORLESS_KINDS,
+    RankEvidence,
+    extract_rank_evidence,
+)
 
 pytestmark = pytest.mark.smoke
 
@@ -110,7 +116,9 @@ def boundary(
             "coord_provenance": "test",
         },
         "reduce_op": reduce_op,
-        "peer": None,
+        "peer": (
+            {"raw": {"tag": 0}, "canonical": {"src": 0, "dst": 1}} if kind in P2P_KINDS else None
+        ),
         "events": {
             "async_op": async_op,
             "completion_binding": "unobserved" if async_op else "issue_sync",
@@ -130,9 +138,11 @@ def boundary(
             "arming_source": "explicit",
         },
         "c10d_group_seq": c10d_group_seq,
-        "disclosures": [],
+        # Recorder-coherent derived fields: the parse chokepoint refuses
+        # records whose disclosure/op_node surface contradicts the rest.
+        "disclosures": ["read_of_inflight_destination"] if async_op else [],
         "op_labels_raw": [f"{kind}_{seq}_raw_r{rank}"],
-        "op_node": True,
+        "op_node": kind not in TENSORLESS_KINDS,
     }
 
 
@@ -657,6 +667,328 @@ class TestSweepFieldValidation:
         from torchlens.merged._evidence import REDUCE_OP_KINDS
 
         assert {site.kind for site in COLLECTIVE_SITES if site.has_reduce_op} == REDUCE_OP_KINDS
+
+
+class TestWireVocabularyLockstep:
+    """R49: the distributed->merged wire vocabulary cannot drift silently.
+
+    The collective_boundary_v1 payload is WRITTEN by
+    ``backends/torch/collectives.py`` (+ the lifecycle ledger) and READ by
+    ``merged/_evidence.py``; both sides used to re-spell the closed
+    vocabularies independently with zero drift gate, so a writer-side rename
+    silently turned every future artifact unparseable (or, worse, unvalidated
+    on the renamed axis). Declared residual: a NEW writer-side token is only
+    caught at parse time; hoisting the writer's literals into one shared
+    constant home is relayed to the capture lane.
+    """
+
+    def _writer_string_literals(self) -> set[str]:
+        import inspect
+
+        from torchlens.backends.torch import collectives
+
+        tree = ast.parse(inspect.getsource(collectives))
+        return {
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+
+    def test_boundary_schema_matches_writer(self):
+        from torchlens.backends.torch import collectives
+        from torchlens.merged import _evidence
+
+        assert collectives.BOUNDARY_SCHEMA == _evidence.BOUNDARY_SCHEMA
+
+    def test_install_epoch_vocabulary_matches_ledger_literal(self):
+        from typing import get_args
+
+        from torchlens.distributed._ledger import InstallEpoch
+        from torchlens.merged._evidence import _INSTALL_EPOCHS
+
+        assert set(get_args(InstallEpoch)) == set(_INSTALL_EPOCHS)
+
+    def test_writer_spells_every_reader_vocabulary_token(self):
+        from torchlens.merged import _evidence
+
+        writer_literals = self._writer_string_literals()
+        for vocab_name in (
+            "_COMPLETION_BINDINGS",
+            "_WITNESS_POLICIES",
+            "_DISCLOSURE_TOKENS",
+            "_NOT_PRESENT_REASONS",
+        ):
+            vocab = getattr(_evidence, vocab_name)
+            missing = set(vocab) - writer_literals
+            assert not missing, (
+                f"reader vocabulary {vocab_name} member(s) {sorted(missing)} never "
+                "appear in the writer module -- a writer-side rename drifted the wire"
+            )
+
+    def test_reader_vocabularies_are_pinned(self):
+        from torchlens.merged import _evidence
+
+        assert set(_evidence._COMPLETION_BINDINGS) == {"issue_sync", "unobserved"}
+        assert set(_evidence._WITNESS_POLICIES) == {"none", "digest"}
+        assert set(_evidence._DISCLOSURE_TOKENS) == {
+            "read_of_inflight_destination",
+            "c10d_group_seq_read_failed",
+        }
+        assert set(_evidence._NOT_PRESENT_REASONS) == {"async_completion_unobserved"}
+
+
+class TestReleaseContract:
+    """Contract section 8: release() refuses typed, never lies about members.
+
+    Fail-before (opus R18 [W]): release() landed contradicting the contract
+    doc ("no separate cleanup surface"), post-release member access raised
+    bare ``KeyError`` from the emptied handle dict, and ``merged.ranks``
+    presented a released presenter as a ZERO-MEMBER merge (empty mapping,
+    ``len() == 0``) while ``rank_ids`` still listed the ranks -- a silent
+    presence lie.
+    """
+
+    def _merged(self):
+        from torchlens.merged import merge_ranks
+
+        return merge_ranks(
+            [
+                trace_for_boundaries([boundary(0, 0)], seeded_ledger()),
+                trace_for_boundaries([boundary(1, 0)], seeded_ledger()),
+            ]
+        )
+
+    def _assert_released_refusal(self, call) -> None:
+        from torchlens.merged._errors import MergedSurfaceUnsupportedError
+
+        with pytest.raises(MergedSurfaceUnsupportedError) as excinfo:
+            call()
+        assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_MEMBER_RELEASED.value
+
+    def test_member_surfaces_refuse_typed_after_release(self, tmp_path):
+        merged = self._merged()
+        merged.release()
+        self._assert_released_refusal(lambda: merged.ranks)
+        self._assert_released_refusal(lambda: merged["anything"])
+        self._assert_released_refusal(lambda: merged.super_op("anything"))
+        self._assert_released_refusal(lambda: merged.save(tmp_path / "released"))
+
+    def test_join_ops_refuses_typed_after_release(self):
+        merged = self._merged()
+        (join,) = merged.joins
+        merged.release()
+        self._assert_released_refusal(lambda: merged.join_ops(join))
+
+    def test_release_never_presents_zero_members(self):
+        """A released presenter must not read as an empty merge."""
+
+        merged = self._merged()
+        merged.release()
+        with pytest.raises(Exception) as excinfo:
+            len(merged.ranks)
+        assert getattr(excinfo.value, "fields", {}).get("code") == (
+            MergedErrorCode.MERGED_MEMBER_RELEASED.value
+        )
+
+    def test_verdicts_stay_readable_after_release(self):
+        merged = self._merged()
+        before = (merged.alignment, merged.value_status, merged.rank_ids)
+        merged.release()
+        assert (merged.alignment, merged.value_status, merged.rank_ids) == before
+        assert merged.report.alignment is before[0]
+        assert merged.joins and merged.gaps == merged._derivation.gap_findings
+        assert isinstance(merged.findings, tuple)
+        assert "MergedTrace" in repr(merged)
+        assert "alignment" in merged.summary()
+
+    def test_release_is_idempotent(self):
+        merged = self._merged()
+        merged.release()
+        merged.release()
+        self._assert_released_refusal(lambda: merged.ranks)
+
+    def test_pre_release_member_access_unchanged(self):
+        merged = self._merged()
+        assert set(merged.ranks) == {0, 1}
+        assert merged.ranks[0] is not None
+
+
+class TestWitnessCompletionCoherence:
+    """R18 fixwave-6: forged witness/completion/disclosure records refuse at parse.
+
+    Fail-before (sol HIGH, 4th round): an async boundary
+    (``completion_binding="unobserved"``) carrying FORGED ``destination_digests``
+    -- bytes the recorder definitionally never observed -- rendered
+    ``attested``/``attested_complete`` when the forgery matched across cores;
+    ``policy_resolved="none"`` cores presenting digests attested the same way
+    (opus+sol); and 15/17 disclosure-tamper arms (``async_op`` flips, stripped
+    ``read_of_inflight_destination``, spurious tokens, ``op_node``/``peer``
+    rewrites, per-boundary install-epoch promotion) passed parse untouched.
+    Every axis now refuses typed at the one chokepoint merge time and load
+    rederivation share.
+    """
+
+    def _extract(self, entry: dict) -> None:
+        extract_rank_evidence(
+            trace_for_boundaries([entry], seeded_ledger()),
+            "coherence-tamper",
+        )
+
+    def _assert_refuses(self, entry: dict) -> None:
+        with pytest.raises(MergeInputError) as excinfo:
+            self._extract(entry)
+        assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
+
+    # --- the headline forgery: async destination digests -------------------
+
+    def test_forged_destination_digests_on_unobserved_completion_refuse(self):
+        entry = boundary(
+            0,
+            0,
+            async_op=True,
+            witness_policy="digest",
+            contribution_digests=["c" * 64],
+            destination_digests=["a" * 64],
+        )
+        self._assert_refuses(entry)
+
+    def test_honest_async_digest_record_still_parses(self):
+        entry = boundary(
+            0,
+            0,
+            async_op=True,
+            witness_policy="digest",
+            contribution_digests=["c" * 64],
+            destination_digests=None,
+        )
+        self._extract(entry)  # must not raise
+
+    # --- digests under witness policy "none" -------------------------------
+
+    def test_contribution_digests_under_policy_none_refuse(self):
+        entry = boundary(0, 0)
+        entry["witness"]["contribution_digests"] = ["c" * 64]
+        self._assert_refuses(entry)
+
+    def test_destination_digests_under_policy_none_refuse(self):
+        entry = boundary(0, 0)
+        entry["witness"]["destination_digests"] = ["a" * 64]
+        self._assert_refuses(entry)
+
+    # --- events coherence ---------------------------------------------------
+
+    def test_async_op_flag_contradicting_completion_binding_refuses(self):
+        entry = boundary(0, 0, async_op=True)
+        entry["events"]["async_op"] = False
+        self._assert_refuses(entry)
+
+    def test_sync_record_claiming_unobserved_binding_refuses(self):
+        entry = boundary(0, 0)
+        entry["events"]["completion_binding"] = "unobserved"
+        self._assert_refuses(entry)
+
+    def test_non_boolean_async_op_refuses(self):
+        entry = boundary(0, 0)
+        entry["events"]["async_op"] = "no"
+        self._assert_refuses(entry)
+
+    # --- disclosure coherence -----------------------------------------------
+
+    def test_stripped_inflight_read_disclosure_refuses(self):
+        entry = boundary(0, 0, async_op=True)
+        entry["disclosures"] = []
+        self._assert_refuses(entry)
+
+    def test_spurious_inflight_read_disclosure_refuses(self):
+        entry = boundary(0, 0)
+        entry["disclosures"] = ["read_of_inflight_destination"]
+        self._assert_refuses(entry)
+
+    def test_unknown_disclosure_token_refuses(self):
+        entry = boundary(0, 0)
+        entry["disclosures"] = ["totally_fine_trust_me"]
+        self._assert_refuses(entry)
+
+    def test_group_seq_value_with_read_failed_disclosure_refuses(self):
+        entry = boundary(0, 0, c10d_group_seq=7)
+        entry["disclosures"] = ["c10d_group_seq_read_failed"]
+        self._assert_refuses(entry)
+
+    # --- not_present_reason coherence ----------------------------------------
+
+    def test_not_present_reason_outside_vocabulary_refuses(self):
+        entry = boundary(0, 0)
+        entry["witness"]["not_present_reason"] = "because"
+        self._assert_refuses(entry)
+
+    def test_spurious_async_reason_on_sync_digest_record_refuses(self):
+        entry = boundary(
+            0,
+            0,
+            witness_policy="digest",
+            contribution_digests=["c" * 64],
+            destination_digests=["a" * 64],
+        )
+        entry["witness"]["not_present_reason"] = "async_completion_unobserved"
+        self._assert_refuses(entry)
+
+    def test_missing_async_reason_on_async_digest_record_refuses(self):
+        entry = boundary(
+            0,
+            0,
+            async_op=True,
+            witness_policy="digest",
+            contribution_digests=["c" * 64],
+        )
+        entry["witness"]["not_present_reason"] = None
+        self._assert_refuses(entry)
+
+    # --- op_node / peer / lifetime coherence ---------------------------------
+
+    def test_op_node_false_on_tensor_kind_refuses(self):
+        entry = boundary(0, 0)
+        entry["op_node"] = False
+        self._assert_refuses(entry)
+
+    def test_op_node_true_on_tensorless_kind_refuses(self):
+        entry = boundary(0, 0, kind="barrier", reduce_op=None, roles=[])
+        entry["op_node"] = True
+        self._assert_refuses(entry)
+
+    def test_peer_record_on_collective_kind_refuses(self):
+        entry = boundary(0, 0)
+        entry["peer"] = {"canonical": {"src": 0, "dst": 1}}
+        self._assert_refuses(entry)
+
+    def test_missing_peer_record_on_p2p_kind_refuses(self):
+        entry = boundary(0, 0, kind="send", channel="p2p/0->1", reduce_op=None)
+        entry["peer"] = None
+        self._assert_refuses(entry)
+
+    def test_lifetime_epoch_outside_vocabulary_refuses(self):
+        entry = boundary(0, 0)
+        entry["lifetime_evidence"]["install_epoch"] = "definitely_complete"
+        self._assert_refuses(entry)
+
+    def test_boundary_epoch_promotion_against_record_epoch_refuses(self):
+        entry = boundary(0, 0)
+        entry["lifetime_evidence"]["install_epoch"] = "armed_before_any_group"
+        self._assert_refuses(entry)
+
+    # --- tensorless empty digest lists (honest recorder shape) ---------------
+
+    def test_tensorless_empty_digest_lists_still_parse(self):
+        """The recorder emits [] digest lists for barrier under policy digest."""
+
+        entry = boundary(0, 0, kind="barrier", reduce_op=None, roles=[], witness_policy="digest")
+        entry["witness"]["contribution_digests"] = []
+        entry["witness"]["destination_digests"] = []
+        self._extract(entry)  # must not raise
+
+    def test_tensor_kind_empty_digest_list_still_refuses(self):
+        entry = boundary(0, 0, witness_policy="digest")
+        entry["witness"]["contribution_digests"] = []
+        self._assert_refuses(entry)
 
 
 class TestRelationsAndCrossChecks:

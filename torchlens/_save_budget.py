@@ -41,6 +41,7 @@ from typing import Any
 
 import torch
 
+from ._errors import InvalidArgumentError
 from .errors._base import CaptureError
 
 __all__ = [
@@ -203,18 +204,22 @@ def resolve_save_budget(value: SaveBudgetOption) -> _BudgetSpec | None:
 
     Raises
     ------
-    ValueError
-        If ``value`` is not one of the documented spellings. Invalid budgets fail
-        loudly rather than silently disabling the guard.
+    InvalidArgumentError
+        (``ValueError`` lineage, ``code="save_budget_invalid"``) if ``value``
+        is not one of the documented spellings. Invalid budgets fail loudly
+        rather than silently disabling the guard.
     """
 
     if value is None:
         return None
     if isinstance(value, str):
         if value != "auto":
-            raise ValueError(
+            raise InvalidArgumentError(
                 f"save_budget string must be 'auto'; got {value!r}. Use a float in (0, 1] for a "
-                "fraction of available memory, an int for absolute bytes, or None to disable."
+                "fraction of available memory, an int for absolute bytes, or None to disable.",
+                code="save_budget_invalid",
+                remedy="pass 'auto', a float in (0, 1], an int byte cap, or None",
+                argument="save_budget",
             )
         return _BudgetSpec(
             fraction=DEFAULT_SAVE_BUDGET_FRACTION,
@@ -225,14 +230,20 @@ def resolve_save_budget(value: SaveBudgetOption) -> _BudgetSpec | None:
             ),
         )
     if isinstance(value, bool):
-        raise ValueError(
-            "save_budget does not accept bool; use None to disable or 'auto' for the default."
+        raise InvalidArgumentError(
+            "save_budget does not accept bool; use None to disable or 'auto' for the default.",
+            code="save_budget_invalid",
+            remedy="pass 'auto', a float in (0, 1], an int byte cap, or None",
+            argument="save_budget",
         )
     if isinstance(value, float):
         if not 0.0 < value <= 1.0:
-            raise ValueError(
+            raise InvalidArgumentError(
                 f"save_budget float must be a fraction in (0, 1]; got {value!r}. "
-                "Pass an int for an absolute byte cap."
+                "Pass an int for an absolute byte cap.",
+                code="save_budget_invalid",
+                remedy="pass 'auto', a float in (0, 1], an int byte cap, or None",
+                argument="save_budget",
             )
         return _BudgetSpec(
             fraction=value,
@@ -241,17 +252,23 @@ def resolve_save_budget(value: SaveBudgetOption) -> _BudgetSpec | None:
         )
     if isinstance(value, int):
         if value < 1:
-            raise ValueError(
-                f"save_budget int must be at least 1 byte; got {value!r}. Use None to disable."
+            raise InvalidArgumentError(
+                f"save_budget int must be at least 1 byte; got {value!r}. Use None to disable.",
+                code="save_budget_invalid",
+                remedy="pass 'auto', a float in (0, 1], an int byte cap, or None",
+                argument="save_budget",
             )
         return _BudgetSpec(
             fraction=None,
             absolute_bytes=value,
             source=f"save_budget={value} ({format_bytes(value)} per device)",
         )
-    raise ValueError(
+    raise InvalidArgumentError(
         f"save_budget must be 'auto', a float in (0, 1], an int of bytes, or None; "
-        f"got {type(value).__name__}"
+        f"got {type(value).__name__}.",
+        code="save_budget_invalid",
+        remedy="pass 'auto', a float in (0, 1], an int byte cap, or None",
+        argument="save_budget",
     )
 
 
