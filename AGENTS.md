@@ -101,6 +101,13 @@ Key entry points:
   `False` honored). Rolled multi-pass field sources resolve through the name-keyed allowlist in
   `torchlens/visualization/_encoding.py`; varying/first-pass-only sources stay unencoded with a
   legend note (honest-visuals tripwire), and unclassified sources refuse `encoding_source_invalid`.
+  Wave-1 size channel `Trace.draw(size_by=..., scale=...)` (UNSTABLE, D4 default-applied):
+  scalar field / `"dims"` (non-batch numel) / callable mapped to width/height MINIMUMS
+  (`fixedsize=false`, area clamped 4x default, fonts never scale, strictly opt-in). Rolled
+  multi-pass sources that cannot be certified single-valued refuse `size_by_rolled_varying`
+  (size refuses where color degrades); `total_*` sums encode + aggregation legend line; the
+  funnel drops NodeSpec width/height on image nodes; `scale=` without `size_by` refuses
+  `scale_requires_size_by`.
 - Visualization: `Trace.draw(order_siblings=True)` applies a Graphviz-only verified
   sibling-ordering post-pass for forward unrolled graphs under the node cap.
   `Trace.draw(collapse="none"|"auto"|"max"|t, fold_repeats=None|True|False)` controls v2 smart

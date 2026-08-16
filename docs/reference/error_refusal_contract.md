@@ -108,7 +108,8 @@ add names to the top-level `torchlens` namespace:
 | `encoding_callable_error` | An encoding-channel user callable (`color_by=fn`) raised while resolving a node's value; the original exception is chained. UNSTABLE code (pre-ratification) | Fix the callable; read `Layer.ops` for per-pass truth instead of per-pass attributes on rolled aggregates |
 | `encoding_requires_dot_layout` | Explicit `layout="rank"` with an active encoding channel (`color_by`); v1 channels are dot-layout-only. UNSTABLE code (pre-ratification) | Pass `layout="dot"` or `layout="auto"`, or drop the channel |
 | `encoding_source_invalid` | An encoding-channel source names no known record field or scalar builtin, or (on a rolled multi-pass node) a field with no declared rolled-aggregate semantics row. UNSTABLE code (pre-ratification) | Pass a Layer/Op field name, a scalar builtin, or a callable; unroll the graph for per-pass sources |
-| `encoding_value_invalid` | An encoding-channel source produced a value the channel cannot encode (bool, non-scalar tensor, or other non-numeric). UNSTABLE code (pre-ratification) | Encode a numeric source, or convert the value inside a callable |
+| `encoding_scale_invalid` | `scale=` is outside the closed size-channel vocabulary (`"sqrt"`/`"linear"`; log rejected by design). UNSTABLE code (pre-ratification) | Pass `scale="sqrt"` (default) or `scale="linear"` |
+| `encoding_value_invalid` | An encoding-channel source produced a value the channel cannot encode (bool, non-scalar tensor, shape from a callable, or other non-numeric). UNSTABLE code (pre-ratification) | Encode a numeric source, or convert the value inside a callable |
 | `env_flag_invalid` | A TorchLens boolean environment variable is set to an unrecognized value | Use `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`, or unset the variable |
 | `episode_declaration_invalid` | The `episode=` declaration is unusable: the stepped module is not a proper submodule of the traced root, the token axis/output contract is unmet, the forced-token feed is malformed, or the declaration combines with chunking, `cache=True`, or a value-free save policy (the structure-only combination refuses with `structure_only_episode_unsupported`) | Fix the declaration per the message; wrap the loop in an `nn.Module` and declare its stepped submodule |
 | `episode_ledger_incoherent` | Episode ledger geometry violates the monotone prefix law, a coherence arm, the declared step count, or the value-mode token presence rule; on load the ledger quarantines and the outcome derivation degrades fail-closed | Re-capture the episode; a hand-edited ledger never loads as claims |
@@ -232,6 +233,7 @@ add names to the top-level `torchlens` namespace:
 | `save_mode_invalid` | Activation save mode is unknown | Choose a documented save mode |
 | `save_predicate_type_invalid` | `save=` is neither SaveOptions, predicate, selector, nor `None` (`save='all'` lands here) | Pass a predicate or SaveOptions; use `layers_to_save='all'` for exhaustive saves |
 | `save_payload_level_conflict` | Optional payload family requires runnable level | Use runnable level or omit that family |
+| `scale_requires_size_by` | `scale=` was supplied without `size_by`; the scale transform applies to the size channel only. UNSTABLE code (pre-ratification) | Pass `size_by=` alongside `scale=`, or drop `scale=` |
 | `selector_function_pattern_type_invalid` | `func()` pattern is not a string | Pass a function-name string |
 | `skip_fn_boundary_invalid` | `skip_fn` tried to skip an input or output layer | Return False for boundary layers |
 | `spec_format_version_unsupported` | Intervention `.tlspec` format version is unknown | Use a supported format version |
@@ -239,6 +241,7 @@ add names to the top-level `torchlens` namespace:
 | `summary_level_invalid` | Summary level is unknown | Pass a documented summary level |
 | `summary_option_conflict` | Aliased summary options disagree | Pass one alias, or equal values |
 | `site_key_unavailable` | Site accessor read on a trace without site keys (legacy artifact or detached layer; spelling provisional pending the S2 vocabulary amendment) | Re-capture with a current TorchLens to mint site keys |
+| `size_by_rolled_varying` | The `size_by` source cannot be certified single-valued on a rolled multi-pass node (marker-varying reconciled field, unreconciled per-call/first-pass projection, or the varying output shape under `"dims"`); size REFUSES where color degrades — an unencoded box is indistinguishable from an encoded small box. UNSTABLE code (pre-ratification) | Unroll the graph to size each pass by its own value, choose a cross-pass total (`total_*`), or pass a callable asserting your own aggregate semantics |
 | `stack_ordinals_duplicate` | Stacked ops share an execution ordinal | Narrow the selector to distinct ops |
 | `stack_ordinals_unavailable` | Matched ops lack recorded execution ordinals | Select ops with recorded ordinals |
 | `stack_output_not_tensor` | Stacked op's saved primary out is not one tensor | Select single-tensor-output ops |

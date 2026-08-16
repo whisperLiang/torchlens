@@ -284,6 +284,22 @@ print(tl.compat.report(model, x).to_markdown())
   with channels active. Typed refusals: `encoding_source_invalid`, `encoding_value_invalid`
   (bools and non-scalar tensors refuse — a bool is not a magnitude), `encoding_callable_error`
   (chains the user exception), `encoding_requires_dot_layout`.
+- `Trace.draw(size_by=..., scale="sqrt"|"linear")` (UNSTABLE spellings, keyword-only) is the
+  wave-1 SIZE channel, shipped with the D4 DEFAULT APPLIED (D4 unruled at merge: sqrt scale +
+  conservative area-only mapping + typed refusal on rolled varying sources). Sources: a scalar
+  record field, the closed `"dims"` shape token (numel of the NON-BATCH output shape; the only
+  shape-valued source — callables must return scalars), or a callable. Emitted sizes are
+  width/height MINIMUMS under `fixedsize=false` (labels never truncate, fonts never scale),
+  encoded area clamped to `SIZE_BY_MAX_AREA_MULT` (4.0) x the default node area; strictly
+  opt-in (plain `draw()` keeps uniform boxes). On rolled multi-pass nodes size REFUSES where
+  color degrades: `size_by_rolled_varying` fires for any source that cannot be certified
+  single-valued (marker-varying reconciled fields, mirrored/per-pass projections, varying
+  shape under `"dims"` — the refusal fires BEFORE dims resolution, so the honest-aggregate
+  range strings are unreachable). Summed-family sources (`total_*`) encode with a mandatory
+  aggregation legend line. The spec funnel DROPS NodeSpec width/height when `spec.image` is
+  set (an image node's size is pixel-derived); `extra_attrs` stays the power-valve override
+  and wins on key conflicts by merge order. `scale=` without `size_by` refuses
+  `scale_requires_size_by`; unknown scale tokens refuse `encoding_scale_invalid`.
 - `Trace.draw(collapse="none"|"auto"|"max"|t, fold_repeats=None|True|False)` controls v2 smart
   collapse for rolled and unrolled graphs, where float `t` in `[0.0, 1.0]` follows the public
   monotone schedule (`0.0 == "none"`, `1.0 == "max"`). `auto` is the first schedule point whose

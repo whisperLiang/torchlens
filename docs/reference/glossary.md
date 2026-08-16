@@ -218,6 +218,24 @@ alignment is evidence, not semantic equivalence.
   (`encoding_source_invalid`). Wrong-typed values refuse (`encoding_value_invalid`); a raising
   callable refuses with the original exception chained (`encoding_callable_error`).
 
+**size_by** *(unstable — no deprecation shim owed; keyword-only)*
+: `draw(size_by=...)` sizes eligible operation nodes from a scalar field, the closed `"dims"`
+  shape token (numel of the non-batch output shape — the D4 default mapping, applied because D4
+  is unruled), or a callable `node -> scalar`. Emitted sizes are width/height MINIMUMS under
+  `fixedsize=false`: a label can never be truncated by an encoding and fonts never scale; the
+  encoded area is clamped to 4x the default node area. Strictly opt-in — plain `draw()` keeps
+  uniform boxes. On rolled multi-pass layers size REFUSES where color degrades
+  (`size_by_rolled_varying`): a size source that cannot be certified single-valued
+  (marker-varying, first-pass projection, varying shape under `"dims"`) has no honest "n/a"
+  rendering. Exact cross-pass totals (`total_*`) encode with a mandatory aggregation legend line;
+  callables bypass the rolled table with a legend disclosure.
+
+**scale (size channel)** *(unstable — no deprecation shim owed; keyword-only)*
+: The size-channel scale transform: `"sqrt"` (default; compresses dynamic range) or `"linear"`
+  (the literal area motif). Log is rejected by design (flattens 512-vs-4096). Supplied without
+  `size_by` it refuses (`scale_requires_size_by`); an unknown token refuses
+  (`encoding_scale_invalid`). Every legend drawn states the active scale.
+
 **show_legend tri-state**
 : `show_legend` accepts `None` (default, AUTO: no legend unless an encoding channel is active,
   then a channel-only disclosure legend), `True` (full theme legend, plus channel rows when
@@ -628,6 +646,11 @@ shim owed*
 : The v1 encoding-channel value source on `Trace.draw` (L5 channel core). See
   the "color_by" entry above for semantics.
 
+**size_by / scale (draw kwargs)** — *unstable — no deprecation shim owed; keyword-only*
+: The wave-1 size encoding channel on `Trace.draw` (D4 default-applied: sqrt +
+  conservative area-only mapping + typed refusal on rolled varying sources).
+  See the "size_by" and "scale (size channel)" entries above for semantics.
+
 **show_legend=None AUTO value** — *unstable — no deprecation shim owed*
 : The tri-state AUTO value on the stable `show_legend` kwarg: no legend unless
   an encoding channel is active, then a channel-only disclosure legend.
@@ -635,4 +658,5 @@ shim owed*
 
 **Encoding refusal codes** — *unstable — no deprecation shim owed*
 : `encoding_source_invalid`, `encoding_value_invalid`,
-  `encoding_callable_error`, `encoding_requires_dot_layout`.
+  `encoding_callable_error`, `encoding_requires_dot_layout`,
+  `size_by_rolled_varying`, `scale_requires_size_by`, `encoding_scale_invalid`.

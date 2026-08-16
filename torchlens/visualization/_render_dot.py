@@ -541,7 +541,9 @@ def _resolve_forward_context(
         # forces dot (show_containers precedent), noticed on cost override.
         from ._encoding import resolve_encoding_engine
 
-        engine = resolve_encoding_engine(request.engine, engine, layout_cost)
+        engine = resolve_encoding_engine(
+            request.engine, engine, layout_cost, request.encoding.active_channels()
+        )
     # Session diagnostic (never persisted; scrub-declared like the sibling
     # decision): the last draw's encoding state, for tests and debugging.
     trace._last_encoding_state = request.encoding
@@ -1049,6 +1051,8 @@ def draw(
     show_orphans: bool = False,
     *,
     color_by: "str | Callable[[Any], Any] | None" = None,
+    size_by: "str | Callable[[Any], Any] | None" = None,
+    scale: "str | None" = None,
 ) -> Any:
     """Render the computational graph through the resolved forward IR pipeline.
 
@@ -1074,11 +1078,14 @@ def draw(
         show_input_transform_summary=show_input_transform_summary,
         show_orphans=show_orphans,
     )
-    from ._encoding import resolve_color_by
+    from ._encoding import resolve_color_by, resolve_size_by, resolve_size_scale
 
-    # Option validation for the encoding channel: an unknown source refuses
-    # HERE, before any render work (encoding_source_invalid).
+    # Option validation for the encoding channels: an unknown source refuses
+    # HERE, before any render work (encoding_source_invalid), and scale=
+    # without size_by refuses scale_requires_size_by.
     encoding_channel_spec = resolve_color_by(color_by)
+    size_channel_spec = resolve_size_by(size_by)
+    size_scale = resolve_size_scale(scale, size_by_active=size_channel_spec is not None)
     request = ResolvedRenderRequest(
         vis_mode=vis_mode,
         show_buffer_layers=cast(BufferVisibilityLiteral, show_buffer_layers),
@@ -1115,18 +1122,26 @@ def draw(
         show_orphans=show_orphans,
         direction=direction,
         color_by=color_by,
+        size_by=size_by,
+        scale=scale,
     )
     request, theme, site_labels = _resolve_draw_request(self, request)
-    if encoding_channel_spec is not None:
+    if encoding_channel_spec is not None or size_channel_spec is not None:
         from ._encoding import attach_encoding_state
 
-        request = attach_encoding_state(request, encoding_channel_spec, theme)
+        request = attach_encoding_state(
+            request,
+            theme,
+            color_spec=encoding_channel_spec,
+            size_spec=size_channel_spec,
+            size_scale=size_scale,
+        )
     show_buffer_layers = request.show_buffer_layers
 
     if vis_renderer == "dagua" and request.encoding is not None:
         from ._encoding import raise_encoding_dagua_refusal
 
-        raise_encoding_dagua_refusal()
+        raise_encoding_dagua_refusal(request.encoding.active_channels())
     if vis_renderer == "dagua":
         opted_in_module = sys.modules.get("torchlens.experimental.dagua")
         if not getattr(opted_in_module, "__torchlens_dagua_opted_in__", False):

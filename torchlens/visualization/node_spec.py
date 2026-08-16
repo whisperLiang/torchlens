@@ -61,6 +61,17 @@ class NodeSpec:
         Optional node tooltip.
     image:
         Optional image path to embed in the node.
+    width:
+        Optional node width minimum in inches (size encoding channel). With
+        ``fixedsize="false"`` the box can only GROW from the label's natural
+        size, so a label can never be truncated by an encoding. Dropped by
+        the spec funnel when ``image`` is set: an image node's size is
+        pixel-derived, and a width minimum would become a live scaling
+        floor (``extra_attrs`` remains the power-valve override).
+    height:
+        Optional node height minimum in inches (see ``width``).
+    fixedsize:
+        Optional Graphviz ``fixedsize`` value emitted with the size fields.
     extra_attrs:
         Additional Graphviz node attributes.
     """
@@ -74,6 +85,9 @@ class NodeSpec:
     penwidth: float | None = None
     tooltip: str | None = None
     image: str | None = None
+    width: float | None = None
+    height: float | None = None
+    fixedsize: str | None = None
     extra_attrs: dict[str, str] = field(default_factory=dict)
 
     def replace(self, **kwargs: Any) -> NodeSpec:

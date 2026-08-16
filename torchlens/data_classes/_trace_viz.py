@@ -139,6 +139,8 @@ class TraceVisualizationMixin(_TraceMixinBase):
         show_orphans: bool = False,  # Invariants support flipping this; owner visual review pending.
         *,
         color_by: str | Callable[[Any], Any] | None = None,
+        size_by: str | Callable[[Any], Any] | None = None,
+        scale: str | None = None,
     ) -> Any:
         """Render the computational graph for this model log.
 
@@ -195,6 +197,26 @@ class TraceVisualizationMixin(_TraceMixinBase):
             sources resolve through the rolled-aggregate allowlist —
             per-pass-varying and first-pass-only sources stay unencoded with
             a legend note rather than painting an unprovable uniform value.
+        size_by:
+            UNSTABLE (keyword-only; no deprecation shim owed). Size encoding
+            channel source: a Layer/Op field name, the closed ``"dims"``
+            shape token (numel of the non-batch output shape — the D4
+            default mapping, applied as default because D4 is unruled), or
+            a callable ``node -> scalar``. Encoded nodes get width/height
+            MINIMUMS (``fixedsize=false``: labels are never truncated,
+            fonts never scale) with encoded area clamped to 4x the default
+            node area. STRICTLY OPT-IN: plain ``draw()`` keeps uniform
+            boxes. On a rolled multi-pass layer a size source that cannot
+            be certified single-valued refuses typed
+            (``size_by_rolled_varying``): size has no honest "n/a"
+            rendering, so it refuses where color degrades. Callables bypass
+            the rolled table (disclosed in the legend).
+        scale:
+            UNSTABLE (keyword-only). Size-channel scale transform:
+            ``"sqrt"`` (default) or ``"linear"`` (the literal area motif).
+            Supplied without ``size_by`` it refuses
+            (``scale_requires_size_by``). Every legend drawn states the
+            active scale.
 
         Returns
         -------
@@ -277,6 +299,8 @@ class TraceVisualizationMixin(_TraceMixinBase):
             show_input_transform_summary=show_input_transform_summary,
             show_orphans=show_orphans,
             color_by=color_by,
+            size_by=size_by,
+            scale=scale,
         )
 
     def add_node_overlay(
