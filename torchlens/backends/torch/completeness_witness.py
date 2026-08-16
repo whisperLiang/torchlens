@@ -56,7 +56,6 @@ from typing import Any, Literal, cast
 import torch
 import torch._ops as _torch_ops  # r47 hon2_1: enumerate the ``torch.ops.*`` __call__ classes
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
-from torch.utils._python_dispatch import TorchDispatchMode
 
 from ... import _state
 from ..._errors import TorchLensCaptureGapWarning
@@ -93,6 +92,7 @@ from ._completeness_types import (
     _TensorOriginRegistry,
     _WitnessState,
 )
+from ._modes import _TorchLensDispatchMode
 from ._tl import (
     get_buffer_address,
     get_tensor_label,
@@ -1221,7 +1221,7 @@ _ORIGIN_FLATTEN_DEPTH_LIMIT = 4
 _BUFFER_STATE_VIEW_OPERATORS = frozenset({"aten.detach", "aten.alias"})
 
 
-class _CompletenessDispatchMode(TorchDispatchMode):
+class _CompletenessDispatchMode(_TorchLensDispatchMode):
     """Census aten calls while TorchLens active logging is enabled."""
 
     def __init__(self, state: _WitnessState) -> None:
