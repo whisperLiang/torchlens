@@ -221,8 +221,16 @@ jobs:
           pytest tests/ -m smoke --ignore-glob="*menagerie*" --ignore=tests/crawler \
             --cov=torchlens --cov-branch \
             --cov-report=term --cov-report=xml:"${{ runner.temp }}/coverage.xml" \
+            --cov-report=json:"${{ runner.temp }}/coverage.json" \
             --cov-fail-under=55 \
             --tb=short -q
+
+      - name: Enforce per-package coverage floors
+        # r7 R72 (sol MED): the aggregate floor alone let a subsystem hollow
+        # out while the total stayed above 55. Verdict-critical packages are
+        # bound individually; floors live in the script (single authority).
+        run: |
+          python scripts/check_package_coverage_floors.py "${{ runner.temp }}/coverage.json"
 
       - name: Upload coverage report
         if: always()

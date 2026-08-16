@@ -153,3 +153,88 @@ def test_floor_lock_is_red_capable() -> None:
     floors = [int(value) for value in re.findall(r"--cov-fail-under=(\d+)", planted)]
     assert floors == [12]
     assert [floor for floor in floors if floor < COVERAGE_FLOOR_BASELINE] == [12]
+
+
+#: Shrink-forbidden per-package floor baselines (r7 R72). The script is the
+#: single runtime authority; this mirror refuses a silent floor cut there.
+PACKAGE_FLOOR_BASELINES: dict[str, float] = {
+    "torchlens/capture": 74.0,
+    "torchlens/postprocess": 80.0,
+    "torchlens/validation": 54.0,
+    "torchlens/backends": 48.0,
+    "torchlens/data_classes": 65.0,
+    "torchlens/_io": 63.0,
+    "torchlens/intervention": 59.0,
+    "torchlens/utils": 59.0,
+    "torchlens/merged": 80.0,
+    "torchlens/_trace_core": 80.0,
+    "torchlens/visualization": 57.0,
+}
+
+
+def _load_floor_script():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_pkg_floor_script", _PROJECT_ROOT / "scripts" / "check_package_coverage_floors.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_per_package_floors_are_enforced_and_never_lowered() -> None:
+    """r7 R72 (sol MED): verdict-critical packages are bound individually.
+
+    The nightly coverage job must invoke the floor script on the json it
+    just produced, and the script's floors may rise but never drop below the
+    committed baselines (the aggregate-floor doctrine, per package).
+    """
+
+    import yaml
+
+    workflow = yaml.safe_load(_nightly_text())
+    job = workflow.get("jobs", {}).get("coverage")
+    assert job is not None
+    runs = "\n".join(step.get("run", "") for step in job.get("steps", []))
+    assert "scripts/check_package_coverage_floors.py" in runs, (
+        "the nightly coverage job no longer enforces per-package floors"
+    )
+    assert "--cov-report=json" in runs, (
+        "the coverage job stopped producing the json the floor script reads"
+    )
+    script = _load_floor_script()
+    assert set(script.PACKAGE_FLOORS) >= set(PACKAGE_FLOOR_BASELINES), (
+        "per-package floor row(s) deleted from the script: "
+        f"{sorted(set(PACKAGE_FLOOR_BASELINES) - set(script.PACKAGE_FLOORS))}"
+    )
+    lowered = {
+        prefix: (script.PACKAGE_FLOORS[prefix], baseline)
+        for prefix, baseline in PACKAGE_FLOOR_BASELINES.items()
+        if script.PACKAGE_FLOORS.get(prefix, 0) < baseline
+    }
+    assert not lowered, (
+        f"per-package floors lowered below their committed baselines: {lowered} "
+        "— the floor is a tripwire, never lower it to pass"
+    )
+
+
+def test_package_percentage_aggregation_is_red_capable() -> None:
+    """The aggregation flags a hollowed package (unit red-capability)."""
+
+    script = _load_floor_script()
+    payload = {
+        "files": {
+            "torchlens/capture/trace.py": {
+                "summary": {
+                    "covered_lines": 10,
+                    "num_statements": 100,
+                    "covered_branches": 0,
+                    "num_branches": 0,
+                }
+            }
+        }
+    }
+    measured = script.package_percentages(payload)
+    assert measured["torchlens/capture"] == 10.0
+    assert measured["torchlens/capture"] < script.PACKAGE_FLOORS["torchlens/capture"]
