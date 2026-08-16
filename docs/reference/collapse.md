@@ -103,3 +103,20 @@ from pixels.
 
 *This image is generated from the same ResNet-18 trace as the ladder. It shows real `auto` and
 `max` plans followed by every schedule step; visible counts are monotone as `t` increases.*
+
+## The compute ceiling
+
+Smart collapse has a preflight compute ceiling: `COLLAPSE_OPTIMIZER_MAX_OPS` (2000 ops,
+importable from `torchlens.visualization.collapse_optimizer`). The frontier selection is
+measured superlinear (~n^1.75) in op count, so on a trace above the ceiling the optimizer
+**declines** instead of silently dominating the render:
+
+- `draw(collapse="auto"|"max")` warns with a `TorchLensWarning` naming the op count and the
+  ceiling, then renders the graph uncollapsed.
+- `Trace.collapse_plan(mode=...)` refuses typed with `InvalidArgumentError`
+  (`code="collapse_plan_unavailable"`, reason `collapse_ops_ceiling`).
+- `Trace.collapse_schedule()` degrades to its single full-graph step (`t=0.0` only).
+
+The decline is disclosed, never silent. To get a collapsed view of a very large trace, reduce
+the rendered graph first with `module=` focus, `vis_call_depth`, or rolled mode; `fold_repeats`
+and `show_containers` styling are unaffected.

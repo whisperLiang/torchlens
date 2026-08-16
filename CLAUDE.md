@@ -241,7 +241,12 @@ print(tl.compat.report(model, x).to_markdown())
   folding), `True` folds eligible repeated runs even with `collapse="none"`, and `False` disables
   run folding. `collapse="max"` may emit segment boxes; `(xN)`, ellipsis, and segment labels must
   stay honest about hidden calls or ranges. `Trace.collapse_plan(mode=...)` returns the diagnostic
-  plan, and `Trace.collapse_schedule()` returns the float schedule metadata.
+  plan, and `Trace.collapse_schedule()` returns the float schedule metadata. Smart collapse
+  has a preflight compute ceiling `COLLAPSE_OPTIMIZER_MAX_OPS` (2000 ops,
+  `torchlens.visualization.collapse_optimizer`): above it the optimizer DECLINES with a
+  `TorchLensWarning` -- `draw(collapse="auto"|"max")` renders uncollapsed,
+  `Trace.collapse_plan()` refuses typed (`collapse_plan_unavailable`), and
+  `collapse_schedule()` degrades to its single full-graph step.
 - Smart-collapse metadata is computed at access time: `Module.collapse_score`,
   `Trace.module_collapse_order`, and `Trace.collapse_order(weights=..., mode=...)`. These are
   not portable fields and must not be added to `*_FIELD_ORDER` without an explicit schema change.

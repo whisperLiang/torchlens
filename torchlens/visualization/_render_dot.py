@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from .._errors import CaptureContextError, InvalidArgumentError, PayloadUnavailableError
+from ..errors._base import TorchLensWarning
 from ..utils.display import atomic_write_text, user_stacklevel
 from . import _render_utils
 from ._render_common import *
@@ -1173,8 +1174,8 @@ def _add_orphan_island_nodes(
         if getattr(self, "_orphan_logs", ()):
             warnings.warn(
                 "orphans were dropped from this capture; re-trace with keep_orphans=True",
-                UserWarning,
-                stacklevel=2,
+                TorchLensWarning,
+                stacklevel=user_stacklevel(),
             )
         return
 

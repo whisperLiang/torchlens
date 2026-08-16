@@ -30,6 +30,8 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from .._errors import InvalidArgumentError
+from ..errors._base import TorchLensWarning
+from ..utils.display import user_stacklevel
 from .auto_collapse import (
     GENERIC_CONTAINER_CLASSES,
     RUN_FOLD_MIN_LENGTH,
@@ -398,13 +400,13 @@ def select_collapse_plan(
         full_plan = collapse_plan_for_source_graph(source_graph, None, None)
         warnings.warn(
             f"TorchLens is skipping smart collapse: this trace has {op_count} "
-            f"ops, above the collapse optimizer's compute ceiling of "
-            f"{COLLAPSE_OPTIMIZER_MAX_OPS} (its selection cost grows "
-            "superlinearly and would dominate the render). The graph renders "
-            "uncollapsed; reduce the rendered graph first with module= focus, "
-            "vis_call_depth, or rolled mode.",
-            UserWarning,
-            stacklevel=2,
+            f"ops, above the collapse optimizer's compute ceiling "
+            f"COLLAPSE_OPTIMIZER_MAX_OPS={COLLAPSE_OPTIMIZER_MAX_OPS} (its "
+            "selection cost grows superlinearly and would dominate the "
+            "render). The graph renders uncollapsed; reduce the rendered "
+            "graph first with module= focus, vis_call_depth, or rolled mode.",
+            TorchLensWarning,
+            stacklevel=user_stacklevel(),
         )
         result = OptimizerResult(
             selected=frozenset(),
