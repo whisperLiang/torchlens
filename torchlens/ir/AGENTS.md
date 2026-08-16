@@ -1,7 +1,11 @@
 # ir/ - Implementation Guide
 
 Internal backend-neutral IR for TorchLens capture unification (per the package docstring).
-Nothing here is public API.
+Almost everything here is internal — with ONE public exception:
+`ir/container.py::register_container` is imported by the package
+`__init__.py` and listed in the top-level `__all__` (97 names), so a rename
+or signature change there is a PUBLIC API break governed by the deprecation
+rules, not an internal refactor.
 
 ## capture_events.py
 - `CaptureEvents` is the ONE logical journal per run: its `append*` methods are the single
@@ -35,6 +39,9 @@ Nothing here is public API.
   `OpGradObserved`, `ParamGradObserved`, `BackwardCoverageGap`).
 
 ## container.py / container_registry.py
+- `register_container(...)` is the PUBLIC user entry point for declaring
+  custom output-container types (top-level `tl.register_container`); treat
+  its name and signature as frozen public API.
 - `ContainerSpec` + `rebuild_container_from_spec()` describe and rebuild output containers;
   `reconstruction_is_lossy()` gates what may round-trip.
 - `ContainerRegistry`, `walk_container()`, `ContainerRecord`/`ContainerSnapshot` record

@@ -109,7 +109,7 @@ one page or carry an explicit N/A rationale; anything else is a defect.
 | `edge:fwd_bwd_tie` | dashed forward-to-backward correspondence edges | p56 |
 | `label:xN` | '(xN)' true recurrence multiplier (same params) | p24, p26, p27, p28, p29 |
 | `label:plusN` | '+N more Class' ellipsis (distinct same-type instances) | p36 |
-| `label:remainder` | collapsed-box 'N layers total' remainder (incl. buffers) | p20, p38 |
+| `label:remainder` | collapsed-box 'N ops + M buffers' contents remainder | p20, p38 |
 | `label:segment_range` | segment box address-range label | p37 |
 | `label:arm` | conditional IF/ELIF/ELSE arm labels | p59 |
 | `control_flow:branch` | tensor-driven if/else taken-arm rendering | p29, p59, p60 |
@@ -174,7 +174,7 @@ one page or carry an explicit N/A rationale; anything else is a defect.
 | 35 | E | `e4_standalone_fold` | Standalone folding: fold_repeats=True with collapse='none' | `block_stack` | 2 |
 | 36 | E | `e5_ellipsis_grammar` | The '+N more' ellipsis, up close | `block_stack` | 1 |
 | 37 | E | `e6_segments` | Segment boxes: max-mode condensed ranges | `resnet50` | 1 |
-| 38 | E | `e7_remainder_labels` | Remainder labels: 'N layers total' includes buffer leaves | `block_stack` | 2 |
+| 38 | E | `e7_remainder_labels` | Remainder labels: 'N ops + M buffers' accounts for buffer leaves | `block_stack` | 2 |
 | 39 | E | `e8_interleaved_artifact` | KNOWN ARTIFACT: interleaved repeat-folds can look like a cycle | `interleaved_stack` | 2 |
 | 40 | E | `e9_collapse_diagnostics` | Diagnostics: Trace.collapse_plan() and Trace.collapse_schedule() | `(text page)` | - |
 | 42 | F | `f1_node_modes` | node_mode: 'default' vs 'profiling' | `tiny_mlp` | 2 |

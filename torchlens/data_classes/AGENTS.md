@@ -30,9 +30,11 @@ layer.ops             # dict[int, Op]
 ## Trace Gotchas
 - `_tracing_finished` changes `__len__`, `__getitem__`, iteration, and display behavior.
 - Fast-pass postprocess relies on `_tracing_finished` staying true between ops.
-- Methods such as `save`, `load`, `find_sites`, `fork`, `replay`, `rerun`, `run`, and
+- Methods such as `save`, `find_sites`, `fork`, `run`, `push`, and
   `preview_fastlog` bridge into other subpackages; avoid importing them at module top if it
-  creates cycles.
+  creates cycles. There is NO `Trace.load` — loading is module-level `tl.load`
+  (see the sibling `CLAUDE.md`) — and `replay`/`rerun` are deprecated warning
+  aliases of `push`/`run`.
 - `run(inputs=...)` returns a transactional `RunResult` for live and loaded sparse providers;
   legacy `run(model, x, ...)` remains the intervention-rerun compatibility path.
 - `graph_shape_hash` is computed before `_set_tracing_finished`.
@@ -57,7 +59,10 @@ layer.ops             # dict[int, Op]
   for copy/pickle/fork/preview ops). `_OP_SLOT_NAMES` remains the declared stored-field
   universe; `_slot()`, `_internal_set`, and `object.__setattr__` compose over the
   descriptors exactly as they did over slots. Never assume per-instance storage.
-- `copy()` shallow-copies selected graph/conditional fields and deep-copies the rest.
+- `copy()` deep-copies graph/conditional metadata and SHARES (shallow) the
+  tensor-payload/callable set — `fields_not_to_deepcopy` in `op.py` is
+  `out`/`transformed_out`/`saved_args`/`saved_kwargs`/`func`/templates/
+  `parent_params`/... — i.e. payloads alias the source op; graph fields do not.
 - `out` for some output/getitem cases may reference parent saved data directly.
 - `grad` is a bare reference; do not mutate it in-place.
 - `var_names` records bare source assignment target names for an op when
