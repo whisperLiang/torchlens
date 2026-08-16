@@ -4,7 +4,7 @@ import dataclasses
 import time
 import warnings
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -149,6 +149,100 @@ def _commit_save_budget(
         reservation,
         (fields_dict.get("out"), fields_dict.get("transformed_out")),
     )
+
+
+def _iter_tree_tensors(*roots: Any) -> Iterator[torch.Tensor]:
+    """Yield every tensor leaf reachable through builtin containers."""
+
+    stack: list[Any] = list(roots)
+    while stack:
+        value = stack.pop()
+        if isinstance(value, torch.Tensor):
+            yield value
+        elif isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            stack.extend(value)
+
+
+def _admit_saved_args_budget(
+    trace: "Trace",
+    fields_dict: dict[str, Any],
+    t_args: Any,
+    t_kwargs: Any,
+) -> "list[Any] | None":
+    """Admit projected ``save_arg_values`` bytes BEFORE the clones allocate.
+
+    r8 R34 (sol 2): both exhaustive paths cloned every tensor argument first
+    and charged only afterward, so a large argument snapshot could allocate
+    well beyond the configured budget before the accountant noticed --
+    violating the pre-admission half of the save-budget contract for exactly
+    the retention family it exists to bound. The source tensors and alias
+    graph are available before the clone: project alias-deduped physical
+    bytes per device and admit them through the standard ``primary`` site
+    (rolling back sibling reservations if one device refuses); the
+    post-clone commit reconciles the estimate alias-aware as usual.
+    """
+
+    budget = getattr(trace, "_save_budget_accountant", None)
+    if budget is None:
+        return None
+    from ..._save_budget import _retained_storage_identities
+
+    per_device: dict[Any, int] = {}
+    seen_identities: set[tuple[Any, ...]] = set()
+    for tensor in _iter_tree_tensors(t_args, t_kwargs):
+        for identity, num_bytes in _retained_storage_identities(tensor):
+            if identity in seen_identities:
+                continue
+            seen_identities.add(identity)
+            per_device[tensor.device] = per_device.get(tensor.device, 0) + num_bytes
+    if not per_device:
+        return []
+    label = fields_dict.get("_layer_label_raw") or fields_dict.get("_label_raw") or "<unlabeled>"
+    reservations: list[Any] = []
+    try:
+        for device, num_bytes in per_device.items():
+            reservation = budget.admit(str(label), device, num_bytes, site="primary")
+            if reservation is not None:
+                reservations.append(reservation)
+    except BaseException:
+        # Release earlier sibling-device reservations: an empty-payload
+        # commit refunds the estimate and charges nothing.
+        for reservation in reservations:
+            budget.commit(reservation, ())
+        raise
+    return reservations
+
+
+def _commit_saved_args_budget(
+    trace: "Trace",
+    fields_dict: dict[str, Any],
+    reservations: "list[Any] | None",
+) -> None:
+    """Reconcile saved-args reservations against the cloned snapshots."""
+
+    budget = getattr(trace, "_save_budget_accountant", None)
+    if budget is None or reservations is None:
+        return
+    cloned = tuple(
+        _iter_tree_tensors(fields_dict.get("saved_args"), fields_dict.get("saved_kwargs"))
+    )
+    by_device: dict[str, list[torch.Tensor]] = {}
+    for tensor in cloned:
+        by_device.setdefault(str(tensor.device), []).append(tensor)
+    committed_devices: set[str] = set()
+    for reservation in reservations:
+        device_key = str(reservation.device)
+        committed_devices.add(device_key)
+        budget.commit(reservation, tuple(by_device.get(device_key, ())))
+    # Clones that landed on a device no reservation covered (should not
+    # happen -- safe copies preserve device -- but never leave retained
+    # storage unledgered).
+    label = fields_dict.get("_layer_label_raw") or fields_dict.get("_label_raw") or "<unlabeled>"
+    for device_key, tensors in by_device.items():
+        if device_key not in committed_devices:
+            budget.charge_retained(str(label), tuple(tensors))
 
 
 def _charge_saved_args_budget(

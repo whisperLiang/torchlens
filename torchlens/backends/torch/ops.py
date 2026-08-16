@@ -834,6 +834,9 @@ _retention_device = _rebind_function(_ops_activations._retention_device, globals
 _admit_save_budget = _rebind_function(_ops_retention._admit_save_budget, globals())
 _commit_save_budget = _rebind_function(_ops_retention._commit_save_budget, globals())
 _charge_saved_args_budget = _rebind_function(_ops_retention._charge_saved_args_budget, globals())
+_admit_saved_args_budget = _rebind_function(_ops_retention._admit_saved_args_budget, globals())
+_commit_saved_args_budget = _rebind_function(_ops_retention._commit_saved_args_budget, globals())
+_iter_tree_tensors = _ops_retention._iter_tree_tensors
 _save_predicate_activation_fields = _rebind_function(
     _ops_retention._save_predicate_activation_fields, globals()
 )

@@ -43,10 +43,11 @@ if TYPE_CHECKING:
 if TYPE_CHECKING:
     from .ops import (
         ExhaustiveOpDraft,
+        _admit_saved_args_budget,
         _append_trace_predicate_context,
         _apply_retroactive_decision,
         _build_trace_predicate_context,
-        _charge_saved_args_budget,
+        _commit_saved_args_budget,
         _retain_lookback_candidate,
         _save_activation_fields,
         _save_predicate_activation_fields,
@@ -253,12 +254,14 @@ def _make_layer_log_entry(
                     activation_transform,
                 )
     if predicate_spec is not None and self.save_arg_values and not fields_dict["has_saved_args"]:
+        # Admit BEFORE the clones allocate (r8 R34, sol 2).
+        arg_reservations = _admit_saved_args_budget(self, fields_dict, t_args, t_kwargs)
         fields_dict["has_saved_args"] = True
         fields_dict["saved_args"] = [_recursive_safe_copy(arg) for arg in t_args]
         fields_dict["saved_kwargs"] = {
             key: _recursive_safe_copy(value) for key, value in t_kwargs.items()
         }
-        _charge_saved_args_budget(self, fields_dict)
+        _commit_saved_args_budget(self, fields_dict, arg_reservations)
     # r29 F3b: seal this record's capture-time (slot -> producer) truth on the
     # Trace, keyed by raw label. The witness (``dropped_edge_tensor_args``) is
     # stamped at CAPTURE, so an edge dropped DOWNSTREAM of it -- anywhere in the

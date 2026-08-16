@@ -960,3 +960,32 @@ def test_successful_rescue_rerun_warns_about_the_double_forward() -> None:
     with pytest.warns(TorchLensCaptureGapWarning, match="executed TWICE"):
         result = capture_with_rescue(run_capture)
     assert result is rescued
+
+
+def test_restore_changed_state_is_nan_aware() -> None:
+    """r8 R16: a state slot legitimately holding NaN is not "changed".
+
+    ``torch.equal`` answers False for bitwise-identical NaNs, so a NaN-bearing
+    buffer read as rescue-mutated on every re-run -- a false double-mutation
+    report plus a pointless restore copy (red-capable: pre-fix the changed
+    tuple names the buffer).
+    """
+
+    import torch
+    from torch import nn
+
+    from torchlens.backends.torch.rescue import _restore_changed_state
+
+    class _NanBuffered(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.register_buffer("stat", torch.tensor([1.0, float("nan"), 3.0]))
+
+    model = _NanBuffered()
+    snapshot = {"buffer:stat": model.stat.detach().clone()}
+    assert _restore_changed_state(model, snapshot) == ()
+
+    model.stat[0] = 2.0  # a REAL change must still be caught and restored
+    changed = _restore_changed_state(model, snapshot)
+    assert changed == ("buffer:stat",)
+    assert model.stat[0].item() == 1.0
