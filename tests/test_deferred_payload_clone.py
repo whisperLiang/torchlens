@@ -360,3 +360,93 @@ def test_kill_switch_restores_eager_clones():
         )
         assert pending_live == baseline_live
         assert isinstance(log[log.layer_labels[-1]].out, torch.Tensor)
+
+
+# ---------------------------------------------------------------------------
+# Positionally-passed ``inplace`` (the mobilenet_v3_small regression).
+#
+# torch's ``Hardswish.forward`` runs ``F.hardswish(input, self.inplace)`` —
+# POSITIONAL — and the underscore mutation below it (``torch._C._nn.
+# hardswish_``) is not a wrapped surface, so the ``F.hardswish`` wrapper is
+# the only interception point. A kwargs-only ``inplace`` probe missed the
+# mutation, left the upstream payload's pending alias stale, and the version
+# belt refused at the next wrapped mutating call (2026-08-16, found by the
+# L1 churn census on mobilenet_v3_small).
+# ---------------------------------------------------------------------------
+
+
+class _PositionalInplaceNet(nn.Module):
+    """The mobilenet_v3 classifier pattern, minus torchvision."""
+
+    def __init__(self):
+        super().__init__()
+        self.lin1 = nn.Linear(8, 8)
+        self.hs = nn.Hardswish(inplace=True)  # F.hardswish(input, self.inplace)
+        self.hsig = nn.Hardsigmoid(inplace=True)  # F.hardsigmoid(input, self.inplace)
+        self.drop = nn.Dropout(p=0.5, inplace=True)
+        self.lin2 = nn.Linear(8, 4)
+
+    def forward(self, x):
+        y = self.lin1(x)
+        y = self.hs(y)  # positional inplace mutates lin1's saved storage
+        y = self.hsig(y)
+        y = self.drop(y)  # wrapped _VF.dropout_ ran the belt check here
+        return self.lin2(y)
+
+
+def _positional_inplace_trace(defer: bool, seed: int = 3):
+    with _payload_clone_mode(defer):
+        torch.manual_seed(seed)
+        model = _PositionalInplaceNet().train()
+        torch.manual_seed(seed)
+        x = torch.randn(2, 8)
+        with torch.no_grad():
+            log = tl.trace(model, x, random_seed=99)
+    return log
+
+
+@pytest.mark.smoke
+def test_positional_inplace_index_located_at_decoration_time():
+    import torch.nn.functional as F
+
+    assert _wrappers._positional_inplace_index(F.hardswish) == 1
+    assert _wrappers._positional_inplace_index(F.hardsigmoid) == 1
+    assert _wrappers._positional_inplace_index(F.dropout) == 3
+    # C builtins expose no signature and cannot carry the parameter.
+    assert _wrappers._positional_inplace_index(torch._C._nn.hardswish_) is None
+    assert _wrappers._positional_inplace_index(torch.add) is None
+
+
+@pytest.mark.smoke
+def test_positional_inplace_capture_does_not_trip_belt():
+    log = _positional_inplace_trace(defer=True)
+    assert isinstance(log[log.layer_labels[-1]].out, torch.Tensor)
+
+
+@pytest.mark.smoke
+def test_positional_inplace_payloads_byte_identical_to_eager():
+    log_eager = _positional_inplace_trace(defer=False)
+    log_defer = _positional_inplace_trace(defer=True)
+    _assert_payloads_identical(log_eager, log_defer)
+    # The saved upstream payload must hold PRE-mutation bytes: applying
+    # hardswish to lin1's saved output must reproduce the hardswish payload.
+    lin1 = next(k for k in log_defer.layer_labels if k.startswith("linear"))
+    hs = next(k for k in log_defer.layer_labels if k.startswith("hardswish"))
+    recomputed = torch.nn.functional.hardswish(log_defer[lin1].out)
+    assert torch.equal(recomputed, log_defer[hs].out)
+    assert not torch.equal(log_defer[lin1].out, log_defer[hs].out)
+
+
+@pytest.mark.heavy
+def test_mobilenet_v3_small_captures_and_validates():
+    torchvision = pytest.importorskip("torchvision")
+
+    torch.manual_seed(0)
+    model = torchvision.models.mobilenet_v3_small().eval()
+    x = torch.randn(1, 3, 224, 224)
+    with torch.no_grad():
+        log = tl.trace(model, x)
+    assert len(log.layer_labels) > 0
+    torch.manual_seed(0)
+    model2 = torchvision.models.mobilenet_v3_small().eval()
+    assert tl.validate(model2, torch.randn(1, 3, 224, 224), scope="forward") is True
