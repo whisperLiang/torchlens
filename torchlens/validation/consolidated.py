@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -444,12 +445,19 @@ def validate(
         # R33-2: validation is the product's largest transient peak and had no
         # instrumentation. Record cheap peak observations around the run and
         # publish them through ``last_validation_peak_memory()``; measurement
-        # only, never part of the verdict.
+        # only, never part of the verdict. R33 follow-up: the probes are an
+        # OPT-IN (TORCHLENS_VALIDATE_PEAK_MEMORY=1), mirroring the
+        # measure_python_peak_memory capture-side design -- the
+        # torch.cuda.is_available() probe can trigger driver init on some
+        # setups and none of it feeds the verdict, so default validate calls
+        # pay nothing. last_validation_peak_memory() already returns None for
+        # the empty off-state.
         from .diagnostics import _LAST_RUN_PEAKS
 
+        peaks_enabled = os.environ.get("TORCHLENS_VALIDATE_PEAK_MEMORY") == "1"
         _LAST_RUN_PEAKS.clear()
-        rss_before = _rss_high_water_bytes()
-        cuda_armed = torch.cuda.is_available() and torch.cuda.is_initialized()
+        rss_before = _rss_high_water_bytes() if peaks_enabled else None
+        cuda_armed = peaks_enabled and torch.cuda.is_available() and torch.cuda.is_initialized()
         cuda_peak_before = 0
         if cuda_armed:
             # R36-2: snapshot the peak instead of reset_peak_memory_stats,
@@ -467,7 +475,7 @@ def validate(
                 backend=backend,
             )
         finally:
-            rss_after = _rss_high_water_bytes()
+            rss_after = _rss_high_water_bytes() if peaks_enabled else None
             if rss_before is not None and rss_after is not None:
                 _LAST_RUN_PEAKS["host_rss_peak_delta_bytes"] = max(0, rss_after - rss_before)
             if cuda_armed:

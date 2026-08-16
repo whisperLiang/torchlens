@@ -250,3 +250,34 @@ def test_validate_scope_end_trims_the_host_allocator(
     model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
     assert tl.validate(model, torch.randn(2, 4), scope="forward", random_seed=0) is True
     assert calls["n"] >= 3, f"only {calls['n']} allocator trims ran; the scope-end trim is missing"
+
+
+def test_validate_peak_instrumentation_is_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R33: the peak-memory probes are an env opt-in, not an always-on cost.
+
+    The RSS/CUDA peak observations never feed the verdict, and the
+    ``torch.cuda.is_available()`` probe can trigger driver init on some
+    setups -- so a default validate call pays nothing and reports ``None``
+    (mirroring the capture-side ``measure_python_peak_memory`` opt-in),
+    while ``TORCHLENS_VALIDATE_PEAK_MEMORY=1`` populates the observations.
+    """
+
+    from torch import nn
+
+    from torchlens.validation.diagnostics import last_validation_peak_memory
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
+
+    monkeypatch.delenv("TORCHLENS_VALIDATE_PEAK_MEMORY", raising=False)
+    assert tl.validate(model, torch.randn(2, 4), scope="forward", random_seed=0) is True
+    assert last_validation_peak_memory() is None, (
+        "default validate populated peak observations without the opt-in"
+    )
+
+    monkeypatch.setenv("TORCHLENS_VALIDATE_PEAK_MEMORY", "1")
+    assert tl.validate(model, torch.randn(2, 4), scope="forward", random_seed=0) is True
+    peaks = last_validation_peak_memory()
+    assert peaks is not None and "host_rss_peak_delta_bytes" in peaks
+    assert peaks["host_rss_peak_delta_bytes"] >= 0
