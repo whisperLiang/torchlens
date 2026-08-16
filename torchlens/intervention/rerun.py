@@ -881,7 +881,7 @@ def _capture_with_active_spec(
         Fresh log built off to the side.
     """
 
-    from ..user_funcs import (  # type: ignore[attr-defined]
+    from ..user_funcs import (
         _run_model_and_save_specified_outs,
         _unwrap_data_parallel,
         check_model_and_input_variants,

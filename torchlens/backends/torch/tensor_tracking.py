@@ -207,7 +207,7 @@ def _add_tensor_backward_hook(
     from .completeness_witness import internal_scalar_read
 
     with internal_scalar_read():
-        t.register_hook(log_grad_to_model_history)  # type: ignore[no-untyped-call]
+        t.register_hook(log_grad_to_model_history)
 
 
 def _ensure_backward_event_stream(trace: "Trace") -> Any:

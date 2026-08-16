@@ -81,7 +81,7 @@ def materialize_log_from_fields(fields_dict: dict[str, object], store: object | 
     # (forcing op nodes to None) was FALSE and is corrected there.
     has_backend_override = "_materialized_backend_address" in fields_dict
     backend_address_override = fields_dict.pop("_materialized_backend_address", None)
-    op_log = Op(fields_dict, _store=store)  # type: ignore[arg-type]
+    op_log = Op(fields_dict, _store=store)
     for field_name, blob_id in pending_blob_ids.items():
         setattr(op_log, field_name, blob_id)
     if has_backend_override:

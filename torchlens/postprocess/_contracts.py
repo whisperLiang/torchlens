@@ -179,7 +179,7 @@ class PostprocessStepContract:
     def __post_init__(self) -> None:
         """Refuse malformed contracts at construction (plain raise, not assert)."""
 
-        if self.writes is None or self.reads is None:  # type: ignore[unreachable]
+        if self.writes is None or self.reads is None:
             raise ValueError(
                 f"Step {self.step}: writes/reads must be exact frozensets; the "
                 "None wildcard is deleted (design-ppdag-v3 defect 1)."

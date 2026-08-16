@@ -1361,18 +1361,18 @@ def _build_collapsed_module_node(
         address_w_pass = f"{address}:{call_index}" if vis_mode == "unrolled" else address
         module_tuple = address_w_pass.rsplit(":", 1)
     ml = self.modules[address]
-    module_type = ml.class_name  # type: ignore[union-attr]
-    module_num_calls = ml.num_calls  # type: ignore[union-attr]
-    module_nparams = ml.num_params  # type: ignore[union-attr]
-    module_nparams_trainable = ml.num_params_trainable  # type: ignore[union-attr]
-    module_nparams_frozen = ml.num_params_frozen  # type: ignore[union-attr]
+    module_type = ml.class_name
+    module_num_calls = ml.num_calls
+    module_nparams = ml.num_params
+    module_nparams_trainable = ml.num_params_trainable
+    module_nparams_frozen = ml.num_params_frozen
 
     # In unrolled mode, each pass of a module is a separate collapsed node
     # (e.g., "encoder.layer.0pass1").  In rolled mode, all ops share one
     # node (e.g., "encoder.layer.0").
     if vis_mode == "unrolled":
         graph_node_label = "pass".join(module_tuple)
-        module_call = ml.ops[int(call_index) - 1]  # type: ignore[index]
+        module_call = ml.ops[int(call_index) - 1]
         module_num_tensors = module_call.num_layers
         module_num_buffers = sum(self[layer].is_buffer for layer in module_call.ops)
         module_has_input_ancestor = any(self[layer].has_input_ancestor for layer in module_call.ops)
@@ -1402,7 +1402,7 @@ def _build_collapsed_module_node(
         graph_node_label = module_tuple[0]
         module_num_tensors = ml.num_layers
         module_num_buffers = sum(self[layer].is_buffer for layer in ml.layer_labels)
-        module_has_input_ancestor = any(self[layer].has_input_ancestor for layer in ml.layer_labels)  # type: ignore[union-attr]
+        module_has_input_ancestor = any(self[layer].has_input_ancestor for layer in ml.layer_labels)
         # Rolled boxes need the same surfaced-exit remainder belt as the
         # unrolled branch (round-25): the atomic-exit drop in
         # ``_collapse_address_for_node`` is vis_mode-independent, so the exit
@@ -1501,10 +1501,10 @@ def _build_collapsed_module_node(
     if theme is not None:
         default_spec = apply_theme_to_spec(default_spec, theme)
     mode_fn = COLLAPSED_MODE_REGISTRY[node_mode]
-    mode_result = mode_fn(ml, default_spec)  # type: ignore[arg-type]
+    mode_result = mode_fn(ml, default_spec)
     mode_spec = default_spec if mode_result is None else mode_result
     if collapsed_node_spec_fn is not None:
-        result = collapsed_node_spec_fn(ml, mode_spec)  # type: ignore[arg-type]
+        result = collapsed_node_spec_fn(ml, mode_spec)
         spec = mode_spec if result is None else result
     else:
         spec = mode_spec
@@ -1694,7 +1694,7 @@ def _get_node_address_shape_color(
         if isinstance(source_node, Op):
             module_pass_exited = node.modules[-1]
             module, _ = module_pass_exited.split(":")
-            if self.modules[module].num_calls == 1:  # type: ignore[union-attr]
+            if self.modules[module].num_calls == 1:
                 node_address = module
             else:
                 node_address = module_pass_exited

@@ -1708,7 +1708,7 @@ def _probe_host_memory_budget_bytes() -> int | None:
     try:
         import psutil
     except ImportError:
-        psutil = None  # type: ignore[assignment]
+        psutil = None
     if psutil is not None:
         try:
             return int(psutil.virtual_memory().available) + int(psutil.swap_memory().free)

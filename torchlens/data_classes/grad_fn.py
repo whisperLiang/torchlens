@@ -304,7 +304,7 @@ class GradFn:
         """Promote call storage to a scoped accessor."""
 
         if not isinstance(self.calls, GradFnCallAccessor):
-            self.calls = GradFnCallAccessor(self.calls, self.label)  # type: ignore[assignment]
+            self.calls = GradFnCallAccessor(self.calls, self.label)
         else:
             self.calls._label = self.label
         for call in self.calls.values():

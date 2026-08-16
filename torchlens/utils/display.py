@@ -465,9 +465,9 @@ def in_notebook() -> bool:
     IPython is not installed.
     """
     try:
-        from IPython import get_ipython  # type: ignore[attr-defined]
+        from IPython import get_ipython
 
-        ipython = get_ipython()  # type: ignore[no-untyped-call]
+        ipython = get_ipython()
         if ipython is None or "IPKernelApp" not in ipython.config:
             return False
     except (ImportError, AttributeError):

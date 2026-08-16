@@ -541,7 +541,7 @@ def validate_backward_pass(
                     )
                 else:
                     stock_loss = loss_fn(model(*stock_inputs, **stock_kwargs))
-                    stock_loss.backward()  # type: ignore[no-untyped-call]
+                    stock_loss.backward()
         except CaptureContextError:
             warnings.warn(
                 "validate_backward_pass could not compute pristine-torch stock "

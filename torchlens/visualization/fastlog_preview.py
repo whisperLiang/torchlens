@@ -99,7 +99,7 @@ def _context_from_layer(
     if isinstance(layer_type, str):
         op_counts[layer_type] = op_counts.get(layer_type, 0) + 1
     return _build_record_context(
-        kind=_kind_from_layer(op_log),  # type: ignore[arg-type]
+        kind=_kind_from_layer(op_log),
         op_log_or_op_data={
             # H5: use the pass-qualified label (op.label, e.g. relu_1_1:2) so each
             # recurrent pass keeps a distinct identity; the aggregate layer_label is

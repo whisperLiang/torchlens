@@ -3699,7 +3699,7 @@ class Op:
         )
         return self.grad
 
-    def __tl_state_items__(self):
+    def __tl_state_items__(self) -> Any:
         """Yield live state ``(field_name, value)`` pairs in declared order.
 
         The M2 state-protocol hook. Enumeration follows the declared

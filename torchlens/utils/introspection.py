@@ -916,7 +916,7 @@ def _get_code_context(
 
     FuncCallLocation = _FUNC_CALL_LOCATION
     if FuncCallLocation is None:
-        from ..data_classes import FuncCallLocation  # type: ignore[attr-defined]
+        from ..data_classes import FuncCallLocation
 
         _FUNC_CALL_LOCATION = FuncCallLocation
 
@@ -924,7 +924,7 @@ def _get_code_context(
 
     anchor: tuple[int, CodeType, int, int] | None = None
     if context_cache is not None:
-        anchor = context_cache.get(_CODE_CONTEXT_ANCHOR_KEY)  # type: ignore[assignment]
+        anchor = context_cache.get(_CODE_CONTEXT_ANCHOR_KEY)
 
     # Single pass, innermost -> outermost. Survivors keep (frame, code,
     # lineno, lasti); internal frames are skipped without building tuples.
@@ -977,7 +977,7 @@ def _get_code_context(
             # the OUTERMOST ``forward`` frame, so no ``forward``-named survivor
             # exists anywhere above it -- the invariant the early-stop relies on.
             cs_frame = call_site[0]
-            context_cache[_CODE_CONTEXT_ANCHOR_KEY] = (  # type: ignore[assignment]
+            context_cache[_CODE_CONTEXT_ANCHOR_KEY] = (
                 id(cs_frame),
                 cs_frame.f_code,
                 cs_frame.f_lasti,

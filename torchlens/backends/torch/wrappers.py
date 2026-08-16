@@ -169,7 +169,7 @@ def _nvtx_range_push(name: str) -> bool:
     """
 
     try:
-        torch.cuda.nvtx.range_push(name)  # type: ignore[no-untyped-call]
+        torch.cuda.nvtx.range_push(name)
     except Exception:
         return False
     return True
@@ -187,7 +187,7 @@ def _nvtx_range_pop(enabled: bool) -> None:
     if not enabled:
         return
     try:
-        torch.cuda.nvtx.range_pop()  # type: ignore[no-untyped-call]
+        torch.cuda.nvtx.range_pop()
     except Exception:
         return
 

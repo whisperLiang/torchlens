@@ -387,7 +387,7 @@ def wandb(log: Any, run: Any | None = None, name: str = "torchlens_trace") -> di
         ) from exc
 
     dataframe = _tracker_dataframe(log)
-    table = wandb_module.Table(dataframe=dataframe)  # type: ignore[no-untyped-call]
+    table = wandb_module.Table(dataframe=dataframe)
     target_run = run if run is not None else getattr(wandb_module, "run", None)
     if target_run is not None:
         target_run.log({name: table})

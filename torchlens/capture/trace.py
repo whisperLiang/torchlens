@@ -684,7 +684,7 @@ def _get_op_nums_from_user_labels(
     unique raw operation numbers for refresh projection.
     """
     if which_layers == "all":
-        return which_layers  # type: ignore[return-value]
+        return which_layers
     elif which_layers in [None, "none", "None", "NONE", []]:
         return []
 
@@ -728,7 +728,7 @@ def _get_op_nums_from_user_labels(
                 )
                 continue
         if layer_key in self._lookup_keys_to_layer_num_dict:
-            raw_layer_nums_to_save.add(self._lookup_keys_to_layer_num_dict[layer_key])  # type: ignore[index]
+            raw_layer_nums_to_save.add(self._lookup_keys_to_layer_num_dict[layer_key])
             continue
 
         keys_with_substr = [key for key in self.layer_dict_all_keys if str(layer_key) in str(key)]
@@ -1563,7 +1563,7 @@ def run_and_log_inputs_through_model(
         # RNG state snapshot for deterministic explicit refreshes and legacy
         # two-pass consistency (#58).
         if self.capture_mode == "exhaustive":
-            self._pre_forward_rng_states = backend.snapshot_rng(self)  # type: ignore[attr-defined]
+            self._pre_forward_rng_states = backend.snapshot_rng(self)
 
         from ..ir import CaptureEvents
 
