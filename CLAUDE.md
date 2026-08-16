@@ -147,7 +147,7 @@ print(tl.compat.report(model, x).to_markdown())
 
 ## Current 2.x Surface
 
-- Top-level `torchlens.__all__` has 97 names: capture, save/load, intervention,
+- Top-level `torchlens.__all__` has 98 names: capture, save/load, intervention,
   selectors, helper transforms, observers, validation, and the three main log classes.
 - Relation accessors on FINISHED traces return IMMUTABLE views (authorized public type
   break, JMT 2026-08-12): label sequences (`op.parents`, `op.children`, `op.modules`,
@@ -372,6 +372,26 @@ print(tl.compat.report(model, x).to_markdown())
   with the typed `tl.errors.ArtifactVersionBelowFloorError` (drop-not-resurrect; the legacy
   field-alias ladders are deleted). Legacy 2.16 intervention specs remain loadable — the
   floor covers Trace rehydration only.
+- STRUCTURE-ONLY CAPTURE (L7a wave 0, D8-DEFAULT branch; every spelling
+  DOCUMENTED-UNSTABLE pending naming-session/S2 ratification):
+  `tl.trace(model, x, capture=CaptureOptions(structure_only=True))` records the
+  op graph, module hierarchy, parameter geometry, and per-op shape/dtype with
+  every value-bearing claim a HYPOTHESIS — value payloads are never retained,
+  value-requiring consumers (save/replay/validate/backward) refuse typed
+  through the ONE chokepoint in `torchlens.capture.structure_only`
+  (capability contract: `docs/reference/structure_only_capabilities.md`), and
+  value-dependent branches refuse DEVICE-NEUTRALLY with the user's exact
+  source line (`value_dependent_branch_unsupported`; missing meta kernels
+  refuse `meta_kernel_unavailable`). Option conflicts (`raise_on_nan`,
+  `intervention_ready`, not-provably-value-free `halt=`) refuse
+  `structure_only_option_conflict` at entry. `trace.structure_only` mirrors
+  the flag (FieldPolicy.DROP + pre-release-registered; persists at the wave-3
+  bump); `trace.discharge_against(real_trace)` corroborates or refutes the
+  hypotheses against a real capture, and a REFUTED discharge flips hypothesis
+  consumers to typed refusals. Meta-materialized models (HF
+  `device_map='meta'`) still refuse at the entry gate — admission is decision
+  point D8, unruled. Human surfaces (summary/profile/explain) carry the
+  structure-only hypothesis banner.
 - `torchlens.debug` owns power-user diagnostics such as `bisect_nan` and `hot_path`;
   the submodule is imported as `tl.debug` and is deliberately not in `__all__`.
 - `tl.receptive_field` is a lazy power-user submodule. `Op`, `Layer`, `ModuleCall`, and

@@ -81,9 +81,17 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/backends/jax/backend.py": 4400,
     "torchlens/_io/bundle.py": 4450,
     "torchlens/_io/runnable_load.py": 3850,
-    "torchlens/user_funcs.py": 3900,
-    "torchlens/backends/torch/backward.py": 3800,
-    "torchlens/data_classes/trace.py": 3750,
+    # 3900 -> 4100: pre-existing red inherited from main's wave-0 merges
+    # (L7a's structure_only entry contract landed user_funcs.py at 4071
+    # without a ledger raise); L1 adds ~20 lines (grouping= knob + docs).
+    "torchlens/user_funcs.py": 4100,
+    # 3800 -> 3900: pre-existing red inherited from main's wave-0 merges
+    # (L4-run/L8/L7a landed backward.py at 3869 without a ledger raise);
+    # re-keyed by the L1 lane, not L1 growth.
+    "torchlens/backends/torch/backward.py": 3900,
+    # 3750 -> 3850: main's L3/L7a merges landed trace.py at 3783 without a
+    # ledger raise; L1 adds ~30 lines (grouping fields + stamp settlement).
+    "torchlens/data_classes/trace.py": 3850,
     "torchlens/utils/_torch_compat.py": 3450,
     # 3400 -> 3450: pre-existing red inherited from the mnv3 capture fix
     # (d86bf2d1, +18 lines of positional-inplace interception landed at 3418
@@ -116,7 +124,9 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/visualization/_render_nodes.py": 2150,
     "torchlens/_io/_safe_unpickle.py": 2100,
     "torchlens/visualization/_render_flow.py": 2100,
-    "torchlens/capture/trace.py": 2200,
+    # 2200 -> 2250: pre-existing red inherited from main's wave-0 merges
+    # (capture/trace.py landed at 2203); re-keyed by the L1 lane.
+    "torchlens/capture/trace.py": 2250,
     "torchlens/backends/torch/completeness_witness.py": 2050,
 }
 

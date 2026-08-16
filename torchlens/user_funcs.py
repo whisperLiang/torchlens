@@ -65,6 +65,7 @@ from ._errors import (
     CaptureContextError,
     InvalidArgumentError,
     KeywordConflictError,
+    StructureOnlyOptionConflictError,
     TorchLensPostfuncError,
 )
 from ._input_coerce import _coerce_input_args
@@ -1454,6 +1455,7 @@ def _run_model_and_save_specified_outs(
     distributed_witness: str = "none",
     save_budget: SaveBudgetOption = "auto",
     raise_on_nan: bool = False,
+    structure_only: bool = False,
     transform: Callable[[Any], Any] | None = None,
     raw_input: Any | None = None,
     save_raw_input: str | bool = "small",
@@ -1816,6 +1818,12 @@ def _run_model_and_save_specified_outs(
         trace._defer_streaming_bundle_finalization = grad_storage_path is not None
         trace._wrapper_runtime_ws.in_exhaustive_pass = True
         trace.raise_on_nan = raise_on_nan
+        # L7a mode-marker prep (S2 SEAM, labeled): the flag DECLARES the mode
+        # (memo sec 1.5) and stamps the mirror field here at entry. At S2
+        # ratification the settlement-side stamp moves to the
+        # capture/outcome.py witness machinery in the S2 author's PR; this
+        # entry write stays as the declared-mode source of truth.
+        trace.structure_only = structure_only
         trace._stop_directive = StopDirective(
             halt_options=getattr(trace, "_predicate_save_options", None),
             raise_on_nan=raise_on_nan,
@@ -2186,6 +2194,167 @@ def _enforce_capability_option_gates(
             )
 
 
+def _enforce_structure_only_entry_contract(
+    *,
+    capture_options: CaptureOptions,
+    layers_to_save: Any,
+    save_predicate: Any,
+    halt: Any,
+    streaming_options: Any,
+    lookback_payload_policy: str,
+    raise_on_nan_value: bool,
+    intervention_ready: bool,
+    should_save_grads: bool,
+) -> str | list[Any] | None:
+    """Enforce the structure-only Layer-0 entry contract (L7a sec 1.3/2.2).
+
+    Option COMBINATIONS that need tensor values refuse typed with the one
+    ``structure_only_option_conflict`` code; explicit value-PAYLOAD requests
+    refuse typed with ``structure_only_values_unsupported`` (the capability
+    table's ``value_payloads`` row enforced at the earliest surface). A clean
+    call resolves to a metadata-only save plan (returns ``None`` as the
+    effective ``layers_to_save``): structure-only capture never retains value
+    payloads, by contract, so the non-explicit ``layers_to_save`` default
+    degrades to metadata-only rather than silently recording values.
+
+    All codes here are DOCUMENTED-UNSTABLE pending naming-session/S2
+    ratification.
+
+    Returns
+    -------
+    str | list[Any] | None
+        The effective metadata-only ``layers_to_save`` value (always ``None``).
+    """
+
+    conflict_remedy = (
+        "drop the conflicting option or run a real capture (tl.trace without "
+        "structure_only). Structure-only capture has no tensor values to test, "
+        "mutate, or replay."
+    )
+    if raise_on_nan_value:
+        raise StructureOnlyOptionConflictError(
+            "structure_only=True cannot combine with raise_on_nan=True: a "
+            "structure-only capture has no tensor values for a nonfinite "
+            "predicate to test",
+            code="structure_only_option_conflict",
+            remedy=conflict_remedy,
+            arguments=("structure_only", "raise_on_nan"),
+        )
+    if intervention_ready:
+        raise StructureOnlyOptionConflictError(
+            "structure_only=True cannot combine with intervention_ready=True: "
+            "runnable eligibility disables the plain escape belt and runnable "
+            "save is refused wholesale under the structure-only contract, so "
+            "the combination must be unreachable rather than quietly belt-less",
+            code="structure_only_option_conflict",
+            remedy=conflict_remedy,
+            arguments=("structure_only", "intervention_ready"),
+        )
+    if halt is not None:
+        from .backends._selective_save import _STATIC_SELECTOR_KINDS
+        from .intervention.selectors import BaseSelector as _BaseSelector
+        from .ir.selector_eval import first_selector_kind_outside
+
+        halt_value_suspect: str | None
+        if not isinstance(halt, _BaseSelector):
+            halt_value_suspect = "bare callable (value use unprovable)"
+        else:
+            halt_value_suspect = first_selector_kind_outside(halt, allowed=_STATIC_SELECTOR_KINDS)
+        if halt_value_suspect is not None:
+            raise StructureOnlyOptionConflictError(
+                "structure_only=True requires a provably value-free halt= "
+                f"predicate; received {halt_value_suspect!r}. A value-touching "
+                "halt predicate would select the recorded graph by values the "
+                "capture does not record",
+                code="structure_only_option_conflict",
+                remedy=(
+                    "use structured value-free selectors (tl.func, tl.in_module, "
+                    "label selectors, and their & | ~ compositions) as halt=, or "
+                    "run a real capture"
+                ),
+                arguments=("structure_only", "halt"),
+            )
+    values_remedy = (
+        "drop the payload-requesting option: structure-only capture records "
+        "structure and shape/dtype hypotheses, never tensor values. Run a real "
+        "capture (tl.trace without structure_only) to record values."
+    )
+
+    def _refuse_values(problem: str, *option_names: str) -> None:
+        raise InvalidArgumentError(
+            problem,
+            code="structure_only_values_unsupported",
+            remedy=values_remedy,
+            argument=option_names[0],
+            arguments=option_names,
+        )
+
+    if save_predicate is not None:
+        _refuse_values(
+            "structure_only=True cannot honor a save= payload selection; "
+            "activations are never recorded under the structure-only contract",
+            "save",
+        )
+    if capture_options.is_field_explicit("layers_to_save") and layers_to_save not in (
+        "none",
+        None,
+        [],
+    ):
+        _refuse_values(
+            "structure_only=True cannot honor an explicit layers_to_save "
+            "payload selection; activations are never recorded under the "
+            "structure-only contract",
+            "layers_to_save",
+        )
+    if capture_options.is_field_explicit("save_grads") and should_save_grads:
+        _refuse_values(
+            "structure_only=True cannot honor save_grads: gradient payloads "
+            "are values and backward capture is refused under the "
+            "structure-only contract",
+            "save_grads",
+        )
+    if streaming_options.bundle_path is not None or streaming_options.out_callback is not None:
+        _refuse_values(
+            "structure_only=True cannot stream activation payloads to disk or "
+            "callbacks; there are no value payloads to stream",
+            "storage",
+        )
+    if capture_options.is_field_explicit("save_arg_values") and capture_options.save_arg_values:
+        _refuse_values(
+            "structure_only=True cannot record non-tensor argument VALUES as "
+            "payloads via save_arg_values",
+            "save_arg_values",
+        )
+    if capture_options.is_field_explicit("layer_visualizers") and capture_options.layer_visualizers:
+        _refuse_values(
+            "structure_only=True cannot run payload-consuming layer "
+            "visualizers; they require tensor values",
+            "layer_visualizers",
+        )
+    if capture_options.is_field_explicit("save_raw_input") and capture_options.save_raw_input:
+        _refuse_values(
+            "structure_only=True cannot retain the raw input payload",
+            "save_raw_input",
+        )
+    if capture_options.is_field_explicit("save_raw_output") and capture_options.save_raw_output:
+        _refuse_values(
+            "structure_only=True cannot retain the raw output payload",
+            "save_raw_output",
+        )
+    if capture_options.is_field_explicit("output_style") and capture_options.output_style:
+        _refuse_values(
+            "structure_only=True cannot decode output VALUES via output_style",
+            "output_style",
+        )
+    if lookback_payload_policy != "metadata_only":
+        _refuse_values(
+            "structure_only=True supports only the metadata-only lookback "
+            "window; retroactive payload retention records values",
+            "lookback_payload_policy",
+        )
+    return None
+
+
 def _reject_unsupported_torch_trace_option_values(capture_options: CaptureOptions) -> None:
     """Reject explicit torch trace-option values that torch does not implement.
 
@@ -2288,6 +2457,7 @@ def trace(
     ) = MISSING,
     *,
     grouping: str | MissingType = MISSING,
+    structure_only: bool | MissingType = MISSING,
     jax_control_flow: Literal["reject", "unroll", "region"] | MissingType = MISSING,
     jax_max_control_flow_unroll: int | MissingType = MISSING,
     module_identity_mode: str | None | MissingType = MISSING,
@@ -2541,6 +2711,16 @@ def trace(
         policy that actually ran on ``trace.grouping_policy``. Distinct
         from the display-only ``fold_repeats`` viz knob, which folds
         repeated module runs at RENDER time and never changes grouping.
+    structure_only:
+        If True, run this capture under the structure-only contract
+        (DOCUMENTED-UNSTABLE surface, pending naming-session/S2 ratification;
+        no deprecation shim owed on rename). The op graph, module hierarchy,
+        parameter geometry, and per-op shape/dtype are recorded with every
+        value-bearing claim treated as a HYPOTHESIS; value payloads are never
+        retained, value-requiring consumers refuse typed, and value-dependent
+        branches refuse with the user's source line. Torch-only. See
+        ``docs/reference/structure_only_capabilities.md`` for the capability
+        contract and ``Trace.discharge_against`` for real-run discharge.
     jax_control_flow:
         Declared JAX control-flow policy. JAX accepts
         ``"reject"``, default ``"unroll"``, and explicit ``"region"``.
@@ -2781,6 +2961,7 @@ def _trace_torch_model(
     module_filter: Callable[[Any], bool] | None | MissingType = MISSING,
     stop_after: Any | None | MissingType = MISSING,
     raise_on_nan: bool | MissingType = MISSING,
+    structure_only: bool | MissingType = MISSING,
     profile: bool | MissingType = MISSING,
     jax_control_flow: Literal["reject", "unroll", "region"] | MissingType = MISSING,
     jax_max_control_flow_unroll: int | MissingType = MISSING,
@@ -2911,6 +3092,7 @@ def _trace_torch_model(
         payload_policy=payload_policy,
         save_preview=save_preview,
         raise_on_nan=raise_on_nan,
+        structure_only=structure_only,
     )
     _reject_unsupported_torch_trace_option_values(capture_options)
     profile_enabled = False if isinstance(profile, MissingType) else bool(profile)
@@ -3043,6 +3225,7 @@ def _trace_torch_model(
     cache_dir_value = capture_options.cache_dir
     module_filter_value = capture_options.module_filter
     raise_on_nan_value = capture_options.raise_on_nan
+    structure_only_value = capture_options.structure_only
     facet_recipes = None if isinstance(recipes, MissingType) else recipes
     if capture_options.stop_after is not None:
         raise NotImplementedError("stop_after is only supported by torchlens.peek.")
@@ -3073,6 +3256,20 @@ def _trace_torch_model(
             remedy="choose either bundle_path/save_outs_to or out_callback/out_sink",
             arguments=("bundle_path", "out_callback"),
         )
+    if structure_only_value:
+        layers_to_save = _enforce_structure_only_entry_contract(
+            capture_options=capture_options,
+            layers_to_save=layers_to_save,
+            save_predicate=save_predicate,
+            halt=halt,
+            streaming_options=streaming_options,
+            lookback_payload_policy=lookback_payload_policy,
+            raise_on_nan_value=raise_on_nan_value,
+            intervention_ready=intervention_ready,
+            should_save_grads=should_save_grads,
+        )
+        save_raw_input_policy = False
+        save_raw_output_policy = False
     train_mode_explicit = capture_options.is_field_explicit("backward_ready")
     train_mode_value = capture_options.backward_ready
     inference_only_conflicts: list[str] = []
@@ -3229,6 +3426,7 @@ def _trace_torch_model(
             # callables are repr-keyed (conservative -- a distinct object misses rather
             # than risking a false hit), matching how output_transform is keyed above.
             "intervention_ready": intervention_ready,
+            "structure_only": structure_only_value,
             "save_raw_input": repr(save_raw_input_policy),
             "save_raw_output": repr(save_raw_output_policy),
             "save_raw_activations": save_raw_activations,
@@ -3324,6 +3522,7 @@ def _trace_torch_model(
             payload_policy=capture_options.payload_policy,
             save_preview=capture_options.save_preview,
             raise_on_nan=raise_on_nan_value,
+            structure_only=structure_only_value,
         )
         recursive_save_options = SaveOptions(
             activation_transform=activation_transform,
@@ -3597,6 +3796,7 @@ def _trace_torch_model(
         distributed_witness=capture_options.distributed_witness,
         save_budget=capture_options.save_budget,
         raise_on_nan=raise_on_nan_value,
+        structure_only=structure_only_value,
         transform=input_transform,
         raw_input=raw_input,
         save_raw_input=save_raw_input_policy,

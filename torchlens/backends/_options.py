@@ -24,6 +24,7 @@ TRACE_OPTION_CAPABILITY_GATES: dict[str, str] = {
     "backward_ready": "backward_capture",
     "save_rng_states": "rng_replay",
     "random_seed": "rng_replay",
+    "structure_only": "structure_only_capture",
 }
 """Public trace options whose support is owned by a ``BackendCapabilities`` flag.
 

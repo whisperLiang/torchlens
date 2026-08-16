@@ -52,6 +52,7 @@ from torch import nn
 import torchlens as tl
 from torchlens import constants
 from torchlens._io import FieldPolicy
+from torchlens.data_classes.aten_op import AtenOp
 from torchlens.data_classes.backward_pass import BackwardPass
 from torchlens.data_classes.buffer import Buffer
 from torchlens.data_classes.field_policy import RecordFieldPolicy, field_order_from_policy
@@ -111,6 +112,7 @@ CATALOGS: tuple[Catalog, ...] = (
     Catalog("MODULE_LOG_FIELD_ORDER", owner=Module),
     Catalog("BACKWARD_PASS_FIELD_ORDER", owner=BackwardPass),
     Catalog("FUNC_CALL_LOCATION_FIELD_ORDER", owner=FuncCallLocation),
+    Catalog("PRIMITIVE_OP_FIELD_ORDER", owner=AtenOp),
     # Historical spellings retained for callers; same object by construction.
     Catalog("OP_LOG_FIELD_ORDER", alias_of="LAYER_PASS_LOG_FIELD_ORDER"),
     Catalog("TENSOR_LOG_FIELD_ORDER", alias_of="LAYER_PASS_LOG_FIELD_ORDER"),

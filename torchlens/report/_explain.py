@@ -301,6 +301,12 @@ def _capture_status_lines(log: Any) -> list[str]:
 
     facts = _capture_verification(log)
     lines = [f"- Capture outcome: {facts['capture_status']}."]
+    # L7a G3 render honesty (memo sec 3.4).
+    if bool(getattr(log, "structure_only", False)):
+        lines.append(
+            "- Structure-only capture: shapes/dtypes are HYPOTHESES, not "
+            "measurements; discharge against a real capture to corroborate."
+        )
     if facts["capture_verified"] is False:
         reason = facts["capture_verification_reason"] or "unrecorded reason"
         lines.append(

@@ -30,7 +30,7 @@ authority.
 - `_raw_` prefix for pre-postprocessing state; `_final_` for post-processed state.
 
 ## Public Surface
-`torchlens.__all__` is intentionally small and currently has 97 names. New user-facing
+`torchlens.__all__` is intentionally small and currently has 98 names. New user-facing
 objects should usually live under submodules (`torchlens.io`, `torchlens.options`,
 `torchlens.bridge`, `torchlens.errors`, etc.) with moved-name shims only when compatibility
 requires them.

@@ -65,6 +65,7 @@ from . import (
     _invariants_equivalence as _invariants_equivalence,
     _invariants_modules_params as _invariants_modules_params,
     _invariants_payloads as _invariants_payloads,
+    _invariants_primitive_ops as _invariants_primitive_ops,
     _invariants_topology as _invariants_topology,
 )
 from .status import (  # noqa: F401 (rebound-child globals)
@@ -442,6 +443,8 @@ _check_edge_use_parent_arg_invariants = _rebind_function(
     _invariants_payloads._check_edge_use_parent_arg_invariants, globals()
 )
 _check_op_log_fields = _rebind_function(_invariants_payloads._check_op_log_fields, globals())
+_check_primitive_op_invariants = _invariants_primitive_ops._check_primitive_op_invariants
+_check_non_torch_primitive_op_inert = _invariants_primitive_ops._check_non_torch_primitive_op_inert
 _check_payload_metadata_invariants = _rebind_function(
     _invariants_payloads._check_payload_metadata_invariants, globals()
 )
@@ -656,6 +659,7 @@ for _split_module in (
     _invariants_backward_flow,
     _invariants_topology,
     _invariants_payloads,
+    _invariants_primitive_ops,
     _invariants_conditional_base,
     _invariants_conditionals,
     _invariants_conditional_modules,
@@ -688,6 +692,11 @@ METADATA_INVARIANT_CONTRACTS: tuple[MetadataInvariantContract, ...] = (
     MetadataInvariantContract(
         "non_torch_backward_inert",
         _check_non_torch_backward_inert,
+        "non_torch",
+    ),
+    MetadataInvariantContract(
+        "non_torch_primitive_op_inert",
+        _check_non_torch_primitive_op_inert,
         "non_torch",
     ),
     MetadataInvariantContract(
@@ -740,6 +749,11 @@ METADATA_INVARIANT_CONTRACTS: tuple[MetadataInvariantContract, ...] = (
         "torch",
     ),
     MetadataInvariantContract("op_log_fields", _check_op_log_fields, "torch"),
+    MetadataInvariantContract(
+        "primitive_op_invariants",
+        _check_primitive_op_invariants,
+        "torch",
+    ),
     MetadataInvariantContract(
         "payload_metadata_invariants",
         _check_payload_metadata_invariants,

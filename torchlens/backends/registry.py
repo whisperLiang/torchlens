@@ -229,7 +229,14 @@ class BackendCapabilityConformanceError(BackendUnsupportedError):
 
 
 GATED_CAPABILITY_FLAGS: frozenset[str] = frozenset(
-    {"backward_capture", "fastlog", "interventions", "rng_replay", "streaming"}
+    {
+        "backward_capture",
+        "fastlog",
+        "interventions",
+        "rng_replay",
+        "streaming",
+        "structure_only_capture",
+    }
 )
 """Capability flags that open behavior gates and therefore require a bound
 implementing surface (see ``BackendSpec.capability_implementations``)."""
@@ -255,6 +262,10 @@ class BackendCapabilities:
         Whether loaded payloads can materialize as runtime arrays.
     streaming:
         Whether streaming save is supported.
+    structure_only_capture:
+        Whether structure-only capture (``structure_only=True``) is
+        supported. DOCUMENTED-UNSTABLE surface pending naming-session/S2
+        ratification.
     intermediate_derived_grads:
         Whether the backend can derive exact op-level gradients outside true
         backward capture.
@@ -284,6 +295,7 @@ class BackendCapabilities:
     rng_replay: bool
     payload_materialization: bool
     streaming: bool
+    structure_only_capture: bool = False
     intermediate_derived_grads: bool = False
     input_container_structure: Literal["none", "paths_only", "full_spec"] = "none"
     output_container_structure: Literal["none", "paths_only", "full_spec"] = "none"

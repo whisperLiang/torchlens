@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 from ._deprecations import REMOVED_IN as _REMOVED_IN  # noqa: E402  (single advertised window)
 
 _LAZY_ATTRS = {
+    "AtenOp": ("torchlens.data_classes.aten_op", "AtenOp"),
     "Bundle": ("torchlens.intervention", "Bundle"),
     "Container": ("torchlens.data_classes.container", "Container"),
     "JaxPayloadLoadHint": ("torchlens._io", "JaxPayloadLoadHint"),
@@ -1266,6 +1267,7 @@ _set_variadic_wrapper_signature(draw_combined, str)
 
 
 __all__ = [
+    "AtenOp",
     "trace",
     "release_model",
     "clear_capture_cache",

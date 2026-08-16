@@ -67,6 +67,7 @@ from .._io import (
     default_fill_state,
     read_tlspec_version,
 )
+from .._io.prerelease import register_prerelease_field
 from .._runnable_seam import (
     RunnableTraceState,
     normalize_runnable_trace_state,
@@ -220,6 +221,7 @@ _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
     "distributed_witness": "none",
     "save_budget": "auto",
     "raise_on_nan": False,
+    "structure_only": False,
     "keep_orphans": False,
     "annotations": {},
     "observer_spans": [],
@@ -1152,6 +1154,7 @@ class Trace(
     _module_capture_ws: ModuleCaptureWorkspace
     _wrapper_runtime_ws: WrapperRuntimeWorkspace
     _fast_run_session: Any | None
+    _primitive_op_profile: Any | None
     backward_root_grad_fn_object_ids: list[int]
     backward_pass_logs: dict[int, BackwardPass]
     code_context: list["FuncCallLocation"]
@@ -1220,6 +1223,12 @@ class Trace(
         "tlspec_version": FieldPolicy.KEEP,
         "_tracing_finished": FieldPolicy.KEEP,
         "capture_mode": FieldPolicy.KEEP,
+        # L7a structure-only mode marker (S3 registrar discipline): declared
+        # DROP under tlspec v7 and registered with the pre-release registrar
+        # (see the register_prerelease_field call after this class body); the
+        # wave-3 coordinated bump flips it to KEEP together with the M-C1..C3
+        # load-validation rows. Never a silent v7 schema change.
+        "structure_only": FieldPolicy.DROP,
         "_runnable": FieldPolicy.DROP,
         "_fast_run_session": FieldPolicy.DROP,
         "escape_detector_mode": FieldPolicy.DROP,
@@ -1474,6 +1483,9 @@ class Trace(
         # from its own state, and .tlspec artifacts stay object-shaped until
         # the M11 direct semantic serialization.
         "_trace_core": FieldPolicy.DROP,
+        # Wave-0 primitive profile: the S3 registrar substitutes KEEP only
+        # beneath its pytest-only activation switch. Ordinary tlspec v7 omits it.
+        "_primitive_op_profile": FieldPolicy.DROP,
         "_pre_forward_rng_states": FieldPolicy.DROP,
         # r63 C1: pre-clone per-slot state metadata signatures (producer-side only,
         # never portable) and the buffer storage-pointer attribution index.
@@ -1727,8 +1739,14 @@ class Trace(
         self._raw_graph_ws = RawGraphWorkspace()
         self._module_capture_ws = ModuleCaptureWorkspace()
         self._wrapper_runtime_ws = WrapperRuntimeWorkspace()
+        self._primitive_op_profile = None
         self._module_capture_ws.module_build_data = _init_module_hierarchy_data()
         self.capture_mode: Literal["exhaustive", "predicate"] = "exhaustive"
+        # L7a: True marks a structure-only capture (the flag declares the
+        # mode; every value-bearing claim is a hypothesis and value consumers
+        # gate through torchlens.capture.structure_only). DOCUMENTED-UNSTABLE
+        # spelling pending naming-session ratification.
+        self.structure_only: bool = False
         self._runnable = RunnableTraceState()
         self._fast_run_session: Any | None = None
         self.halted = False
@@ -3021,6 +3039,7 @@ class Trace(
             "chunked_forward": False,
             "module_filter": None,
             "raise_on_nan": False,
+            "structure_only": False,
             "keep_orphans": False,
             "annotations": {},
             "observer_spans": [],
@@ -3159,6 +3178,12 @@ class Trace(
         # retain the previous trace's events and re-serialize them later).
         state.pop("_capture_events", None)
         self.__dict__.update(state)
+        from .._io.prerelease import prerelease_fields_active
+
+        if prerelease_fields_active() and self.__dict__.get("_primitive_op_profile") is not None:
+            from ..validation._invariants_primitive_ops import validate_loaded_primitive_profile
+
+            validate_loaded_primitive_profile(self)
         # Event streams never serialize (FieldPolicy.DROP), but a restored
         # trace remains a supported backward-capture target within the live
         # process, so restore installs a fresh stream EXPLICITLY here rather
@@ -3747,20 +3772,42 @@ class Trace(
     # ******** Public Convenience Methods ********
     # ********************************************
 
+    def discharge_against(self, real_trace: "Trace") -> Any:
+        """Discharge this structure-only trace's hypotheses against a real run.
+
+        DOCUMENTED-UNSTABLE surface (L7a; no deprecation shim owed on
+        rename). Only defined on a structure-only capture; ``real_trace``
+        must be an ordinary settled COMPLETE capture of the same graph.
+        Returns a frozen ``StructureDischarge`` record (per-claim table +
+        overall verdict); neither trace is mutated — the verdict registers in
+        a weak-keyed side table consulted by the structure-only capability
+        chokepoint (a REFUTED discharge flips hypothesis consumers to typed
+        refusals). See ``torchlens.capture.structure_only.discharge_against``
+        for the full join/precondition contract.
+        """
+
+        from ..capture.structure_only import discharge_against as _discharge
+
+        return _discharge(self, real_trace)
+
 
 Trace.FIELD_FORK_POLICY = fork_policy_from_policy(Trace.FIELD_POLICY)  # type: ignore[attr-defined]
 Trace.DEFAULT_FILL_STATE = default_fill_state_from_policy(Trace.FIELD_POLICY)  # type: ignore[attr-defined]
 
+# S3-gated wave-0 primitive profile hook. The registrar accepts only the
+# declared DROP policy above and substitutes KEEP solely in its pytest switch.
+register_prerelease_field(Trace, "_primitive_op_profile", persisted_policy=FieldPolicy.KEEP)
 
-def _register_prerelease_fields() -> None:
-    """Register sprint-gated DROP fields (S3 registrar; grouping/-_policy
-    persist KEEP only at the coordinated tlspec bump -- gates run under the
-    test switch)."""
+# L7a mode marker rides the S3 pre-release registrar: declared FieldPolicy.DROP
+# above (no schema change under tlspec v7), registered here so portability exit
+# gates can round-trip it under the test-only activation switch, and flipped to
+# the persisting policy at the wave-3 coordinated bump (which retires this
+# registration together with the M-C1..C3 load-validation rows).
+register_prerelease_field(Trace, "structure_only", persisted_policy=FieldPolicy.KEEP)
 
-    from .._io.prerelease import register_prerelease_field
-
-    register_prerelease_field(Trace, "grouping")
-    register_prerelease_field(Trace, "grouping_policy")
-
-
-_register_prerelease_fields()
+# L1 grouping surface: the knob mirror + the grouping-policy stamp, declared
+# FieldPolicy.DROP above and registered so the portability exit gates can
+# round-trip them under the test-only switch; flipped to persisting at the
+# wave-3 coordinated bump.
+register_prerelease_field(Trace, "grouping")
+register_prerelease_field(Trace, "grouping_policy")

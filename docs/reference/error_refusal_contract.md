@@ -153,6 +153,7 @@ add names to the top-level `torchlens` namespace:
 | `manifest_schema_invalid` | Manifest parses as a JSON object but violates the bundle schema (missing/mistyped field, forged entry, count mismatch) | Re-save the artifact with `tl.save()`; do not hand-edit the manifest |
 | `manifest_unreadable` | Manifest cannot be read or does not parse within bounds | Check permissions/integrity; re-save if truncated |
 | `manifest_write_failed` | `manifest.json` could not be written during save | Check disk space and directory permissions, then re-save |
+| `meta_kernel_unavailable` | An op with no meta kernel died inside torch dispatch during structure-only capture (`MetaKernelUnavailableError`; original chained) | Run a real capture, or upgrade torch for broader meta-kernel coverage |
 | `metadata_object_count_exceeded` | `metadata.pkl` opcode count exceeds the allocation ceiling | Treat as a hostile/implausible artifact; re-save from source |
 | `metadata_payload_not_a_mapping` | `metadata.pkl` payload is not a metadata mapping | The artifact is corrupt or hand-edited; re-save with `tl.save()` |
 | `model_type_unsupported` | Torch capture model is not an `nn.Module` | Pass a module or select its backend |
@@ -227,6 +228,17 @@ add names to the top-level `torchlens` namespace:
 | `stack_shape_mismatch` | Stacked outputs have different shapes | Select ops with identical output shapes |
 | `storage_argument_conflict` | `storage` and `streaming` were both supplied | Prefer `storage`, or remove it |
 | `structural_hash_mismatch` | Model structural hash differs from the pinned value (`StructuralHashMismatchError`, `AssertionError` lineage) | Inspect the captured traces for the divergence, or re-pin if intentional |
+| `structure_only_backward_unsupported` | Backward/gradient capture is refused on a structure-only trace (v1) | Run a real capture for backward surfaces |
+| `structure_only_discharge_precondition` | `discharge_against` preconditions unmet (not a structure-only trace, oracle not ordinary, or oracle not COMPLETE) | Discharge a structure-only trace against a settled COMPLETE real capture |
+| `structure_only_episode_unsupported` | Episode capture does not compose with structure-only (v1; S2-amendment candidate) | Run the episode capture without `structure_only` |
+| `structure_only_option_conflict` | `structure_only=True` combined with an option that needs tensor values (`raise_on_nan`, `intervention_ready`, a not-provably-value-free `halt=`) | Drop the conflicting option or run a real capture |
+| `structure_only_refuted_hypothesis` | A registered real-run discharge REFUTED this structure-only trace's hypotheses; hypothesis consumers refuse | Re-capture after fixing the divergence, or consume the discharge record directly |
+| `structure_only_replay_unsupported` | Replay/run requires tensor values a structure-only trace never records | Run a real capture for replay surfaces |
+| `structure_only_runnable_unsupported` | Runnable save is refused on a structure-only trace (v1; L7b late-bind may amend) | Run a real capture with `intervention_ready=True` for runnable artifacts |
+| `structure_only_save_unsupported` | Persisting a structure-only trace is refused until the coordinated tlspec bump lands the marker and load rows | Keep the trace in-session, or run a real capture to save |
+| `structure_only_type_invalid` | Capture option `structure_only` is not a bool | Pass `structure_only=True` or `structure_only=False` |
+| `structure_only_validation_unsupported` | Validation entry has nothing to compare against on a structure-only trace; discharge is the verification story | Use `Trace.discharge_against(real_trace)` instead |
+| `structure_only_values_unsupported` | A value-payload request (save selection, gradients, streaming sinks, raw input/output, output decode) cannot be honored under `structure_only=True` | Drop the payload-requesting option or run a real capture |
 | `sweep_intervention_conflict` | `sweep()` received a second intervention | Express the target through `at` |
 | `sweep_names_length_mismatch` | Sweep names and values have different lengths | Pass one name per value |
 | `sweep_site_missing` | Sweep site target is missing | Pass `at` |
@@ -242,6 +254,7 @@ add names to the top-level `torchlens` namespace:
 | `transform_not_differentiable` | An out/grad/activation transform returned a non-tensor, non-grad dtype, or graph-disconnected value while `backward_ready=True`/`keep_grad=True` (`TrainingModeConfigError`, `ValueError` lineage) | Return a differentiable floating-dtype tensor that stays on the autograd graph |
 | `unknown_backend` | Explicit backend name is not registered | Choose a registered backend |
 | `unsupported_tensor_variant` | Model/input carries meta, fake, functional, or sparse tensor variants (`UnsupportedTensorVariantError`) | Materialize dense, strided tensors with concrete shapes on a real device |
+| `value_dependent_branch_unsupported` | A tensor-value escape reached user code during structure-only capture (`ValueDependentBranchError`; device-neutral, exact source line) | Run a real capture, or restructure the branch to be shape-derived |
 | `visualization_bool_option_invalid` | A bool-only draw/visualization option received a non-bool (strings such as `'no'` were silently truthy) | Pass True or False |
 | `visualization_show_containers_invalid` | `show_containers` is outside its closed vocabulary | Pass False or one of `labels`, `cluster`, `collapsed`, `auto`, `nodes` |
 | `visualization_intervention_mode_invalid` | Intervention rendering mode is unknown | Choose `node_mark` or `as_node` |

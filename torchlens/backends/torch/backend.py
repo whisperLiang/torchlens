@@ -57,6 +57,7 @@ from .ops import (
     runnable_output_losslessness,
 )
 from .sources import log_source_tensor as _log_source_tensor
+from .structure_only_belt import structure_only_escape_belt
 from .wrappers import unwrap_torch, wrap_torch
 
 if TYPE_CHECKING:
@@ -398,7 +399,11 @@ class TorchBackend:
 
             trace = cast("Trace", session)
             with capture_escape_guard(trace), capture_completeness_witness(trace):
-                with capture_scalar_escape_warning(trace):
+                # L7a Layer-1 mode belt: escalated device-neutral escape
+                # refusals for structure_only=True sessions; a no-op context
+                # on the default path (zero-diff). The plain scalar-escape
+                # warning belt hands off to it in-mode (its module notes why).
+                with structure_only_escape_belt(trace), capture_scalar_escape_warning(trace):
                     with _state.active_logging(trace):
                         # R54 wrapped-epoch check: model prep wrapped torch
                         # BEFORE admission, so a concurrent unwrap_torch()

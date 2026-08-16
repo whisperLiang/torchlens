@@ -665,6 +665,21 @@ def _torch_fastlog_implementation() -> object:
     return Recorder
 
 
+def _torch_structure_only_implementation() -> object:
+    """Resolve the torch structure-only capture implementing surface.
+
+    Returns
+    -------
+    object
+        The escalated escape-belt installer the torch capture path enters
+        for ``trace(structure_only=True)`` sessions.
+    """
+
+    from .torch.structure_only_belt import structure_only_escape_belt
+
+    return structure_only_escape_belt
+
+
 def _torch_streaming_implementation() -> object:
     """Resolve the torch streaming-save implementing surface.
 
@@ -1109,6 +1124,7 @@ def register_default_backend_specs() -> None:
                 rng_replay=True,
                 payload_materialization=True,
                 streaming=True,
+                structure_only_capture=True,
                 intermediate_derived_grads=False,
                 input_container_structure="full_spec",
                 output_container_structure="full_spec",
@@ -1123,6 +1139,7 @@ def register_default_backend_specs() -> None:
                 "interventions": _torch_interventions_implementation,
                 "rng_replay": _torch_rng_replay_implementation,
                 "streaming": _torch_streaming_implementation,
+                "structure_only_capture": _torch_structure_only_implementation,
             },
             serialization_policy=SerializationPolicy(
                 payload_policy="full",
