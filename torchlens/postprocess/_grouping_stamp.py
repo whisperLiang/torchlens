@@ -162,6 +162,37 @@ def _site_list_valid(value: Any) -> bool:
     return True
 
 
+def _stamp_shape_violation(payload: Any) -> str | None:
+    """Shape/schema layer of stamp validation: malformed / unknown_key."""
+
+    if not isinstance(payload, dict):
+        return "malformed"
+    if set(payload.keys()) != _STAMP_KEYS:
+        return "unknown_key" if set(payload.keys()) - _STAMP_KEYS else "malformed"
+    if payload["schema"] != GROUPING_POLICY_SCHEMA:
+        return "malformed"
+    return None
+
+
+def _stamp_vocabulary_violation(payload: dict[str, Any]) -> str | None:
+    """Closed-vocabulary layer of stamp validation."""
+
+    policy = payload["policy"]
+    requested = payload["requested"]
+    detector = payload["detector"]
+    effective = payload["effective"]
+    settlement_note = payload["settlement_note"]
+    if policy not in POLICY_VALUES or requested not in REQUESTED_VALUES:
+        return "vocabulary"
+    if detector not in DETECTOR_VALUES or not isinstance(effective, bool):
+        return "vocabulary"
+    if not (settlement_note is None or isinstance(settlement_note, str)):
+        return "vocabulary"
+    if isinstance(settlement_note, str) and not settlement_note.startswith("grouping_stamp_"):
+        return "vocabulary"
+    return None
+
+
 def validate_grouping_policy_stamp(
     payload: Any,
     *,
@@ -176,25 +207,16 @@ def validate_grouping_policy_stamp(
     rules ``C1``-``C8`` (user-facing on violation).
     """
 
-    if not isinstance(payload, dict):
-        return "malformed"
-    if set(payload.keys()) != _STAMP_KEYS:
-        return "unknown_key" if set(payload.keys()) - _STAMP_KEYS else "malformed"
-    if payload["schema"] != GROUPING_POLICY_SCHEMA:
-        return "malformed"
+    shape_violation = _stamp_shape_violation(payload)
+    if shape_violation is not None:
+        return shape_violation
     policy = payload["policy"]
     requested = payload["requested"]
-    detector = payload["detector"]
     effective = payload["effective"]
     settlement_note = payload["settlement_note"]
-    if policy not in POLICY_VALUES or requested not in REQUESTED_VALUES:
-        return "vocabulary"
-    if detector not in DETECTOR_VALUES or not isinstance(effective, bool):
-        return "vocabulary"
-    if not (settlement_note is None or isinstance(settlement_note, str)):
-        return "vocabulary"
-    if isinstance(settlement_note, str) and not settlement_note.startswith("grouping_stamp_"):
-        return "vocabulary"
+    vocabulary_violation = _stamp_vocabulary_violation(payload)
+    if vocabulary_violation is not None:
+        return vocabulary_violation
     folded_sites = payload["folded_sites"]
     site_join = payload["site_join"]
     for axis_value in (folded_sites, site_join):
@@ -202,33 +224,32 @@ def validate_grouping_policy_stamp(
             continue
         if not _site_list_valid(axis_value):
             return "C4"
-    # C1/C2: fold state must match the policy that claims it.
-    if policy == "fold_sites" and folded_sites == "none":
-        return "C1"
-    if policy != "fold_sites" and folded_sites != "none":
-        return "C2"
-    # C3: a degraded/declined grouping never claims a policy it did not run.
-    if effective is False and policy != "unknown":
-        return "C3"
-    # C5: stamp/recurrence_detection coherence (params_only <-> False).
-    if (
-        recurrence_detection is not None
-        and policy in ("structural", "params_only")
-        and (policy == "params_only") != (recurrence_detection is False)
-    ):
-        return "C5"
-    # C6: mirror coherence with the requested-knob field.
-    if grouping is not None and requested != "unknown" and requested != grouping:
-        return "C6"
-    # C7: a healthy stamp never carries a settlement; a settled stamp never
-    # claims health.
-    if settlement_note is not None and not (policy == "unknown" and effective is False):
-        return "C7"
-    # C8: a product-layer join is only legal on episode products. The exact
-    # capture_kind predicate is L2's spelling (wired at the S2 amendment);
-    # until then no artifact can legitimately carry one -- fail closed.
-    if site_join != "none":
-        return "C8"
+    coherence_rules: tuple[tuple[str, bool], ...] = (
+        # C1/C2: fold state must match the policy that claims it.
+        ("C1", policy == "fold_sites" and folded_sites == "none"),
+        ("C2", policy != "fold_sites" and folded_sites != "none"),
+        # C3: a degraded/declined grouping never claims a policy it did not run.
+        ("C3", effective is False and policy != "unknown"),
+        # C5: stamp/recurrence_detection coherence (params_only <-> False).
+        (
+            "C5",
+            recurrence_detection is not None
+            and policy in ("structural", "params_only")
+            and (policy == "params_only") != (recurrence_detection is False),
+        ),
+        # C6: mirror coherence with the requested-knob field.
+        ("C6", grouping is not None and requested != "unknown" and requested != grouping),
+        # C7: a healthy stamp never carries a settlement; a settled stamp never
+        # claims health.
+        ("C7", settlement_note is not None and not (policy == "unknown" and effective is False)),
+        # C8: a product-layer join is only legal on episode products. The exact
+        # capture_kind predicate is L2's spelling (wired at the S2 amendment);
+        # until then no artifact can legitimately carry one -- fail closed.
+        ("C8", site_join != "none"),
+    )
+    for rule_name, violated in coherence_rules:
+        if violated:
+            return rule_name
     return None
 
 

@@ -443,32 +443,8 @@ class EpisodeLedgerRow:
         coord = payload["coord"]
         if not isinstance(coord, Mapping):
             raise ValueError("episode-ledger row field 'coord' must be a mapping")
-        tokens_value = payload["tokens"]
-        tokens: tuple[int, ...] | None
-        if tokens_value is None:
-            tokens = None
-        elif isinstance(tokens_value, Sequence) and not isinstance(tokens_value, (str, bytes)):
-            if not all(
-                isinstance(token, int) and not isinstance(token, bool) for token in tokens_value
-            ):
-                raise ValueError("episode-ledger row field 'tokens' must hold ints")
-            tokens = tuple(int(token) for token in tokens_value)
-        else:
-            raise ValueError("episode-ledger row field 'tokens' must be a list of ints or null")
-        frontier_value = payload["frontier"]
-        frontier: dict[str, str] | None
-        if frontier_value is None:
-            frontier = None
-        elif isinstance(frontier_value, Mapping):
-            if set(frontier_value) != _FRONTIER_KEYS:
-                raise ValueError(
-                    f"episode-ledger row frontier must carry exactly {sorted(_FRONTIER_KEYS)}"
-                )
-            if not all(isinstance(value, str) for value in frontier_value.values()):
-                raise ValueError("episode-ledger row frontier values must be strings")
-            frontier = {key: str(value) for key, value in frontier_value.items()}
-        else:
-            raise ValueError("episode-ledger row field 'frontier' must be a mapping or null")
+        tokens = _parse_row_tokens(payload["tokens"])
+        frontier = _parse_row_frontier(payload["frontier"])
         return cls(
             episode_step=_require_non_negative_int(payload, "episode_step"),
             role=cast("Role", _require_vocabulary(payload, "role", _ROLES)),
@@ -480,6 +456,36 @@ class EpisodeLedgerRow:
             rng_digest=_optional_str(payload, "rng_digest"),
             escalation=_optional_str(payload, "escalation"),
         )
+
+
+def _parse_row_tokens(tokens_value: Any) -> tuple[int, ...] | None:
+    """Parse one row's ``tokens`` payload field, FAIL-CLOSED."""
+
+    if tokens_value is None:
+        return None
+    if isinstance(tokens_value, Sequence) and not isinstance(tokens_value, (str, bytes)):
+        if not all(
+            isinstance(token, int) and not isinstance(token, bool) for token in tokens_value
+        ):
+            raise ValueError("episode-ledger row field 'tokens' must hold ints")
+        return tuple(int(token) for token in tokens_value)
+    raise ValueError("episode-ledger row field 'tokens' must be a list of ints or null")
+
+
+def _parse_row_frontier(frontier_value: Any) -> dict[str, str] | None:
+    """Parse one row's ``frontier`` payload field, FAIL-CLOSED."""
+
+    if frontier_value is None:
+        return None
+    if isinstance(frontier_value, Mapping):
+        if set(frontier_value) != _FRONTIER_KEYS:
+            raise ValueError(
+                f"episode-ledger row frontier must carry exactly {sorted(_FRONTIER_KEYS)}"
+            )
+        if not all(isinstance(value, str) for value in frontier_value.values()):
+            raise ValueError("episode-ledger row frontier values must be strings")
+        return {key: str(value) for key, value in frontier_value.items()}
+    raise ValueError("episode-ledger row field 'frontier' must be a mapping or null")
 
 
 class EpisodeLedger:
@@ -741,6 +747,64 @@ class EpisodeFoldResult:
     provenance_tier: ProvenanceTier = "exact"
 
 
+def _complete_prefix_length(statuses: Sequence[str]) -> int:
+    """Length of the leading run of COMPLETE member statuses."""
+
+    length = 0
+    for status in statuses:
+        if status != "COMPLETE":
+            break
+        length += 1
+    return length
+
+
+def _fold_effective_tier(
+    member_tiers: Sequence[ProvenanceTier] | None, excluded: frozenset[int]
+) -> ProvenanceTier:
+    """Validate the surviving member tiers and fold them to their minimum."""
+
+    tiers: list[ProvenanceTier] = []
+    if member_tiers is not None:
+        tiers = [tier for index, tier in enumerate(member_tiers) if index not in excluded]
+        for tier in tiers:
+            if tier not in _PROVENANCE_TIERS:
+                raise ValueError(f"episode provenance tier {tier!r} is out of vocabulary")
+    return "ledger_only" if any(tier == "ledger_only" for tier in tiers) else "exact"
+
+
+def _fold_terminal_tail(
+    status: str,
+    at_step: int,
+    phase: str | None,
+    episode_tier: ProvenanceTier,
+) -> EpisodeFoldResult | None:
+    """Fold arms 3/5/6: the single trailing non-complete member's verdict."""
+
+    if status == "HALTED":
+        return EpisodeFoldResult(
+            status="episode_halted_at_step",
+            at_step=at_step,
+            member_status="HALTED",
+            provenance_tier=episode_tier,
+        )
+    if status == "ABORTED_NONFINITE":
+        return EpisodeFoldResult(
+            status="episode_aborted_at_step",
+            at_step=at_step,
+            member_status="ABORTED_NONFINITE",
+            provenance_tier=episode_tier,
+        )
+    if status == "FAILED":
+        return EpisodeFoldResult(
+            status="episode_failed_at_step",
+            at_step=at_step,
+            member_status="FAILED",
+            member_phase=phase if phase is not None else "unattributed",
+            provenance_tier=episode_tier,
+        )
+    return None
+
+
 def derive_episode_status(
     member_outcomes: Sequence[tuple[str, str | None]],
     *,
@@ -786,15 +850,7 @@ def derive_episode_status(
 
     excluded = escalation_members or frozenset()
     members = [pair for index, pair in enumerate(member_outcomes) if index not in excluded]
-    tiers: list[ProvenanceTier] = []
-    if member_tiers is not None:
-        tiers = [tier for index, tier in enumerate(member_tiers) if index not in excluded]
-        for tier in tiers:
-            if tier not in _PROVENANCE_TIERS:
-                raise ValueError(f"episode provenance tier {tier!r} is out of vocabulary")
-    episode_tier: ProvenanceTier = (
-        "ledger_only" if any(tier == "ledger_only" for tier in tiers) else "exact"
-    )
+    episode_tier = _fold_effective_tier(member_tiers, excluded)
 
     # Arm 1: any member UNATTESTED or UNKNOWN, or the ledger violates the law.
     if ledger is not None:
@@ -807,12 +863,7 @@ def derive_episode_status(
             return EpisodeFoldResult(status="episode_unknown", provenance_tier=episode_tier)
 
     statuses = [status.upper() for status, _phase in members]
-    complete_prefix = 0
-    for status in statuses:
-        if status == "COMPLETE":
-            complete_prefix += 1
-        else:
-            break
+    complete_prefix = _complete_prefix_length(statuses)
     non_complete_tail = statuses[complete_prefix:]
 
     # Arm 2: all N declared members COMPLETE (needs the ledger-only N).
@@ -821,31 +872,11 @@ def derive_episode_status(
 
     # Arms 3/5/6: exactly one non-complete member, and it is last.
     if len(non_complete_tail) == 1:
-        k = complete_prefix
-        status = non_complete_tail[0]
-        phase = members[k][1]
-        if status == "HALTED":
-            return EpisodeFoldResult(
-                status="episode_halted_at_step",
-                at_step=k,
-                member_status="HALTED",
-                provenance_tier=episode_tier,
-            )
-        if status == "ABORTED_NONFINITE":
-            return EpisodeFoldResult(
-                status="episode_aborted_at_step",
-                at_step=k,
-                member_status="ABORTED_NONFINITE",
-                provenance_tier=episode_tier,
-            )
-        if status == "FAILED":
-            return EpisodeFoldResult(
-                status="episode_failed_at_step",
-                at_step=k,
-                member_status="FAILED",
-                member_phase=phase if phase is not None else "unattributed",
-                provenance_tier=episode_tier,
-            )
+        terminal = _fold_terminal_tail(
+            non_complete_tail[0], complete_prefix, members[complete_prefix][1], episode_tier
+        )
+        if terminal is not None:
+            return terminal
 
     # Arm 4: clean COMPLETE prefix + a ledger-declared driver halt at k+1
     # (the until=-at-boundary case: no member for the halted step ever
@@ -932,6 +963,77 @@ def _ledger_error(message: str, *, code: str) -> Exception:
     return EpisodeLedgerError(message, code=code)
 
 
+def _resolved_stepped_address(stepped: Any, model: Any) -> str:
+    """Validate the stepped module and resolve its address inside the root."""
+
+    import torch.nn as nn
+
+    if not isinstance(stepped, nn.Module):
+        raise _declaration_error(
+            "EpisodeSpec.stepped_module must be an nn.Module (the stepped model "
+            f"whose calls define step boundaries), got {type(stepped).__name__}."
+        )
+    if stepped is model:
+        raise _declaration_error(
+            "EpisodeSpec.stepped_module is the episode root itself. The wrapper-"
+            "module entry requires the stepped model to be a PROPER submodule of "
+            "the traced root (the callable-root entry is a separate, later "
+            "contract). Remedy: wrap the generation loop in an nn.Module whose "
+            "forward steps this model, and trace the wrapper."
+        )
+    for name, candidate in model.named_modules():
+        if candidate is stepped and name:
+            return name
+    raise _declaration_error(
+        "EpisodeSpec.stepped_module is not a submodule of the traced episode "
+        "root; the ledger's step boundaries are the stepped module's calls "
+        "inside the root's forward."
+    )
+
+
+def _validated_forced_tokens(spec: EpisodeSpec) -> tuple[int, ...] | None:
+    """Validate the teacher-forced feed against the declaration."""
+
+    if spec.forced_tokens is None:
+        return None
+    try:
+        forced = tuple(int(token) for token in spec.forced_tokens)
+    except (TypeError, ValueError):
+        raise _declaration_error(
+            "EpisodeSpec.forced_tokens must be an iterable of ints (the "
+            "teacher-forced feed), got "
+            f"{type(spec.forced_tokens).__name__}."
+        ) from None
+    if not forced:
+        raise _declaration_error("EpisodeSpec.forced_tokens must be non-empty when given.")
+    if spec.n_steps is not None and len(forced) != spec.n_steps:
+        raise _declaration_error(
+            f"EpisodeSpec.forced_tokens has {len(forced)} tokens but n_steps="
+            f"{spec.n_steps}; the forced feed must cover exactly the declared steps."
+        )
+    return forced
+
+
+def _preflight_declared_state(spec: EpisodeSpec) -> None:
+    """E-A4: declared-state preflight, unconditional, at declaration time."""
+
+    import torch
+
+    for index, item in enumerate(spec.state):
+        if isinstance(item, torch.Tensor):
+            continue  # tensors snapshot/restore by clone within declared scope
+        try:
+            copy.deepcopy(item)
+        except Exception as exc:
+            raise _declaration_error(
+                f"EpisodeSpec.state[{index}] ({type(item).__name__}) is not "
+                "snapshot/restorable within the declared checkpoint scope: "
+                f"deepcopy failed with {type(exc).__name__}: {exc}. Remedy: "
+                "declare only snapshotable state, or make the item deep-copyable.",
+                code="episode_state_unsnapshotable",
+            ) from exc
+
+
 def resolve_episode_declaration(spec: EpisodeSpec, model: Any) -> ResolvedEpisode:
     """Validate an episode declaration at entry, BEFORE execution.
 
@@ -960,8 +1062,6 @@ def resolve_episode_declaration(spec: EpisodeSpec, model: Any) -> ResolvedEpisod
         ``episode_state_unsnapshotable`` for the E-A4 refusal.
     """
 
-    import torch.nn as nn
-
     from ..options import EpisodeSpec as _EpisodeSpec
 
     if not isinstance(spec, _EpisodeSpec):
@@ -969,31 +1069,7 @@ def resolve_episode_declaration(spec: EpisodeSpec, model: Any) -> ResolvedEpisod
             f"episode= expects an EpisodeSpec, got {type(spec).__name__}. "
             "Remedy: pass tl.options.EpisodeSpec(stepped_module=...)"
         )
-    stepped = spec.stepped_module
-    if not isinstance(stepped, nn.Module):
-        raise _declaration_error(
-            "EpisodeSpec.stepped_module must be an nn.Module (the stepped model "
-            f"whose calls define step boundaries), got {type(stepped).__name__}."
-        )
-    if stepped is model:
-        raise _declaration_error(
-            "EpisodeSpec.stepped_module is the episode root itself. The wrapper-"
-            "module entry requires the stepped model to be a PROPER submodule of "
-            "the traced root (the callable-root entry is a separate, later "
-            "contract). Remedy: wrap the generation loop in an nn.Module whose "
-            "forward steps this model, and trace the wrapper."
-        )
-    address: str | None = None
-    for name, candidate in model.named_modules():
-        if candidate is stepped and name:
-            address = name
-            break
-    if address is None:
-        raise _declaration_error(
-            "EpisodeSpec.stepped_module is not a submodule of the traced episode "
-            "root; the ledger's step boundaries are the stepped module's calls "
-            "inside the root's forward."
-        )
+    address = _resolved_stepped_address(spec.stepped_module, model)
     if spec.rng != "managed":
         raise _declaration_error(
             f"EpisodeSpec.rng={spec.rng!r} is unsupported; only the 'managed' "
@@ -1008,23 +1084,7 @@ def resolve_episode_declaration(spec: EpisodeSpec, model: Any) -> ResolvedEpisod
         raise _declaration_error(
             f"EpisodeSpec.token_axis={spec.token_axis!r} must be an int axis index."
         )
-    forced: tuple[int, ...] | None = None
-    if spec.forced_tokens is not None:
-        try:
-            forced = tuple(int(token) for token in spec.forced_tokens)
-        except (TypeError, ValueError):
-            raise _declaration_error(
-                "EpisodeSpec.forced_tokens must be an iterable of ints (the "
-                "teacher-forced feed), got "
-                f"{type(spec.forced_tokens).__name__}."
-            ) from None
-        if not forced:
-            raise _declaration_error("EpisodeSpec.forced_tokens must be non-empty when given.")
-        if spec.n_steps is not None and len(forced) != spec.n_steps:
-            raise _declaration_error(
-                f"EpisodeSpec.forced_tokens has {len(forced)} tokens but n_steps="
-                f"{spec.n_steps}; the forced feed must cover exactly the declared steps."
-            )
+    forced = _validated_forced_tokens(spec)
     reason = spec.reason
     if (spec.escalated_from is None) != (reason is None):
         raise _declaration_error(
@@ -1036,22 +1096,7 @@ def resolve_episode_declaration(spec: EpisodeSpec, model: Any) -> ResolvedEpisod
             f"EpisodeSpec.reason={reason!r} is outside the closed vocabulary "
             f"{sorted(_ESCALATION_REASONS)}."
         )
-    # E-A4: declared-state preflight, unconditional, at declaration time.
-    import torch
-
-    for index, item in enumerate(spec.state):
-        if isinstance(item, torch.Tensor):
-            continue  # tensors snapshot/restore by clone within declared scope
-        try:
-            copy.deepcopy(item)
-        except Exception as exc:
-            raise _declaration_error(
-                f"EpisodeSpec.state[{index}] ({type(item).__name__}) is not "
-                "snapshot/restorable within the declared checkpoint scope: "
-                f"deepcopy failed with {type(exc).__name__}: {exc}. Remedy: "
-                "declare only snapshotable state, or make the item deep-copyable.",
-                code="episode_state_unsnapshotable",
-            ) from exc
+    _preflight_declared_state(spec)
     return ResolvedEpisode(
         episode_id=f"ep-{uuid.uuid4().hex[:16]}",
         address=address,
@@ -1249,6 +1294,67 @@ def _emitted_tokens(trace: Any, resolved: ResolvedEpisode, n_rows: int) -> list[
     return tokens
 
 
+def _derive_row_statuses(
+    status: str, phase: Any, calls: list[Any], started: int
+) -> list[RowStatus]:
+    """Derive per-step row statuses from the settled outcome and call records."""
+
+    if status == "COMPLETE" or (
+        status == "FAILED" and phase in ("finalize", "postprocess", "teardown")
+    ):
+        return ["complete"] * started
+    if status in ("HALTED", "ABORTED_NONFINITE") or (
+        status == "FAILED" and phase in ("forward", None)
+    ):
+        if started == 0:
+            return []
+        tail: RowStatus = "complete" if _call_returned(calls[-1]) else "interrupted"
+        prefix: list[RowStatus] = ["complete"] * (started - 1)
+        return [*prefix, tail]
+    # UNATTESTED / UNKNOWN: structural, unverified disclosures.
+    return [
+        cast("RowStatus", "complete" if _call_returned(call) else "interrupted") for call in calls
+    ]
+
+
+def _build_ledger_rows(
+    *,
+    n_total: int,
+    started: int,
+    statuses: list[RowStatus],
+    calls: list[Any],
+    prompt_len: int,
+    tokens_by_row: list[tuple[int, ...]] | None,
+    frontier: dict[str, str] | None,
+) -> list[EpisodeLedgerRow]:
+    """Build the ordered per-step rows (absent rows past the started prefix)."""
+
+    rows: list[EpisodeLedgerRow] = []
+    for step in range(n_total):
+        if step < started:
+            row_status = statuses[step]
+            call = calls[step]
+            coord: dict[str, Any] = {
+                "member_call_index": getattr(call, "call_index", step + 1),
+                "pass_range": list(_pass_range_for_call(call) or ()) or None,
+            }
+        else:
+            row_status = "absent"
+            coord = {"member_call_index": step + 1, "pass_range": None}
+        rows.append(
+            EpisodeLedgerRow(
+                episode_step=step,
+                role="prefill" if step == 0 else "decode",
+                status=row_status,
+                coord=coord,
+                cache_len=prompt_len + step,
+                tokens=(tokens_by_row[step] if tokens_by_row is not None else None),
+                frontier=(frontier if row_status == "interrupted" else None),
+            )
+        )
+    return rows
+
+
 def write_episode_ledger(trace: Any, resolved: ResolvedEpisode) -> EpisodeLedger:
     """Write the finalized episode ledger onto the settled product (S7 L3).
 
@@ -1293,25 +1399,7 @@ def write_episode_ledger(trace: Any, resolved: ResolvedEpisode) -> EpisodeLedger
     n_total = resolved.n_steps if resolved.n_steps is not None else started
     n_total = max(n_total, started)
 
-    statuses: list[RowStatus]
-    if status == "COMPLETE" or (
-        status == "FAILED" and phase in ("finalize", "postprocess", "teardown")
-    ):
-        statuses = ["complete"] * started
-    elif status in ("HALTED", "ABORTED_NONFINITE") or (
-        status == "FAILED" and phase in ("forward", None)
-    ):
-        if started == 0:
-            statuses = []
-        else:
-            tail: RowStatus = "complete" if _call_returned(calls[-1]) else "interrupted"
-            prefix: list[RowStatus] = ["complete"] * (started - 1)
-            statuses = [*prefix, tail]
-    else:  # UNATTESTED / UNKNOWN: structural, unverified disclosures.
-        statuses = [
-            cast("RowStatus", "complete" if _call_returned(call) else "interrupted")
-            for call in calls
-        ]
+    statuses = _derive_row_statuses(status, phase, calls, started)
 
     prompt_len = _prompt_length(trace, resolved.token_axis)
 
@@ -1331,29 +1419,15 @@ def write_episode_ledger(trace: Any, resolved: ResolvedEpisode) -> EpisodeLedger
         first = halt_frontier[0] if isinstance(halt_frontier, (list, tuple)) else halt_frontier
         frontier = {"boundary_kind": "op", "boundary_label": str(first)}
 
-    rows: list[EpisodeLedgerRow] = []
-    for step in range(n_total):
-        if step < started:
-            row_status = statuses[step]
-            call = calls[step]
-            coord: dict[str, Any] = {
-                "member_call_index": getattr(call, "call_index", step + 1),
-                "pass_range": list(_pass_range_for_call(call) or ()) or None,
-            }
-        else:
-            row_status = "absent"
-            coord = {"member_call_index": step + 1, "pass_range": None}
-        rows.append(
-            EpisodeLedgerRow(
-                episode_step=step,
-                role="prefill" if step == 0 else "decode",
-                status=row_status,
-                coord=coord,
-                cache_len=prompt_len + step,
-                tokens=(tokens_by_row[step] if tokens_by_row is not None else None),
-                frontier=(frontier if row_status == "interrupted" else None),
-            )
-        )
+    rows = _build_ledger_rows(
+        n_total=n_total,
+        started=started,
+        statuses=statuses,
+        calls=calls,
+        prompt_len=prompt_len,
+        tokens_by_row=tokens_by_row,
+        frontier=frontier,
+    )
 
     try:
         ledger = EpisodeLedger(header, rows)
