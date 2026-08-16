@@ -41,22 +41,36 @@ _SELECT_FAMILY_FLOOR = frozenset({"E4", "E7", "E9", "F", "I", "B", "SIM", "UP", 
 #: set, so per-file-ignores do not mask sites). SHRINK-ONLY: lower a ceiling
 #: alongside a real cleanup; raising one is the exact silent-growth this test
 #: exists to prevent (SIM105 grew 74 -> 99 while ledgered as "deferred").
+#:
+#: 2026-08-16 R70 r7 INSTRUMENT CORRECTION (fixwave-7): the count parser was
+#: blind to .ipynb diagnostics (the "cell N" path segment contains a space,
+#: so `^\S+:` never matched) -- every ceiling below was frozen against a
+#: measurement that silently excluded all 88 notebook sites. The parser is
+#: fixed and every ceiling re-trued to the corrected 2026-08-16 measurement
+#: at the fixwave-7 tip. Four ceilings RISE here as an explicit re-ledger of
+#: pre-existing, newly-visible notebook debt -- NOT growth (the sites predate
+#: the ceilings; enumerated per code below). Five ceilings SHRINK to the true
+#: count in the same pass. SHRINK-ONLY from these corrected values.
 _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     # r7 R23 reconcile: hunt-6 counts 102 (fable, full lint scope) vs 99
     # (opus, torchlens+tests+scripts) were BOTH correct -- the delta is
-    # exactly the 3 examples/notebooks sites. This ceiling's own authority
-    # is the isolated-mode measurement described above (109); cite the
-    # measurement MODE with any future count or the dispute recurs.
-    "B905": 109,
+    # exactly the 3 examples/notebooks sites. 2026-08-16 re-true: with the
+    # ipynb-aware parser the isolated-mode CI-scope count IS 102 (99 .py +
+    # 3 notebook sites); ceiling shrunk 109 -> 102. Cite the measurement
+    # MODE with any future count or the dispute recurs.
+    "B905": 102,
     "B028": 2,
     "B023": 17,
     "B904": 17,
     "B018": 14,
     "B007": 16,
     "B008": 3,
-    "SIM108": 88,
-    "SIM105": 99,
-    "SIM102": 40,
+    # 2026-08-16 re-true (ipynb-aware parser): shrunk to the corrected
+    # counts -- SIM108 88 -> 86, SIM105 99 -> 92 (90 .py + 2 ipynb),
+    # SIM102 40 -> 39.
+    "SIM108": 86,
+    "SIM105": 92,
+    "SIM102": 39,
     "SIM117": 45,
     "SIM115": 7,
     "UP031": 16,
@@ -92,8 +106,16 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     # family got ceilinged -- "every one a place a capture bug can hide".
     # Ceilings frozen at the 2026-08-15 fix/capture-r6 measurement (pinned
     # ruff 0.15.4, isolated, CI scope + config extend-excludes). SHRINK-ONLY.
-    "BLE001": 511,
-    "S110": 39,
+    # 2026-08-16 R70 r7 explicit re-ledger (instrument correction, see the
+    # header note): the parser-blind measurement missed 72 BLE001 and 2 S110
+    # notebook sites (audit-notebook demo cells that deliberately catch
+    # Exception to DISPLAY refusal behavior, plus two guarded-import
+    # try/except/pass cells). True corrected counts: BLE001 523 (451 .py +
+    # 72 ipynb), S110 41 (39 .py + 2 ipynb). These are pre-existing sites
+    # made visible, not growth; the .py populations did not move. Relayed to
+    # the docs lane for notebook-side cleanup; SHRINK-ONLY from here.
+    "BLE001": 523,
+    "S110": 41,
     # 35->36 (fixwave-5 settle): one new guarded-iteration continue landed
     # with the wave's defensive sweeps; re-frozen at the post-wave tip.
     "S112": 36,
@@ -113,8 +135,13 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     # NEXT ignore entry from entering unmeasured.
     "B009": 120,
     "B010": 100,
-    "SIM118": 49,
-    "SIM401": 1,
+    # 2026-08-16 R70 r7 explicit re-ledger (instrument correction, header
+    # note): the parser missed 5 SIM118 and 1 SIM401 notebook sites. True
+    # corrected counts: SIM118 54 (49 .py + 5 ipynb), SIM401 2 (1 .py +
+    # 1 ipynb). Pre-existing sites made visible, not growth; relayed to the
+    # docs lane as mechanically fixable. SHRINK-ONLY from here.
+    "SIM118": 54,
+    "SIM401": 2,
 }
 
 #: Codes measured over torchlens/ only (see the D417 and complexity notes
@@ -159,7 +186,9 @@ def test_ruff_select_ratchet_never_narrows() -> None:
 def _count_by_code(concise_output: str) -> Counter[str]:
     """Count violations per code from ruff concise output (pure, testable)."""
 
-    return Counter(re.findall(r"^\S+:\d+:\d+: ([A-Z]+\d+)", concise_output, re.MULTILINE))
+    return Counter(
+        re.findall(r"^\S+?(?::cell \d+)?:\d+:\d+: ([A-Z]+\d+)", concise_output, re.MULTILINE)
+    )
 
 
 def _measure_deferred_codes() -> Counter[str]:
@@ -229,9 +258,14 @@ def test_deferred_ceiling_parser_is_red_capable() -> None:
         "torchlens/a.py:1:1: B023 Function definition does not bind loop variable\n"
         "torchlens/a.py:9:5: B023 Function definition does not bind loop variable\n"
         "tests/b.py:2:3: SIM105 Use `contextlib.suppress`\n"
+        # Notebook diagnostics carry a "cell N" path segment WITH A SPACE. The
+        # original parser (`^\S+:...`) silently dropped every one of them --
+        # BLE001 measured 451 while the true CI-scope count was 523 (R70 r7).
+        "notebooks/audit/c.ipynb:cell 4:1:2: BLE001 Do not catch blind exception: `Exception`\n"
+        "examples/d.ipynb:cell 12:9:5: B023 Function definition does not bind loop variable\n"
     )
     counts = _count_by_code(planted)
-    assert counts == Counter({"B023": 2, "SIM105": 1})
+    assert counts == Counter({"B023": 3, "SIM105": 1, "BLE001": 1})
     assert counts.get("B023", 0) > 1  # a ceiling of 1 would trip on this plant
 
 
