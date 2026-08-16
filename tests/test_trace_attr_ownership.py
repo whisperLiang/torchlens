@@ -59,6 +59,10 @@ _TRACE_IDENTIFIERS = frozenset(
         "target_trace",
         "source_trace",
         "refreshed",
+        # grind-r6 b5 R50 (opus): bundle load writes
+        # ``loaded_trace._source_bundle_model_fingerprint`` -- a trace-shaped
+        # local name outside the original 8-identifier allowlist.
+        "loaded_trace",
     }
 )
 
@@ -106,6 +110,35 @@ def _external_writes(tree: ast.AST) -> list[tuple[str, int, str]]:
             and _is_trace_base(ast.unparse(node.args[0]))
         ):
             found.append((node.args[1].value, node.lineno, node.func.id))
+        # ``trace.__dict__["_x"] = v`` and ``trace.__dict__.setdefault("_x",
+        # ...)`` attach the same undeclared field while dodging both the
+        # attribute-assign scan and setattr (grind-r6 b5 R45:
+        # _backward_grad_fn_type_counter broke tl.save through exactly this
+        # spelling).
+        for target in targets:
+            if (
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Attribute)
+                and target.value.attr == "__dict__"
+                and isinstance(target.slice, ast.Constant)
+                and isinstance(target.slice.value, str)
+                and _is_private_name(target.slice.value)
+                and _is_trace_base(ast.unparse(target.value.value))
+            ):
+                found.append((target.slice.value, node.lineno, "dict-assign"))
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "setdefault"
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "__dict__"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+            and _is_private_name(node.args[0].value)
+            and _is_trace_base(ast.unparse(node.func.value.value))
+        ):
+            found.append((node.args[0].value, node.lineno, "dict-setdefault"))
     return found
 
 
@@ -218,4 +251,32 @@ def test_gate_scanner_detects_planted_offenders() -> None:
         "_counter",
         "_via_delattr",
         "_via_setattr",
+    ]
+
+
+def test_gate_scanner_detects_dict_spellings_and_loaded_trace() -> None:
+    """grind-r6 b5 R45/R50: the ``__dict__`` spellings and the local-name gap.
+
+    ``trace.__dict__["_x"] = v`` and ``trace.__dict__.setdefault("_x", ...)``
+    attach the same undeclared field as an attribute assignment while dodging
+    the assign/setattr scans (this is exactly how
+    ``_backward_grad_fn_type_counter`` broke ``tl.save``), and
+    ``loaded_trace``-based writes rooted outside the original 8-identifier
+    allowlist were invisible entirely.
+    """
+
+    planted = ast.parse(
+        "trace.__dict__['_via_dict_assign'] = 1\n"
+        "log.__dict__.setdefault('_via_dict_setdefault', {})\n"
+        "loaded_trace._via_loaded_trace = 2\n"
+        # Negatives: public key, non-literal key, non-trace base.
+        "trace.__dict__['public'] = 3\n"
+        "trace.__dict__[key] = 4\n"
+        "config.__dict__['_not_a_trace'] = 5\n"
+    )
+    attrs = sorted(attr for attr, _, _ in _external_writes(planted))
+    assert attrs == [
+        "_via_dict_assign",
+        "_via_dict_setdefault",
+        "_via_loaded_trace",
     ]

@@ -2606,8 +2606,16 @@ def _emit_discovered_grad_fn(
     *,
     created_in_pass: int | None,
     creator_object_id: int | None,
+    type_counter: dict[str, int],
 ) -> None:
-    """Append a discovery event and runtime record for one grad-fn object."""
+    """Append a discovery event and runtime record for one grad-fn object.
+
+    ``type_counter`` is rewalk-scoped scratch owned by the caller
+    (grind-r6 b5 R45: parking it on ``trace.__dict__`` left an undeclared
+    private field on the Trace that broke ``tl.save`` after two
+    differentiable grad passes -- ``_backward_grad_fn_type_counter``
+    missing from ``PORTABLE_STATE_SPEC``).
+    """
 
     grad_fn_object_id = id(grad_fn_handle)
     next_grad_fns = list(_iter_next_grad_fns(grad_fn_handle))
@@ -2615,7 +2623,6 @@ def _emit_discovered_grad_fn(
     grad_fn_record = trace.grad_fn_logs.get(grad_fn_object_id)
     if grad_fn_record is None:
         grad_fn_type = _normalize_grad_fn_type(grad_fn_handle)
-        type_counter = trace.__dict__.setdefault("_backward_grad_fn_type_counter", {})
         step_index = len(trace.grad_fn_order) + 1
         type_index, step_index, label = _grad_fn_label_parts(
             trace,
@@ -2687,6 +2694,17 @@ def _rewalk_higher_order_grad_fns(trace: Any) -> None:
         return
     existing_ids = set(trace.grad_fn_logs)
 
+    # Rewalk-scoped label allocation state, seeded from every existing record
+    # so a fresh discovery can never collide with an already-assigned
+    # ``type_index`` (same seeding idiom as the projection rebuild path).
+    # Holding this on the trace between rewalks left an undeclared private
+    # field that broke tl.save (grind-r6 b5 R45).
+    type_counter: dict[str, int] = {}
+    for existing_record in trace.grad_fn_logs.values():
+        type_counter[existing_record.type] = max(
+            type_counter.get(existing_record.type, 0), existing_record.type_index
+        )
+
     discovered_ids: set[int] = set()
     for terminal, creator_object_id, pass_index in terminals:
         queue: deque[Any] = deque([terminal])
@@ -2701,6 +2719,7 @@ def _rewalk_higher_order_grad_fns(trace: Any) -> None:
                 grad_fn_handle,
                 created_in_pass=pass_index,
                 creator_object_id=creator_object_id,
+                type_counter=type_counter,
             )
             queue.extend(_iter_next_grad_fns(grad_fn_handle))
     _sync_grad_fn_graph_relations(trace)

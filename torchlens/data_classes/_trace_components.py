@@ -456,4 +456,28 @@ TRACE_EXTERNAL_WRITE_EXEMPTIONS: dict[str, str] = {
     "_last_sibling_ordering_decision": (
         "viz: last sibling-ordering decision for diagnostics (scrub-declared runtime-only)"
     ),
+    # --- __dict__-spelled transients surfaced by the r6 R45 gate widening --
+    # Every row below is popped/consumed within its own window; none can
+    # reach tl.save on the exhaustive path (the counter that COULD --
+    # _backward_grad_fn_type_counter -- was fixed to rewalk-scoped scratch
+    # instead of being ledgered here).
+    "_tl_pending_accumulate_grad_fire_records": (
+        "torch backward: AccumulateGrad fire records pending projection; popped in the "
+        "same backward bracket (both exits)"
+    ),
+    "_higher_order_grad_fn_terminals": (
+        "torch backward: differentiable-pass terminal queue; popped by the rewalk that consumes it"
+    ),
+    "_module_entry_adoptions": (
+        "torch model prep: module-entry adoption queue; popped by its postprocess step "
+        "and scrub-declared"
+    ),
+    "_fastlog_grad_contexts": (
+        "fastlog: predicate-pass grad RecordContexts keyed by public label; lives on the "
+        "recorder's session trace only, never on a cooked to_trace() result"
+    ),
+    "_source_bundle_model_fingerprint": (
+        "bundle load: model fingerprint carried for re-save provenance; detached and "
+        "restored around scrub_for_save with its declared siblings"
+    ),
 }
