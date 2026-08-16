@@ -438,6 +438,59 @@ def _probe_torch_wrapper_bindings() -> DoctorCheck:
     )
 
 
+def _probe_mechanical_belt() -> DoctorCheck:
+    """Report protocol-invisible belt coverage gaps.
+
+    Returns
+    -------
+    DoctorCheck
+        Disclosure row for belt probe failures and unprobed candidates. A
+        candidate whose mode visibility could not be MEASURED (probe raised,
+        or no probe recipe exists) is neither belt-patched nor proven
+        protocol-visible, so a stale pre-wrap reference to it can drop ops
+        with zero signal while the capture still reports
+        ``capture_verified=True`` (grind-r6 b3 R02, sol MED).
+    """
+
+    from ..backends.torch.belt import belt_report
+
+    if not _state._is_decorated:
+        return DoctorCheck(
+            "mechanical belt",
+            "SKIP",
+            "belt not derived yet (torch wrapping is lazy; run a capture first)",
+        )
+    report = belt_report()
+    if report is None:
+        return DoctorCheck("mechanical belt", "SKIP", "belt derivation unavailable")
+    # Unprobed candidates are a STANDING recipe-coverage limitation (hundreds
+    # of in-place variants have no probe recipe on every healthy build), so
+    # they are disclosed as a count with examples but never flip the status —
+    # a permanent false alarm trains users to ignore the row (r-b4 R26-4).
+    # A probe FAILURE is unexpected breakage on this build and drives WARN.
+    unprobed_examples = ", ".join(f"{ns}.{fn}" for ns, fn in report.unprobed_candidates[:5])
+    unprobed_detail = f"unprobed_candidates={report.unprobed_candidate_count}"
+    if unprobed_examples:
+        unprobed_detail += f" (e.g. {unprobed_examples})"
+    if not report.probe_failures:
+        return DoctorCheck(
+            "mechanical belt",
+            "PASS",
+            f"members={len(report.members)}; probe_failures=none; {unprobed_detail}",
+        )
+    failure_names = ", ".join(f"{ns}.{fn}" for ns, fn in report.probe_failures)
+    detail = (
+        f"members={len(report.members)}; probe FAILURES (visibility unmeasured; a stale "
+        f"pre-wrap reference to these can silently drop ops): {failure_names}; "
+        f"{unprobed_detail}"
+    )
+    if report.probe_failure_details:
+        detail += "; failure_details=" + "; ".join(
+            f"{ns}.{fn}: {reason}" for ns, fn, reason in report.probe_failure_details
+        )
+    return DoctorCheck("mechanical belt", "WARN", detail)
+
+
 def _runtime_capability_snapshot() -> dict[str, bool]:
     """Return all runtime compatibility capability flags.
 
@@ -489,6 +542,7 @@ def doctor() -> DoctorReport:
         DoctorCheck("pytorch", "PASS", torch.__version__),
         _probe_torch_capabilities(),
         _probe_torch_wrapper_bindings(),
+        _probe_mechanical_belt(),
         DoctorCheck(
             "cuda",
             "PASS" if torch.cuda.is_available() else "SKIP",

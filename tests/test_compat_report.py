@@ -32,6 +32,7 @@ EXPECTED_COMPAT_ROW_KEYS = {
     "fx_graph_module",
     "hf_transformers",
     "lightning_training_step",
+    "mechanical_belt",
     "multi_gpu_rng",
     "quantized_tensor",
     "pipeline_parallel",

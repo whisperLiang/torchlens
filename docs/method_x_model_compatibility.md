@@ -35,8 +35,8 @@ for name, model in models.items():
 
 | Model | Rows | Non-pass rows |
 | --- | ---: | --- |
-| `linear_mlp` | 23 | none |
-| `conv_pool` | 23 | none |
+| `linear_mlp` | 24 | none |
+| `conv_pool` | 24 | none |
 
 Both representative models report `pass` for every check:
 
@@ -57,6 +57,7 @@ Both representative models report `pass` for every check:
 - torch.compile
 - FX GraphModule
 - Runtime capability snapshot
+- Protocol-invisible belt coverage
 - Lightning training_step mid-loop
 - vmap/functorch
 - Quantized tensors/modules

@@ -776,3 +776,26 @@ def test_refresh_inherits_the_configured_save_budget() -> None:
     with pytest.raises(SaveBudgetExceededError):
         trace.save_new_outs(model, x)
     trace.cleanup()
+
+
+def test_output_parent_promotion_is_charged() -> None:
+    """grind-r6 b5 R34-N2: promoted output-parent payloads are charged.
+
+    A selective capture whose model outputs were NOT selected still retains
+    the output-parent payloads (the documented promotion rule), but the
+    promotion path resolved storage with no admit/commit -- a silent
+    undercount on every such capture. The final linear (2 KB, output parent)
+    must appear in the committed footprint alongside the selected relu.
+    """
+
+    trace = tl.trace(
+        _model(),
+        _input(),
+        capture=CaptureOptions(layers_to_save=["relu"], save_budget=10_000_000),
+    )
+    ledger = trace._save_budget_accountant.ledgers["cpu"]
+    # relu_1 (selected, 2 KB) + linear_2 (promoted output parent, 2 KB).
+    assert ledger.committed_bytes >= 4096, (
+        f"committed {ledger.committed_bytes} bytes; the promoted output-parent "
+        "payload is invisible to the accountant"
+    )

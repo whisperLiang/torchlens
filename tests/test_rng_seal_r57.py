@@ -335,3 +335,44 @@ def test_seeded_global_torch_draw_stays_clean() -> None:
     assert not any("torch" in channel.lower() for channel in result.channels), (
         f"seeded global torch draw over-triggered: {sorted(result.channels)!r}"
     )
+
+
+@pytest.mark.smoke
+def test_capture_is_rng_neutral_to_the_host_process() -> None:
+    """grind-r6 b8 R57 (opus MED, measured): capture restores all engines.
+
+    Capture entry seeds python random, NumPy, and torch (for a reproducible
+    forward) and never restored them, so ONE instrumented forward inside a
+    seeded evaluation loop silently diverged every subsequent host draw --
+    dropout masks, augmentation, shuffling -- from the uninstrumented run.
+    The runnable-transaction and fast-run paths already bracket the same
+    seeding; the primary capture entry now does too. The reseed POLICY is
+    untouched (queued RNG-reseed fork); only the leak is closed. The
+    auto-seed pick itself draws from a PRIVATE entropy stream (never the
+    user's global engines), so neutrality holds even with
+    ``random_seed=None`` while consecutive captures still get fresh seeds.
+    """
+
+    import random as _random
+
+    import numpy as _np
+
+    import torchlens as tl
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
+    x = torch.randn(1, 4)
+
+    torch.manual_seed(0)
+    _np.random.seed(0)
+    _random.seed(0)
+    control = (torch.rand(1).item(), _np.random.rand(), _random.random())
+
+    torch.manual_seed(0)
+    _np.random.seed(0)
+    _random.seed(0)
+    tl.trace(model, x)
+    after = (torch.rand(1).item(), _np.random.rand(), _random.random())
+
+    assert after == control, (
+        f"capture perturbed the host RNG engines: control={control} after={after}"
+    )

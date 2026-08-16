@@ -302,3 +302,67 @@ def test_per_call_save_grads_false_gates_legacy_layer_slot() -> None:
         if isinstance(getattr(trace[label], "grad", None), torch.Tensor)
     ]
     assert retained == [], f"save_grads=False call retained legacy grad payloads: {retained}"
+
+
+@pytest.mark.smoke
+def test_saved_grad_hook_clones_once_and_transforms_once() -> None:
+    """grind-r6 b5 R34-N1/R35-N1 (fable+opus, probe-corroborated).
+
+    The tensor hook fired BOTH retention paths: the charged event-sidecar
+    build AND the legacy layer-slot write, which minted a second independent
+    clone and executed ``grad_transform`` a SECOND time per firing --
+    uncharged by the save budget (saved grads retained ~2x while the budget
+    saw 1x). The layer slots must now REUSE the event-sidecar payload
+    objects: one transform execution per firing, identical payload objects
+    in both surfaces.
+    """
+
+    transform_calls: list[int] = []
+
+    def counting_transform(grad: torch.Tensor) -> torch.Tensor:
+        transform_calls.append(1)
+        return grad * 2.0
+
+    torch.manual_seed(0)
+    model = _TinyModel()
+    x = torch.randn(2, 3, requires_grad=True)
+    trace = tl.trace(
+        model,
+        x,
+        capture=CaptureOptions(backward_ready=True, save_grads="all"),
+        grad_transform=counting_transform,
+    )
+    trace.log_backward(_loss(trace))
+
+    from torchlens.ir.events import OpGradObserved
+
+    grad_events = [e for e in trace.backward_events if isinstance(e, OpGradObserved)]
+    fired = [
+        e for e in grad_events if e.payload_ref is not None or e.transformed_payload_ref is not None
+    ]
+    assert fired, "no gradient events retained payloads; test premise broken"
+    assert len(transform_calls) == len(fired), (
+        f"grad_transform executed {len(transform_calls)}x for {len(fired)} retained "
+        "gradient events -- the legacy layer slot re-ran the transform"
+    )
+
+    # The layer slots hold the SAME payload objects the event sidecar charged
+    # (identity reuse, not a second uncharged clone).
+    events_by_label = {e.op_label: e for e in fired}
+    reused = 0
+    for label, event in events_by_label.items():
+        layer = trace.layer_dict_all_keys.get(label)
+        if layer is None or not getattr(layer, "has_grad", False):
+            continue
+        transformed_slot = getattr(layer, "transformed_grad", None)
+        if transformed_slot is not None:
+            assert transformed_slot is event.transformed_payload_ref, (
+                f"{label}: layer transformed_grad is a second clone, not the charged event payload"
+            )
+            reused += 1
+        raw_slot = getattr(layer, "grad", None)
+        if raw_slot is not None and event.payload_ref is not None:
+            assert raw_slot is event.payload_ref, (
+                f"{label}: layer grad is a second clone, not the charged event payload"
+            )
+    assert reused, "no layer slot carried a transformed payload; premise broken"

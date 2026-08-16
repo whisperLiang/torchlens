@@ -188,14 +188,18 @@ def _add_tensor_backward_hook(
                     and target_owner_map.get(tensor_label, hooked_tensor_id) != hooked_tensor_id
                 ):
                     return
-            _emit_tensor_grad_event(active_trace, grad, tensor_label)
+            prebuilt = _emit_tensor_grad_event(active_trace, grad, tensor_label)
             # Gate the legacy layer-slot write on the ACTIVE per-call policy,
             # not the deprecated ``save_grads`` attribute: a per-call
             # ``log_backward(..., save_grads=False)`` sets the policy while
             # the attribute can stay truthy, and the attribute-keyed gate
             # kept retaining full grad payloads the caller disabled.
+            # The event-sidecar payloads are handed down for REUSE: the
+            # legacy layer-slot write used to mint a second independent
+            # clone and run grad_transform a second time, uncharged by the
+            # save budget (grind-r6 b5 R34-N1/R35-N1, fable+opus probe).
             if _active_save_grads_policy(active_trace) not in (None, False, "none", []):
-                _log_tensor_grad(active_trace, grad, tensor_label)
+                _log_tensor_grad(active_trace, grad, tensor_label, prebuilt=prebuilt)
 
     # TorchLens bookkeeping: torch's ``register_hook`` reads ``self.grad_fn``
     # internally, and ``t`` can be the user's registered state receiver (an
@@ -342,11 +346,23 @@ def _current_backward_graph_task_id() -> int | None:
     return int(task_id) if isinstance(task_id, int) and task_id >= 0 else None
 
 
-def _emit_tensor_grad_event(trace: "Trace", grad: torch.Tensor, tensor_label: str) -> None:
-    """Append an ``OpGradObserved`` event for a tensor hook firing."""
+def _emit_tensor_grad_event(
+    trace: "Trace", grad: torch.Tensor, tensor_label: str
+) -> tuple[torch.Tensor | None, Any | None, bool]:
+    """Append an ``OpGradObserved`` event for a tensor hook firing.
+
+    Returns
+    -------
+    tuple[torch.Tensor | None, Any | None, bool]
+        ``(raw_payload, transformed_payload, built)`` — the payloads this
+        event retained and whether the build actually ran past the policy
+        gate. The legacy layer-slot writer REUSES these instead of minting a
+        second uncharged clone and re-running ``grad_transform`` (grind-r6
+        b5 R34-N1/R35-N1).
+    """
 
     if getattr(trace, "_tl_backward_triggers_disarmed", False):
-        return
+        return None, None, False
     stream_start = time.perf_counter()
     events = _ensure_backward_event_stream(trace)
     _record_phase_timing(
@@ -365,7 +381,7 @@ def _emit_tensor_grad_event(trace: "Trace", grad: torch.Tensor, tensor_label: st
     final_label = getattr(trace, "_raw_to_final_layer_labels", {}).get(tensor_label, tensor_label)
     with pause_logging():
         memory = int(grad.nelement() * grad.element_size())
-        payload, transformed_payload = _build_grad_payloads(trace, grad, final_label)
+        payload, transformed_payload, built = _build_grad_payloads(trace, grad, final_label)
     _record_phase_timing(
         trace,
         "backward_grad_event:payload",
@@ -389,11 +405,12 @@ def _emit_tensor_grad_event(trace: "Trace", grad: torch.Tensor, tensor_label: st
         "backward_grad_event:append",
         time.perf_counter() - append_start,
     )
+    return payload, transformed_payload, built
 
 
 def _build_grad_payloads(
     trace: "Trace", grad: torch.Tensor, layer_label: str
-) -> tuple[torch.Tensor | None, Any | None]:
+) -> tuple[torch.Tensor | None, Any | None, bool]:
     """Return raw and transformed payloads for one observed op gradient.
 
     Parameters
@@ -407,14 +424,18 @@ def _build_grad_payloads(
 
     Returns
     -------
-    tuple[torch.Tensor | None, Any | None]
-        Raw payload and transformed payload retained for this event.
+    tuple[torch.Tensor | None, Any | None, bool]
+        Raw payload, transformed payload, and whether the build ran past the
+        policy gate (``built=True`` means the payload pair — including a
+        legitimately-``None`` raw slot under ``save_raw_gradients=False`` —
+        is THE charged retention for this grad+label and safe to reuse).
     """
 
     if not _should_save_grad_payload(trace, layer_label):
-        return None, None
+        return None, None, False
     if layer_label not in getattr(trace, "layer_dict_all_keys", {}):
-        return _build_fastlog_grad_payloads(trace, grad)
+        raw_payload, transformed_payload = _build_fastlog_grad_payloads(trace, grad)
+        return raw_payload, transformed_payload, True
     op = trace.layer_dict_all_keys[layer_label]
     grad_transform = getattr(trace, "grad_transform", None)
     save_raw_gradients = getattr(trace, "save_raw_gradients", True)
@@ -427,7 +448,7 @@ def _build_grad_payloads(
     )
     if grad_transform is None:
         _commit_grad_payload_budget(trace, reservation, (raw_payload,))
-        return raw_payload, None
+        return raw_payload, None, True
     writer = getattr(trace, "_out_writer", None)
     transformed_payload = op._apply_transform(
         grad,
@@ -446,7 +467,7 @@ def _build_grad_payloads(
         streaming_active=writer is not None,
     )
     _commit_grad_payload_budget(trace, reservation, (raw_payload, transformed_payload))
-    return raw_payload, transformed_payload
+    return raw_payload, transformed_payload, True
 
 
 def _should_save_grad_payload(trace: "Trace", layer_label: str) -> bool:
@@ -751,7 +772,12 @@ def _active_save_grads_policy(trace: "Trace") -> Any:
     return getattr(trace, "save_grads", None)
 
 
-def _log_tensor_grad(self: "Trace", grad: torch.Tensor, _label_raw: str) -> None:
+def _log_tensor_grad(
+    self: "Trace",
+    grad: torch.Tensor,
+    _label_raw: str,
+    prebuilt: tuple[torch.Tensor | None, Any | None, bool] | None = None,
+) -> None:
     """Callback invoked during backward pass to save a tensor's grad.
 
     Resolves the raw label to a final label, then saves the grad on the
@@ -762,6 +788,15 @@ def _log_tensor_grad(self: "Trace", grad: torch.Tensor, _label_raw: str) -> None
     Args:
         grad: The grad tensor from autograd.
         _label_raw: Raw tensor label used to look up the final label.
+        prebuilt: The event-sidecar ``(raw_payload, transformed_payload,
+            built)`` triple from ``_emit_tensor_grad_event``. When built, the
+            layer slots REUSE those exact (budget-charged) objects instead of
+            minting a second uncharged clone and running ``grad_transform``
+            a second time (grind-r6 b5 R34-N1/R35-N1); output-layer children
+            share the parent's payloads, matching their identity-wrapper
+            contract. When the event build did not run (narrower event
+            selection, disarmed sidecar), the slot's payloads are built and
+            charged per layer through the same chokepoint.
     """
     self.has_gradients = True
     if _label_raw not in self._raw_to_final_layer_labels:
@@ -792,7 +827,17 @@ def _log_tensor_grad(self: "Trace", grad: torch.Tensor, _label_raw: str) -> None
                 continue
         if layer_label not in self._saved_grad_labels:
             self._saved_grad_labels.add(layer_label)
-        layer.log_tensor_grad(grad)
+        payload_source = (
+            prebuilt
+            if prebuilt is not None and prebuilt[2]
+            else _build_grad_payloads(self, grad, layer_label)
+        )
+        if payload_source[2]:
+            layer.log_tensor_grad(grad, prebuilt=(payload_source[0], payload_source[1]))
+        else:
+            # Retention policy denies a payload for this label through the
+            # charged chokepoint; keep the historical bare slot write.
+            layer.log_tensor_grad(grad)
         self.saved_gradient_memory += layer.gradient_memory
         self.total_gradient_memory += layer.gradient_memory
 
