@@ -314,6 +314,16 @@ print(tl.compat.report(model, x).to_markdown())
   `newrank=true` (cross-cluster constraints are silently ignored without it). While stacking
   is active the sibling-ordering post-pass NO-OPS (two rank-constraint systems would fight);
   collapsed boxes and fold reps stay un-annotated in v1; v1 has exactly ONE cohort.
+- CHECKED SUPPRESSION (UNSTABLE spelling `show_redundant_args`, DEFAULT-ON): `draw()` node
+  labels omit a module constructor arg exactly when the equality check licenses it — the arg
+  value provably equals the captured shape dimension it duplicates on THIS trace (closed torch
+  module-family table in `torchlens/visualization/_arg_suppression.py`; the check runs at the
+  trace-bearing prepass and is data equality on records, never a render-back loop).
+  kernel_size/stride/padding/dilation/groups/num_embeddings/num_heads are NEVER candidates; a
+  mismatch or unavailable shape keeps the arg VISIBLE (self-honest — the mismatch case is the
+  interesting one); rolled varying aggregates keep args visible while unrolled per-pass nodes
+  suppress (deliberate divergence, pinned both modes); detached records render all args.
+  `show_redundant_args=True` shows everything. Doc: `docs/reference/encoding.md`.
 - `Trace.draw(collapse="none"|"auto"|"max"|t, fold_repeats=None|True|False)` controls v2 smart
   collapse for rolled and unrolled graphs, where float `t` in `[0.0, 1.0]` follows the public
   monotone schedule (`0.0 == "none"`, `1.0 == "max"`). `auto` is the first schedule point whose

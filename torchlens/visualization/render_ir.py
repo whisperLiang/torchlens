@@ -291,6 +291,7 @@ def build_render_ir(
     universe: Any | None = None,
     segments: Mapping[str, Any] | None = None,
     segment_lookup: _SegmentLookup | None = None,
+    suppressed_args: Mapping[int, frozenset[str]] | None = None,
 ) -> RenderIR:
     """Build the first render-IR slice from current renderer-faithful emissions.
 
@@ -331,6 +332,14 @@ def build_render_ir(
         from ._encoding import populate_encoding_state
 
         populate_encoding_state(encoding, trace, universe)
+    if suppressed_args is None and not getattr(resolved_context, "show_redundant_args", False):
+        # Checked suppression (L5 M4, DEFAULT-ON): the trace-bearing prepass
+        # proves which constructor-arg rows duplicate captured shapes on
+        # THIS trace; unprovable or mismatching args stay visible.
+        from ._arg_suppression import compute_suppressed_arg_keys
+
+        suppressed_args = compute_suppressed_arg_keys(trace, universe)
+    suppressed_args = suppressed_args or {}
     from ._render_nodes import _atomic_module_sibling_counts
 
     sibling_counts = _atomic_module_sibling_counts(trace)
@@ -343,6 +352,7 @@ def build_render_ir(
             repeat_folds,
             segment_lookup,
             sibling_counts,
+            suppressed_args,
         )
         for unit in universe.units
     )
@@ -729,6 +739,7 @@ def _node_from_unit(
     repeat_folds: Mapping[str, ModuleRepeatFold] | None,
     segment_lookup: _SegmentLookup,
     sibling_counts: Mapping[str, int] | None = None,
+    suppressed_args: Mapping[int, frozenset[str]] | None = None,
 ) -> RenderIRNode:
     """Decorate one structural node-universe unit as a render-IR node."""
 
@@ -761,7 +772,14 @@ def _node_from_unit(
     region_path: tuple[str, ...] = ()
     if emission.node is not None:
         node_calls, owned_node_args, node_color, node_spec, label_spans = _resolve_node_decision(
-            trace, emission, context, universe, repeat_folds, segment_lookup, sibling_counts
+            trace,
+            emission,
+            context,
+            universe,
+            repeat_folds,
+            segment_lookup,
+            sibling_counts,
+            suppressed_args,
         )
         modules = list(emission.node.modules)
         if emission.kind == "module_box":
@@ -794,6 +812,7 @@ def _resolve_node_decision(
     repeat_folds: Mapping[str, ModuleRepeatFold] | None,
     segment_lookup: _SegmentLookup,
     sibling_counts: Mapping[str, int] | None = None,
+    suppressed_args: Mapping[int, frozenset[str]] | None = None,
 ) -> tuple[
     tuple[Any, ...],
     tuple[tuple[str, dict[str, Any]], ...],
@@ -889,6 +908,7 @@ def _resolve_node_decision(
             resolved_specs,
             sibling_counts,
             encoding=getattr(context, "encoding", None),
+            suppressed_args=suppressed_args,
         )
     owned = tuple(
         (owner, dict(args))

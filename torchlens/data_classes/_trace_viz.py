@@ -142,6 +142,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
         size_by: str | Callable[[Any], Any] | None = None,
         scale: str | None = None,
         stack_by: str | bool | Callable[[Any], Any] | None = None,
+        show_redundant_args: bool = False,
     ) -> Any:
         """Render the computational graph for this model log.
 
@@ -231,6 +232,15 @@ class TraceVisualizationMixin(_TraceMixinBase):
             While stacking is active the sibling-ordering post-pass no-ops
             (two rank-constraint systems would fight), and collapsed boxes/
             fold reps stay un-annotated.
+        show_redundant_args:
+            UNSTABLE (keyword-only). Checked suppression of redundant
+            constructor-arg label rows is DEFAULT-ON: an arg such as
+            ``in_features=4`` is omitted exactly when its value provably
+            equals the captured shape dimension it duplicates on THIS
+            trace (a closed torch-module candidate table; the check is
+            data equality on records). A mismatch or unavailable shape
+            keeps the arg VISIBLE — the rule can only reveal more, never
+            hide a discrepancy. Pass ``True`` to show every captured arg.
 
         Returns
         -------
@@ -316,6 +326,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
             size_by=size_by,
             scale=scale,
             stack_by=stack_by,
+            show_redundant_args=show_redundant_args,
         )
 
     def add_node_overlay(

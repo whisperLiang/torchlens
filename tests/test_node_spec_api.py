@@ -41,16 +41,27 @@ def test_default_nodespec_for_conv2d_includes_args(tmp_path: Any) -> None:
     assert "padding=(1, 1)" in dot
 
 
-def test_default_nodespec_for_linear_includes_in_out(tmp_path: Any) -> None:
-    """Linear default labels should include full feature-count names."""
+def test_default_nodespec_for_linear_suppresses_proven_redundant_args(tmp_path: Any) -> None:
+    """Checked suppression (L5 M4, default-on): in/out_features provably equal
+    the captured shape dims, so the default label omits them; the
+    ``show_redundant_args=True`` opt-out restores the full feature-count
+    names. (Historical default pinned the names unconditionally.)"""
 
     model = nn.Linear(in_features=16, out_features=32)
     log = tl.trace(model, torch.randn(1, 16))
 
     dot = _render_dot(log, tmp_path)
+    assert "in_features" not in dot
+    assert "out_features" not in dot
 
-    assert "in_features=16" in dot
-    assert "out_features=32" in dot
+    dot_all = log.draw(
+        vis_save_only=True,
+        vis_fileformat="svg",
+        vis_outpath=str(tmp_path / "graph_all"),
+        show_redundant_args=True,
+    )
+    assert "in_features=16" in dot_all
+    assert "out_features=32" in dot_all
 
 
 def test_node_spec_fn_receives_layer_log_and_default(tmp_path: Any) -> None:

@@ -116,6 +116,10 @@ class ResolvedRenderRequest:
     scale: Any = None
     stack_by: Any = None
     encoding: Any = None
+    # Checked suppression (L5 M4, DOCUMENTED-UNSTABLE spelling): True shows
+    # every constructor arg; False (default) suppresses args the equality
+    # check proves redundant against this trace's captured shapes.
+    show_redundant_args: bool = False
     font_size: int | None = None
     dpi: int | None = None
     for_paper: bool = False

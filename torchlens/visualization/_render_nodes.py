@@ -401,6 +401,7 @@ def _add_node_to_graphviz(
     rolled_maps: "_RolledEdgeMaps | None" = None,
     deduped_edge_registry: dict[tuple[Any, ...], dict[str, Any]] | None = None,
     encoding: Any | None = None,
+    suppressed_args: Mapping[int, frozenset[str]] | None = None,
 ) -> None:
     """Adds a node and its relevant edges to the graphviz figure.
 
@@ -486,6 +487,7 @@ def _add_node_to_graphviz(
             collapsed_container_nodes,
             show_input_transform_summary,
             encoding=encoding,
+            suppressed_args=suppressed_args,
         )
 
     _add_edges_for_node(
@@ -536,6 +538,7 @@ def _build_layer_node(
     resolved_specs: list[NodeSpec] | None = None,
     sibling_counts: Mapping[str, int] | None = None,
     encoding: Any | None = None,
+    suppressed_args: Mapping[int, frozenset[str]] | None = None,
 ) -> str:
     """Builds and adds a standard (non-collapsed) layer node to the graphviz graph.
 
@@ -588,6 +591,7 @@ def _build_layer_node(
             vis_mode,
             node_label_fields=node_label_fields,
             node_overlay=node_overlay,
+            suppressed_arg_keys=(suppressed_args or {}).get(id(node), frozenset()),
         ),
         shape=node_shape,
         fillcolor=node_bg_color,
@@ -1929,6 +1933,7 @@ def compute_default_node_lines(
     *,
     node_label_fields: list[str] | None = None,
     node_overlay: str | OverlayScores | None = None,
+    suppressed_arg_keys: frozenset[str] = frozenset(),
 ) -> list[str]:
     """Build default plain-text rows for a layer node.
 
@@ -1944,6 +1949,10 @@ def compute_default_node_lines(
         Optional label fields to render instead of the default field set.
     node_overlay:
         Optional overlay to append as an additional label row.
+    suppressed_arg_keys:
+        Constructor-arg keys the checked-suppression prepass proved
+        redundant (default empty: every arg visible — the detached-record
+        degrade rule).
 
     Returns
     -------
@@ -2003,7 +2012,7 @@ def compute_default_node_lines(
     lines.append(title)
     lines.append(f"{format_shape(layer_log.shape)}, {format_memory(layer_log.activation_memory)}")
 
-    module_kwargs = format_module_kwargs(layer_log)
+    module_kwargs = format_module_kwargs(layer_log, suppressed_keys=suppressed_arg_keys)
     if module_kwargs is not None:
         lines.append(module_kwargs)
 

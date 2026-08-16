@@ -111,7 +111,10 @@ Key entry points:
   strictly opt-in): annotation -> `rank=same` groups (`newrank=true`); `True`/`"auto"` is
   licensed by global pass_index monotonicity (else `stack_by_auto_underivable`), explicit
   field/callable bypasses with caption disclosure, rolled refuses
-  `stack_by_requires_unrolled`, sibling ordering no-ops while stacking.
+  `stack_by_requires_unrolled`, sibling ordering no-ops while stacking. Checked suppression
+  (UNSTABLE `show_redundant_args`, DEFAULT-ON): labels omit constructor args PROVEN equal to
+  captured shape dims (closed torch-family table; mismatch/unavailable stays visible;
+  `show_redundant_args=True` shows all).
 - Visualization: `Trace.draw(order_siblings=True)` applies a Graphviz-only verified
   sibling-ordering post-pass for forward unrolled graphs under the node cap.
   `Trace.draw(collapse="none"|"auto"|"max"|t, fold_repeats=None|True|False)` controls v2 smart

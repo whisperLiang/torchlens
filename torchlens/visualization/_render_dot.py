@@ -626,6 +626,15 @@ def _populate_forward_ir(trace: "Trace", context: _ForwardRenderContext) -> _For
         container_max_inline=request.container_max_inline,
         pending_nodes=pending_container_collapse_nodes,
     )
+    # Checked suppression (L5 M4, DEFAULT-ON): the trace-bearing prepass
+    # proves which constructor-arg rows duplicate captured shapes on THIS
+    # trace; unprovable or mismatching args stay visible (self-honest).
+    # Computed ONCE and shared by the IR decision pass and node emission.
+    suppressed_args: dict[int, frozenset[str]] = {}
+    if not request.show_redundant_args:
+        from ._arg_suppression import compute_suppressed_arg_keys
+
+        suppressed_args = compute_suppressed_arg_keys(trace, context.node_universe)
     forward_render_ir = build_render_ir(
         trace,
         collapse_fn=request.collapse_fn,
@@ -634,6 +643,7 @@ def _populate_forward_ir(trace: "Trace", context: _ForwardRenderContext) -> _For
         universe=context.node_universe,
         segments=context.segments,
         segment_lookup=context.segment_lookup,
+        suppressed_args=suppressed_args,
     )
     antiparallel_projected_edges = projected_antiparallel_endpoint_pairs(forward_render_ir)
     decisions_by_name = {node.name: node for node in forward_render_ir.nodes}
@@ -681,6 +691,7 @@ def _populate_forward_ir(trace: "Trace", context: _ForwardRenderContext) -> _For
                 rolled_maps,
                 deduped_edge_registry,
                 encoding=request.encoding,
+                suppressed_args=suppressed_args,
             )
     for node_args in pending_container_collapse_nodes:
         forward_ir_builder.node(**node_args)
@@ -1078,6 +1089,7 @@ def draw(
     size_by: "str | Callable[[Any], Any] | None" = None,
     scale: "str | None" = None,
     stack_by: "str | bool | Callable[[Any], Any] | None" = None,
+    show_redundant_args: bool = False,
 ) -> Any:
     """Render the computational graph through the resolved forward IR pipeline.
 
@@ -1153,6 +1165,7 @@ def draw(
         size_by=size_by,
         scale=scale,
         stack_by=stack_by,
+        show_redundant_args=show_redundant_args,
     )
     request, theme, site_labels = _resolve_draw_request(self, request)
     if (

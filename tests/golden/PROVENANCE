@@ -18,3 +18,11 @@ reason: r19 empty-duplicate ancestor cluster re-opens removed by tail-path prune
 env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 recorded: 2026-08-15T20:27:00.907966+00:00
+---
+generator: tests/test_viz_render_identity_oracle.py
+flag: TORCHLENS_UPDATE_VIZ_RENDER_ORACLE=1
+reason: L5 M4 checked suppression DEFAULT-ON: node labels omit constructor args proven equal to captured shape dims (design-L5-memo sec 5); show_redundant_args=True restores them
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: d34f120c679f19c14ef1041fd5647de328909c15 (dirty)
+recorded: 2026-08-16T23:00:50.522050+00:00

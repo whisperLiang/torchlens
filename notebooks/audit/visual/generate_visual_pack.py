@@ -694,6 +694,10 @@ AXES: dict[str, str] = {
     "artifact:apparent_cycle": "interleaved repeat-fold apparent-cycle artifact (known)",
     "diag:collapse_plan": "Trace.collapse_plan() diagnostic",
     "diag:collapse_schedule": "Trace.collapse_schedule() diagnostic",
+    "labels:checked_suppression": (
+        "default-on checked suppression of constructor args proven equal to captured shape dims"
+    ),
+    "labels:show_redundant_args": "show_redundant_args=True opt-out (every captured arg)",
 }
 
 # Axes that are deliberately NOT given a page, with the honest reason.
@@ -1734,6 +1738,31 @@ SECTIONS: list[Section] = [
                     ),
                 ],
                 covers=["node_label_fields"],
+            ),
+            Page(
+                label="f5b_checked_suppression",
+                title="Checked suppression: redundant constructor args (default-on)",
+                caption=(
+                    "Node labels omit a module constructor arg exactly when the CHECK licenses it: the "
+                    "arg value provably equals the captured shape dimension it duplicates on THIS trace "
+                    "(closed torch-family table; kernel_size/stride/padding/groups are never candidates). "
+                    "A mismatch or unavailable shape keeps the arg VISIBLE -- the rule reveals, never "
+                    "hides. show_redundant_args=True restores every captured arg.\n"
+                    "CHECK: left panel omits in_channels/out_channels/in_features/out_features; right "
+                    "panel shows them; kernel/stride/padding rows are identical in both."
+                ),
+                panels=[
+                    Panel(
+                        "default draw() -- proven-redundant args suppressed",
+                        "small_conv",
+                    ),
+                    Panel(
+                        "show_redundant_args=True -- every captured arg",
+                        "small_conv",
+                        kwargs={"show_redundant_args": True},
+                    ),
+                ],
+                covers=["labels:checked_suppression", "labels:show_redundant_args"],
             ),
             Page(
                 label="f6_code_panel",

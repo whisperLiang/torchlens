@@ -208,7 +208,7 @@ def format_memory(bytes_or_quantity: Any) -> str:
     return str(bytes_or_quantity)
 
 
-def format_module_kwargs(module: Any) -> str | None:
+def format_module_kwargs(module: Any, suppressed_keys: frozenset[str] = frozenset()) -> str | None:
     """Render captured module/function kwargs in Python keyword syntax.
 
     Parameters
@@ -216,6 +216,12 @@ def format_module_kwargs(module: Any) -> str | None:
     module:
         Rendered layer-like object. TorchLens stores visualization kwargs in
         ``func_config`` on ``Layer`` and ``Op`` records.
+    suppressed_keys:
+        Constructor-arg keys the checked-suppression prepass proved
+        redundant against this trace's captured shapes
+        (``visualization._arg_suppression``). The default (empty) renders
+        every arg — render paths without the trace-bearing prepass
+        (detached/standalone records) degrade to all-visible.
 
     Returns
     -------
@@ -227,7 +233,9 @@ def format_module_kwargs(module: Any) -> str | None:
     if not isinstance(config, Mapping) or len(config) == 0:
         return None
 
-    ordered_keys = _ordered_kwarg_keys(module, config)
+    ordered_keys = [
+        key for key in _ordered_kwarg_keys(module, config) if key not in suppressed_keys
+    ]
     parts = [f"{key}={_format_value(config[key])}" for key in ordered_keys]
     return ", ".join(parts) if parts else None
 

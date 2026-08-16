@@ -247,6 +247,17 @@ alignment is evidence, not semantic equivalence.
   Rank groups ride `RenderIR.stack_rank_groups` and emit as `rank=same` subgraphs under
   `newrank=true`; the sibling-ordering post-pass no-ops while stacking is active.
 
+**show_redundant_args** *(unstable — no deprecation shim owed; keyword-only)*
+: Checked suppression of redundant constructor-arg label rows is DEFAULT-ON: `draw()` omits a
+  module constructor arg exactly when the check licenses it — the arg value provably equals the
+  captured shape dimension it claims to duplicate on THIS trace (a closed torch nn module-family
+  candidate table; kernel_size/stride/padding/groups/num_embeddings/num_heads are never
+  candidates). A mismatch or unavailable shape keeps the arg VISIBLE — the rule can only reveal
+  more, never hide a discrepancy. Rolled varying aggregates keep args visible while their
+  unrolled per-pass nodes suppress (deliberate divergence); detached records render all args.
+  `draw(show_redundant_args=True)` shows every captured arg. Reference:
+  `docs/reference/encoding.md`.
+
 **show_legend tri-state**
 : `show_legend` accepts `None` (default, AUTO: no legend unless an encoding channel is active,
   then a channel-only disclosure legend), `True` (full theme legend, plus channel rows when
@@ -666,6 +677,10 @@ shim owed*
 : The wave-1 rank encoding channel on `Trace.draw` (stacking split (a):
   explicit + licensed auto on plain traces). The `True`/`"auto"` request form
   is itself an unstable spelling. See the "stack_by" entry above.
+
+**show_redundant_args (draw kwarg)** — *unstable — no deprecation shim owed; keyword-only*
+: Opt-out for the default-on checked suppression of redundant constructor-arg
+  label rows (slate 8.7). See the "show_redundant_args" entry above.
 
 **show_legend=None AUTO value** — *unstable — no deprecation shim owed*
 : The tri-state AUTO value on the stable `show_legend` kwarg: no legend unless
