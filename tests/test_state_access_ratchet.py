@@ -35,7 +35,13 @@ _PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "torchlens"
 # 294 -> 291 (2026-08-15 fixwave-4 settle): release_model's held-ref
 # normalization (capcache-r5) had added six raw unwrap-ledger reads; they now
 # route through the state-owned `_state.wrap_epoch_ledgers()` accessor.
-_ACCESS_SITE_BASELINE = 291
+# 291 -> 296 (2026-08-16 fw6settle reconcile): +4 wrap-ledger reads in
+# identity_shims.py (8ac52828/1487caca -- alias resolution over
+# `_decorated_to_orig`/`_orig_to_decorated`/`_decorated_func_mapper`, the
+# same wrap-state-surgery class as validation/_pristine.py: there is no
+# capture handle to route through), +2 `_is_decorated` SKIP guards in the
+# doctor/compat probes (3a70a76c), -1 discharged in observers.py.
+_ACCESS_SITE_BASELINE = 296
 
 
 def _state_access_sites() -> list[tuple[str, int]]:
