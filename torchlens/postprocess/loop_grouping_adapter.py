@@ -2406,7 +2406,10 @@ def _merge_iso_groups_to_layers(
             for param_type in sg_param_types.get(sg1, frozenset()):
                 subgraphs_by_param_type[param_type].append(sg1)
 
-        def _weight_tied_sg_pairs() -> Iterator[tuple[str, str]]:
+        def _weight_tied_sg_pairs(
+            subgraphs_by_param_type: dict[str, list[str]] = subgraphs_by_param_type,
+            candidate_sg_pairs: set[tuple[str, str]] = candidate_sg_pairs,
+        ) -> Iterator[tuple[str, str]]:
             """Yield the shared-param-type subgraph triangle LAZILY (r8 R29).
 
             The eager ``candidate_sg_pairs.update(combinations(...))`` build
