@@ -666,3 +666,48 @@ jobs:
 
           print("platform canary OK:", tl.__version__)
           PY
+
+  shuffle-stress:
+    # r7 R76 (sol b2 MED): the release-gating random-order row covers ONE
+    # time-derived seed per PR, but the isolation evidence bar is >=3 shuffle
+    # seeds -- a failure-triggering ordering could need many PR runs to
+    # surface. Three fresh run-id-derived seeds nightly over the smoke tier;
+    # each failure output names its seed for deterministic reproduction
+    # (pytest -p randomly --randomly-seed=<n>).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install Graphviz
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphviz
+
+      - name: Install canonical CPU test environment
+        run: |
+          uv pip install --system \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e ".[dev,test,tabular]" \
+            "torch==2.8.0+cpu" \
+            "torchvision==0.23.0+cpu"
+          uv pip check
+
+      - name: Smoke tier under three fresh shuffle seeds
+        run: |
+          for offset in 1 2 3; do
+            seed="$(( ${{ github.run_id }} % 1000000000 + offset ))"
+            echo "== shuffle seed $seed =="
+            pytest tests/ -m smoke --ignore-glob="*menagerie*" --ignore=tests/crawler \
+              -p randomly --randomly-seed="$seed" --tb=short -q
+          done

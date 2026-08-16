@@ -672,6 +672,47 @@ def _reset_warn_once_sentinels() -> Iterator[None]:
                 setattr(module, name, prior)
 
 
+#: Public content registries that tests mutate through PUBLIC registration
+#: APIs with no unregister spelling (r7 R76, sol b2 MED): a registered
+#: container class or custom op rule was a permanent process-global, so
+#: full-suite and targeted runs saw different registry state depending on
+#: which tests had run first. Snapshot/restore per test, same lazy
+#: sys.modules discipline as the warn-once sentinels.
+_CONTENT_REGISTRIES: tuple[tuple[str, str], ...] = (
+    ("torchlens.ir.container", "_CONTAINER_REGISTRY"),
+    ("torchlens.capture.flops", "_CUSTOM_OP_RULES"),
+)
+
+
+@pytest.fixture(autouse=True)
+def _restore_content_registries() -> Iterator[None]:
+    """Restore registered-container and custom-op-rule state after every test."""
+
+    snapshots: dict[tuple[str, str], object] = {}
+    for module_name, name in _CONTENT_REGISTRIES:
+        module = sys.modules.get(module_name)
+        if module is None:
+            snapshots[(module_name, name)] = _MISSING
+            continue
+        snapshots[(module_name, name)] = dict(getattr(module, name))
+    try:
+        yield
+    finally:
+        for module_name, name in _CONTENT_REGISTRIES:
+            module = sys.modules.get(module_name)
+            if module is None:
+                continue
+            prior = snapshots[(module_name, name)]
+            registry = getattr(module, name)
+            if prior is _MISSING:
+                # Module imported DURING the test: whatever it registered at
+                # import time is legitimate baseline; drop only test-added
+                # rows is impossible to distinguish, so leave as-is.
+                continue
+            registry.clear()
+            registry.update(prior)
+
+
 _CAPABILITY_DEPENDENT_CACHES: tuple[tuple[str, str], ...] = (
     # Second-layer lru_caches whose cached value DERIVES from a lazy HAS_*
     # capability probe (grind p5 §3.9: the b7fe953e class one layer down).
