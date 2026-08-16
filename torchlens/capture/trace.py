@@ -71,7 +71,13 @@ if TYPE_CHECKING:
     from ..data_classes.trace import Trace
 from ..data_classes._lookup_keys import _give_user_feedback_about_lookup_key
 from ..utils.display import _timed_phase, _vprint
-from ..utils.rng import host_rng_advanced, snapshot_host_rng
+from ..utils.rng import (
+    host_rng_advanced,
+    log_current_rng_states,
+    restore_host_rng,
+    set_rng_from_saved_states,
+    snapshot_host_rng,
+)
 
 _ACTIVE_CAPTURE_BACKEND: CaptureBackend | None = None
 
@@ -1367,6 +1373,26 @@ def run_and_log_inputs_through_model(
     pass restores the same pre-forward RNG state so stochastic layers produce
     identical graph structure.
     """
+    # Capture is RNG-NEUTRAL to the host process (grind-r6 b8 R57, opus MED):
+    # seeding below reseeds all three global engines (python random / numpy /
+    # torch+cuda) for a reproducible forward, and nothing restored them, so
+    # ONE instrumented forward inside a seeded loop silently diverged every
+    # subsequent host draw from the uninstrumented run. Snapshot here (before
+    # the seed draw itself) and restore at the same teardown points that
+    # release the capture reservation — the exact bracket the runnable
+    # transaction and fast-run paths already use. The reseed POLICY itself is
+    # unchanged (it stays with the queued RNG-reseed fork); only the leak is
+    # closed. Pre-reservation typed refusals keep the historical unrestored
+    # behavior (they raise before the teardown points exist).
+    entry_host_rng = snapshot_host_rng()
+    entry_torch_rng = log_current_rng_states(torch_only=True)
+
+    def _restore_capture_entry_rng() -> None:
+        """Restore the pre-capture global RNG engines (host + torch)."""
+
+        restore_host_rng(entry_host_rng)
+        set_rng_from_saved_states(entry_torch_rng)
+
     if random_seed is None:
         random_seed = random.randint(1, 4294967294)
     self.random_seed = random_seed  # type: ignore[assignment]
@@ -1479,6 +1505,7 @@ def run_and_log_inputs_through_model(
         # A raise between the reservation claim and the outer ``try`` would
         # otherwise leak the reservation and wedge every later admission.
         capture_slot.__exit__(None, None, None)
+        _restore_capture_entry_rng()
         raise
 
     try:
@@ -1943,14 +1970,34 @@ def run_and_log_inputs_through_model(
             # tracker uninstall and end_label_session, leaving the user's model
             # permanently altered by a failed capture.
             try:
-                if capture_session is not None and not postprocess:
-                    capture_session.snapshot_recording_projection(self)
-                    self._fastlog_captured_run_core = capture_session.seal()
-            finally:
-                backend.cleanup_failed_forward_session(
-                    self, (model, input_tensors, (input_args, input_kwargs)), e
+                try:
+                    if capture_session is not None and not postprocess:
+                        capture_session.snapshot_recording_projection(self)
+                        self._fastlog_captured_run_core = capture_session.seal()
+                finally:
+                    backend.cleanup_failed_forward_session(
+                        self, (model, input_tensors, (input_args, input_kwargs)), e
+                    )
+                self.__dict__.pop("_capture_producer_policy", None)
+            except Exception as cleanup_exc:
+                # grind-r6 b1 R06 (sol MED, probe): the PRIMARY user error must
+                # propagate. An ordinary seal/cleanup double-fault used to
+                # escape INSTEAD of ``raise e`` -- the settled CaptureOutcome
+                # named the primary while the escaping exception was the
+                # secondary and carried no partial_log. Mirror the interrupt
+                # arm: attach the secondary as a note and re-raise the primary
+                # below. A BaseException secondary (Ctrl-C during cleanup)
+                # keeps escaping -- interrupts always win (B8-23 doctrine).
+                note = (
+                    "TorchLens failed-forward cleanup also failed while handling "
+                    f"this error: {type(cleanup_exc).__name__}: "
+                    f"{safe_exception_str(cleanup_exc)}"
                 )
-            self.__dict__.pop("_capture_producer_policy", None)
+                add_note = getattr(e, "add_note", None)
+                if add_note is not None:
+                    add_note(note)
+                else:  # Python 3.10: no PEP 678 notes -- surface via warning.
+                    warnings.warn(note, RuntimeWarning, stacklevel=2)
         finally:
             # Guaranteed settlement: a cleanup double-fault still stamps the
             # terminal outcome before the (original or secondary) exception
@@ -2085,5 +2132,7 @@ def run_and_log_inputs_through_model(
             raise
         finally:
             # Outermost: a teardown double-fault must not leak the capture
-            # reservation, or every later admission refuses forever.
+            # reservation, or every later admission refuses forever. The
+            # RNG restore rides the same guarantee (grind-r6 b8 R57).
             capture_slot.__exit__(None, None, None)
+            _restore_capture_entry_rng()
