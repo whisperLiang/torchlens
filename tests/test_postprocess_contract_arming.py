@@ -227,3 +227,32 @@ def test_step_13_never_flushes_the_allocator_ungated(
         assert not calls, "step 13 flushed the allocator with a gate false"
     finally:
         trace.cleanup()
+
+
+def test_step_20_releases_every_live_param_ref() -> None:
+    """Postprocess ends with no live parameter reference in any ParamLog.
+
+    r7 R74 (opus): the ``executor#_run_step_20`` return-None mutant's only
+    killer was an incidental failure-propagation test — nothing PURPOSEFULLY
+    asserted the step's contract. Step 20 runs ``release_param_refs``, so a
+    finished capture must hold ``_param_ref is None`` (released) on every
+    ParamLog; keeping live refs pins the model's parameters against GC.
+    """
+
+    import torch
+    from torch import nn
+
+    import torchlens as tl
+
+    trace = tl.trace(nn.Sequential(nn.Linear(3, 3), nn.ReLU()), torch.randn(2, 3))
+    try:
+        param_logs = list(trace.param_logs.values())
+        assert param_logs, "expected captured parameters"
+        offenders = [
+            log.param_address
+            for log in param_logs
+            if log._param_ref is not None or not log._param_ref_released
+        ]
+        assert not offenders, f"finished capture still holds live parameter references: {offenders}"
+    finally:
+        trace.cleanup()

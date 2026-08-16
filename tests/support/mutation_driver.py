@@ -242,18 +242,24 @@ SUITE = [
     # B01 killers (b9-opus R74-2): the oracle-independence tamper battery is
     # the file arming the edge-occurrence multiplicity witness; without it a
     # bare return planted before that block survived the rest of this suite.
+    # (Also the dedicated arming file for the newest oracle-independence
+    # witnesses -- b9-opus R74r3-F2 part 1; this row was listed twice with
+    # the two rationales, r7 dedupe merged them.)
     "tests/test_oracle_independence.py",
+    # r7 R74 (opus, PROVEN suite-composition artifacts): 2 of 4 sampled
+    # executor survivors were killed by tests OUTSIDE this suite --
+    # _run_step_16_5 (graph_shape_hash) by six surface-oracle byte params,
+    # _run_step_20 (release_param_refs) by the outcome-characterization
+    # planted-propagation test. The weekly executor leg was structurally red
+    # on non-defects; score the real killers instead of writing duplicates.
+    "tests/surface_oracle/test_surface_oracle.py",
+    "tests/test_capture_outcome_characterization.py",
     # M14 killers: the direct synthetic-input liveness file plus the two
     # armed-capture enforcement plants (undeclared read, in-place write
     # smuggle) that exercise the checker through a real postprocess run.
     "tests/test_postprocess_contract_arming.py",
     "tests/test_postprocess_dag.py::test_read_enforcement_trips_on_undeclared_read",
     "tests/test_postprocess_dag.py::test_executor_seam_patched_step_executes_and_audits",
-    # The dedicated arming file for the newest oracle-independence witnesses
-    # (edge-occurrence multiplicity et al.) -- its ABSENCE let a sub-check
-    # deletion survive the whole SUITE while this file's killer caught it in
-    # 1.4s (b9-opus R74r3-F2 part 1).
-    "tests/test_oracle_independence.py",
 ]
 
 #: Known baseline reds, deselected so a mutant verdict is never confounded.
