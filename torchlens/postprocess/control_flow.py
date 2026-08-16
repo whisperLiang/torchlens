@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from itertools import chain
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -803,6 +803,46 @@ def _get_gained_branch_entries(
     return child_stack[shared_prefix_len:]
 
 
+def _buffer_value_fingerprint(value: torch.Tensor) -> tuple[Any, ...]:
+    """Return a cheap equality-compatible fingerprint for a buffer value.
+
+    ``torch.equal`` tensors always share a fingerprint (shape, dtype, device,
+    and the first/last elements), so bucketing dedup candidates by this key
+    never separates a pair the pairwise sweep would have merged. Collisions
+    are fine -- the caller still confirms with ``torch.equal``. NaN sample
+    elements compare unequal to themselves, which matches ``torch.equal``
+    refusing to equate NaN-bearing tensors.
+
+    Parameters
+    ----------
+    value:
+        Captured buffer tensor.
+
+    Returns
+    -------
+    tuple[Any, ...]
+        Hashable bucket key.
+    """
+
+    numel = value.numel()
+    head: Any
+    tail: Any
+    if numel == 0:
+        head = tail = None
+    else:
+        try:
+            if value.dim() == 0:
+                head = tail = value.item()
+            else:
+                head = value[(0,) * value.dim()].item()
+                tail = value[tuple(size - 1 for size in value.shape)].item()
+        except (RuntimeError, ValueError):
+            # Exotic dtypes without .item() support degrade to a
+            # metadata-only bucket -- correct, just coarser.
+            head = tail = "unsampled"
+    return (str(value.dtype), str(value.device), tuple(value.shape), numel, head, tail)
+
+
 def _fix_buffer_layers(self: Trace) -> None:
     """Step 6: Connect buffer sources, merge duplicates, and assign pass numbers.
 
@@ -862,30 +902,50 @@ def _fix_buffer_layers(self: Trace) -> None:
 
     # Merge buffers with the same hash AND the same tensor value.
     # Buffers sharing the same hash but different values are kept as separate
-    # unique buffers (the for/else clause appends unmatched buffers to unique_buffers).
+    # unique buffers (the for/else clause registers unmatched buffers as new uniques).
+    # torch.equal candidates are narrowed by a cheap value fingerprint first:
+    # the former sweep compared every new buffer against EVERY prior unique in
+    # its hash group, Theta(G^2) whole-tensor compares when the values all
+    # differ (a training-mode recurrent BatchNorm's running stats, hunt-6
+    # R52-1). Equal tensors always share a fingerprint, so bucketing never
+    # changes which unique a buffer merges into.
     deferred_buffer_removals: dict[str, tuple[Op, Op]] = {}
+    # Per-survivor membership sets shared across the whole sweep: the
+    # membership guards in _merge_buffer_entries otherwise rescan the
+    # survivor's growing edge lists once per merged duplicate (the second
+    # half of the R52-1 quadratic).
+    survivor_edge_shadows: dict[str, dict[str, set[str]]] = {}
     for _, buffers_orig in buffer_hash_groups.items():
-        buffers = buffers_orig[1:]
-        unique_buffers = buffers_orig[:1]
-        for _b, buffer_label in enumerate(buffers):
+        unique_labels_by_fingerprint: dict[tuple[Any, ...], list[str]] = defaultdict(list)
+        first_out = self[buffers_orig[0]].out if buffers_orig else None
+        if first_out is not None:
+            unique_labels_by_fingerprint[_buffer_value_fingerprint(first_out)].append(
+                buffers_orig[0]
+            )
+        for buffer_label in buffers_orig[1:]:
             buffer = self[buffer_label]
-            for unique_buffer_label in unique_buffers:
+            candidate_labels = (
+                ()
+                if buffer.out is None
+                else unique_labels_by_fingerprint.get(_buffer_value_fingerprint(buffer.out), ())
+            )
+            for unique_buffer_label in candidate_labels:
                 unique_buffer = self[unique_buffer_label]
-                if (
-                    (buffer.out is not None)
-                    and (unique_buffer.out is not None)
-                    and (torch.equal(buffer.out, unique_buffer.out))
-                ):
+                if (unique_buffer.out is not None) and torch.equal(buffer.out, unique_buffer.out):
                     _merge_buffer_entries(
                         self,
                         unique_buffer,
                         buffer,
                         deferred_removals=deferred_buffer_removals,
+                        survivor_edge_shadows=survivor_edge_shadows,
                     )
                     rewired_buffers.append(unique_buffer._label_raw)
                     break
             else:
-                unique_buffers.append(buffer_label)
+                if buffer.out is not None:
+                    unique_labels_by_fingerprint[_buffer_value_fingerprint(buffer.out)].append(
+                        buffer_label
+                    )
 
     _finish_deferred_buffer_removals(self, deferred_buffer_removals)
 
@@ -1045,6 +1105,7 @@ def _merge_buffer_entries(
     buffer_to_remove: Op,
     *,
     deferred_removals: dict[str, tuple[Op, Op]] | None = None,
+    survivor_edge_shadows: dict[str, dict[str, set[str]]] | None = None,
 ) -> None:
     """Merge a duplicate buffer into a source buffer, rewiring all edges.
 
@@ -1052,10 +1113,35 @@ def _merge_buffer_entries(
     ``source_buffer``, updates parent_arg_positions in children to point to
     the source buffer, fixes internal_source_parents/ancestors references
     across the graph, and removes the duplicate from the layer dict.
+
+    ``survivor_edge_shadows`` (keyed by survivor raw label) carries the
+    survivor's edge-list membership sets across repeated merges into the same
+    survivor, so the guards below stay O(1) instead of rescanning lists that
+    grow with every merged duplicate (hunt-6 R52-1). Any entry for a node
+    whose lists this call mutates as a NEIGHBOUR is invalidated, keeping the
+    shadows exact.
     """
+    if survivor_edge_shadows is None:
+        survivor_edge_shadows = {}
+    shadow = survivor_edge_shadows.get(source_buffer._label_raw)
+    if shadow is None:
+        shadow = {
+            "children": set(source_buffer.children),
+            "parents": set(source_buffer.parents),
+            "internal_source_parents": set(source_buffer.internal_source_parents),
+            "conditional_entry_children": set(source_buffer.conditional_entry_children),
+        }
+        survivor_edge_shadows[source_buffer._label_raw] = shadow
+    # The removed duplicate can never be a survivor again.
+    survivor_edge_shadows.pop(buffer_to_remove._label_raw, None)
     for child_layer in buffer_to_remove.children:
-        if child_layer not in source_buffer.children:
+        if child_layer not in shadow["children"]:
+            shadow["children"].add(child_layer)
             source_buffer.children.append(child_layer)
+        # This call rewrites the child's own parent lists below; drop any
+        # survivor shadow it may hold so a later merge rebuilds it fresh.
+        if child_layer != source_buffer._label_raw:
+            survivor_edge_shadows.pop(child_layer, None)
         # Preserve edge MULTIPLICITY: ``parents`` is an edge-OCCURRENCE list (one entry
         # per argument slot), so a child consuming the removed buffer at two slots must
         # end with two entries naming the survivor. ``list.remove`` strips only the FIRST
@@ -1090,8 +1176,11 @@ def _merge_buffer_entries(
         source_buffer.has_output_descendant = True
 
     for parent_layer in buffer_to_remove.parents:
-        if parent_layer not in source_buffer.parents:
+        if parent_layer not in shadow["parents"]:
+            shadow["parents"].add(parent_layer)
             source_buffer.parents.append(parent_layer)
+        if parent_layer != source_buffer._label_raw:
+            survivor_edge_shadows.pop(parent_layer, None)
         parent_children = self[parent_layer].children
         if buffer_to_remove._label_raw in parent_children:
             parent_children.remove(buffer_to_remove._label_raw)
@@ -1107,7 +1196,8 @@ def _merge_buffer_entries(
             parent_children.append(source_buffer._label_raw)
 
     for parent_layer in buffer_to_remove.internal_source_parents:
-        if parent_layer not in source_buffer.internal_source_parents:
+        if parent_layer not in shadow["internal_source_parents"]:
+            shadow["internal_source_parents"].add(parent_layer)
             source_buffer.internal_source_parents.append(parent_layer)
 
     # Step 5 ran BEFORE this merge: transfer the removed duplicate's
@@ -1117,7 +1207,8 @@ def _merge_buffer_entries(
     # conditional_edge_call_indices) repoint via ``replacement_labels`` in the
     # closing reference scrub (deep-hunt C3).
     for entry_child in buffer_to_remove.conditional_entry_children:
-        if entry_child not in source_buffer.conditional_entry_children:
+        if entry_child not in shadow["conditional_entry_children"]:
+            shadow["conditional_entry_children"].add(entry_child)
             source_buffer.conditional_entry_children.append(entry_child)
     for cond_id, branch_children in buffer_to_remove.conditional_arm_children.items():
         survivor_branches = source_buffer.conditional_arm_children.setdefault(cond_id, {})
