@@ -496,6 +496,16 @@ def _compat_reference_reports() -> dict[str, Any]:
         snippet builds them.
     """
 
+    # Pin the belt-coverage row to its post-wrap status: the row honestly
+    # reports ``not_tested`` before the lazy first-capture wrap derives the
+    # belt, so its rendered status would otherwise depend on whether THIS
+    # process already captured (pytest's conftest warm-up capture vs the
+    # bare-python regenerate command) — exactly the process-state flap this
+    # machine-invariant projection forbids. Wrapping is idempotent and every
+    # full-suite pytest process is already wrapped by session setup.
+    from torchlens.backends.torch.wrappers import wrap_torch
+
+    wrap_torch()
     models = {
         "linear_mlp": nn.Sequential(nn.Linear(4, 6), nn.ReLU(), nn.Linear(6, 2)).eval(),
         "conv_pool": nn.Sequential(

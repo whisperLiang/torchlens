@@ -171,6 +171,12 @@ _INSTALL_STATE_AND_CACHES = frozenset(
         # by the shim uninstall path.
         ("torchlens/backends/torch/identity_shims.py", "_family_installed"),
         ("torchlens/backends/torch/identity_shims.py", "_installed"),
+        # Live shim identity registry (fixwave-6 capture-r7 8ac52828): id ->
+        # shim rows written at shim install so handler-presentation can prove
+        # a callable is OUR live shim by identity; cleared by the shim
+        # uninstall alongside _installed, so it is install bookkeeping, not
+        # capture state.
+        ("torchlens/backends/torch/identity_shims.py", "_live_shims"),
         # Meta-path finder handle for the lazy causal-bias shim (fix/rescue
         # dcd0ca9c): installed once so a post-wrap `import transformers` still
         # gets the shim, removed by the shim uninstall alongside _installed.
