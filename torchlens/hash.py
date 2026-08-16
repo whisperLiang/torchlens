@@ -17,6 +17,7 @@ import numpy as np
 import torch
 
 from ._errors import ArgumentTypeError
+from ._transport import digest_byte_view
 from .errors._base import TorchLensWarning, ValidationError
 from .options import CaptureOptions
 from .utils.hashing import compute_graph_shape_hash
@@ -87,19 +88,17 @@ def _update_content_digest(digest: Any, value: Any) -> None:
             _update_content_digest(digest, tensor.int_repr())
             digest.update(repr(tensor.qscheme()).encode("ascii") + b"\0")
             return
-        # Flatten to 1-D before the uint8 reinterpret: ``view(torch.uint8)``
-        # refuses a 0-dim (scalar) tensor ("self.dim() cannot be 0 to view Float
-        # as Byte"), which otherwise crashes ``content()`` on a scalar and, via a
-        # bare-except in the runnable-bundle path, silently drops the manifest
-        # ``input_hash`` for scalar inputs (an attestation gap). ``reshape(-1)`` on
-        # a contiguous tensor is a contiguous view and is byte-identical to the
-        # prior expression for every >=1-D tensor, so pinned hashes are unchanged.
-        # ``.numpy()`` shares the tensor's memory; hashing through the buffer
-        # protocol avoids materializing a whole-payload ``bytes`` copy. The
-        # digest bytes are identical to the prior ``.tobytes()`` spelling.
-        byte_view = tensor.contiguous().reshape(-1).view(torch.uint8).numpy()
+        # The shared transport byte view flattens to 1-D before the uint8
+        # reinterpret (``view(torch.uint8)`` refuses a 0-dim scalar tensor,
+        # which otherwise crashed ``content()`` and, via a bare-except in the
+        # runnable-bundle path, silently dropped the manifest ``input_hash``
+        # for scalar inputs), hashes through the buffer protocol (no
+        # whole-payload ``bytes`` copy; digest bytes identical to the prior
+        # ``.tobytes()`` spelling), and resolves lazy conj/neg bits first
+        # (r8 R35: the hand-rolled view here crashed on ``x.conj()`` inputs).
+        byte_view = digest_byte_view(tensor)
         digest.update(byte_view.nbytes.to_bytes(8, "big"))
-        digest.update(byte_view.data)
+        digest.update(byte_view)
         return
     if isinstance(value, Mapping):
         digest.update(b"mapping\0")

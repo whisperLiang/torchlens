@@ -16,7 +16,7 @@ import torch
 from torch import nn
 
 from . import _state
-from ._transport import to_cpu_contiguous
+from ._transport import digest_byte_view
 
 
 def _iter_tensor_inputs(obj: Any) -> list[torch.Tensor]:
@@ -70,26 +70,24 @@ def _hash_tensor_content(tensor: torch.Tensor) -> str:
     """
 
     with _state.pause_logging():
-        cpu = to_cpu_contiguous(tensor)
         # Frame the LOGICAL dtype (b5-opus-R35-1 twin; same rule as the
         # op.py dedup digest) so a bfloat16 input can never hash identically
         # to the float32 tensor of the same values -- a dtype change must be
         # a capture-cache MISS. r7 R35 (fable): the old bf16->f32 transport
-        # upcast copy is GONE -- the uint8 reinterpret view below transports
-        # bf16 (and float8 friends) natively, and this digest is
-        # process-local cache keying, so the byte change is invisible.
-        logical_dtype = str(cpu.dtype)
-        # Byte-reinterpreting uint8 view: covers dtypes numpy cannot
-        # transport directly (float8 and friends), so content-bearing
-        # exotic-dtype state hashes by CONTENT instead of falling back to
-        # a content-blind fragment. ``.data`` hashes through the buffer
-        # protocol -- no whole-payload ``tobytes`` copy (r7 R35-3).
-        payload = cpu.reshape(-1).view(torch.uint8).numpy().data
+        # upcast copy is GONE -- the shared byte view transports bf16 (and
+        # float8 friends) natively, and this digest is process-local cache
+        # keying, so the byte change is invisible. r8 R35: the transport +
+        # uint8 reinterpret live in ONE authority (``_transport``), which
+        # also resolves lazy conj/neg bits -- the hand-rolled view here
+        # crashed on ``x.conj()`` inputs.
+        shape = tuple(tensor.shape)
+        logical_dtype = str(tensor.dtype)
+        payload = digest_byte_view(tensor)
     hasher = hashlib.sha256()
     hasher.update(
         repr(
             (
-                tuple(cpu.shape),
+                shape,
                 logical_dtype,
                 str(tensor.device),
                 bool(tensor.requires_grad),
