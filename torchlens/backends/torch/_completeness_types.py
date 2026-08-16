@@ -83,6 +83,11 @@ class _WitnessState:
     census: bool = True
     record_escapes: bool = False
     ledger: bool = False
+    record_aten: bool = False
+    aten_events: Any = None
+    capture_phase: str = "forward"
+    backward_epoch_index: int | None = None
+    aten_storage_alias_groups: dict[tuple[str, int], int] = field(default_factory=dict)
     # r43: armed for the entire forward window (SAME lifetime as
     # ``_observe_invisible_host_escapes``), cleared in its ``finally``. The
     # non-owner captured-tensor belt gates on THIS flag, never the racy global

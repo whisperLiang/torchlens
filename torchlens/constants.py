@@ -945,6 +945,41 @@ BACKWARD_PASS_FIELD_ORDER = [
     "grad_fn_calls",
 ]
 
+PRIMITIVE_OP_FIELD_ORDER = [
+    "label",
+    "sequence",
+    "capture_phase",
+    "forward_pass_index",
+    "backward_epoch_index",
+    "owner_func_call_id",
+    "parent_op_refs",
+    "parent_grad_fn_call_ref",
+    "owner_status",
+    "decomposition_slot",
+    "namespace",
+    "operator",
+    "overload",
+    "schema",
+    "schema_fingerprint",
+    "module_call_stack",
+    "input_tensor_facts",
+    "output_tensor_facts",
+    "mutation_kind",
+    "view_copy_kind",
+    "autocast_context",
+    "dispatch_key_context",
+    "grad_fn_ref",
+    "grad_fn_link_status",
+    "grad_fn_link_provenance",
+    "algorithmic_flops",
+    "flop_status",
+    "flop_formula_source",
+    "flop_formula_version",
+    "outcome",
+    "exception_type",
+    "execution_context",
+]
+
 # ---------------------------------------------------------------------------
 # Function discovery for decoration
 # ---------------------------------------------------------------------------

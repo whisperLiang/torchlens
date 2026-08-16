@@ -5,6 +5,7 @@ from collections.abc import Callable
 import torch
 
 from .capture.outcome import CaptureOutcome, CapturePhase, CaptureStatus, FailureOrigin
+from .data_classes.aten_op import AtenOp, OpRef
 from .data_classes.backward_pass import BackwardPass
 from .data_classes.buffer import Buffer
 from .data_classes.func_call_location import FuncCallLocation
@@ -22,6 +23,7 @@ GradientPostfunc = Callable[[torch.Tensor], torch.Tensor]
 
 __all__ = [
     "ActivationPostfunc",
+    "AtenOp",
     "BackwardPass",
     "Buffer",
     "Bytes",
@@ -39,6 +41,7 @@ __all__ = [
     "Module",
     "ModuleCall",
     "ModuleInputSnapshot",
+    "OpRef",
     "Param",
     "PreHookEffect",
     "Quantity",

@@ -1152,6 +1152,7 @@ class Trace(
     _module_capture_ws: ModuleCaptureWorkspace
     _wrapper_runtime_ws: WrapperRuntimeWorkspace
     _fast_run_session: Any | None
+    _primitive_op_profile: Any | None
     backward_root_grad_fn_object_ids: list[int]
     backward_pass_logs: dict[int, BackwardPass]
     code_context: list["FuncCallLocation"]
@@ -1476,6 +1477,9 @@ class Trace(
         # from its own state, and .tlspec artifacts stay object-shaped until
         # the M11 direct semantic serialization.
         "_trace_core": FieldPolicy.DROP,
+        # Wave-0 primitive profile: the S3 registrar substitutes KEEP only
+        # beneath its pytest-only activation switch. Ordinary tlspec v7 omits it.
+        "_primitive_op_profile": FieldPolicy.DROP,
         "_pre_forward_rng_states": FieldPolicy.DROP,
         # r63 C1: pre-clone per-slot state metadata signatures (producer-side only,
         # never portable) and the buffer storage-pointer attribution index.
@@ -1729,6 +1733,7 @@ class Trace(
         self._raw_graph_ws = RawGraphWorkspace()
         self._module_capture_ws = ModuleCaptureWorkspace()
         self._wrapper_runtime_ws = WrapperRuntimeWorkspace()
+        self._primitive_op_profile = None
         self._module_capture_ws.module_build_data = _init_module_hierarchy_data()
         self.capture_mode: Literal["exhaustive", "predicate"] = "exhaustive"
         # L7a: True marks a structure-only capture (the flag declares the
@@ -3162,6 +3167,12 @@ class Trace(
         # retain the previous trace's events and re-serialize them later).
         state.pop("_capture_events", None)
         self.__dict__.update(state)
+        from .._io.prerelease import prerelease_fields_active
+
+        if prerelease_fields_active() and self.__dict__.get("_primitive_op_profile") is not None:
+            from ..validation._invariants_primitive_ops import validate_loaded_primitive_profile
+
+            validate_loaded_primitive_profile(self)
         # Event streams never serialize (FieldPolicy.DROP), but a restored
         # trace remains a supported backward-capture target within the live
         # process, so restore installs a fresh stream EXPLICITLY here rather
@@ -3759,6 +3770,10 @@ class Trace(
 
 Trace.FIELD_FORK_POLICY = fork_policy_from_policy(Trace.FIELD_POLICY)  # type: ignore[attr-defined]
 Trace.DEFAULT_FILL_STATE = default_fill_state_from_policy(Trace.FIELD_POLICY)  # type: ignore[attr-defined]
+
+# S3-gated wave-0 primitive profile hook. The registrar accepts only the
+# declared DROP policy above and substitutes KEEP solely in its pytest switch.
+register_prerelease_field(Trace, "_primitive_op_profile", persisted_policy=FieldPolicy.KEEP)
 
 # L7a mode marker rides the S3 pre-release registrar: declared FieldPolicy.DROP
 # above (no schema change under tlspec v7), registered here so portability exit

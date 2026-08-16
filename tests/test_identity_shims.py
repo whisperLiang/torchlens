@@ -25,6 +25,7 @@ unwrapped eager torch. Flag gates use ``getattr`` so the module also imports
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
@@ -417,6 +418,80 @@ class TestSubclassCtorUnderWitness:
         torch.manual_seed(0)
         x = torch.randn(2, 3)
         assert tl.validation.validate_forward_pass(PlainCtorModel(), x)
+
+    def test_all_top_contiguous_torchlens_modes_are_restored(self) -> None:
+        """The constructor bracket exits and restores every removable owned mode."""
+        from torchlens.backends.torch._modes import (
+            _TorchLensDispatchMode,
+            pause_own_dispatch_modes,
+        )
+
+        events: list[str] = []
+
+        class SyntheticMode(_TorchLensDispatchMode):
+            def __init__(self, name: str) -> None:
+                super().__init__()
+                self.name = name
+
+            def __enter__(self) -> Any:
+                events.append(f"enter:{self.name}")
+                return super().__enter__()
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc_value: BaseException | None,
+                traceback: Any,
+            ) -> bool | None:
+                events.append(f"exit:{self.name}")
+                return super().__exit__(exc_type, exc_value, traceback)
+
+        outer = SyntheticMode("outer")
+        inner = SyntheticMode("inner")
+        with outer, inner:
+            events.clear()
+            with pause_own_dispatch_modes() as exited:
+                assert exited == (inner, outer)
+            assert events == ["exit:inner", "exit:outer", "enter:outer", "enter:inner"]
+
+    def test_foreign_mode_blocks_owned_mode_pop(self) -> None:
+        """A foreign top mode and every owned mode below it remain untouched."""
+        from torch.utils._python_dispatch import TorchDispatchMode
+
+        from torchlens.backends.torch._modes import (
+            _TorchLensDispatchMode,
+            pause_own_dispatch_modes,
+        )
+
+        class OwnedMode(_TorchLensDispatchMode):
+            pass
+
+        class ForeignMode(TorchDispatchMode):
+            pass
+
+        owned = OwnedMode()
+        foreign = ForeignMode()
+        with owned, foreign:
+            with pause_own_dispatch_modes() as exited:
+                assert exited == ()
+
+    def test_owned_modes_restore_when_paused_call_raises(self) -> None:
+        """The pause bracket restores owned modes before propagating an exception."""
+        from torchlens.backends.torch._modes import (
+            _TorchLensDispatchMode,
+            pause_own_dispatch_modes,
+        )
+
+        owned = _TorchLensDispatchMode()
+        with owned:
+            with pytest.raises(RuntimeError, match="ctor failed"):
+                with pause_own_dispatch_modes() as exited:
+                    assert exited == (owned,)
+                    raise RuntimeError("ctor failed")
+            from torchlens.utils._torch_compat import get_current_dispatch_mode_stack
+
+            stack = get_current_dispatch_mode_stack()
+            assert stack is not None and stack[-1] is owned
 
 
 class _PlainTensorSubclass(torch.Tensor):

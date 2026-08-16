@@ -34,6 +34,7 @@ from ..utils import get_vars_of_type_from_obj, safe_copy
 from ..utils._torch_symbols import torch_attr
 from ..utils.display import _record_phase_timing
 from ._ingest_contract import IngestInputs, JournalView, Step0Result
+from ._primitive_profile import _materialize_forward_primitive_profile
 
 if TYPE_CHECKING:
     from torchlens.data_classes.op import Op
@@ -179,6 +180,7 @@ def build_ingest_inputs(trace: Trace, events: CaptureEvents) -> IngestInputs:
             buffer_write_events=_journal_buffer_write_events(trace),
             output_version_events=tuple(events.output_version_events),
             grad_fn_handles_by_label_raw=events.grad_fn_handles_by_label_raw,
+            aten_events=tuple(events.aten_events),
         ),
         module_workspace=trace._module_capture_ws,
         raw_graph_workspace=trace._raw_graph_ws,
@@ -238,6 +240,11 @@ def materialize_from_events(trace: Trace, events: CaptureEvents) -> None:
     inputs = build_ingest_inputs(trace, events)
     result = _materialize_module.ingest_op_records(inputs, CELL_SOURCES)
     apply_step0_result(trace, result)
+    _materialize_forward_primitive_profile(
+        trace,
+        inputs.journal.aten_events,
+        recording_enabled=bool(events.aten_recording_enabled),
+    )
 
 
 def ingest_op_records(inputs: IngestInputs, manifest: Mapping[str, str]) -> Step0Result:

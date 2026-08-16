@@ -16,6 +16,7 @@ import pytest
 
 from torchlens import constants as tl_constants
 from torchlens.data_classes._schema_bindings import STORAGE_BINDINGS
+from torchlens.data_classes.aten_op import AtenOp
 from torchlens.data_classes.backward_pass import BackwardPass
 from torchlens.data_classes.buffer import Buffer
 from torchlens.data_classes.field_policy import (
@@ -34,6 +35,7 @@ from torchlens.data_classes.trace import Trace
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 _SCHEMA = {
+    "primitive_op": (AtenOp, tl_constants.PRIMITIVE_OP_FIELD_ORDER),
     "trace": (Trace, tl_constants.MODEL_LOG_FIELD_ORDER),
     "op": (Op, tl_constants.LAYER_PASS_LOG_FIELD_ORDER),
     "layer": (Layer, tl_constants.LAYER_LOG_FIELD_ORDER),
@@ -98,6 +100,25 @@ def test_binding_axes_are_coherent(schema_key: str) -> None:
             assert name in ("equivalent_ops", "recurrent_ops"), (
                 f"unexpected copy_on_read field {schema_key}.{name}"
             )
+
+
+@pytest.mark.smoke
+def test_primitive_candidate_bindings_are_isolated_from_installed_runtime_rows() -> None:
+    """S3 candidate kinds are auditable without activating physical bindings."""
+
+    from tools.generate_record_schema import collect_primitive_candidate_bindings
+
+    candidate = collect_primitive_candidate_bindings()
+    assert {binding.kind for binding in STORAGE_BINDINGS["primitive_op"].values()} == {
+        StorageKind.RUNTIME
+    }
+    assert candidate["parent_op_refs"] == "EDGE"
+    assert candidate["module_call_stack"] == "EDGE"
+    assert candidate["input_tensor_facts"] == "SCALAR"
+    assert candidate["output_tensor_facts"] == "SCALAR"
+    assert candidate["label"] == "INTERNED"
+    assert candidate["execution_context"] == "INTERNED"
+    assert set(candidate.values()) == {"EDGE", "INTERNED", "SCALAR"}
 
 
 @pytest.mark.heavy

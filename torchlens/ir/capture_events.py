@@ -27,6 +27,8 @@ from .events import (
     OutputVersionEvent,
     ParamGradObserved,
     PreHookProvenanceEvent,
+    _AtenCallEvent,
+    _ModePausedInteriorEvent,
 )
 from .live_index import LiveIndex
 from .op_record import (
@@ -75,6 +77,7 @@ LANE_MERGE_POLICIES: dict[str, str] = {
     "output_version_events": "run_local",
     "buffer_write_events": "run_local",
     "backward_events": "run_local",
+    "aten_events": "append_restamp",
 }
 
 # Lanes whose events carry a ``target_seq`` reference into the op lane's seq
@@ -92,6 +95,7 @@ _LANE_APPENDERS: dict[str, str] = {
     "pre_hook_events": "append_pre_hook",
     "intervention_events": "append_intervention",
     "op_amendments": "append_amendment",
+    "aten_events": "append_aten",
 }
 
 
@@ -263,6 +267,8 @@ class CaptureEvents:
         | GradFnFired
         | BackwardCoverageGap
     ] = field(default_factory=list)
+    aten_events: list[_AtenCallEvent | _ModePausedInteriorEvent] = field(default_factory=list)
+    aten_recording_enabled: bool = False
     # Typed post-commit knowledge lane (producer unification P4): the op lane
     # is genuinely append-only and every post-commit mutation is an
     # ``OpAmendment`` folded by the canonical reducer. Amendments are stamped
@@ -485,6 +491,8 @@ class CaptureEvents:
             buffer_write_events=list(self.buffer_write_events),
             intervention_events=list(self.intervention_events),
             backward_events=list(self.backward_events),
+            aten_events=list(self.aten_events),
+            aten_recording_enabled=self.aten_recording_enabled,
             param_refs=dict(self.param_refs),
             raw_layer_counter=self.raw_layer_counter,
             raw_layer_type_counter=dict(self.raw_layer_type_counter),
@@ -522,6 +530,7 @@ class CaptureEvents:
         self.output_version_events.clear()
         self.buffer_write_events.clear()
         self.intervention_events.clear()
+        self.aten_events.clear()
         self.live_index.clear()
         self.grad_fn_handles_by_label_raw.clear()
 
@@ -881,6 +890,18 @@ class CaptureEvents:
         self._refuse_sealed_append("intervention_events")
         object.__setattr__(event, "seq", self.next_seq())
         self.intervention_events.append(event)
+
+    def append_aten(self, event: _AtenCallEvent | _ModePausedInteriorEvent) -> None:
+        """Append one ATen-profile event under the journal sequencing authority.
+
+        Parameters
+        ----------
+        event
+            Value-free primitive-call or observer-gap event.
+        """
+
+        object.__setattr__(event, "seq", self.next_seq())
+        self.aten_events.append(event)
 
     def concat(self, other: CaptureEvents, *, lanes: Iterable[str] | None = None) -> None:
         """Merge another stream's lanes into this journal under the merge law.
