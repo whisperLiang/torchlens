@@ -392,9 +392,9 @@ The Trace PHYSICAL component decomposition (components as storage owners
 behind 220 property forwards) is the named remaining slice: the declared
 per-field ownership map (`_trace_components.py`) partitions every field
 (live counts move with re-keys — recompute from `TRACE_FIELD_OWNERSHIP` in
-`_trace_components.py`; at 2026-08-15: header 16 / capture_config 50 /
-witness 32 / source_metadata 22 / totals 35 / session 60 / runnable 1 /
-graph 99, total 315 ownership rows over the 220 forwarded fields — the
+`_trace_components.py`; at 2026-08-16: header 16 / capture_config 50 /
+witness 32 / source_metadata 22 / totals 35 / session 61 / runnable 1 /
+graph 99, total 316 ownership rows over the 220 forwarded fields — the
 graph plane is absorbed by the core, not built as an object), the lockstep ratchet enforces the map, and
 the physical move is mechanical against it.
 

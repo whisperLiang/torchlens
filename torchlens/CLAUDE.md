@@ -132,7 +132,7 @@ exclusive with backward-related capture because it discards the autograd graph.
 | `_errors.py`, `errors/` | Public and legacy exception classes |
 | `_io/`, `io/` | Portable `.tlspec` save/load, manifest, lazy tensor refs, public I/O helpers |
 | `options.py` | Capture, save, visualization, replay, intervention, and streaming option groups |
-| `observers.py` | `tap()` and `record_span()` observer helpers |
+| `observers.py` | `tap()` and `span()` observer helpers (`record_span` is a deprecated warning alias) |
 | `report/` | `report.explain(log)` and capture-time scalar logging |
 | `stats/` | Streaming stats and `aggregate()` over dataloaders |
 | `types.py`, `accessors/` | Moved type/accessor aliases for non-top-level public names |

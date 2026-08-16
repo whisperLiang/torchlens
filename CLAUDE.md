@@ -359,7 +359,7 @@ print(tl.compat.report(model, x).to_markdown())
   (`backends/torch/rescue.py`); the result is disclosed (`capture_verified=False`, reason
   `"mode_rescue_rerun"`, session-time `trace.rescue_rerun`). Primary captures are NEVER mode-armed
   (fused-path observer effect). Protocol-invisible constructors that no mode can see (derived
-  per build: `from_numpy`, `frombuffer`, `Tensor.as_subclass`) keep targeted module-attr patching
+  per build: `from_numpy`, `from_dlpack`, `frombuffer`, `Tensor.as_subclass`, `Tensor._make_subclass`) keep targeted module-attr patching
   (`backends/torch/belt.py`). Residuals declared, typed, never silent: worker-thread stale refs
   (modes are thread-local) and de-moded `handle_torch_function` composite interiors disclose
   `"escape_rescue_unrecovered"`; an authoritative witness/detector/dynamo verdict stays in place,
