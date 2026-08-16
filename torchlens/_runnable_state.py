@@ -2641,9 +2641,15 @@ def runnable_tensor_byte_digest(value: torch.Tensor) -> str:
         )
     with _state.pause_logging():
         cpu_value = to_cpu_contiguous(value)
-        payload = cpu_value.reshape(-1).view(torch.uint8).numpy().tobytes()
+        # Buffer-protocol digest (r7 R35-3): streaming the prefix and the
+        # uint8 view into one hasher is byte-identical to the old
+        # ``sha256(prefix + payload.tobytes())`` while skipping the
+        # whole-payload bytes copy (per parameter/buffer staged).
+        payload_view = cpu_value.reshape(-1).view(torch.uint8).numpy().data
         logical_prefix = f"{cpu_value.dtype}|{tuple(cpu_value.shape)}|".encode()
-    return sha256(logical_prefix + payload).hexdigest()
+        hasher = sha256(logical_prefix)
+        hasher.update(payload_view)
+    return hasher.hexdigest()
 
 
 __all__ = [

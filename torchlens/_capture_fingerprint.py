@@ -71,19 +71,20 @@ def _hash_tensor_content(tensor: torch.Tensor) -> str:
 
     with _state.pause_logging():
         cpu = to_cpu_contiguous(tensor)
-        # Frame the LOGICAL dtype captured BEFORE the numpy-transport
-        # bf16->float32 upcast (b5-opus-R35-1 twin; same rule as the op.py
-        # dedup digest): framing the post-upcast dtype made a bfloat16 input
-        # hash identically to the float32 tensor of the same values, so a
-        # dtype change was a capture-cache HIT serving the wrong trace.
+        # Frame the LOGICAL dtype (b5-opus-R35-1 twin; same rule as the
+        # op.py dedup digest) so a bfloat16 input can never hash identically
+        # to the float32 tensor of the same values -- a dtype change must be
+        # a capture-cache MISS. r7 R35 (fable): the old bf16->f32 transport
+        # upcast copy is GONE -- the uint8 reinterpret view below transports
+        # bf16 (and float8 friends) natively, and this digest is
+        # process-local cache keying, so the byte change is invisible.
         logical_dtype = str(cpu.dtype)
-        if cpu.dtype is torch.bfloat16:
-            cpu = cpu.to(torch.float32)
         # Byte-reinterpreting uint8 view: covers dtypes numpy cannot
         # transport directly (float8 and friends), so content-bearing
         # exotic-dtype state hashes by CONTENT instead of falling back to
-        # a content-blind fragment.
-        payload = cpu.reshape(-1).view(torch.uint8).numpy().tobytes()
+        # a content-blind fragment. ``.data`` hashes through the buffer
+        # protocol -- no whole-payload ``tobytes`` copy (r7 R35-3).
+        payload = cpu.reshape(-1).view(torch.uint8).numpy().data
     hasher = hashlib.sha256()
     hasher.update(
         repr(
@@ -319,7 +320,14 @@ def _attribute_state_fragment(value: Any, depth: int = 0) -> object:
         if getattr(getattr(value, "dtype", None), "hasobject", False):
             return _never_matching_fragment("ndarray-object-dtype")
         try:
-            digest = hashlib.sha256(value.tobytes()).hexdigest()
+            # Buffer-protocol digest (r7 R35-3): ``tobytes`` materialized a
+            # whole-payload copy; a non-contiguous array contiguizes first
+            # (same C-order bytes, so the digest is unchanged) and a
+            # contiguous one hashes zero-copy.
+            import numpy as _np
+
+            contiguous = _np.ascontiguousarray(value)
+            digest = hashlib.sha256(contiguous.data).hexdigest()
             return ("ndarray", tuple(getattr(value, "shape", ())), str(value.dtype), digest)
         except Exception:
             return _never_matching_fragment("ndarray-unreadable")

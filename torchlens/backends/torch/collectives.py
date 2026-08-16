@@ -270,7 +270,10 @@ def _digest_tensor(tensor: torch.Tensor) -> str:
     flat = to_cpu_contiguous(tensor).reshape(-1)
     if flat.numel() == 0:
         return hashlib.sha256(b"").hexdigest()
-    return hashlib.sha256(flat.view(torch.uint8).numpy().tobytes()).hexdigest()
+    # Buffer-protocol digest (r7 R35-3): identical bytes to the old
+    # ``tobytes`` spelling (this digest PERSISTS in collective annotations,
+    # so byte identity is load-bearing) without the whole-payload copy.
+    return hashlib.sha256(flat.view(torch.uint8).numpy().data).hexdigest()
 
 
 def _role_entry(role: str, index: int, tensor: torch.Tensor) -> dict[str, Any]:
