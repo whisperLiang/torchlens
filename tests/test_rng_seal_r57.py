@@ -265,3 +265,73 @@ def test_auto_seed_freshness_survives_the_restore() -> None:
     assert first.random_seed != second.random_seed, (
         "restore bracket swallowed the auto-seed draw; captures now reuse one seed"
     )
+
+
+@pytest.mark.smoke
+def test_torch_generator_draw_changes_state_digest() -> None:
+    """A model-held ``torch.Generator`` is digestable like the numpy analog.
+
+    r7 b8-sol: the digest raised ``_NotADigestableRng`` for torch.Generator,
+    so a model-held instance drawn on a pre-existing (non-hooked) thread
+    advanced state with NO witness while ``np.random.default_rng`` analogs
+    were digest-caught -- and the residual enumeration claimed the residual
+    was "only an EXTERNALLY-HELD generator".
+    """
+
+    generator = torch.Generator()
+    generator.manual_seed(7)
+    before = host_nondeterminism_monitor._digest_rng_instance(generator)
+    torch.randn(4, generator=generator)
+    after = host_nondeterminism_monitor._digest_rng_instance(generator)
+    assert before != after, "torch.Generator draw left the state digest unchanged"
+
+
+@pytest.mark.smoke
+def test_model_held_torch_generator_pre_existing_thread_draw_is_witnessed() -> None:
+    """The exact sol scenario: pre-existing thread draws from a model-held
+    ``torch.Generator`` mid-window -- the window must NOT settle clean."""
+
+    import threading
+
+    class _TorchGenModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.gen = torch.Generator()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x
+
+    model = _TorchGenModel()
+    start = threading.Event()
+    done = threading.Event()
+
+    def worker() -> None:
+        start.wait(10.0)
+        torch.randn(4, generator=model.gen)
+        done.set()
+
+    thread = threading.Thread(target=worker)
+    thread.start()  # pre-existing (never-hooked) thread
+    try:
+        with host_nondeterminism_monitor(model) as result:
+            start.set()
+            assert done.wait(10.0)
+    finally:
+        thread.join(10.0)
+    assert result.channels or result.uncertain, (
+        "model-held torch.Generator drawn on a pre-existing thread settled "
+        "channels=[] / uncertain=False (false-VERIFIED escape)"
+    )
+
+
+@pytest.mark.smoke
+def test_seeded_global_torch_draw_stays_clean() -> None:
+    """The replayable global torch engine stays identity-exempt (no
+    over-trigger): a seeded ``torch.randn`` model draw must not ceiling."""
+
+    torch.manual_seed(3)
+    with host_nondeterminism_monitor(nn.Identity()) as result:
+        torch.randn(4)
+    assert not any("torch" in channel.lower() for channel in result.channels), (
+        f"seeded global torch draw over-triggered: {sorted(result.channels)!r}"
+    )
