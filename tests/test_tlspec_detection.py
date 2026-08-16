@@ -31,7 +31,17 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
     ("manifest", "spec", "expected"),
     [
         ({"tlspec_version": 1, "kind": "intervention"}, None, "v2.0_unified"),
-        ({"kind": "intervention", "format_version": "1"}, None, "v2.16_intervention_with_kind"),
+        (
+            {"kind": "intervention", "format_version": "1"},
+            {"format_version": "1"},
+            "v2.16_intervention_with_kind",
+        ),
+        # A kind-bearing manifest WITHOUT spec.json is not an intervention
+        # artifact (every v2.16 intervention save writes spec.json); inferring
+        # it from `kind` alone misrouted a unified manifest with a deleted
+        # tlspec_version into the intervention loader, which died on the
+        # absent spec.json untyped (R73).
+        ({"kind": "intervention", "format_version": "1"}, None, "unknown"),
         ({"format_version": "1"}, {"format_version": "1"}, "v2.16_intervention"),
         ({"tlspec_version": 2}, None, "v2.16_modellog_portable"),
         ({}, None, "unknown"),

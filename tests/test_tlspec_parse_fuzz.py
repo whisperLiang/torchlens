@@ -16,14 +16,13 @@ manifest schema instead of a hand-list:
 Contract, pinned from the probed loader surface (2026-08-15): every
 structural corruption must be refused with a torchlens-typed
 ``TorchLensIOError`` — never a silent success, never an untyped stack trace.
-The two ledgered tolerances:
 
-* ``_OPTIONAL_KEYS`` may be ABSENT (legacy-manifest compatibility) but still
-  type-check when present;
-* deleting ``tlspec_version`` routes the loader down the legacy-format
-  dispatch and currently surfaces an UNTYPED ``FileNotFoundError`` for
-  ``spec.json`` (relayed to the IO lane); the sweep pins "some exception,
-  never a silent success" for that one key until the dispatch is hardened.
+The one ledgered tolerance: ``_OPTIONAL_KEYS`` may be ABSENT (legacy-manifest
+compatibility) but still type-check when present. Deleting ``tlspec_version``
+historically misrouted the loader down the legacy intervention dispatch and
+died with an untyped ``FileNotFoundError``; the dispatch now requires the
+artifact to actually carry ``spec.json``, so that deletion falls through to
+the typed manifest refusal like every other required key.
 """
 
 from __future__ import annotations
@@ -62,10 +61,6 @@ _OPTIONAL_KEYS = frozenset(
         "kind",
     }
 )
-
-#: Deleting this key re-routes format dispatch (legacy spec.json probe) and
-#: currently raises an untyped FileNotFoundError — ledgered, relayed.
-_LEGACY_DISPATCH_KEY = "tlspec_version"
 
 
 @pytest.fixture(scope="module")
@@ -108,18 +103,19 @@ def _rewrite_manifest(artifact: Path, mutate) -> None:
 
 
 def test_every_toplevel_key_deletion_is_adjudicated(seed_artifact: Path, tmp_path: Path) -> None:
-    """Deleting each discovered key: typed refusal, ledgered tolerance, or wart."""
+    """Deleting each discovered key: typed refusal or ledgered tolerance.
+
+    ``tlspec_version`` deletion needs no special arm anymore: format dispatch
+    requires ``spec.json`` before classifying an artifact as a v2.16
+    intervention bundle, so the deletion falls through to the typed manifest
+    refusal (formerly an untyped ``FileNotFoundError`` wart, R73).
+    """
 
     outcomes: list[str] = []
     for key in _manifest_keys(seed_artifact):
         artifact = _corrupt_copy(seed_artifact, tmp_path)
         _rewrite_manifest(artifact, lambda data, key=key: data.pop(key))
-        if key == _LEGACY_DISPATCH_KEY:
-            # The typed refusal OR the ledgered legacy-dispatch wart (a raw
-            # FileNotFoundError for spec.json); never a silent success.
-            with pytest.raises((TorchLensIOError, FileNotFoundError)):
-                tl.load(str(artifact))
-        elif key in _OPTIONAL_KEYS:
+        if key in _OPTIONAL_KEYS:
             loaded = tl.load(str(artifact))
             assert type(loaded).__name__ == "Trace"
             loaded.cleanup()
