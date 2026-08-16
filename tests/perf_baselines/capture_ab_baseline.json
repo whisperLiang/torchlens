@@ -1,0 +1,35 @@
+{
+  "context": {
+    "nproc": 32,
+    "torch_num_threads": 16,
+    "torch_version": "2.13.0+cu130",
+    "load_average_1m": 4.48
+  },
+  "sha": "94fcb64cbc2419457dae782fa50de1be9de77d54",
+  "small_capture": {
+    "cnn": {
+      "native_ms": 0.5856969946762547,
+      "trace_ms": 37.53841150319204,
+      "ratio": 64.0918629332245,
+      "n": 12.0
+    },
+    "mlp": {
+      "native_ms": 0.09264949767384678,
+      "trace_ms": 28.21971349476371,
+      "ratio": 304.5857150149407,
+      "n": 12.0
+    }
+  },
+  "decode_pair": {
+    "gpt2": {
+      "native_ms": 213.5839690163266,
+      "wrapped_ms": 2083.5777564934688,
+      "fast_ms": 285.43078900838736,
+      "fast_vs_wrapped": 7.299765255640459,
+      "wrapped_vs_native": 9.755309661532687,
+      "fast_vs_native": 1.3363867631215745,
+      "steps": 12.0,
+      "window": 64.0
+    }
+  }
+}
