@@ -1,3 +1,4 @@
+import gc
 import os
 import random
 import sys
@@ -196,6 +197,55 @@ HEAVY_DURATION_BUDGET_SECONDS = 20.0
 #: never the pre-r3 15s crutch (3x the budget); it is documented in the
 #: budget sentence the docs-lockstep gate parses.
 DURATION_BUDGET_GRACE_SECONDS = 2.0
+
+# GC PAUSE LEDGER (r7 R76-1, opus b2 MED): a garbage-collection pause's cost
+# is proportional to the LIVE SESSION HEAP at the moment it runs, not to the
+# work of the test it lands in — the identical 18 gc-calling tests measured
+# 0.24-0.66s alone but 7.4-16.3s at ~80% through a 5,000-test session, and
+# min(wall, cpu) does not help because a collection burns CPU. Charging that
+# pause to whichever test happened to trigger the collection made the
+# always-on tripwire an ORDER-DEPENDENT red (the offender set differed
+# between two full-tier orderings) — the one place the isolation machinery
+# manufactured cross-test coupling. Collection pauses are therefore charged
+# to a SESSION ledger, never to the test that triggered them: a gc callback
+# accumulates in-collection wall time, and the charged window subtracts the
+# pause seconds that fell inside it. This is a charge ATTRIBUTION fix, not a
+# budget raise: a test's own compute stays fully charged, and a genuinely
+# mis-tiered test still trips on its non-GC cost. Accepted residual: a test
+# whose OWN garbage dominates a collection gets that collection free — the
+# allocation cost that produced the garbage is still charged, and per-test
+# heap attribution inside a shared-heap collection is not measurable.
+_GC_PAUSE_LEDGER = {"collecting_since": None, "seconds": 0.0}
+
+
+def _record_gc_pause(phase: str, info: dict[str, Any]) -> None:
+    """gc callback: accumulate wall seconds spent inside collections."""
+
+    if phase == "start":
+        _GC_PAUSE_LEDGER["collecting_since"] = time.perf_counter()
+        return
+    started = _GC_PAUSE_LEDGER["collecting_since"]
+    if started is not None:
+        _GC_PAUSE_LEDGER["collecting_since"] = None
+        _GC_PAUSE_LEDGER["seconds"] += time.perf_counter() - started
+
+
+if not any(callback is _record_gc_pause for callback in gc.callbacks):
+    gc.callbacks.append(_record_gc_pause)
+
+
+def _charged_seconds(wall_seconds: float, cpu_seconds: float, gc_pause_seconds: float) -> float:
+    """Return the budget-charged time for one protocol window.
+
+    ``min(wall, cpu)`` (see the CHARGED TIME block above) minus the
+    session-attributed GC pause seconds that fell inside the window, floored
+    at zero. A collection pause consumes wall AND cpu, so it is subtracted
+    after the min.
+    """
+
+    return max(0.0, min(wall_seconds, cpu_seconds) - gc_pause_seconds)
+
+
 #: Per-parametrize-cell allowance for a smoke family's aggregate budget: a
 #: family's cost legitimately scales with its cell count (278 selector cells
 #: at ~57ms/cell), so the aggregate bar is max(2x the per-test budget,
@@ -300,6 +350,7 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
     """
 
     cpu_before = _process_cpu_seconds()
+    gc_pause_before = _GC_PAUSE_LEDGER["seconds"]
     result = yield
     # Coverage-instrumented sessions are provably outside the budget
     # contract: instrumentation slows every test by design, and the
@@ -312,7 +363,10 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
         return result
     cpu_seconds = _process_cpu_seconds() - cpu_before
     wall_seconds = sum(getattr(item, "_tl_phase_durations", {}).values())
-    charged = min(wall_seconds, cpu_seconds)
+    # Collection pauses inside this window are session-heap cost, never this
+    # test's cost (r7 R76-1; see the GC PAUSE LEDGER block above).
+    gc_pause_seconds = _GC_PAUSE_LEDGER["seconds"] - gc_pause_before
+    charged = _charged_seconds(wall_seconds, cpu_seconds, gc_pause_seconds)
     load_factor = _smoke_budget_load_factor()
     tier_budget = _duration_budget_tier(item)
     if tier_budget is not None and tier_budget[0] in {"smoke", "unmarked"}:
@@ -516,18 +570,19 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     # Pre-fill whole-tree scan caches during collection (uncharged time): a
     # module may expose `warm_scan_caches()` when its scanners' one-time parse
     # cost (~5-8s of genuine CPU) would otherwise land in whichever of its
-    # tests runs first and sit on the duration-budget boundary. Gated on the
-    # marker-lint tests being IN session: they are the budget's enforcement
-    # point, so sessions without them (targeted runs, nested pytest
-    # subprocesses like the -O leg probe) skip the warm cost entirely.
-    if lint_tests:
-        warmed: set[int] = set()
-        for item in items:
-            module = getattr(item, "module", None)
-            warm = getattr(module, "warm_scan_caches", None)
-            if warm is not None and id(module) not in warmed:
-                warmed.add(id(module))
-                warm()
+    # tests runs first and sit on the duration-budget boundary. UNCONDITIONAL:
+    # the budget tripwire enforces at sessionfinish in EVERY session, so a
+    # targeted run of a scanner module (no marker-lint collected) must warm
+    # too or its first test eats the parse cost and trips the always-on gate.
+    # Only sessions that collected a warm-capable module pay the cost, and
+    # they would pay it inside a charged test window otherwise.
+    warmed: set[int] = set()
+    for item in items:
+        module = getattr(item, "module", None)
+        warm = getattr(module, "warm_scan_caches", None)
+        if warm is not None and id(module) not in warmed:
+            warmed.add(id(module))
+            warm()
 
 
 def _coverage_requested(config: pytest.Config) -> bool:

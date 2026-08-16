@@ -1278,3 +1278,53 @@ def test_sessionfinish_budget_tripwire_flips_exit_status(
     )
     _enforce_duration_budget_at_sessionfinish(session, 1)  # type: ignore[arg-type]
     assert session.exitstatus == 0
+
+
+def test_gc_pauses_charge_the_session_ledger_not_the_test(
+    request: pytest.FixtureRequest,
+) -> None:
+    """r7 R76-1 (opus b2 MED): collection pauses are session cost, never test cost.
+
+    A ``gc.collect()`` pause walks the LIVE SESSION HEAP, so its cost is a
+    function of test ORDER and suite size (0.24-0.66s alone vs 7.4-16.3s at
+    ~80% through a full-tier session for the identical tests), and
+    ``min(wall, cpu)`` cannot absorb it because a collection burns CPU. The
+    conftest gc callback must be LIVE (accumulating real collection pauses
+    into the session ledger), and the charge computation must subtract the
+    in-window pause from the min while never charging negative time. This is
+    charge attribution, not a tolerance: a test's own compute stays charged
+    in full.
+    """
+
+    import gc
+
+    conftest_plugin = next(
+        (
+            plugin
+            for plugin in request.config.pluginmanager.get_plugins()
+            if hasattr(plugin, "_charged_seconds")
+        ),
+        None,
+    )
+    assert conftest_plugin is not None, (
+        "tests/conftest.py no longer exposes the gc-aware _charged_seconds "
+        "helper -- the order-dependent gc-charge red (r7 R76-1) is back"
+    )
+
+    # The callback is registered and accumulates a REAL collection's pause.
+    ledger = conftest_plugin._GC_PAUSE_LEDGER
+    assert any(callback is conftest_plugin._record_gc_pause for callback in gc.callbacks), (
+        "the gc pause callback is not installed"
+    )
+    before = ledger["seconds"]
+    gc.collect()
+    assert ledger["seconds"] > before, "a full collection accumulated no pause time"
+    assert ledger["collecting_since"] is None, "the ledger is stuck mid-collection"
+
+    # Charge attribution: the in-window pause comes off the min; a test's
+    # non-GC compute stays fully charged; the floor is zero, never negative.
+    charged = conftest_plugin._charged_seconds
+    assert charged(10.0, 8.0, 0.0) == 8.0
+    assert charged(10.0, 8.0, 6.5) == pytest.approx(1.5)
+    assert charged(10.0, 8.0, 9.0) == 0.0
+    assert charged(0.2, 0.2, 0.0) == pytest.approx(0.2)

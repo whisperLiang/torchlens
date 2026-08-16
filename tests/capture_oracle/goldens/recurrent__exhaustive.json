@@ -1319,14 +1319,14 @@
         "pre_hook_invocations": 0,
         "rng_draw_count": 0,
         "rng_state_after": [
-          "22e52678",
-          "e07f1165",
-          "b0261e4f",
-          "8b7a02f8",
-          "d1d8135f",
-          "7b0d5719",
-          "958414d8",
-          "086b6594"
+          "b8cf38b6",
+          "2ca4ca46",
+          "19b3a5d1",
+          "37a56ef7",
+          "46340ec7",
+          "4cbae9ac",
+          "056aac24",
+          "f1182cb7"
         ],
         "rng_state_before": [
           "b8cf38b6",
@@ -1343,20 +1343,20 @@
     "schema_version": 1,
     "tracking": {
       "cuda_peak_memory_median_bytes": null,
-      "python_peak_memory_median_bytes": 642872,
+      "python_peak_memory_median_bytes": 633716,
       "sample_count": 3,
       "torch_version": "2.13.0+cu130",
-      "wall_time_median_ms": 208.33437200053595
+      "wall_time_median_ms": 77.02194000012241
     }
   },
   "sha256_chunks": [
-    "5fe0b07a",
-    "76c29a85",
-    "96b3cfb1",
-    "ddfc508f",
-    "e3ca6618",
-    "dded6196",
-    "d1505cd7",
-    "1965cfae"
+    "f5045cbb",
+    "4ffe4a4e",
+    "e49b17ca",
+    "59d0b55a",
+    "1f96b3a2",
+    "93fb8b55",
+    "af5b8e41",
+    "d2406fd7"
   ]
 }

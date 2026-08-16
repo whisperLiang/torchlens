@@ -69,7 +69,10 @@ Backend integration:
 - Post-commit knowledge never mutates the op lane: it rides the typed `OpAmendment` lane
   (`CaptureEvents.append_amendment`, nine exact-set families) and folds through the ONE
   reducer `amended_op_records()`. grad-fn handles live ONLY in the journal side index
-  (`grad_fn_handles_by_label_raw`); records never carry them.
+  (`grad_fn_handles_by_label_raw`); records never carry them. The one sanctioned in-place
+  carve-out — the fastlog ancestry backfill on a cook-owned `copy_for_replay` projection —
+  is pinned (with every other op-lane mutator) by the closed ledger in
+  `tests/producer_parity/test_op_lane_inplace_writers.py`.
 - Preview backends keep emitting compat `OpEvent`s until S15 and adapt at the one ingest
   boundary (`op_record_from_event`); `OpEvent`, `PATH_TO_FLAT` (amendment fold guard),
   and `_clone_op_event_for_replay` are retained-with-schedule (S15) and guard-tested in
