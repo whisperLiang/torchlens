@@ -750,8 +750,15 @@ def _block_has_unguarded_yield(statements: list[ast.stmt], guarded: bool) -> boo
         Whether an unguarded (teardown-free) yield exists in the block.
     """
 
+    def _is_noop(stmt: ast.stmt) -> bool:
+        # r7 R77 (sol b2): `yield log; pass` (or a trailing docstring/ellipsis)
+        # is NOT a teardown path -- only a meaningful statement counts.
+        return isinstance(stmt, ast.Pass) or (
+            isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant)
+        )
+
     for index, statement in enumerate(statements):
-        followed = guarded or index + 1 < len(statements)
+        followed = guarded or any(not _is_noop(later) for later in statements[index + 1 :])
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
         if isinstance(statement, ast.Try):
@@ -801,6 +808,11 @@ def _fixture_has_real_teardown(function: ast.FunctionDef | ast.AsyncFunctionDef)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "addfinalizer"
         ):
+            # r7 R77 (sol b2): `addfinalizer(lambda: None)` is a lint dodge,
+            # not a teardown; a literal no-op lambda does not count.
+            argument = node.args[0] if node.args else None
+            if isinstance(argument, ast.Lambda) and isinstance(argument.body, ast.Constant):
+                continue
             return True
     has_yield = _block_contains_yield(function.body)
     return has_yield and not _block_has_unguarded_yield(function.body, False)
@@ -940,6 +952,29 @@ def cached_trace():
     yield tl.trace(model, x)
 """
 
+# r7 R77 (sol b2): the two lint-dodge shapes the old predicate accepted --
+# syntax after the yield that does nothing, and a literal no-op finalizer.
+_EVASION_NOOP_AFTER_YIELD = """
+import pytest
+import torchlens as tl
+
+@pytest.fixture(scope="session")
+def cached_trace():
+    log = tl.trace(model, x)
+    yield log
+    pass
+"""
+
+_EVASION_NOOP_FINALIZER = """
+import pytest
+import torchlens as tl
+
+@pytest.fixture(scope="session")
+def cached_trace(request):
+    request.addfinalizer(lambda: None)
+    yield tl.trace(model, x)
+"""
+
 _COMPLIANT_STATEMENT_AFTER_YIELD = """
 import pytest
 import torchlens as tl
@@ -988,6 +1023,10 @@ def per_test_trace():
             _EVASION_HELPER_INDIRECTION, ["planted.py::cached_trace"], id="helper-indirection"
         ),
         pytest.param(_EVASION_BARE_YIELD, ["planted.py::cached_trace"], id="bare-yield"),
+        pytest.param(
+            _EVASION_NOOP_AFTER_YIELD, ["planted.py::cached_trace"], id="noop-after-yield"
+        ),
+        pytest.param(_EVASION_NOOP_FINALIZER, ["planted.py::cached_trace"], id="noop-finalizer"),
         pytest.param(_COMPLIANT_STATEMENT_AFTER_YIELD, [], id="ok-statement-after-yield"),
         pytest.param(_COMPLIANT_TRY_FINALLY, [], id="ok-try-finally-class-nested-helper"),
         pytest.param(_COMPLIANT_FUNCTION_SCOPE_BARE_YIELD, [], id="ok-function-scope"),
@@ -1169,3 +1208,73 @@ def test_serial_marker_is_not_a_budget_exemption() -> None:
     )
     assert _duration_budget_tier(_FakeItem({"serial", "slow"})) is None
     assert _duration_budget_tier(_FakeItem({"rare"})) is None
+
+
+def test_sessionfinish_budget_tripwire_flips_exit_status(
+    request: pytest.FixtureRequest,
+) -> None:
+    """r7 R41 (sol b2 HIGH): the budget tripwire is always-on, not collectable.
+
+    Enforcement used to live only in this file's assertion tests, so any
+    targeted run that did not collect ``test_marker_lint.py`` exited green
+    over budget. The conftest ``pytest_sessionfinish`` path must flip a green
+    session to failing whenever the offender ledger (or a family aggregate)
+    is non-empty -- and must leave already-failing or clean sessions alone.
+
+    The enforcement helper is resolved from the LIVE registered conftest
+    plugin (a bare ``conftest`` import is ambiguous during full-suite
+    collection; ``tests`` is not a package), which also pins that the hook
+    really is loaded in every tests/-scoped session.
+    """
+
+    from types import SimpleNamespace
+
+    conftest_plugin = next(
+        (
+            plugin
+            for plugin in request.config.pluginmanager.get_plugins()
+            if hasattr(plugin, "_enforce_duration_budget_at_sessionfinish")
+        ),
+        None,
+    )
+    assert conftest_plugin is not None, (
+        "tests/conftest.py no longer registers the sessionfinish duration-"
+        "budget enforcement helper -- the always-on tripwire is gone"
+    )
+    _enforce_duration_budget_at_sessionfinish = (
+        conftest_plugin._enforce_duration_budget_at_sessionfinish
+    )
+
+    def _fake_session(**attrs: object) -> SimpleNamespace:
+        plugin_manager = SimpleNamespace(get_plugin=lambda name: None)
+        return SimpleNamespace(
+            config=SimpleNamespace(pluginmanager=plugin_manager),
+            exitstatus=0,
+            **attrs,
+        )
+
+    # Per-item offender on a green session -> forced failure.
+    session = _fake_session(
+        _tl_duration_budget_offenders=[("tests/x.py::test_slow", "smoke", 9.0, 8.0, 7.0)]
+    )
+    _enforce_duration_budget_at_sessionfinish(session, 0)  # type: ignore[arg-type]
+    assert session.exitstatus == 1
+
+    # Family aggregate offender alone -> forced failure.
+    session = _fake_session(
+        _tl_smoke_family_stats={"tests/x.py::fam": (30.0, 4)},
+        _tl_smoke_family_budgets={"tests/x.py::fam": 12.0},
+    )
+    _enforce_duration_budget_at_sessionfinish(session, 0)  # type: ignore[arg-type]
+    assert session.exitstatus == 1
+
+    # Clean session stays green; failing session is left alone (the
+    # marker-lint assertion or an ordinary failure already owns the status).
+    session = _fake_session()
+    _enforce_duration_budget_at_sessionfinish(session, 0)  # type: ignore[arg-type]
+    assert session.exitstatus == 0
+    session = _fake_session(
+        _tl_duration_budget_offenders=[("tests/x.py::test_slow", "smoke", 9.0, 8.0, 7.0)]
+    )
+    _enforce_duration_budget_at_sessionfinish(session, 1)  # type: ignore[arg-type]
+    assert session.exitstatus == 0

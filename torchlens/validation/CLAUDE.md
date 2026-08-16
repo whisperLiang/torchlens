@@ -12,7 +12,8 @@ metadata invariants, intervention readiness, and unified `.tlspec` manifest sche
 | `backward.py` | Backward-pass grad-capture validation vs stock autograd |
 | `consolidated.py` | Public `validate(..., scope=...)` dispatcher and intervention report |
 | `invariants.py` | Metadata invariant categories and `MetadataInvariantError` |
-| `_invariants_*.py` | Per-domain invariant implementations (entry, topology, connectivity, conditionals, buffers, modules/params, payloads, equivalence, backward graph/flow/domain) |
+| `_invariants_*.py` | Per-domain invariant implementations (entry, topology, connectivity, conditional base + conditional modules, buffers, modules/params, payloads, equivalence, backward graph/flow/domain) |
+| `_pristine.py` | Pristine-oracle helpers (fixwave-5 R75-1): the untouched-baseline capture the replay oracle compares against |
 | `exemptions.py` | Replay/perturbation exemption registries and dynamic checks |
 | `status.py` | Replay-validation status objects |
 | `diagnostics.py` | Structured replay-failure diagnostics (add-only relative to pass/fail) |

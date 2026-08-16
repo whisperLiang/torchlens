@@ -87,6 +87,63 @@ def test_matcher_is_red_capable() -> None:
     )
 
 
+def _git_config_reference_violations(paths_and_texts: list[tuple[str, str]]) -> list[str]:
+    """Private-path references inside git CONFIG files (rule lines name paths).
+
+    r7 R82 (opus b10 MED): ``.gitattributes`` published five internal
+    ``.research/docs-plan-megasprint_PLAN*.md`` filenames in this PUBLIC repo
+    -- dead LFS rules left behind when the files were untracked (8f74a25b).
+    The path gate above cannot see them (the leak is file CONTENT), and the
+    pre-commit hook matched staged PATHS only. A git config rule line whose
+    subject path is private is a leak of the artifact's name and the
+    sprint's existence even when the rule is inert.
+    """
+
+    violations: list[str] = []
+    for path, text in paths_and_texts:
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            subject = line.strip().split(" ", 1)[0].split("\t", 1)[0]
+            if subject and PRIVATE_PATH_PATTERN.search(subject):
+                violations.append(f"{path}:{line_number}: {line.strip()}")
+    return violations
+
+
+def test_git_config_files_reference_no_private_paths() -> None:
+    """No tracked .gitattributes/.lfsconfig rule may name a private path."""
+
+    config_paths = [
+        p
+        for p in _tracked_files()
+        if p == ".lfsconfig" or p.endswith(".gitattributes") or p.endswith("/.lfsconfig")
+    ]
+    contents = [
+        (p, (REPO_ROOT / p).read_text(encoding="utf-8", errors="replace")) for p in config_paths
+    ]
+    violations = _git_config_reference_violations(contents)
+    assert violations == [], (
+        "git config rule(s) in this PUBLIC repo reference private paths -- "
+        f"delete the rule lines (they leak internal artifact names): {violations}"
+    )
+
+
+def test_git_config_reference_matcher_is_red_capable() -> None:
+    """Non-vacuity: the content matcher fires on the leaked class and spares public rules."""
+
+    hits = _git_config_reference_violations(
+        [
+            (
+                ".gitattributes",
+                ".research/docs-plan-megasprint_PLAN.md filter=lfs diff=lfs merge=lfs -text\n"
+                ".project-context/todos.md -text\n"
+                "*.ipynb filter=nbstripout\n"
+                ".project-context/architecture.md -text\n",
+            )
+        ]
+    )
+    assert len(hits) == 2
+    assert all(".research/" in hit or "todos" in hit for hit in hits)
+
+
 def test_matcher_mirrors_precommit_hook() -> None:
     """The hook config's regex and this test's matcher may never drift apart."""
 

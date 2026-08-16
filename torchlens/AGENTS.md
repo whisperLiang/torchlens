@@ -18,7 +18,7 @@ authority.
 | `_source_links.py` | Source-link helpers used by reports/visualization |
 | `constants.py` | FIELD_ORDER tuples and decorated torch function discovery |
 | `options.py` | Immutable grouped options and flat-argument merge helpers |
-| `observers.py` | `tap`, `record_span`, and active span state |
+| `observers.py` | `tap`, `span` (canonical; `record_span` is a deprecated warning alias), and active span state |
 | `types.py` | Moved public type aliases not kept in top-level `__all__` |
 | `user_funcs.py` | Main capture, summary, visualization, validation, and bundle graph entry points |
 
@@ -167,7 +167,9 @@ update the class definition, the appropriate FIELD_ORDER constant, metadata test
 
 ## Critical Invariants
 1. `_state.py` has no outgoing torchlens imports except the sanctioned `errors._base`
-   typing-only leaf (cycle-safe by construction; documented in `_state.py`).
+   leaf — a RUNTIME import (its classes are base classes, e.g. `ReentrantTraceError`);
+   only the TYPE_CHECKING block below it is typing-only (cycle-safe by construction;
+   documented in `_state.py`).
 2. `_ensure_model_prepared()` is the lazy wrapping chokepoint; do not reintroduce import-time
    torch namespace mutation.
 3. RNG state capture/restore must happen before `active_logging()`.

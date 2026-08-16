@@ -49,6 +49,15 @@ pure-Python rank layout above 20,000 cost units.
 - `fastlog_preview.py`: overlays predicate decisions on a full log.
 - `fastlog_live.py`: live fastlog preview helpers.
 - `code_panel.py`: Graphviz code side panel.
+- `_render_common.py`: shared render types, constants, and imports for Graphviz rendering.
+- `_render_nodes.py`: node construction and raw-value helpers for Graphviz rendering.
+- `_render_edges.py`: edge and endpoint helpers for Graphviz rendering.
+- `_render_flow.py`: focus, skip, container, and sibling setup helpers.
+- `_render_utils.py`: internal Graphviz helpers shared across rendering paths.
+- `_label_format.py`: node-label formatting helpers.
+- `_edge_multiplicity.py`: rendered-edge multiplicity disclosure (r19 dedupe registry).
+- `_condensed_flow.py`: child condensed-flow-graph construction for smart collapse.
+- `request.py`: resolved visualization requests and output targets.
 
 ## Gotchas
 - Graphviz render writes a DOT source file alongside rendered output.

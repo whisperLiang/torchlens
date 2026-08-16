@@ -1,8 +1,13 @@
-# Staleness signal for the repo's frozen pins (R61, b2-opus B2R5-24): every
-# hardened pin here -- the SHA-pinned Actions, the hash-locked release/builder
-# stacks -- is deliberately frozen, and without a refresh signal nothing tells a
-# maintainer when an upstream SECURITY release lands. Dependabot opens review
-# PRs; it never auto-merges, so pins move on review rather than never.
+# Staleness signal for the repo's frozen pins (R61): the SHA-pinned Actions,
+# the hash-locked release/builder stack (pip @ /.github/workflows), and the
+# pyproject tool pins (pip @ /) each get weekly review PRs. Dependabot never
+# auto-merges, so pins move on review rather than never.
+#
+# NOT covered here (r7 R61, opus+sol): .pre-commit-config.yaml hook SHAs --
+# Dependabot has no pre-commit ecosystem. Their staleness signal is the
+# weekly hook-staleness report in .github/workflows/weekly.yml, which runs
+# `pre-commit autoupdate` on a scratch copy and surfaces the diff in the job
+# summary.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
@@ -15,7 +20,13 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
-    # Security releases only for the locked stacks; routine version churn on
-    # the release path is noise.
+    # `dependency-type: all` = every update in the locked stack opens a
+    # review PR (whether GitHub's security filtering applies is a repo
+    # setting, not this file).
     allow:
       - dependency-type: "all"
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

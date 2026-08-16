@@ -14,7 +14,8 @@
   first, not a function name.
 - Lookup order: `FUNC_ARG_SPECS` static table -> `_state._dynamic_arg_specs` dynamic cache
   (uncacheable entries marked with the `DYNAMIC_SPEC_UNCACHEABLE` sentinel) -> BFS fallback.
-- `ArgSpec` stores tensor arg indexes, tensor kwarg names, param arg indexes, and param kwarg names.
+- `ArgSpec` stores exactly the 3 resolved fields above: tensor arg `positions`,
+  tensor `sequence_positions`, and `tensor_kwargs` names (no param-index fields exist).
 - Keep keyword handling accurate; stale entries can hide graph parents.
 
 ## salient_args.py

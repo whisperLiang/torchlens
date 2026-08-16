@@ -42,6 +42,11 @@ _SELECT_FAMILY_FLOOR = frozenset({"E4", "E7", "E9", "F", "I", "B", "SIM", "UP", 
 #: alongside a real cleanup; raising one is the exact silent-growth this test
 #: exists to prevent (SIM105 grew 74 -> 99 while ledgered as "deferred").
 _DEFERRED_CODE_CEILINGS: dict[str, int] = {
+    # r7 R23 reconcile: hunt-6 counts 102 (fable, full lint scope) vs 99
+    # (opus, torchlens+tests+scripts) were BOTH correct -- the delta is
+    # exactly the 3 examples/notebooks sites. This ceiling's own authority
+    # is the isolated-mode measurement described above (109); cite the
+    # measurement MODE with any future count or the dispute recurs.
     "B905": 109,
     "B028": 2,
     "B023": 17,

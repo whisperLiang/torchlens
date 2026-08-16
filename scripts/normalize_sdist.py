@@ -113,7 +113,13 @@ def normalize_wheel(path: str) -> None:
             clone.compress_type = zipfile.ZIP_DEFLATED
             clone.create_system = 3  # unix, so the mode bits are authoritative
             mode = (info.external_attr >> 16) & 0o7777
-            clone.external_attr = (0o100000 | _normalized_mode(mode)) << 16
+            # Carry the original file-TYPE bits through and rewrite only the
+            # permission bits (r7 R84: stamping S_IFREG unconditionally would
+            # republish an explicit ``dir/`` member as a zero-length regular
+            # file; latent on setuptools-83 wheels, wrong for the general
+            # normalizer this is written as). Untyped entries get S_IFREG.
+            type_bits = (info.external_attr >> 16) & 0o170000 or 0o100000
+            clone.external_attr = (type_bits | _normalized_mode(mode)) << 16
             target.writestr(clone, data)
     with open(path, "wb") as output:
         output.write(normalized.getvalue())

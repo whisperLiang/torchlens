@@ -81,15 +81,17 @@ jobs:
           pip install --require-hashes --only-binary :all:
           -r .github/workflows/release-requirements.txt
 
-      # The version TAG push invokes git-lfs (a few .research/*.md files are
-      # LFS-tracked). CI checks out with lfs disabled (pointers only, no LFS
-      # content), so the push is rejected with "missing or corrupt local
-      # objects" -- but those objects already live on the remote (pushed when
-      # the files landed on main), so an incomplete push is safe here. Without
-      # this, the tag never gets created and (pre-`[skip ci]`) every run
-      # re-released -> the 1599-commit runaway. `locksverify=false` additionally
-      # sidesteps the locking-API failure caused by the App's bracketed
-      # credential URL (`torchlens-release[bot]`).
+      # NO file is LFS-tracked at HEAD (r7 R82: the dead .gitattributes rules
+      # that once justified this block are deleted -- they leaked private
+      # .research/ filenames in a PUBLIC repo). LFS objects from that era
+      # remain only in REMOTE history, so git-lfs can still activate on ref
+      # pushes that traverse those commits from a checkout with lfs disabled
+      # (pointers only, no LFS content locally); the objects already live on
+      # the remote, so an incomplete push stays safe. Without this belt, a
+      # rejected tag push meant the tag never got created and
+      # (pre-`[skip ci]`) every run re-released -> the 1599-commit runaway.
+      # `locksverify=false` separately sidesteps the locking-API failure
+      # caused by the App's bracketed credential URL (`torchlens-release[bot]`).
       - name: Let git-lfs tolerate the CI tag push
         run: |
           git config lfs.allowincompletepush true

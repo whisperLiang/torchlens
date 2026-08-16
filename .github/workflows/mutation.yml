@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       family:
-        description: "mutant family (registry|checks|blocks|exempt|arms|corechecks|bounded=all-bounded)"
+        description: "mutant family (registry|checks|blocks|exempt|arms|corechecks|executor|bounded=all-bounded)"
         required: false
         default: ""
       arm_shard:
@@ -56,15 +56,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y graphviz
 
-      - name: Install CPU test environment
+      - name: Install canonical CPU test environment
+        # r7 R82 (opus MED): this leg formerly installed BARE `torch` (newest
+        # resolvable) while its own header names weekly.yml's pinned job "the
+        # canonical pinned CPU env". A zero-survivor gate is only meaningful
+        # against a fixed interpreter: a new torch release could flip a
+        # survivor either way on an unrelated upstream event. Same pins as
+        # weekly.yml's mutation-margin job; pydot AND graphviz pinned
+        # together (r7 R83: the DOT emitters were pinned asymmetrically here).
         run: |
           uv pip install --system \
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \
             --index-strategy unsafe-best-match \
             -e ".[test]" \
-            torch \
-            "pydot==4.0.1"
+            "torch==2.8.0+cpu" \
+            "torchvision==0.23.0+cpu" \
+            "pydot==4.0.1" \
+            "graphviz==0.21"
 
       - name: Select rotation slot
         id: slot
@@ -72,6 +81,21 @@ jobs:
           INPUT_FAMILY: ${{ inputs.family }}
           INPUT_ARM_SHARD: ${{ inputs.arm_shard }}
         run: |
+          # r7 R82 (opus LM): validate dispatch inputs BEFORE they reach
+          # $GITHUB_OUTPUT -- a newline or shell metacharacter in a raw input
+          # could forge additional step outputs through the append below.
+          case "$INPUT_FAMILY" in
+            ""|registry|checks|blocks|exempt|arms|corechecks|executor|bounded) ;;
+            *) echo "invalid family input: $INPUT_FAMILY"; exit 1 ;;
+          esac
+          case "$INPUT_ARM_SHARD" in
+            "") ;;
+            */*)
+              if ! printf '%s' "$INPUT_ARM_SHARD" | grep -qE '^[0-9]+/[0-9]+$'; then
+                echo "invalid arm_shard input: $INPUT_ARM_SHARD"; exit 1
+              fi ;;
+            *) echo "invalid arm_shard input: $INPUT_ARM_SHARD"; exit 1 ;;
+          esac
           if [ -n "$INPUT_FAMILY" ]; then
             family="$INPUT_FAMILY"
             shard="$INPUT_ARM_SHARD"
@@ -88,6 +112,12 @@ jobs:
           echo "selected family=$family shard=$shard"
 
       - name: Run mutation campaign
+        # r7 R82 (opus LM, zizmor): step outputs route through env, never
+        # inline ${{ }} interpolation into the shell -- the same pattern the
+        # slot step already uses for the raw dispatch inputs.
+        env:
+          SLOT_FAMILY: ${{ steps.slot.outputs.family }}
+          SLOT_SHARD: ${{ steps.slot.outputs.shard }}
         run: |
           set -o pipefail
           mkdir -p mutation-results
@@ -101,14 +131,12 @@ jobs:
               2>&1 | tee "mutation-results/$tag.log"
           }
           status=0
-          if [ "${{ steps.slot.outputs.family }}" = "bounded" ]; then
-            for fam in registry checks corechecks blocks exempt; do
+          if [ "$SLOT_FAMILY" = "bounded" ]; then
+            for fam in registry checks corechecks blocks exempt executor; do
               run_family "$fam" "" "$fam" || status=1
             done
           else
-            run_family "${{ steps.slot.outputs.family }}" \
-              "${{ steps.slot.outputs.shard }}" \
-              "${{ steps.slot.outputs.family }}" || status=1
+            run_family "$SLOT_FAMILY" "$SLOT_SHARD" "$SLOT_FAMILY" || status=1
           fi
           exit "$status"
 

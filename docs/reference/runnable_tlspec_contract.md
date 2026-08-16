@@ -2238,7 +2238,7 @@ exists, which a source meta-test pins.
 ### Three-valued input alias topology
 
 Runtime input aliasing against the de-aliased capture is judged by ONE shared three-valued
-touched-byte engine (`torchlens.utils.tensor_utils`, r37 INV-2): identity (`a is b`) and PROVED
+touched-byte engine (`torchlens.utils.alias_footprint`, r37 INV-2 (split out of tensor_utils in e11dd787)): identity (`a is b`) and PROVED
 overlap of recorded-disjoint inputs are observed contradictions (`diverged`); PROVED disjointness
 passes; anything unproven is `unknown`, which adds the `input_alias_topology_unresolved` ceiling
 -- `unverifiable` path, `not_applicable` attestation -- never `overlap` by assumption and never

@@ -406,6 +406,9 @@ def select_collapse_plan(
             "render). The graph renders uncollapsed; reduce the rendered "
             "graph first with module= focus, vis_call_depth, or rolled mode.",
             TorchLensWarning,
+            # r7 R19 (opus b6 LOW): a fixed stacklevel resolved to TorchLens's
+            # own _trace_stats caller; blame the user's draw()/collapse_plan()
+            # line instead (the entry depth differs per public spelling).
             stacklevel=user_stacklevel(),
         )
         result = OptimizerResult(

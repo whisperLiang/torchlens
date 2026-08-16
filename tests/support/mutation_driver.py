@@ -59,8 +59,8 @@ checkout is refused. It is a SCRIPT, deliberately not named ``test_*``: the
 red-capability *tests* live in the suite itself; this measures their margin.
 CI wiring (b9 round 5, two complementary legs): ``weekly.yml``'s
 ``mutation-margin`` job scores every bounded family
-(registry/checks/corechecks/blocks/exempt) each week in the canonical pinned
-CPU env and fails on any survivor or scoring error;
+(registry/checks/corechecks/blocks/exempt/executor) each week in the
+canonical pinned CPU env and fails on any survivor or scoring error;
 ``.github/workflows/mutation.yml`` automates the ~161-run per-arm campaign
 as a weekly rotating shard (one of four arm shards per week, plus
 ``workflow_dispatch`` for any family), archives every verdict, and fails on
@@ -228,6 +228,11 @@ EXEMPT_MUTANTS: dict[str, tuple[str, str]] = {
 #: Bounded arming suite: the files whose job is to kill the mutants above.
 SUITE = [
     "tests/test_validation.py",
+    # Step-18 (streamed-bundle finalization) killers: the executor family's
+    # first sample campaign proved _should_run_step_18 forced-False survived
+    # every file below (r7 R74; no suite file streamed to disk). Removing
+    # this file resurrects a PROVEN survivor.
+    "tests/test_streaming_finalization_arming.py",
     "tests/test_replay_corruption_battery.py",
     "tests/test_internals.py",
     "tests/test_ancestry_closure_invariant.py",
@@ -475,12 +480,59 @@ def neuter_raise_arm(path: Path, func: str, index: int) -> str:
     if index >= len(arms):
         raise SystemExit(f"{func} in {path} has {len(arms)} arms; no index {index}")
     lineno, end_lineno, col = arms[index]
-    keyword = "break" if (lineno, end_lineno, col) in while_exit_arm_keys(src, func) else "pass"
+    keyword = arm_disarm_keyword(src, func, index)
     lines = src.splitlines(keepends=True)
     replacement = f"{' ' * col}{keyword}  # R74-ARM-MUTANT\n"
     lines[lineno - 1 : end_lineno] = [replacement]
     path.write_text("".join(lines), encoding="utf-8")
     return src
+
+
+def arm_disarm_keyword(src: str, func: str, index: int) -> str:
+    """Return the disarm keyword (``break``/``pass``) for one raise arm.
+
+    Exposed separately so the archived verdict record can label the operator
+    it ACTUALLY applied (r7 R74 F3: the record said "pass replacing raise
+    arm 0" for the one while-exit arm where ``break`` was applied -- the very
+    arm whose operator choice is load-bearing).
+    """
+
+    arms = enumerate_raise_arms(src, func)
+    if index >= len(arms):
+        raise SystemExit(f"{func} has {len(arms)} arms; no index {index}")
+    return "break" if arms[index] in while_exit_arm_keys(src, func) else "pass"
+
+
+def derive_executor_mutants(sandbox: Path) -> dict[str, tuple[str, str, str]]:
+    """One skip mutant per postprocess-executor step and gate predicate.
+
+    r7 R74 (sol b9 HIGH): the census never targeted
+    ``postprocess/_executor.py`` -- 25 ``_run_step_*`` bodies plus the
+    conditional ``_should_run_step_*`` predicates had NO mutation verdict,
+    even though R74 explicitly scopes ``postprocess/``. DERIVED from the
+    module's defs (like the registry family), so a new step enrolls itself:
+    a ``_run_step_*`` neuters to ``return None`` (the step silently skips)
+    and a ``_should_run_step_*`` to ``return False`` (the gate never fires).
+    Import/collection errors stay ERROR verdicts, never kills.
+    """
+
+    rel = "torchlens/postprocess/_executor.py"
+    tree = ast.parse((sandbox / rel).read_text(encoding="utf-8"))
+    mutants: dict[str, tuple[str, str, str]] = {}
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name.startswith("_run_step_"):
+            mutants[f"executor#{node.name}"] = (rel, node.name, "None")
+        elif node.name.startswith("_should_run_step_"):
+            mutants[f"executor#{node.name}"] = (rel, node.name, "False")
+    if len(mutants) < 20:
+        raise SystemExit(
+            f"executor derivation found only {len(mutants)} step functions in "
+            f"{rel} -- the module moved or the naming convention changed; "
+            "re-point the derivation rather than scoring a hollow family"
+        )
+    return mutants
 
 
 def derive_arm_mutants(
@@ -691,6 +743,26 @@ def run_suite(
         return SuiteTimeout(float(timeout or 0.0))
 
 
+def require_nonempty_selection(
+    ids: list[str], *, family: str | None, arm_shard: str | None
+) -> None:
+    """Refuse an empty mutant selection instead of scoring vacuously green.
+
+    r7 R79 (fable b10 MED, corroborated by the R82 lane): an empty ``ids``
+    list skipped the campaign loop entirely and printed ``all mutants
+    KILLED`` with exit 0 -- so a shard-slicing bug or a family-key rename
+    would turn the scheduled leg permanently, silently green. Zero selected
+    mutants is never a verdict; it is a selection failure.
+    """
+
+    if not ids:
+        raise SystemExit(
+            "EMPTY MUTANT SELECTION -- refusing to report a vacuous "
+            f"'all mutants KILLED' (family={family!r}, arm_shard={arm_shard!r}); "
+            "fix the family key or shard arithmetic"
+        )
+
+
 def main() -> None:
     """Parse arguments, enforce the pristine control, and score each mutant."""
 
@@ -710,7 +782,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--family",
-        choices=("registry", "checks", "blocks", "exempt", "arms", "corechecks"),
+        choices=("registry", "checks", "blocks", "exempt", "arms", "corechecks", "executor"),
         help="score only one mutant family (a full arm campaign is ~161 runs)",
     )
     parser.add_argument(
@@ -755,6 +827,7 @@ def main() -> None:
             "delete them; registry contracts enroll automatically"
         )
     arm_mutants = derive_arm_mutants(sandbox, registry)
+    executor_mutants = derive_executor_mutants(sandbox)
     derive_core_check_roster(sandbox)
     plan: dict[str, tuple[str, str, str | None, str, int | None]] = {}
     families: dict[str, list[str]] = {}
@@ -776,6 +849,9 @@ def main() -> None:
     for mid, (rel, func, arm_index) in arm_mutants.items():
         plan[mid] = (rel, func, None, "None", arm_index)
         families.setdefault("arms", []).append(mid)
+    for mid, (rel, func, value) in executor_mutants.items():
+        plan[mid] = (rel, func, None, value, None)
+        families.setdefault("executor", []).append(mid)
     n_families = (
         len(registry)
         + len(MUTANTS)
@@ -783,6 +859,7 @@ def main() -> None:
         + len(BLOCK_MUTANTS)
         + len(EXEMPT_MUTANTS)
         + len(arm_mutants)
+        + len(executor_mutants)
     )
     if len(plan) != n_families:
         raise SystemExit("mutant id collision across families -- rename the clash")
@@ -790,7 +867,7 @@ def main() -> None:
         f"roster: {len(registry)} registry contracts + {len(MUTANTS)} checks + "
         f"{len(CORE_CHECK_MUTANTS)} core checkers + "
         f"{len(BLOCK_MUTANTS)} witness blocks + {len(EXEMPT_MUTANTS)} exemption gates + "
-        f"{len(arm_mutants)} raise arms",
+        f"{len(arm_mutants)} raise arms + {len(executor_mutants)} executor steps",
         flush=True,
     )
 
@@ -811,6 +888,7 @@ def main() -> None:
             raise SystemExit(f"bad --arm-shard {args.arm_shard!r}: need 1 <= I <= N")
         ids = [mid for pos, mid in enumerate(sorted(ids)) if pos % shard_count == shard_index - 1]
         print(f"shard {shard_index}/{shard_count}: {len(ids)} mutants", flush=True)
+    require_nonempty_selection(ids, family=args.family, arm_shard=args.arm_shard)
 
     # Pristine control: verdicts are meaningless over a red baseline (the b9
     # hunt's un-controlled pass hallucinated 2 kills off pre-existing reds).
@@ -843,8 +921,9 @@ def main() -> None:
         rel, func, marker, value, arm_index = plan[mid]
         path = sandbox / rel
         if arm_index is not None:
+            keyword = arm_disarm_keyword(path.read_text(encoding="utf-8"), func, arm_index)
             original = neuter_raise_arm(path, func, arm_index)
-            operator = f"pass replacing raise arm {arm_index}"
+            operator = f"{keyword} replacing raise arm {arm_index}"
         elif marker is None:
             original = neuter(path, func, value)
             operator = f"return {value}"
