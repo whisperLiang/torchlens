@@ -4324,7 +4324,7 @@
   "field": "modules",
   "file": "torchlens/ir/op_record_scatter.py",
   "has_default": false,
-  "sites": 3,
+  "sites": 4,
   "via_getattr": false
  },
  {
@@ -4924,7 +4924,7 @@
   "field": "kind",
   "file": "torchlens/postprocess/finalization.py",
   "has_default": false,
-  "sites": 5,
+  "sites": 4,
   "via_getattr": false
  },
  {
@@ -6140,7 +6140,7 @@
   "field": "modules",
   "file": "torchlens/validation/_invariants_payloads.py",
   "has_default": false,
-  "sites": 2,
+  "sites": 3,
   "via_getattr": false
  },
  {
@@ -6188,7 +6188,7 @@
   "field": "parent_arg_positions",
   "file": "torchlens/validation/_invariants_topology.py",
   "has_default": false,
-  "sites": 1,
+  "sites": 2,
   "via_getattr": false
  },
  {
