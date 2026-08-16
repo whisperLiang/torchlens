@@ -1393,3 +1393,74 @@ def test_taxonomy_allowlist_has_no_stale_or_shadowing_entries() -> None:
         assert isinstance(reason, str) and reason.strip(), (
             f"allowlist entry {entry!r} must carry a non-empty reason"
         )
+
+
+# --- fixwave-5 refusal-code provocations (error-code coverage gate) -----------------
+
+
+def test_input_kwargs_type_invalid_provoked() -> None:
+    """Non-Mapping input_kwargs refuses typed at entry with its stable code."""
+
+    import torch
+
+    import torchlens as tl
+    from torchlens._errors import ArgumentTypeError
+
+    model = torch.nn.Identity()
+    with pytest.raises(ArgumentTypeError) as excinfo:
+        tl.trace(model, torch.ones(2), input_kwargs=[1, 2])  # type: ignore[arg-type]
+    assert excinfo.value.fields["code"] == "input_kwargs_type_invalid"
+
+
+def test_layers_to_save_type_invalid_provoked() -> None:
+    """A Tensor in the deprecated positional layers_to_save slot refuses typed.
+
+    This is almost always a fourth positional model input; the refusal names
+    the bundle-as-tuple remedy.
+    """
+
+    import torch
+
+    import torchlens as tl
+    from torchlens._errors import ArgumentTypeError
+
+    model = torch.nn.Identity()
+    with pytest.raises(ArgumentTypeError) as excinfo:
+        # layers_to_save is the FOURTH positional slot (after input_kwargs).
+        tl.trace(model, torch.ones(2), None, torch.ones(2))  # type: ignore[misc]
+    assert excinfo.value.fields["code"] == "layers_to_save_type_invalid"
+
+
+def test_intervention_replacement_invalid_provoked() -> None:
+    """A wrong-shape intervention replacement refuses typed with its stable code."""
+
+    import torch
+
+    import torchlens as tl
+    from torchlens.intervention.errors import HookValueError
+
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.ReLU())
+    with pytest.raises(HookValueError) as excinfo:
+        tl.trace(
+            model,
+            torch.ones(2, 4),
+            intervene=tl.when(tl.func("relu"), tl.replace_with(torch.ones(999))),
+        )
+    assert excinfo.value.fields["code"] == "intervention_replacement_invalid"
+
+
+def test_output_unsupported_tensor_variant_provoked() -> None:
+    """A nested tensor built inside forward() refuses attribution with its code."""
+
+    import torch
+
+    import torchlens as tl
+    from torchlens._errors import OutputAttributionError
+
+    class _NestedOut(torch.nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.nested.nested_tensor([x[0], x[1, :2]])
+
+    with pytest.raises(OutputAttributionError) as excinfo:
+        tl.trace(_NestedOut(), torch.ones(2, 4))
+    assert excinfo.value.fields["code"] == "output_unsupported_tensor_variant"
