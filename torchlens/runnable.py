@@ -277,6 +277,12 @@ class RunnableErrorCode(str, Enum):
     COLLECTIVE_BOUNDARY_RUNNABLE_UNSUPPORTED = "collective_boundary_runnable_unsupported"
     HALTED_CAPTURE_NOT_RUNNABLE = "halted_capture_not_runnable"
     USER_INTERVENTION_NOT_REPLAYABLE = "user_intervention_not_replayable"
+    #: PROVISIONAL SPELLING (D18, ships documented-unstable pending naming
+    #: ratification): the live refresh projector refused buffer-sink routing --
+    #: a train-mode (value-changing) buffer writer, unproven (``None``) write
+    #: evidence, a claim/evidence contradiction, or a refreshed rerun that
+    #: wrote a buffer on the newly-allowed eval-mode path.
+    BUFFER_SINK_ROUTING_MUTABLE = "buffer_sink_routing_mutable"
 
 
 class LiteralAtomKind(str, Enum):

@@ -1104,8 +1104,11 @@ def _record_runnable_module_training_modes(trace: "Trace", model: Any) -> None:
     on the given inputs, so the captured mode is DECLARED state the replay reproduces.
     Recording it (per submodule -- submodules can differ) lets the producer declare the mode
     as a witness fact; a mode-sensitive op replayed without a recorded mode fact is downgraded
-    to UNVERIFIABLE (fail closed). It runs only for intervention-ready captures, touches no
-    tensors, and stores an in-memory map consumed by the producer at save time.
+    to UNVERIFIABLE (fail closed). It runs for every capture (D18 widened the former
+    intervention-ready gate so the live refresh projector's mode-claim belt holds on the
+    default path; the widening is verdict-inert on the sparse side because the runnable
+    producer refuses non-intervention-ready captures outright), touches no tensors, and
+    stores an in-memory map consumed by the producer at save time and by the projector belt.
 
     Parameters
     ----------
@@ -1115,8 +1118,6 @@ def _record_runnable_module_training_modes(trace: "Trace", model: Any) -> None:
         The prepared source model whose per-module ``training`` flags are recorded.
     """
 
-    if not bool(getattr(trace, "intervention_ready", False)):
-        return
     named_modules = getattr(model, "named_modules", None)
     if not callable(named_modules):
         return

@@ -40,6 +40,21 @@ class RunPreconditionError(RunnableTLSPECError, ConfigurationError, ValueError):
     """Runtime inputs or sparse call construction violated a frozen contract."""
 
 
+class BufferSinkRoutingError(RunnableTLSPECError, ConfigurationError, ValueError):
+    """The live refresh projector refused mutable or unproven buffer-sink routing.
+
+    Raised with ``fields["code"] == "buffer_sink_routing_mutable"`` (a
+    ``RunnableErrorCode`` member; provisional spelling, documented-unstable)
+    by all four typed buffer-sink arms of the mode-aware refresh projector
+    (D18): a train-mode buffer WRITER (``buffer_value_changed=True``),
+    unproven write evidence (``None``, fail closed), a recorded mode claim
+    contradicting the write evidence, and the refresh write tripwire (the
+    refreshed rerun's own journal recorded a value-changing buffer write on
+    the newly-allowed no-write path). ``ValueError`` stays in the MRO and the
+    message keeps the pinned "computational graph changed" term, so every
+    historical ``except ValueError`` caller and pinned match survive."""
+
+
 class RuntimeSignatureDriftError(RunnableTLSPECError, CompatibilityError, RuntimeError):
     """A resolved native callable rejected the frozen recipe during execution."""
 
@@ -61,6 +76,7 @@ class CollectiveBoundaryReplayError(RunnableTLSPECError, ValidationError, Runtim
 
 
 __all__ = [
+    "BufferSinkRoutingError",
     "CollectiveBoundaryReplayError",
     "NumericAttestationError",
     "PathDivergenceError",
