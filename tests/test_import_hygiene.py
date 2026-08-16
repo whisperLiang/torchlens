@@ -38,6 +38,9 @@ _LAZY_MODULE_CASES = (
     ("intervention", "func"),
     ("user_funcs", "trace"),
     ("data_classes", "Buffer"),
+    # r7 R81: the documented tl.autoroute.output spelling used to resolve
+    # only by import-order side effect (no lazy row).
+    ("autoroute", "output"),
 )
 
 #: Third-party packages a bare ``import torchlens`` must never pull. FROZEN and
@@ -301,7 +304,8 @@ for facade_name, module_path in facades.items():
         assert getattr(facade_module, public_name) is expected
 
 assert collisions == {
-    "attribution": [], "compat": ["lovely", "torchextractor", "torchshow"],
+    "attribution": [], "autoroute": ["input", "output"],
+    "compat": ["lovely", "torchextractor", "torchshow"],
     "data_classes": [], "debug": [], "distributed": [], "examples": [],
     "experimental": ["dagua", "node_styles"], "export": [],
     "fastlog": ["dry_run", "recover"], "intervention": ["replay", "rerun", "sites"],
