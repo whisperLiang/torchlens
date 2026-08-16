@@ -151,3 +151,35 @@ def test_fork_of_fork_pickle_round_trip(parent_trace: tl.Trace) -> None:
     grandfork = fork.fork()
     restored = pickle.loads(pickle.dumps(grandfork))
     assert len(restored.layer_list) == len(grandfork.layer_list)
+
+
+def test_pickle_and_deepcopy_after_receptive_field_access() -> None:
+    """RF session caches must not leak mappingproxies into the pickle path.
+
+    Hunt-6 incidental HIGH: after ANY receptive-field access the lazy
+    influence-geometry caches (``_receptive_field_solution`` /
+    ``_rf_source_solutions`` / ``_rf_target_solutions``) held
+    mappingproxy-bearing solution objects that ``__getstate__`` carried
+    verbatim, so ``pickle.dumps(trace)`` and ``copy.deepcopy(trace)`` raised
+    ``TypeError: cannot pickle 'mappingproxy' object`` while the SAME calls
+    succeeded on a fresh trace (``tl.save`` was unaffected -- its scrub path
+    drops the fields). Influence geometry is an advertised lazy surface, so
+    inspect-RF-then-snapshot is a realistic user path.
+    """
+
+    model = nn.Sequential(nn.Conv2d(1, 2, 3, padding=1), nn.ReLU())
+    trace = tl.trace(model, torch.randn(1, 1, 8, 8))
+
+    box = trace["relu_1_2"].receptive_field.at((2, 2))
+    assert box is not None
+    assert trace.__dict__.get("_receptive_field_solution") is not None
+
+    payload = pickle.dumps(trace)  # crashed before the __getstate__ scrub
+    restored = pickle.loads(payload)
+    cloned = copy.deepcopy(trace)
+
+    # The caches rebuild on demand: RF stays usable on both copies.
+    for twin in (restored, cloned):
+        assert twin.__dict__.get("_receptive_field_solution") is None
+        rebuilt = twin["relu_1_2"].receptive_field.at((2, 2))
+        assert rebuilt is not None
