@@ -200,11 +200,16 @@ class TraceVisualizationMixin(_TraceMixinBase):
             vis_node_placement = cast(VisNodePlacementLiteral, layout)
         if node_style is not MISSING:
             node_mode = cast(VisNodeModeLiteral, node_style)
+        # The three legacy vis_* sentinels warn like the vis_opt hop above:
+        # a silent translation is an unannounced removal hazard (R48-a).
         if vis_node_mode is not MISSING:
+            warn_deprecated_alias("vis_node_mode", "node_style")
             node_mode = cast(VisNodeModeLiteral, vis_node_mode)
         if vis_buffers is not MISSING:
+            warn_deprecated_alias("vis_buffers", "show_buffer_layers")
             show_buffer_layers = cast(BufferVisibilityLiteral | bool, vis_buffers)
         if vis_direction is not MISSING:
+            warn_deprecated_alias("vis_direction", "direction")
             direction = cast(VisDirectionLiteral, vis_direction)
         if vis_mode == "none":
             return None

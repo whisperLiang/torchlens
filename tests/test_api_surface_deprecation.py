@@ -229,3 +229,37 @@ def test_load_intervention_spec_wrapper_warns(monkeypatch: pytest.MonkeyPatch) -
     with pytest.warns(DeprecationWarning):
         result = torchlens.load_intervention_spec("demo.tlspec")
     assert result is sentinel
+
+
+@pytest.mark.parametrize(
+    ("legacy_kwarg", "legacy_value", "canonical"),
+    [
+        ("vis_node_mode", "default", "node_style"),
+        ("vis_buffers", "meaningful", "show_buffer_layers"),
+        ("vis_direction", "bottomup", "direction"),
+    ],
+)
+def test_draw_legacy_vis_kwargs_warn(
+    tmp_path: Path,
+    small_model: _TinyModel,
+    small_input: torch.Tensor,
+    legacy_kwarg: str,
+    legacy_value: str,
+    canonical: str,
+) -> None:
+    """The three sentinel-detected ``draw`` translations must warn (R48-a).
+
+    ``draw(vis_node_mode=)`` / ``draw(vis_buffers=)`` / ``draw(vis_direction=)``
+    were silently translated to their canonical spellings while the sibling
+    ``vis_opt=`` hop warned -- an unannounced removal hazard (grind b4 R48-a,
+    carried byte-identical through fixwave-5).
+    """
+
+    log = torchlens.trace(small_model, small_input)
+    with pytest.warns(DeprecationWarning, match=rf"`{legacy_kwarg}`.*`{canonical}`"):
+        log.draw(
+            vis_outpath=str(tmp_path / "graph"),
+            vis_save_only=True,
+            vis_fileformat="dot",
+            **{legacy_kwarg: legacy_value},
+        )
