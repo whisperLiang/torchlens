@@ -49,3 +49,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 23ae097ab99b23bf16a2913959f80747ee15e74a (clean)
 recorded: 2026-08-16T15:23:26.253140+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: l2/l3 merge-gate reconcile: episode capture (capture_kind=episode, S6 member relations) + aten wave 0 (primitive_op profile, _aten_capture, structure_only belt) moved/added producer-consumer sites
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 862c656a468dd3716665f6512875c297b7326a3b (dirty)
+recorded: 2026-08-16T21:17:58.766864+00:00
