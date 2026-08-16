@@ -175,6 +175,7 @@ CELL_SOURCE_MANIFEST: dict[str, str] = {
     'saved_args': 'FACET:templates',
     'saved_kwargs': 'FACET:templates',
     'shape': 'JOIN:payload',
+    'site_key': 'DEFAULT',
     'source_trace': 'EXTRAS:source_trace',
     'step_index': 'CORE',
     'terminal_bool_for': 'DEFAULT',

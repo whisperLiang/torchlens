@@ -95,7 +95,9 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/_io/runnable_load.py": 3850,
     "torchlens/user_funcs.py": 4200,
     "torchlens/backends/torch/backward.py": 3900,
-    "torchlens/data_classes/trace.py": 3800,
+    # 3800 -> 3850: L1 adds the grouping knob mirror + grouping_policy stamp
+    # settlement (~25 lines) on top of the re-stepped feature-sprint baseline.
+    "torchlens/data_classes/trace.py": 3850,
     "torchlens/utils/_torch_compat.py": 3450,
     "torchlens/backends/torch/wrappers.py": 3400,
     "torchlens/backends/tinygrad/backend.py": 3300,

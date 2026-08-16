@@ -89,3 +89,19 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 8f637da18bd0d73fc897e2fc39920aa157269f73 (dirty)
 recorded: 2026-08-16T21:40:46.774101+00:00
+---
+generator: producer_parity/test_ledger.py (static half)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: featmega L1 merge: site_key/site_peers/shape_summary accessors, verdict-tiered site join, and the grouping_policy_v1 stamp add reviewed read sites in the layer/grouping family
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 41804a9db4fe2a6bb03f4fcb08c3cde9f4185c62 (clean)
+recorded: 2026-08-16T21:43:20.761964+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: featmega L1 merge: site_key/site_peers/shape_summary accessors, verdict-tiered site join, and the grouping_policy_v1 stamp add reviewed read sites in the layer/grouping family
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 41804a9db4fe2a6bb03f4fcb08c3cde9f4185c62 (clean)
+recorded: 2026-08-16T21:43:32.406166+00:00

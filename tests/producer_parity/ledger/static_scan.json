@@ -420,7 +420,7 @@
   "field": "modules",
   "file": "torchlens/backends/_finalize.py",
   "has_default": true,
-  "sites": 1,
+  "sites": 2,
   "via_getattr": true
  },
  {
@@ -2696,6 +2696,14 @@
   "via_getattr": false
  },
  {
+  "ambiguous": false,
+  "field": "source_trace",
+  "file": "torchlens/data_classes/_layer_sites.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
   "ambiguous": true,
   "field": "modules",
   "file": "torchlens/data_classes/_lookup_keys.py",
@@ -4936,6 +4944,14 @@
   "via_getattr": true
  },
  {
+  "ambiguous": false,
+  "field": "equivalence_class",
+  "file": "torchlens/postprocess/_site_join.py",
+  "has_default": false,
+  "sites": 2,
+  "via_getattr": false
+ },
+ {
   "ambiguous": true,
   "field": "kind",
   "file": "torchlens/postprocess/ast_branches.py",
@@ -5264,11 +5280,19 @@
   "via_getattr": false
  },
  {
+  "ambiguous": false,
+  "field": "layer_type",
+  "file": "torchlens/postprocess/loop_detection.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
   "ambiguous": true,
   "field": "modules",
   "file": "torchlens/postprocess/loop_detection.py",
   "has_default": true,
-  "sites": 2,
+  "sites": 3,
   "via_getattr": true
  },
  {

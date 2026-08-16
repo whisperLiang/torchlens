@@ -174,6 +174,10 @@ MODEL_LOG_FIELD_ORDER = [
     "save_code_context",
     "save_rng_states",
     "recurrence_detection",
+    # Grouping knob mirror + grouping-policy stamp (L1 wave 0; both
+    # FieldPolicy.DROP under tlspec v7, prerelease-registered)
+    "grouping",
+    "grouping_policy",
     "verbose",
     "profile_enabled",
     "has_gradients",
@@ -427,6 +431,10 @@ LAYER_PASS_LOG_FIELD_ORDER = [
     "equivalence_class",
     "equivalent_ops",
     "recurrent_ops",
+    # Structural position identity (site_key_v1, minted at step 7; portable
+    # bridging relation -- FieldPolicy.DROP until the coordinated tlspec bump,
+    # prerelease-registered)
+    "site_key",
     # Graph info
     "parents",
     "parent_arg_positions",

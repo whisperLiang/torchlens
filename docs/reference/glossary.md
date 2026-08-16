@@ -388,6 +388,82 @@ Spellings below shipped ahead of their naming-session/S2 ratification under
 the megasprint provisional-name protocol: they may rename WITHOUT deprecation
 shims, by declared contract. Each carries the same tag at its definition.
 
+**site_key (`Op.site_key`)** — *unstable — no deprecation shim owed*
+: The portable structural-position identity of one retained op
+  (`site_key_v1`): a `"s1|"`-prefixed string of the pass-free module address
+  stack, the normalized op type, the output slot, and a 1-based occurrence
+  ordinal within one pass-qualified innermost module call instance, minted
+  from raw records at grouping time on every backend. Policy-independent
+  (identical whether grouping ran, degraded, or was off), process-portable
+  (no barcodes, ids, or arg hashes), and a BRIDGING relation: two captures of
+  the same program agree on site keys even when their layer labels disagree.
+  It proves POSITION, never source identity — cross-capture joins carry a
+  per-call-instance cardinality guard, a source-location witness, and a
+  three-tier verdict (corroborated / positional / refused). Editing the
+  model's `forward()` changes downstream sites: keys bridge captures of the
+  SAME program, never a program diff. The `"s1"` prefix makes any future
+  re-keying a visible schema event. `FieldPolicy.DROP` under tlspec v7
+  (prerelease-registered; persists at the coordinated bump).
+
+**Layer.site_key** — *unstable — no deprecation shim owed*
+: The layer's single site key iff every op in the layer shares exactly one.
+  A site-SPANNING layer (within-call-instance recurrence such as transformer
+  residual-add pairs, or root-context loops) refuses typed
+  `layer_site_ambiguous` — read per-pass keys via `.ops[k].site_key`.
+  Site-uniformity and pass-uniformity are DIFFERENT axes: a reused-module
+  multi-pass layer has one key. Legacy pre-site-key artifacts refuse typed
+  `site_key_unavailable`, never a `None` read.
+
+**Layer.site_peers** — *unstable — no deprecation shim owed*
+: Layers sharing any of this layer's site keys within the trace (the
+  reused-relu cohort surface), computed live per call and never persisted.
+  Refuses typed `site_key_unavailable` on keyless layers — a legacy artifact
+  never collapses into a `None`-key peer-of-everything.
+
+**Layer.shape_summary** — *unstable — no deprecation shim owed*
+: Derived (never persisted) data string summarizing output shapes ACROSS
+  PASSES of one layer: `None` for single-pass and shape-uniform layers; one
+  varying axis renders `"A->B"` (monotone) or `"A-B"` (min-max); multi-axis
+  or rank-varying layers render first-to-last full shapes
+  (`"2x64x8x8->2x512x4x4"`). Distinct from the internal module-run fold
+  summary (`ModuleRepeatFold.shape_summary`), which summarizes across a
+  repeated MODULE RUN. The string legitimately contains `->`; renderers must
+  HTML-escape it (escape-at-render, never assert-absence).
+
+**grouping= (trace kwarg) / trace.grouping** — *unstable — no deprecation
+shim owed; S2-gated vocabulary*
+: Closed-vocabulary grouping-policy knob: `"structural"` (default — today's
+  recurrence grouping), `"strict_shapes"` (reserved; refuses typed until its
+  own reviewed design lands), `"fold_sites"` (the D1 within-capture folding
+  axis; refuses typed on plain captures until an affirmative D1 ruling).
+  Unknown values refuse `grouping_invalid`; legal-but-not-entry-legal values
+  refuse `grouping_policy_unavailable`. The mirror field `trace.grouping`
+  records the requested value. Distinct from the display-only `fold_repeats`
+  viz knob, which folds repeated module runs at render time and never
+  changes grouping.
+
+**trace.grouping_policy** — *unstable — no deprecation shim owed; S2-gated
+vocabulary*
+: The persisted, load-validated `grouping_policy_v1` stamp recording HOW the
+  trace was grouped: `policy` (the step-7 grouping that actually ran —
+  `structural` / `params_only` / later `fold_sites`), `requested` (the knob
+  mirror), `folded_sites` and `site_join` (two distinct site-granular axes:
+  step-7 folds vs product-layer joins), `detector`, `effective`, and
+  `settlement_note`. Loads validate against the exact writer key set, closed
+  vocabularies, and coherence rules C1–C8; parse failure or incoherence
+  warns once and settles to THE canonical degraded representation
+  (`policy="unknown"`, `settlement_note="grouping_stamp_<reason>"`), which
+  round-trips byte-stable and stays degraded — verdicts only worsen across
+  persistence. Legacy pre-stamp artifacts settle silently to
+  `grouping_stamp_legacy`; degraded stamps refuse stamp-consuming
+  operations typed. `FieldPolicy.DROP` under tlspec v7
+  (prerelease-registered).
+
+**L1 grouping refusal codes** — *unstable — no deprecation shim owed;
+S2-gated*
+: `layer_site_ambiguous`, `site_key_unavailable`, `grouping_invalid`,
+  `grouping_policy_unavailable`.
+
 **structure_only (capture kwarg) / trace.structure_only** — *unstable — no
 deprecation shim owed*
 : `tl.trace(model, x, capture=CaptureOptions(structure_only=True))` runs the

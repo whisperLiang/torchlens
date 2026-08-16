@@ -2469,6 +2469,7 @@ def trace(
         | MissingType
     ) = MISSING,
     *,
+    grouping: str | MissingType = MISSING,
     structure_only: bool | MissingType = MISSING,
     jax_control_flow: Literal["reject", "unroll", "region"] | MissingType = MISSING,
     jax_max_control_flow_unroll: int | MissingType = MISSING,
@@ -2714,6 +2715,16 @@ def trace(
     recipes:
         Per-trace additive facet recipes captured into the immutable
         registry snapshot for the returned trace.
+    grouping:
+        UNSTABLE (no deprecation shim owed). Closed-vocabulary grouping
+        policy: ``"structural"`` (the default -- today's recurrence
+        grouping), ``"strict_shapes"`` (reserved; refuses typed until its
+        own reviewed design lands), ``"fold_sites"`` (the D1 folding axis;
+        refuses typed on plain captures until an affirmative D1 ruling).
+        The requested value is recorded on ``trace.grouping`` and the
+        policy that actually ran on ``trace.grouping_policy``. Distinct
+        from the display-only ``fold_repeats`` viz knob, which folds
+        repeated module runs at RENDER time and never changes grouping.
     structure_only:
         If True, run this capture under the structure-only contract
         (DOCUMENTED-UNSTABLE surface, pending naming-session/S2 ratification;
@@ -2796,6 +2807,15 @@ def trace(
     public_trace_kwargs = locals().copy()
     public_trace_kwargs.pop("backend")
     public_trace_kwargs.pop("capture_output_structure")
+    # grouping= (UNSTABLE, keyword-only; L1 wave 0): closed-vocabulary knob.
+    # Only "structural" (today's grouping, the default) is entry-legal;
+    # "strict_shapes" waits on its own reviewed design and "fold_sites" on
+    # an affirmative D1 ruling (the flip PR) / the episode capture kind.
+    public_trace_kwargs.pop("grouping")
+    if grouping is not MISSING:
+        from .postprocess._grouping_stamp import validate_grouping_knob
+
+        validate_grouping_knob(grouping)
     if chunk_paths is not MISSING and chunk_paths is not None and chunk_size in (MISSING, None):
         raise ChunkedForwardConfigError("chunk_paths requires chunk_size.")
     if backend is None and (jax_static_argnums is not MISSING or grad_options is not MISSING):

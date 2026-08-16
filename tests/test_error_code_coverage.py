@@ -47,7 +47,9 @@ import pytest
 from torchlens.merged import MergedErrorCode
 from torchlens.runnable import RunnableErrorCode
 
-pytestmark = pytest.mark.smoke
+# Per-test smoke marks (the former module-level pytestmark was additive
+# with the census's heavy re-tier and tripped the marker-combination
+# lint; every non-census test stays in the smoke tier).
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PACKAGE_ROOT = _REPO_ROOT / "torchlens"
@@ -140,6 +142,10 @@ UNPROVOKED_BASELINE: frozenset[str] = frozenset(
         "recording_multipass_not_convertible",
         "recording_option_duplicate",
         "renderer_capability_unsupported",
+        # run_fast_divergence_policy_invalid, run_fast_requires_inputs,
+        # run_legacy_options_conflict, run_source_model_collected: rows
+        # DELETED (shrink-only lock-in) -- the L4 S1-seam merge's compat pins
+        # now provoke them.
         "run_input_missing",
         "selector_function_pattern_type_invalid",
         "skip_fn_boundary_invalid",
@@ -509,6 +515,7 @@ def _test_referenced_codes(universe: set[str]) -> set[str]:
     return referenced & universe
 
 
+@pytest.mark.smoke
 def test_universe_is_nonempty() -> None:
     """Anti-vacuity: the scanners find real vocabularies."""
 
@@ -519,6 +526,7 @@ def test_universe_is_nonempty() -> None:
     assert any(origin == "error_refusal_contract" for origin in universe.values())
 
 
+@pytest.mark.smoke
 def test_every_enum_member_is_reachable_in_source() -> None:
     """No frozen enum member is declaration-only (dead vocabulary)."""
 
@@ -544,6 +552,7 @@ def test_every_enum_member_is_reachable_in_source() -> None:
     )
 
 
+@pytest.mark.smoke
 def test_every_code_is_provoked_or_consciously_ledgered() -> None:
     """The shrink-only provocation ratchet over the full vocabulary."""
 
@@ -572,6 +581,7 @@ def test_every_code_is_provoked_or_consciously_ledgered() -> None:
     )
 
 
+@pytest.mark.smoke
 def test_provocation_scanner_is_red_capable() -> None:
     """A code absent from every test is actually reported (gate can fail)."""
 
@@ -580,6 +590,7 @@ def test_provocation_scanner_is_red_capable() -> None:
     assert referenced == set()
 
 
+@pytest.mark.smoke
 def test_prose_names_and_inert_tables_never_count_as_provocation() -> None:
     """Non-executed mention channels never count (r3+r4 b6 R25 lineage).
 
@@ -712,6 +723,10 @@ def _codeless_io_raises() -> list[str]:
     return offenders
 
 
+# Whole-package AST census: crossed the 5s smoke partition as the tree grew
+# through the wave-0 merges (6.1s isolated at the L1 merge); heavy per the
+# marker partition (5-20s), not a budget dodge.
+@pytest.mark.heavy
 def test_codeless_io_raise_count_only_shrinks() -> None:
     """The IO error family's codeless-raise debt is a shrink-only ratchet."""
 

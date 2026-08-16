@@ -28,6 +28,18 @@ Key entry points:
   `draw_backward()`, `validate_forward_pass()`
 - Backend registry: `torchlens/backends/registry.py` - `BackendSpec`, `BackendName`,
   backend resolution, validation dispatch, and canonical backend errors.
+- Site keys + grouping surface (L1 wave 0, DOCUMENTED-UNSTABLE): every
+  retained op carries the portable structural-position key `op.site_key`
+  (`site_key_v1`, minted at grouping time on every backend,
+  policy-independent, the cross-capture bridging relation);
+  `Layer.site_key` / `Layer.site_peers` / `Layer.shape_summary` are the
+  Layer surface (typed refusals `layer_site_ambiguous` /
+  `site_key_unavailable`); `grouping=` is the closed-vocabulary knob
+  ("structural" default; others refuse typed pre-D1/S2) mirrored on
+  `trace.grouping`, with the load-validated `grouping_policy_v1` stamp on
+  `trace.grouping_policy` (C1-C8 coherence; degrade-settlement monotonic).
+  Persisted rows are DROP + prerelease-registered; join/fold machinery in
+  `torchlens/postprocess/_site_key.py` / `_site_join.py` / `_grouping_stamp.py`.
 - Structure-only capture (DOCUMENTED-UNSTABLE, D8-default):
   `tl.trace(model, x, capture=CaptureOptions(structure_only=True))` records
   structure + shape/dtype HYPOTHESES, never values; value consumers refuse

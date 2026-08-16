@@ -260,7 +260,10 @@ _RAW_LABEL_BEARING_LIST_FIELDS = (
     "equivalent_ops",
     "recurrent_ops",
 )
-_RAW_LABEL_BEARING_SCALAR_FIELDS = ("buffer_source", "module", "atomic_module_call")
+# ``site_key`` joins the sweep roster; its COMPONENT-level scan (a raw label
+# embedded before the ordinal tail is invisible to this whole-string pattern)
+# lives in ``_invariants_sites._check_site_key_invariants``.
+_RAW_LABEL_BEARING_SCALAR_FIELDS = ("buffer_source", "module", "atomic_module_call", "site_key")
 
 # Dict-shaped relation metadata carrying labels on either axis:
 # ``conditional_elif_children`` holds label LISTS as values (int keys), and
@@ -608,6 +611,8 @@ _check_graph_ordering = _rebind_function(_invariants_equivalence._check_graph_or
 _check_loop_detection_invariants = _rebind_function(
     _invariants_equivalence._check_loop_detection_invariants, globals()
 )
+from ._invariants_sites import _check_site_key_invariants  # noqa: E402
+
 _check_distance_invariants = _rebind_function(
     _invariants_connectivity._check_distance_invariants, globals()
 )
@@ -718,6 +723,14 @@ METADATA_INVARIANT_CONTRACTS: tuple[MetadataInvariantContract, ...] = (
         "loop_detection_invariants",
         _check_loop_detection_invariants,
         "torch",
+    ),
+    # Site-key tripwires I-S1/I-S2/I-S3' (L1 grouping core). All backends:
+    # every producer mints keys; legacy keyless artifacts are out of the
+    # declared domain (presence guard at the invariant's birth).
+    MetadataInvariantContract(
+        "site_key_invariants",
+        _check_site_key_invariants,
+        "all",
     ),
     MetadataInvariantContract("graph_topology", _check_graph_topology, "torch"),
     MetadataInvariantContract(

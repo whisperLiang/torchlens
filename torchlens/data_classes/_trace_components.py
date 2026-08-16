@@ -177,6 +177,8 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "save_code_context": "capture_config",
     "save_rng_states": "capture_config",
     "recurrence_detection": "capture_config",
+    "grouping": "capture_config",
+    "grouping_policy": "capture_config",
     "verbose": "capture_config",
     "profile_enabled": "capture_config",
     "has_gradients": "totals",

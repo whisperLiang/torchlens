@@ -83,8 +83,11 @@ _STANDING_REGISTRATIONS: dict[str, tuple[str, ...]] = {
         "sequence",
         "view_copy_kind",
     ),
+    "Op": ("site_key",),
     "OpRef": ("func_call_id", "op_label", "op_row_index"),
-    "Trace": ("_primitive_op_profile", "structure_only"),
+    # L1 wave 0: the grouping knob mirror + grouping-policy stamp; L3:
+    # _primitive_op_profile; L7a: structure_only.
+    "Trace": ("_primitive_op_profile", "grouping", "grouping_policy", "structure_only"),
     # L2 episode ledger: the gated annotations sub-key rides the synthetic
     # "Trace.annotations" owner (see torchlens/_io/prerelease.py).
     "Trace.annotations": ("episode",),
@@ -164,8 +167,8 @@ def test_registration_requires_declared_drop_policy() -> None:
     with pytest.raises(ValueError, match="no-op"):
         register_prerelease_field(Trace, _PLANT_FIELD, persisted_policy=FieldPolicy.DROP)
     # No refused registration may have landed; only STANDING lane
-    # registrations (real sprint-gated fields awaiting the coordinated bump,
-    # e.g. L7a's Trace.structure_only) are present.
+    # registrations (real sprint-gated fields awaiting the coordinated bump)
+    # are present.
     assert registered_prerelease_fields() == _STANDING_REGISTRATIONS
 
 
