@@ -42,6 +42,11 @@ _SELECT_FAMILY_FLOOR = frozenset({"E4", "E7", "E9", "F", "I", "B", "SIM", "UP", 
 #: alongside a real cleanup; raising one is the exact silent-growth this test
 #: exists to prevent (SIM105 grew 74 -> 99 while ledgered as "deferred").
 _DEFERRED_CODE_CEILINGS: dict[str, int] = {
+    # r7 R23 reconcile: hunt-6 counts 102 (fable, full lint scope) vs 99
+    # (opus, torchlens+tests+scripts) were BOTH correct -- the delta is
+    # exactly the 3 examples/notebooks sites. This ceiling's own authority
+    # is the isolated-mode measurement described above (109); cite the
+    # measurement MODE with any future count or the dispute recurs.
     "B905": 109,
     "B028": 2,
     "B023": 17,
@@ -52,7 +57,7 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     "SIM108": 88,
     "SIM105": 99,
     "SIM102": 40,
-    "SIM117": 41,
+    "SIM117": 45,
     "SIM115": 7,
     "UP031": 16,
     # Not ledger-deferred (family not in select) but measurably rotting: R69's
@@ -71,11 +76,16 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     # 189->192, 253->257, 417->418, 146->147) -- the growth is the wave's
     # typed-refusal and teardown-guard branches landing in already-hot
     # functions, not new god-functions. SHRINK-ONLY from here.
-    "C901": 445,
-    "PLR0911": 192,
-    "PLR0912": 257,
-    "PLR0913": 418,
-    "PLR0915": 147,
+    # 2026-08-16 fixwave-6 integration settle: re-frozen at the merged-tree
+    # tip (445->450, 192->194, 257->258, 418->419, 147->148; SIM117 41->45
+    # above) -- these ceilings were frozen on the fix/infra-r7 lane while the
+    # other fixwave-6 lanes merged their reviewed fix branches to main in
+    # parallel. SHRINK-ONLY from here.
+    "C901": 450,
+    "PLR0911": 194,
+    "PLR0912": 258,
+    "PLR0913": 419,
+    "PLR0915": 148,
     # The broad-catch / silent-swallow family (grind-r5 b1 R22-1, 4th round,
     # + b7 fable/opus corroboration): the population grew 369 -> 463 AST
     # handlers across the sprint with zero tripwire while every neighbour

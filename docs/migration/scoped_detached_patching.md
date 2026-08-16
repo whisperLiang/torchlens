@@ -33,7 +33,7 @@ repair stale bindings. Coverage is now:
    require re-reading the attribute after unwrap, or a fresh process.
 2. **Mechanical belt.** A small, per-build DERIVED set of wrapped functions is invisible to every
    `TorchFunctionMode` (zero protocol callbacks, measured at wrap time): on current builds
-   `torch.from_numpy`, `torch.from_dlpack`, `torch.frombuffer`, and `torch.Tensor.as_subclass`
+   `torch.from_numpy`, `torch.from_dlpack`, `torch.frombuffer`, `torch.Tensor.as_subclass`, and `torch.Tensor._make_subclass`
    (the authoritative set is the live derivation in `belt_report().members`, pinned per build in
    `tests/test_mechanical_belt.py`). A stale reference to one
    of these produces no signal a rescue could trigger on, so module-level attribute references to

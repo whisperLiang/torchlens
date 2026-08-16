@@ -1178,3 +1178,96 @@ def test_backend_parity_update_flag_arms_on_exact_one_only(
         # Digest mismatch proves the disarmed flag COMPARED instead of writing.
         parity._assert_projection_matches_golden("probe", {"a": 1})
     assert '"a": 1' in (tmp_path / "probe.json").read_text(), "disarmed flag must not rewrite"
+
+
+@pytest.mark.smoke
+def test_session_warmup_carveout_matches_every_golden_flag_prefix() -> None:
+    """r7 R77 (fable b2 MED): the warmup skip must honor ALL golden prefixes.
+
+    The session warmup capture wraps torch before any test runs; SF-53
+    wrap-state-guarded golden families therefore need the warmup skipped when
+    ANY declared golden flag is armed. The fixwave-5 carve-out hardcoded
+    ``TORCHLENS_UPDATE_`` and left the ``TORCHLENS_REGEN_`` families'
+    documented regen recipes hard-failing at their own guard. Pin: the
+    conftest predicate derives from ``GOLDEN_FLAG_PREFIXES``, never a
+    hand-copied prefix literal.
+    """
+
+    conftest_text = (Path(__file__).resolve().parent / "conftest.py").read_text(encoding="utf-8")
+    assert "key.startswith(GOLDEN_FLAG_PREFIXES)" in conftest_text, (
+        "the session-warmup golden carve-out no longer derives from "
+        "_oracle_env.GOLDEN_FLAG_PREFIXES"
+    )
+    assert 'key.startswith("TORCHLENS_UPDATE_")' not in conftest_text, (
+        "a hand-copied single-prefix carve-out is back in conftest.py"
+    )
+
+
+@pytest.mark.smoke
+def test_provenance_source_disclosure_ignores_the_familys_own_output() -> None:
+    """r7 R78-1 (opus b10 MED): the dirty disclosure must be about the SOURCE.
+
+    Golden bytes are rewritten BEFORE the provenance stamp, so counting the
+    family's own fresh output in `git status --porcelain` made every real
+    rebaseline read "dirty" -- an always-firing disclosure discloses nothing.
+    The filter drops the stamping family's own paths and PROVENANCE sidecars;
+    genuine source-tree dirt still reads dirty.
+    """
+
+    from _oracle_env import _foreign_porcelain_lines
+
+    own = "tests/golden/family_a/"
+    regen_only = (
+        " M tests/golden/family_a/case1.dot\n"
+        "?? tests/golden/family_a/case2.dot\n"
+        " M tests/golden/family_a/PROVENANCE\n"
+    )
+    assert _foreign_porcelain_lines(regen_only, own) == []
+    with_source_dirt = regen_only + " M torchlens/visualization/_render_dot.py\n"
+    foreign = _foreign_porcelain_lines(with_source_dirt, own)
+    assert foreign == [" M torchlens/visualization/_render_dot.py"]
+    # A rename record is judged by its destination path.
+    renamed = "R  tests/golden/family_a/old.dot -> tests/golden/family_a/new.dot\n"
+    assert _foreign_porcelain_lines(renamed, own) == []
+    # Sibling-family output still counts as dirt (conservative, disclosed).
+    sibling = " M tests/golden/family_b/case.dot\n"
+    assert _foreign_porcelain_lines(sibling, own) == [" M tests/golden/family_b/case.dot"]
+
+
+@pytest.mark.smoke
+def test_emitter_census_discovers_every_emitter_declaration() -> None:
+    """r7 R78-2 (opus b10 MED): the emitter census is DERIVED-complete, both ways.
+
+    The six census rows were hand-written with no discovery sweep, so a NEW
+    file gaining an ``_EMITTER_PACKAGES`` tuple was simply absent and
+    unchecked -- the declaration-vs-usage hole moved one level up (the
+    wrap-state guard's regex-discovery is the in-file precedent). Sweep every
+    test file: an ``_EMITTER_PACKAGES`` declaration outside the census is a
+    refusal, and every ENV-governed marker directory must be reachable from
+    the census.
+    """
+
+    censused = {relpath for relpath, _, _ in _EMITTER_PACKAGE_CENSUS}
+    declaring = {relpath for relpath, source in _test_texts() if _EMITTER_TUPLE_RE.search(source)}
+    undiscovered = declaring - censused
+    assert not undiscovered, (
+        f"file(s) declare _EMITTER_PACKAGES outside the census: {sorted(undiscovered)} "
+        "-- add census rows (and the family's ENV-<pkg> markers) in the same change"
+    )
+    # Marker-table direction: every ENV-governed directory is reachable from
+    # the census, so a dir added to the marker table cannot float unchecked.
+    # Reason-bearing exemptions only (never bare names):
+    exempt_dirs = {
+        # Two-layer byte+pixel scheme in test_bundle_diff_renderer.py; keys
+        # on the graphviz BINARY version (ENV-graphviz-dot), not on python
+        # emitter packages, and does not resolve through resolve_env_golden.
+        "snapshots",
+    }
+    census_dirs = {directory for _, directory, _ in _EMITTER_PACKAGE_CENSUS}
+    unreachable = set(_ENV_GOVERNED_REQUIRED_MARKERS) - census_dirs - exempt_dirs
+    assert not unreachable, (
+        f"ENV-governed marker dir(s) unreachable from the emitter census: "
+        f"{sorted(unreachable)} -- their emitter keying is unchecked"
+    )
+    stale_exempt = exempt_dirs - set(_ENV_GOVERNED_REQUIRED_MARKERS)
+    assert not stale_exempt, f"stale emitter-census exemption(s): {sorted(stale_exempt)}"

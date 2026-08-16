@@ -69,9 +69,28 @@ def _iter_python_blocks() -> list[tuple[str, int, str]]:
     return blocks
 
 
+def _doc_block_params() -> list[object]:
+    """Wrap blocks in params; compile-bearing blocks are HEAVY.
+
+    r7 R41/R72 fresh-env gate finding: the ``torch.compile`` fence in
+    reference/debug.md charges ~15s CPU in a COLD environment (first-run
+    dynamo/inductor compilation; the dev box's warm cache hid it), blowing
+    the 5s-tier budget the moment enforcement became always-on. Cold-cache
+    compilation cost is heavy-class by measurement, per-cell.
+    """
+
+    params: list[object] = []
+    for file_name, block_index, code in _iter_python_blocks():
+        marks = (
+            (pytest.mark.heavy,) if ("torch.compile" in code or "frames_compiled" in code) else ()
+        )
+        params.append(pytest.param(file_name, block_index, code, marks=marks))
+    return params
+
+
 @pytest.mark.parametrize(
     ("file_name", "block_index", "code"),
-    _iter_python_blocks(),
+    _doc_block_params(),
     ids=lambda value: str(value),
 )
 def test_p2_doc_python_block_runs(
@@ -284,3 +303,62 @@ def test_collapse_reference_gallery_exists_and_is_regenerable() -> None:
     assert linked_names == IMAGE_NAMES
     missing = [name for name in IMAGE_NAMES if not (DEFAULT_OUT_DIR / name).is_file()]
     assert not missing, f"Regenerate with scripts/render_collapse_reference.py: {missing}"
+
+
+#: r7 R81 (opus b2 MED): pages with python fences OUTSIDE the executed set,
+#: each with a reason. The executed gate covered 9 of 33 fence-bearing pages
+#: with NO drift gate, so a new page (or a new fence on an old one) shipped
+#: unexecuted and rotted silently -- the show(gradient=True)/RF-ordering rot
+#: class. SHRINK-ONLY: move pages into DOC_FILES as they gain execution
+#: coverage; a NEW page must either join DOC_FILES or take a reasoned row
+#: here in the same change.
+DOC_FENCE_EXEMPT: dict[str, str] = {
+    "backends.md": "preview-backend snippets need tf/jax/mlx/tinygrad/paddle runtimes",
+    "backward.md": "pending execution coverage (queued: backward capture snippets)",
+    "buffers.md": "pending execution coverage",
+    "containers.md": "pending execution coverage",
+    "facets.md": "pending execution coverage (semantic recipes; heavier model deps)",
+    "intervention_api.md": "pending execution coverage",
+    "intervention_explainers.md": "pending execution coverage",
+    "method_x_model_compatibility.md": "compatibility matrix stubs, not runnable programs",
+    "migration/from_captum.md": "needs captum installed (weekly bridge leg env only)",
+    "migration/from_fx.md": "pending execution coverage",
+    "migration/from_nnsight.md": "needs nnsight (heavyweight, deliberately dark)",
+    "migration/from_pyvene.md": "needs pyvene (not a declared extra)",
+    "migration/from_thingsvision.md": "needs thingsvision (not a declared extra)",
+    "migration/from_torchextractor.md": "needs torchextractor (bridge shim demo)",
+    "migration/from_transformerlens.md": "needs transformer_lens (heavyweight)",
+    "migration/v2.0_api_changes.md": "contains deliberate 'Before:' v1 blocks that must NOT run",
+    "rank_layout.md": "pending execution coverage (graphviz layout demo)",
+    "receptive_projective_fields.md": "pending execution coverage",
+    "reference/hash.md": "pending execution coverage",
+    "reference/limitations.md": "illustrative failure-mode fragments, not runnable programs",
+    "reference/runnable_tlspec_contract.md": "contract fragments reference artifacts not in-repo",
+    "semantic_io.md": "pending execution coverage (autoroute/facet demos)",
+    "speed_optimized_defaults.md": "pending execution coverage",
+    "visibility.md": "pending execution coverage",
+}
+
+
+def test_every_fence_bearing_doc_page_is_executed_or_reason_exempt() -> None:
+    """The executed-docs set is closed under new pages, both directions."""
+
+    docs = _docs_dir()
+    fence_pages = {
+        page.relative_to(docs).as_posix()
+        for page in sorted(docs.rglob("*.md"))
+        if BLOCK_RE.search(page.read_text(encoding="utf-8"))
+    }
+    unaccounted = fence_pages - set(DOC_FILES) - set(DOC_FENCE_EXEMPT)
+    assert not unaccounted, (
+        "docs page(s) carry python fences but are neither executed by this "
+        f"suite nor reason-exempt: {sorted(unaccounted)} -- add to DOC_FILES "
+        "(preferred) or write a reasoned DOC_FENCE_EXEMPT row"
+    )
+    stale = (set(DOC_FENCE_EXEMPT) | set(DOC_FILES)) - fence_pages
+    # Canonical non-docs pages (README/CLAUDE/AGENTS) are executed separately.
+    stale -= {"performance.md", "for-ai-agents.md"}
+    assert not stale.intersection(DOC_FENCE_EXEMPT), (
+        f"stale DOC_FENCE_EXEMPT row(s): {sorted(stale & set(DOC_FENCE_EXEMPT))} "
+        "-- the page lost its fences or moved; delete the row"
+    )

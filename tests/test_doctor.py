@@ -106,6 +106,33 @@ def test_capability_row_optional_absences_do_not_warn(monkeypatch: pytest.Monkey
     assert "missing=" not in row.detail
 
 
+def test_capability_row_pre_graphsafe_generator_flags_stay_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """r7 R26 (opus b4 LM): a pre-graph-safe torch install is healthy, not degraded.
+
+    The three ``torch.Generator`` method probes gate rows of the RNG
+    ``GENERATOR_METHOD_TABLE``: a ``False`` DROPS the row, so there is no
+    method left to monitor and nothing degrades. On the older half of the
+    declared ``torch>=2.1`` matrix these flags are legitimately absent; they
+    must report under ``optional_absent=`` and keep the doctor row at PASS
+    instead of a permanent unactionable WARN.
+    """
+
+    from torchlens.utils import _probe_torch_capabilities, _torch_compat as tc
+
+    for flag in (
+        "HAS_GENERATOR_CLONE_STATE",
+        "HAS_GENERATOR_GRAPHSAFE_GET_STATE",
+        "HAS_GENERATOR_GRAPHSAFE_SET_STATE",
+    ):
+        monkeypatch.setattr(tc, flag, False)
+    row = _probe_torch_capabilities()
+    assert row.status == "PASS"
+    assert "optional_absent=" in row.detail
+    assert "missing=" not in row.detail
+
+
 def test_capability_row_genuine_degradation_still_warns(monkeypatch: pytest.MonkeyPatch) -> None:
     """A genuine degradation (non-optional flag False) still drives WARN."""
 

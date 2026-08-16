@@ -411,13 +411,21 @@ def guard_wrap_state_for_golden_update(update_env: str) -> None:
     _WRAP_GUARD_CLEARED.add(update_env)
 
 
-def _source_identity() -> str:
+def _source_identity(golden_dir: Path | None = None) -> str:
     """Return ``<HEAD sha> (clean|dirty)`` for the generating checkout.
 
     A reviewed rebaseline must be mechanically tied to the exact source that
     emitted it, and a dirty-tree generation must be DISCLOSED, not silently
     recorded as if it came from a commit (b10 R78 round 5). Best-effort: a
     non-git checkout records ``unknown`` rather than failing the update run.
+
+    ``golden_dir`` names the family's OWN output directory: the golden bytes
+    are rewritten BEFORE the provenance stamp, so counting them made the
+    disclosure structurally always-"dirty" and therefore inert (r7 R78-1 --
+    the line exists to disclose a dirty SOURCE TREE, not the regeneration's
+    own output). PROVENANCE sidecars are excluded for the same reason. A
+    multi-family regen session still reads dirty from the OTHER families'
+    fresh outputs -- conservative, disclosed here.
     """
 
     import subprocess
@@ -439,10 +447,33 @@ def _source_identity() -> str:
             text=True,
             check=True,
             timeout=30,
-        ).stdout.strip()
+        ).stdout
     except (OSError, subprocess.SubprocessError):
         return "unknown (git unavailable)"
-    return f"{head} ({'dirty' if status else 'clean'})"
+    own_prefix = None
+    if golden_dir is not None:
+        try:
+            own_prefix = golden_dir.resolve().relative_to(repo_root).as_posix() + "/"
+        except ValueError:
+            own_prefix = None
+    lines = _foreign_porcelain_lines(status, own_prefix)
+    return f"{head} ({'dirty' if lines else 'clean'})"
+
+
+def _foreign_porcelain_lines(status: str, own_prefix: str | None) -> list[str]:
+    """Porcelain lines OUTSIDE the stamping family's own output (pure, testable)."""
+
+    lines = []
+    for line in status.splitlines():
+        path_part = line[3:].split(" -> ")[-1].strip().strip('"')
+        if own_prefix is not None and (
+            path_part.startswith(own_prefix) or path_part == own_prefix.rstrip("/")
+        ):
+            continue
+        if path_part.endswith("PROVENANCE"):
+            continue
+        lines.append(line)
+    return lines
 
 
 def write_provenance(golden_dir: Path, generator: str, update_env: str, reason: str) -> None:
@@ -477,7 +508,7 @@ def write_provenance(golden_dir: Path, generator: str, update_env: str, reason: 
         f"reason: {reason}\n"
         f"env: {env_fingerprint()}\n"
         f"torch: {torch.__version__}\n"
-        f"source: {_source_identity()}\n"
+        f"source: {_source_identity(golden_dir)}\n"
         f"recorded: {datetime.datetime.now(datetime.timezone.utc).isoformat()}\n"
     )
     path = golden_dir / "PROVENANCE"

@@ -82,7 +82,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
     # A CI run must never mutate goldens: any armed update/regen/record flag
     # would silently rebaseline instead of verifying (b7 R53-3 / b10 R78-8).
-    from _oracle_env import golden_mutation_flags_armed_under_ci
+    from _oracle_env import GOLDEN_FLAG_PREFIXES, golden_mutation_flags_armed_under_ci
 
     armed = golden_mutation_flags_armed_under_ci(os.environ)
     if armed:
@@ -122,8 +122,12 @@ def pytest_configure(config: pytest.Config) -> None:
     # families guard that generation starts on UNWRAPPED torch (SF-53), and
     # this warmup capture would trip that guard before any test ran, making
     # the documented single-family regen recipe impossible to execute.
+    # r7 R77 (fable b2 MED): match EVERY declared golden-flag prefix, not one
+    # hardcoded spelling -- the TORCHLENS_REGEN_ families (export goldens) are
+    # SF-53 wrap-state-guarded too, and the UPDATE_-only carve-out left their
+    # documented regen recipe hard-failing at its own guard.
     golden_update_armed = any(
-        key.startswith("TORCHLENS_UPDATE_") and value == "1" for key, value in os.environ.items()
+        key.startswith(GOLDEN_FLAG_PREFIXES) and value == "1" for key, value in os.environ.items()
     )
     if not config.option.collectonly and not golden_update_armed:
         import warnings as _warnings
@@ -164,8 +168,9 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 # boundary: smoke and unmarked tests must fit 5s, heavy 20s (each load-scaled
 # below; the pre-r3 15s crutch let a 59s test stay smoke under sprint load —
 # R41 b2 opus+sol). `slow` is unbounded, `rare` only runs on request, and
-# `serial` is exempt by definition (its wall time under parallel load is
-# exactly what the marker declares unrepresentative).
+# `serial` is NOT exempt: it resolves its heavy/smoke/unmarked budget
+# normally (r7 R41 sol LOW: this comment used to claim the opposite of
+# `_duration_budget_tier` and tests/AGENTS.md — the code is the contract).
 #
 # CHARGED TIME (round-4, the load-flake fix): a test is charged
 # min(wall seconds, CPU seconds incl. subprocess children). Wall alone
@@ -296,6 +301,15 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
 
     cpu_before = _process_cpu_seconds()
     result = yield
+    # Coverage-instrumented sessions are provably outside the budget
+    # contract: instrumentation slows every test by design, and the
+    # partition boundary is about UNINSTRUMENTED compute cost (r7 R41/R72:
+    # the nightly coverage job used to --deselect ONE budget test by a name
+    # that had since been renamed, so the real assertions ran instrumented
+    # anyway and the always-on sessionfinish tripwire could not be
+    # deselected at all). Every uninstrumented leg still records + enforces.
+    if bool(getattr(item.config.option, "cov_source", None)):
+        return result
     cpu_seconds = _process_cpu_seconds() - cpu_before
     wall_seconds = sum(getattr(item, "_tl_phase_durations", {}).values())
     charged = min(wall_seconds, cpu_seconds)
@@ -339,6 +353,61 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
             item.session._tl_duration_budget_offenders = offenders
         offenders.append((item.nodeid, tier, wall_seconds, cpu_seconds, budget))
     return result
+
+
+def _duration_budget_failure_lines(session: pytest.Session) -> list[str]:
+    """Render every recorded duration-budget violation for one session.
+
+    Covers both the per-item ledger and the aggregate 5s-tier family stats,
+    mirroring exactly what ``tests/test_marker_lint.py`` asserts.
+    """
+
+    lines = [
+        f"{nodeid} [{tier}]: wall {wall:.1f}s / cpu {cpu:.1f}s "
+        f"(budget {budget:.0f}s on min(wall, cpu))"
+        for nodeid, tier, wall, cpu, budget in getattr(session, "_tl_duration_budget_offenders", [])
+    ]
+    family_budgets = getattr(session, "_tl_smoke_family_budgets", {})
+    for family, (total, count) in getattr(session, "_tl_smoke_family_stats", {}).items():
+        budget = family_budgets.get(family, float("inf"))
+        if total > budget:
+            lines.append(
+                f"{family}: {total:.1f}s charged over {count} cells (family budget {budget:.1f}s)"
+            )
+    return lines
+
+
+def _enforce_duration_budget_at_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Always-on duration-budget tripwire (r7 R41, sol b2 HIGH).
+
+    Enforcement used to live ONLY in
+    ``test_marker_lint.py::test_bounded_tier_tests_stay_within_duration_budget``,
+    so any targeted invocation that did not collect that file exited GREEN
+    over budget — contradicting the tests/AGENTS.md sentence "checked at the
+    end of every session" and removing the tripwire from the documented
+    per-step targeted workflow. The marker-lint test remains the rich
+    reporting surface inside gate runs; this helper (called from the module's
+    single ``pytest_sessionfinish`` hook) makes the session exit non-zero
+    even when that file was never collected.
+    """
+
+    if exitstatus != 0:
+        return  # already failing (incl. the marker-lint assertion itself)
+    lines = _duration_budget_failure_lines(session)
+    if not lines:
+        return
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    header = (
+        "duration-budget tripwire (tests/conftest.py::pytest_sessionfinish): "
+        "tests exceeded their tier budget this session"
+    )
+    if reporter is not None:
+        reporter.write_line(header, red=True)
+        for line in lines:
+            reporter.write_line("  " + line, red=True)
+    else:  # pragma: no cover - headless embedding without a terminal reporter
+        print(header + "\n  " + "\n  ".join(lines))
+    session.exitstatus = 1
 
 
 @pytest.hookimpl(wrapper=True)
@@ -480,7 +549,7 @@ def _coverage_requested(config: pytest.Config) -> bool:
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """Write coverage artifacts only for real coverage runs.
+    """Enforce the duration budget, then write coverage artifacts.
 
     Parameters
     ----------
@@ -490,6 +559,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         Final pytest exit status.
     """
 
+    _enforce_duration_budget_at_sessionfinish(session, exitstatus)
     del exitstatus
     _state._collect_usage_stats = False
     _state._function_call_counts.clear()
@@ -600,6 +670,47 @@ def _reset_warn_once_sentinels() -> Iterator[None]:
                 _set_sentinel_default(module, name, default)
             else:
                 setattr(module, name, prior)
+
+
+#: Public content registries that tests mutate through PUBLIC registration
+#: APIs with no unregister spelling (r7 R76, sol b2 MED): a registered
+#: container class or custom op rule was a permanent process-global, so
+#: full-suite and targeted runs saw different registry state depending on
+#: which tests had run first. Snapshot/restore per test, same lazy
+#: sys.modules discipline as the warn-once sentinels.
+_CONTENT_REGISTRIES: tuple[tuple[str, str], ...] = (
+    ("torchlens.ir.container", "_CONTAINER_REGISTRY"),
+    ("torchlens.capture.flops", "_CUSTOM_OP_RULES"),
+)
+
+
+@pytest.fixture(autouse=True)
+def _restore_content_registries() -> Iterator[None]:
+    """Restore registered-container and custom-op-rule state after every test."""
+
+    snapshots: dict[tuple[str, str], object] = {}
+    for module_name, name in _CONTENT_REGISTRIES:
+        module = sys.modules.get(module_name)
+        if module is None:
+            snapshots[(module_name, name)] = _MISSING
+            continue
+        snapshots[(module_name, name)] = dict(getattr(module, name))
+    try:
+        yield
+    finally:
+        for module_name, name in _CONTENT_REGISTRIES:
+            module = sys.modules.get(module_name)
+            if module is None:
+                continue
+            prior = snapshots[(module_name, name)]
+            registry = getattr(module, name)
+            if prior is _MISSING:
+                # Module imported DURING the test: whatever it registered at
+                # import time is legitimate baseline; drop only test-added
+                # rows is impossible to distinguish, so leave as-is.
+                continue
+            registry.clear()
+            registry.update(prior)
 
 
 _CAPABILITY_DEPENDENT_CACHES: tuple[tuple[str, str], ...] = (

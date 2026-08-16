@@ -3,7 +3,7 @@
 The workflow FILES are the authority; this inventory summarizes them. If they
 disagree, the YAML wins — update this doc in the same change.
 
-## Workflows (all seven)
+## Workflows (all eight)
 
 | File | Trigger | What It Does |
 |------|---------|-------------|
@@ -14,6 +14,7 @@ disagree, the YAML wins — update this doc in the same change.
 | `workflows/nightly.yml` | Cron + `workflow_dispatch` | Perf regression gate, full fast tier, coverage floor, capture byte oracle, preview-backend matrix (tf/jax/tinygrad/paddle/mlx), wheel+sdist double-build reproducibility gate, PEP 561 consumer smoke. |
 | `workflows/weekly.yml` | Cron + `workflow_dispatch` | Slow and rare tiers with executed-floor attestations. |
 | `workflows/latest-canary.yml` | Cron + `workflow_dispatch` | Smoke tier against latest released torch/torchvision (ecosystem-drift isolation). |
+| `workflows/mutation.yml` | Cron (Sun) + `workflow_dispatch` | Rotating per-arm mutation-campaign shard (1-of-4 arm shards weekly; any family on dispatch) in the canonical pinned CPU env; fails on any SURVIVOR/ERROR/TIMEOUT; archives per-mutant verdicts. |
 
 ## CI must NEVER auto-commit (locked)
 

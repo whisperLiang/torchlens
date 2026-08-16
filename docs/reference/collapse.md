@@ -92,6 +92,23 @@ count explicit. Collapsed-box remainders and segment totals likewise count every
 including buffer leaves. This is the honesty contract: labels never claim a repeated call, module,
 or total that the hidden content does not support.*
 
+## The compute ceiling
+
+Smart-collapse selection is measured superlinear (~n^1.75) in op count, so it carries a
+preflight compute ceiling: `COLLAPSE_OPTIMIZER_MAX_OPS` (2,000 ops). On a trace above the
+ceiling the optimizer **declines disclosed** instead of burning CPU-hours:
+
+- `draw(collapse="auto"|"max"|t)` emits a `TorchLensWarning` naming the op count and the
+  ceiling, then renders the graph **uncollapsed** — every mode above the ceiling produces the
+  same full graph.
+- `Trace.collapse_plan(mode=...)` refuses typed: `InvalidArgumentError` with
+  `code="collapse_plan_unavailable"` and a `collapse_ops_ceiling` reason.
+- `Trace.collapse_schedule()` degrades to its single full-graph step (`t=0.0` only).
+
+The remedy is to shrink the rendered graph before collapsing: focus with `module=`, bound the
+depth with `vis_call_depth`, or render the rolled graph. The ceiling is a compute guard on the
+selection optimizer, not a correctness limit — the trace itself is complete.
+
 ## `collapse_plan()` diagnostics
 
 `Trace.collapse_plan(mode=...)` exposes the renderer-faithful plan for one requested mode.

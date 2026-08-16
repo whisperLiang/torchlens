@@ -397,9 +397,12 @@ nnsight module.path.output       -> log.modules["module.path"].facets["out"]
 
 ## Recipe Plugins
 
-At import, TorchLens loads installed setuptools entry points in the
-`torchlens.recipes` group. A broken entry point warns and is skipped; TorchLens
-does not scan or execute local directories.
+On FIRST USE of the facet-recipe subsystem (not at `import torchlens` --
+the loader is module-level in `torchlens/semantic/recipes/__init__.py`, and
+`torchlens.semantic` is lazy), TorchLens loads installed setuptools entry
+points in the `torchlens.recipes` group. A broken entry point therefore warns
+when facets are first touched, not at import. Entry points are never scanned
+from local directories.
 
 ## Built-In Inventory
 

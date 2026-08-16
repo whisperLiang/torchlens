@@ -583,10 +583,18 @@ major_on_zero = true
 #   git checkout vX.Y.Z
 #   pip install --require-hashes --only-binary :all: \
 #       -r .github/workflows/release-requirements.txt
-#   SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD^)" python -m build
+#   SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD^)" python -m build --no-isolation
 #   SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD^)" \
 #       python scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl
-build_command = "SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python -m build && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl"
+#
+# --no-isolation (r7 R86, fable+opus HIGH): without it `python -m build`
+# creates an isolated env and pip-installs the setuptools backend UNPINNED
+# from the live index at build time -- inside the token scope, with the
+# repo-write App token persisted in .git/config. The backend now comes from
+# the same hash-verified lock as the builder (setuptools== in
+# release-requirements.txt); tests/test_packaging_diet.py enforces the
+# lockstep in both directions.
+build_command = "SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python -m build --no-isolation && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl"
 # `[skip ci]` is REQUIRED: the bot pushes this commit to main, and without the
 # skip token GitHub re-triggers the Release workflow on it, which re-releases and
 # pushes again -> infinite loop. (See git history: a 1599-commit runaway.)

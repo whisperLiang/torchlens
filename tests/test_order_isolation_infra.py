@@ -205,3 +205,43 @@ def test_no_randomly_flag_actually_disables_shuffling(tmp_path: Path) -> None:
         "a seeded default run produced definition order — shuffling is not "
         "actually happening (order-isolation coverage is fictional)"
     )
+
+
+@pytest.mark.smoke
+def test_content_registries_are_restored_between_tests(
+    request: pytest.FixtureRequest,
+) -> None:
+    """r7 R76 (sol b2 MED): public-registry mutations must not outlive a test.
+
+    ``register_op_rule`` and container registration are plain global
+    assignments with no unregister spelling, so a registered test class was a
+    permanent process-global -- full-suite and targeted runs diverged on
+    registry state. The conftest autouse fixture snapshots and restores both
+    content registries; this drives the fixture generator directly and
+    proves the restore (red-capable: delete the fixture and this fails).
+    """
+
+    conftest_plugin = next(
+        (
+            plugin
+            for plugin in request.config.pluginmanager.get_plugins()
+            if hasattr(plugin, "_restore_content_registries")
+        ),
+        None,
+    )
+    assert conftest_plugin is not None, "conftest lost _restore_content_registries"
+    fixture_fn = conftest_plugin._restore_content_registries
+    raw = getattr(fixture_fn, "__wrapped__", None) or fixture_fn.__pytest_wrapped__.obj
+
+    from torchlens.capture.flops import _CUSTOM_OP_RULES
+
+    sentinel = "r76_isolation_probe_op"
+    assert sentinel not in _CUSTOM_OP_RULES
+    generator = raw()
+    next(generator)
+    _CUSTOM_OP_RULES[sentinel] = (lambda *_a: 1, None)
+    assert sentinel in _CUSTOM_OP_RULES
+    generator.close()  # fixture teardown restores the snapshot
+    assert sentinel not in _CUSTOM_OP_RULES, (
+        "the content-registry fixture failed to restore _CUSTOM_OP_RULES"
+    )

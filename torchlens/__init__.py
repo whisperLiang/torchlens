@@ -53,6 +53,11 @@ _LAZY_ATTRS = {
     "aggregate": ("torchlens.stats", "aggregate"),
     "assert_unchanged": ("torchlens.hash", "assert_unchanged"),
     "attribution": ("torchlens.attribution", None),
+    # r7 R81 (sol b2): docs/semantic_io.md documents tl.autoroute.output.*
+    # and the agent docs list autoroute among the lazy attrs, but the row
+    # was missing -- the documented spelling resolved only after a separate
+    # `import torchlens.autoroute` (import-order side effect).
+    "autoroute": ("torchlens.autoroute", None),
     "bwd_hook": ("torchlens.intervention", "bwd_hook"),
     "clamp": ("torchlens.intervention", "clamp"),
     "compat": ("torchlens.compat", None),

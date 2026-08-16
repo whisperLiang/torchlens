@@ -369,3 +369,210 @@ def test_core_check_roster_matches_the_real_tree() -> None:
 
     driver = _load_driver_module()
     driver.derive_core_check_roster(_REPO_ROOT)
+
+
+@pytest.mark.smoke
+def test_empty_mutant_selection_refuses_vacuous_green() -> None:
+    """r7 R79 (fable b10 MED): zero selected mutants is a refusal, not a pass.
+
+    An empty ``ids`` list used to skip the campaign loop and print ``all
+    mutants KILLED`` with exit 0, so a shard-slicing bug or family-key rename
+    turned the scheduled leg permanently green while scoring NOTHING.
+    """
+
+    driver = _load_driver_module()
+    with pytest.raises(SystemExit, match="EMPTY MUTANT SELECTION"):
+        driver.require_nonempty_selection([], family="arms", arm_shard="9/9")
+    # Non-empty selections pass through untouched.
+    driver.require_nonempty_selection(["m1"], family=None, arm_shard=None)
+    # main() calls the floor after family filtering and shard slicing.
+    source = (_REPO_ROOT / "tests" / "support" / "mutation_driver.py").read_text(encoding="utf-8")
+    main_body = source.split("def main()", 1)[1]
+    slice_pos = main_body.find("--arm-shard")
+    floor_pos = main_body.find("require_nonempty_selection")
+    assert slice_pos != -1 and floor_pos != -1 and floor_pos > slice_pos, (
+        "the empty-selection floor must run AFTER family filtering and shard "
+        "slicing in main(), or an empty slice still scores vacuously green"
+    )
+
+
+@pytest.mark.smoke
+def test_mutation_workflow_rotation_contract() -> None:
+    """r7 cluster 19: the rotation contract f9964208 claimed but never pinned.
+
+    The scheduled leg's slot selection and family routing live in shell
+    inside ``mutation.yml``; nothing else checks that the families it names
+    exist in the driver, that the rotation can only produce shards 1..4 of
+    4, or that step outputs stay routed through ``env:`` (the zizmor
+    template-injection class). Pin all three so a workflow edit that breaks
+    the campaign's selection contract goes red here instead of scoring an
+    empty (now refused) or wrong slice on a scheduled Sunday.
+    """
+
+    import re
+
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "mutation.yml").read_text(encoding="utf-8")
+    driver = _load_driver_module()
+
+    # Every family literal the workflow can route exists in the driver's
+    # vocabulary ("bounded" is the workflow-side fan-out alias).
+    families_in_driver = set(driver.FAMILIES) if hasattr(driver, "FAMILIES") else None
+    bounded_loop = re.search(r"for fam in ([a-z ]+);", workflow)
+    assert bounded_loop is not None, "mutation.yml lost its bounded fan-out loop"
+    workflow_families = set(bounded_loop.group(1).split())
+    assert workflow_families == {
+        "registry",
+        "checks",
+        "corechecks",
+        "blocks",
+        "exempt",
+        "executor",
+    }
+    if families_in_driver is not None:
+        assert workflow_families <= families_in_driver
+
+    # The rotation arithmetic yields shard I/4 with I in 1..4 for every ISO
+    # week (%V is 01..53); shard 0 or an out-of-range index is impossible.
+    assert re.search(r"%\s*4\s*\+\s*1", workflow), (
+        "rotation slot arithmetic changed: the ISO-week mapping must stay "
+        "modulo-4 plus one (shards 1..4, never 0)"
+    )
+    assert 'shard="${slot}/4"' in workflow
+    for week in range(1, 54):
+        slot = week % 4 + 1
+        assert 1 <= slot <= 4
+
+    # Step outputs reach the run block through env, never inline ${{ }}
+    # interpolation (r7 R82 template-injection fix).
+    run_step = workflow.split("Run mutation campaign", 1)[1]
+    assert "SLOT_FAMILY: ${{ steps.slot.outputs.family }}" in run_step
+    assert "${{ steps.slot.outputs" not in run_step.split("run: |", 1)[1], (
+        "mutation.yml interpolates step outputs directly into the shell "
+        "again -- route them through env (template-injection class)"
+    )
+
+    # Dispatch inputs are validated before touching $GITHUB_OUTPUT.
+    assert re.search(r"case \"\$INPUT_FAMILY\" in", workflow), (
+        "dispatch input validation removed from the slot step"
+    )
+
+    # r7 R74 (sol MED): the two mutation legs must score against ONE
+    # canonical interpreter env -- a torch release flipping a survivor on an
+    # unrelated upstream event makes historical verdicts incomparable.
+    # Scoped to each leg's canonical-env install step (weekly.yml carries
+    # other, unrelated torch pins for its floor-matrix jobs).
+    weekly = (_REPO_ROOT / ".github" / "workflows" / "weekly.yml").read_text(encoding="utf-8")
+
+    def _canonical_env_step(text: str, source: str) -> str:
+        match = re.search(
+            r"name: Install canonical CPU test environment.*?(?=\n\s*- name:)",
+            text,
+            flags=re.DOTALL,
+        )
+        assert match is not None, f"{source} lost its canonical CPU env install step"
+        return match.group(0)
+
+    for package in ("torch", "torchvision"):
+        pins = {
+            name: set(re.findall(rf'"{package}==([0-9][^"]*)"', _canonical_env_step(text, name)))
+            for name, text in (("mutation.yml", workflow), ("weekly.yml", weekly))
+        }
+        assert all(len(v) == 1 for v in pins.values()), (
+            f"each mutation leg needs exactly one {package} pin in its canonical env step: {pins}"
+        )
+        assert pins["mutation.yml"] == pins["weekly.yml"], (
+            f"the mutation legs disagree on {package}: {pins} -- both must "
+            "install the canonical pinned CPU pair"
+        )
+
+
+@pytest.mark.smoke
+def test_armed_arm_count_is_a_visible_growing_ratchet() -> None:
+    """r7 R74 F2 (opus MED): 'N of 161 arms armed' is a tracked number, not a discovery.
+
+    The r5 corpus fix armed exactly the 12 sampled survivor arms (+1); the
+    other ~148 have never been scored, and opus measured 4/4 fresh arms
+    SURVIVING -- so the scheduled arm campaign is expected red until the
+    burn-down completes. This ratchet publishes the armed count and refuses
+    to let it shrink: every per-arm minimal plant is a ``test_corruption_arm_*``
+    test, the template being the 13 that landed in 369078e1. Raise the floor
+    with every burn-down batch. (The plant-writing burn-down itself is
+    validation-domain work -- relayed to the validation lane in fixwave-6.)
+    """
+
+    import re
+
+    corpus = "".join(
+        path.read_text(encoding="utf-8") for path in sorted((_REPO_ROOT / "tests").glob("*.py"))
+    )
+    armed = len(set(re.findall(r"def (test_corruption_arm_\w+)", corpus)))
+    floor = 13  # r7 baseline: the 12 r5-proven survivors + the reciprocity mirror
+    assert armed >= floor, (
+        f"armed per-arm plant count fell to {armed} (floor {floor}): "
+        "per-arm killers must never be deleted without a replacement"
+    )
+
+
+@pytest.mark.smoke
+def test_operator_label_matches_the_applied_disarm_keyword(tmp_path: Path) -> None:
+    """r7 R74 F3 (opus LOW): the archived record labels the operator actually applied.
+
+    ``module_containment_logic``-style while-exit arms are disarmed with
+    ``break`` (termination preserved); the verdict row said ``pass`` for
+    them unconditionally -- a lie in the one place operator choice is
+    load-bearing.
+    """
+
+    driver = _load_driver_module()
+    module = tmp_path / "checker.py"
+    module.write_text(
+        "def _check(items):\n"
+        "    pending = list(items)\n"
+        "    while pending:\n"
+        "        row = pending.pop()\n"
+        "        if row is None:\n"
+        "            raise MetadataInvariantError('none row')\n"
+        "    if not items:\n"
+        "        raise MetadataInvariantError('empty')\n",
+        encoding="utf-8",
+    )
+    src = module.read_text(encoding="utf-8")
+    assert driver.arm_disarm_keyword(src, "_check", 0) == "break"
+    assert driver.arm_disarm_keyword(src, "_check", 1) == "pass"
+    with pytest.raises(SystemExit, match="no index 9"):
+        driver.arm_disarm_keyword(src, "_check", 9)
+    # main() derives the label from the same helper, in the applied spelling.
+    driver_source = (_REPO_ROOT / "tests" / "support" / "mutation_driver.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'operator = f"{keyword} replacing raise arm {arm_index}"' in driver_source
+    assert 'operator = f"pass replacing raise arm' not in driver_source
+
+
+@pytest.mark.smoke
+def test_executor_family_derivation_reaches_every_step() -> None:
+    """r7 R74 (sol b9 HIGH): the postprocess executor is enrolled, DERIVED.
+
+    25 ``_run_step_*`` bodies plus the conditional gate predicates had no
+    mutation verdict while R74 explicitly scopes ``postprocess/``. The
+    family derives from the module's defs, so a new step self-enrolls; run
+    bodies neuter to ``return None`` (silent skip) and gate predicates to
+    ``return False`` (never fires), each the dangerous direction.
+    """
+
+    driver = _load_driver_module()
+    mutants = driver.derive_executor_mutants(_REPO_ROOT)
+    run_steps = {mid for mid in mutants if "#_run_step_" in mid}
+    gates = {mid for mid in mutants if "#_should_run_step_" in mid}
+    assert len(run_steps) >= 20, f"only {len(run_steps)} run-step mutants derived"
+    assert gates, "no gate-predicate mutants derived"
+    for mid, (rel, func, value) in mutants.items():
+        assert rel == "torchlens/postprocess/_executor.py"
+        assert value == ("None" if func.startswith("_run_step_") else "False"), (mid, value)
+    # Cross-check against the live registry: every StepSpec.run is enrolled.
+    from torchlens.postprocess._executor import STEP_REGISTRY
+
+    registered_runs = {spec.run.__name__ for spec in STEP_REGISTRY}
+    enrolled_funcs = {func for _, func, _ in mutants.values()}
+    missing = registered_runs - enrolled_funcs
+    assert not missing, f"STEP_REGISTRY steps outside the executor family: {sorted(missing)}"

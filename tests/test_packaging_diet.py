@@ -376,6 +376,53 @@ def test_release_job_python_stack_is_hash_locked() -> None:
         "the release lock no longer pins the `build` builder"
     )
 
+    # r7 R86 (fable HIGH + opus MED-HIGH, MEASURED): `python -m build`
+    # WITHOUT --no-isolation creates an isolated env and pip-installs the
+    # build backend (setuptools) from the LIVE index at build time -- inside
+    # the token scope, with the repo-write App token persisted in
+    # .git/config. That is arbitrary unpinned code with push access, escaping
+    # the hash lock this test guards. The builder must run --no-isolation
+    # against the hash-locked env, which therefore must pin the backend.
+    assert "--no-isolation" in match.group(1), (
+        "build_command runs `python -m build` without --no-isolation: the "
+        "isolated build env pip-installs an UNPINNED setuptools from the "
+        "live index inside the release token scope"
+    )
+    # r7 R84: the normalizer decides the published bytes of BOTH artifacts;
+    # dropping either argument shipped machine-dependent bytes with the
+    # first signal a post-release nightly red.
+    assert "python scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl" in match.group(1), (
+        "build_command no longer normalizes both artifacts "
+        "(scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl)"
+    )
+    setuptools_pins = [line for line in requirement_lines if line.startswith("setuptools==")]
+    assert setuptools_pins, (
+        "release lock does not pin the setuptools build backend; "
+        "--no-isolation builds resolve it from this lock"
+    )
+    backend_floor = re.search(
+        r'^requires = \["setuptools>=(\d+)"\]', pyproject_text, flags=re.MULTILINE
+    )
+    assert backend_floor, "pyproject [build-system] requires lost its setuptools floor"
+    pinned_version = setuptools_pins[0].split("==")[1].split()[0].strip("\\").strip()
+    assert int(pinned_version.split(".")[0]) >= int(backend_floor.group(1)), (
+        f"locked setuptools {pinned_version} is below the [build-system] "
+        f"floor >={backend_floor.group(1)} (CVE-2026-59890 sdist-governance fix)"
+    )
+
+    # The nightly double-build gate must attest the SAME no-isolation builder
+    # the release uses, or its byte-identity proof is about a different
+    # (index-resolved) backend than the one that ships.
+    nightly_text = (repo_root / ".github" / "workflows" / "nightly.yml").read_text()
+    nightly_builds = [
+        line for line in nightly_text.splitlines() if re.search(r"python -m build\b", line)
+    ]
+    assert nightly_builds, "nightly.yml lost its double-build gate invocations"
+    isolated_nightly = [line for line in nightly_builds if "--no-isolation" not in line]
+    assert not isolated_nightly, (
+        f"nightly build invocation(s) without --no-isolation: {isolated_nightly}"
+    )
+
 
 @pytest.mark.slow
 def test_built_wheel_manifest_is_diet(tmp_path: Path) -> None:
@@ -444,12 +491,28 @@ def test_nightly_gate_installs_release_locked_builder() -> None:
     repo_root = Path(__file__).resolve().parent.parent
     nightly_yml = (repo_root / ".github" / "workflows" / "nightly.yml").read_text()
 
-    assert "--require-hashes" in nightly_yml, (
+    # r7 R84: scope the assertions to the wheel job's BUILD STEP -- the old
+    # whole-file substring passed if the flag appeared anywhere in the
+    # 600-line workflow, not necessarily in the step that installs the
+    # builder the gate then attests.
+    build_step = re.search(
+        r"name: Build wheel and sdist with the release's exact builder.*?(?=\n\s*- name:)",
+        nightly_yml,
+        flags=re.DOTALL,
+    )
+    assert build_step is not None, "nightly.yml lost its exact-builder build step"
+    step_text = build_step.group(0)
+    assert "--require-hashes" in step_text, (
         "the nightly double-build gate no longer installs the builder hash-verified"
     )
-    assert "--only-binary :all:" in nightly_yml
-    assert ".github/workflows/release-requirements.txt" in nightly_yml, (
+    assert "--only-binary :all:" in step_text
+    assert ".github/workflows/release-requirements.txt" in step_text, (
         "the nightly double-build gate no longer installs the release's exact builder"
+    )
+    install_pos = step_text.find("--require-hashes")
+    build_pos = step_text.find("python -m build")
+    assert 0 <= install_pos < build_pos, (
+        "the hash-verified install must precede `python -m build` inside the build step"
     )
     assert "build-requirements.txt" not in nightly_yml, (
         "a second builder lock reappeared; release-requirements.txt is the single pin authority"
@@ -458,4 +521,30 @@ def test_nightly_gate_installs_release_locked_builder() -> None:
     assert not (workflows_dir / "build-requirements.txt").exists(), (
         "the retired build-requirements.txt lock is back; the builder pin "
         "lives in release-requirements.txt (single pin authority)"
+    )
+
+
+def test_precommit_pin_is_single_valued_and_inside_the_contributor_band() -> None:
+    """r7 R87-2 (opus LOW): the tool that RUNS the parity gate gets a parity gate.
+
+    CI judges hooks with an exact ``pre-commit==`` while contributors resolve
+    the dev extra's ``>=4,<5`` band; nothing tied the two the way ruff,
+    pydot, graphviz, and pip-audit are tied. Every workflow pin must be ONE
+    version and it must satisfy the contributor band, so a CI-only verdict a
+    contributor cannot reproduce needs a conscious band edit first.
+    """
+
+    project_root = Path(__file__).resolve().parent.parent
+    workflow_text = "".join(
+        path.read_text() for path in sorted((project_root / ".github" / "workflows").glob("*.yml"))
+    )
+    ci_pins = set(re.findall(r"pre-commit==([0-9]+\.[0-9]+\.[0-9]+)", workflow_text))
+    assert len(ci_pins) == 1, f"expected ONE pre-commit CI pin across workflows: {ci_pins}"
+    pyproject_text = (project_root / "pyproject.toml").read_text()
+    band = re.search(r'"pre-commit>=([0-9]+),<([0-9]+)"', pyproject_text)
+    assert band is not None, "dev extra lost its pre-commit band"
+    major = int(next(iter(ci_pins)).split(".")[0])
+    assert int(band.group(1)) <= major < int(band.group(2)), (
+        f"CI pre-commit pin {ci_pins} escaped the contributor band "
+        f">={band.group(1)},<{band.group(2)}"
     )
