@@ -4232,7 +4232,11 @@ class Op:
             self._internal_set("saved_args", None)
             self._internal_set("saved_kwargs", None)
 
-    def log_tensor_grad(self, grad: torch.Tensor) -> None:
+    def log_tensor_grad(
+        self,
+        grad: torch.Tensor,
+        prebuilt: "tuple[torch.Tensor | None, Any | None] | None" = None,
+    ) -> None:
         """Save the grad tensor for this layer's output.
 
         Called by the backward hook registered during the forward pass.
@@ -4241,6 +4245,12 @@ class Op:
 
         Args:
             grad: The grad tensor flowing back through this operation.
+            prebuilt: Budget-charged ``(raw_payload, transformed_payload)``
+                pair already built (and transform-validated) by the
+                event-sidecar path for this exact grad. When given, the slot
+                REUSES those objects: no second clone, no second
+                ``grad_transform`` execution, no uncharged retention
+                (grind-r6 b5 R34-N1/R35-N1).
         """
         trace = self._source_trace
         raw_grad = grad
@@ -4253,6 +4263,29 @@ class Op:
         self.transformed_grad_dtype = None
         self.transformed_gradient_memory = None
         writer = getattr(trace, "_out_writer", None) if trace is not None else None
+        if prebuilt is not None:
+            raw_payload, transformed_payload = prebuilt
+            if grad_transform is not None:
+                self._internal_set("transformed_grad", transformed_payload)
+                self.transformed_grad_shape = _shape_or_none(self.transformed_grad)
+                self.transformed_grad_dtype = _dtype_or_none(self.transformed_grad)
+                self.transformed_gradient_memory = _memory_or_none(self.transformed_grad)
+            self._internal_set("grad", raw_payload)
+            self.has_grad = True
+            if writer is not None and getattr(trace, "_defer_streaming_bundle_finalization", False):
+                self._stream_tensor_blob(
+                    writer,
+                    tensor_field="grad",
+                    pending_field="_pending_grad_blob_id",
+                    kind="grad",
+                )
+                self._stream_tensor_blob(
+                    writer,
+                    tensor_field="transformed_grad",
+                    pending_field="_pending_transformed_grad_blob_id",
+                    kind="transformed_grad",
+                )
+            return
         if grad_transform is not None:
             self._internal_set(
                 "transformed_grad",

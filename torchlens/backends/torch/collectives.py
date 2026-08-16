@@ -270,7 +270,12 @@ def _digest_tensor(tensor: torch.Tensor) -> str:
     flat = to_cpu_contiguous(tensor).reshape(-1)
     if flat.numel() == 0:
         return hashlib.sha256(b"").hexdigest()
-    return hashlib.sha256(flat.view(torch.uint8).numpy().tobytes()).hexdigest()
+    # Buffer-protocol digest (grind-r6 b5 R35-N2): the terminal .tobytes()
+    # materialized a full second payload copy; the memoryview spelling is
+    # proven copy-free and digest-identical (utils/hashing.py sibling).
+    digest = hashlib.sha256()
+    digest.update(flat.view(torch.uint8).numpy().data)
+    return digest.hexdigest()
 
 
 def _role_entry(role: str, index: int, tensor: torch.Tensor) -> dict[str, Any]:
