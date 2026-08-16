@@ -9,6 +9,7 @@ widening, determinism, and the contract-doc lockstep gates.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -666,6 +667,74 @@ class TestSweepFieldValidation:
         from torchlens.merged._evidence import REDUCE_OP_KINDS
 
         assert {site.kind for site in COLLECTIVE_SITES if site.has_reduce_op} == REDUCE_OP_KINDS
+
+
+class TestWireVocabularyLockstep:
+    """R49: the distributed->merged wire vocabulary cannot drift silently.
+
+    The collective_boundary_v1 payload is WRITTEN by
+    ``backends/torch/collectives.py`` (+ the lifecycle ledger) and READ by
+    ``merged/_evidence.py``; both sides used to re-spell the closed
+    vocabularies independently with zero drift gate, so a writer-side rename
+    silently turned every future artifact unparseable (or, worse, unvalidated
+    on the renamed axis). Declared residual: a NEW writer-side token is only
+    caught at parse time; hoisting the writer's literals into one shared
+    constant home is relayed to the capture lane.
+    """
+
+    def _writer_string_literals(self) -> set[str]:
+        import inspect
+
+        from torchlens.backends.torch import collectives
+
+        tree = ast.parse(inspect.getsource(collectives))
+        return {
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+
+    def test_boundary_schema_matches_writer(self):
+        from torchlens.backends.torch import collectives
+        from torchlens.merged import _evidence
+
+        assert collectives.BOUNDARY_SCHEMA == _evidence.BOUNDARY_SCHEMA
+
+    def test_install_epoch_vocabulary_matches_ledger_literal(self):
+        from typing import get_args
+
+        from torchlens.distributed._ledger import InstallEpoch
+        from torchlens.merged._evidence import _INSTALL_EPOCHS
+
+        assert set(get_args(InstallEpoch)) == set(_INSTALL_EPOCHS)
+
+    def test_writer_spells_every_reader_vocabulary_token(self):
+        from torchlens.merged import _evidence
+
+        writer_literals = self._writer_string_literals()
+        for vocab_name in (
+            "_COMPLETION_BINDINGS",
+            "_WITNESS_POLICIES",
+            "_DISCLOSURE_TOKENS",
+            "_NOT_PRESENT_REASONS",
+        ):
+            vocab = getattr(_evidence, vocab_name)
+            missing = set(vocab) - writer_literals
+            assert not missing, (
+                f"reader vocabulary {vocab_name} member(s) {sorted(missing)} never "
+                "appear in the writer module -- a writer-side rename drifted the wire"
+            )
+
+    def test_reader_vocabularies_are_pinned(self):
+        from torchlens.merged import _evidence
+
+        assert set(_evidence._COMPLETION_BINDINGS) == {"issue_sync", "unobserved"}
+        assert set(_evidence._WITNESS_POLICIES) == {"none", "digest"}
+        assert set(_evidence._DISCLOSURE_TOKENS) == {
+            "read_of_inflight_destination",
+            "c10d_group_seq_read_failed",
+        }
+        assert set(_evidence._NOT_PRESENT_REASONS) == {"async_completion_unobserved"}
 
 
 class TestReleaseContract:
