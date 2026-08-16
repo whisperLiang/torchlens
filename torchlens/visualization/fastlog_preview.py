@@ -217,10 +217,13 @@ def _append_predicate_input_lines(lines: list[str], ctx: RecordContext) -> None:
 def _append_module_event_lines(lines: list[str], layer_log: Any) -> None:
     """Append module entry/exit details when available."""
 
-    entered = tuple(getattr(layer_log, "module_call_stack", ()) or ())
+    # B3R7-R05-1: ``module_call_stack`` is the op's containment stack (the
+    # calls it ran inside), not the entered-module stack the old enter-lane
+    # semantics implied -- label the line accordingly.
+    active = tuple(getattr(layer_log, "module_call_stack", ()) or ())
     exited = tuple(getattr(layer_log, "output_of_modules", ()) or ())
-    if entered:
-        lines.append("module_enter: " + ", ".join(str(item) for item in entered))
+    if active:
+        lines.append("module_stack: " + ", ".join(str(item) for item in active))
     if exited:
         lines.append("module_exit: " + ", ".join(str(item) for item in exited))
 

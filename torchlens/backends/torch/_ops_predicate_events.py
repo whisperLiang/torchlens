@@ -464,7 +464,9 @@ def _build_module_context_fields(
 
     fields_dict["module"] = module
     fields_dict["modules"] = modules
-    fields_dict["module_call_stack"] = []
+    # B3R7-R05-1: same containment fact as ``modules`` (relabeled together at
+    # step 11), never the fed-call stack -- that is ``input_to_module_calls``.
+    fields_dict["module_call_stack"] = list(modules)
     fields_dict["module_entry_arg_keys"] = defaultdict(list)
     fields_dict["input_to_module_calls"] = []
     fields_dict["output_of_modules"] = []

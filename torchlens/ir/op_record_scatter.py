@@ -218,7 +218,13 @@ CELL_SOURCES: dict[str, str] = {
     "modules": "FACET:modules",
     "fx_qualpath": "DEFAULT",
     "fx_call_index": "DEFAULT",
-    "module_call_stack": "JOIN:module_enter",
+    # B3R7-R05-1: ``module_call_stack`` is the op's OWN containment stack (the
+    # glossary's "ModuleCall labels active for this Op"), so it derives from
+    # the creation-time modules facet -- NOT from the module-enter join, whose
+    # fed-call stack made the one persisted field mean three different things
+    # (fed-call for module inputs, containment for module outputs, empty
+    # otherwise). The fed-call fact lives on ``input_to_module_calls``.
+    "module_call_stack": "FACET:modules",
     "input_to_module_calls": "JOIN:module_enter",
     "module_entry_arg_keys": "JOIN:module_enter",
     "output_of_modules": "JOIN:module_exit",
@@ -473,7 +479,11 @@ def scatter_record_to_cells(record: OpRecord, extras: IngestExtras, owning_trace
         "modules": list(modules_facet.modules),
         "fx_qualpath": None,
         "fx_call_index": 0,
-        "module_call_stack": [],
+        # Same facet as ``modules``: the containment stack active at op
+        # creation. Both cells hold raw ``(address, call_index)`` pairs here
+        # and are converted to canonical ``address:N`` ModuleCall labels
+        # together by the step-11 relabel (labeling.py).
+        "module_call_stack": list(modules_facet.modules),
         "input_to_module_calls": [],
         "module_entry_arg_keys": defaultdict(list),
         "output_of_modules": [],

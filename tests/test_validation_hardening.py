@@ -412,6 +412,70 @@ def test_r05_dangling_edge_label_reports_owning_contract() -> None:
     assert "zz_nonexistent_9_9" in str(exc_info.value)
 
 
+class _Nested(nn.Module):
+    """Sequential inside an attribute plus a top-level op between modules."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.a = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
+        self.l2 = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.l2(torch.sigmoid(self.a(x)))
+
+
+def test_r05_module_call_stack_is_single_fact_containment() -> None:
+    """FAIL-AFTER-WHERE-PASSED-BEFORE: the persisted tri-fact field is gone.
+
+    ``module_call_stack`` used to be three unrelated facts in one persisted
+    slot: the FED call's address stack for module-input ops (``input_1``
+    reported ``('a', 'a.0')`` while running in no module at all), its own
+    containment ADDRESSES for module-output ops, and empty otherwise -- with
+    ``module_call_depth`` computed from a different field. It is now the one
+    glossary fact for every op: root-first ModuleCall labels active for this
+    op, equal to ``modules``, with ``module_call_depth`` its depth.
+    """
+
+    trace, _ = _capture(_Nested(), torch.randn(2, 4))
+    by_label = {op.layer_label: op for op in trace.layer_list}
+
+    # Top-level ops (the model input, an op between modules) run in NO module
+    # call: the stack must be empty, not the fed call's stack.
+    assert tuple(by_label["input_1"].module_call_stack) == ()
+    assert tuple(by_label["sigmoid_1_3"].module_call_stack) == ()
+    # The fed-call fact lives on input_to_module_calls, un-conflated.
+    assert tuple(by_label["input_1"].input_to_module_calls) == ("a:1", "a.0:1")
+    assert tuple(by_label["sigmoid_1_3"].input_to_module_calls) == ("l2:1",)
+
+    # Interior and module-output ops carry root-first ModuleCall LABELS
+    # (pass-qualified), not bare addresses.
+    assert tuple(by_label["linear_1_1"].module_call_stack) == ("a:1", "a.0:1")
+    assert tuple(by_label["relu_1_2"].module_call_stack) == ("a:1", "a.1:1")
+
+    # The three facts are tied on every op: stack == modules, depth == len.
+    for op in trace.layer_list:
+        assert tuple(op.module_call_stack) == tuple(op.modules)
+        assert op.module_call_depth == len(op.module_call_stack)
+
+
+def test_r05_module_call_stack_corruption_fails_invariants() -> None:
+    """The tri-fact tie is armed: a fed-call-style stack fails validation.
+
+    Nothing used to check ``module_call_stack`` against ``modules`` or
+    ``module_call_depth``, so the shipped inconsistency passed
+    ``check_metadata_invariants`` on every plain capture.
+    """
+
+    trace, _ = _capture(_Nested(), torch.randn(2, 4))
+    input_op = _op_by_layer_label(trace, "input_1")
+    assert tuple(input_op.modules) == ()
+    input_op.module_call_stack = ("a", "a.0")  # the retired fed-call fact
+
+    with pytest.raises(MetadataInvariantError) as exc_info:
+        check_metadata_invariants(trace)
+    assert "module_call_stack" in str(exc_info.value)
+
+
 def test_r05_parent_arg_positions_foreign_domain_fails() -> None:
     """FAIL-AFTER-WHERE-PASSED-BEFORE: the arg map's top-level domain is closed.
 

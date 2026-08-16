@@ -689,11 +689,13 @@ def _build_submodule_call_logs(
                 te = self.ops[op_label]
             except (KeyError, TypeError):
                 continue
-            if (
-                len(te.module_call_stack) > 0
-                and call_label in te.input_to_module_calls
-                and te.layer_label not in pass_input_layers
-            ):
+            # B3R7-R05-1: ``input_to_module_calls`` is the authoritative
+            # fed-call fact. The old ``len(module_call_stack) > 0`` companion
+            # test was a proxy for the same thing only while the enter lane
+            # wrote both together; under containment semantics it would drop
+            # top-level-created inputs (e.g. the model input) from the call's
+            # input roster.
+            if call_label in te.input_to_module_calls and te.layer_label not in pass_input_layers:
                 pass_input_layers.append(te.layer_label)
             if te.is_module_output and call_label in te.output_of_module_calls:
                 pass_output_layers.append(te.layer_label)
@@ -902,8 +904,8 @@ def _build_module_logs(self: "Trace") -> None:
     # quadratic and dominates validation postprocessing.
     _pass_input_layers_by_call: dict[str, list[str]] = defaultdict(list)
     for te in self.layer_list:
-        if len(te.module_call_stack) == 0:
-            continue
+        # B3R7-R05-1: iterate the fed-call fact directly; the old
+        # ``module_call_stack`` emptiness guard was an enter-lane proxy.
         for call_label in te.input_to_module_calls:
             _pass_input_layers_by_call[call_label].append(te.layer_label)
 

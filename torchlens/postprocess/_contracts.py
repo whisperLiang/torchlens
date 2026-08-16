@@ -952,6 +952,9 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "input_to_module_calls",
                 "lookup_keys",
                 "module",
+                # B3R7-R05-1: relabeled to canonical ModuleCall labels in
+                # lockstep with ``modules`` (same containment fact).
+                "module_call_stack",
                 "modules",
                 "ordinal_index",
                 "output_of_module_calls",
@@ -977,6 +980,7 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "layer_label",
                 "layer_label_short",
                 "module",
+                "module_call_stack",
                 "modules",
                 "num_passes",
                 "output_of_module_calls",
@@ -1216,7 +1220,10 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "is_orphan",
                 "label",
                 "layer_label",
-                "module_call_stack",
+                # B3R7-R05-1 note: ``module_call_stack`` is no longer read
+                # here -- the module-log builder keys pass-input membership on
+                # ``input_to_module_calls`` alone (the old emptiness guard was
+                # an enter-lane proxy for the same fact).
                 "multi_output_name",
                 "output_of_module_calls",
                 "raw_index",
@@ -1940,6 +1947,10 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "is_input",
                     "is_output",
                     "module",
+                    # B3R7-R05-1: step 11 relabels module_call_stack to
+                    # canonical ModuleCall labels in lockstep with modules;
+                    # step 1 seeds it empty on synthetic output nodes.
+                    "module_call_stack",
                     "modules",
                     "num_passes",
                     "output_of_module_calls",
@@ -2917,6 +2928,9 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "input_to_module_calls",
                     "lookup_keys",
                     "module",
+                    # B3R7-R05-1: step 18's streamed-bundle serialization reads
+                    # the stack after step 11's canonical-label relabel.
+                    "module_call_stack",
                     "modules",
                     "ordinal_index",
                     "output_of_module_calls",

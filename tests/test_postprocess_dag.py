@@ -132,6 +132,10 @@ MULTI_WRITER_GOLDEN = {
     "is_terminal_bool": ("3", "5"),
     "kwargs_template": ("3", "6", "9"),
     "module": ("1", "11"),
+    # B3R7-R05-1: module_call_stack is the same containment fact as modules
+    # (seeded from the modules facet at ingest, relabeled at step 11); step 1
+    # writes the empty stack on synthetic output nodes.
+    "module_call_stack": ("1", "11"),
     "modules": ("1", "11"),
     "num_passes": ("1", "7"),
     "out": ("1", "11.75", "19"),

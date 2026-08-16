@@ -2139,7 +2139,7 @@
     "module": "conv:1",
     "module_call_depth": 1,
     "module_call_stack": [
-     "conv"
+     "conv:1"
     ],
     "module_entry_arg_keys": {},
     "modules": [
@@ -2510,9 +2510,7 @@
     "min_distance_to_output": 3,
     "module": null,
     "module_call_depth": 0,
-    "module_call_stack": [
-     "conv"
-    ],
+    "module_call_stack": [],
     "module_entry_arg_keys": {
      "\"conv:1\"": [
       0
@@ -6507,7 +6505,7 @@
     "module": "conv:1",
     "module_call_depth": 1,
     "module_call_stack": [
-     "conv"
+     "conv:1"
     ],
     "module_entry_arg_keys": {},
     "modules": [
@@ -6878,9 +6876,7 @@
     "min_distance_to_output": 3,
     "module": null,
     "module_call_depth": 0,
-    "module_call_stack": [
-     "conv"
-    ],
+    "module_call_stack": [],
     "module_entry_arg_keys": {
      "\"conv:1\"": [
       0
@@ -10878,7 +10874,7 @@
     "module": "conv:1",
     "module_call_depth": 1,
     "module_call_stack": [
-     "conv"
+     "conv:1"
     ],
     "module_entry_arg_keys": {},
     "modules": [
@@ -11249,9 +11245,7 @@
     "min_distance_to_output": 3,
     "module": null,
     "module_call_depth": 0,
-    "module_call_stack": [
-     "conv"
-    ],
+    "module_call_stack": [],
     "module_entry_arg_keys": {
      "\"conv:1\"": [
       0
@@ -15174,7 +15168,7 @@
     "module": "conv:1",
     "module_call_depth": 1,
     "module_call_stack": [
-     "conv"
+     "conv:1"
     ],
     "module_entry_arg_keys": {},
     "modules": [
@@ -15545,9 +15539,7 @@
     "min_distance_to_output": 3,
     "module": null,
     "module_call_depth": 0,
-    "module_call_stack": [
-     "conv"
-    ],
+    "module_call_stack": [],
     "module_entry_arg_keys": {
      "\"conv:1\"": [
       0

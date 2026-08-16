@@ -834,6 +834,12 @@ def _add_lookup_keys_for_layer_entry(
         layer_entry.modules = [
             _module_call_label(module_call) for module_call in layer_entry.modules
         ]
+        # B3R7-R05-1: ``module_call_stack`` carries the same containment fact
+        # as ``modules`` (seeded from the modules facet at ingest), so it is
+        # relabeled to canonical ``address:N`` ModuleCall labels in lockstep.
+        layer_entry.module_call_stack = [
+            _module_call_label(module_call) for module_call in layer_entry.module_call_stack
+        ]
         if (layer_entry.module is None) and len(layer_entry.modules) > 0:
             layer_entry.module = layer_entry.modules[-1]
 

@@ -19,7 +19,6 @@ from torchlens.ir import CaptureEvents
 from torchlens.ir.events import (
     ModuleEnterEvent,
     ModuleExitEvent,
-    ModuleFrame,
     ModulePrepEvent,
     OpEvent,
 )
@@ -1512,9 +1511,13 @@ def _module_input_fields(
                 for tensor in input_tensors
                 if (label_raw := get_tensor_label(tensor)) is not None
             ]
+        # B3R7-R05-1: this enter lane must NOT touch ``module_call_stack``.
+        # It used to append the entered call's address here, which stamped the
+        # FED call's stack onto ops that never ran inside it (the model input,
+        # top-level producers) -- the fed-call fact is ``input_to_module_calls``;
+        # containment comes from the op's own modules facet at ingest.
         for label_raw in input_labels:
             fields = by_label.setdefault(label_raw, _empty_module_input_fields())
-            cast(list[Any], fields["module_call_stack"]).append(address)
             cast(list[Any], fields["input_to_module_calls"]).append(call_tuple)
         for label_raw, arg_key in event.layer_argnames:
             fields = by_label.setdefault(label_raw, _empty_module_input_fields())
@@ -1580,9 +1583,11 @@ def _module_output_fields(
                     role_hints,
                     output_index,
                 )
+        # B3R7-R05-1: the exit lane no longer overwrites ``module_call_stack``
+        # (its containment value now comes uniformly from the op's own modules
+        # facet at ingest); this loop keeps only the atomic-leaf detection.
         for label_raw, stack, _is_atomic, _atomic_call in event.per_output_atomic:
             fields = by_label.setdefault(label_raw, _empty_module_output_fields())
-            fields["module_call_stack"] = _module_stack_addresses(stack)
             # A module output op is an atomic (single-op leaf) module exit when its
             # innermost module call contains exactly one op. This is computed from
             # the finalized op-to-module map rather than at capture time so that
@@ -1658,7 +1663,6 @@ def _empty_module_input_fields() -> dict[str, object]:
     """
 
     return {
-        "module_call_stack": [],
         "input_to_module_calls": [],
         "module_entry_arg_keys": defaultdict(list),
     }
@@ -1785,23 +1789,6 @@ def _multi_output_name_from_event(
         output_index,
         hints=role_hints,  # type: ignore[arg-type]
     )
-
-
-def _module_stack_addresses(stack: tuple[ModuleFrame, ...]) -> list[str]:
-    """Convert module frames to the raw module-call-stack field format.
-
-    Parameters
-    ----------
-    stack
-        Module frames carried by a module-exit event.
-
-    Returns
-    -------
-    list[str]
-        Module addresses in stack order.
-    """
-
-    return [frame.address for frame in stack]
 
 
 def _input_io_roles(raw_graph_workspace: Any, op_events: list[OpEvent]) -> dict[str, str]:

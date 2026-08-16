@@ -3325,7 +3325,12 @@ class Op:
 
     @property
     def module_call_depth(self) -> int:
-        """Depth of module nesting for this operation."""
+        """Depth of ``module_call_stack``, the op's active ModuleCall nesting.
+
+        ``module_call_stack`` holds the same containment fact as ``modules``
+        (root-first ModuleCall labels active for this op; B3R7-R05-1 tied the
+        two by invariant), so the length of either is this depth.
+        """
         return len(self.modules)
 
     @property
