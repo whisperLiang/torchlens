@@ -56,6 +56,7 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "module_identity_mode": "header",
     "param_source": "header",
     "derived_grads": "graph",
+    "_primitive_op_profile": "graph",
     # Union additions (2026-08-13 grind): fields declared by the G2/F3a/B1-04
     # fixes now carry owners. Semantic-output scratch + predicate keys are
     # session-lifetime; validation side channels are session; bundle-source
