@@ -93,7 +93,10 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/backends/jax/backend.py": 4400,
     "torchlens/_io/bundle.py": 4500,
     "torchlens/_io/runnable_load.py": 3850,
-    "torchlens/user_funcs.py": 4200,
+    # 4200 -> 4050: the wave-0 governance sweep extracted the structure-only
+    # Layer-0 entry contract to capture/_structure_only_entry.py; re-keyed
+    # down to the next 50-line step above the post-split measurement.
+    "torchlens/user_funcs.py": 4050,
     "torchlens/backends/torch/backward.py": 3900,
     # 3800 -> 3850: L1 adds the grouping knob mirror + grouping_policy stamp
     # settlement (~25 lines) on top of the re-stepped feature-sprint baseline.
