@@ -298,6 +298,8 @@ class RefreshProjector:
         refreshed_prefix = [layer for layer in refreshed.layer_list if layer.layer_type != "output"]
 
         def _prefix_signature(layers: list[Any]) -> tuple[tuple[Any, ...], ...]:
+            """Return the structural (label, type, parents) prefix signature."""
+
             return tuple(
                 (
                     layer._layer_label_raw,

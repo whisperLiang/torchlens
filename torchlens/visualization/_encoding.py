@@ -1008,6 +1008,8 @@ def channel_wrapped_node_spec_fn(
         return node_spec_fn
 
     def channel_then_user(layer_log: Any, spec: Any) -> Any:
+        """Apply the channel fill, then let the user callback override it."""
+
         spec = spec.replace(fillcolor=channel_fill)
         if node_spec_fn is None:
             return spec

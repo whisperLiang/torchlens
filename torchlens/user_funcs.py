@@ -2294,6 +2294,8 @@ def _enforce_structure_only_entry_contract(
     )
 
     def _refuse_values(problem: str, *option_names: str) -> None:
+        """Raise the typed structure-only value-payload refusal."""
+
         raise InvalidArgumentError(
             problem,
             code="structure_only_values_unsupported",

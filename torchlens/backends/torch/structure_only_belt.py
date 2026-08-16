@@ -255,6 +255,8 @@ def _make_escalated_method(original: Any, state: _StructureOnlyBeltState, name: 
 
     @functools.wraps(original)
     def wrapper(self: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
+        """Refuse on hypothesis tensors, then defer to the original method."""
+
         _maybe_refuse_escape(state, name, self)
         return original(self, *args, **kwargs)
 
@@ -266,6 +268,8 @@ def _make_escalated_module_func(original: Any, state: _StructureOnlyBeltState, n
 
     @functools.wraps(original)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        """Refuse on hypothesis tensor operands, then defer to the original."""
+
         for operand in args:
             if isinstance(operand, torch.Tensor):
                 _maybe_refuse_escape(state, f"torch.{name}", operand)
@@ -278,6 +282,8 @@ def _make_escalated_property(descriptor: Any, state: _StructureOnlyBeltState, na
     """Wrap one getset-descriptor property with the escalated belt."""
 
     def getter(self: torch.Tensor) -> Any:
+        """Refuse on hypothesis tensors, then read the original descriptor."""
+
         _maybe_refuse_escape(state, name, self)
         return descriptor.__get__(self, type(self))
 
@@ -304,6 +310,8 @@ def structure_only_escape_belt(trace: Any) -> Iterator[None]:
     property_restores: dict[str, tuple[bool, Any]] = {}
 
     def _restore() -> None:
+        """Unwind every belt patch, shadow-aware (delete unshadowed names)."""
+
         for name, (shadowed, original) in method_restores.items():
             if shadowed:
                 setattr(torch.Tensor, name, original)
@@ -374,6 +382,8 @@ def _innermost_traceback_frame(exc: BaseException) -> types.TracebackType | None
 
 
 def _frame_location(tb: types.TracebackType) -> tuple[Path, int]:
+    """Return the resolved (file, line) of one traceback frame."""
+
     return Path(tb.tb_frame.f_code.co_filename).resolve(), tb.tb_lineno
 
 

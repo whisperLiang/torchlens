@@ -77,6 +77,8 @@ class SiteJoinRow:
 
     @property
     def joined(self) -> bool:
+        """Whether this key joined (corroborated or positional tier)."""
+
         return self.verdict in (_SiteJoinVerdict.CORROBORATED, _SiteJoinVerdict.POSITIONAL)
 
 
@@ -92,6 +94,8 @@ class SiteProfile:
     witnesses: dict[str, frozenset[_Witness | None]]
 
     def cohort_of(self, key: str) -> _Cohort:
+        """Return the key's cohort identity (the site key minus its ordinal)."""
+
         module_site, layer_type, output_slot, _ = parse_site_key(key)
         return (module_site, layer_type, output_slot)
 
@@ -142,6 +146,8 @@ def site_profile(trace: Any) -> SiteProfile:
 
 
 def _witness_known(values: frozenset[_Witness | None]) -> bool:
+    """Whether every op behind a key carries a source-location witness."""
+
     return bool(values) and None not in values
 
 
@@ -218,12 +224,16 @@ def fold_site_groups(rows: Iterable[FoldRow]) -> dict[str, frozenset[str]]:
     parent: dict[str, str] = {row.label: row.label for row in rows}
 
     def find(label: str) -> str:
+        """Return the component root of ``label`` with path compression."""
+
         while parent[label] != label:
             parent[label] = parent[parent[label]]
             label = parent[label]
         return label
 
     def union(a: str, b: str) -> None:
+        """Merge the components containing ``a`` and ``b``."""
+
         root_a, root_b = find(a), find(b)
         if root_a != root_b:
             parent[root_a] = root_b

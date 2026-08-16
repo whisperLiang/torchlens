@@ -619,6 +619,8 @@ def _loaded_until_cut(
     requested = set(plan.requested_layer_labels)
 
     def _bases(call: RunnableCallDescriptor) -> set[str]:
+        """Return the pass-stripped base labels of one recorded call."""
+
         return {op_label.rsplit(":", 1)[0] for op_label in call.op_labels}
 
     target_indexes = [index for index, call in enumerate(calls) if _bases(call) & requested]
@@ -748,6 +750,8 @@ def run_live_trace(
     if until_plan is not None:
 
         def _until_latch(ctx: Any, _plan: _RunUntilPlan = until_plan) -> bool:
+            """Fire once at the first boundary past the last requested site."""
+
             raw_index = getattr(ctx, "raw_index", None)
             if raw_index is not None and int(raw_index) >= _plan.stop_raw_index:
                 _plan.fired = True

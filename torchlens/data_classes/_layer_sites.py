@@ -40,8 +40,12 @@ SHAPE_SUMMARY_CHARACTER_CLASS = frozenset("0123456789x->-")
 
 
 def _pass_ordered_ops(layer: Layer) -> list[Any]:
-    # ``Layer.ops`` is keyed by 1-based pass index (positional ints are a
-    # separate 0-based access path); sort items for pass order.
+    """Return the layer's ops in pass order.
+
+    ``Layer.ops`` is keyed by 1-based pass index (positional ints are a
+    separate 0-based access path); sorting the items yields pass order.
+    """
+
     return [op for _, op in sorted(layer.ops.items())]
 
 
