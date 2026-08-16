@@ -78,6 +78,7 @@ MODEL_LOG_FIELD_ORDER = [
     "derived_grads",
     "capture_mode",
     "structure_only",
+    "intervention_audit",
     "_runnable",
     "_fast_run_session",
     "escape_detector_mode",

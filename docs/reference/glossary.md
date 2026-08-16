@@ -401,6 +401,31 @@ shim owed; S2-gated*
   mask_shape_mismatch | facet_write_mask_unavailable | population_too_small`),
   and `selection_apply_invalid` (stage 2).
 
+**tl.Edit / do(selection, edit)** — *Edit ratified (slate 5.5, subject to D7
+default-keep); mask-application semantics documented-unstable*
+: `tl.Edit` is the public edit-object type; `HelperSpec` is its deprecated
+  alias (stable surface, no removal scheduled). `trace.do(selection, edit)`
+  applies an edit to a resolved selection under the NORMATIVE
+  MASK-APPLICATION CONTRACT: the edit hook computes its full replacement
+  exactly as today (helpers stay mask-oblivious), then the ENGINE applies
+  `torch.where(mask, edited, original)` on a FRESH tensor — never in-place
+  on, never a view aliasing, the stored capture value. Whole-site masks
+  short-circuit the scatter (exactly today's behavior). No broadcasting in
+  v1; shape/dtype/device/broadcast mismatches and ineligible sites refuse
+  `selection_apply_invalid` (closed reason set
+  `shape | dtype | device | broadcast | not_maskable`). Learned-parameter
+  edits refuse typed (D3 activation-path narrowing, default keep). Each
+  Selection-targeted do() appends an audit record (query repr + resolve
+  digest + per-site relations) to `trace.intervention_audit` (DROP-gated,
+  session-time under v7).
+
+**tl.patch_from(source_trace)** — *unstable — no deprecation shim owed*
+: Edit factory patching targeted sites from another trace's recorded
+  post-capture values (activation patching); with a Selection target only
+  the selected elements are patched. Portability `opaque_audit`: persisted
+  args carry source-trace IDENTITY only (never the Trace, never tensors);
+  values bind at do() time session-side; no executable-save path in v1.
+
 **register_predicate(name, \*, replace=False)** — *unstable — no deprecation
 shim owed*
 : Registers a plain predicate callable under a name for later

@@ -27,6 +27,7 @@ STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {
         "derived_grads": StorageBinding(StorageKind.SCALAR),
         "capture_mode": StorageBinding(StorageKind.SCALAR),
         "structure_only": StorageBinding(StorageKind.RUNTIME),
+        "intervention_audit": StorageBinding(StorageKind.RUNTIME),
         "_runnable": StorageBinding(StorageKind.RUNTIME, annotation="<class 'torchlens._runnable_seam.RunnableTraceState'>"),
         "_fast_run_session": StorageBinding(StorageKind.RUNTIME, annotation='typing.Optional[typing.Any]'),
         "escape_detector_mode": StorageBinding(StorageKind.RUNTIME),

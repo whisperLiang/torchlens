@@ -110,6 +110,8 @@ TARGET_ALL = [
     "units",
     "params",
     "random_selection",
+    "Edit",
+    "patch_from",
 ]
 
 CANONICAL_SUBMODULES = [
@@ -172,7 +174,9 @@ def test_all_matches_frozen_96_name_surface() -> None:
     user-facing half of the capture-cache bounds fix) = 97.
     The L6 selection algebra (feature megasprint, DOCUMENTED-UNSTABLE pending
     naming-session ratification) adds `Selection`, `ResolvedSelection`,
-    `units`, `params`, and `random_selection` = 102.
+    `units`, `params`, and `random_selection` = 102; its stage 2 adds
+    `Edit` (public edit-object type; HelperSpec is the deprecated alias)
+    and `patch_from` = 104.
     Paper-era compatibility shims remain available through ``__getattr__`` but
     are not advertised in ``__all__``.
     """

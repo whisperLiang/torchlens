@@ -569,6 +569,10 @@ class TraceInterventionMixin(_TraceMixinBase):
             direction=direction,
         )
 
+        if mutation_kind in ("selection_replayed", "selection_set"):
+            # Leaf-site selection edits propagate (or deliberately do not)
+            # inside the mutation step; no hook targets exist to push.
+            return self
         if selected_engine == "set_only":
             return self
         if selected_engine == "replay":
@@ -720,9 +724,20 @@ class TraceInterventionMixin(_TraceMixinBase):
         Returns
         -------
         str
-            ``"set"`` or ``"attach_hooks"``.
+            ``"set"``, ``"attach_hooks"``, or ``"selection_hooks"``.
         """
 
+        from ..selection import ResolvedSelection, Selection
+
+        if isinstance(hooks_or_site, (Selection, ResolvedSelection)):
+            return self._apply_selection_do(
+                hooks_or_site,
+                value_or_hook,
+                engine=engine,
+                strict=strict,
+                confirm_mutation=confirm_mutation,
+                direction=direction,
+            )
         if engine == "set_only" and value_or_hook is not None:
             self.set(
                 hooks_or_site,
@@ -749,6 +764,159 @@ class TraceInterventionMixin(_TraceMixinBase):
             confirm_mutation=confirm_mutation,
         )
         return "attach_hooks"
+
+    def _apply_selection_do(
+        self: "Trace",
+        selection: Any,
+        edit: Any,
+        *,
+        engine: str,
+        strict: bool,
+        confirm_mutation: bool,
+        direction: str | None,
+    ) -> str:
+        """Apply a Selection-targeted edit under the mask-application contract.
+
+        The selection resolves against this trace. Interior sites (sites with
+        a replayable func) get the edit attached to the hook plan with the
+        engine-owned edit-then-scatter wrapper (element masks) or unchanged
+        (whole-site short-circuit). LEAF sites (inputs/buffers; no func to
+        replay) get the edited value computed NOW from the saved value under
+        the same scatter contract, committed transactionally, and propagated
+        with origin-preserving replay. An audit record (query repr + resolve
+        digest + per-site relations) is appended to ``intervention_audit``.
+        Empty resolutions attach nothing (emptiness is disclosure, never an
+        error).
+
+        Returns
+        -------
+        str
+            ``"selection_hooks"`` (interior sites; caller runs the engine),
+            ``"selection_replayed"`` (leaf sites already propagated), or
+            ``"selection_set"`` (leaf values committed without propagation).
+        """
+
+        from ..intervention.errors import EngineDispatchError
+        from ..intervention.selectors import label as label_selector
+        from ..selection import build_selection_do_plan
+
+        self._warn_if_root_mutation(confirm_mutation=confirm_mutation)
+        resolved, plan, audit = build_selection_do_plan(self, selection, edit)
+        leaf_items = [item for item in plan if item["is_leaf"]]
+        hook_items = [item for item in plan if not item["is_leaf"]]
+        if leaf_items and hook_items:
+            raise EngineDispatchError(
+                "a selection plan mixing leaf sites (inputs/buffers) and interior "
+                "sites cannot propagate as ONE replay transaction in v1: interior "
+                "recomputation reads captured consumed values, so the leaf edit "
+                "would be silently discarded at the interior site. Split the "
+                "selection by site class."
+            )
+        if not plan:
+            self.intervention_audit.append(audit)
+            return "selection_replayed"
+        if leaf_items:
+            if engine not in ("replay", "set_only"):
+                raise EngineDispatchError(
+                    "leaf-site selection edits (inputs/buffers) ride the replay "
+                    "engine (or set_only); for rerun, pass the modified input as x=."
+                )
+            self._apply_leaf_selection_edits(leaf_items)
+            if engine == "replay":
+                from ..intervention.replay import push_from
+
+                for item in leaf_items:
+                    push_from(self, item["op"], replay=ReplayOptions(strict=strict))
+                self.intervention_audit.append(audit)
+                return "selection_replayed"
+            self.intervention_audit.append(audit)
+            return "selection_set"
+        for item in hook_items:
+            self.attach_hooks(
+                label_selector(item["op"].label),
+                item["edit"],
+                strict=strict,
+                confirm_mutation=True,
+                direction=direction,
+            )
+        self.intervention_audit.append(audit)
+        return "selection_hooks"
+
+    def _apply_leaf_selection_edits(self: "Trace", leaf_items: list[dict[str, Any]]) -> None:
+        """Compute + commit leaf-site edited values under the scatter contract.
+
+        The edit hook computes its full replacement from the SAVED leaf value
+        (helpers stay mask-oblivious); the engine wrapper scatters selected
+        elements onto a fresh tensor. Commit rides the transactional replay
+        commit helper (snapshot + rollback), minting FireRecords so
+        disclosure matches the hook path.
+        """
+
+        from ..intervention.hooks import make_hook_context
+        from ..intervention.replay import _commit_replay_updates
+        from ..intervention.types import FireRecord, HelperSpec
+        from ..selection import _apply_invalid
+
+        pending_updates: dict[str, torch.Tensor] = {}
+        pending_records: dict[str, list[Any]] = {}
+        for item in leaf_items:
+            op = item["op"]
+            derived = item["edit"]
+            saved = op.out
+            if not isinstance(saved, torch.Tensor):
+                raise _apply_invalid(
+                    "not_maskable",
+                    f"leaf site {op.label!r} has no saved tensor value to edit.",
+                    site=op.label,
+                )
+            if isinstance(derived, HelperSpec):
+                if derived.factory is None:
+                    raise _apply_invalid(
+                        "not_maskable",
+                        f"edit {derived.helper_name!r} has no runtime factory.",
+                        site=op.label,
+                    )
+                hook_callable = derived.factory()
+                helper_spec: HelperSpec | None = derived
+                helper_name = derived.helper_name
+            else:
+                hook_callable = derived
+                helper_spec = None
+                helper_name = getattr(derived, "__name__", "hook")
+            context = make_hook_context(
+                name=helper_name,
+                timing="post",
+                direction="forward",
+                layer_log=op,
+                run_ctx={},
+                args=(saved,),
+                kwargs={},
+            )
+            applied = hook_callable(saved, hook=context)
+            if not isinstance(applied, torch.Tensor):
+                raise _apply_invalid(
+                    "not_maskable",
+                    f"edit at leaf site {op.label!r} produced a non-tensor "
+                    f"({type(applied).__name__}).",
+                    site=op.label,
+                )
+            pending_updates[op.layer_label] = applied
+            pending_records[op.layer_label] = [
+                FireRecord(
+                    target_label=op.layer_label,
+                    call_label=op.label,
+                    func_call_id=op.func_call_id,
+                    container_path=tuple(op.container_path or ()),
+                    engine="replay",
+                    helper=helper_spec,
+                    site_label=op.layer_label,
+                    timing="post",
+                    direction="forward",
+                    helper_name=helper_name,
+                    replaced=applied is not saved,
+                )
+            ]
+        _commit_replay_updates(self, pending_updates, pending_records)
 
     def _validate_supplied_model_matches_capture(self: "Trace", model: nn.Module) -> None:
         """Validate rerun model evidence against the captured source model.

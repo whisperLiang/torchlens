@@ -46,7 +46,11 @@ _PLANT_FIELD = "_tl_save_selector_fire_count"
 #: are made RELATIVE to this ledger so each new writer lane lands here as a
 #: reviewed one-line diff (registrar keeps the live inventory).
 _STANDING_REGISTRATIONS: dict[str, tuple[str, ...]] = {
-    "Trace": ("structure_only",),  # L7a mode marker (wave 0)
+    "HelperSpec": ("selection_recipe",),  # L6 Query-Selection recipe family
+    "Trace": (
+        "intervention_audit",  # L6 resolved-intervention audit record
+        "structure_only",  # L7a mode marker (wave 0)
+    ),
 }
 
 

@@ -142,6 +142,8 @@ _LAZY_ATTRS = {
     "where": ("torchlens.intervention", "where"),
     "without_op": ("torchlens.intervention", "without_op"),
     "zero_ablate": ("torchlens.intervention", "zero_ablate"),
+    "Edit": ("torchlens.intervention", "Edit"),
+    "patch_from": ("torchlens.intervention", "patch_from"),
     # L6 selection algebra (DOCUMENTED-UNSTABLE pending naming-session
     # ratification; megasprint provisional-name protocol).
     "Selection": ("torchlens.selection", "Selection"),
@@ -1375,4 +1377,6 @@ __all__ = [
     "units",
     "params",
     "random_selection",
+    "Edit",
+    "patch_from",
 ]

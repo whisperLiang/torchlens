@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any, ClassVar, Literal, TypeAlias
 
 from .._io import FieldPolicy
+from .._io.prerelease import register_prerelease_field
 from ..ir.container import (
     ContainerSpec,
     DataclassField,
@@ -182,6 +183,11 @@ class HelperSpec:
         "direction": FieldPolicy.KEEP,
         "batch_independent": FieldPolicy.KEEP,
         "compatible_with_append": FieldPolicy.KEEP,
+        # L6 Query-Selection recipe family (S3 registrar discipline): declared
+        # DROP under tlspec v7 and pre-release-registered; the wave-3 bump
+        # flips it to BLOB_RECURSIVE (recipe ASTs may embed unit-term masks).
+        # NEVER smuggled through the KEEP args/kwargs fields.
+        "selection_recipe": FieldPolicy.DROP,
     }
 
     helper_name: str
@@ -196,6 +202,7 @@ class HelperSpec:
     direction: HelperDirection | None = None
     batch_independent: bool = False
     compatible_with_append: bool = False
+    selection_recipe: Any = field(default=None, compare=False)
 
     @property
     def name(self) -> str:
@@ -850,7 +857,17 @@ def _build_op_log_fork_policy() -> dict[str, ForkFieldPolicy]:
 MODEL_LOG_FIELD_FORK_POLICY = _build_trace_fork_policy()
 LAYER_PASS_LOG_FIELD_FORK_POLICY = _build_op_log_fork_policy()
 
+#: Public edit-object type (slate 5.5, ratified subject to D7 default-keep):
+#: ``tl.Edit`` is the public spelling; ``HelperSpec`` is its deprecated alias
+#: (stable surface, no removal scheduled).
+Edit = HelperSpec
+
+register_prerelease_field(
+    HelperSpec, "selection_recipe", persisted_policy=FieldPolicy.BLOB_RECURSIVE
+)
+
 __all__ = [
+    "Edit",
     "CapturedArgTemplate",
     "ArgComponent",
     "ContainerSpec",

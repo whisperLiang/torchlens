@@ -1458,3 +1458,252 @@ def _selection_from_layer(layer: Any) -> Selection:
 
     layer_label = getattr(layer, "layer_label", None) or layer.label
     return Selection(_WholeSiteTerm(site_label=layer_label, pass_index=None), kind="ACT")
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: Selection-targeted edits — THE NORMATIVE MASK-APPLICATION CONTRACT.
+# Helpers stay mask-oblivious; the ENGINE owns masking (edit-then-scatter):
+# the edit hook computes its full replacement tensor exactly as today, then
+# the engine applies ``torch.where(mask, edited, original)`` on a FRESH
+# tensor — never in-place on, and never a view aliasing, the stored capture
+# value. Whole-site masks short-circuit the scatter (exactly today's
+# behavior). No broadcasting in v1.
+# ---------------------------------------------------------------------------
+
+
+def _apply_invalid(reason: str, message: str, **fields: Any) -> SelectionError:
+    """Build the closed-reason mask-application refusal."""
+
+    return SelectionError(message, code="selection_apply_invalid", reason=reason, **fields)
+
+
+def _validate_edited(edited: Any, out: torch.Tensor, site_label: str) -> torch.Tensor:
+    """Validate the edit output against the site output (no-broadcast v1)."""
+
+    if not isinstance(edited, torch.Tensor):
+        raise _apply_invalid(
+            "not_maskable",
+            f"element-masked edit at {site_label!r} produced a non-tensor "
+            f"({type(edited).__name__}); masked edits require tensor outputs.",
+            site=site_label,
+        )
+    if tuple(edited.shape) != tuple(out.shape):
+        try:
+            torch.broadcast_shapes(tuple(edited.shape), tuple(out.shape))
+            broadcastable = True
+        except RuntimeError:
+            broadcastable = False
+        raise _apply_invalid(
+            "broadcast" if broadcastable else "shape",
+            f"edit output shape {tuple(edited.shape)!r} does not match site "
+            f"{site_label!r} output shape {tuple(out.shape)!r}; no broadcasting in v1.",
+            site=site_label,
+        )
+    if edited.dtype != out.dtype:
+        raise _apply_invalid(
+            "dtype",
+            f"edit output dtype {edited.dtype} does not match site {site_label!r} "
+            f"output dtype {out.dtype}.",
+            site=site_label,
+        )
+    if edited.device != out.device:
+        raise _apply_invalid(
+            "device",
+            f"edit output device {edited.device} does not match site {site_label!r} "
+            f"output device {out.device}.",
+            site=site_label,
+        )
+    return edited
+
+
+def _masked_factory(inner_factory: Any, mask: _Mask, site_label: str) -> Any:
+    """Wrap a helper hook factory with the engine-owned scatter step."""
+
+    def factory() -> Any:
+        inner = inner_factory()
+
+        def _masked_hook(out: Any, *, hook: Any) -> Any:
+            if not isinstance(out, torch.Tensor):
+                raise _apply_invalid(
+                    "not_maskable",
+                    f"site {site_label!r} produced a non-tensor output at apply "
+                    "time; element-masked edits address single-tensor outputs only.",
+                    site=site_label,
+                )
+            if tuple(out.shape) != mask.shape:
+                raise _apply_invalid(
+                    "shape",
+                    f"site {site_label!r} output shape {tuple(out.shape)!r} does not "
+                    f"match the selection's recorded index space {mask.shape!r}.",
+                    site=site_label,
+                )
+            edited = inner(out, hook=hook)
+            edited = _validate_edited(edited, out, site_label)
+            dense = mask._dense_ro().to(out.device)
+            # EDIT-THEN-SCATTER on a fresh tensor; stored capture truth is
+            # never written through.
+            return torch.where(dense, edited, out)
+
+        return _masked_hook
+
+    return factory
+
+
+def _derive_masked_edit(edit: Any, entry: SiteEntry, digest: str, site_label: str) -> Any:
+    """Derive the per-site edit spec/hook under the mask contract.
+
+    A whole-site mask short-circuits the scatter and returns the edit's
+    behavior unchanged (only the recipe disclosure is stamped). Element
+    masks wrap the hook factory with the engine scatter; the derived spec's
+    factory is session-time (``FieldPolicy.DROP``) — the mask never enters
+    a persisted KEEP field, and the recipe rides the DROP-gated
+    ``selection_recipe`` family.
+    """
+
+    import dataclasses
+
+    from .intervention.types import HelperSpec
+
+    recipe = {
+        "resolve_digest": digest,
+        "site_key": repr(entry.site_key),
+        "relation": entry.provenance.relation,
+        "selected": entry.selected_count,
+        "source": entry.provenance.source,
+    }
+    if isinstance(edit, HelperSpec):
+        disclosure = (
+            ("selection_digest", digest),
+            ("selection_site", repr(entry.site_key)),
+            ("selection_relation", entry.provenance.relation),
+        )
+        if entry._mask.form == "whole":
+            return dataclasses.replace(
+                edit,
+                metadata=tuple(edit.metadata) + disclosure,
+                selection_recipe=recipe,
+            )
+        if edit.factory is None:
+            raise _apply_invalid(
+                "not_maskable",
+                f"edit {edit.helper_name!r} has no runtime factory to mask.",
+                site=site_label,
+            )
+        return dataclasses.replace(
+            edit,
+            factory=_masked_factory(edit.factory, entry._mask, site_label),
+            # The derived spec cannot be re-executed from its persisted form
+            # alone (the mask is session-time until the wave-3 bump).
+            portability="opaque_audit",
+            metadata=tuple(edit.metadata) + disclosure,
+            selection_recipe=recipe,
+        )
+    if callable(edit):
+        if entry._mask.form == "whole":
+            return edit
+
+        def _plain_factory() -> Any:
+            def _adapter(out: Any, *, hook: Any) -> Any:
+                return edit(out, hook=hook)
+
+            return _adapter
+
+        return _masked_factory(_plain_factory, entry._mask, site_label)()
+    raise ValueError(
+        "do(selection, edit) requires an Edit/HelperSpec, a hook callable, or a "
+        f"replacement tensor; got {type(edit).__name__}."
+    )
+
+
+def build_selection_do_plan(
+    trace: Any, selection_like: Any, edit: Any
+) -> tuple[ResolvedSelection, list[dict[str, Any]], dict[str, Any]]:
+    """Resolve a selection target and derive the per-site edit plan.
+
+    Returns ``(resolved, [{"op", "entry", "is_leaf", "edit"}, ...], audit_record)``.
+    ACT selections only: PARAM edits are typed-refused pending the D3 ruling
+    (differentiability narrowed to the activation path); EDGE selections are
+    stage-3 edge-substitution territory.
+    """
+
+    if edit is None:
+        raise ValueError(
+            "do(selection, edit) requires an edit: pass an Edit/HelperSpec "
+            "(e.g. tl.zero_ablate()), a hook callable, or a replacement tensor."
+        )
+    lifted = _lift(selection_like)
+    assert lifted is not None
+    if isinstance(lifted, ResolvedSelection):
+        if lifted._trace is not trace:
+            raise SelectionError(
+                "the resolved selection is bound to a different trace; resolve "
+                "against this trace first.",
+                code="selection_trace_mismatch",
+            )
+        resolved = lifted
+    else:
+        resolved = lifted.resolve(trace)
+    if resolved.kind == "PARAM":
+        raise _apply_invalid(
+            "not_maskable",
+            "learned-parameter edits are outside the stage-2 activation path "
+            "(differentiability is narrowed to activations pending the D3 "
+            "ruling; the wave-2 default is a typed refusal).",
+        )
+    if resolved.kind == "EDGE":
+        raise _apply_invalid(
+            "not_maskable",
+            "edge selections address edge substitution (stage 3), not node edits.",
+        )
+
+    from .intervention.types import HelperSpec
+
+    if not isinstance(edit, HelperSpec) and not callable(edit):
+        # Raw replacement values (tensors, scalars) route through the shipped
+        # replace_with helper and then obey the same scatter contract.
+        from .intervention.predicates import replace_with
+
+        edit = replace_with(edit)
+
+    plan: list[dict[str, Any]] = []
+    for entry in resolved:
+        layer_label, pass_index = entry.site_key
+        ops = [
+            op
+            for op in _find_act_ops(trace, layer_label)
+            if getattr(op, "pass_index", 1) == pass_index
+        ]
+        if not ops:
+            raise _unresolvable(
+                "site_not_in_trace",
+                f"resolved site {entry.site_key!r} is not present on this trace.",
+                site=layer_label,
+            )
+        op = ops[0]
+        plan.append(
+            {
+                "op": op,
+                "entry": entry,
+                "is_leaf": getattr(op, "func", None) is None,
+                "edit": _derive_masked_edit(edit, entry, resolved.resolve_digest, op.label),
+            }
+        )
+
+    audit: dict[str, Any] = {
+        "kind": resolved.kind,
+        "selection_repr": repr(selection_like),
+        "resolve_digest": resolved.resolve_digest,
+        "sites": [
+            {
+                "site_key": repr(entry.site_key),
+                "relation": entry.provenance.relation,
+                "selected": entry.selected_count,
+            }
+            for entry in resolved
+        ],
+        "edit": getattr(edit, "helper_name", getattr(edit, "__name__", repr(type(edit)))),
+    }
+    source_identity = getattr(edit, "kwargs", None)
+    if getattr(edit, "helper_name", None) == "patch_from" and source_identity:
+        audit["patch_source"] = dict(source_identity)
+    return resolved, plan, audit

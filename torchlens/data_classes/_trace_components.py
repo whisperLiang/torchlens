@@ -77,6 +77,7 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     # the settlement witness machinery after S2 ratification (seam labeled in
     # user_funcs.py).
     "structure_only": "witness",
+    "intervention_audit": "session",
     "_runnable": "runnable",
     "_fast_run_session": "graph",
     "escape_detector_mode": "witness",
