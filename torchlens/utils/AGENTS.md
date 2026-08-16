@@ -22,6 +22,7 @@ this package mostly stateless and free of high-level TorchLens business logic.
 | `_multipass_access.py` | Multi-pass-safe attribute access for aggregate (recurrent) `Layer` objects |
 | `_torch_symbols.py` | Single sanctioned spelling for resolving top-level `torch` attributes on the load/decode/exec path |
 | `_uninit_alloc.py` | Closed uninitialized-memory value-source name table (the ONE shared predicate block; `rng.py` re-exports it) |
+| `env_flags.py` | THE closed-vocabulary boolean env-knob parser (`closed_bool_env`); torchlens-owned on/off knobs must parse through it, never exact-`"1"` or raw truthiness (round-7 R47) |
 | `__init__.py` | 1,000+ lines of PUBLIC API — `doctor()`, `list_modules`/`list_ops`, `flop_count`, `peek_graph`, `synthetic_input`, `find_executable_save_set`, `trace_streaming`, and the `_LAZY_EXPORTS` `__getattr__`; NOT editable boilerplate |
 
 (Source-link helpers live at top level in `torchlens/_source_links.py`, not in this package.)

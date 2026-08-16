@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import copy
 import gc
-import os
 import weakref
 from collections import OrderedDict
 from collections.abc import Iterator
@@ -52,6 +51,7 @@ from .._trace_core.op_store import _MISSING, DetachedOpStore, PooledCell, cow_co
 from .._trace_core.record_rows import CORE_KEY, ROW_KEY
 from ..capture.outcome import stamp_forked
 from ..intervention.types import MODEL_LOG_FIELD_FORK_POLICY, ForkFieldPolicy
+from ..utils.env_flags import closed_bool_env
 from ._accessor_base import Accessor
 from ._state_adapter import state_items, state_new, state_restore
 from .func_call_location import FuncCallLocation
@@ -163,7 +163,10 @@ def _memoized_deep_copy(
         # those entries are discarded rather than handed to the next field.
         if fork_memo is not None and mark is not None:
             fork_memo.rollback(mark)
-        if os.environ.get("TORCHLENS_DEBUG_FORK_COPY"):
+        # Closed parse (round-7 b7 R47): the raw-truthiness spelling made
+        # ``TORCHLENS_DEBUG_FORK_COPY=0`` ENABLE the debug re-raise it names
+        # off, and a typo silently selected a state.
+        if closed_bool_env("TORCHLENS_DEBUG_FORK_COPY"):
             raise
         if fallback is _PROPAGATE:
             return on_failure(value)

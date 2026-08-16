@@ -66,6 +66,7 @@ from ..ir.container import (
 from ..ir.container_registry import ContainerRecord, ContainerSnapshot, Role
 from ..quantities import Duration
 from ..utils.display import _timed_phase, _vprint, in_notebook, int_list_to_compact_str
+from ..utils.env_flags import closed_bool_env
 from ._label_format import (
     format_memory,
     format_module_kwargs,
@@ -135,10 +136,19 @@ def strict_collapse_checks_enabled() -> bool:
     Returns
     -------
     bool
-        True when ``TORCHLENS_COLLAPSE_STRICT=1`` is set.
+        True when ``TORCHLENS_COLLAPSE_STRICT`` is set to an affirmative
+        value (``1/true/yes/on``).
+
+    Raises
+    ------
+    InvalidArgumentError
+        When the variable is set to an unrecognized value (round-7 b7 R47:
+        the historical exact-``"1"`` parse silently left this
+        verification-arming tripwire OFF on ``=true`` or a typo while the
+        exporter believed it was armed).
     """
 
-    return os.environ.get("TORCHLENS_COLLAPSE_STRICT") == "1"
+    return closed_bool_env("TORCHLENS_COLLAPSE_STRICT")
 
 
 def format_collapsed_module_contents(num_layers: int, num_buffer_layers: int) -> str:
