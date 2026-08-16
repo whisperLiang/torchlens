@@ -3158,9 +3158,18 @@ def _run_backward_with_capture(
             _clear_pending_accumulate_grad_records(trace)
         except BaseException as exc:
             cleanup_error = exc
+        # SUCCESS path: there is no primary exception whose precedence would
+        # justify discarding a failure here, so fold it into cleanup_error
+        # like the sibling steps. suppress(BaseException) silently discarded
+        # a KeyboardInterrupt delivered during handle removal after a
+        # successful backward and log_backward returned normally (grind-r6
+        # b8 R63, fable probe). Already-removed / framework-debris handles
+        # still never mask a real first failure: the fold keeps the FIRST.
         for handle in handles:
-            with contextlib.suppress(BaseException):
+            try:
                 handle.remove()
+            except BaseException as exc:
+                cleanup_error = cleanup_error if cleanup_error is not None else exc
         try:
             _clear_forward_grad_fn_refs(trace)
         except BaseException as exc:
