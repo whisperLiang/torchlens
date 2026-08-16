@@ -501,11 +501,15 @@ def build_profile(
         frame.attrs["top_k"] = top_k
     outcome = getattr(trace, "outcome", None)
     status_value = getattr(getattr(outcome, "status", None), "value", None)
+    capture_status = str(status_value) if status_value is not None else "unknown"
+    capture_verified = getattr(trace, "capture_verified", None)
+    capture_verification_reason = getattr(trace, "capture_verification_reason", None)
+    rescue_rerun = bool(getattr(trace, "rescue_rerun", None) or False)
     verification = {
-        "capture_status": str(status_value) if status_value is not None else "unknown",
-        "capture_verified": getattr(trace, "capture_verified", None),
-        "capture_verification_reason": getattr(trace, "capture_verification_reason", None),
-        "rescue_rerun": bool(getattr(trace, "rescue_rerun", None) or False),
+        "capture_status": capture_status,
+        "capture_verified": capture_verified,
+        "capture_verification_reason": capture_verification_reason,
+        "rescue_rerun": rescue_rerun,
     }
     frame.attrs.update(verification)
     honesty_frame.attrs.update(verification)
@@ -514,5 +518,8 @@ def build_profile(
         level=level,
         _honesty_frame=honesty_frame,
         _tree_text=_build_call_tree(trace),
-        **verification,
+        capture_status=capture_status,
+        capture_verified=capture_verified,
+        capture_verification_reason=capture_verification_reason,
+        rescue_rerun=rescue_rerun,
     )
