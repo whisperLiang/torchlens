@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from ._render_common import RenderedNodeEmission
     from ._render_edges import _SegmentLookup
     from .auto_collapse import ModuleRepeatFold
+    from .node_spec import NodeSpec
     from .node_universe import NodeUnit
     from .renderers.base import RendererCapabilities
 
@@ -56,7 +57,8 @@ class RenderIRNode:
     node_calls: tuple[Any, ...] = ()
     owned_node_args: tuple[tuple[str, dict[str, Any]], ...] = ()
     node_color: str = "black"
-    node_spec: Any | None = None
+    # S5 contract (C4): typed NodeSpec | None (was Any).
+    node_spec: NodeSpec | None = None
     region_path: tuple[str, ...] = ()
 
 
@@ -717,7 +719,7 @@ def _node_from_unit(
     owned_node_args: tuple[tuple[str, dict[str, Any]], ...] = ()
     node_color = "black"
     label_spans: tuple[str, ...] = ()
-    node_spec: Any | None = None
+    node_spec: NodeSpec | None = None
     region_path: tuple[str, ...] = ()
     if emission.node is not None:
         node_calls, owned_node_args, node_color, node_spec, label_spans = _resolve_node_decision(
@@ -755,7 +757,11 @@ def _resolve_node_decision(
     segment_lookup: _SegmentLookup,
     sibling_counts: Mapping[str, int] | None = None,
 ) -> tuple[
-    tuple[Any, ...], tuple[tuple[str, dict[str, Any]], ...], str, Any | None, tuple[str, ...]
+    tuple[Any, ...],
+    tuple[tuple[str, dict[str, Any]], ...],
+    str,
+    NodeSpec | None,
+    tuple[str, ...],
 ]:
     """Resolve one visible node's complete presentation decision.
 
