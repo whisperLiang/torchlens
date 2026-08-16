@@ -121,10 +121,21 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # accountant settle): two more `_save_budget_accountant` reads in
     # _ops_retention.py, the same optional session-time idiom already
     # ledgered for that exact field.
-    "backends/torch": 120,
+    # 120 -> 124 (2026-08-16 l2/l3 merge-gate reconcile, 5f0a4f8d aten wave 0):
+    # _aten_capture.py reads the optional session-time `_module_capture_ws`
+    # workspace (x2) and `_capture_events` stream (x2); both are absent
+    # outside a live capture window, so the None default is the correct
+    # "no active capture" reading (aten recording then no-ops).
+    "backends/torch": 124,
     "bridge": 1,
     "bundle": 1,
-    "capture": 20,
+    # 20 -> 22 (2026-08-16 l2 episode, f2228f46 S7 suite): the episode
+    # partial-failure disclosure in _episode_ledger.py best-effort reads the
+    # optional `_capture_events` stream and `_raw_graph_ws` workspace off a
+    # FAILED partial trace; either may legitimately be absent at the point of
+    # failure, so the None default is the correct "nothing to disclose"
+    # reading (the row degrades to interrupted/absent, never guesses).
+    "capture": 22,
     # 25 -> 27 (2026-08-14 fix-wave reconcile, 7f90a885 fix/walkers): the
     # linear ordinal_index cache keys its per-trace memo on the session-time
     # `_backward_projection_revision` counter in grad_fn_call.py (x2); absent
@@ -146,7 +157,12 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     "fastlog": 2,
     "intervention": 43,
     "ir": 2,
-    "postprocess": 5,
+    # 5 -> 8 (2026-08-16 l2/l3 merge-gate reconcile, 5f0a4f8d aten wave 0):
+    # _primitive_profile.py reads the optional DROP-gated
+    # `_primitive_op_profile` store (x2) and `_capture_events` stream; absent
+    # on non-aten / loaded traces, so the None default is the correct
+    # "no primitive layer" reading.
+    "postprocess": 8,
     "report": 1,
     # 7 -> 6 (2026-08-14 fixwave-2 reconcile): one reach-in discharged upstream.
     "repgeom": 6,
@@ -162,7 +178,13 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # false-fire fix): _invariants_payloads.py reads the optional
     # `_loaded_from_bundle` marker to scope op_log_fields to live captures;
     # absent on live traces, so the False default is the correct reading.
-    "validation": 25,
+    # 25 -> 30 (2026-08-16 l2/l3 merge-gate reconcile, 5f0a4f8d aten wave 0):
+    # _invariants_primitive_ops.py reads the optional DROP-gated
+    # `_primitive_op_profile` store (x3, absent = no primitive layer to
+    # check, and the non-torch invariant asserts it IS absent) and the
+    # `_tracing_finished` marker (x2) that scopes the unresolved-ownership
+    # check to completed traces; both defaults are the correct readings.
+    "validation": 30,
     # 20 -> 23 (2026-08-14 fixwave-2 reconcile): intended R19/R40 rendering
     # additions (node-overlay names/scores, source-code blob, `_visualizer_dir`
     # consolidation into _render_dot.py) against removed `_raw_layer_dict` /
