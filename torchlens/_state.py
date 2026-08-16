@@ -197,10 +197,16 @@ per thread/context; each thread starts from the empty default.
 _naming_counters: dict[str, int] = {}
 """Process-global counters used by unnamed ``trace`` captures.
 
-The counter is intentionally not thread-safe. Public capture is serialized by
-``active_logging()``'s re-entrancy guard, which is the same concurrency boundary
-used by the rest of TorchLens logging state.
+Guarded by ``_naming_lock`` (r7 b8-sol R54): ``_auto_name`` runs during
+capture setup BEFORE admission, so ``active_logging()``'s re-entrancy guard
+does not serialize it -- two racing pre-admission threads could interleave the
+read-modify-write and mint the SAME name for both captures (the refused loser
+had already consumed the bump). The lock makes the get+increment atomic; it is
+never held around user code or any other lock.
 """
+
+_naming_lock = threading.Lock()
+"""Serializes ``_naming_counters`` read-modify-write (see that docstring)."""
 
 _HF_CLASS_SUFFIXES: tuple[str, ...] = (
     "ForCausalLM",
@@ -298,8 +304,9 @@ def _auto_name(model: Any) -> str:
 
     class_name = type(model).__name__
     short = _strip_hf_suffix(class_name).lower()
-    n = _naming_counters.get(short, 0) + 1
-    _naming_counters[short] = n
+    with _naming_lock:
+        n = _naming_counters.get(short, 0) + 1
+        _naming_counters[short] = n
     return f"{short}_{n}"
 
 
@@ -317,10 +324,11 @@ def reset_naming_counter(class_name: str | None = None) -> None:
         The naming counter dictionary is mutated in place.
     """
 
-    if class_name is None:
-        _naming_counters.clear()
-    else:
-        _naming_counters.pop(class_name, None)
+    with _naming_lock:
+        if class_name is None:
+            _naming_counters.clear()
+        else:
+            _naming_counters.pop(class_name, None)
 
 
 def reset_capture_runtime_context() -> None:
@@ -782,39 +790,65 @@ def _capture_conflict_is_live() -> bool:
     return _capture_reserved_by is not None and _capture_reserved_by != threading.get_ident()
 
 
+_capture_reservation_token: object | None = None
+"""Opaque continuation token minted with the live reservation claim.
+
+Same-thread re-entry into ``capture_reservation`` is sanctioned for exactly
+one caller: the capture orchestration invoked BY the reserving recorder pass,
+which receives this token from the recorder and presents it back. A nested
+PUBLIC capture entered from user code running inside the reserved window
+(input-walk container protocols, model-prep hooks, tensor-subclass
+``__torch_function__`` during input setup) holds no token, so the thread-ident
+check alone must never admit it (R55: both captures used to COMPLETE).
+Written only under the admission lock.
+"""
+
+
 @contextmanager
-def capture_reservation() -> Iterator[None]:
+def capture_reservation(resume: object | None = None) -> Iterator[object]:
     """Reserve the capture slot BEFORE any capture-global side effect runs.
 
     Entered at the top of a public capture (``tl.trace`` orchestration,
     ``tl.record``'s recorder pass) so a concurrent capture is refused typed
     BEFORE it can sweep the admitted capture's label session or overwrite the
     fastlog ``RecordingState`` (the refused-loser data-quality corruption).
-    Nested same-thread entry is a passthrough: the recorder reserves around
-    ``active_recording_state`` and the inner orchestration re-enters here
-    before ``active_logging`` without releasing the outer claim. A genuinely
+
+    Yields the reservation's continuation token. Same-thread re-entry is a
+    passthrough ONLY when ``resume`` presents the live token: the recorder
+    reserves around ``active_recording_state``, hands the yielded token to the
+    inner orchestration, and that orchestration re-enters here before
+    ``active_logging`` without releasing the outer claim. A same-thread entry
+    WITHOUT the token is a nested public capture started by user code inside
+    the reserved window and refuses typed (R55) -- the bare thread-ident
+    passthrough used to let both captures run to completion. A genuinely
     nested capture (inside a live forward) refuses on the same predicate as
     ``active_logging``.
     """
 
-    global _capture_reserved_by
+    global _capture_reserved_by, _capture_reservation_token
     ident = threading.get_ident()
     with _capture_admission_lock:
         if _logging_enabled or _active_trace is not None or _hook_reentrancy_depth > 0:
             raise _reentrant_refusal()
         if _capture_reserved_by is None:
             _capture_reserved_by = ident
+            _capture_reservation_token = object()
+            token = _capture_reservation_token
             owns_reservation = True
         elif _capture_reserved_by == ident:
+            if resume is None or resume is not _capture_reservation_token:
+                raise _reentrant_refusal()
+            token = _capture_reservation_token
             owns_reservation = False
         else:
             raise _reentrant_refusal()
     try:
-        yield
+        yield token
     finally:
         if owns_reservation:
             with _capture_admission_lock:
                 _capture_reserved_by = None
+                _capture_reservation_token = None
 
 
 @contextmanager

@@ -840,6 +840,7 @@ class TraceValidationMixin(_TraceMixinBase):
         grad_layers_to_save: str | list[str | int] | None = "all",
         random_seed: int | None = None,
         postprocess: bool = True,
+        reservation_resume: object | None = None,
     ) -> Any:
         """Run a forward pass and capture it into this model log.
 
@@ -848,6 +849,9 @@ class TraceValidationMixin(_TraceMixinBase):
         model, input_args, input_kwargs, layers_to_save, grad_layers_to_save, random_seed:
             Forwarded unchanged to
             :func:`torchlens.capture.trace.run_and_log_inputs_through_model`.
+        reservation_resume:
+            Continuation token from the caller's own live ``capture_reservation``
+            claim (the recorder pass); a bare nested entry without it refuses.
         """
         from ..capture.trace import run_and_log_inputs_through_model as _impl
 
@@ -860,6 +864,7 @@ class TraceValidationMixin(_TraceMixinBase):
             grad_layers_to_save=grad_layers_to_save,
             random_seed=random_seed,
             postprocess=postprocess,
+            reservation_resume=reservation_resume,
         )
 
     def log_backward(self: "Trace", loss: torch.Tensor, **backward_kwargs: Any) -> "Trace":

@@ -1346,6 +1346,7 @@ def run_and_log_inputs_through_model(
     grad_layers_to_save: str | list[str | int] | None = "all",
     random_seed: int | None = None,
     postprocess: bool = True,
+    reservation_resume: object | None = None,
 ) -> Any:
     """Core orchestration: run a forward pass and log everything into Trace.
 
@@ -1461,9 +1462,11 @@ def run_and_log_inputs_through_model(
     # concurrent capture destined for the typed ``ReentrantTraceError`` used
     # to run those mutations first and orphan the admitted winner's session
     # (runtime-probed ``capture_verified=False``). Same-thread re-entry from
-    # the recorder's outer reservation passes through; the reservation is
-    # released in the outermost ``finally`` below.
-    capture_slot = _state.capture_reservation()
+    # the recorder's outer reservation passes through only by presenting the
+    # recorder's continuation token (R55: a bare same-thread re-entry is a
+    # nested public capture from user code inside the window and refuses);
+    # the reservation is released in the outermost ``finally`` below.
+    capture_slot = _state.capture_reservation(resume=reservation_resume)
     capture_slot.__enter__()
     try:
         compiled_capture_context = (
