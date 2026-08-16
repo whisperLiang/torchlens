@@ -7,10 +7,13 @@ passing only data-flow edges in ``data_parents`` and ``data_children``.
 
 import heapq
 import itertools as it
+import warnings
 from bisect import bisect_right
 from collections import Counter, OrderedDict, defaultdict, deque
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
+
+from ..errors._base import TorchLensWarning
 
 FrontierNodes = OrderedDict[str, dict[str, deque[str]]]
 
@@ -27,6 +30,40 @@ _MIN_PARAM_FREE_LOOP_BODY_OPS = 2
 # sparse sources never pay a graph-wide traversal, while genuinely dense demand
 # reaches the O(1) mask lane after two bounded probes.
 _DENSE_SOURCE_DISTINCT_QUERIES = 2
+
+# Node-count ceiling for the whole-graph descendant-mask batch DP (r8 R60-3):
+# the batch stores one N-bit int per node, an O(N^2/8)-byte table -- ~32MB at
+# the ceiling, but ~1.25GB at 100k nodes and ~125GB at 1M, reached by a plain
+# straight-line loop (the common case). Above the ceiling, dense sources keep
+# the demand-driven per-source BFS: each cached mask is only N/8 bytes and the
+# total stays proportional to actual dense demand.
+_DENSE_BATCH_MAX_NODES = 16_384
+
+# Byte budget for demand-driven per-source descendant masks above which the
+# cache stops RETAINING new masks (queries stay exact through the bounded
+# per-pair BFS lane). Bounds worst-case cache memory when pathological demand
+# makes every source dense on a huge graph.
+_DESCENDANT_MASK_BYTE_BUDGET = 64 * 2**20
+
+# Work budget for the param-free refinement fixpoint (r8 R60-5): the loop
+# terminates (refinement only splits), but the round count is O(N) and each
+# round is O(E), so a deep unrolled chain paid O(N*E). The budget counts
+# member-signature rebuilds across rounds; realistic graphs converge far
+# below it (a 5k-op chain costs ~25M visits). On exhaustion every remaining
+# multi-member candidate class DISSOLVES to singletons -- an unconverged
+# partition may still be too coarse, and over-splitting (no recurrence claim)
+# is the honest direction -- with a one-per-capture warning.
+_PF_FIXPOINT_WORK_BUDGET = 50_000_000
+
+# Reachability-probe ceiling for one equal-signature cohort's pair triangle
+# (r8 R60-4): mutually-unreachable siblings sharing one signature (``ys =
+# [x * i for i in range(N)]``) ran the FULL O(k^2) triangle -- ~5e11 probes at
+# 1M ops -- because the ``distinct_roots == 1`` early break only helps when
+# unions fire. Genuine loop cohorts chain through the consecutive-pair window
+# and exit at one root long before the ceiling; a cohort that exhausts it is
+# overwhelmingly parallel streams (whose correct outcome IS no union), and the
+# one-per-capture warning disclosures the bounded sweep.
+_PF_COHORT_PAIR_PROBE_CEILING = 250_000
 
 # A slot color is the site identity a parent contributes to a param-free op's
 # signature: ``("param", call_identity)`` for parameterized calls, ``("anchor",
@@ -1173,6 +1210,10 @@ class _ReachabilityCache:
                     return cached
                 self._sparse_query_counts[src_label] = queries_seen + 1
                 return self._bounded_pair_query(src_label, dst_label)
+            if self._mask_budget_exhausted():
+                # Mask retention budget spent (r8 R60-3): stay on the exact
+                # bounded pair lane instead of growing the cache further.
+                return self._bounded_pair_query(src_label, dst_label)
             mask = self._acquire_descendant_mask(src_label)
         return (mask >> self._bit_index[dst_label]) & 1 == 1
 
@@ -1195,11 +1236,25 @@ class _ReachabilityCache:
         """
         if not self._batch_attempted:
             self._batch_attempted = True
-            self._batch_build_descendant_masks()
+            # Node-count ceiling (r8 R60-3): the batch stores one N-bit int
+            # per node -- an O(N^2/8)-byte table that reaches ~1.25GB at 100k
+            # nodes on a plain straight-line loop. Above the ceiling the
+            # demand-driven per-source BFS keeps memory proportional to
+            # actual dense demand.
+            if len(self._workspace.nodes) <= _DENSE_BATCH_MAX_NODES:
+                self._batch_build_descendant_masks()
         mask = self._descendant_bits.get(src_label)
         if mask is None:
             mask = self._build_descendant_mask(src_label)
         return mask
+
+    def _mask_budget_exhausted(self) -> bool:
+        """Return whether retained per-source masks have spent the byte budget."""
+        node_count = len(self._bit_index)
+        if node_count == 0:
+            return False
+        mask_bytes = node_count // 8 + 1
+        return len(self._descendant_bits) * mask_bytes >= _DESCENDANT_MASK_BYTE_BUDGET
 
     def _batch_build_descendant_masks(self) -> None:
         """Build every descendant mask in one reverse-insertion-order DP pass.
@@ -1903,9 +1958,26 @@ def _pf_partition_class(
         # sliding window, which is ragged by construction (n-1 pairs from n
         # items). strict=True here would raise on every non-empty cohort.
         pair_iter = it.chain(zip(cohort, cohort[1:], strict=False), it.combinations(cohort, 2))
+        pair_probes = 0
         for member1, member2 in pair_iter:
             if find(member1) == find(member2):
                 continue
+            pair_probes += 1
+            if pair_probes > _PF_COHORT_PAIR_PROBE_CEILING:
+                # Bounded sweep (r8 R60-4): see the ceiling's rationale. The
+                # consecutive-pair window has already run in full, so genuine
+                # loop chains are unified; what remains is the exhaustive
+                # cross-check over (overwhelmingly parallel) siblings.
+                warnings.warn(
+                    "TorchLens recurrence grouping hit the pair-probe ceiling "
+                    f"({_PF_COHORT_PAIR_PROBE_CEILING}) on an equal-signature "
+                    f"cohort of {len(cohort)} ops; non-consecutive recurrence "
+                    "links past the ceiling are not unified and those ops stay "
+                    "ungrouped (structure and payloads are unaffected).",
+                    TorchLensWarning,
+                    stacklevel=2,
+                )
+                break
             consumers1 = consumer_site_frames[member1]
             consumers2 = consumer_site_frames[member2]
             if (
@@ -2105,10 +2177,35 @@ def _assign_param_free_layers(workspace: _GroupingWorkspace) -> None:
         for label in labels:
             class_of[label] = leader
 
+    fixpoint_work = 0
     while True:
+        if fixpoint_work > _PF_FIXPOINT_WORK_BUDGET:
+            # Budget exhausted (r8 R60-5): dissolve every remaining
+            # multi-member class -- the partition may still be too coarse,
+            # and a coarse class would CLAIM recurrence the evidence has not
+            # settled, so the honest degradation is no claim at all.
+            warnings.warn(
+                "TorchLens recurrence grouping exhausted its refinement "
+                f"budget ({_PF_FIXPOINT_WORK_BUDGET} member visits) before "
+                "converging; the affected parameter-free ops stay ungrouped "
+                "(structure and payloads are unaffected).",
+                TorchLensWarning,
+                stacklevel=2,
+            )
+            for leader, members in list(classes.items()):
+                if len(members) < 2:
+                    continue
+                del classes[leader]
+                key = class_key.pop(leader)
+                for member in members:
+                    classes[member] = [member]
+                    class_key[member] = key
+                    class_of[member] = member
+            break
         signatures: dict[str, Counter] = {}
         parent_colors: dict[str, list[tuple[str, _SlotColor]]] = {}
         for leader, members in classes.items():
+            fixpoint_work += len(members)
             for member in members:
                 pairs = [
                     (parent, _pf_slot_color(workspace, parent, class_of))
@@ -2308,9 +2405,29 @@ def _merge_iso_groups_to_layers(
         for sg1 in nodes_by_subgraph:
             for param_type in sg_param_types.get(sg1, frozenset()):
                 subgraphs_by_param_type[param_type].append(sg1)
-        for shared_subgraphs in subgraphs_by_param_type.values():
-            for sg1, sg2 in it.combinations(sorted(shared_subgraphs), 2):
-                candidate_sg_pairs.add((sg1, sg2))
+
+        def _weight_tied_sg_pairs() -> Iterator[tuple[str, str]]:
+            """Yield the shared-param-type subgraph triangle LAZILY (r8 R29).
+
+            The eager ``candidate_sg_pairs.update(combinations(...))`` build
+            materialized O(G^2) tuples per tied-weight iso group (~2M pairs
+            at G=2048) BEFORE the consumer's ``distinct_roots == 1`` break
+            could prune anything; generating them behind the same generator
+            keeps the transient cost proportional to pairs actually
+            consumed. The seen set grows only with consumption, and dedup
+            against the adjacency-derived eager pairs preserves the exact
+            historical pair universe (order may differ, which is sound: the
+            min-root union makes the final partition order-independent, and
+            this order is still deterministic).
+            """
+
+            emitted: set[tuple[str, str]] = set()
+            for shared_subgraphs in subgraphs_by_param_type.values():
+                for pair in it.combinations(sorted(shared_subgraphs), 2):
+                    if pair in candidate_sg_pairs or pair in emitted:
+                        continue
+                    emitted.add(pair)
+                    yield pair
 
         def _bucketed_candidate_pairs(
             candidate_sg_pairs: set[tuple[str, str]] = candidate_sg_pairs,
@@ -2319,7 +2436,7 @@ def _merge_iso_groups_to_layers(
         ) -> Iterator[tuple[str, str]]:
             """Yield candidate pairs oriented by capture order (earlier first)."""
 
-            for sg1, sg2 in sorted(candidate_sg_pairs):
+            for sg1, sg2 in it.chain(sorted(candidate_sg_pairs), _weight_tied_sg_pairs()):
                 if sg1 == sg2:
                     members = sorted(nodes_by_subgraph[sg1], key=order_index.__getitem__)
                     yield from it.combinations(members, 2)
