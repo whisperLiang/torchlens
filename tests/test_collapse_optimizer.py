@@ -1941,3 +1941,62 @@ def test_collapse_ceiling_documented_lockstep() -> None:
         assert str(COLLAPSE_OPTIMIZER_MAX_OPS) in text, (
             f"{page.name} misses the ceiling value {COLLAPSE_OPTIMIZER_MAX_OPS}"
         )
+
+
+def test_repeat_fold_discovery_scans_module_table_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Descendant-aware fold discovery must not rescan ``trace.modules`` per child.
+
+    Hunt-6 R29-3: ``_iter_collapsible_runs(allow_selected_descendant=True)``
+    called ``_selected_descendants`` once per child and
+    ``_iter_collapsible_child_path_runs`` once per sibling, and each call
+    iterated EVERY ``trace.modules`` facade -- Theta(S*M) module visits before
+    fold legality was even considered. Each discovery pass now builds one
+    shared sorted index, so the module table is iterated a constant number of
+    times per pass regardless of sibling count.
+    """
+
+    from torch import nn
+
+    from torchlens.data_classes._accessor_base import Accessor
+
+    model = nn.Sequential(*[nn.Sequential(nn.Linear(4, 4), nn.ReLU()) for _ in range(6)])
+    trace = tl.trace(model, torch.randn(2, 4))
+    children = [m.address for m in trace.modules if m.address.isdigit()]
+    assert len(children) == 6
+
+    def collapse_fn(module: Any) -> bool:
+        """Select Linear leaves so children are only descendant-selected."""
+
+        return str(getattr(module, "class_name", "")) == "Linear"
+
+    scans = {"n": 0}
+    original_iter = Accessor.__iter__
+
+    def counting_iter(self: Any) -> Any:
+        """Count full accessor iterations."""
+
+        if self is trace.modules:
+            scans["n"] += 1
+        return original_iter(self)
+
+    monkeypatch.setattr(Accessor, "__iter__", counting_iter)
+
+    scans["n"] = 0
+    list(
+        auto_collapse._iter_collapsible_runs(
+            trace, children, collapse_fn, allow_selected_descendant=True
+        )
+    )
+    assert scans["n"] <= 2, (
+        f"descendant-aware run discovery iterated trace.modules {scans['n']} times "
+        f"for {len(children)} children -- the per-child full scan is back"
+    )
+
+    scans["n"] = 0
+    list(auto_collapse._iter_collapsible_child_path_runs(trace, children, collapse_fn))
+    assert scans["n"] <= 2, (
+        f"child-path discovery iterated trace.modules {scans['n']} times "
+        f"for {len(children)} siblings -- the per-sibling full scan is back"
+    )
