@@ -372,6 +372,31 @@ print(tl.compat.report(model, x).to_markdown())
   with the typed `tl.errors.ArtifactVersionBelowFloorError` (drop-not-resurrect; the legacy
   field-alias ladders are deleted). Legacy 2.16 intervention specs remain loadable — the
   floor covers Trace rehydration only.
+- SITE KEYS + GROUPING SURFACE (L1 wave 0; every spelling DOCUMENTED-UNSTABLE
+  pending naming-session/S2 ratification): every retained op carries
+  `op.site_key` (`site_key_v1`) — a portable, policy-independent
+  STRUCTURAL-POSITION identity minted at grouping time on every backend
+  (`"s1|" + module-site/type/slot/ordinal`, percent-escaped; ordinals restart
+  per pass-qualified innermost call instance, so reused-module calls share
+  keys across instances). It is a BRIDGING relation (cross-capture joins on
+  position, never proven source identity: per-call-instance cardinality guard
+  + source-location witness + corroborated/positional/refused verdict tiers,
+  internal until S2). `Layer.site_key` returns the single shared key or
+  refuses typed `layer_site_ambiguous` (within-call recurrence groups span
+  sites); `Layer.site_peers` indexes same-site layers live; keyless legacy
+  artifacts refuse `site_key_unavailable`. `Layer.shape_summary` is the
+  derived across-pass shape string ("2->4" monotone / "2-4" min-max /
+  first->last full shapes; contains `->`, escape at render). The
+  `grouping=` trace kwarg is closed-vocabulary ("structural" default;
+  "strict_shapes"/"fold_sites" refuse typed until their designs/D1 rule);
+  `trace.grouping` mirrors the request and `trace.grouping_policy` is the
+  load-validated `grouping_policy_v1` stamp (coherence rules C1-C8;
+  invalid/legacy stamps settle to the canonical degraded representation and
+  refuse stamp-consuming operations typed). All persisted rows are
+  FieldPolicy.DROP + prerelease-registered under tlspec v7. Invariants
+  I-S1/I-S2/I-S3' are live tripwires; folding stays OFF everywhere except
+  future episode products (D1 default) — the tier-(a) fold closure ships
+  entry-dark as a pure function.
 - STRUCTURE-ONLY CAPTURE (L7a wave 0, D8-DEFAULT branch; every spelling
   DOCUMENTED-UNSTABLE pending naming-session/S2 ratification):
   `tl.trace(model, x, capture=CaptureOptions(structure_only=True))` records the
