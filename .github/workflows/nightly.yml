@@ -471,7 +471,7 @@ jobs:
           python -m pip install --require-hashes --only-binary :all: \
             -r .github/workflows/release-requirements.txt
           SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
-            python -m build --outdir "${{ runner.temp }}/dist"
+            python -m build --no-isolation --outdir "${{ runner.temp }}/dist"
           SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
             python scripts/normalize_sdist.py \
             "${{ runner.temp }}"/dist/torchlens-*.tar.gz \
@@ -501,7 +501,7 @@ jobs:
             umask 002
             chmod -R g+w .
             SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
-              python -m build --outdir "${{ runner.temp }}/dist-rebuild"
+              python -m build --no-isolation --outdir "${{ runner.temp }}/dist-rebuild"
             SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
               python scripts/normalize_sdist.py \
               "${{ runner.temp }}"/dist-rebuild/torchlens-*.tar.gz \

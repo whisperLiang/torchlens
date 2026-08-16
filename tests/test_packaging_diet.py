@@ -376,6 +376,46 @@ def test_release_job_python_stack_is_hash_locked() -> None:
         "the release lock no longer pins the `build` builder"
     )
 
+    # r7 R86 (fable HIGH + opus MED-HIGH, MEASURED): `python -m build`
+    # WITHOUT --no-isolation creates an isolated env and pip-installs the
+    # build backend (setuptools) from the LIVE index at build time -- inside
+    # the token scope, with the repo-write App token persisted in
+    # .git/config. That is arbitrary unpinned code with push access, escaping
+    # the hash lock this test guards. The builder must run --no-isolation
+    # against the hash-locked env, which therefore must pin the backend.
+    assert "--no-isolation" in match.group(1), (
+        "build_command runs `python -m build` without --no-isolation: the "
+        "isolated build env pip-installs an UNPINNED setuptools from the "
+        "live index inside the release token scope"
+    )
+    setuptools_pins = [line for line in requirement_lines if line.startswith("setuptools==")]
+    assert setuptools_pins, (
+        "release lock does not pin the setuptools build backend; "
+        "--no-isolation builds resolve it from this lock"
+    )
+    backend_floor = re.search(
+        r'^requires = \["setuptools>=(\d+)"\]', pyproject_text, flags=re.MULTILINE
+    )
+    assert backend_floor, "pyproject [build-system] requires lost its setuptools floor"
+    pinned_version = setuptools_pins[0].split("==")[1].split()[0].strip("\\").strip()
+    assert int(pinned_version.split(".")[0]) >= int(backend_floor.group(1)), (
+        f"locked setuptools {pinned_version} is below the [build-system] "
+        f"floor >={backend_floor.group(1)} (CVE-2026-59890 sdist-governance fix)"
+    )
+
+    # The nightly double-build gate must attest the SAME no-isolation builder
+    # the release uses, or its byte-identity proof is about a different
+    # (index-resolved) backend than the one that ships.
+    nightly_text = (repo_root / ".github" / "workflows" / "nightly.yml").read_text()
+    nightly_builds = [
+        line for line in nightly_text.splitlines() if re.search(r"python -m build\b", line)
+    ]
+    assert nightly_builds, "nightly.yml lost its double-build gate invocations"
+    isolated_nightly = [line for line in nightly_builds if "--no-isolation" not in line]
+    assert not isolated_nightly, (
+        f"nightly build invocation(s) without --no-isolation: {isolated_nightly}"
+    )
+
 
 @pytest.mark.slow
 def test_built_wheel_manifest_is_diet(tmp_path: Path) -> None:
