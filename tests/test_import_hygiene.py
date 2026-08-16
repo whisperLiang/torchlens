@@ -437,6 +437,15 @@ def test_all_lazy_facades_match_direct_import_public_names() -> None:
     _run_import_script(_lazy_facade_fidelity_script())
 
 
+# r7 R41 (opus b2 HIGH): these two families are HEAVY by aggregate compute,
+# not per-cell speed — every cell deliberately spawns a fresh interpreter
+# that imports torchlens+torch (~3.3s charged children-CPU each), so a
+# 4-cell family costs ~13s while each cell sits inside the 5s boundary.
+# Left unmarked, they made the documented mid backstop (and nightly's
+# not-slow leg) deterministically red against the 5s-tier aggregate family
+# budget. The subprocess-per-cell design is the point (direct-import
+# patterns need a cold interpreter); the honest tier for the FAMILY is heavy.
+@pytest.mark.heavy
 @pytest.mark.parametrize(("module_name", "member_name"), _LAZY_MODULE_CASES)
 def test_lazified_module_top_level_access_patterns(module_name: str, member_name: str) -> None:
     """Top-level attributes and from-imports should load each deferred module."""
@@ -450,6 +459,7 @@ def test_lazified_module_top_level_access_patterns(module_name: str, member_name
     )
 
 
+@pytest.mark.heavy
 @pytest.mark.parametrize(("module_name", "member_name"), _LAZY_MODULE_CASES)
 def test_lazified_module_direct_import_patterns(module_name: str, member_name: str) -> None:
     """Direct submodule and member imports should work from a bare package import."""

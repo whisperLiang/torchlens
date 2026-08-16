@@ -1169,3 +1169,73 @@ def test_serial_marker_is_not_a_budget_exemption() -> None:
     )
     assert _duration_budget_tier(_FakeItem({"serial", "slow"})) is None
     assert _duration_budget_tier(_FakeItem({"rare"})) is None
+
+
+def test_sessionfinish_budget_tripwire_flips_exit_status(
+    request: pytest.FixtureRequest,
+) -> None:
+    """r7 R41 (sol b2 HIGH): the budget tripwire is always-on, not collectable.
+
+    Enforcement used to live only in this file's assertion tests, so any
+    targeted run that did not collect ``test_marker_lint.py`` exited green
+    over budget. The conftest ``pytest_sessionfinish`` path must flip a green
+    session to failing whenever the offender ledger (or a family aggregate)
+    is non-empty -- and must leave already-failing or clean sessions alone.
+
+    The enforcement helper is resolved from the LIVE registered conftest
+    plugin (a bare ``conftest`` import is ambiguous during full-suite
+    collection; ``tests`` is not a package), which also pins that the hook
+    really is loaded in every tests/-scoped session.
+    """
+
+    from types import SimpleNamespace
+
+    conftest_plugin = next(
+        (
+            plugin
+            for plugin in request.config.pluginmanager.get_plugins()
+            if hasattr(plugin, "_enforce_duration_budget_at_sessionfinish")
+        ),
+        None,
+    )
+    assert conftest_plugin is not None, (
+        "tests/conftest.py no longer registers the sessionfinish duration-"
+        "budget enforcement helper -- the always-on tripwire is gone"
+    )
+    _enforce_duration_budget_at_sessionfinish = (
+        conftest_plugin._enforce_duration_budget_at_sessionfinish
+    )
+
+    def _fake_session(**attrs: object) -> SimpleNamespace:
+        plugin_manager = SimpleNamespace(get_plugin=lambda name: None)
+        return SimpleNamespace(
+            config=SimpleNamespace(pluginmanager=plugin_manager),
+            exitstatus=0,
+            **attrs,
+        )
+
+    # Per-item offender on a green session -> forced failure.
+    session = _fake_session(
+        _tl_duration_budget_offenders=[("tests/x.py::test_slow", "smoke", 9.0, 8.0, 7.0)]
+    )
+    _enforce_duration_budget_at_sessionfinish(session, 0)  # type: ignore[arg-type]
+    assert session.exitstatus == 1
+
+    # Family aggregate offender alone -> forced failure.
+    session = _fake_session(
+        _tl_smoke_family_stats={"tests/x.py::fam": (30.0, 4)},
+        _tl_smoke_family_budgets={"tests/x.py::fam": 12.0},
+    )
+    _enforce_duration_budget_at_sessionfinish(session, 0)  # type: ignore[arg-type]
+    assert session.exitstatus == 1
+
+    # Clean session stays green; failing session is left alone (the
+    # marker-lint assertion or an ordinary failure already owns the status).
+    session = _fake_session()
+    _enforce_duration_budget_at_sessionfinish(session, 0)  # type: ignore[arg-type]
+    assert session.exitstatus == 0
+    session = _fake_session(
+        _tl_duration_budget_offenders=[("tests/x.py::test_slow", "smoke", 9.0, 8.0, 7.0)]
+    )
+    _enforce_duration_budget_at_sessionfinish(session, 1)  # type: ignore[arg-type]
+    assert session.exitstatus == 0

@@ -66,7 +66,15 @@ still runs under `-m smoke`, so those combinations are forbidden — drop `smoke
 (a per-parametrize-cell `slow` refinement of a `heavy` family is the one sanctioned combo).
 `tests/test_marker_lint.py` enforces the partition and the runtime tripwire: smoke/unmarked
 tests budget 5s and heavy 20s (load-scaled 1x-4x plus a 2s boundary-noise grace, charged on min(wall, cpu)), checked at
-the end of every session.
+the end of every session — literally: `tests/conftest.py::pytest_sessionfinish` flips a green
+session to failing on any recorded offender, so targeted runs that never collect
+`test_marker_lint.py` are enforced too (r7 R41). Known bounds of the tripwire: it charges only
+tests that actually RAN in the session (a permanently deselected test is never bounded), the
+budget is load-scaled so the same family can pass loaded and fail quiet (the boundary is
+compute cost, not wall time), and a test that mostly sleeps is uncatchable by design
+(min(wall, cpu) charging). Subprocess-per-cell parametrized families whose AGGREGATE compute
+is heavy-class belong in `heavy` even when each cell is under 5s (the lazy-module
+import-pattern families are the precedent).
 
 ## Fixtures
 `tests/conftest.py` owns deterministic seeding and common inputs such as image tensors,

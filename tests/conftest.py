@@ -164,8 +164,9 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 # boundary: smoke and unmarked tests must fit 5s, heavy 20s (each load-scaled
 # below; the pre-r3 15s crutch let a 59s test stay smoke under sprint load —
 # R41 b2 opus+sol). `slow` is unbounded, `rare` only runs on request, and
-# `serial` is exempt by definition (its wall time under parallel load is
-# exactly what the marker declares unrepresentative).
+# `serial` is NOT exempt: it resolves its heavy/smoke/unmarked budget
+# normally (r7 R41 sol LOW: this comment used to claim the opposite of
+# `_duration_budget_tier` and tests/AGENTS.md — the code is the contract).
 #
 # CHARGED TIME (round-4, the load-flake fix): a test is charged
 # min(wall seconds, CPU seconds incl. subprocess children). Wall alone
@@ -341,6 +342,61 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
     return result
 
 
+def _duration_budget_failure_lines(session: pytest.Session) -> list[str]:
+    """Render every recorded duration-budget violation for one session.
+
+    Covers both the per-item ledger and the aggregate 5s-tier family stats,
+    mirroring exactly what ``tests/test_marker_lint.py`` asserts.
+    """
+
+    lines = [
+        f"{nodeid} [{tier}]: wall {wall:.1f}s / cpu {cpu:.1f}s "
+        f"(budget {budget:.0f}s on min(wall, cpu))"
+        for nodeid, tier, wall, cpu, budget in getattr(session, "_tl_duration_budget_offenders", [])
+    ]
+    family_budgets = getattr(session, "_tl_smoke_family_budgets", {})
+    for family, (total, count) in getattr(session, "_tl_smoke_family_stats", {}).items():
+        budget = family_budgets.get(family, float("inf"))
+        if total > budget:
+            lines.append(
+                f"{family}: {total:.1f}s charged over {count} cells (family budget {budget:.1f}s)"
+            )
+    return lines
+
+
+def _enforce_duration_budget_at_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Always-on duration-budget tripwire (r7 R41, sol b2 HIGH).
+
+    Enforcement used to live ONLY in
+    ``test_marker_lint.py::test_bounded_tier_tests_stay_within_duration_budget``,
+    so any targeted invocation that did not collect that file exited GREEN
+    over budget — contradicting the tests/AGENTS.md sentence "checked at the
+    end of every session" and removing the tripwire from the documented
+    per-step targeted workflow. The marker-lint test remains the rich
+    reporting surface inside gate runs; this helper (called from the module's
+    single ``pytest_sessionfinish`` hook) makes the session exit non-zero
+    even when that file was never collected.
+    """
+
+    if exitstatus != 0:
+        return  # already failing (incl. the marker-lint assertion itself)
+    lines = _duration_budget_failure_lines(session)
+    if not lines:
+        return
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    header = (
+        "duration-budget tripwire (tests/conftest.py::pytest_sessionfinish): "
+        "tests exceeded their tier budget this session"
+    )
+    if reporter is not None:
+        reporter.write_line(header, red=True)
+        for line in lines:
+            reporter.write_line("  " + line, red=True)
+    else:  # pragma: no cover - headless embedding without a terminal reporter
+        print(header + "\n  " + "\n  ".join(lines))
+    session.exitstatus = 1
+
+
 @pytest.hookimpl(wrapper=True)
 def pytest_make_collect_report(
     collector: pytest.Collector,
@@ -480,7 +536,7 @@ def _coverage_requested(config: pytest.Config) -> bool:
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """Write coverage artifacts only for real coverage runs.
+    """Enforce the duration budget, then write coverage artifacts.
 
     Parameters
     ----------
@@ -490,6 +546,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         Final pytest exit status.
     """
 
+    _enforce_duration_budget_at_sessionfinish(session, exitstatus)
     del exitstatus
     _state._collect_usage_stats = False
     _state._function_call_counts.clear()
