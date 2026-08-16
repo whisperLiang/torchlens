@@ -1871,3 +1871,39 @@ def test_collapse_optimizer_ops_ceiling_declines_disclosed(
         warnings_module.simplefilter("ignore")
         schedule = fresh.collapse_schedule()
     assert len(schedule.steps) == 1
+
+
+def test_collapse_ceiling_advisory_category_and_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """r7 R19 (opus b6 LOW): the ceiling advisory is selectable and blames user code.
+
+    The decline warning shipped as a bare ``UserWarning`` with a fixed
+    ``stacklevel=2`` that resolved to TorchLens's own ``_trace_stats`` caller,
+    so users could neither filter/promote it by category
+    (``filterwarnings(category=TorchLensWarning)``) nor see which of THEIR
+    lines triggered it. It must carry the TorchLensWarning taxonomy and blame
+    the first frame outside the package.
+    """
+
+    from torch import nn
+
+    from torchlens._errors import TorchLensWarning
+    from torchlens.visualization import collapse_optimizer as optimizer_module
+
+    monkeypatch.setattr(optimizer_module, "COLLAPSE_OPTIMIZER_MAX_OPS", 1)
+    trace = tl.trace(nn.Sequential(nn.Linear(4, 4), nn.ReLU()), torch.randn(2, 4))
+
+    with pytest.warns(TorchLensWarning, match="skipping smart collapse") as record:
+        trace.draw(
+            collapse="max",
+            vis_save_only=True,
+            vis_fileformat="dot",
+            order_siblings=False,
+        )
+    decline = [w for w in record if "skipping smart collapse" in str(w.message)]
+    assert decline, "ceiling advisory not emitted"
+    assert decline[0].filename == __file__, (
+        "advisory blames a torchlens-internal frame instead of the user call "
+        f"site: {decline[0].filename}:{decline[0].lineno}"
+    )

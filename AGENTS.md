@@ -68,7 +68,12 @@ Key entry points:
   folding), `True` folds eligible repeated runs even with `collapse="none"`, and `False` disables
   run folding. `collapse="max"` may emit segment boxes; `(xN)`, ellipsis, and segment labels must
   stay honest about hidden calls or ranges. `Trace.collapse_plan(mode=...)` returns the diagnostic
-  plan, and `Trace.collapse_schedule()` returns the float schedule metadata.
+  plan, and `Trace.collapse_schedule()` returns the float schedule metadata. Smart collapse has a
+  compute ceiling: above `COLLAPSE_OPTIMIZER_MAX_OPS` (2,000 ops) the superlinear selection is
+  DECLINED disclosed — `draw(collapse=...)` warns (`TorchLensWarning`) and renders uncollapsed,
+  `collapse_plan()` refuses typed (`collapse_plan_unavailable`), and `collapse_schedule()`
+  degrades to its single full-graph step; reduce the rendered graph first (`module=` focus,
+  `vis_call_depth`, rolled mode).
 
 Common unified capture patterns:
 

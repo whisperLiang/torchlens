@@ -109,6 +109,7 @@ avoids a rescue forward. The historical broad `sys.modules` crawler is deleted;
 | bf16/fp16 GPU reductions replay in a different legal order. | Validation can exceed its tolerance even when the model is semantically sound. | Re-run deterministically or validate in float32 before classifying the mismatch as capture failure. |
 | Two unrelated repeated subgraphs have the same loop fingerprint. | Recurrence detection can group them into a layer with more passes than expected. | Capture with `recurrence_detection=False` / the current recurrence-disable option and inspect the ungrouped Ops. |
 | An input-routed intervention targets an in-place or `out=` call. | Recognized in-place calls snapshot semantic inputs, but raw hooks may see live references; detected `out=` aliasing warns at hook fire time. | Prefer output interventions or non-mutating functional spellings when the original input value matters. |
+| The trace exceeds the smart-collapse compute ceiling (`COLLAPSE_OPTIMIZER_MAX_OPS`, 2,000 ops). | `draw(collapse=...)` warns and renders uncollapsed; `collapse_plan()` refuses typed (`collapse_plan_unavailable`); `collapse_schedule()` degrades to one full-graph step. | Shrink the rendered graph first: `module=` focus, `vis_call_depth`, or rolled mode. See `docs/reference/collapse.md`. |
 
 ## CI-attested platforms
 

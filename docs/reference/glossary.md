@@ -126,7 +126,10 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
 
 **Collapse**
 : A rendering-only condensation of module detail. `collapse="none"`, `"auto"`, `"max"`, or a
-  float in `[0, 1]` never changes the underlying Trace.
+  float in `[0, 1]` never changes the underlying Trace. Above the smart-collapse compute
+  ceiling (`COLLAPSE_OPTIMIZER_MAX_OPS`, 2,000 ops) selection is declined disclosed: `draw`
+  warns and renders uncollapsed, `collapse_plan()` refuses typed
+  (`collapse_plan_unavailable`), and `collapse_schedule()` degrades to one full-graph step.
 
 **Run folding**
 : `fold_repeats=True` replaces eligible runs of distinct same-class sibling modules with a

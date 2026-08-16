@@ -29,7 +29,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from .._errors import InvalidArgumentError
+from .._errors import InvalidArgumentError, TorchLensWarning
+from ..utils.display import user_stacklevel
 from .auto_collapse import (
     GENERIC_CONTAINER_CLASSES,
     RUN_FOLD_MIN_LENGTH,
@@ -403,8 +404,11 @@ def select_collapse_plan(
             "superlinearly and would dominate the render). The graph renders "
             "uncollapsed; reduce the rendered graph first with module= focus, "
             "vis_call_depth, or rolled mode.",
-            UserWarning,
-            stacklevel=2,
+            TorchLensWarning,
+            # r7 R19 (opus b6 LOW): a fixed stacklevel resolved to TorchLens's
+            # own _trace_stats caller; blame the user's draw()/collapse_plan()
+            # line instead (the entry depth differs per public spelling).
+            stacklevel=user_stacklevel(),
         )
         result = OptimizerResult(
             selected=frozenset(),
