@@ -229,6 +229,50 @@ def test_release_app_token_is_permission_scoped() -> None:
     assert token_step["with"]["permission-contents"] == "write"
 
 
+def test_release_job_bounds_the_app_token_hold() -> None:
+    """The release job declares a timeout so the App token's life is bounded.
+
+    Without ``timeout-minutes`` the job inherits GitHub's 6-hour default,
+    and a hung pip resolve or PyPI upload keeps a live repo-write credential
+    on the runner for all of it (r7 R82). A healthy release finishes in well
+    under 30 minutes; anything longer is a failure worth killing.
+    """
+
+    release = _load_yaml(_WORKFLOWS / "release.yml")["jobs"]["release"]
+    timeout = release.get("timeout-minutes")
+    assert isinstance(timeout, int), (
+        "the release job must declare timeout-minutes; the 6-hour default "
+        "is a 6-hour repo-write App-token hold"
+    )
+    assert timeout <= 60, f"release timeout-minutes {timeout} exceeds the 1-hour token-hold budget"
+
+
+def test_mutation_dispatch_inputs_are_validated_whole_string() -> None:
+    """The slot step validates arm_shard with case patterns, never per-line grep.
+
+    ``grep -qE '^...$'`` matches PER LINE: ``1/1\\nforged=x`` passed on its
+    first line and the embedded newline reached ``$GITHUB_OUTPUT`` as a
+    forged output row (r7 R82, empirically reproduced). Shell ``case``
+    patterns match the entire string, newlines included, so the validation
+    must stay case-only.
+    """
+
+    mutation = _load_yaml(_WORKFLOWS / "mutation.yml")["jobs"]
+    steps = [step for job in mutation.values() for step in job.get("steps", [])]
+    slot = next(step for step in steps if "INPUT_ARM_SHARD" in str(step.get("env", {})))
+    script = "\n".join(
+        line for line in slot["run"].splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "grep" not in script, (
+        "arm_shard validation must not use grep: it matches per line and a "
+        "newline-embedding input forges $GITHUB_OUTPUT rows"
+    )
+    assert "*[!0-9/]*" in script, (
+        "arm_shard validation lost the whole-string character-class case "
+        "pattern that rejects newlines and shell metacharacters"
+    )
+
+
 def test_non_release_checkouts_do_not_persist_credentials() -> None:
     """Every checkout that never pushes sets ``persist-credentials: false``.
 

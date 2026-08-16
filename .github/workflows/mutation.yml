@@ -88,12 +88,16 @@ jobs:
             ""|registry|checks|blocks|exempt|arms|corechecks|executor|bounded) ;;
             *) echo "invalid family input: $INPUT_FAMILY"; exit 1 ;;
           esac
+          # Whole-string validation via case patterns ONLY (r7 R82, proven
+          # bypass): grep matches PER LINE, so "1/1<newline>forged=x" passed
+          # the old `grep -qE '^[0-9]+/[0-9]+$'` on its first line and the
+          # embedded newline reached $GITHUB_OUTPUT as a forged output row.
+          # A case pattern matches the ENTIRE string, newlines included.
           case "$INPUT_ARM_SHARD" in
             "") ;;
-            */*)
-              if ! printf '%s' "$INPUT_ARM_SHARD" | grep -qE '^[0-9]+/[0-9]+$'; then
-                echo "invalid arm_shard input: $INPUT_ARM_SHARD"; exit 1
-              fi ;;
+            *[!0-9/]*|*/*/*|/*|*/)
+              echo "invalid arm_shard input: $INPUT_ARM_SHARD"; exit 1 ;;
+            */*) ;;
             *) echo "invalid arm_shard input: $INPUT_ARM_SHARD"; exit 1 ;;
           esac
           if [ -n "$INPUT_FAMILY" ]; then
