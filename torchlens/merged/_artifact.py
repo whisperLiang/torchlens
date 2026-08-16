@@ -64,15 +64,58 @@ def _bounded_exc(exc: BaseException) -> str:
 
 
 CANONICAL_ENCODING = "torchlens-canonical-json-v1"
-"""UTF-8, sorted keys, no NaN/Infinity, LF, no insignificant whitespace."""
+"""UTF-8, sorted keys, STRING keys only, no NaN/Infinity, no lone surrogates,
+LF, no insignificant whitespace."""
+
+
+def _reject_noncanonical(obj: Any, path: str = "$") -> None:
+    """Refuse payload shapes ``json.dumps`` would coerce or die on (R73).
+
+    The output feeds SHA-256 integrity digests and byte-equality derivation
+    oracles, so silent coercion is a canonicalization COLLISION: ``{1: "a"}``
+    and ``{"1": "a"}`` produced identical bytes (likewise ``True``/``"true"``),
+    letting two structurally distinct payloads share one attested digest.
+    Non-finite floats, lone surrogates, and unserializable leaves raised raw
+    ``ValueError``/``UnicodeEncodeError``/``TypeError`` past the module's
+    otherwise-typed refusal surface. Reject all of it typed at the boundary.
+    """
+
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if not isinstance(key, str):
+                raise _schema_refusal(
+                    f"canonical JSON requires string mapping keys; {path} carries a "
+                    f"{type(key).__name__} key (silent coercion would collide digests)"
+                )
+            _reject_noncanonical(value, f"{path}.{key}")
+        return
+    if isinstance(obj, (list, tuple)):
+        for index, value in enumerate(obj):
+            _reject_noncanonical(value, f"{path}[{index}]")
+        return
+    if isinstance(obj, float) and (obj != obj or obj in (float("inf"), float("-inf"))):
+        raise _schema_refusal(f"canonical JSON forbids non-finite floats; {path} is {obj!r}")
+    if isinstance(obj, str):
+        try:
+            obj.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise _schema_refusal(
+                f"canonical JSON requires UTF-8-encodable strings; {path} carries a lone surrogate"
+            ) from exc
 
 
 def canonical_json_bytes(obj: Any) -> bytes:
     """Serialize ``obj`` under the canonical encoding declared above."""
 
-    text = json.dumps(
-        obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
-    )
+    _reject_noncanonical(obj)
+    try:
+        text = json.dumps(
+            obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        )
+    except (TypeError, ValueError) as exc:
+        raise _schema_refusal(
+            f"payload is not canonically serializable ({_bounded_exc(exc)})"
+        ) from exc
     return (text + "\n").encode("utf-8")
 
 

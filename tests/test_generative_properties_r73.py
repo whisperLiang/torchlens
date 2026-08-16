@@ -338,3 +338,39 @@ def test_fresh_seed_leg_stays_wired_into_ci() -> None:
         "the fresh-seed leg no longer targets the parse-fuzz sweep; its seeded "
         "truncation/byte-flip cases are back to a fixed regression corpus"
     )
+
+
+def test_canonical_json_bytes_refuses_noncanonical_inputs_typed() -> None:
+    """R73: the canonical encoder is an integrity surface -- refuse, never coerce.
+
+    Fail-before: ``{1: "a"}`` and ``{"1": "a"}`` (likewise ``True``/``"true"``)
+    silently produced IDENTICAL bytes, so two structurally distinct payloads
+    shared one attested SHA-256 digest; NaN/Inf, lone surrogates, bytes
+    leaves, and mixed-type keys escaped as raw ValueError/UnicodeEncodeError/
+    TypeError past the module's typed refusal surface.
+    """
+
+    from torchlens.merged import MergedErrorCode
+    from torchlens.merged._errors import MergedArtifactError
+
+    bad_payloads = [
+        {1: "a"},  # int key: coerced to "1" -> digest collision with {"1": "a"}
+        {True: "a"},  # bool key: coerced to "true"
+        {1.0: "a"},  # float key
+        {1: "a", "b": 2},  # mixed keys: raw TypeError from sort_keys
+        {"a": float("nan")},
+        {"a": float("inf")},
+        {"nested": [{"deep": float("-inf")}]},
+        {"a": "\udc80"},  # lone surrogate: escaped dumps, died at .encode
+        {"a": b"raw-bytes"},
+    ]
+    for payload in bad_payloads:
+        with pytest.raises(MergedArtifactError) as excinfo:
+            canonical_json_bytes(payload)
+        assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value, (
+            f"payload {payload!r} refused with the wrong code"
+        )
+
+    # The collision pair itself: the string-keyed form still encodes, and it is
+    # now the ONLY spelling that produces these bytes.
+    assert canonical_json_bytes({"1": "a"}) == b'{"1":"a"}\n'
