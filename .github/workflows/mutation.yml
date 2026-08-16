@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       family:
-        description: "mutant family (registry|checks|blocks|exempt|arms|corechecks|bounded=all-bounded)"
+        description: "mutant family (registry|checks|blocks|exempt|arms|corechecks|executor|bounded=all-bounded)"
         required: false
         default: ""
       arm_shard:
@@ -85,7 +85,7 @@ jobs:
           # $GITHUB_OUTPUT -- a newline or shell metacharacter in a raw input
           # could forge additional step outputs through the append below.
           case "$INPUT_FAMILY" in
-            ""|registry|checks|blocks|exempt|arms|corechecks|bounded) ;;
+            ""|registry|checks|blocks|exempt|arms|corechecks|executor|bounded) ;;
             *) echo "invalid family input: $INPUT_FAMILY"; exit 1 ;;
           esac
           case "$INPUT_ARM_SHARD" in
@@ -132,7 +132,7 @@ jobs:
           }
           status=0
           if [ "$SLOT_FAMILY" = "bounded" ]; then
-            for fam in registry checks corechecks blocks exempt; do
+            for fam in registry checks corechecks blocks exempt executor; do
               run_family "$fam" "" "$fam" || status=1
             done
           else

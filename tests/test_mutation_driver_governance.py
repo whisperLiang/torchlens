@@ -420,7 +420,14 @@ def test_mutation_workflow_rotation_contract() -> None:
     bounded_loop = re.search(r"for fam in ([a-z ]+);", workflow)
     assert bounded_loop is not None, "mutation.yml lost its bounded fan-out loop"
     workflow_families = set(bounded_loop.group(1).split())
-    assert workflow_families == {"registry", "checks", "corechecks", "blocks", "exempt"}
+    assert workflow_families == {
+        "registry",
+        "checks",
+        "corechecks",
+        "blocks",
+        "exempt",
+        "executor",
+    }
     if families_in_driver is not None:
         assert workflow_families <= families_in_driver
 
@@ -540,3 +547,32 @@ def test_operator_label_matches_the_applied_disarm_keyword(tmp_path: Path) -> No
     )
     assert 'operator = f"{keyword} replacing raise arm {arm_index}"' in driver_source
     assert 'operator = f"pass replacing raise arm' not in driver_source
+
+
+@pytest.mark.smoke
+def test_executor_family_derivation_reaches_every_step() -> None:
+    """r7 R74 (sol b9 HIGH): the postprocess executor is enrolled, DERIVED.
+
+    25 ``_run_step_*`` bodies plus the conditional gate predicates had no
+    mutation verdict while R74 explicitly scopes ``postprocess/``. The
+    family derives from the module's defs, so a new step self-enrolls; run
+    bodies neuter to ``return None`` (silent skip) and gate predicates to
+    ``return False`` (never fires), each the dangerous direction.
+    """
+
+    driver = _load_driver_module()
+    mutants = driver.derive_executor_mutants(_REPO_ROOT)
+    run_steps = {mid for mid in mutants if "#_run_step_" in mid}
+    gates = {mid for mid in mutants if "#_should_run_step_" in mid}
+    assert len(run_steps) >= 20, f"only {len(run_steps)} run-step mutants derived"
+    assert gates, "no gate-predicate mutants derived"
+    for mid, (rel, func, value) in mutants.items():
+        assert rel == "torchlens/postprocess/_executor.py"
+        assert value == ("None" if func.startswith("_run_step_") else "False"), (mid, value)
+    # Cross-check against the live registry: every StepSpec.run is enrolled.
+    from torchlens.postprocess._executor import STEP_REGISTRY
+
+    registered_runs = {spec.run.__name__ for spec in STEP_REGISTRY}
+    enrolled_funcs = {func for _, func, _ in mutants.values()}
+    missing = registered_runs - enrolled_funcs
+    assert not missing, f"STEP_REGISTRY steps outside the executor family: {sorted(missing)}"
