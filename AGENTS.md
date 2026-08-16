@@ -28,6 +28,13 @@ Key entry points:
   `draw_backward()`, `validate_forward_pass()`
 - Backend registry: `torchlens/backends/registry.py` - `BackendSpec`, `BackendName`,
   backend resolution, validation dispatch, and canonical backend errors.
+- Structure-only capture (DOCUMENTED-UNSTABLE, D8-default):
+  `tl.trace(model, x, capture=CaptureOptions(structure_only=True))` records
+  structure + shape/dtype HYPOTHESES, never values; value consumers refuse
+  typed through `torchlens.capture.structure_only` (contract:
+  `docs/reference/structure_only_capabilities.md`); value-dependent branches
+  refuse device-neutrally at the user's source line;
+  `trace.discharge_against(real_trace)` corroborates/refutes hypotheses.
 - Sparse capture: `tl.record(model, x, save=...)` is torch-only in backend v1; it returns
   `Recording`, and `Recording.to_trace()` materializes full graph structure with explicit
   errors for unsaved payload reads. Forward exceptions default to

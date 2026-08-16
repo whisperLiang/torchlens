@@ -135,6 +135,23 @@ def _process_rss_bytes() -> int:
     return int(psutil.Process().memory_info().rss)
 
 
+def _structure_only_forward_boundary(trace: "Trace") -> "contextlib.AbstractContextManager[None]":
+    """LAYER-2 backstop for structure-only captures (L7a memo sec 2.2).
+
+    Inert ``nullcontext`` on the default path; for ``structure_only=True``
+    sessions the torch-backend boundary classifies exceptions escaping the
+    user forward by raising-frame provenance (typed meta-kernel /
+    unenumerated-escape refusals; user exceptions propagate annotated). The
+    lazy import keeps this backend-neutral module torch-light.
+    """
+
+    if bool(getattr(trace, "structure_only", False)):
+        from ..backends.torch.structure_only_belt import structure_only_forward_boundary
+
+        return structure_only_forward_boundary(trace)
+    return contextlib.nullcontext()
+
+
 @contextlib.contextmanager
 def _forward_peak_memory_bracket(trace: "Trace", device: "object | None") -> "Iterator[None]":
     """Record forward-pass peak memory around the model forward call.
@@ -1714,14 +1731,15 @@ def run_and_log_inputs_through_model(
                 self._runnable.capture_ambient = snapshot_ambient_execution_context()
 
             if self.capture_mode == "predicate":
-                outputs = _run_predicate_forward_with_root_frame(
-                    self,
-                    backend,
-                    model,
-                    input_args,
-                    input_kwargs,
-                    model_device,
-                )
+                with _structure_only_forward_boundary(self):
+                    outputs = _run_predicate_forward_with_root_frame(
+                        self,
+                        backend,
+                        model,
+                        input_args,
+                        input_kwargs,
+                        model_device,
+                    )
             else:
                 with _timed_phase(self, "dispatch:forward_model"):
                     with _forward_peak_memory_bracket(self, model_device):
@@ -1774,9 +1792,10 @@ def run_and_log_inputs_through_model(
                                     )
                             else:
                                 _rng_channels = None
-                                outputs = cast(Callable[..., Any], model)(
-                                    *input_args, **input_kwargs
-                                )
+                                with _structure_only_forward_boundary(self):
+                                    outputs = cast(Callable[..., Any], model)(
+                                        *input_args, **input_kwargs
+                                    )
                             _global_advanced = host_rng_advanced(
                                 _host_rng_before, snapshot_host_rng()
                             )

@@ -395,6 +395,14 @@ def save(
     from ..capture.outcome import CaptureOutcomeError, require_capture_capability
 
     require_capture_capability(trace, "save_analysis")
+    # L7a: a structure-only trace refuses persistence wholesale until the
+    # wave-3 coordinated bump lands the marker + load-validation rows (the
+    # registrar's test-only activation switch is the one sanctioned
+    # exit-gate round-trip; every switch-on write stamps the fail-closed
+    # pre-release marker).
+    from ..capture.structure_only import require_structure_only_capability
+
+    require_structure_only_capability(trace, "save_analysis_artifact")
     # A PartialTrace is a failed-capture inspection wrapper, never a savable
     # product (its FIELD_POLICY declares both fields session-time DROP). Every
     # SHIPPED wrapper settles FAILED and refuses through the gate above; this
@@ -426,6 +434,7 @@ def save(
         refuse_poisoned_trace(trace, "export")
     save_level = coerce_tlspec_save_level(level)
     if save_level == "runnable":
+        require_structure_only_capability(trace, "save_runnable")
         # N4: a halted capture records a PREFIX of the forward, and the sparse
         # runnable contract requires the complete taken path. Refusal surfaces
         # through the runnable error vocabulary.
