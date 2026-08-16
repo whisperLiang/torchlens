@@ -334,3 +334,7 @@ def test_fresh_seed_leg_stays_wired_into_ci() -> None:
     assert "test_generative_properties_r73.py" in text, (
         "the fresh-seed leg no longer targets the generative property suite"
     )
+    assert "test_tlspec_parse_fuzz.py" in text, (
+        "the fresh-seed leg no longer targets the parse-fuzz sweep; its seeded "
+        "truncation/byte-flip cases are back to a fixed regression corpus"
+    )

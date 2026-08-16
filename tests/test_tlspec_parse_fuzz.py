@@ -7,8 +7,11 @@ manifest schema instead of a hand-list:
 * the key sweeps parametrize over whatever top-level keys a freshly saved
   manifest actually carries — a NEW manifest key automatically enters the
   required-key contract and forces a conscious ledger decision;
-* the seeded sweeps (truncations, byte flips) draw offsets from a fixed-seed
-  RNG, deterministic across runs but not hand-chosen.
+* the seeded sweeps (truncations, byte flips) draw offsets from a seeded RNG:
+  deterministic per run, with the default seed overridable through
+  ``TORCHLENS_FUZZ_SEED`` so the nightly fresh-seed leg explores new offsets
+  instead of replaying one frozen 24-case corpus forever (failure messages
+  interpolate the seed for reproduction).
 
 Contract, pinned from the probed loader surface (2026-08-15): every
 structural corruption must be refused with a torchlens-typed
@@ -26,6 +29,7 @@ The two ledgered tolerances:
 from __future__ import annotations
 
 import json
+import os
 import random
 import shutil
 from collections.abc import Iterator
@@ -39,6 +43,11 @@ import torchlens as tl
 from torchlens.errors import TorchLensIOError
 
 pytestmark = pytest.mark.heavy
+
+#: Seed for the generative sweeps below. The default replays the historical
+#: fixed corpus; the nightly fresh-seed leg overrides it per run (R73: a
+#: fixed-seed fuzz suite is a regression corpus, never exploration).
+_SEED = int(os.environ.get("TORCHLENS_FUZZ_SEED", "1973"))
 
 #: Top-level manifest keys that may legitimately be ABSENT (older manifests
 #: predate them; the loader defaults them). Deleting any OTHER key must be a
@@ -174,21 +183,27 @@ def test_tensor_entry_mutations_are_typed_refusals(
 def test_seeded_truncations_are_typed_refusals(seed_artifact: Path, tmp_path: Path) -> None:
     """Seeded truncations of manifest and metadata must refuse typed."""
 
-    rng = random.Random(1973)
+    rng = random.Random(_SEED)
     manifest_bytes = (seed_artifact / "manifest.json").read_bytes()
     metadata_bytes = (seed_artifact / "metadata.pkl").read_bytes()
     for _ in range(8):
         artifact = _corrupt_copy(seed_artifact, tmp_path)
         cut = rng.randrange(1, len(manifest_bytes))
         (artifact / "manifest.json").write_bytes(manifest_bytes[:cut])
-        with pytest.raises(TorchLensIOError):
+        try:
             tl.load(str(artifact))
+        except TorchLensIOError:
+            continue
+        pytest.fail(f"manifest truncated at byte {cut} loaded silently (seed {_SEED})")
     for _ in range(4):
         artifact = _corrupt_copy(seed_artifact, tmp_path)
         cut = rng.randrange(1, len(metadata_bytes))
         (artifact / "metadata.pkl").write_bytes(metadata_bytes[:cut])
-        with pytest.raises(TorchLensIOError):
+        try:
             tl.load(str(artifact))
+        except TorchLensIOError:
+            continue
+        pytest.fail(f"metadata truncated at byte {cut} loaded silently (seed {_SEED})")
 
 
 def test_seeded_manifest_byte_flips_never_escape_untyped(
@@ -201,7 +216,7 @@ def test_seeded_manifest_byte_flips_never_escape_untyped(
     parse path.
     """
 
-    rng = random.Random(2026)
+    rng = random.Random(_SEED + 1)
     manifest_bytes = (seed_artifact / "manifest.json").read_bytes()
     escapes: list[str] = []
     for index in range(12):
@@ -218,7 +233,9 @@ def test_seeded_manifest_byte_flips_never_escape_untyped(
             escapes.append(f"case {index} offset {offset}: {type(exc).__name__}: {exc}")
         else:
             loaded.cleanup()
-    assert not escapes, f"manifest byte flips escaped the typed surface: {escapes}"
+    assert not escapes, (
+        f"manifest byte flips escaped the typed surface (seed {_SEED + 1}): {escapes}"
+    )
 
 
 def test_non_utf8_manifest_byte_is_typed_refusal(seed_artifact: Path, tmp_path: Path) -> None:
