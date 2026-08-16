@@ -51,7 +51,8 @@ SAVE_MODES: frozenset[str] = frozenset(get_args(SaveMode))
 #   reorder noise (~4 ULP on eval MHA, see _runnable_path_faithfulness.py).
 # * fp16 / bf16 payloads accumulate in fp32 and round ONCE to storage, so the
 #   replay difference is storage-rounding dominated: a few ULPs of the
-#   storage dtype. Headroom 4 ULP.
+#   storage dtype. Headroom 4 ULP -- a MODEL bound (unmeasured), unlike the
+#   fp32 row's measured ~4-ULP eval-MHA reorder observation cited above.
 #
 # The absolute term exists ONLY to absorb jitter at the very bottom of the
 # representable range (denormal quanta): it is the same ULP headroom applied
