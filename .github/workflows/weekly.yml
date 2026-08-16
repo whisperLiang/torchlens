@@ -123,3 +123,47 @@ jobs:
         with:
           name: mutation-${{ matrix.family }}
           path: ${{ runner.temp }}/mutation-${{ matrix.family }}.log
+
+  hook-pin-staleness:
+    # r7 R61 (opus LM + sol MED, converged): the pre-commit hook SHAs are
+    # correctly frozen but had NO refresh signal -- Dependabot has no
+    # pre-commit ecosystem, so gitleaks/detect-secrets could sit on an old
+    # security release indefinitely while dependabot.yml's header claimed
+    # every frozen pin was covered. This job is that signal: it runs
+    # `pre-commit autoupdate` on a scratch copy and surfaces the diff in the
+    # job summary + a warning annotation. ADVISORY by design (exit 0): pins
+    # move on review, and a red that fires on every routine upstream release
+    # would train everyone to ignore the job (the permanent-WARN disease).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - run: uv pip install --system "pre-commit==4.6.2"
+
+      - name: Report stale pre-commit hook pins
+        run: |
+          cp .pre-commit-config.yaml "${RUNNER_TEMP}/pre-commit-before.yaml"
+          pre-commit autoupdate --freeze
+          if git diff --quiet -- .pre-commit-config.yaml; then
+            echo "All pre-commit hook pins are current." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning title=Stale pre-commit hook pins::pre-commit autoupdate proposes newer hook revisions; review and bump the frozen SHAs (keep ruff-pre-commit locked to the repo ruff pin)."
+            {
+              echo "## Stale pre-commit hook pins"
+              echo '```diff'
+              git diff -- .pre-commit-config.yaml
+              echo '```'
+              echo "ruff-pre-commit is DELIBERATELY locked to the repo's ruff pin;"
+              echo "ignore its row unless the pyproject/lint.yml pins move too."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          git checkout -- .pre-commit-config.yaml

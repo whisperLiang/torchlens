@@ -136,7 +136,9 @@ jobs:
         run: |
           pip install --require-hashes --only-binary :all: \
             -r .github/workflows/release-requirements.txt
-          pip install "pytest>=8,<10"
+          # r7 R61 (sol MED): a mutable range let identical commits run
+          # different dependency bytes over time in a CI-executed stack.
+          pip install "pytest==9.1.1"
 
       - name: Run the no-major parser behavioral tests
         # The hard import first: if PSR ever fell out of the lock these

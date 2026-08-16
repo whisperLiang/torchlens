@@ -522,3 +522,29 @@ def test_nightly_gate_installs_release_locked_builder() -> None:
         "the retired build-requirements.txt lock is back; the builder pin "
         "lives in release-requirements.txt (single pin authority)"
     )
+
+
+def test_precommit_pin_is_single_valued_and_inside_the_contributor_band() -> None:
+    """r7 R87-2 (opus LOW): the tool that RUNS the parity gate gets a parity gate.
+
+    CI judges hooks with an exact ``pre-commit==`` while contributors resolve
+    the dev extra's ``>=4,<5`` band; nothing tied the two the way ruff,
+    pydot, graphviz, and pip-audit are tied. Every workflow pin must be ONE
+    version and it must satisfy the contributor band, so a CI-only verdict a
+    contributor cannot reproduce needs a conscious band edit first.
+    """
+
+    project_root = Path(__file__).resolve().parent.parent
+    workflow_text = "".join(
+        path.read_text() for path in sorted((project_root / ".github" / "workflows").glob("*.yml"))
+    )
+    ci_pins = set(re.findall(r"pre-commit==([0-9]+\.[0-9]+\.[0-9]+)", workflow_text))
+    assert len(ci_pins) == 1, f"expected ONE pre-commit CI pin across workflows: {ci_pins}"
+    pyproject_text = (project_root / "pyproject.toml").read_text()
+    band = re.search(r'"pre-commit>=([0-9]+),<([0-9]+)"', pyproject_text)
+    assert band is not None, "dev extra lost its pre-commit band"
+    major = int(next(iter(ci_pins)).split(".")[0])
+    assert int(band.group(1)) <= major < int(band.group(2)), (
+        f"CI pre-commit pin {ci_pins} escaped the contributor band "
+        f">={band.group(1)},<{band.group(2)}"
+    )
