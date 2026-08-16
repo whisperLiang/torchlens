@@ -88,7 +88,12 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # 24 -> 25 (2026-08-15 r3settle reconcile): bundle.py reads the optional
     # `_runnable` seam (absent on non-runnable traces; None default correct),
     # the same f2bc65a6 idiom already ledgered at <root>.
-    "_io": 25,
+    # 25 -> 26 (2026-08-16 fw7settle reconcile, fcf0e97c buffer-value channel
+    # gate): accessor_rebuild.py/bundle.py read the optional
+    # `_buffer_initial_values` channel; absent unless the capture recorded
+    # pre-forward buffer values, so the None default is the correct "no
+    # channel" reading (net +1 against a discharged older site).
+    "_io": 26,
     "autoroute": 2,
     "backends/jax": 7,
     "backends/mlx": 21,
@@ -112,7 +117,11 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # output-parent promotion charge reads the optional session-time
     # `_save_budget_accountant` in backend.py, the same idiom as the
     # pre-existing _ops_retention.py/tensor_tracking.py reads of that field.
-    "backends/torch": 118,
+    # 118 -> 120 (2026-08-16 fw7settle reconcile, 76fe9c94 r8 R16+R34
+    # accountant settle): two more `_save_budget_accountant` reads in
+    # _ops_retention.py, the same optional session-time idiom already
+    # ledgered for that exact field.
+    "backends/torch": 120,
     "bridge": 1,
     "bundle": 1,
     "capture": 20,
@@ -128,7 +137,11 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # reused charged-grad-payload path in op.py adds a third read of the
     # optional session-time `_defer_streaming_bundle_finalization` flag, the
     # same idiom as the two reads already ledgered for that file.
-    "data_classes": 30,
+    # 30 -> 31 (2026-08-16 fw7settle reconcile, 76fe9c94 r8 R16+R34
+    # accountant settle): op.py's release path reads the optional
+    # session-time `_save_budget_accountant`, the idiom already ledgered at
+    # backends/torch for that exact field.
+    "data_classes": 31,
     "experimental": 1,
     "fastlog": 2,
     "intervention": 43,
@@ -145,7 +158,11 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # 23 -> 24 (2026-08-15 r3settle reconcile): _invariants_payloads.py reads
     # the optional `_trace_core` op-store seam, absent on loaded/preview
     # traces, so the None default is the correct "no sealed core" reading.
-    "validation": 24,
+    # 24 -> 25 (2026-08-16 fw7settle reconcile, 5ef9cf21 loaded-artifact
+    # false-fire fix): _invariants_payloads.py reads the optional
+    # `_loaded_from_bundle` marker to scope op_log_fields to live captures;
+    # absent on live traces, so the False default is the correct reading.
+    "validation": 25,
     # 20 -> 23 (2026-08-14 fixwave-2 reconcile): intended R19/R40 rendering
     # additions (node-overlay names/scores, source-code blob, `_visualizer_dir`
     # consolidation into _render_dot.py) against removed `_raw_layer_dict` /

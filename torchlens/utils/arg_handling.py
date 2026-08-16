@@ -15,6 +15,7 @@ import torch
 from torch import nn
 
 from .._input_walk import INPUT_TREE_MAX_DEPTH, _inspect_instance_state_items
+from .._state import ReentrantTraceError
 from .alias_footprint import (
     TensorByteFootprint,
     tensor_byte_footprint,
@@ -128,6 +129,12 @@ def rebuild_tuple_like(arg_type: type[Any], items: list[Any]) -> Any:
         try:
             with pause_logging():
                 candidate = build()
+        except ReentrantTraceError:
+            # ``build()`` runs the USER's subclass constructor: a nested
+            # public capture attempted there is the R55 typed refusal, not a
+            # rebuild failure -- absorbing it into the fallback ladder would
+            # hide the program error the refusal exists to surface.
+            raise
         except Exception:
             continue
         if type(candidate) is not arg_type:
@@ -251,6 +258,10 @@ def rebuild_mapping_like(original: Any, pairs: list[tuple[Any, Any]]) -> Any | N
     try:
         for key, value in pairs:
             mapping_like_set_item(shell, key, value)
+    except ReentrantTraceError:
+        # Key ``__hash__``/``__eq__`` is user code; the R55 refusal
+        # propagates (see rebuild_tuple_like).
+        raise
     except Exception:
         return None
     if not _copy_instance_state_inertly(original, shell):
@@ -944,6 +955,14 @@ def safe_copy_input_tree(
     except InvalidArgumentError:
         # Typed depth/cycle refusals from the shared input-boundary contract
         # propagate; a clone fallback would just re-walk the same tree.
+        raise
+    except ReentrantTraceError:
+        # R55: since the r8 R54 admission reorder the copy runs INSIDE the
+        # reserved window, so a tensor-subclass ``__torch_function__`` (or any
+        # input protocol hook) attempting a nested public capture refuses
+        # HERE. That refusal is a typed program error, not a copy failure --
+        # degrading it to a semantic gap would settle the outer capture
+        # COMPLETE while silencing the documented ReentrantTraceError.
         raise
     except Exception as exc:
         semantic_gaps.append(

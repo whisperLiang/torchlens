@@ -1711,6 +1711,9 @@ def _clone_tensor_payload(
         Tensor retention mode. ``"copy"`` preserves historical clone behavior,
         ``"reference"`` stores the source tensor, ``"view"`` stores the
         graph-connected source tensor, and ``"cpu_async"`` copies to CPU.
+    target_device
+        Optional device for the stored copy; only ``save_mode="copy"`` moves,
+        and ``None``/``"same"``/the source device leave the payload in place.
 
     Returns
     -------
@@ -1797,6 +1800,9 @@ def copy_tensor_payload(
         If True, detach the saved payload from the autograd graph. This is used
         when saving outs to avoid retaining the full computational graph in
         memory.
+    target_device
+        Optional device for the stored copy, forwarded to the tensor-clone
+        path; ``None``/``"same"``/the source device leave the payload in place.
 
     Returns
     -------

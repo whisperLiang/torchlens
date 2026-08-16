@@ -81,6 +81,8 @@ def test_every_hub_function_resolves_through_hub_globals() -> None:
             ----------
             value:
                 Candidate namespace member.
+            bound_family_files:
+                Family filenames bound at definition time (B023 idiom).
 
             Returns
             -------

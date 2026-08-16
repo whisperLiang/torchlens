@@ -100,13 +100,15 @@ def test_arm_derivation_addresses_every_invariant_raise() -> None:
         mid for mid in arms if mid.split("#", 1)[0] in ("op_log_fields", "capture_edge_survival")
     ]
     assert survivors, "the proven-survivor contracts lost their arm enrollment"
-    sentinel_arm = arms.get("op_log_fields#a06")
+    # a06 -> a07 (2026-08-16 fw7settle): the loaded-artifact non-None-func
+    # arm (5ef9cf21) enumerates ahead of the sentinel arm and shifted its id.
+    sentinel_arm = arms.get("op_log_fields#a07")
     assert sentinel_arm is not None, "op_log_fields lost the functionless-sentinel arm id"
     src = (_REPO_ROOT / sentinel_arm[0]).read_text(encoding="utf-8")
     lineno, end, _ = driver.enumerate_raise_arms(src, sentinel_arm[1])[sentinel_arm[2]]
     arm_text = " ".join(line.strip() for line in src.splitlines()[lineno - 1 : end])
     assert "functionless" in arm_text, (
-        "op_log_fields#a06 no longer addresses the functionless-sentinel arm — "
+        "op_log_fields#a07 no longer addresses the functionless-sentinel arm — "
         "arms moved; re-derive the survivor ids in this test and re-score them"
     )
 

@@ -2301,7 +2301,15 @@ def test_validation_status_cache_invalidated_on_fork() -> None:
 
 
 def test_buffer_semantic_ownership_invariant_fires_on_wrong_module_stack() -> None:
-    """Buffer source nodes must claim the owner or an active consumer module."""
+    """Buffer source nodes must claim the owner or an active consumer module.
+
+    Two redundant tripwires cover this plant: op_log_fields'
+    module_call_stack<->modules coherence check (runs first in the contract
+    order, and the plant rewrites modules without the stack) and
+    buffer_xrefs' semantic-ownership check. The plant must refuse either
+    way — the test pins the refusal and the planted module claim, not which
+    redundant layer wins the race.
+    """
 
     trace = tl.trace(
         BufferOwnerModel(),
@@ -2313,7 +2321,7 @@ def test_buffer_semantic_ownership_invariant_fires_on_wrong_module_stack() -> No
     buffer_op._internal_set("modules", ["self:1"])  # noqa: SLF001
     buffer_op._internal_set("module", "self:1")  # noqa: SLF001
 
-    with pytest.raises(MetadataInvariantError, match="buffer_xrefs"):
+    with pytest.raises(MetadataInvariantError, match="module"):
         check_metadata_invariants(trace)
 
 

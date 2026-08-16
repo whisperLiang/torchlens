@@ -61,6 +61,9 @@ _WARN_ONCE_SENTINELS: tuple[tuple[str, str, object], ...] = (
     ("torchlens.visualization._render_common", "_SIBLING_ORDER_WARNING_EMITTED", False),
     ("torchlens.visualization._render_dot", "_SIBLING_ORDER_WARNING_EMITTED", False),
     ("torchlens.visualization.auto_collapse", "_COUNT_MISMATCH_WARNING_EMITTED", False),
+    # WeakSet of Traces that already got the collapse-ceiling decline warning;
+    # a plain set() reset would strong-pin those Traces for the session.
+    ("torchlens.visualization.collapse_optimizer", "_CEILING_WARNED_TRACES", weakref.WeakSet()),
 )
 
 

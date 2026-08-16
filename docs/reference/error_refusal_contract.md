@@ -102,6 +102,7 @@ add names to the top-level `torchlens` namespace:
 | `diagnostic_severity_invalid` | Diagnostic severity is outside the closed vocabulary | Choose a documented severity |
 | `distributed_payload_witness_unsupported` | Payload witnesses are reserved | Use digest witnesses |
 | `distributed_witness_invalid` | Distributed witness mode is unknown | Choose `none` or `digest` |
+| `env_flag_invalid` | A TorchLens boolean environment variable is set to an unrecognized value | Use `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`, or unset the variable |
 | `error_constructor_args_conflict` | Diagnostic constructor got message args and fields | Pass a message or named fields, not both |
 | `fold_repeats_invalid` | Repeat-fold policy is invalid | Choose `None`, `True`, or `False` |
 | `followed_by_unsupported` | `tl.followed_by(...)` predicate shape or retroactive capture is unsupported on this surface (`PredicateError`, `RuntimeError` lineage) | Compose `candidate & tl.followed_by(successor)` and capture with `tl.trace(save=...)` |
@@ -229,6 +230,7 @@ add names to the top-level `torchlens` namespace:
 | `sweep_values_empty` | Sweep values iterable is empty | Pass at least one value |
 | `sweep_values_missing` | Sweep values iterable is missing | Pass a non-empty iterable |
 | `tensor_connection_labels_missing` | Manual edge endpoint lacks a capture label | Use tensors already captured in the active trace |
+| `tlspec_format_markers_incoherent` | Artifact manifest carries `kind` without `tlspec_version` yet has no `spec.json` — format markers are incoherent (`TorchLensIOError`) | Restore the manifest's `tlspec_version` key or re-save the artifact from its source trace |
 | `top_n_invalid` | Requested `top_n` is below one | Pass a positive integer |
 | `trace_cleaned_up` | Public read on a Trace that `cleanup()` husked (`TraceCleanedUpError`, `AttributeError` lineage) | Re-capture with `tl.trace(...)`; cleanup permanently empties a Trace |
 | `trace_not_finished` | Export requested before the forward pass finished | Wait until `trace(...)` has returned |

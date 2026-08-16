@@ -56,6 +56,12 @@ _BITSET_FIELDS = {"root_ancestors", "internal_source_ancestors"}
 #: Group-shared fields (content lives once per group block).
 _GROUP_FIELDS = {"equivalent_ops", "recurrent_ops"}
 
+#: Edge fields the torch backend ALSO overlays with slot-preserving
+#: properties (staging-set/frozen-view accessors on ``Op``); like the
+#: bitset pair they must classify before the property check or the
+#: result depends on whether the backend module is imported.
+_OVERLAY_EDGE_FIELDS = {"input_ancestors", "output_descendants"}
+
 #: Copy-on-read alias-barrier fields (JMT-FORK-1 default: fresh copies).
 _COPY_ON_READ_FIELDS = {"equivalent_ops", "recurrent_ops"}
 
@@ -136,7 +142,7 @@ def _classify(
         return "BITSET", "mutable_container"
     if name in _GROUP_FIELDS:
         return "GROUP", "mutable_container"
-    if _is_property(cls, name):
+    if _is_property(cls, name) and name not in _OVERLAY_EDGE_FIELDS:
         return "COMPUTED", "immutable"
     if policy.portable_policy is FieldPolicy.DROP:
         return "RUNTIME", "immutable"

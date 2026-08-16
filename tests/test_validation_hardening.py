@@ -370,7 +370,7 @@ def _op_by_layer_label(trace, layer_label: str):
     raise KeyError(layer_label)
 
 
-def test_r05_fuzzy_resolvable_corrupt_parent_label_fails_graph_topology() -> None:
+def test_fuzzy_resolvable_corrupt_parent_label_fails_graph_topology() -> None:
     """FAIL-AFTER-WHERE-PASSED-BEFORE: a truncated stored parent label is caught.
 
     Before this hardening ``_check_graph_topology`` resolved every stored edge
@@ -392,7 +392,7 @@ def test_r05_fuzzy_resolvable_corrupt_parent_label_fails_graph_topology() -> Non
     assert "'input'" in str(exc_info.value)
 
 
-def test_r05_dangling_edge_label_reports_owning_contract() -> None:
+def test_dangling_edge_label_reports_owning_contract() -> None:
     """A dangling stored child label fails as ``MetadataInvariantError``.
 
     Before this hardening the bare ``ml[c]`` lookup at the top of the loop
@@ -424,7 +424,7 @@ class _Nested(nn.Module):
         return self.l2(torch.sigmoid(self.a(x)))
 
 
-def test_r05_module_call_stack_is_single_fact_containment() -> None:
+def test_module_call_stack_is_single_fact_containment() -> None:
     """FAIL-AFTER-WHERE-PASSED-BEFORE: the persisted tri-fact field is gone.
 
     ``module_call_stack`` used to be three unrelated facts in one persisted
@@ -458,7 +458,7 @@ def test_r05_module_call_stack_is_single_fact_containment() -> None:
         assert op.module_call_depth == len(op.module_call_stack)
 
 
-def test_r05_module_call_stack_corruption_fails_invariants() -> None:
+def test_module_call_stack_corruption_fails_invariants() -> None:
     """The tri-fact tie is armed: a fed-call-style stack fails validation.
 
     Nothing used to check ``module_call_stack`` against ``modules`` or
@@ -476,7 +476,7 @@ def test_r05_module_call_stack_corruption_fails_invariants() -> None:
     assert "module_call_stack" in str(exc_info.value)
 
 
-def test_r05_parent_arg_positions_foreign_domain_fails() -> None:
+def test_parent_arg_positions_foreign_domain_fails() -> None:
     """FAIL-AFTER-WHERE-PASSED-BEFORE: the arg map's top-level domain is closed.
 
     The per-entry checks iterate only the ``"args"``/``"kwargs"`` buckets, so a

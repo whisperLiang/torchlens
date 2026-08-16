@@ -253,7 +253,17 @@ def test_pinned_small_capture_fixed_cost_ratio_gate() -> None:
         f"1={one_op_ms:.3f}ms 16={sixteen_op_ms:.3f}ms 64={sixty_four_op_ms:.3f}ms "
         f"fixed_ratio={fixed_cost_ratio:.3f} slope_ratio={slope_ratio:.3f}"
     )
-    assert fixed_cost_ratio < 0.48
+    # 0.48 -> 0.55 (2026-08-16 fw7settle, bisected to e763548a r8 R39): the
+    # wrong-trace cache trio deleted the module-namespace slot memo as
+    # provably unsound (constant-length replacement kept a stale slot list
+    # -- provenance laundering), so the session-end sweep pays one fresh
+    # isinstance pass per capture: +~3ms fixed on this box (1-op 16.6ms ->
+    # 18-19ms, 16/64-op unchanged; isolated ratio 0.43 -> 0.47, loaded
+    # fw7c session 0.524). A conscious correctness-over-speed trade, not
+    # creep; a DOUBLED fixed floor from the new baseline still reads ~0.63
+    # and fails. Tracking exactly-stamped tensors instead of sweeping
+    # namespaces would win the cost back -- follow-up, not a gate loosen.
+    assert fixed_cost_ratio < 0.55
     assert 0.45 < slope_ratio < 2.25
 
 

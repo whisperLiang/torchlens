@@ -11,6 +11,7 @@ pid vanishes, and exits on its own when the group empties first.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
@@ -132,7 +133,5 @@ def test_grandchild_dies_after_parent_sigkill(tmp_path) -> None:
         if spawner.poll() is None:
             spawner.kill()
             spawner.wait(timeout=10)
-        try:
+        with contextlib.suppress(OSError, ValueError):
             os.killpg(int(pgid_file.read_text()), signal.SIGKILL)
-        except (OSError, ValueError):
-            pass
