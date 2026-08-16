@@ -114,6 +114,7 @@ class ResolvedRenderRequest:
     color_by: Any = None
     size_by: Any = None
     scale: Any = None
+    stack_by: Any = None
     encoding: Any = None
     font_size: int | None = None
     dpi: int | None = None

@@ -107,7 +107,11 @@ Key entry points:
   multi-pass sources that cannot be certified single-valued refuse `size_by_rolled_varying`
   (size refuses where color degrades); `total_*` sums encode + aggregation legend line; the
   funnel drops NodeSpec width/height on image nodes; `scale=` without `size_by` refuses
-  `scale_requires_size_by`.
+  `scale_requires_size_by`. Wave-1 rank channel `Trace.draw(stack_by=...)` (UNSTABLE,
+  strictly opt-in): annotation -> `rank=same` groups (`newrank=true`); `True`/`"auto"` is
+  licensed by global pass_index monotonicity (else `stack_by_auto_underivable`), explicit
+  field/callable bypasses with caption disclosure, rolled refuses
+  `stack_by_requires_unrolled`, sibling ordering no-ops while stacking.
 - Visualization: `Trace.draw(order_siblings=True)` applies a Graphviz-only verified
   sibling-ordering post-pass for forward unrolled graphs under the node cap.
   `Trace.draw(collapse="none"|"auto"|"max"|t, fold_repeats=None|True|False)` controls v2 smart

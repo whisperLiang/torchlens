@@ -153,6 +153,7 @@ _VISUALIZATION_FIELDS: Final[tuple[str, ...]] = (
     "color_by",
     "size_by",
     "scale",
+    "stack_by",
     "font_size",
     "dpi",
     "for_paper",
@@ -1541,6 +1542,9 @@ class VisualizationOptions:
     scale:
         UNSTABLE size-channel scale transform (``"sqrt"``/``"linear"``);
         see ``Trace.draw``.
+    stack_by:
+        UNSTABLE rank-channel annotation source (``True``/``"auto"``,
+        field, or callable); see ``Trace.draw``.
     font_size:
         Optional Graphviz font size.
     dpi:
@@ -1589,6 +1593,7 @@ class VisualizationOptions:
     color_by: str | Callable[[Any], Any] | None = None
     size_by: str | Callable[[Any], Any] | None = None
     scale: str | None = None
+    stack_by: str | bool | Callable[[Any], Any] | None = None
     font_size: int | None = None
     dpi: int | None = None
     for_paper: bool = False
@@ -1629,6 +1634,7 @@ class VisualizationOptions:
         color_by: str | Callable[[Any], Any] | None | MissingType = MISSING,
         size_by: str | Callable[[Any], Any] | None | MissingType = MISSING,
         scale: str | None | MissingType = MISSING,
+        stack_by: str | bool | Callable[[Any], Any] | None | MissingType = MISSING,
         font_size: int | None | MissingType = MISSING,
         dpi: int | None | MissingType = MISSING,
         for_paper: bool | MissingType = MISSING,
@@ -1730,6 +1736,7 @@ class VisualizationOptions:
             "color_by": _resolve_option_value("color_by", color_by, None, specified_fields),
             "size_by": _resolve_option_value("size_by", size_by, None, specified_fields),
             "scale": _resolve_option_value("scale", scale, None, specified_fields),
+            "stack_by": _resolve_option_value("stack_by", stack_by, None, specified_fields),
             "font_size": _resolve_option_value("font_size", font_size, None, specified_fields),
             "dpi": _resolve_option_value("dpi", dpi, None, specified_fields),
             "for_paper": _resolve_option_value("for_paper", for_paper, False, specified_fields),
@@ -2400,6 +2407,7 @@ def visualization_to_render_kwargs(visualization: VisualizationOptions) -> dict[
         "color_by": visualization.color_by,
         "size_by": visualization.size_by,
         "scale": visualization.scale,
+        "stack_by": visualization.stack_by,
         "font_size": visualization.font_size,
         "dpi": visualization.dpi,
         "for_paper": visualization.for_paper,

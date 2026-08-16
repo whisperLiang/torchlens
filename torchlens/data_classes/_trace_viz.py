@@ -141,6 +141,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
         color_by: str | Callable[[Any], Any] | None = None,
         size_by: str | Callable[[Any], Any] | None = None,
         scale: str | None = None,
+        stack_by: str | bool | Callable[[Any], Any] | None = None,
     ) -> Any:
         """Render the computational graph for this model log.
 
@@ -217,6 +218,19 @@ class TraceVisualizationMixin(_TraceMixinBase):
             Supplied without ``size_by`` it refuses
             (``scale_requires_size_by``). Every legend drawn states the
             active scale.
+        stack_by:
+            UNSTABLE (keyword-only). Rank encoding channel: nodes sharing an
+            annotation value pin to one Graphviz rank (column/row), the
+            classic unrolled-RNN timestep diagram. STRICTLY OPT-IN.
+            ``True``/``"auto"`` derives the annotation (``pass_index`` on
+            multi-pass ops only) under the lockstep license — the
+            multi-pass execution order must be globally monotone, else it
+            refuses (``stack_by_auto_underivable``); an explicit field name
+            or callable bypasses the license (the caption disclosed what
+            was used). Rolled graphs refuse (``stack_by_requires_unrolled``).
+            While stacking is active the sibling-ordering post-pass no-ops
+            (two rank-constraint systems would fight), and collapsed boxes/
+            fold reps stay un-annotated.
 
         Returns
         -------
@@ -301,6 +315,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
             color_by=color_by,
             size_by=size_by,
             scale=scale,
+            stack_by=stack_by,
         )
 
     def add_node_overlay(

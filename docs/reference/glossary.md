@@ -236,6 +236,17 @@ alignment is evidence, not semantic equivalence.
   `size_by` it refuses (`scale_requires_size_by`); an unknown token refuses
   (`encoding_scale_invalid`). Every legend drawn states the active scale.
 
+**stack_by** *(unstable — no deprecation shim owed; keyword-only)*
+: `draw(stack_by=...)` pins nodes sharing an annotation value to one Graphviz rank (the classic
+  unrolled-RNN timestep diagram; strictly opt-in). `True`/`"auto"` derives the annotation
+  (`pass_index` on multi-pass ops only) under the LOCKSTEP LICENSE: granted iff the pass_index
+  sequence over all multi-pass ops in raw execution order is globally non-decreasing — then
+  "same column = same execution window" is exactly what the figure claims. Non-monotone traces
+  refuse (`stack_by_auto_underivable`); an explicit field/callable bypasses the license with the
+  caption disclosing what was used; rolled graphs refuse (`stack_by_requires_unrolled`).
+  Rank groups ride `RenderIR.stack_rank_groups` and emit as `rank=same` subgraphs under
+  `newrank=true`; the sibling-ordering post-pass no-ops while stacking is active.
+
 **show_legend tri-state**
 : `show_legend` accepts `None` (default, AUTO: no legend unless an encoding channel is active,
   then a channel-only disclosure legend), `True` (full theme legend, plus channel rows when
@@ -651,6 +662,11 @@ shim owed*
   conservative area-only mapping + typed refusal on rolled varying sources).
   See the "size_by" and "scale (size channel)" entries above for semantics.
 
+**stack_by (draw kwarg)** — *unstable — no deprecation shim owed; keyword-only*
+: The wave-1 rank encoding channel on `Trace.draw` (stacking split (a):
+  explicit + licensed auto on plain traces). The `True`/`"auto"` request form
+  is itself an unstable spelling. See the "stack_by" entry above.
+
 **show_legend=None AUTO value** — *unstable — no deprecation shim owed*
 : The tri-state AUTO value on the stable `show_legend` kwarg: no legend unless
   an encoding channel is active, then a channel-only disclosure legend.
@@ -659,4 +675,5 @@ shim owed*
 **Encoding refusal codes** — *unstable — no deprecation shim owed*
 : `encoding_source_invalid`, `encoding_value_invalid`,
   `encoding_callable_error`, `encoding_requires_dot_layout`,
-  `size_by_rolled_varying`, `scale_requires_size_by`, `encoding_scale_invalid`.
+  `size_by_rolled_varying`, `scale_requires_size_by`, `encoding_scale_invalid`,
+  `stack_by_auto_underivable`, `stack_by_requires_unrolled`.

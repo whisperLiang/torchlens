@@ -444,6 +444,13 @@ def _build_graphviz_shell(
     )
     if getattr(trace, "_has_direct_writes", False):
         caption_body += "Direct writes detected - recipe propagation will overlay<br align='left'/>"
+    encoding_state = getattr(request, "encoding", None)
+    if encoding_state is not None and getattr(encoding_state, "stack_spec", None) is not None:
+        # Stacking disclosure is part of the contract (memo 4.1): the
+        # rendered output captions which annotation produced the columns.
+        caption_body += (
+            f"stacked by: {html_escape(encoding_state.stack_spec.display_name)}<br align='left'/>"
+        )
     graph_caption = f"<<FONT COLOR='{theme.default_font}'>{caption_body}</FONT>>"
 
     dot = graphviz.Digraph(
@@ -738,7 +745,14 @@ def _finalize_forward_ir(
 
     request = context.request
     sibling_order_chains: tuple[SiblingOrderChain, ...] = ()
-    if _should_order_siblings(
+    # Stacking fence (L5 M3, conservative no-op): stack_by pins ranks, and
+    # two independent constraint systems fighting over dot's layout is how
+    # oscillation starts (visualization/CLAUDE.md no-op pattern). Stacking
+    # is strictly opt-in, so this never fires on plain draw().
+    stack_channel_active = (
+        request.encoding is not None and getattr(request.encoding, "stack_spec", None) is not None
+    )
+    if not stack_channel_active and _should_order_siblings(
         order_siblings=request.order_siblings,
         engine=context.engine,
         vis_mode=request.vis_mode,
@@ -861,6 +875,16 @@ def _emit_and_finish_forward(
 
     dot = context.dot
     GraphvizRenderer().emit(forward_render_ir, dot)
+    if forward_render_ir.stack_rank_groups:
+        # Stacking channel (L5 M3): rank=same groups span module clusters,
+        # so newrank=true opts dot into global rank constraints (without it
+        # cross-cluster rank=same is silently ignored -- a dishonest no-op).
+        dot.graph_attr.update({"newrank": "true"})
+        for rank_group in forward_render_ir.stack_rank_groups:
+            with dot.subgraph() as rank_subgraph:
+                rank_subgraph.attr(rank="same")
+                for member in rank_group.members:
+                    rank_subgraph.node(member)
     for overlay_edge in work.container_overlay_edges:
         dot.edge(
             tail_name=overlay_edge.tail_name,
@@ -1053,6 +1077,7 @@ def draw(
     color_by: "str | Callable[[Any], Any] | None" = None,
     size_by: "str | Callable[[Any], Any] | None" = None,
     scale: "str | None" = None,
+    stack_by: "str | bool | Callable[[Any], Any] | None" = None,
 ) -> Any:
     """Render the computational graph through the resolved forward IR pipeline.
 
@@ -1086,6 +1111,9 @@ def draw(
     encoding_channel_spec = resolve_color_by(color_by)
     size_channel_spec = resolve_size_by(size_by)
     size_scale = resolve_size_scale(scale, size_by_active=size_channel_spec is not None)
+    from ._stacking import resolve_stack_by
+
+    stack_channel_spec = resolve_stack_by(stack_by, vis_mode)
     request = ResolvedRenderRequest(
         vis_mode=vis_mode,
         show_buffer_layers=cast(BufferVisibilityLiteral, show_buffer_layers),
@@ -1124,9 +1152,14 @@ def draw(
         color_by=color_by,
         size_by=size_by,
         scale=scale,
+        stack_by=stack_by,
     )
     request, theme, site_labels = _resolve_draw_request(self, request)
-    if encoding_channel_spec is not None or size_channel_spec is not None:
+    if (
+        encoding_channel_spec is not None
+        or size_channel_spec is not None
+        or stack_channel_spec is not None
+    ):
         from ._encoding import attach_encoding_state
 
         request = attach_encoding_state(
@@ -1135,6 +1168,7 @@ def draw(
             color_spec=encoding_channel_spec,
             size_spec=size_channel_spec,
             size_scale=size_scale,
+            stack_spec=stack_channel_spec,
         )
     show_buffer_layers = request.show_buffer_layers
 

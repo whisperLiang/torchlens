@@ -162,6 +162,27 @@ class RenderIROrderingConstraint:
 
 
 @dataclass(frozen=True)
+class RenderIRRankGroup:
+    """One stacking (rank) channel group: nodes pinned to one Graphviz rank.
+
+    Parameters
+    ----------
+    kind:
+        Constraint kind; v1 emits ``"stack"`` only (the ``stack_by``
+        encoding channel; the license/cohort semantics live in
+        ``visualization._stacking``).
+    key:
+        Repr of the shared annotation value (rank key).
+    members:
+        Rendered node names pinned to the shared rank.
+    """
+
+    kind: str
+    key: str
+    members: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class RenderIRDotStatement:
     """Immutable backend-ready DOT statement without TorchLens host objects."""
 
@@ -195,6 +216,8 @@ class RenderIR:
     regions: tuple[RenderIRRegion, ...]
     ordering_constraints: tuple[RenderIROrderingConstraint, ...] = ()
     dot_statements: tuple[RenderIRDotStatement, ...] = ()
+    # Stacking channel (L5 M3): rank=same groups resolved at the prepass.
+    stack_rank_groups: tuple[RenderIRRankGroup, ...] = ()
 
     def required_capabilities(self) -> RendererCapabilities:
         """Return backend features required to render this IR exactly.
@@ -326,11 +349,18 @@ def build_render_ir(
     edges = _build_forward_edges_from_universe(universe)
     regions = _build_regions(trace, nodes, edges)
     _warn_if_render_exceeds_disclosure_ceiling(len(nodes), len(edges))
+    stack_rank_groups: tuple[RenderIRRankGroup, ...] = ()
+    if encoding is not None:
+        stack_rank_groups = tuple(
+            RenderIRRankGroup(kind="stack", key=key, members=members)
+            for key, members in getattr(encoding, "stack_groups", ()) or ()
+        )
     return RenderIR(
         context=resolved_context,
         nodes=nodes,
         edges=edges,
         regions=regions,
+        stack_rank_groups=stack_rank_groups,
     )
 
 

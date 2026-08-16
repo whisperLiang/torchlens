@@ -510,6 +510,12 @@ class EncodingState:
     size_domain: tuple[float, float] | None = None
     size_notes: list[str] = field(default_factory=list)
     size_aggregation_lines: list[str] = field(default_factory=list)
+    # STACK (rank) channel (wave 1). ``stack_groups`` holds
+    # (rank_key_repr, member node names) rows resolved at the prepass and
+    # emitted as rank=same subgraphs under newrank=true.
+    stack_spec: EncodingChannelSpec | None = None
+    stack_groups: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    stack_notes: list[str] = field(default_factory=list)
 
     def note(self, text: str) -> None:
         """Record a color-channel legend note once."""
@@ -522,6 +528,12 @@ class EncodingState:
 
         if text not in self.size_notes:
             self.size_notes.append(text)
+
+    def stack_note(self, text: str) -> None:
+        """Record a stack-channel legend note once."""
+
+        if text not in self.stack_notes:
+            self.stack_notes.append(text)
 
     def fillcolor_for(self, node: Any) -> str | None:
         """Phase B: return the precomputed fill for ``node`` (None = unencoded)."""
@@ -541,6 +553,8 @@ class EncodingState:
             channels.append("color_by")
         if self.size_spec is not None:
             channels.append("size_by")
+        if self.stack_spec is not None:
+            channels.append("stack_by")
         return tuple(channels)
 
     @property
@@ -1346,6 +1360,11 @@ def populate_encoding_state(state: EncodingState, trace: Trace, universe: Any) -
     if state.size_spec is not None:
         _compute_size_geometry(state)
 
+    if state.stack_spec is not None:
+        from ._stacking import compute_stack_groups
+
+        compute_stack_groups(state, trace, universe)
+
     if state.spec is None:
         return
     if not raw_values:
@@ -1444,6 +1463,15 @@ def add_channel_legend_to_graphviz(
                     f"min {_format_size_domain_value(low)} .. max {_format_size_domain_value(high)}"
                 )
             rows.append(NodeSpec(lines=size_lines, shape="box", style="filled,rounded"))
+        if state.stack_spec is not None:
+            # Rank rule (memo 2.3): the legend names the annotation used.
+            stack_lines = [
+                f"stack_by: {state.stack_spec.display_name}",
+                "same rank = same annotation value",
+            ]
+            for note in state.stack_notes:
+                stack_lines.append(note)
+            rows.append(NodeSpec(lines=stack_lines, shape="box", style="filled,rounded"))
         for index, spec in enumerate(rows):
             node_args = _node_spec_to_graphviz_args(apply_theme_to_spec(spec, theme))
             node_args["name"] = f"tl_encoding_legend_{index}"
@@ -1477,6 +1505,7 @@ def attach_encoding_state(
     color_spec: EncodingChannelSpec | None = None,
     size_spec: EncodingChannelSpec | None = None,
     size_scale: str = "sqrt",
+    stack_spec: EncodingChannelSpec | None = None,
 ) -> Any:
     """Return ``request`` with a fresh per-draw :class:`EncodingState` attached."""
 
@@ -1489,6 +1518,7 @@ def attach_encoding_state(
             dark_theme=theme.name == "dark",
             size_spec=size_spec,
             size_scale=size_scale,
+            stack_spec=stack_spec,
         ),
     )
 
