@@ -1164,3 +1164,72 @@ def test_validate_forward_pass_accepts_a_bare_ground_truth_tensor() -> None:
     trace, ground_truth = _capture(model, x)
     assert trace.validate_forward_pass(ground_truth) is True
     assert trace.validate_forward_pass([ground_truth]) is True
+
+
+class _InplaceMaskGate(nn.Module):
+    """In-place bool op whose probe used to corrupt the retained operand."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        mask = x > 0
+        gate = x < 1.0e30
+        mask.logical_and_(gate)
+        return mask.float()
+
+
+def test_bool_predicate_probe_never_mutates_retained_saved_args() -> None:
+    """r8 R08 (fable MH): the battery must execute against CLONES.
+
+    The bool universe includes in-place ops (``logical_and_``); the probe
+    executed the captured func against the record's retained ``saved_args``
+    with only the probed slot substituted, so one probe run MUTATED the
+    capture evidence in place and returned a verdict computed on the
+    corrupted operand (red-capable: pre-fix the byte comparison fails).
+    """
+
+    from torchlens.validation.exemptions import _bool_predicate_influence_probe
+
+    trace, _ground_truth = _capture(_InplaceMaskGate(), torch.randn(3, 4))
+    target = [op for op in trace.layer_list if op.func_name == "logical_and_"][0]
+    saved_args = list(target.saved_args or ())
+    assert saved_args and isinstance(saved_args[0], torch.Tensor)
+    snapshots = [
+        arg.detach().clone() if isinstance(arg, torch.Tensor) else arg for arg in saved_args
+    ]
+    arg_positions = (getattr(target, "parent_arg_positions", None) or {}).get("args", {})
+    assert arg_positions, "expected positional parent metadata on the in-place op"
+    # Probe through each single-parent slot the metadata knows about.
+    for position, parent_label in arg_positions.items():
+        _bool_predicate_influence_probe(target, [parent_label])
+        _ = position
+    for index, snapshot in enumerate(snapshots):
+        if isinstance(snapshot, torch.Tensor):
+            assert torch.equal(saved_args[index], snapshot), (
+                f"probe mutated retained saved_args[{index}] in place"
+            )
+
+
+def test_bool_predicate_probe_catch_is_typed() -> None:
+    """r8 R08 (sol fault-injection): unexpected probe crashes PROPAGATE.
+
+    The old blanket ``except Exception`` swallowed genuine capture-bug
+    crashes into the evidence-free heuristic pass; benign substitute
+    refusals (TypeError/ValueError/RuntimeError) still settle "cannot run".
+    """
+
+    from torchlens.validation.exemptions import _bool_predicate_influence_probe
+
+    trace, _ground_truth = _capture(_PredicateZoo("isnan"), torch.randn(3, 4))
+    target = [op for op in trace.layer_list if op.func_name == "isnan"][0]
+    parent_label = target.parents[0]
+
+    object.__setattr__(
+        target, "func", lambda *args, **kwargs: (_ for _ in ()).throw(KeyError("capture bug"))
+    )
+    with pytest.raises(KeyError, match="capture bug"):
+        _bool_predicate_influence_probe(target, [parent_label])
+
+    def _benign_refusal(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202 - test shim
+        raise RuntimeError("substitute rejected")
+
+    object.__setattr__(target, "func", _benign_refusal)
+    assert _bool_predicate_influence_probe(target, [parent_label]) is None

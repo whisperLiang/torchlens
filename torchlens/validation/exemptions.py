@@ -1923,14 +1923,34 @@ def _bool_predicate_influence_probe(layer: Op, layers_to_perturb: list[str]) -> 
             from ..utils.tensor_utils import tensor_nanequal
 
             for substitute in _bool_probe_battery(parent_saved):
-                probe_args = list(args)
+                # CLONE every retained operand per battery run (r8 R08, fable
+                # MH): the bool universe includes IN-PLACE ops
+                # (``logical_and_``, ``bitwise_*_`` masks), and executing one
+                # against the record's retained ``saved_args`` MUTATED the
+                # capture evidence itself -- the probe then returned a verdict
+                # computed on the corrupted operand, and every LATER
+                # replay/comparison read poisoned payloads. The substitute is
+                # already a fresh tensor; each raw slot clones fresh per run
+                # so an in-place probe can only ever write scratch.
+                probe_args = [
+                    item.clone() if isinstance(item, torch.Tensor) else item for item in args
+                ]
                 probe_args[parent_index] = substitute
                 probe_output = func(*probe_args)
                 if not isinstance(probe_output, torch.Tensor):
                     return None
                 if not tensor_nanequal(probe_output, saved_output, allow_tolerance=False):
                     return True
-    except Exception:
+    except (TypeError, ValueError, RuntimeError, NotImplementedError):
+        # Typed catch (r8 R08, sol fault-injection): these are the classes a
+        # legitimate op raises when it rejects a battery substitute
+        # (dtype/shape/value refusals, unimplemented substitute dtypes) --
+        # "probe cannot run", which reverts to the DISCLOSED heuristic
+        # exemption (status quo ante). The old blanket ``except Exception``
+        # also swallowed genuine capture-bug crashes (a poisoned replay
+        # callable, a torchlens internal error) into that same evidence-free
+        # pass, disarming exactly the tripwire this probe strengthens; those
+        # now propagate.
         return None
     return False
 
