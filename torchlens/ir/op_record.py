@@ -346,142 +346,212 @@ class OpRecord:
     # facet-backed legacy names
     @property
     def parent_arg_positions(self) -> dict[str, dict[Any, str]]:
+        """Mirror ``graph.parent_arg_positions`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("graph").parent_arg_positions
 
     @property
     def _edge_uses(self) -> tuple[object, ...]:
+        """Mirror ``graph.edge_uses`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("graph").edge_uses
 
     @property
     def unattributed_tensor_args(self) -> tuple[str, ...]:
+        """Mirror ``graph.unattributed_tensor_args`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("graph").unattributed_tensor_args
 
     @property
     def dropped_edge_tensor_args(self) -> tuple[str, ...]:
+        """Mirror ``graph.dropped_edge_tensor_args`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("graph").dropped_edge_tensor_args
 
     @property
     def is_output_parent(self) -> bool:
+        """Mirror ``graph.is_output_parent`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("graph").is_output_parent
 
     @property
     def input_was_parameter(self) -> bool:
+        """Mirror ``graph.input_was_parameter`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("graph").input_was_parameter
 
     @property
     def equivalence_class(self) -> str | None:
+        """Mirror ``graph.equivalence_class`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("graph").equivalence_class
 
     @property
     def module_stack(self) -> tuple[object, ...]:
+        """Mirror ``modules.module_stack`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("modules").module_stack
 
     @property
     def modules(self) -> tuple[tuple[str, int], ...]:
+        """Mirror ``modules.modules`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("modules").modules
 
     @property
     def input_ancestors(self) -> frozenset[str]:
+        """Mirror ``ancestry.input_ancestors`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("ancestry").input_ancestors
 
     @property
     def internal_source_ancestors(self) -> frozenset[str]:
+        """Mirror ``ancestry.internal_source_ancestors`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("ancestry").internal_source_ancestors
 
     @property
     def root_ancestors(self) -> frozenset[str]:
+        """Mirror ``ancestry.root_ancestors`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("ancestry").root_ancestors
 
     @property
     def has_internal_source_ancestor(self) -> bool:
+        """Mirror ``ancestry.has_internal_source_ancestor`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("ancestry").has_internal_source_ancestor
 
     @property
     def grad_fn_class_qualname(self) -> str | None:
+        """Mirror ``autograd.grad_fn_class_qualname`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("autograd").grad_fn_class_qualname
 
     @property
     def is_transform(self) -> bool:
+        """Mirror ``transform.is_transform`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("transform").is_transform
 
     @property
     def transform_kind(self) -> str | None:
+        """Mirror ``transform.transform_kind`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("transform").transform_kind
 
     @property
     def transform_chain(self) -> tuple[str, ...]:
+        """Mirror ``transform.transform_chain`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("transform").transform_chain
 
     @property
     def transform_config(self) -> dict[str, object]:
+        """Mirror ``transform.transform_config`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("transform").transform_config
 
     @property
     def transform_fn_name(self) -> str | None:
+        """Mirror ``transform.transform_fn_name`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("transform").transform_fn_name
 
     @property
     def transform_fn_qualname(self) -> str | None:
+        """Mirror ``transform.transform_fn_qualname`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("transform").transform_fn_qualname
 
     @property
     def transform_fn_source(self) -> object | None:
+        """Mirror ``transform.transform_fn_source`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("transform").transform_fn_source
 
     @property
     def is_scalar_bool(self) -> bool | None:
+        """Mirror ``control.is_scalar_bool`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("control").is_scalar_bool
 
     @property
     def bool_value(self) -> bool | None:
+        """Mirror ``control.bool_value`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("control").bool_value
 
     @property
     def params(self) -> tuple[ParamRef, ...]:
+        """Mirror ``params.params`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("params").params
 
     @property
     def parent_params(self) -> tuple[object, ...]:
+        """Mirror ``params.parent_params`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("params").parent_params
 
     @property
     def backend_semantics(self) -> BackendSemantics | None:
+        """Mirror ``policy.backend_semantics`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("policy").backend_semantics
 
     @property
     def policy(self) -> CapturePolicy | None:
+        """Mirror ``policy.policy`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("policy").policy
 
     @property
     def predicate_matched(self) -> bool:
+        """Mirror ``policy.predicate_matched`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("policy").predicate_matched
 
     @property
     def tracing_finished(self) -> bool:
+        """Mirror ``policy.tracing_finished`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("policy").tracing_finished
 
     @property
     def construction_done(self) -> bool:
+        """Mirror ``policy.construction_done`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("policy").construction_done
 
     @property
     def record_context(self) -> object | None:
+        """Mirror ``recording.record_context`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("recording").record_context
 
     @property
     def capture_spec(self) -> object | None:
+        """Mirror ``recording.capture_spec`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("recording").capture_spec
 
     @property
     def intervention_fired(self) -> bool:
+        """Mirror ``intervention.intervention_fired`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("intervention").intervention_fired
 
     @property
     def intervention_replaced(self) -> bool:
+        """Mirror ``intervention.intervention_replaced`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("intervention").intervention_replaced
 
     @property
     def fire_results(self) -> tuple[object, ...]:
+        """Mirror ``intervention.fire_results`` through the facet default (legacy flat name)."""
+
         return self._facet_or_default("intervention").fire_results
 
     @property

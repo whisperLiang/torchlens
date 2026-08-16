@@ -541,6 +541,8 @@ def apply_tf_module_intervention(
             continue
 
         def _fire_for_site(tensor: Any, site: TFInterventionSite = site) -> Any:
+            """Fire the definition-time-bound site on one matched tensor leaf."""
+
             return _fire_site(plan, session, tf, site, tensor, _producer_label(session, tensor))
 
         current = _map_tensor_leaves(current, tf, _fire_for_site)
