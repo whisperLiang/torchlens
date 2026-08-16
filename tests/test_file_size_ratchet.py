@@ -72,6 +72,17 @@ _NEW_FILE_LINE_CAP = 2000
 #: 2950->3000, auto_collapse 2400->2450) -- reviewed fixwave-7 growth
 #: (buffer-value channel gating, R29 lazy pair generation, admission
 #: ordering, collapse-ceiling honesty) landing in already-ledgered files.
+#: 2026-08-16 FEATURE MEGASPRINT wave-0 settle: seven ceilings re-stepped to the
+#: next 50 above the merged-tree measurement. UNLIKE the fixwave raises above,
+#: this growth is NEW FEATURE MASS by design (L1 grouping, L2 episode capture,
+#: L3 aten layer, L4 S1 contract, L5 encoding channel, L7a structure-only, L8
+#: census), landing in already-ledgered files. The METAPLAN defers the DEBLOAT
+#: pass to the post-features mega-hardening round, so this is a conscious raise
+#: with a DEBT RECORD, not an accepted new normal. PRE-SPRINT BASELINE at
+#: kickoff 75439a67 (the debloat pass's target to return to or beat):
+#:   _io/bundle.py 4450 | backends/torch/backward.py 3800
+#:   bundle/__init__.py 2450 | capture/trace.py 2200
+#:   data_classes/trace.py 3750 | options.py 2425 | user_funcs.py 3900
 _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/validation/core.py": 5300,
     "torchlens/data_classes/op.py": 5200,
@@ -79,11 +90,11 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/utils/rng.py": 4950,
     "torchlens/visualization/collapse_optimizer.py": 4600,
     "torchlens/backends/jax/backend.py": 4400,
-    "torchlens/_io/bundle.py": 4450,
+    "torchlens/_io/bundle.py": 4500,
     "torchlens/_io/runnable_load.py": 3850,
-    "torchlens/user_funcs.py": 3900,
-    "torchlens/backends/torch/backward.py": 3800,
-    "torchlens/data_classes/trace.py": 3750,
+    "torchlens/user_funcs.py": 4200,
+    "torchlens/backends/torch/backward.py": 3900,
+    "torchlens/data_classes/trace.py": 3800,
     "torchlens/utils/_torch_compat.py": 3450,
     "torchlens/backends/torch/wrappers.py": 3400,
     "torchlens/backends/tinygrad/backend.py": 3300,
@@ -98,7 +109,7 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/capture/arg_positions.py": 2650,
     "torchlens/backends/jax/jaxpr.py": 2550,
     "torchlens/_capture_state_helpers.py": 2350,
-    "torchlens/bundle/__init__.py": 2450,
+    "torchlens/bundle/__init__.py": 2750,
     "torchlens/data_classes/layer.py": 2350,
     "torchlens/postprocess/loop_grouping_adapter.py": 2600,
     "torchlens/visualization/_render_leaf.py": 2400,
@@ -108,7 +119,7 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     # every feature lane's grouped options must land on, so reviewed
     # per-merge raises here are the ratchet working as intended (growth
     # noticed, reason stated), not silent god-file regrowth.
-    "torchlens/options.py": 2425,
+    "torchlens/options.py": 2550,
     "torchlens/intervention/save.py": 2350,
     "torchlens/_io/scrub.py": 2400,
     "torchlens/debug/_infer_input_shape.py": 2250,
@@ -118,7 +129,7 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/visualization/_render_nodes.py": 2150,
     "torchlens/_io/_safe_unpickle.py": 2100,
     "torchlens/visualization/_render_flow.py": 2100,
-    "torchlens/capture/trace.py": 2200,
+    "torchlens/capture/trace.py": 2250,
     "torchlens/backends/torch/completeness_witness.py": 2050,
 }
 
