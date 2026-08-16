@@ -904,13 +904,19 @@ def _substitute_conditional_branch_edges(
         dropped, substituted duplicates deduplicated in order.
     """
     filtered_edges: list[tuple[str, str]] = []
+    # Set-backed dedup (round-7 R52, wave-introduced 1e211f81): the list
+    # membership test made this O(E^2) PER REMOVED LAYER (probe-measured
+    # exponent ~2.3 on trace-level IF edges); the arm-edge filter above
+    # already uses the seen-set idiom.
+    filtered_seen: set[tuple[str, str]] = set()
     for parent, child in conditional_branch_edges:
         mapped_parent = _map_removed_label(parent, labels_to_remove, replacement_labels)
         mapped_child = _map_removed_label(child, labels_to_remove, replacement_labels)
         if mapped_parent is None or mapped_child is None:
             continue
         mapped_edge = (mapped_parent, mapped_child)
-        if mapped_edge not in filtered_edges:
+        if mapped_edge not in filtered_seen:
+            filtered_seen.add(mapped_edge)
             filtered_edges.append(mapped_edge)
     return filtered_edges
 
