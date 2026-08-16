@@ -136,6 +136,13 @@ def cleanup(self: "Trace") -> None:
         # trace) lives outside MODEL_LOG_FIELD_ORDER, so it survived the
         # husking above with no eviction path at all.
         "_receptive_field_solution",
+        # r8 R50 (sol): the save-budget accountant lives outside
+        # MODEL_LOG_FIELD_ORDER too (session-time FieldPolicy.DROP), so it
+        # survived cleanup with its per-device ledgers and weak payload
+        # watches -- dead weight on a husked trace the :42 contract says is
+        # effectively empty. (The sibling claim on
+        # ``_predicate_lookback_candidates`` was verified already-clean.)
+        "_save_budget_accountant",
     ]:
         if hasattr(self, attr):
             delattr(self, attr)

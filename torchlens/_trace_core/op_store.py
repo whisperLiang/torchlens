@@ -61,6 +61,76 @@ _NO_OVERLAY = object()
 #: delete semantics are identical either way; ``new_row`` refuses once sealed).
 _TRANSPOSE_MIN_ROWS = 512
 
+# Depth ceiling for the nested-container payload eviction walk (r8 R37).
+_EVICT_WALK_DEPTH_CEILING = 8
+
+
+def _evict_payloads_in_cell(
+    value: Any,
+    tensor_cls: type,
+    depth: int = 0,
+    seen: set[int] | None = None,
+) -> Any:
+    """Return ``value`` with every reachable tensor replaced by ``None``.
+
+    Bounded to builtin containers (list/tuple/dict/set/frozenset): a direct
+    tensor becomes ``None`` (the payload-absent spelling), mutable containers
+    evict in place, tuples/frozensets rebuild only when a member changed
+    (named tuples reconstruct through their own type, falling back to the
+    unchanged original -- keeping a pin -- rather than corrupting the
+    container type). Tensors inside non-builtin custom objects remain the
+    disclosed residual; cyclic containers terminate through the seen set.
+    """
+
+    if isinstance(value, tensor_cls):
+        return None
+    if depth >= _EVICT_WALK_DEPTH_CEILING:
+        return value
+    if isinstance(value, list):
+        if seen is None:
+            seen = set()
+        if id(value) in seen:
+            return value
+        seen.add(id(value))
+        for index, item in enumerate(value):
+            value[index] = _evict_payloads_in_cell(item, tensor_cls, depth + 1, seen)
+        return value
+    if isinstance(value, tuple):
+        rebuilt = [_evict_payloads_in_cell(item, tensor_cls, depth + 1, seen) for item in value]
+        if all(new is old for new, old in zip(rebuilt, value)):
+            return value
+        if type(value) is tuple:
+            return tuple(rebuilt)
+        try:
+            # Named tuples and tuple subclasses reconstruct through their own
+            # type; an unreconstructable subclass keeps the original (a
+            # retained pin beats a corrupted container).
+            return type(value)(*rebuilt)
+        except Exception:
+            try:
+                return type(value)(rebuilt)
+            except Exception:
+                return value
+    if isinstance(value, dict):
+        if seen is None:
+            seen = set()
+        if id(value) in seen:
+            return value
+        seen.add(id(value))
+        for key in list(value):
+            value[key] = _evict_payloads_in_cell(value[key], tensor_cls, depth + 1, seen)
+        return value
+    if isinstance(value, (set, frozenset)):
+        if not any(isinstance(item, tensor_cls) for item in value):
+            return value
+        survivors = {item for item in value if not isinstance(item, tensor_cls)}
+        survivors.add(None)
+        try:
+            return type(value)(survivors)
+        except Exception:
+            return value
+    return value
+
 
 class OpStoreLayout:
     """Immutable field-name-to-field-id layout shared by every op store.
@@ -247,7 +317,7 @@ class OpRowStore:
             self._evict_tensor_payloads()
 
     def _evict_tensor_payloads(self) -> None:
-        """Release top-level tensor-valued cells once no owning core is alive.
+        """Release tensor-valued cells once no owning core is alive.
 
         A retained ``Op`` is a two-word view over this shared store, so one
         live facade used to pin EVERY captured payload after its Trace died.
@@ -255,20 +325,23 @@ class OpRowStore:
         trace, so tensor cells (saved ``out`` payloads and friends) are
         replaced with ``None`` -- the existing "no payload retained"
         spelling -- while every metadata cell stays readable. Tensors nested
-        inside non-tensor containers are a disclosed residual (top-level
-        cells only). Keep the source Trace alive (or clone the tensor) to
-        keep payloads past the trace's lifetime.
+        inside builtin CONTAINER cells (``saved_args`` trees and friends)
+        are evicted through a bounded walk too (r8 R37, sol repro: a tensor
+        inside a saved-args tuple survived Trace death via any retained Op);
+        tensors inside non-builtin custom objects remain the disclosed
+        residual. Keep the source Trace alive (or clone the tensor) to keep
+        payloads past the trace's lifetime.
         """
 
         import torch
 
         tensor_cls = torch.Tensor
+        evict = _evict_payloads_in_cell
         rows = self._rows
         if rows is not None:
             for row_cells in rows:
                 for fid, value in enumerate(row_cells):
-                    if isinstance(value, tensor_cls):
-                        row_cells[fid] = None
+                    row_cells[fid] = evict(value, tensor_cls)
         columns = self._columns
         if columns is not None:
             for column in columns:
@@ -276,12 +349,10 @@ class OpRowStore:
                     continue
                 values = column.values
                 for index, value in enumerate(values):
-                    if isinstance(value, tensor_cls):
-                        values[index] = None
+                    values[index] = evict(value, tensor_cls)
         overlay = self._overlay
         for key, value in overlay.items():
-            if isinstance(value, tensor_cls):
-                overlay[key] = None
+            overlay[key] = evict(value, tensor_cls)
         # Surviving views (reachable only through retained fork Ops now that
         # every owning core is dead) read their own snapshot surfaces, so
         # they are swept too. Shared snapshot lists (fork chains) evict
@@ -294,12 +365,10 @@ class OpRowStore:
             if snapshot_rows is not None:
                 for row_cells in snapshot_rows:
                     for fid, value in enumerate(row_cells):
-                        if isinstance(value, tensor_cls):
-                            row_cells[fid] = None
+                        row_cells[fid] = evict(value, tensor_cls)
             for view_overlay in (view._base_overlay, view._overlay):
                 for key, value in view_overlay.items():
-                    if isinstance(value, tensor_cls):
-                        view_overlay[key] = None
+                    view_overlay[key] = evict(value, tensor_cls)
 
     def __len__(self) -> int:
         """Return the number of rows ever appended (removed rows included)."""
