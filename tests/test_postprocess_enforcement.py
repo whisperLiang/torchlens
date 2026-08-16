@@ -451,6 +451,57 @@ def test_audit_env_knob_refusals_are_typed(monkeypatch: pytest.MonkeyPatch) -> N
         monkeypatch.delenv(env_name)
 
 
+def test_read_audit_without_assertions_refuses_typed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """r7 R04-1: a requested read audit that cannot run refuses at capture.
+
+    ``TORCHLENS_POSTPROCESS_READ_AUDIT=enforce`` with
+    ``TORCHLENS_POSTPROCESS_ASSERTIONS`` unset was silently inert -- the read
+    audit acts only inside the assertion-armed windows, so a CI leg exporting
+    just the read knob got a green run while a live undeclared read (the
+    step-16 R04-2 finding) sailed through. The combination now refuses typed
+    at postprocess entry, matching the armed-under--O precedent (red-capable:
+    pre-fix this capture completes green).
+    """
+
+    import torch
+    from torch import nn
+
+    import torchlens as tl
+    from torchlens._errors import InvalidArgumentError
+
+    monkeypatch.delenv("TORCHLENS_POSTPROCESS_ASSERTIONS", raising=False)
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_READ_AUDIT", "enforce")
+    with pytest.raises(InvalidArgumentError) as exc_info:
+        tl.trace(nn.ReLU(), torch.ones(2))
+    assert exc_info.value.fields["code"] == "postprocess_audit_env_invalid"
+    assert exc_info.value.fields["argument"] == "TORCHLENS_POSTPROCESS_READ_AUDIT"
+
+
+def test_multi_output_module_axis_passes_full_enforcement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """r7 R04-2: the LSTM-cell / tuple-submodule shape enforces green.
+
+    Step 16 read two undeclared op-store columns (``multi_output_name``,
+    ``_source_trace_ref``) on every module call with more than one output
+    entry; the enforcement matrix never covered that family, so the audit's
+    own tripwire only fired for end users who armed it (red-capable: pre-fix
+    this trips 'Step 16 ... read undeclared op-store columns'). The reviewed
+    contract diff declares both reads (no ordering edges: both columns are
+    ingest-written, never step-written) and the axis pins the family.
+    """
+
+    from support.postprocess_axes import _axis_multi_output_module
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_READ_AUDIT", "enforce")
+    trace = _axis_multi_output_module()
+    assert trace is not None
+    trace.cleanup()
+
+
 def exc_code_line(stdout: str) -> str:
     """Return the refusal code printed by the -O provocation child."""
 

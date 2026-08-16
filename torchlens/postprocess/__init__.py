@@ -266,9 +266,10 @@ def _read_audit_mode() -> str:
     with no diagnostic, silently disarming the read audit. Unset/empty is the
     only implicit off; anything else must be a recognized mode.
 
-    The read audit only runs inside the assertion-armed audit windows, so this
-    knob has NO effect unless ``TORCHLENS_POSTPROCESS_ASSERTIONS`` is also set
-    (grind b7 R47-6).
+    The read audit only runs inside the assertion-armed audit windows;
+    requesting a mode without ``TORCHLENS_POSTPROCESS_ASSERTIONS`` armed
+    refuses at postprocess entry (``_require_read_audit_armable``, r7 R04-1)
+    instead of being silently inert (grind b7 R47-6).
     """
 
     raw = os.environ.get(_READ_AUDIT_ENV, "")
@@ -281,6 +282,32 @@ def _read_audit_mode() -> str:
             argument=_READ_AUDIT_ENV,
         )
     return mode
+
+
+def _require_read_audit_armable() -> None:
+    """Refuse a requested read audit that cannot actually run (r7 R04-1).
+
+    The read audit acts only inside the assertion-armed audit windows, so
+    ``TORCHLENS_POSTPROCESS_READ_AUDIT=enforce`` with
+    ``TORCHLENS_POSTPROCESS_ASSERTIONS`` unset was silently inert: a CI leg or
+    agent lane exporting only the read knob got a green run and reported
+    read-contract enforcement while a genuine undeclared read sailed through
+    (demonstrated live on the step-16 R04-2 finding). The sibling
+    ``_postprocess_assertions_enabled`` already HARD-ERRORS when armed under
+    ``python -O`` for exactly this vacuous-audit reason; requesting a read
+    audit without the windows it runs in is the same class and refuses the
+    same way.
+    """
+
+    if _read_audit_mode() and not _postprocess_assertions_enabled():
+        raise InvalidArgumentError(
+            f"{_READ_AUDIT_ENV} is set but {_POSTPROCESS_ASSERT_ENV} is not: the read "
+            "audit only acts inside the assertion-armed audit windows, so this "
+            "configuration checks nothing while reading as enforcement",
+            code="postprocess_audit_env_invalid",
+            remedy=(f"also set {_POSTPROCESS_ASSERT_ENV}=1, or unset {_READ_AUDIT_ENV}"),
+            argument=_READ_AUDIT_ENV,
+        )
 
 
 def _open_step_write_audit(self: "Trace") -> None:
@@ -646,6 +673,9 @@ def _postprocess_body(
         Hierarchical address strings for each output.
     """
 
+    # r7 R04-1: a requested-but-unarmable read audit refuses HERE, before any
+    # step window, so the knob can never be silently inert for a whole run.
+    _require_read_audit_armable()
     capture_events = getattr(self, "capture_events", None)
     capture_session = None
     # Resolve each output tensor's graph parent BEFORE materializing events:
