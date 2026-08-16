@@ -329,6 +329,10 @@ _RESULT_CACHE: weakref.WeakKeyDictionary[
         dict[tuple[RenderContext, str, OptimizerWeights], OptimizerResult],
     ],
 ] = weakref.WeakKeyDictionary()
+#: Traces whose over-ceiling decline already warned (r8 R60-13: declined
+#: results skip the result cache -- the revision snapshot that keyed it is
+#: itself the O(N) cost being avoided -- so warn-once rides its own set).
+_CEILING_WARNED_TRACES: weakref.WeakSet = weakref.WeakSet()
 _SCHEDULE_CACHE: weakref.WeakKeyDictionary[
     object,
     tuple[tuple[object, ...], dict[RenderContext, CollapseSchedule]],
@@ -371,19 +375,12 @@ def select_collapse_plan(
     """
 
     resolved_weights = OptimizerWeights() if weights is None else weights
-    # Weights are part of the cache identity: a weighted result must never be
-    # served for a differently weighted call (stale-cache defect class).
-    cache_key = (context, mode, resolved_weights)
-    revision = _collapse_graph_revision(trace)
-    cache_entry = _RESULT_CACHE.get(trace)
-    if cache_entry is None or cache_entry[0] != revision:
-        cached_by_context: dict[tuple[RenderContext, str, OptimizerWeights], OptimizerResult] = {}
-        _RESULT_CACHE[trace] = (revision, cached_by_context)
-    else:
-        cached_by_context = cache_entry[1]
-    cached = cached_by_context.get(cache_key)
-    if cached is not None:
-        return cached
+    # Ceiling check FIRST (r8 R60-13): ``_collapse_graph_revision`` is an
+    # uncached O(N) deep snapshot (per-op label/parents/children/module
+    # tuples), so computing it before the ceiling allocated ~100k nested
+    # tuples on a 100k-op trace only to decline ten lines later. Over-ceiling
+    # traces never reach the revision snapshot or the result cache; the
+    # decline warning dedupes per trace instead of per cached revision.
     op_count = len(trace.ops)
     if op_count > COLLAPSE_OPTIMIZER_MAX_OPS:
         # Preflight compute ceiling (b8 R60): the frontier selection is
@@ -398,20 +395,22 @@ def select_collapse_plan(
 
             source_graph = build_source_graph(trace, context)
         full_plan = collapse_plan_for_source_graph(source_graph, None, None)
-        warnings.warn(
-            f"TorchLens is skipping smart collapse: this trace has {op_count} "
-            f"ops, above the collapse optimizer's compute ceiling "
-            f"COLLAPSE_OPTIMIZER_MAX_OPS={COLLAPSE_OPTIMIZER_MAX_OPS} (its "
-            "selection cost grows superlinearly and would dominate the "
-            "render). The graph renders uncollapsed; reduce the rendered "
-            "graph first with module= focus, vis_call_depth, or rolled mode.",
-            TorchLensWarning,
-            # r7 R19 (opus b6 LOW): a fixed stacklevel resolved to TorchLens's
-            # own _trace_stats caller; blame the user's draw()/collapse_plan()
-            # line instead (the entry depth differs per public spelling).
-            stacklevel=user_stacklevel(),
-        )
-        result = OptimizerResult(
+        if trace not in _CEILING_WARNED_TRACES:
+            _CEILING_WARNED_TRACES.add(trace)
+            warnings.warn(
+                f"TorchLens is skipping smart collapse: this trace has {op_count} "
+                f"ops, above the collapse optimizer's compute ceiling "
+                f"COLLAPSE_OPTIMIZER_MAX_OPS={COLLAPSE_OPTIMIZER_MAX_OPS} (its "
+                "selection cost grows superlinearly and would dominate the "
+                "render). The graph renders uncollapsed; reduce the rendered "
+                "graph first with module= focus, vis_call_depth, or rolled mode.",
+                TorchLensWarning,
+                # r7 R19 (opus b6 LOW): a fixed stacklevel resolved to TorchLens's
+                # own _trace_stats caller; blame the user's draw()/collapse_plan()
+                # line instead (the entry depth differs per public spelling).
+                stacklevel=user_stacklevel(),
+            )
+        return OptimizerResult(
             selected=frozenset(),
             repeat_folds={},
             plan=full_plan,
@@ -425,8 +424,19 @@ def select_collapse_plan(
                 f"COLLAPSE_OPTIMIZER_MAX_OPS={COLLAPSE_OPTIMIZER_MAX_OPS}"
             ),
         )
-        cached_by_context[cache_key] = result
-        return result
+    # Weights are part of the cache identity: a weighted result must never be
+    # served for a differently weighted call (stale-cache defect class).
+    cache_key = (context, mode, resolved_weights)
+    revision = _collapse_graph_revision(trace)
+    cache_entry = _RESULT_CACHE.get(trace)
+    if cache_entry is None or cache_entry[0] != revision:
+        cached_by_context: dict[tuple[RenderContext, str, OptimizerWeights], OptimizerResult] = {}
+        _RESULT_CACHE[trace] = (revision, cached_by_context)
+    else:
+        cached_by_context = cache_entry[1]
+    cached = cached_by_context.get(cache_key)
+    if cached is not None:
+        return cached
     if mode == "max":
         result = _select_max_plan(trace, context, weights, source_graph)
         cached_by_context[cache_key] = result
@@ -657,6 +667,28 @@ def collapse_schedule(
     """
 
     _ = weights
+    if len(trace.ops) > COLLAPSE_OPTIMIZER_MAX_OPS:
+        # Ceiling check FIRST (r8 R60-13): the revision snapshot below is an
+        # uncached O(N) deep walk, pointless when the optimizer will decline.
+        # The degraded single full-graph step is built directly (the decline
+        # inside select_collapse_plan warns once per trace).
+        from .source_graph import build_source_graph
+
+        over_source_graph = build_source_graph(trace, context)
+        over_full_plan = collapse_plan_for_source_graph(over_source_graph, None, None)
+        over_full_count = count(over_full_plan)
+        select_collapse_plan(trace, context, mode="max", source_graph=over_source_graph)
+        return CollapseSchedule(
+            (
+                CollapseScheduleStep(
+                    t=0.0,
+                    target_count=over_full_count,
+                    visible_count=over_full_count,
+                    collapsed_addresses=frozenset(),
+                    plan=over_full_plan,
+                ),
+            )
+        )
     revision = _collapse_graph_revision(trace)
     cache_entry = _SCHEDULE_CACHE.get(trace)
     if cache_entry is None or cache_entry[0] != revision:

@@ -136,6 +136,13 @@ def cleanup(self: "Trace") -> None:
         # trace) lives outside MODEL_LOG_FIELD_ORDER, so it survived the
         # husking above with no eviction path at all.
         "_receptive_field_solution",
+        # r8 R50 (sol): the save-budget accountant lives outside
+        # MODEL_LOG_FIELD_ORDER too (session-time FieldPolicy.DROP), so it
+        # survived cleanup with its per-device ledgers and weak payload
+        # watches -- dead weight on a husked trace the :42 contract says is
+        # effectively empty. (The sibling claim on
+        # ``_predicate_lookback_candidates`` was verified already-clean.)
+        "_save_budget_accountant",
     ]:
         if hasattr(self, attr):
             delattr(self, attr)
@@ -904,13 +911,18 @@ def _substitute_conditional_branch_edges(
         dropped, substituted duplicates deduplicated in order.
     """
     filtered_edges: list[tuple[str, str]] = []
+    # Set shadow for the dedup (r8 R60/cleanup): list membership made this
+    # O(E^2) on edge-heavy conditional graphs; same idiom as the arm-entry
+    # sibling above.
+    filtered_seen: set[tuple[str, str]] = set()
     for parent, child in conditional_branch_edges:
         mapped_parent = _map_removed_label(parent, labels_to_remove, replacement_labels)
         mapped_child = _map_removed_label(child, labels_to_remove, replacement_labels)
         if mapped_parent is None or mapped_child is None:
             continue
         mapped_edge = (mapped_parent, mapped_child)
-        if mapped_edge not in filtered_edges:
+        if mapped_edge not in filtered_seen:
+            filtered_seen.add(mapped_edge)
             filtered_edges.append(mapped_edge)
     return filtered_edges
 

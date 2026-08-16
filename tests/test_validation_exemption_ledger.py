@@ -58,6 +58,32 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _EXEMPTIONS_SRC = _REPO_ROOT / "torchlens" / "validation" / "exemptions.py"
 _CORE_SRC = _REPO_ROOT / "torchlens" / "validation" / "core.py"
 
+
+def _exemption_emitting_sources() -> list[Path]:
+    """Every torchlens source file that can emit an exemption decision.
+
+    r8 R08-1 (opus): the closure derivation used to parse EXACTLY the two
+    files above, so an exemption emitted from any THIRD module passed both
+    closure directions vacuously (never derived, never ledgered -- the whole
+    tripwire for the LOCKED principle going silent per-exemption). The file
+    set is now DISCOVERED by scanning the package for the emission patterns
+    the two scanners recognize; a god-file split of ``core.py`` or a brand
+    new emitting module enters the closure automatically.
+    """
+
+    emission_markers = (
+        "PosthocPerturbDecision(",
+        ".exempted(",
+        'decision="exempted"',
+    )
+    sources: list[Path] = []
+    for path in sorted((_REPO_ROOT / "torchlens").rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if any(marker in text for marker in emission_markers):
+            sources.append(path)
+    return sources
+
+
 _CONTRACTS = frozenset(
     {
         "C1 replay determinism",
@@ -531,9 +557,11 @@ def ledger_gaps(derived: set[str], ledgered: set[str]) -> tuple[set[str], set[st
 
 
 def test_posthoc_exemption_vocabulary_is_fully_ledgered() -> None:
-    """Every posthoc exemption reason has an audit record."""
+    """Every posthoc exemption reason has an audit record (package-wide)."""
 
-    derived = posthoc_exempting_reasons(_EXEMPTIONS_SRC.read_text(encoding="utf-8"))
+    derived: set[str] = set()
+    for source in _exemption_emitting_sources():
+        derived |= posthoc_exempting_reasons(source.read_text(encoding="utf-8"))
     ledgered = {entry.code for entry in EXEMPTION_LEDGER if entry.tier == "posthoc"}
     unledgered, phantom = ledger_gaps(derived, ledgered)
     assert not unledgered, (
@@ -544,9 +572,15 @@ def test_posthoc_exemption_vocabulary_is_fully_ledgered() -> None:
 
 
 def test_core_exemption_vocabulary_is_fully_ledgered() -> None:
-    """Every exemption ``validation/core.py`` can settle has an audit record."""
+    """Every settleable core exemption has an audit record (package-wide)."""
 
-    derived = core_exempting_reasons(_CORE_SRC.read_text(encoding="utf-8"))
+    derived: set[str] = set()
+    for source in _exemption_emitting_sources():
+        if source == _EXEMPTIONS_SRC:
+            # The posthoc constructor file: its ``exempt=True`` reasons are
+            # the POSTHOC vocabulary above, not core settlement codes.
+            continue
+        derived |= core_exempting_reasons(source.read_text(encoding="utf-8"))
     ledgered = {
         entry.code for entry in EXEMPTION_LEDGER if entry.tier in ("early_exit", "recorder")
     }

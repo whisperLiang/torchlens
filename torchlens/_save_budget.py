@@ -564,7 +564,17 @@ class SaveBudget:
         ledger = self._ledger_for(device)
         ledger.committed_bytes += int(num_bytes)
         ledger.num_saved += 1
-        self._raise_if_over_budget(label, device, ledger, phase=_SITE_PHASES[site][0])
+        try:
+            self._raise_if_over_budget(label, device, ledger, phase=_SITE_PHASES[site][0])
+        except BaseException:
+            # Refusal rollback (r8 R34, opus A): the refused reservation used
+            # to stay CHARGED -- never-allocated bytes inflated every later
+            # figure (a second refusal reported phantom activations) and,
+            # under return_partial/attach_partial recovery, a fresh save that
+            # genuinely fit was refused against ghost bytes.
+            ledger.committed_bytes -= int(num_bytes)
+            ledger.num_saved -= 1
+            raise
         return _BudgetReservation(label=label, device=device, num_bytes=int(num_bytes), site=site)
 
     def commit(
@@ -649,21 +659,32 @@ class SaveBudget:
         for payload in payloads:
             if not isinstance(payload, torch.Tensor):
                 continue
-            identity, physical_bytes = _retained_storage_identity(payload)
             ledger_key = str(payload.device)
             ledger = self._ledger_for(payload.device)
-            entry = ledger.retained_storage.get(identity)
-            if entry is not None:
-                entry.live_refs += 1
+            # Component-granular identities (r8 R34, sol 1): the historical
+            # ONE aggregate identity per sparse wrapper made two retained
+            # sparse tensors sharing index storage charge the shared indices
+            # TWICE ((indices+values_a) + (indices+values_b) instead of the
+            # physical union) -- a false refusal at an exact union-byte
+            # boundary. Each physical component storage now dedups on its
+            # own identity; ``num_saved`` still counts payloads, not
+            # components.
+            payload_counted = False
+            for identity, physical_bytes in _retained_storage_identities(payload):
+                entry = ledger.retained_storage.get(identity)
+                if entry is not None:
+                    entry.live_refs += 1
+                    self._watch_payload(payload, ledger_key, identity)
+                    continue
+                ledger.retained_storage[identity] = _RetainedStorageEntry(
+                    physical_bytes=physical_bytes, live_refs=1
+                )
                 self._watch_payload(payload, ledger_key, identity)
-                continue
-            ledger.retained_storage[identity] = _RetainedStorageEntry(
-                physical_bytes=physical_bytes, live_refs=1
-            )
-            self._watch_payload(payload, ledger_key, identity)
-            ledger.committed_bytes += physical_bytes
-            ledger.num_saved += 1
-            self._raise_if_over_budget(label, payload.device, ledger, phase=phase)
+                ledger.committed_bytes += physical_bytes
+                if not payload_counted:
+                    ledger.num_saved += 1
+                    payload_counted = True
+                self._raise_if_over_budget(label, payload.device, ledger, phase=phase)
 
     def _watch_payload(
         self,
@@ -829,8 +850,8 @@ class SaveBudget:
         )
 
 
-def _retained_storage_identity(tensor: torch.Tensor) -> tuple[tuple[Any, ...], int]:
-    """Return a device-scoped physical storage identity and byte size.
+def _retained_storage_identities(tensor: torch.Tensor) -> list[tuple[tuple[Any, ...], int]]:
+    """Return one device-scoped physical identity + byte size per storage.
 
     Parameters
     ----------
@@ -839,17 +860,16 @@ def _retained_storage_identity(tensor: torch.Tensor) -> tuple[tuple[Any, ...], i
 
     Returns
     -------
-    tuple[tuple[Any, ...], int]
-        Stable identity while the retained storage is live, plus physical bytes.
-
-    Notes
-    -----
-    Sparse payloads (COO and compressed layouts) have no top-level storage;
-    they are identified and charged through their physical component storages
-    (index tensor(s) AND values). The historical fallback billed them at
-    ``numel() * element_size()`` — LOGICAL dense bytes — under an id-based
-    identity, so index storage went unledgered while the values were
-    overcounted at dense shape.
+    list[tuple[tuple[Any, ...], int]]
+        One ``(identity, physical_bytes)`` entry per physical storage the
+        payload holds. Strided tensors have exactly one; sparse payloads
+        (COO and compressed layouts) have no top-level storage and yield one
+        entry PER COMPONENT (index tensor(s) AND values), so partially
+        overlapping sparse tensors dedup on the shared component instead of
+        double-charging it under one aggregate identity (r8 R34, sol 1).
+        The historical fallback billed unreadable payloads at
+        ``numel() * element_size()`` — LOGICAL dense bytes — under an
+        id-based identity.
     """
 
     from ._state import pause_logging
@@ -859,19 +879,18 @@ def _retained_storage_identity(tensor: torch.Tensor) -> tuple[tuple[Any, ...], i
             if tensor.layout is not torch.strided:
                 from .utils.tensor_utils import sparse_component_tensors
 
-                component_ptrs: list[int] = []
-                num_bytes = 0
-                for component in sparse_component_tensors(tensor):
-                    storage = component.untyped_storage()
-                    component_ptrs.append(int(storage.data_ptr()))
-                    num_bytes += int(storage.nbytes())
-                sparse_identity: tuple[Any, ...] = (
-                    str(tensor.device),
-                    str(tensor.layout),
-                    tuple(component_ptrs),
-                    num_bytes,
-                )
-                return sparse_identity, num_bytes
+                device = str(tensor.device)
+                return [
+                    (
+                        (
+                            device,
+                            int(component.untyped_storage().data_ptr()),
+                            int(component.untyped_storage().nbytes()),
+                        ),
+                        int(component.untyped_storage().nbytes()),
+                    )
+                    for component in sparse_component_tensors(tensor)
+                ]
             storage = tensor.untyped_storage()
             num_bytes = int(storage.nbytes())
             identity: tuple[Any, ...] = (
@@ -879,7 +898,28 @@ def _retained_storage_identity(tensor: torch.Tensor) -> tuple[tuple[Any, ...], i
                 int(storage.data_ptr()),
                 num_bytes,
             )
-            return identity, num_bytes
+            return [(identity, num_bytes)]
         except Exception:
             num_bytes = int(tensor.numel() * tensor.element_size())
-            return (str(tensor.device), "tensor", id(tensor), num_bytes), num_bytes
+            return [((str(tensor.device), "tensor", id(tensor), num_bytes), num_bytes)]
+
+
+def _retained_storage_identity(tensor: torch.Tensor) -> tuple[tuple[Any, ...], int]:
+    """Return one aggregate identity + total bytes (diagnostic compat shim).
+
+    The charging path uses :func:`_retained_storage_identities`
+    (component-granular); this aggregate view sums the components and keeps
+    the historical single-identity shape for introspection/tests.
+    """
+
+    entries = _retained_storage_identities(tensor)
+    if len(entries) == 1:
+        return entries[0]
+    total_bytes = sum(num_bytes for _, num_bytes in entries)
+    aggregate: tuple[Any, ...] = (
+        str(tensor.device),
+        str(tensor.layout),
+        tuple(identity for identity, _ in entries),
+        total_bytes,
+    )
+    return aggregate, total_bytes

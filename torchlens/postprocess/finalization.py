@@ -1429,21 +1429,28 @@ def _build_conditional_records(self: "Trace") -> None:
             arm._bind(self, conditional.id, arm_index)
         conditionals.append(conditional)
 
-    for layer in self.layer_list:
-        roles = []
-        for conditional in conditionals:
-            for arm_index, arm in enumerate(conditional.arms):
-                if layer.layer_label in role_labels_by_cond_arm.get(
-                    (conditional.id, arm_index, "evaluation"), []
-                ):
-                    roles.append(
-                        ConditionalRoleRef(conditional.id, arm_index, arm.kind, "evaluation")
+    # Inverted role index (r8 R60-7): the per-layer triple loop with an
+    # innermost list-membership check was O(N_layers x Sum|role lists|)
+    # whenever a conditional's entry-edge children were numerous (an ``if``
+    # in a hot unrolled loop). One pass over the role buckets builds the
+    # same per-layer role lists in the same (conditional, arm,
+    # evaluation-then-body) order; per-bucket label dedup mirrors the old
+    # one-role-per-membership semantics.
+    roles_by_label: dict[str, list[ConditionalRoleRef]] = {}
+    for conditional in conditionals:
+        for arm_index, arm in enumerate(conditional.arms):
+            for role in ("evaluation", "body"):
+                bucket = role_labels_by_cond_arm.get((conditional.id, arm_index, role), [])
+                bucket_seen: set[str] = set()
+                for label in bucket:
+                    if label in bucket_seen:
+                        continue
+                    bucket_seen.add(label)
+                    roles_by_label.setdefault(label, []).append(
+                        ConditionalRoleRef(conditional.id, arm_index, arm.kind, role)
                     )
-                if layer.layer_label in role_labels_by_cond_arm.get(
-                    (conditional.id, arm_index, "body"), []
-                ):
-                    roles.append(ConditionalRoleRef(conditional.id, arm_index, arm.kind, "body"))
-        layer.in_conditionals = roles
+    for layer in self.layer_list:
+        layer.in_conditionals = roles_by_label.get(layer.layer_label, [])
         if (
             layer.terminal_conditional_id is not None
             and layer.terminal_conditional_id in event_by_id
@@ -1781,16 +1788,25 @@ def _reuse_streamed_blob_ids(
 
     skipped_blob_ids: set[str] = set()
     for live_layer, scrubbed_layer in zip(trace.layer_list, scrubbed_layers, strict=True):
+        # One lazy full-schema snapshot per layer (r8 R29): the old loop
+        # rebuilt the ~200-300-field portable state dict on EVERY field
+        # iteration and BEFORE the pending short-circuit, so every layer of
+        # every streamed save paid 4 full dict builds to read one key. Each
+        # field key is read once and the four keys are distinct, so the
+        # snapshot cannot go stale across this layer's own setattrs.
+        scrubbed_items: dict[str, Any] | None = None
         for tensor_field, pending_field in (
             ("out", "_pending_blob_id"),
             ("transformed_out", "_pending_transformed_out_blob_id"),
             ("grad", "_pending_grad_blob_id"),
             ("transformed_grad", "_pending_transformed_grad_blob_id"),
         ):
-            tensor_blob = dict(state_items(scrubbed_layer)).get(tensor_field)
             pending_blob_id = getattr(live_layer, pending_field, None)
             if pending_blob_id is None:
                 continue
+            if scrubbed_items is None:
+                scrubbed_items = dict(state_items(scrubbed_layer))
+            tensor_blob = scrubbed_items.get(tensor_field)
             if not isinstance(tensor_blob, BlobRef):
                 setattr(
                     scrubbed_layer,

@@ -42,19 +42,77 @@ if _HAS_PROCESS_GROUPS:
         _PRCTL = None
 
 _PR_SET_PDEATHSIG = 1
+# Pre-resolved as plain ints (r8 R40, opus b6): the hook runs between fork
+# and exec, where object allocation (a ``contextlib.suppress`` instance, an
+# enum ``int()`` coercion) can touch interpreter state that is not
+# fork-safe under an allocator lock held by another thread at fork time.
+_PDEATHSIG_KILL = 9
 
 
 def _arm_parent_death_signal() -> None:
     """preexec hook: SIGKILL this child when its parent process dies.
 
-    Runs post-fork pre-exec; only CALLS the pre-resolved libc function (no
-    imports, no allocation-heavy work). Best-effort: a failure leaves the
-    historical behavior (child survives parent death until box reboot).
+    Runs post-fork pre-exec; only CALLS the pre-resolved libc function with
+    pre-resolved int arguments (no imports, no allocation). Best-effort: a
+    failure leaves the historical behavior (child survives parent death
+    until box reboot).
     """
 
     if _PRCTL is not None:
-        with contextlib.suppress(Exception):
-            _PRCTL(_PR_SET_PDEATHSIG, int(signal.SIGKILL), 0, 0, 0)
+        try:
+            _PRCTL(_PR_SET_PDEATHSIG, _PDEATHSIG_KILL, 0, 0, 0)
+        except Exception:
+            pass
+
+
+# Group-reaper watchdog (r8 R40 arm 2, sol probe): PDEATHSIG protects only
+# the DIRECT child -- a plain non-detached grandchild (``sh -c 'sleep &'``,
+# a forking dot plugin) survived a hard parent SIGKILL because the group
+# teardown runs in the (now dead) parent and the leader's own PDEATHSIG
+# death orphans the rest of its group. The reaper is a tiny detached
+# ``/bin/sh`` in its OWN session that polls the parent pid; when the parent
+# vanishes it SIGKILLs the child's whole process group and exits. It also
+# exits on its own as soon as the target group is empty, and the parent
+# reaps it explicitly on every normal/exception path.
+# NOTE: no ``--`` separator before the negative pgid -- dash's builtin
+# ``kill`` rejects it ("Illegal number: -") while accepting the bare
+# ``kill -KILL -PGID`` spelling, which bash and busybox accept too.
+_REAPER_SCRIPT = (
+    "while kill -0 {parent_pid} 2>/dev/null; do "
+    "kill -0 -{pgid} 2>/dev/null || exit 0; "
+    "sleep 1; "
+    "done; "
+    "kill -KILL -{pgid} 2>/dev/null"
+)
+
+
+def _spawn_group_reaper(pgid: int) -> subprocess.Popen[Any] | None:
+    """Start the parent-death group reaper for one spawned child group."""
+
+    if not _HAS_PROCESS_GROUPS or not os.path.exists("/bin/sh"):
+        return None
+    try:
+        return subprocess.Popen(
+            ["/bin/sh", "-c", _REAPER_SCRIPT.format(parent_pid=os.getpid(), pgid=pgid)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        # Best-effort belt: spawning the watchdog must never fail a render.
+        return None
+
+
+def _reap_group_reaper(reaper: subprocess.Popen[Any] | None) -> None:
+    """Stop and reap the watchdog once the parent has finished teardown."""
+
+    if reaper is None:
+        return
+    with contextlib.suppress(Exception):
+        reaper.kill()
+    with contextlib.suppress(Exception):
+        reaper.wait(timeout=_KILL_GRACE_SECONDS)
 
 
 def _terminate_process_group(proc: subprocess.Popen[Any]) -> None:
@@ -121,6 +179,9 @@ def run_bounded_subprocess(
         start_new_session=_HAS_PROCESS_GROUPS,
         preexec_fn=_arm_parent_death_signal if _PRCTL is not None else None,
     )
+    # ``start_new_session`` makes the child its own group leader, so its pid
+    # IS the group id the reaper watches.
+    reaper = _spawn_group_reaper(proc.pid) if _HAS_PROCESS_GROUPS else None
     try:
         stdout, stderr = proc.communicate(input=input, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -133,6 +194,8 @@ def run_bounded_subprocess(
     except BaseException:
         _terminate_process_group(proc)
         raise
+    finally:
+        _reap_group_reaper(reaper)
     if check and proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd, output=stdout, stderr=stderr)
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)

@@ -62,7 +62,11 @@ OP_TUPLE_VIEW_FIELDS: tuple[str, ...] = (
     "_edge_uses",
 )
 
-#: Op label-set relation fields stored as interned frozenset views at freeze.
+#: Op label-set relation fields normalized to interned frozenset views at
+#: freeze. Since r8 R60-2 these are ALSO bitset-compacted right before the
+#: seal (see ``OP_BITSET_VIEW_FIELDS``); this conversion is the belt for any
+#: cell still holding a raw staging set at freeze time (bitset cells are
+#: skipped by the exact-type check).
 OP_FROZENSET_VIEW_FIELDS: tuple[str, ...] = (
     "input_ancestors",
     "output_descendants",
@@ -73,10 +77,14 @@ OP_DATAFLOW_FIELDS: tuple[str, ...] = ("parents", "children")
 
 #: The bitset-backed ancestor closures (frozen materialization lives with the
 #: bitset machinery in ``backends/torch/ops.py``; listed here so the view
-#: universe is declared in one place).
+#: universe is declared in one place). r8 R60-2 widened the pair to all four
+#: label-set closures: per-op frozensets kept ``input_ancestors``/
+#: ``output_descendants`` as the dominant O(N*L) retained-memory term.
 OP_BITSET_VIEW_FIELDS: tuple[str, ...] = (
     "root_ancestors",
     "internal_source_ancestors",
+    "input_ancestors",
+    "output_descendants",
 )
 
 #: Edge family name in ``TraceCore.edges`` for forward dataflow.

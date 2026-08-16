@@ -418,6 +418,13 @@ def _materialize_conditional_records(
         if parent_conditional_key is not None and parent_conditional_key in events_by_key:
             event.parent_conditional_id = events_by_key[parent_conditional_key].id
 
+    # Position/membership shadows (r8 R60-6): the list `not in` / `.index()`
+    # trio made this loop O(k^2) per conditional over its terminal bool ops
+    # (a bool inside a hot unrolled loop shares one structural key). The
+    # shadows keep `bool_layers`/`_arm_bool_indices` byte-identical --
+    # first-occurrence index, insertion order preserved.
+    bool_positions_by_event: dict[int, dict[str, int]] = {}
+    arm_seen_by_event: dict[int, dict[str, set[int]]] = {}
     for bool_label, classifications in bool_classifications.items():
         bool_layer = self[bool_label]
         bool_layer.terminal_conditional_id = None
@@ -430,14 +437,27 @@ def _materialize_conditional_records(
             event = events_by_key[bool_conditional_key]
             if bool_layer.terminal_conditional_id is None:
                 bool_layer.terminal_conditional_id = event.id
-            if bool_label not in event.bool_layers:
+            positions = bool_positions_by_event.get(event.id)
+            if positions is None:
+                positions = {}
+                for index, label in enumerate(event.bool_layers):
+                    positions.setdefault(label, index)
+                bool_positions_by_event[event.id] = positions
+            bool_index = positions.get(bool_label)
+            if bool_index is None:
+                bool_index = len(event.bool_layers)
+                positions[bool_label] = bool_index
                 event.bool_layers.append(bool_label)
                 getattr(event, "_bool_layers_raw").append(bool_label)
-            bool_index = event.bool_layers.index(bool_label)
             arm_kind = classification.branch_test_kind or "then"
             arm_bool_indices: dict[str, list[int]] = getattr(event, "_arm_bool_indices")
             arm_indices = arm_bool_indices.setdefault(arm_kind, [])
-            if bool_index not in arm_indices:
+            arm_seen = arm_seen_by_event.setdefault(event.id, {}).get(arm_kind)
+            if arm_seen is None:
+                arm_seen = set(arm_indices)
+                arm_seen_by_event[event.id][arm_kind] = arm_seen
+            if bool_index not in arm_seen:
+                arm_seen.add(bool_index)
                 arm_indices.append(bool_index)
 
     for bool_label in _iter_terminal_scalar_bool_labels(self):

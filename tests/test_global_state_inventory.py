@@ -385,9 +385,6 @@ _WEAK_SUBJECT_TABLES = frozenset(
         ("torchlens/backends/torch/completeness_witness.py", "_RUNNABLE_INPUT_STORAGE_SITES"),
         ("torchlens/backends/torch/completeness_witness.py", "_STATE_METADATA_FACTS"),
         ("torchlens/backends/torch/completeness_witness.py", "_STORAGE_REBIND_BARRIER_LABELS"),
-        # Per-module-namespace container-slot memo (8ba75e99), keyed weakly by
-        # the module object with a len(namespace)-based staleness check.
-        ("torchlens/backends/torch/model_prep.py", "_module_namespace_container_slots"),
         ("torchlens/backends/torch/model_prep.py", "_source_line_cache"),
         # Implicit-backward task ordinals keyed weakly by their owning trace;
         # entries die with the trace.
@@ -406,6 +403,10 @@ _WEAK_SUBJECT_TABLES = frozenset(
         ("torchlens/visualization/auto_collapse.py", "_OP_ADJACENCY_INDEX_CACHE"),
         ("torchlens/visualization/code_panel.py", "_SOURCE_MEMO"),
         ("torchlens/visualization/collapse_optimizer.py", "_BOX_UNITS_CACHE"),
+        # Warn-once set for over-ceiling collapse declines (r8 R60-13):
+        # declined results no longer enter the revision-keyed result cache,
+        # so the one-warning-per-trace dedup rides its own weak set.
+        ("torchlens/visualization/collapse_optimizer.py", "_CEILING_WARNED_TRACES"),
         ("torchlens/visualization/collapse_optimizer.py", "_RESULT_CACHE"),
         ("torchlens/visualization/collapse_optimizer.py", "_SCHEDULE_CACHE"),
     }
@@ -1091,7 +1092,6 @@ _WEAKLY_HELD = frozenset(
         ("torchlens/backends/torch/completeness_witness.py", "_RUNNABLE_LEDGER_FACTS"),
         ("torchlens/backends/torch/completeness_witness.py", "_STATE_METADATA_FACTS"),
         ("torchlens/backends/torch/completeness_witness.py", "_STORAGE_REBIND_BARRIER_LABELS"),
-        ("torchlens/backends/torch/model_prep.py", "_module_namespace_container_slots"),
         ("torchlens/backends/torch/model_prep.py", "_source_line_cache"),
         ("torchlens/backends/torch/tensor_tracking.py", "_IMPLICIT_BACKWARD_TASK_IDS"),
         ("torchlens/backends/torch/wrappers.py", "_COW_STATE_PTRS_CACHE"),
@@ -1104,6 +1104,7 @@ _WEAKLY_HELD = frozenset(
         ("torchlens/visualization/auto_collapse.py", "_OP_ADJACENCY_INDEX_CACHE"),
         ("torchlens/visualization/code_panel.py", "_SOURCE_MEMO"),
         ("torchlens/visualization/collapse_optimizer.py", "_BOX_UNITS_CACHE"),
+        ("torchlens/visualization/collapse_optimizer.py", "_CEILING_WARNED_TRACES"),
         ("torchlens/visualization/collapse_optimizer.py", "_RESULT_CACHE"),
         ("torchlens/visualization/collapse_optimizer.py", "_SCHEDULE_CACHE"),
     }

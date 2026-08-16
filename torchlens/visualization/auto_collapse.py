@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from .._errors import InvalidArgumentError
 from .._literals import CollapseLiteral, FoldRepeatsLiteral, VisModeLiteral
+from ..errors._base import TorchLensWarning
 
 # Condensed-flow-graph construction: split to _condensed_flow.py under the R43
 # file-size ratchet. The dataclasses and helpers re-export here (historical
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
     from ..data_classes.module import Module
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace
+    from .collapse_optimizer import OptimizerResult
 
 
 GENERIC_CONTAINER_CLASSES = frozenset({"Sequential", "ModuleList", "ModuleDict", "ParameterList"})
@@ -413,8 +415,18 @@ def collapse_order(
             remedy="pass mode='auto' or 'max'",
             argument="mode",
         )
+    from .collapse_optimizer import select_collapse_plan
+
+    result = select_collapse_plan(trace, RenderContext(), mode=mode)
+    if result.declined:
+        # Over-ceiling decline (r8 R60-8): the old order ran the full
+        # O(N*D) ``analyze_collapse`` only to zero every score afterwards.
+        # An empty table is the honest degraded surface -- every consumer
+        # reads through ``.get(address, 0.0)``, so the observable scores
+        # are identical without the wasted analysis.
+        return []
     analysis = analyze_collapse(trace)
-    scores = _v2_selected_module_scores(trace, analysis, mode=mode)
+    scores = _v2_selected_module_scores(trace, analysis, mode=mode, result=result)
     return sorted(scores.items(), key=lambda item: (-item[1], item[0]))
 
 
@@ -435,12 +447,14 @@ def _v2_selected_module_scores(
     analysis: CollapseAnalysis,
     *,
     mode: Literal["auto", "max"],
+    result: OptimizerResult | None = None,
 ) -> dict[str, float]:
     """Return same-shape scores derived from the v2 selected module set."""
 
     from .collapse_optimizer import select_collapse_plan
 
-    result = select_collapse_plan(trace, RenderContext(), mode=mode)
+    if result is None:
+        result = select_collapse_plan(trace, RenderContext(), mode=mode)
     selected = result.selected if not result.declined else frozenset()
     hidden_max = max(
         (
@@ -580,6 +594,25 @@ def resolve_repeat_folds(
         return {}
     if collapse_fn is None and fold_repeats is not True:
         return {}
+    from .collapse_optimizer import COLLAPSE_OPTIMIZER_MAX_OPS
+
+    if len(trace.ops) > COLLAPSE_OPTIMIZER_MAX_OPS:
+        # Compute-ceiling parity (r8 R60-9): ``draw(fold_repeats=True)`` with
+        # ``collapse="none"`` entered run folding directly -- full
+        # ``analyze_collapse`` plus uncached per-candidate structural digests
+        # and three extra plan builds -- without ever consulting the one
+        # op-count ceiling the collapse engine has. Decline DISCLOSED, same
+        # policy as the optimizer: the graph renders without run folds.
+        warnings.warn(
+            f"TorchLens is skipping repeat-run folding: this trace has "
+            f"{len(trace.ops)} ops, above the collapse engine's compute "
+            f"ceiling COLLAPSE_OPTIMIZER_MAX_OPS={COLLAPSE_OPTIMIZER_MAX_OPS}. "
+            "The graph renders without folds; reduce the rendered graph "
+            "first with module= focus, vis_call_depth, or rolled mode.",
+            TorchLensWarning,
+            stacklevel=2,
+        )
+        return {}
     eligibility_collapse_fn = collapse_fn if collapse_fn is not None else _always_collapse_module
     render_collapse_fn = collapse_fn
     v2_repeat_folds = getattr(collapse_fn, "_torchlens_v2_repeat_folds", None)
@@ -605,6 +638,11 @@ def resolve_repeat_folds(
     analysis = analyze_collapse(trace)
     candidate_folds: list[ModuleRepeatFold] = []
     candidate_addresses: set[str] = set()
+    # One selected-module index per discovery sweep (r8 R29): the per-group
+    # rebuild inside the iterators evaluated collapse_fn over every module
+    # once per sibling group -- Theta(M^2) predicate calls on module-heavy
+    # models.
+    sweep_selected_index = _selected_address_index(trace, eligibility_collapse_fn)
     for parent_address, child_addresses in _sibling_address_groups(trace).items():
         graph = _flow_graph_for_sibling_group(
             trace,
@@ -625,6 +663,7 @@ def resolve_repeat_folds(
             trace,
             flow_addresses,
             eligibility_collapse_fn,
+            selected_index=sweep_selected_index,
         ):
             if any(address in candidate_addresses for address in run):
                 continue
@@ -647,6 +686,7 @@ def resolve_repeat_folds(
             flow_addresses,
             eligibility_collapse_fn,
             allow_selected_descendant=True,
+            selected_index=sweep_selected_index,
         ):
             if any(address in candidate_addresses for address in run):
                 continue
@@ -1256,6 +1296,7 @@ def _iter_collapsible_runs(
     collapse_fn: Callable[[Module], bool],
     run_stem: str | None = None,
     allow_selected_descendant: bool = False,
+    selected_index: tuple[str, ...] | None = None,
 ) -> Iterator[tuple[str, ...]]:
     """Yield flow-consecutive same-class runs with equal adjacent output shapes.
 
@@ -1291,10 +1332,14 @@ def _iter_collapsible_runs(
 
     # One shared sorted index instead of a full trace.modules scan per child:
     # the per-child rescans made descendant-aware discovery Theta(S*M) in
-    # sibling count x module count (hunt-6 R29-3).
-    selected_index: tuple[str, ...] | None = (
-        _selected_address_index(trace, collapse_fn) if allow_selected_descendant else None
-    )
+    # sibling count x module count (hunt-6 R29-3). r8 R29: callers walking
+    # MANY sibling groups pass the index in, so it builds once per discovery
+    # sweep instead of once per group (the cross-group rebuild was Theta(M^2)
+    # in module count).
+    if selected_index is None and allow_selected_descendant:
+        selected_index = _selected_address_index(trace, collapse_fn)
+    if not allow_selected_descendant:
+        selected_index = None
     current_key: tuple[str, str] | None = None
     current_descendant_only_num_layers: int | None = None
     current_has_direct_selection = False
@@ -1349,6 +1394,7 @@ def _iter_collapsible_child_path_runs(
     trace: Trace,
     sibling_addresses: list[str],
     collapse_fn: Callable[[Module], bool],
+    selected_index: tuple[str, ...] | None = None,
 ) -> Iterator[tuple[str, ...]]:
     """Yield repeated selected child paths under consecutive sibling parents.
 
@@ -1368,8 +1414,10 @@ def _iter_collapsible_child_path_runs(
     """
 
     # Shared index: the former per-sibling _selected_descendants call scanned
-    # the whole module table once per sibling (hunt-6 R29-3).
-    selected_index = _selected_address_index(trace, collapse_fn)
+    # the whole module table once per sibling (hunt-6 R29-3). r8 R29: callers
+    # walking many sibling groups pass it in (once per sweep, not per group).
+    if selected_index is None:
+        selected_index = _selected_address_index(trace, collapse_fn)
     relative_paths = sorted(
         {
             selected_address.removeprefix(f"{sibling}.")

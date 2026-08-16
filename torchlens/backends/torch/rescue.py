@@ -44,6 +44,7 @@ from ..._errors import OutputAttributionError, TorchLensCaptureGapWarning
 from ...errors._base import TorchLensWarning
 from ...utils.display import user_stacklevel
 from ...utils.rng import log_current_rng_states, set_rng_from_saved_states
+from ...utils.tensor_utils import tensor_nanequal
 
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace
@@ -420,10 +421,15 @@ def _restore_changed_state(model: Any, snapshot: dict[str, Any]) -> tuple[str, .
                 changed.append(key)
                 continue
             try:
+                # NaN-aware oracle (r8 R16): ``torch.equal`` answers False for
+                # bitwise-identical NaNs, so a state slot legitimately holding
+                # NaN (a running stat poisoned upstream, a sentinel buffer)
+                # read as "changed by the rescue" every run -- a false
+                # double-mutation report plus a pointless restore copy.
                 if (
                     current.shape == baseline.shape
                     and current.dtype == baseline.dtype
-                    and torch.equal(current, baseline)
+                    and tensor_nanequal(current, baseline, allow_tolerance=False)
                 ):
                     continue
                 changed.append(key)

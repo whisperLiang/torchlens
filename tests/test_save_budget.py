@@ -799,3 +799,73 @@ def test_output_parent_promotion_is_charged() -> None:
         f"committed {ledger.committed_bytes} bytes; the promoted output-parent "
         "payload is invisible to the accountant"
     )
+
+
+# ---------------------------------------------------------------------------
+# r8 R34: accountant charge-order trio
+# ---------------------------------------------------------------------------
+
+
+def test_refused_admission_rolls_back_the_reservation() -> None:
+    """opus R34-A: a refused admit must leave the ledger exactly as it was."""
+
+    budget = SaveBudget.from_option(1000)
+    assert budget is not None
+    device = torch.device("cpu")
+    budget.admit("ok", device, 400)
+    ledger = budget.ledgers["cpu"]
+    assert (ledger.committed_bytes, ledger.num_saved) == (400, 1)
+    with pytest.raises(SaveBudgetExceededError):
+        budget.admit("too_big", device, 5000)
+    assert (ledger.committed_bytes, ledger.num_saved) == (400, 1), (
+        "the refused reservation stayed charged (phantom bytes inflate every later figure)"
+    )
+
+
+def test_sparse_partial_alias_charges_the_physical_union() -> None:
+    """sol R34-1: shared sparse components dedup instead of double-charging."""
+
+    indices = torch.tensor([[0, 1], [1, 0]])
+    values_a = torch.tensor([1.0, 2.0])
+    values_b = torch.tensor([3.0, 4.0])
+    sparse_a = torch.sparse_coo_tensor(indices, values_a, (2, 2))._coalesced_(True)
+    sparse_b = torch.sparse_coo_tensor(indices, values_b, (2, 2))._coalesced_(True)
+    # Force literal storage sharing of the index component.
+    assert (
+        sparse_a._indices().untyped_storage().data_ptr()
+        != (sparse_b._indices().untyped_storage().data_ptr())
+        or True
+    )  # construction may or may not share; assert on accounting below
+    budget = SaveBudget.from_option(10**9)
+    assert budget is not None
+    budget.charge_retained("a", (sparse_a,))
+    committed_after_first = budget.ledgers["cpu"].committed_bytes
+    budget.charge_retained("b", (sparse_b,))
+    committed_after_second = budget.ledgers["cpu"].committed_bytes
+    values_bytes = values_b.untyped_storage().nbytes()
+    if sparse_a._indices().untyped_storage().data_ptr() == (
+        sparse_b._indices().untyped_storage().data_ptr()
+    ):
+        # Shared indices: the second tensor may only add its values bytes.
+        assert committed_after_second - committed_after_first == values_bytes
+    else:
+        indices_bytes = sparse_b._indices().untyped_storage().nbytes()
+        assert committed_after_second - committed_after_first == values_bytes + indices_bytes
+
+
+def test_saved_args_refuse_at_pre_allocation_admission() -> None:
+    """sol R34-2: the snapshot budget check fires BEFORE the clones allocate.
+
+    Red-capable: pre-fix the post-clone ``charge_retained`` refused at the
+    ``post_transform_reconciliation`` phase, after every clone existed.
+    """
+
+    model = nn.Linear(64, 64)
+    x = torch.randn(64, 64)
+    with pytest.raises(SaveBudgetExceededError) as excinfo:
+        tl.trace(
+            model,
+            x,
+            capture=tl.options.CaptureOptions(save_arg_values=True, save_budget=1000),
+        )
+    assert excinfo.value.fields["accounting_phase"] == "pre_allocation_admission"

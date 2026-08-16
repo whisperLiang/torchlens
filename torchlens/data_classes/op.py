@@ -91,7 +91,7 @@ from .._trace_core.relation_views import (
 )
 from .._trace_state import TraceState
 from .._training_validation import _NON_GRAD_DTYPES, TrainingModeConfigError
-from .._transport import to_cpu_contiguous
+from .._transport import digest_byte_view
 from ..backends.torch._tl import mark_detached_saved_activation
 from ..constants import ARG_EXPRESSIONS_FIELD, LAYER_PASS_LOG_FIELD_ORDER, RAW_LABEL_SUFFIX
 from ..intervention.errors import DirectActivationWriteWarning
@@ -1566,15 +1566,13 @@ def _tensor_content_hash(value: torch.Tensor) -> str:
         return f"functorch_wrapped_tensor:{id(value)}"
 
     with pause_logging():
-        tensor = value
-        if tensor.is_conj() or tensor.is_neg():
-            # ``safe_copy`` used to materialize lazy conj/neg; the zero-copy
-            # transport must resolve them first or the uint8 view refuses.
-            tensor = tensor.resolve_conj().resolve_neg()
-        tensor = to_cpu_contiguous(tensor)
-        logical_dtype = str(tensor.dtype)
-        shape = tuple(tensor.shape)
-        payload = tensor.reshape(-1).view(torch.uint8).numpy().data
+        # r8 R35: conj/neg resolution + the uint8 reinterpret live in the
+        # ONE transport authority (``_transport.digest_byte_view``); the
+        # local resolve guard this site pioneered moved there so the other
+        # digest sites cannot drift from it.
+        logical_dtype = str(value.dtype)
+        shape = tuple(value.shape)
+        payload = digest_byte_view(value)
         hasher = hashlib.sha256()
         hasher.update(repr((shape, logical_dtype)).encode("utf-8"))
         hasher.update(payload)
@@ -4294,6 +4292,21 @@ class Op:
                     kind="transformed_grad",
                 )
             return
+        # Admit BEFORE the transform/clone allocate (r8 R34, fable F1): a
+        # policy-DENIED label reaching this legacy slot (callable/selector
+        # save_grads with _grad_op_nums_to_save == "all") used to retain a
+        # full uncharged grad clone -- invisible to a tight save_budget.
+        # Source-sized reservation, transform delta reconciled at commit,
+        # exactly the primary-site contract.
+        budget = getattr(trace, "_save_budget_accountant", None) if trace is not None else None
+        grad_reservation = None
+        if budget is not None:
+            grad_reservation = budget.admit(
+                str(getattr(self, "_layer_label_raw", "<grad>")),
+                raw_grad.device,
+                int(raw_grad.numel() * raw_grad.element_size()),
+                site="primary",
+            )
         if grad_transform is not None:
             self._internal_set(
                 "transformed_grad",
@@ -4334,6 +4347,8 @@ class Op:
             _copy_grad_payload(raw_grad, save_mode=save_mode) if store_raw else None,
         )
         self.has_grad = True
+        if budget is not None and grad_reservation is not None:
+            budget.commit(grad_reservation, (self.grad, self.transformed_grad))
         if writer is not None and getattr(trace, "_defer_streaming_bundle_finalization", False):
             self._stream_tensor_blob(
                 writer,

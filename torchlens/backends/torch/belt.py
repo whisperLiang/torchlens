@@ -37,6 +37,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import threading
 import types
 import weakref
 from collections.abc import Callable, Iterator
@@ -318,10 +319,24 @@ def belt_report() -> BeltReport | None:
     The derivation is re-validated against the live wrapper registries: if
     the wrapper generation changed underneath the cache, mutations made with
     the dead generation are reversed and the belt re-derives.
+
+    From a NON-OWNER thread while a capture is live (``doctor()`` /
+    ``compat.report()`` polled during a long forward), the cached report is
+    served READ-ONLY (r8 R54 belt pair): deriving would evaluate probe
+    originals under the global-RNG snapshot/restore bracket, and the restore
+    would REWIND any draws the capture made in between -- silently repeating
+    its dropout/noise stream -- while the stale-generation reversal would
+    patch module slots underneath the running capture.
     """
 
     global _report, _member_map
     if not _state._is_decorated:
+        return _report
+    if (
+        (_state._logging_enabled or _state._active_trace is not None)
+        and _state._active_owner_thread_id is not None
+        and _state._active_owner_thread_id != threading.get_ident()
+    ):
         return _report
     if _report is not None and not _member_map_is_current():
         restore_belt_references()

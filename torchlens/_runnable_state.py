@@ -17,7 +17,7 @@ from typing import Any
 import torch
 
 from . import _state
-from ._transport import to_cpu_contiguous
+from ._transport import digest_byte_view
 from .errors import RunCapabilityUnavailableError, RunPreconditionError, StateBindingError
 from .runnable import (
     CANONICAL_INITIALIZER_BY_ROLE,
@@ -2640,13 +2640,15 @@ def runnable_tensor_byte_digest(value: torch.Tensor) -> str:
             code=RunnableErrorCode.INPUT_TREE_MISMATCH.value,
         )
     with _state.pause_logging():
-        cpu_value = to_cpu_contiguous(value)
         # Buffer-protocol digest (r7 R35-3): streaming the prefix and the
         # uint8 view into one hasher is byte-identical to the old
         # ``sha256(prefix + payload.tobytes())`` while skipping the
-        # whole-payload bytes copy (per parameter/buffer staged).
-        payload_view = cpu_value.reshape(-1).view(torch.uint8).numpy().data
-        logical_prefix = f"{cpu_value.dtype}|{tuple(cpu_value.shape)}|".encode()
+        # whole-payload bytes copy (per parameter/buffer staged). r8 R35:
+        # the transport + uint8 reinterpret live in ONE authority
+        # (``_transport.digest_byte_view``), which also resolves lazy
+        # conj/neg bits -- the hand-rolled view here crashed on conj state.
+        payload_view = digest_byte_view(value)
+        logical_prefix = f"{value.dtype}|{tuple(value.shape)}|".encode()
         hasher = sha256(logical_prefix)
         hasher.update(payload_view)
     return hasher.hexdigest()

@@ -46,8 +46,9 @@ if TYPE_CHECKING:
     from .ops import (
         _SETTER_MUTATION_FUNC_NAMES,
         _admit_save_budget,
-        _charge_saved_args_budget,
+        _admit_saved_args_budget,
         _commit_save_budget,
+        _commit_saved_args_budget,
         _is_inplace_augmented_assignment_dunder,
         _label_version_baseline,
         _should_keep_alias_mutation_contract,
@@ -483,10 +484,14 @@ def _save_activation_fields(
         if dedup_cached_out is not None:
             raw_out = dedup_cached_out
         else:
+            # Single-transport retention (r8 b5 R35): ``"copy"`` mode
+            # materializes directly on the retention device (one copy); the
+            # other save modes ignore the target and keep the follow-up move.
             raw_out = safe_copy(
                 t,
                 fields_dict["detach_saved_activations"],
                 save_mode=save_mode,
+                target_device=fields_dict["output_device"],
             )
             if fields_dict["output_device"] not in [str(raw_out.device), "same"]:
                 if save_mode == "cpu_async":
@@ -567,12 +572,15 @@ def _save_activation_fields(
             out_sink(fields_dict["_label_raw"], fields_dict["out"])
 
         if trace.save_arg_values:
+            # Admit BEFORE the clones allocate (r8 R34, sol 2): the snapshot
+            # used to clone every tensor argument first and charge after.
+            arg_reservations = _admit_saved_args_budget(trace, fields_dict, t_args, t_kwargs)
             fields_dict["has_saved_args"] = True
             fields_dict["saved_args"] = [_recursive_safe_copy(arg) for arg in t_args]
             fields_dict["saved_kwargs"] = {
                 key: _recursive_safe_copy(value) for key, value in t_kwargs.items()
             }
-            _charge_saved_args_budget(trace, fields_dict)
+            _commit_saved_args_budget(trace, fields_dict, arg_reservations)
         else:
             fields_dict["saved_args"] = None
             fields_dict["saved_kwargs"] = None
