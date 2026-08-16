@@ -61,27 +61,32 @@ _NEW_FILE_LINE_CAP = 2000
 #: reviewed defensive fixes (typed refusals, R56 teardown guards, provenance
 #: sentinels), not drift. tensor_utils.py instead SHRANK below the unledgered
 #: cap by splitting the r37 INV-2 alias engine into utils/alias_footprint.py.
+#: 2026-08-16 fixwave-6 integration settle: 10 ceilings re-stepped to the next
+#: 50 above the union-tree measurement -- this ledger was frozen on the
+#: fix/infra-r7 lane while the other fixwave-6 lanes (capture/iomerged/
+#: valid-conc/vizgraph) merged their reviewed fix growth to main in parallel;
+#: the raise reconciles the branch-frozen census with the merged tree.
 _GOD_FILE_CEILINGS: dict[str, int] = {
-    "torchlens/validation/core.py": 5250,
-    "torchlens/data_classes/op.py": 5150,
+    "torchlens/validation/core.py": 5300,
+    "torchlens/data_classes/op.py": 5200,
     "torchlens/_io/runnable.py": 5000,
-    "torchlens/utils/rng.py": 4900,
+    "torchlens/utils/rng.py": 4950,
     "torchlens/visualization/collapse_optimizer.py": 4600,
     "torchlens/backends/jax/backend.py": 4400,
-    "torchlens/_io/bundle.py": 4300,
+    "torchlens/_io/bundle.py": 4350,
     "torchlens/_io/runnable_load.py": 3850,
-    "torchlens/user_funcs.py": 3800,
+    "torchlens/user_funcs.py": 3850,
     "torchlens/backends/torch/backward.py": 3800,
     "torchlens/data_classes/trace.py": 3750,
     "torchlens/utils/_torch_compat.py": 3450,
     "torchlens/backends/torch/wrappers.py": 3400,
     "torchlens/backends/tinygrad/backend.py": 3300,
     "torchlens/backends/mlx/backend.py": 3250,
-    "torchlens/postprocess/_contracts.py": 3200,
+    "torchlens/postprocess/_contracts.py": 3250,
     "torchlens/backends/torch/model_prep.py": 3200,
     "torchlens/data_classes/module.py": 2950,
     "torchlens/visualization/auto_collapse.py": 2400,
-    "torchlens/validation/exemptions.py": 2850,
+    "torchlens/validation/exemptions.py": 2950,
     "torchlens/backends/paddle/backend.py": 2700,
     "torchlens/_runnable_state.py": 2700,
     "torchlens/capture/arg_positions.py": 2650,
@@ -90,9 +95,9 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/bundle/__init__.py": 2450,
     "torchlens/data_classes/layer.py": 2350,
     "torchlens/postprocess/loop_grouping_adapter.py": 2500,
-    "torchlens/visualization/_render_leaf.py": 2350,
+    "torchlens/visualization/_render_leaf.py": 2400,
     "torchlens/visualization/_render_edges.py": 2350,
-    "torchlens/options.py": 2350,
+    "torchlens/options.py": 2400,
     "torchlens/intervention/save.py": 2350,
     "torchlens/_io/scrub.py": 2350,
     "torchlens/debug/_infer_input_shape.py": 2250,
@@ -102,7 +107,7 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/visualization/_render_nodes.py": 2150,
     "torchlens/_io/_safe_unpickle.py": 2100,
     "torchlens/visualization/_render_flow.py": 2100,
-    "torchlens/capture/trace.py": 2100,
+    "torchlens/capture/trace.py": 2200,
     "torchlens/backends/torch/completeness_witness.py": 2050,
 }
 
@@ -116,15 +121,19 @@ _MAX_LEDGER_SLACK = 100
 #: Frozen ceilings for the tests/ frontier (r7 R43-F1 census, 2026-08-16,
 #: next 50-line step above measurement). Same doctrine as the package
 #: ledger: shrink freely, raise consciously with a reason, leave at <= 2000.
+#: 2026-08-16 fixwave-6 integration settle: test_backward and
+#: test_global_state_inventory re-stepped -- the census ran on the infra lane
+#: while the capture lane's reviewed tripwire growth for those files merged
+#: to main in parallel.
 _TEST_FILE_CEILINGS: dict[str, int] = {
     "tests/test_validation.py": 8500,
     "tests/example_models.py": 5500,
     "tests/test_real_world_models.py": 4850,
     "tests/test_toy_models.py": 4050,
     "tests/test_auto_collapse_metrics.py": 3200,
-    "tests/test_backward.py": 2500,
+    "tests/test_backward.py": 2550,
     "tests/validation_goldens/test_validation_exemption_hardening.py": 2400,
-    "tests/test_global_state_inventory.py": 2300,
+    "tests/test_global_state_inventory.py": 2450,
     "tests/test_conditional_branches.py": 2150,
     "tests/test_tlspec_runnable_r41_crossthread_witness.py": 2050,
 }

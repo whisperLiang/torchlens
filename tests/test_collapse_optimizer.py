@@ -1886,13 +1886,10 @@ def test_collapse_ceiling_warning_category_and_attribution(
 
     import warnings as warnings_module
 
-    from torch import nn
-
     from torchlens.errors import TorchLensWarning
-    from torchlens.visualization import collapse_optimizer as optimizer_module
 
-    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
-    monkeypatch.setattr(optimizer_module, "COLLAPSE_OPTIMIZER_MAX_OPS", 2)
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.ReLU())
+    monkeypatch.setattr(collapse_optimizer, "COLLAPSE_OPTIMIZER_MAX_OPS", 2)
     fresh = tl.trace(model, torch.randn(2, 4))
 
     with warnings_module.catch_warnings(record=True) as caught:
@@ -1908,8 +1905,7 @@ def test_collapse_ceiling_warning_category_and_attribution(
     decline = declines[0]
     # Selectable via the package taxonomy, not just blanket UserWarning.
     assert issubclass(decline.category, TorchLensWarning)
-    # Names the governing constant so users can see the threshold they are on
-    # the wrong side of.
+    # Names the governing constant so users can see the threshold they crossed.
     assert "COLLAPSE_OPTIMIZER_MAX_OPS" in str(decline.message)
     # Attributed to the caller's frame (this file), not a torchlens internal.
     assert decline.filename == __file__
