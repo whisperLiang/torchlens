@@ -32,6 +32,7 @@ _SCOPED_CAPTURE_STATE = frozenset(
         ("torchlens/_state.py", "_active_hook_plan"),
         ("torchlens/_state.py", "_active_intervention_spec"),
         ("torchlens/_state.py", "_active_owner_thread_id"),
+        ("torchlens/_state.py", "_aten_recording_armed"),
         # _active_record_spans left this ledger in fixwave-5 (R54): it is now
         # a never-rebound ContextVar holding an immutable tuple, so it is no
         # longer process-global mutable state at all.
@@ -874,6 +875,7 @@ def _capture_scope_snapshot() -> dict[str, Any]:
         "relationship_input_id": _state._relationship_input_id,
         "relationship_input_shape_hash": _state._relationship_input_shape_hash,
         "runnable_ledger_armed": _state._runnable_ledger_armed,
+        "aten_recording_armed": _state._aten_recording_armed,
         "capture_reserved_by": _state._capture_reserved_by,
         "active_label_session": torch_tl._ACTIVE_LABEL_SESSION,
         "active_witness_state": completeness_witness._ACTIVE_WITNESS_STATE,
