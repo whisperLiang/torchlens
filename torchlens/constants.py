@@ -173,6 +173,10 @@ MODEL_LOG_FIELD_ORDER = [
     "save_code_context",
     "save_rng_states",
     "recurrence_detection",
+    # Grouping knob mirror + grouping-policy stamp (L1 wave 0; both
+    # FieldPolicy.DROP under tlspec v7, prerelease-registered)
+    "grouping",
+    "grouping_policy",
     "verbose",
     "profile_enabled",
     "has_gradients",

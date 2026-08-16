@@ -118,6 +118,8 @@ add names to the top-level `torchlens` namespace:
 | `graphviz_binary_unavailable` | The Graphviz executable is not on PATH, so no render subprocess can start (`GraphvizUnavailableError`, `RuntimeError` lineage) | Install the Graphviz system package (`apt install graphviz` / `brew install graphviz`) |
 | `graphviz_render_failed` | Graphviz did not produce a usable rendered artifact (`GraphvizRenderError`, `RuntimeError` lineage) | Lower dpi, render direct SVG, or cap the graph size |
 | `gradient_pass_ambiguous` | Gradient query spans multiple backward passes | Pick one pass or record positionally |
+| `grouping_invalid` | `grouping=` value is outside the closed vocabulary | Choose a documented grouping policy value |
+| `grouping_policy_unavailable` | `grouping=` value is legal vocabulary but not entry-legal for this capture kind/wave (spelling provisional pending the S2 vocabulary amendment) | Use the default `grouping='structural'` |
 | `halt_predicate_type_invalid` | `tl.trace` `halt` is not callable (`ArgumentTypeError`, `TypeError` lineage; the `tl.record` twin is `recording_halt_predicate_type_invalid`) | Pass a predicate or `None` |
 | `hash_content_type_unsupported` | `tl.hash.content` value cannot be deterministically encoded (`ArgumentTypeError`, `TypeError` lineage) | Pass tensors, arrays, builtin scalars/containers, or `__dict__`-inspectable objects |
 | `hash_expected_type_invalid` | `tl.assert_unchanged` pin is neither a string nor `None` (`ArgumentTypeError`, `TypeError` lineage) | Pass the pinned hash string, or `None` to bootstrap a pin |

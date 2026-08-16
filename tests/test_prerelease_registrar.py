@@ -43,8 +43,9 @@ _PLANT_FIELD = "_tl_save_selector_fire_count"
 
 #: STANDING registrations live at import time (the S3 writer-lane inventory);
 #: updating this ledger is a conscious act reviewed with the owning lane's
-#: merge. L1 wave 0: Op.site_key (the site_key_v1 bridging relation).
-_STANDING_REGISTRATIONS = {"Op": ("site_key",)}
+#: merge. L1 wave 0: Op.site_key (the site_key_v1 bridging relation) and
+#: Trace.grouping / Trace.grouping_policy (the knob mirror + policy stamp).
+_STANDING_REGISTRATIONS = {"Op": ("site_key",), "Trace": ("grouping", "grouping_policy")}
 
 
 @pytest.fixture
@@ -80,10 +81,11 @@ def test_registration_requires_declared_drop_policy() -> None:
 
 
 def test_registry_inventory_and_unregister(planted_field: str) -> None:
-    assert registered_prerelease_fields() == {
+    expected_with_plant = {
         **_STANDING_REGISTRATIONS,
-        "Trace": (planted_field,),
+        "Trace": tuple(sorted((*_STANDING_REGISTRATIONS["Trace"], planted_field))),
     }
+    assert registered_prerelease_fields() == expected_with_plant
     unregister_prerelease_field(Trace, planted_field)
     assert registered_prerelease_fields() == _STANDING_REGISTRATIONS
     # Fixture teardown unregisters again; must be idempotent.

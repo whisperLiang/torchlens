@@ -51,6 +51,7 @@ from ...ir.op_record import amend_preview_output_parent_rebind
 from ...ir.predicate import RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
+from ...postprocess._grouping_stamp import build_grouping_policy_stamp
 from ...postprocess._materialize import materialize_from_events
 from ...postprocess.finalization import _build_module_logs
 from ...postprocess.loop_grouping_adapter import (
@@ -1847,6 +1848,10 @@ class JAXBackend:
         """
 
         assignments = self._jax_recurrence_assignments(trace)
+        trace.grouping_policy = build_grouping_policy_stamp(
+            ran_recurrence_grouping=bool(trace.recurrence_detection),
+            requested=getattr(trace, "grouping", "structural"),
+        )
         raw_labels = tuple(trace._raw_graph_ws.raw_layer_labels_list)
         raw_to_final_op_label: dict[str, str] = {}
 

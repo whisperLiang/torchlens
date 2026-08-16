@@ -13,6 +13,7 @@ from ..data_classes.layer import Layer
 from ..data_classes.module import ModuleAccessor
 from ..data_classes.trace import Trace, _init_module_hierarchy_data
 from ..ir.op_record import amend_preview_output_parent_mark
+from ..postprocess._grouping_stamp import build_grouping_policy_stamp
 from ..postprocess._site_key import SiteKeyMinter
 from ..postprocess.finalization import _build_module_logs, _build_root_module_log
 from ..postprocess.loop_grouping_adapter import RecurrenceAssignment
@@ -156,6 +157,10 @@ def finalize_single_pass_trace(
     # claim grouping that never happened. (JAX finalizes through its own
     # recurrence-grouping path and keeps the request.)
     trace.recurrence_detection = assignments is not None
+    trace.grouping_policy = build_grouping_policy_stamp(
+        ran_recurrence_grouping=assignments is not None,
+        requested=getattr(trace, "grouping", "structural"),
+    )
     if update_param_totals_from_layers:
         _update_param_totals_from_layers(trace)
     if count_layers_with_attached_params:

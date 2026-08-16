@@ -9,6 +9,7 @@ import hashlib
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
+from ._grouping_stamp import build_grouping_policy_stamp
 from ._site_key import SiteKeyMinter
 from .loop_grouping_adapter import (
     RecurrenceAssignment,
@@ -336,6 +337,10 @@ def _group_by_shared_params(self: "Trace") -> None:
             self[label]._layer_label_raw = leader_raw
 
     _rebuild_pass_assignments(self)
+    self.grouping_policy = build_grouping_policy_stamp(
+        ran_recurrence_grouping=False,
+        requested=getattr(self, "grouping", "structural"),
+    )
 
 
 def _detect_and_label_loops(self: "Trace") -> None:
@@ -351,6 +356,10 @@ def _detect_and_label_loops(self: "Trace") -> None:
     grouping_graph = _build_recurrence_grouping_graph(self)
     assignments = group_recurrent_nodes(grouping_graph)
     _apply_recurrence_assignments(self, assignments)
+    self.grouping_policy = build_grouping_policy_stamp(
+        ran_recurrence_grouping=True,
+        requested=getattr(self, "grouping", "structural"),
+    )
 
 
 def _build_recurrence_grouping_graph(self: "Trace") -> RecurrenceGroupingGraph:

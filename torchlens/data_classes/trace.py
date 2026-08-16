@@ -169,6 +169,8 @@ else:
 
 
 _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
+    "grouping": "structural",
+    "grouping_policy": None,
     "trace_label": None,
     "model_label": None,
     "backend": "torch",
@@ -1346,6 +1348,10 @@ class Trace(
         "save_code_context": FieldPolicy.KEEP,
         "save_rng_states": FieldPolicy.KEEP,
         "recurrence_detection": FieldPolicy.KEEP,
+        # L1 grouping surface: DROP under tlspec v7, prerelease-registered
+        # (S3 discipline); flips to persisting at the coordinated bump.
+        "grouping": FieldPolicy.DROP,
+        "grouping_policy": FieldPolicy.DROP,
         "verbose": FieldPolicy.KEEP,
         "profile_enabled": FieldPolicy.KEEP,
         "has_gradients": FieldPolicy.KEEP,
@@ -1814,6 +1820,11 @@ class Trace(
         self.save_code_context = save_code_context
         self.save_rng_states = save_rng_states
         self.recurrence_detection = recurrence_detection
+        # L1 grouping surface: "structural" is the only entry-legal knob
+        # value in wave 0 (others refuse typed at trace entry); the stamp is
+        # written by each producer once step-7 grouping settles.
+        self.grouping = "structural"
+        self.grouping_policy: dict[str, Any] | None = None
         self.verbose = verbose
         self.profile_enabled = False
         self.has_gradients = False
@@ -3205,6 +3216,18 @@ class Trace(
         from ..capture.outcome import resolve_loaded_outcome
 
         self.__dict__["_capture_outcome"] = resolve_loaded_outcome(self.__dict__)
+        # Grouping-policy stamp: adopt-or-degrade (L1). An absent stamp
+        # (every pre-stamp v7 artifact) settles silently to the canonical
+        # legacy settlement; an invalid one warns once and settles with the
+        # violated rule's name. Monotonic: verdicts only worsen across
+        # persistence, and the settled payload round-trips byte-stable. The
+        # knob mirror normalizes first (a DROP-scrubbed field restores as an
+        # explicit None, bypassing default fill).
+        if self.__dict__.get("grouping") is None:
+            self.__dict__["grouping"] = "structural"
+        from ..postprocess._grouping_stamp import settle_loaded_grouping_policy
+
+        self.__dict__["grouping_policy"] = settle_loaded_grouping_policy(self.__dict__)
         # F9: adopt the restored detached records into a fresh sealed core so
         # loaded traces rejoin the single-truth store (best-effort — an abort
         # preserves the coreless-island behavior; backward records stay
@@ -3727,3 +3750,17 @@ class Trace(
 
 Trace.FIELD_FORK_POLICY = fork_policy_from_policy(Trace.FIELD_POLICY)  # type: ignore[attr-defined]
 Trace.DEFAULT_FILL_STATE = default_fill_state_from_policy(Trace.FIELD_POLICY)  # type: ignore[attr-defined]
+
+
+def _register_prerelease_fields() -> None:
+    """Register sprint-gated DROP fields (S3 registrar; grouping/-_policy
+    persist KEEP only at the coordinated tlspec bump -- gates run under the
+    test switch)."""
+
+    from .._io.prerelease import register_prerelease_field
+
+    register_prerelease_field(Trace, "grouping")
+    register_prerelease_field(Trace, "grouping_policy")
+
+
+_register_prerelease_fields()
