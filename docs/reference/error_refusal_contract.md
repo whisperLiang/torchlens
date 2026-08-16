@@ -248,7 +248,7 @@ string, never on message text. The lockstep gate enrolls each constant explicitl
 (`tests/test_error_contract_lockstep.py`), so renaming the constant or drifting its
 string value fails the gate exactly like an inline code.
 
-| Code | Refusal | Remedy class |
+| Kind | Refusal | Remedy class |
 |---|---|---|
 | `ambiguous_group_lifetime` | A collective used a process group whose pre-arming lifetime cannot be proven | Call `tl.distributed.arm()` at process start, before any group is created |
 | `uncaptured_collective_op` | Arm-time recognizer set-inequality or dispatcher schema scan found a collective the wraps would not capture | Upgrade TorchLens to a build whose recognizer covers the installed torch, or avoid the unrecognized collective in the traced forward |
