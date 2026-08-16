@@ -497,6 +497,133 @@ S2-gated*
   `structure_only_refuted_hypothesis`, `structure_only_discharge_precondition`,
   `structure_only_type_invalid`.
 
+**PredicateProtocol** — *unstable — no deprecation shim owed*
+: `torchlens.ir.predicate_registry.PredicateProtocol` — the frozen callable
+  signature for the capture-lifecycle `save`/`halt`/`until` predicate slots:
+  one positional concrete `RecordContext`, returning a normalized decision.
+  The S4 seam contract; normative page:
+  [predicate_runtime.md](predicate_runtime.md). The `intervene=` and grad
+  slots are outside the protocol.
+
+**coerce_predicate(value, \*, slot)** — *unstable — no deprecation shim owed*
+: The single documented coercion door for predicate consumers
+  (`torchlens.ir.predicate_registry`). Closed value domain {raw callable,
+  registered-name str}; raw callables (including `BaseSelector` instances and
+  `followed_by` composites) return BY IDENTITY, registered names return a
+  slot-aware enforcing wrapper carrying
+  `__torchlens_cache_key__ = ("registered", name, version)`. Slot vocabulary
+  `save | halt | until` is closed (S2-owned); unknown slots refuse typed.
+
+**Selection / ResolvedSelection / `__selection__`** — *unstable — no
+deprecation shim owed (do/Selection spellings slate-ratified subject to D7)*
+: `tl.Selection` is the composable selection QUERY — a frozen AST over leaf
+  terms (selector / receptive-field box / gradient-RF / facet / param / unit)
+  and boolean combinators, trace-independent; `selection.resolve(trace)`
+  returns a `tl.ResolvedSelection` — frozen, trace-bound, an ordered tuple of
+  `SiteEntry(site_key, mask, provenance)` rows. TWO-LEVEL DENOTATION:
+  (touched-site family, selected-element set); zero-mask entries are retained
+  first-class; `.empty`/`__bool__` are ELEMENT-level; `bool()` on the QUERY
+  type refuses typed (`selection_bool_ambiguous`). Anything region-shaped
+  implements `__selection__`; `SiteEntry.mask` returns a FRESH materialization
+  (mutation cannot alter the selection). Masks are exact AS SETS; producer
+  inexactness rides the closed `provenance.relation` lattice
+  (`exact | upper_bound | lower_bound | unknown`). `ResolvedSelection` is
+  session-time only, never persisted. Selection kinds `ACT | PARAM | EDGE`
+  are a closed vocabulary; mixed kinds refuse `selection_kind_incompatible`.
+
+**Selection operators `| & - ~` (+ reflected)** — *ratified set (slate 5.4);
+semantics unstable-documented*
+: Same-site operands compose as masks; different-site yields a MULTI-SITE
+  selection; `-` never un-touches sites (`fam(A-B) = fam(A)`); `~` is the
+  touched-site mask complement (never predicate negation and never
+  model-universe). NO `__xor__`: `(a - b) | (b - a)` spells it.
+  `BaseSelector` keeps its shipped composite semantics; `selector - selector`
+  desugars to `and(a, not(b))`; a selector composed with a region producer
+  defers to the Selection algebra.
+
+**tl.units / tl.params / tl.random_selection** — *unstable — no deprecation
+shim owed*
+: Stage-1 producer constructors: `units(site, indices)` (explicit site +
+  index set), `params(name, mask=None)` (named-parameter element region),
+  `random_selection(like=, within=, seed=)` (seeded size-matched control
+  sampled without replacement inside `within`; too-small populations refuse
+  `selection_unresolvable` / `population_too_small`).
+
+**SelectionError / selection refusal codes** — *unstable — no deprecation
+shim owed; S2-gated*
+: One carrier class (`torchlens.selection.SelectionError`, catalogued in the
+  intervention error catalog) for the closed codes
+  `selection_trace_mismatch`, `selection_bool_ambiguous`,
+  `selection_kind_incompatible`, `selection_unresolvable` (closed reason set
+  `site_not_in_trace | value_not_saved | non_tensor_site | no_index_space |
+  mask_shape_mismatch | facet_write_mask_unavailable | population_too_small`),
+  and `selection_apply_invalid` (stage 2).
+
+**tl.Edit / do(selection, edit)** — *Edit ratified (slate 5.5, subject to D7
+default-keep); mask-application semantics documented-unstable*
+: `tl.Edit` is the public edit-object type; `HelperSpec` is its deprecated
+  alias (stable surface, no removal scheduled). `trace.do(selection, edit)`
+  applies an edit to a resolved selection under the NORMATIVE
+  MASK-APPLICATION CONTRACT: the edit hook computes its full replacement
+  exactly as today (helpers stay mask-oblivious), then the ENGINE applies
+  `torch.where(mask, edited, original)` on a FRESH tensor — never in-place
+  on, never a view aliasing, the stored capture value. Whole-site masks
+  short-circuit the scatter (exactly today's behavior). No broadcasting in
+  v1; shape/dtype/device/broadcast mismatches and ineligible sites refuse
+  `selection_apply_invalid` (closed reason set
+  `shape | dtype | device | broadcast | not_maskable`). Learned-parameter
+  edits refuse typed (D3 activation-path narrowing, default keep). Each
+  Selection-targeted do() appends an audit record (query repr + resolve
+  digest + per-site relations) to `trace.intervention_audit` (DROP-gated,
+  session-time under v7).
+
+**tl.patch_from(source_trace)** — *unstable — no deprecation shim owed*
+: Edit factory patching targeted sites from another trace's recorded
+  post-capture values (activation patching); with a Selection target only
+  the selected elements are patched. Portability `opaque_audit`: persisted
+  args carry source-trace IDENTITY only (never the Trace, never tensors);
+  values bind at do() time session-side; no executable-save path in v1.
+
+**trace.edges / edge substitution** — *unstable — no deprecation shim owed;
+S2/S3-gated*
+: `trace.edges` returns the dataflow edge family (one `EdgeUseRecord` per
+  parent→child occurrence; requires an `intervention_ready` capture, else
+  `edge_provenance_unavailable`). The canonical occurrence address is
+  `(child_func_call_id, arg_kind, arg_path)`. Edge records lift as EDGE-kind
+  selections (whole-edge granularity; `~` complements within the trace's
+  edge family). `do(edge_selection, edit)` replaces the value CONSUMED on
+  the edge — only the child's consumption changes; `parent.out` stays
+  producer truth. Ships on the replay/push engine ONLY
+  (`edge_intervention_engine_unsupported` otherwise; the rerun-engine design
+  is an escalated named future). Storage fork: the substituted value lives
+  in the DROP-gated `Op.edge_substitutions` store (+
+  `Op.edge_replacement_stamps`, `FireRecord.edge_address`); capture truth
+  (`saved_args`, `out_versions_by_child`, `parent.out`) is retained
+  unmodified — the pre-edit snapshot that makes divergence decidable.
+  Validation: every tier-(ii) entry must be corroborated (FireRecord +
+  stamp) else FAIL; corroborated children are RE-EXECUTED with the
+  substituted value spliced at the address and must match (verdict
+  `edge_intervention_boundary` — a different check, never no check).
+  v7 PERSISTENCE BOUNDARY: an edge-intervened trace refuses
+  `edge_intervention_save_unsupported` at ALL four save levels while the
+  pre-release switch is inactive (session-only in production until the
+  wave-3 bump); the refusal precedes `artifact_save_level_unsupported`.
+
+**TapObserver.values(masked=True)** — *unstable — no deprecation shim owed*
+: `tap(resolved_selection)` stores each firing site's mask on the
+  `TapRecord`; `values(masked=True)` returns fresh masked copies (selected
+  elements). `values()` stays exactly the shipped full-snapshot behavior.
+
+**register_predicate(name, \*, replace=False)** — *unstable — no deprecation
+shim owed*
+: Registers a plain predicate callable under a name for later
+  `coerce_predicate` acceptance; returns the function truly unchanged (no
+  attribute stamped, nothing the restricted loader consults). Duplicate user
+  names refuse `predicate_name_conflict` without `replace=True`; builtin
+  names are never replaceable; name misses at coercion refuse
+  `predicate_unregistered`. The registry is INERT until consuming surfaces
+  adopt name acceptance.
+
 **color_by (draw kwarg)** — *unstable — no deprecation shim owed; keyword-only*
 : The v1 encoding-channel value source on `Trace.draw` (L5 channel core). See
   the "color_by" entry above for semantics.

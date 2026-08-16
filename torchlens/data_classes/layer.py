@@ -47,6 +47,7 @@ from .._io import (
 from ..constants import LAYER_LOG_FIELD_ORDER, LAYER_PASS_LOG_FIELD_ORDER
 from ..ir.refs import DtypeRef
 from ..quantities import Bytes, Duration, Flops, Macs, as_macs
+from ..selection import _SelectionOperand
 from ._accessor_base import Accessor
 from ._repr import format_config_items, format_shape_list
 from .field_policy import build_record_field_policy_table, portable_state_spec_from_policy
@@ -460,7 +461,7 @@ class OpAccessor(Accessor["Op"]):
         return None
 
 
-class Layer:
+class Layer(_SelectionOperand):
     """Aggregate per-layer metadata for a logged model operation.
 
     Groups one or more Op objects (one per invocation of this layer).
@@ -1180,6 +1181,13 @@ class Layer:
                 field_name=field_name,
             )
         return getattr(self.ops[0], field_name)
+
+    def __selection__(self) -> object:
+        """Lift this layer's whole output as an ACT selection term (ALL passes)."""
+
+        from ..selection import _selection_from_layer
+
+        return _selection_from_layer(self)
 
     @property
     def receptive_field(self) -> "ReceptiveFieldView":

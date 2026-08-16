@@ -1053,6 +1053,7 @@ def _validate_body_index(value: Any, *, schema_version: int) -> None:
         "grad_fn_grad",
         "module_arg",
         "module_meta",
+        "edge_substitution",
         "orphan_payload",
         "out",
         "pre_hook_input",

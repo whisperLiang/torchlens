@@ -250,6 +250,42 @@ class _FastCopySpec:
     source_ref: LazyActivationRef
 
 
+def _refuse_edge_intervened_save(trace: Any) -> None:
+    """Refuse v7 saves of edge-intervened traces (two-conjunct key, L6 4.3).
+
+    REFUSES iff tier-(ii) edge-substitution entries are PRESENT on the trace
+    AND the S3 pre-release switch is INACTIVE. Under the pytest-only switch
+    the guard stands down BY THE STATED KEY (second conjunct false — not a
+    bypass): the write is unconditionally marker-stamped and refuses to load
+    as a real v7 artifact, so no production artifact is created. The refusal
+    lifts for all four levels only with the coordinated wave-3 bump.
+    """
+
+    from .prerelease import prerelease_fields_active
+
+    if prerelease_fields_active():
+        return
+    carriers = [
+        op.label
+        for op in getattr(trace, "layer_list", ()) or ()
+        if getattr(op, "edge_substitutions", None)
+    ]
+    if not carriers:
+        return
+    from .._errors import InvalidArgumentError
+
+    raise InvalidArgumentError(
+        "this trace carries edge-substitution interventions, and tlspec v7 has "
+        "no occurrence-granular carrier at ANY save level: the artifact would "
+        "present post-edit values with zero edge provenance. Edge-intervened "
+        "traces are session-only in production until the coordinated wave-3 "
+        "schema bump ships the registered edge fields.",
+        code="edge_intervention_save_unsupported",
+        remedy="analyze in-session, or re-capture without the edge edit before saving",
+        carriers=tuple(carriers),
+    )
+
+
 def save(
     trace: Trace,
     path: str | Path,
@@ -403,6 +439,21 @@ def save(
     from ..capture.structure_only import require_structure_only_capability
 
     require_structure_only_capability(trace, "save_analysis_artifact")
+    # L6 stage 3: THE v7 PERSISTENCE BOUNDARY for edge-intervened traces,
+    # keyed on TWO conjuncts — tier-(ii) edge-substitution entries PRESENT
+    # AND the S3 pre-release switch INACTIVE (the state in which the gated
+    # fields scrub DROP, i.e. every state v7 production code can reach). No
+    # occurrence-granular carrier survives a v7 save at ANY level, so an
+    # edge-intervened trace is SESSION-ONLY in production until the wave-3
+    # coordinated bump flips the registered rows. Runs at the save entry
+    # AHEAD of level dispatch/validation, so on trace-carrying artifacts
+    # this refusal PRECEDES artifact_save_level_unsupported. SAVE-ENTRY
+    # REFUSAL ORDER (owners disjoint, all fail closed — do not silently
+    # reorder another owner's refusal): (1) MergedTrace presenter refusal,
+    # (2) N1 capture-outcome gate, (3) L7a structure-only chokepoint,
+    # (4) this L6 edge boundary. Reviewers of record for this hunk: L4 + S3
+    # registrar + L7 (chokepoint co-owner).
+    _refuse_edge_intervened_save(trace)
     # A PartialTrace is a failed-capture inspection wrapper, never a savable
     # product (its FIELD_POLICY declares both fields session-time DROP). Every
     # SHIPPED wrapper settles FAILED and refuses through the gate above; this

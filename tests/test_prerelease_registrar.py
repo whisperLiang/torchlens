@@ -49,6 +49,8 @@ _PLANT_FIELD = "_tl_save_selector_fire_count"
 # Importing the facade deliberately installs every L3 registration before the
 # exact standing-inventory assertions run.
 _STANDING_REGISTRATIONS: dict[str, tuple[str, ...]] = {
+    "FireRecord": ("edge_address",),  # L6 edge-occurrence address on fire records
+    "HelperSpec": ("selection_recipe",),  # L6 Query-Selection recipe family
     AtenOp.__name__: (
         "algorithmic_flops",
         "autocast_context",
@@ -83,11 +85,21 @@ _STANDING_REGISTRATIONS: dict[str, tuple[str, ...]] = {
         "sequence",
         "view_copy_kind",
     ),
-    "Op": ("site_key",),
+    "Op": (
+        "edge_replacement_stamps",  # L6 save-time edge corroboration verdicts
+        "edge_substitutions",  # L6 tier-(ii) occurrence-granular edge store
+        "site_key",
+    ),
     "OpRef": ("func_call_id", "op_label", "op_row_index"),
     # L1 wave 0: the grouping knob mirror + grouping-policy stamp; L3:
     # _primitive_op_profile; L7a: structure_only.
-    "Trace": ("_primitive_op_profile", "grouping", "grouping_policy", "structure_only"),
+    "Trace": (
+        "_primitive_op_profile",
+        "grouping",
+        "grouping_policy",
+        "intervention_audit",  # L6 resolved-intervention audit record
+        "structure_only",
+    ),
     # L2 episode ledger: the gated annotations sub-key rides the synthetic
     # "Trace.annotations" owner (see torchlens/_io/prerelease.py).
     "Trace.annotations": ("episode",),

@@ -1460,3 +1460,65 @@ __all__ = [
     "swap_with",
     "zero_ablate",
 ]
+
+
+def patch_from(source: Any) -> HelperSpec:
+    """Create a helper that patches site values from another trace's capture.
+
+    For each targeted site, the replacement value is the SOURCE trace's
+    recorded post-capture value at that same site (same-trace alignment is
+    exact by construction: same index spaces). Combined with a Selection
+    target, only the selected elements are patched (the engine's
+    edit-then-scatter contract).
+
+    PORTABILITY: ``opaque_audit`` (the shipped rule) — the spec's persisted
+    args carry the source-trace IDENTITY (label + class + a stable id), never
+    the ``Trace`` object and never tensor payloads; the values themselves are
+    bound at ``do()`` time session-side, with the resolved-intervention audit
+    record as the artifact carrier. Saving a patch-intervened trace persists
+    an audit-only spec; no executable-save path exists for it in v1.
+
+    DOCUMENTED-UNSTABLE spelling pending its naming-session ratification.
+    """
+
+    identity = {
+        "source_trace_label": str(getattr(source, "trace_label", "") or ""),
+        "source_model_class": str(getattr(source, "model_class_qualname", "") or ""),
+        "source_object_id": str(id(source)),
+    }
+
+    def factory() -> Callable[..., torch.Tensor]:
+        """Return the runtime hook binding source values at fire time."""
+
+        def _hook(out: torch.Tensor, *, hook: HookContext) -> torch.Tensor:
+            """Return the source trace's recorded value for this site."""
+
+            site_label = hook.layer_log.get("layer_label") if hook.layer_log else None
+            source_site = None
+            if site_label is not None:
+                source_site = source.layer_dict_all_keys.get(site_label)
+            if source_site is None:
+                from .errors import HookValueError
+
+                raise HookValueError(
+                    f"patch_from source trace has no site {site_label!r}; "
+                    "patch selections must resolve on sites the source captured."
+                )
+            value = source_site.out
+            if not isinstance(value, torch.Tensor):
+                from .errors import HookValueError
+
+                raise HookValueError(f"patch_from source value at {site_label!r} is not a tensor.")
+            # Never hand the source trace's stored tensor itself downstream —
+            # the engine writes hook outputs into this trace's records.
+            return value.detach().clone()
+
+        return _hook
+
+    return _helper_spec(
+        "patch_from",
+        kwargs=identity,
+        factory=factory,
+        portability="opaque_audit",
+        batch_independent=True,
+    )

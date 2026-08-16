@@ -69,6 +69,7 @@ from .._io import (
     default_fill_state,
     read_tlspec_version,
 )
+from .._io.prerelease import register_prerelease_field
 from .._save_budget import SaveBudgetExceededError
 from .._state import pause_logging
 from .._trace_core.fact_blocks import OP_FACT_FIELDS
@@ -111,6 +112,7 @@ from ..quantities import (
     as_flops,
     as_macs,
 )
+from ..selection import _SelectionOperand
 from ..utils._torch_compat import tensor_version_or_none
 from ..utils.arg_handling import copy_arg_tree
 from ..utils.display import tensor_stats_summary
@@ -199,6 +201,8 @@ _LAYER_PASS_LOG_DEFAULT_FILL: dict[str, Any] = {
     "args_template": None,
     "kwargs_template": None,
     "_edge_uses": [],
+    "edge_substitutions": {},
+    "edge_replacement_stamps": {},
     "var_names": [],
     "is_orphan": False,
     "_address_normalized": None,
@@ -1748,7 +1752,7 @@ if TYPE_CHECKING:
     from .trace import Trace
 
 
-class Op:
+class Op(_SelectionOperand):
     """Metadata for a single tensor operation (one pass of one layer).
 
     Constructed from a dict whose keys must exactly match
@@ -1902,6 +1906,8 @@ class Op:
         parents: Any
         parent_arg_positions: Any
         _edge_uses: Any
+        edge_substitutions: dict[Any, Any]
+        edge_replacement_stamps: dict[Any, Any]
         root_ancestors: Any
         children: Any
         has_children: Any
@@ -2094,6 +2100,12 @@ class Op:
         "parents": FieldPolicy.KEEP,
         "parent_arg_positions": FieldPolicy.KEEP,
         "_edge_uses": FieldPolicy.KEEP,
+        # L6 stage 3 (S3 registrar discipline): occurrence-granular edge-
+        # substitution store + save-time corroboration stamps. DROP under
+        # v7, pre-release-registered; the wave-3 bump flips them to
+        # BLOB_RECURSIVE / KEEP respectively. Never a silent v7 change.
+        "edge_substitutions": FieldPolicy.DROP,
+        "edge_replacement_stamps": FieldPolicy.DROP,
         "root_ancestors": FieldPolicy.KEEP,
         "children": FieldPolicy.KEEP,
         "has_children": FieldPolicy.KEEP,
@@ -3835,6 +3847,13 @@ class Op:
         except AttributeError:
             pass
 
+    def __selection__(self) -> object:
+        """Lift this op's whole output as an ACT selection term (one pass)."""
+
+        from ..selection import _selection_from_op
+
+        return _selection_from_op(self)
+
     @property
     def receptive_field(self) -> "ReceptiveFieldView":
         """Return the lazy receptive-field query view for this Op."""
@@ -5183,6 +5202,10 @@ def _compact_store_rows(store: Any, pool: dict[Any, Any]) -> None:
 # Backward-compatible alias: TensorLog was the original name for
 # Op before the Layer aggregate class was introduced in PR #92.
 TensorLog = Op
+
+
+register_prerelease_field(Op, "edge_substitutions", persisted_policy=FieldPolicy.BLOB_RECURSIVE)
+register_prerelease_field(Op, "edge_replacement_stamps", persisted_policy=FieldPolicy.KEEP)
 
 
 def _register_prerelease_fields() -> None:

@@ -143,6 +143,15 @@ _LAZY_ATTRS = {
     "where": ("torchlens.intervention", "where"),
     "without_op": ("torchlens.intervention", "without_op"),
     "zero_ablate": ("torchlens.intervention", "zero_ablate"),
+    "Edit": ("torchlens.intervention", "Edit"),
+    "patch_from": ("torchlens.intervention", "patch_from"),
+    # L6 selection algebra (DOCUMENTED-UNSTABLE pending naming-session
+    # ratification; megasprint provisional-name protocol).
+    "Selection": ("torchlens.selection", "Selection"),
+    "ResolvedSelection": ("torchlens.selection", "ResolvedSelection"),
+    "units": ("torchlens.selection", "units"),
+    "params": ("torchlens.selection", "params"),
+    "random_selection": ("torchlens.selection", "random_selection"),
 }
 
 _MOVED_OBJECTS = {
@@ -1365,4 +1374,11 @@ __all__ = [
     "grad_zero",
     "tap",
     "record_span",
+    "Selection",
+    "ResolvedSelection",
+    "units",
+    "params",
+    "random_selection",
+    "Edit",
+    "patch_from",
 ]
