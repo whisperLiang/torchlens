@@ -35,7 +35,7 @@ _SAFE_DEFAULT_FACTORIES: dict[str, Any] = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TupleIndex:
     """Index component for tuple/list output paths."""
 
@@ -44,7 +44,7 @@ class TupleIndex:
     index: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DictKey:
     """Key component for dict output paths."""
 
@@ -53,7 +53,7 @@ class DictKey:
     key: Any
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class NamedField:
     """Field-name component for namedtuple output paths."""
 
@@ -62,7 +62,7 @@ class NamedField:
     name: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DataclassField:
     """Field-name component for dataclass output paths."""
 
@@ -71,7 +71,7 @@ class DataclassField:
     name: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class HFKey:
     """Key component for HuggingFace ``ModelOutput`` output paths."""
 
