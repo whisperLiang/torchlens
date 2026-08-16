@@ -706,6 +706,8 @@ _UNARY_FUNCS = [
     # Memory / storage
     "pinmemory",
     "sharememory",
+    "isshared",
+    "isview",
     "recordstream",
     "storage",
     "storageoffset",
@@ -2152,6 +2154,9 @@ _PHASE5B_VALIDATED_ARG_SPECS = {
     ),
     "indicescopy": ArgSpec(positions=(0,), tensor_kwargs=("self",)),
     "infersize": ArgSpec(),
+    # F.max_unpool*'s internal size check: (output_size: list[int], dim: int),
+    # no tensor-bearing arguments.
+    "checkunpooloutputsize": ArgSpec(),
     "inprojection": ArgSpec(
         positions=(0, 1, 2, 3, 4, 5, 6, 7, 8),
         tensor_kwargs=("q", "k", "v", "w_q", "w_k", "w_v", "b_q", "b_k", "b_v"),
