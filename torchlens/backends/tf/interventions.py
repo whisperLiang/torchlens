@@ -651,8 +651,10 @@ def _mark_intervention_event(session: Any, label: str, fire_result: FireResult) 
     if event is None:
         return
     # Post-commit knowledge rides the typed amendment lane (P4): the site op
-    # was committed by the op_callback before the wrap layer fired, so this is
-    # the one sanctioned channel — never an in-place op_events[i] write.
+    # was committed by the op_callback before the wrap layer fired. In-place
+    # op_events[i] writes are reserved for the ledgered cook-owned-projection
+    # carve-out (tests/producer_parity/test_op_lane_inplace_writers.py) and
+    # are never sanctioned here.
     session.events.append_amendment(
         amend_module_exit_intervention(
             event.seq,

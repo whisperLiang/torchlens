@@ -77,8 +77,12 @@ moves, and the totality test asserts appender coverage.
 
 **S10 — SINGLE WRITER.** Only the `CaptureEvents` append methods allocate `seq` or
 append. Backends, projectors, postprocess, indexes, and public objects never mutate a
-lane list directly. Derived indexes (`LiveIndex`) are rebuildable caches, never
-authorities.
+lane list directly, with ONE ledgered carve-out: the fastlog ancestry-closure backfill
+(`fastlog/types.py::_backfill_cooked_ancestry`) replaces op-lane cells in place on the
+`copy_for_replay` projection a cook owns (never a sealed stream) and invalidates
+`_amended_fold_cache`. The closed set of in-place op-lane writers is enforced by the
+package-wide AST ledger in `tests/producer_parity/test_op_lane_inplace_writers.py`.
+Derived indexes (`LiveIndex`) are rebuildable caches, never authorities.
 
 **S11 — HONEST LIFECYCLE.** Forward completion does not imply capture closure: backward
 MAY append while armed. Detached streams (pickle restore, forks) record their

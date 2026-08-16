@@ -289,6 +289,14 @@ facets, strict protocol with legacy flat-name properties) through the ONE commit
 (`ingest_op_records`). The op lane is genuinely append-only: post-commit knowledge rides
 the typed `OpAmendment` lane (nine exact-set families, `append_amendment` the single
 writer) and every amended-state read folds through `CaptureEvents.amended_op_records()`.
+ONE sanctioned in-place carve-out exists: the fastlog ancestry-closure backfill
+(`fastlog/types.py::_backfill_cooked_ancestry`) replaces op-lane cells on the
+`copy_for_replay` projection a cook owns — never the sealed Recording stream — and nulls
+`_amended_fold_cache` afterwards. Every in-place op-lane writer (this one included) is
+pinned by the closed reason-bearing ledger in
+`tests/producer_parity/test_op_lane_inplace_writers.py`, whose package-wide AST scan sees
+subscript/slice/augmented writes, `del`, and mutating list methods; a new writer is red
+until consciously ledgered.
 grad-fn handles live only in the journal side index (`grad_fn_handles_by_label_raw`).
 The legacy `OpEvent` torch producer and its dual-path env switch were
 deleted (P7); preview backends keep emitting compat `OpEvent`s until S15 and adapt at the
