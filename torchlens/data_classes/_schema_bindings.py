@@ -448,6 +448,7 @@ STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {
         "equivalence_class": StorageBinding(StorageKind.INTERNED),
         "equivalent_ops": StorageBinding(StorageKind.GROUP, mutability="copy_on_read"),
         "recurrent_ops": StorageBinding(StorageKind.GROUP, mutability="copy_on_read"),
+        "site_key": StorageBinding(StorageKind.RUNTIME),
         "parents": StorageBinding(StorageKind.EDGE),
         "parent_arg_positions": StorageBinding(StorageKind.SCALAR, mutability="mutable_container"),
         "_edge_uses": StorageBinding(StorageKind.SCALAR, mutability="mutable_container"),

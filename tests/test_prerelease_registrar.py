@@ -41,6 +41,11 @@ pytestmark = pytest.mark.smoke
 #: Any declared-DROP field works; this one is a plain session-time int.
 _PLANT_FIELD = "_tl_save_selector_fire_count"
 
+#: STANDING registrations live at import time (the S3 writer-lane inventory);
+#: updating this ledger is a conscious act reviewed with the owning lane's
+#: merge. L1 wave 0: Op.site_key (the site_key_v1 bridging relation).
+_STANDING_REGISTRATIONS = {"Op": ("site_key",)}
+
 
 @pytest.fixture
 def planted_field():
@@ -71,13 +76,16 @@ def test_registration_requires_declared_drop_policy() -> None:
         register_prerelease_field(Trace, "_no_such_field_anywhere")
     with pytest.raises(ValueError, match="no-op"):
         register_prerelease_field(Trace, _PLANT_FIELD, persisted_policy=FieldPolicy.DROP)
-    assert registered_prerelease_fields() == {}
+    assert registered_prerelease_fields() == _STANDING_REGISTRATIONS
 
 
 def test_registry_inventory_and_unregister(planted_field: str) -> None:
-    assert registered_prerelease_fields() == {"Trace": (planted_field,)}
+    assert registered_prerelease_fields() == {
+        **_STANDING_REGISTRATIONS,
+        "Trace": (planted_field,),
+    }
     unregister_prerelease_field(Trace, planted_field)
-    assert registered_prerelease_fields() == {}
+    assert registered_prerelease_fields() == _STANDING_REGISTRATIONS
     # Fixture teardown unregisters again; must be idempotent.
 
 

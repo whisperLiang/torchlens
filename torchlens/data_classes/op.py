@@ -1898,6 +1898,7 @@ class Op:
         equivalence_class: Any
         equivalent_ops: Any
         recurrent_ops: Any
+        site_key: str | None
         parents: Any
         parent_arg_positions: Any
         _edge_uses: Any
@@ -2086,6 +2087,10 @@ class Op:
         "equivalence_class": FieldPolicy.KEEP,
         "equivalent_ops": FieldPolicy.KEEP,
         "recurrent_ops": FieldPolicy.KEEP,
+        # site_key_v1 structural-position identity: DROP under tlspec v7,
+        # prerelease-registered (S3 discipline) -- persists KEEP only at the
+        # coordinated version bump.
+        "site_key": FieldPolicy.DROP,
         "parents": FieldPolicy.KEEP,
         "parent_arg_positions": FieldPolicy.KEEP,
         "_edge_uses": FieldPolicy.KEEP,
@@ -5178,3 +5183,20 @@ def _compact_store_rows(store: Any, pool: dict[Any, Any]) -> None:
 # Backward-compatible alias: TensorLog was the original name for
 # Op before the Layer aggregate class was introduced in PR #92.
 TensorLog = Op
+
+
+def _register_prerelease_fields() -> None:
+    """Register sprint-gated Op fields with the S3 prerelease registrar.
+
+    ``site_key`` lands declared ``FieldPolicy.DROP`` under tlspec v7; the
+    registration makes it scrub with its intended persisting policy under
+    the TEST-ONLY activation switch (portability exit gates), and flips to
+    a real ``KEEP`` only at the coordinated version bump.
+    """
+
+    from .._io.prerelease import register_prerelease_field
+
+    register_prerelease_field(Op, "site_key")
+
+
+_register_prerelease_fields()

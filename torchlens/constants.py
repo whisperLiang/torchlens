@@ -426,6 +426,10 @@ LAYER_PASS_LOG_FIELD_ORDER = [
     "equivalence_class",
     "equivalent_ops",
     "recurrent_ops",
+    # Structural position identity (site_key_v1, minted at step 7; portable
+    # bridging relation -- FieldPolicy.DROP until the coordinated tlspec bump,
+    # prerelease-registered)
+    "site_key",
     # Graph info
     "parents",
     "parent_arg_positions",

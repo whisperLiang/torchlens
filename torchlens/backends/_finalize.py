@@ -13,6 +13,7 @@ from ..data_classes.layer import Layer
 from ..data_classes.module import ModuleAccessor
 from ..data_classes.trace import Trace, _init_module_hierarchy_data
 from ..ir.op_record import amend_preview_output_parent_mark
+from ..postprocess._site_key import SiteKeyMinter
 from ..postprocess.finalization import _build_module_logs, _build_root_module_log
 from ..postprocess.loop_grouping_adapter import RecurrenceAssignment
 from ..quantities import Bytes
@@ -100,6 +101,7 @@ def finalize_single_pass_trace(
         The trace is updated in place.
     """
 
+    _mint_preview_site_keys(trace)
     assignments: dict[str, RecurrenceAssignment] | None = None
     if recurrence_detection:
         assignments = compute_preview_recurrence_assignments(trace, backend_name=backend_name)
@@ -486,6 +488,37 @@ def _update_distance(op_log: Any, min_field: str, max_field: str, hops: int) -> 
     current_max = getattr(op_log, max_field, None)
     setattr(op_log, min_field, hops if current_min is None else min(current_min, hops))
     setattr(op_log, max_field, hops if current_max is None else max(current_max, hops))
+
+
+def _mint_preview_site_keys(trace: Trace) -> None:
+    """Mint the policy-independent ``site_key_v1`` on every retained preview op.
+
+    Runs before recurrence assignments are computed (site keys are structural
+    facts from raw records, identical whether grouping runs or not -- P4), so
+    the preview node builder copies the minted key into its
+    ``RecurrenceNode`` and the ungrouped path carries keys all the same.
+    Orphan ops consume no ordinals and keep ``site_key=None`` (SF-63).
+
+    Parameters
+    ----------
+    trace:
+        Trace whose ``_raw_graph_ws.raw_layer_dict`` holds materialized
+        preview ops in execution order.
+    """
+
+    minter = SiteKeyMinter()
+    for op_log in trace._raw_graph_ws.raw_layer_dict.values():
+        if getattr(op_log, "is_orphan", False):
+            continue
+        op_log.site_key = minter.mint(
+            getattr(op_log, "modules", None) or (),
+            str(getattr(op_log, "type", "") or ""),
+            (
+                getattr(op_log, "multi_output_index", None)
+                if getattr(op_log, "in_multi_output", False)
+                else None
+            ),
+        )
 
 
 def _finalize_single_op(

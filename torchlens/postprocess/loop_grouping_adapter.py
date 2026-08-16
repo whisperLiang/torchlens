@@ -154,6 +154,11 @@ class RecurrenceNode:
     deliberately excludes tensor arguments AND their shapes so genuine variable-length
     recurrence (a loop whose activations shrink each step) keeps one signature across
     passes. ``None`` preserves the historical behavior."""
+    site_key: str | None = None
+    """Portable ``site_key_v1`` structural-position identity (:mod:`._site_key`).
+
+    Minted by each producer's node builder from raw records in execution order;
+    policy-independent (identical whether grouping runs, degrades, or is off)."""
     recurrence_anchored: bool = False
     """Whether this op has a reused persistent identity that anchors genuine recurrence.
 
@@ -204,6 +209,9 @@ class RecurrenceAssignment:
         Number of passes represented by this layer.
     equivalence_key:
         Canonical structural key assigned to the grouped nodes.
+    site_key:
+        This NODE's portable structural-position key (op-granular, never a
+        group fact: site-spanning groups carry distinct member keys).
     """
 
     layer_label: str
@@ -211,6 +219,7 @@ class RecurrenceAssignment:
     pass_index: int
     num_passes: int
     equivalence_key: str
+    site_key: str | None = None
 
 
 _ParamCallIdentity = tuple[
@@ -241,6 +250,7 @@ class _MutableRecurrenceNode:
     recurrence_anchored: bool = False
     module_site: tuple[str, ...] | None = None
     arg_signature: str | None = None
+    site_key: str | None = None
 
 
 @dataclass
@@ -322,6 +332,7 @@ class _GroupingWorkspace:
                 recurrence_anchored=node.recurrence_anchored,
                 module_site=node.module_site,
                 arg_signature=node.arg_signature,
+                site_key=node.site_key,
             )
             for label, node in graph.nodes.items()
             if label in eligible and node.retain and not node.pruned
@@ -386,6 +397,7 @@ class _GroupingWorkspace:
                 pass_index=index + 1,
                 num_passes=len(members),
                 equivalence_key=node.equivalence_key,
+                site_key=node.site_key,
             )
         return assignments
 

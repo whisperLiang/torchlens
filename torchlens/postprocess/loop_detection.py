@@ -9,6 +9,7 @@ import hashlib
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
+from ._site_key import SiteKeyMinter
 from .loop_grouping_adapter import (
     RecurrenceAssignment,
     RecurrenceGroupingGraph,
@@ -254,6 +255,33 @@ def _differentiated_param_equivalence_classes(self: "Trace") -> dict[str, str]:
     return effective
 
 
+def _mint_site_keys(self: "Trace") -> None:
+    """Mint the policy-independent ``site_key_v1`` on every retained op.
+
+    Runs identically on the full-detection and degraded
+    (``recurrence_detection=False``) paths -- site keys are structural facts
+    computed from raw records BEFORE any grouping verdict, so both paths
+    produce byte-identical key multisets (property P4). Orphan ops consume
+    no ordinals and keep ``site_key=None`` (the SF-63 ruling).
+
+    Parameters
+    ----------
+    self:
+        Trace currently running Step 7 postprocessing.
+    """
+
+    minter = SiteKeyMinter()
+    for label in self._raw_graph_ws.raw_layer_labels_list:
+        node = self[label]
+        if getattr(node, "is_orphan", False):
+            continue
+        node.site_key = minter.mint(
+            getattr(node, "modules", None) or (),
+            node.layer_type,
+            getattr(node, "multi_output_index", None),
+        )
+
+
 def _group_by_shared_params(self: "Trace") -> None:
     """Group repeated uses of the same parameterized function.
 
@@ -266,9 +294,11 @@ def _group_by_shared_params(self: "Trace") -> None:
     -----
     Operations without parameters remain individual single-pass layers. The
     helper sets ``_layer_label_raw``, ``recurrent_ops``, ``pass_index``, and
-    ``num_passes`` on every retained op.
+    ``num_passes`` on every retained op, plus the policy-independent
+    ``site_key`` (identical to the full-detection path's keys, P4).
     """
 
+    _mint_site_keys(self)
     effective_equivalence = _differentiated_param_equivalence_classes(self)
     for label, effective_class in effective_equivalence.items():
         self[label].equivalence_class = effective_class
@@ -317,6 +347,7 @@ def _detect_and_label_loops(self: "Trace") -> None:
         Trace currently running Step 7 postprocessing.
     """
 
+    _mint_site_keys(self)
     grouping_graph = _build_recurrence_grouping_graph(self)
     assignments = group_recurrent_nodes(grouping_graph)
     _apply_recurrence_assignments(self, assignments)
@@ -404,6 +435,7 @@ def _build_recurrence_grouping_graph(self: "Trace") -> RecurrenceGroupingGraph:
             ),
             module_site=_module_site(node),
             arg_signature=_structural_arg_signature(node) if node.uses_params else None,
+            site_key=getattr(node, "site_key", None),
         )
 
     return RecurrenceGroupingGraph(
