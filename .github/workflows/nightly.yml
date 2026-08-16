@@ -25,7 +25,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-          fetch-depth: 2
+          # Full history + tags: the cumulative leg anchors on the latest
+          # release tag, not just HEAD^ (r7 R30).
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
@@ -46,9 +49,19 @@ jobs:
             "torchvision==0.23.0+cpu" \
             numpy
 
-      - name: Prepare adjacent-commit baseline checkout
+      - name: Prepare adjacent-commit and release-anchor baselines
+        # r7 R30 (opus MED, round-1 carry): the adjacent-commit differential
+        # alone is baselined-in by the NEXT commit (regress in C, land D
+        # before the nightly, and every future comparison is D-vs-C) and
+        # carries no cumulative ceiling (ten sequential 9% regressions pass
+        # ten nightly gates). The release tag is the fixed anchor: it moves
+        # only when a release ships, so slow drift accumulates against it
+        # instead of being re-based away nightly.
         run: |
           git worktree add --detach "${{ runner.temp }}/perf-base" HEAD^
+          anchor="$(git describe --tags --abbrev=0)"
+          echo "release anchor: $anchor"
+          git worktree add --detach "${{ runner.temp }}/perf-anchor" "$anchor"
 
       - name: Measure baseline and current commit on the same runner
         env:
@@ -59,6 +72,11 @@ jobs:
             --smoke --samples 10 --timeout 180 \
             --out-json "${{ runner.temp }}/perf-base.json" \
             --out-md "${{ runner.temp }}/perf-base.md"
+          cd "${{ runner.temp }}/perf-anchor"
+          PYTHONPATH=. "$PERF_PYTHON" -m benchmarks.perf_suite \
+            --smoke --samples 10 --timeout 180 \
+            --out-json "${{ runner.temp }}/perf-anchor.json" \
+            --out-md "${{ runner.temp }}/perf-anchor.md"
           cd "$GITHUB_WORKSPACE"
           PYTHONPATH=. "$PERF_PYTHON" -m benchmarks.perf_suite \
             --smoke --samples 10 --timeout 180 \
@@ -73,6 +91,14 @@ jobs:
             --baseline "${{ runner.temp }}/perf-base.json" \
             --current "${{ runner.temp }}/perf-current.json" \
             --out "${{ runner.temp }}/perf-comparison.json"
+          # Cumulative ceiling vs the release anchor: 25% tolerance -- wide
+          # enough for a release cycle's reviewed growth, tight enough that
+          # compounding "9% per commit" drift goes red before it doubles.
+          PYTHONPATH=. "$PERF_PYTHON" -m benchmarks.perf_gate \
+            --baseline "${{ runner.temp }}/perf-anchor.json" \
+            --current "${{ runner.temp }}/perf-current.json" \
+            --rel-tolerance 0.25 \
+            --out "${{ runner.temp }}/perf-anchor-comparison.json"
 
       - name: Upload performance evidence
         if: always()
@@ -81,7 +107,9 @@ jobs:
           name: nightly-perf-gate
           path: |
             ${{ runner.temp }}/perf-base.json
+            ${{ runner.temp }}/perf-anchor.json
             ${{ runner.temp }}/perf-current.json
+            ${{ runner.temp }}/perf-anchor-comparison.json
             ${{ runner.temp }}/perf-comparison.json
 
   fast-tier:
