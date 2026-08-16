@@ -352,7 +352,21 @@ def _check_op_log_fields(ml: Trace) -> None:
             or is_functionless_internal_source
             or is_functionless_replacement
         ):
-            if not callable(lpl.func):
+            if bool(getattr(ml, "_loaded_from_bundle", False)):
+                # Loaded-artifact arm (R10-3): ``Op.func`` is FieldPolicy.DROP
+                # and ``__getstate__`` hard-nulls it, so ``callable(func)``
+                # false-fired on EVERY loaded torch trace. The loaded arm
+                # asserts the known load-time shape POSITIVELY -- a non-None
+                # func on a loaded artifact is tampering or a schema change
+                # this invariant must see -- while the func_name checks below
+                # stay enforced in both arms. The live arm is untouched.
+                if lpl.func is not None:
+                    raise MetadataInvariantError(
+                        name,
+                        f"Layer {label}: loaded artifact carries a non-None func "
+                        "(func is FieldPolicy.DROP and never persists)",
+                    )
+            elif not callable(lpl.func):
                 raise MetadataInvariantError(name, f"Layer {label}: func is not callable")
             if not lpl.func_name:
                 raise MetadataInvariantError(name, f"Layer {label}: func_name is empty")
