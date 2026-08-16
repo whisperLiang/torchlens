@@ -75,6 +75,30 @@ jobs:
       # the verdict environment.
       - run: uv pip install --system "pre-commit==4.6.2"
 
+      - name: Verify the ruff hook SHA matches its claimed version tag
+        # r7 R87 (opus MED): the ruff rev moved from a version tag to a git
+        # SHA with a hand-written `# vX.Y.Z` trailer, so the version lockstep
+        # test began validating an UNVERIFIED claim -- a bump that moves the
+        # SHA and forgets the trailer (or lands on a wrong mirror commit)
+        # passed green while the one --fix hook with write access WROTE with
+        # a different ruff than the gate JUDGES. Resolving the claimed tag on
+        # the hook repo and requiring it to equal the pinned SHA converts the
+        # trailer into a checked binding.
+        run: |
+          rev="$(grep -A20 'astral-sh/ruff-pre-commit' .pre-commit-config.yaml | grep -oEm1 'rev: [0-9a-f]{40}' | cut -d' ' -f2)"
+          version="$(grep -A20 'astral-sh/ruff-pre-commit' .pre-commit-config.yaml | grep -oEm1 'rev: [0-9a-f]{40} *# *v[0-9]+\.[0-9]+\.[0-9]+' | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+')"
+          { test -n "$rev" && test -n "$version"; } || { echo "could not parse ruff hook rev/trailer"; exit 1; }
+          resolved="$(git ls-remote --tags https://github.com/astral-sh/ruff-pre-commit "refs/tags/${version}^{}" | cut -f1)"
+          if [ -z "$resolved" ]; then
+            resolved="$(git ls-remote --tags https://github.com/astral-sh/ruff-pre-commit "refs/tags/${version}" | cut -f1)"
+          fi
+          test -n "$resolved" || { echo "tag ${version} not found on ruff-pre-commit"; exit 1; }
+          if [ "$resolved" != "$rev" ]; then
+            echo "ruff hook rev ${rev} does not match tag ${version} (${resolved}): the trailer is lying"
+            exit 1
+          fi
+          echo "ruff hook rev verified: ${version} -> ${rev}"
+
       - name: Run every pre-commit hook over the full tree
         run: pre-commit run --all-files --show-diff-on-failure
 
@@ -179,7 +203,7 @@ jobs:
           print(f"quality.yml tracks the newest-admitted torch {newest} ({len(quality)} literals)")
           PY
 
-      - name: Golden-fingerprint and audit pin lockstep (pydot, graphviz, pip-audit)
+      - name: Golden-fingerprint and audit pin lockstep (pydot, graphviz, jsonschema, pip-audit)
         # pydot is a DOT-render golden fingerprint KEY: the [test] extra is the
         # pin authority and the lean .[dev,tabular] legs repeat it inline, so a
         # bump that misses a site silently renders goldens with a different
@@ -190,19 +214,24 @@ jobs:
         # markers) but a CORE runtime dep that must stay a floor for users —
         # so its authority is the marker itself, and the CI inline pins must
         # equal it (grind r5, b10 R78-3).
+        # r7 R83: the inline scans now cover EVERY workflow file — the old
+        # hand-enumerated two-file list let mutation.yml's third pydot pin
+        # drift unguarded from birth. jsonschema joins the gate: its three
+        # tests.yml inline copies validate the menagerie release lock, so a
+        # partial bump forks lock-validation verdicts between legs.
         run: |
           python - <<'PY'
           import pathlib
           import re
 
           pyproject = pathlib.Path("pyproject.toml").read_text()
-          tests = pathlib.Path(".github/workflows/tests.yml").read_text()
-          canary = pathlib.Path(".github/workflows/latest-canary.yml").read_text()
+          workflows = sorted(pathlib.Path(".github/workflows").glob("*.yml"))
+          all_workflows = "".join(path.read_text() for path in workflows)
           quality = pathlib.Path(".github/workflows/quality.yml").read_text()
 
           pydot_authority = set(re.findall(r'"pydot==([0-9][^"]*)"', pyproject))
           assert len(pydot_authority) == 1, f"expected ONE pydot pin in pyproject: {pydot_authority}"
-          pydot_inline = set(re.findall(r"pydot==([0-9][^\"'\s]*)", tests + canary))
+          pydot_inline = set(re.findall(r"pydot==([0-9][^\"'\s]*)", all_workflows))
           assert pydot_inline == pydot_authority, (
               f"inline pydot pins {pydot_inline} drifted from the [test] extra "
               f"authority {pydot_authority}: bump every site together or the "
@@ -218,6 +247,22 @@ jobs:
               "that actually audits releases"
           )
 
+          jsonschema_inline = set(re.findall(r"jsonschema==([0-9][^\"'\s]*)", all_workflows))
+          assert len(jsonschema_inline) <= 1, (
+              f"inline jsonschema pins disagree across workflows: {jsonschema_inline} — "
+              "the inline copy validates the menagerie release lock, so a partial "
+              "bump forks lock-validation verdicts between legs (r7 R83-2)"
+          )
+          if jsonschema_inline:
+              band = re.search(r'"jsonschema>=([0-9.]+),<([0-9.]+)"', pyproject)
+              assert band is not None, "dev extra lost its jsonschema band"
+              pinned = next(iter(jsonschema_inline))
+              def _key(version): return tuple(int(part) for part in version.split("."))
+              assert _key(band.group(1)) <= _key(pinned) < _key(band.group(2)), (
+                  f"inline jsonschema {pinned} escaped the dev-extra band "
+                  f">={band.group(1)},<{band.group(2)}"
+              )
+
           markers = {
               path: pathlib.Path(path).read_text().strip()
               for path in (
@@ -227,7 +272,7 @@ jobs:
           }
           marker_versions = set(markers.values())
           assert len(marker_versions) == 1, f"ENV-graphviz markers disagree: {markers}"
-          gv_inline = set(re.findall(r"graphviz==([0-9][^\"'\s]*)", tests + canary))
+          gv_inline = set(re.findall(r"graphviz==([0-9][^\"'\s]*)", all_workflows))
           assert gv_inline == marker_versions, (
               f"inline graphviz pins {gv_inline} drifted from the committed "
               f"ENV-graphviz markers {marker_versions}: the python DOT emitter "
@@ -235,7 +280,8 @@ jobs:
               "families off-canonical on the enforcing row (b10 R78-3)"
           )
           print(
-              f"pydot {pydot_authority}, graphviz {marker_versions}, and "
+              f"pydot {pydot_authority}, graphviz {marker_versions}, jsonschema "
+              f"{jsonschema_inline or '(no inline pins)'}, and "
               f"pip-audit {audit_authority} in lockstep"
           )
           PY

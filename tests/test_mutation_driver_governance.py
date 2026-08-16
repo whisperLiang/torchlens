@@ -369,3 +369,82 @@ def test_core_check_roster_matches_the_real_tree() -> None:
 
     driver = _load_driver_module()
     driver.derive_core_check_roster(_REPO_ROOT)
+
+
+@pytest.mark.smoke
+def test_empty_mutant_selection_refuses_vacuous_green() -> None:
+    """r7 R79 (fable b10 MED): zero selected mutants is a refusal, not a pass.
+
+    An empty ``ids`` list used to skip the campaign loop and print ``all
+    mutants KILLED`` with exit 0, so a shard-slicing bug or family-key rename
+    turned the scheduled leg permanently green while scoring NOTHING.
+    """
+
+    driver = _load_driver_module()
+    with pytest.raises(SystemExit, match="EMPTY MUTANT SELECTION"):
+        driver.require_nonempty_selection([], family="arms", arm_shard="9/9")
+    # Non-empty selections pass through untouched.
+    driver.require_nonempty_selection(["m1"], family=None, arm_shard=None)
+    # main() calls the floor after family filtering and shard slicing.
+    source = (_REPO_ROOT / "tests" / "support" / "mutation_driver.py").read_text(encoding="utf-8")
+    main_body = source.split("def main()", 1)[1]
+    slice_pos = main_body.find("--arm-shard")
+    floor_pos = main_body.find("require_nonempty_selection")
+    assert slice_pos != -1 and floor_pos != -1 and floor_pos > slice_pos, (
+        "the empty-selection floor must run AFTER family filtering and shard "
+        "slicing in main(), or an empty slice still scores vacuously green"
+    )
+
+
+@pytest.mark.smoke
+def test_mutation_workflow_rotation_contract() -> None:
+    """r7 cluster 19: the rotation contract f9964208 claimed but never pinned.
+
+    The scheduled leg's slot selection and family routing live in shell
+    inside ``mutation.yml``; nothing else checks that the families it names
+    exist in the driver, that the rotation can only produce shards 1..4 of
+    4, or that step outputs stay routed through ``env:`` (the zizmor
+    template-injection class). Pin all three so a workflow edit that breaks
+    the campaign's selection contract goes red here instead of scoring an
+    empty (now refused) or wrong slice on a scheduled Sunday.
+    """
+
+    import re
+
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "mutation.yml").read_text(encoding="utf-8")
+    driver = _load_driver_module()
+
+    # Every family literal the workflow can route exists in the driver's
+    # vocabulary ("bounded" is the workflow-side fan-out alias).
+    families_in_driver = set(driver.FAMILIES) if hasattr(driver, "FAMILIES") else None
+    bounded_loop = re.search(r"for fam in ([a-z ]+);", workflow)
+    assert bounded_loop is not None, "mutation.yml lost its bounded fan-out loop"
+    workflow_families = set(bounded_loop.group(1).split())
+    assert workflow_families == {"registry", "checks", "corechecks", "blocks", "exempt"}
+    if families_in_driver is not None:
+        assert workflow_families <= families_in_driver
+
+    # The rotation arithmetic yields shard I/4 with I in 1..4 for every ISO
+    # week (%V is 01..53); shard 0 or an out-of-range index is impossible.
+    assert re.search(r"%\s*4\s*\+\s*1", workflow), (
+        "rotation slot arithmetic changed: the ISO-week mapping must stay "
+        "modulo-4 plus one (shards 1..4, never 0)"
+    )
+    assert 'shard="${slot}/4"' in workflow
+    for week in range(1, 54):
+        slot = week % 4 + 1
+        assert 1 <= slot <= 4
+
+    # Step outputs reach the run block through env, never inline ${{ }}
+    # interpolation (r7 R82 template-injection fix).
+    run_step = workflow.split("Run mutation campaign", 1)[1]
+    assert "SLOT_FAMILY: ${{ steps.slot.outputs.family }}" in run_step
+    assert "${{ steps.slot.outputs" not in run_step.split("run: |", 1)[1], (
+        "mutation.yml interpolates step outputs directly into the shell "
+        "again -- route them through env (template-injection class)"
+    )
+
+    # Dispatch inputs are validated before touching $GITHUB_OUTPUT.
+    assert re.search(r"case \"\$INPUT_FAMILY\" in", workflow), (
+        "dispatch input validation removed from the slot step"
+    )

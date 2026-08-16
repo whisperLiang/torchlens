@@ -691,6 +691,26 @@ def run_suite(
         return SuiteTimeout(float(timeout or 0.0))
 
 
+def require_nonempty_selection(
+    ids: list[str], *, family: str | None, arm_shard: str | None
+) -> None:
+    """Refuse an empty mutant selection instead of scoring vacuously green.
+
+    r7 R79 (fable b10 MED, corroborated by the R82 lane): an empty ``ids``
+    list skipped the campaign loop entirely and printed ``all mutants
+    KILLED`` with exit 0 -- so a shard-slicing bug or a family-key rename
+    would turn the scheduled leg permanently, silently green. Zero selected
+    mutants is never a verdict; it is a selection failure.
+    """
+
+    if not ids:
+        raise SystemExit(
+            "EMPTY MUTANT SELECTION -- refusing to report a vacuous "
+            f"'all mutants KILLED' (family={family!r}, arm_shard={arm_shard!r}); "
+            "fix the family key or shard arithmetic"
+        )
+
+
 def main() -> None:
     """Parse arguments, enforce the pristine control, and score each mutant."""
 
@@ -811,6 +831,7 @@ def main() -> None:
             raise SystemExit(f"bad --arm-shard {args.arm_shard!r}: need 1 <= I <= N")
         ids = [mid for pos, mid in enumerate(sorted(ids)) if pos % shard_count == shard_index - 1]
         print(f"shard {shard_index}/{shard_count}: {len(ids)} mutants", flush=True)
+    require_nonempty_selection(ids, family=args.family, arm_shard=args.arm_shard)
 
     # Pristine control: verdicts are meaningless over a red baseline (the b9
     # hunt's un-controlled pass hallucinated 2 kills off pre-existing reds).
