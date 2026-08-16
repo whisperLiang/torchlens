@@ -240,3 +240,50 @@ def test_persisted_selector_repr_relativizes_absolute_paths() -> None:
     assert entries, "expected a zero-match ledger entry"
     assert "/home/someone" not in entries[0]["selector"]
     assert "cfg.json" in entries[0]["selector"]
+
+
+def test_layers_to_save_zero_match_warns_and_persists(tmp_path) -> None:
+    """grind-r6 b3 R15 (opus MED, probe-proven; residual of B3R5-R15-1).
+
+    ``layers_to_save`` resolves through its own predicate machinery, never a
+    ``BaseSelector``, so a typo'd layer name sat OUTSIDE the zero-match
+    disclosure family: the capture retained only the always-retained output
+    tail and disclosed nothing, live and in the artifact -- while the same
+    typo in the ``save=`` slot warned and persisted a record. This is the
+    highest-traffic instance of the cc2cabbb class ("an ablation sweep with
+    one typo'd layer name concluded 'this layer does not matter'").
+    """
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        log = tl.trace(
+            _model(),
+            torch.ones(1, 3),
+            capture=tl.options.CaptureOptions(layers_to_save=["nosuchlayerzzz"]),
+        )
+    assert any("matched zero layers" in str(w.message) for w in caught), (
+        "typo'd layers_to_save produced no zero-match warning"
+    )
+    entries = log.annotations.get("unmatched_capture_selectors", [])
+    assert any(entry["slot"] == "layers_to_save" for entry in entries), (
+        f"no persisted layers_to_save zero-match record: {entries}"
+    )
+
+    # The artifact carries the record too.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        tl.save(log, tmp_path / "zm.tlspec")
+        loaded = tl.load(tmp_path / "zm.tlspec")
+    loaded_entries = loaded.annotations.get("unmatched_capture_selectors", [])
+    assert any(entry["slot"] == "layers_to_save" for entry in loaded_entries)
+
+    # Control: the correct spelling selects and stays silent.
+    with warnings.catch_warnings(record=True) as clean:
+        warnings.simplefilter("always")
+        control = tl.trace(
+            _model(),
+            torch.ones(1, 3),
+            capture=tl.options.CaptureOptions(layers_to_save=["linear"]),
+        )
+    assert not any("matched zero layers" in str(w.message) for w in clean)
+    assert not control.annotations.get("unmatched_capture_selectors")
