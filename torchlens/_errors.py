@@ -181,6 +181,17 @@ class ArgumentConflictError(_ActionableErrorMixin, ConfigurationError, ValueErro
         )
 
 
+class StructureOnlyOptionConflictError(ArgumentConflictError):
+    """Raised when ``structure_only=True`` is combined with an option that
+    needs tensor values (L7a Layer-0 entry conflict).
+
+    One code (``structure_only_option_conflict``) covers every arm; the
+    offending option name rides ``fields["arguments"]``. DOCUMENTED-UNSTABLE:
+    class name and code are provisional pending naming-session/S2
+    ratification (no deprecation shim owed on rename).
+    """
+
+
 class KeywordConflictError(_ActionableErrorMixin, ConfigurationError, TypeError):
     """Raised when conflicting keyword/call-surface spellings are supplied together.
 

@@ -115,6 +115,7 @@ _CAPTURE_FIELDS: Final[tuple[str, ...]] = (
     "save_budget",
     "distributed_witness",
     "raise_on_nan",
+    "structure_only",
 )
 _SAVE_FIELDS: Final[tuple[str, ...]] = (
     "activation_transform",
@@ -220,6 +221,7 @@ _CAPTURE_FLAT_TO_GROUP: Final[dict[str, str]] = {
     "payload_policy": "payload_policy",
     "save_preview": "save_preview",
     "raise_on_nan": "raise_on_nan",
+    "structure_only": "structure_only",
 }
 _SAVE_FLAT_TO_GROUP: Final[dict[str, str]] = {
     "activation_transform": "activation_transform",
@@ -709,6 +711,14 @@ def _validate_capture_values(values: Mapping[str, Any]) -> None:
             remedy="set distributed_witness to 'digest' for byte-exact witness digests",
             argument="distributed_witness",
         )
+    if not isinstance(values["structure_only"], bool):
+        raise ArgumentTypeError(
+            "Capture option structure_only is not a bool",
+            code="structure_only_type_invalid",
+            remedy="pass structure_only=True or structure_only=False",
+            argument="structure_only",
+            received_type=type(values["structure_only"]).__name__,
+        )
 
 
 def _set_frozen_fields(
@@ -1024,6 +1034,15 @@ class CaptureOptions:
         cap to enforce those devices.
     raise_on_nan:
         Whether capture should stop at the first NaN or Inf tensor.
+    structure_only:
+        Whether this capture runs under the structure-only contract
+        (DOCUMENTED-UNSTABLE surface, pending naming-session/S2 ratification;
+        no deprecation shim owed on rename). Structure-only capture records
+        the op graph, module hierarchy, parameter geometry, and per-op
+        shape/dtype as HYPOTHESES while every value-bearing claim is refused
+        typed or gated; value-dependent branches refuse with the user's
+        source line. Torch-only; the capability contract lives in
+        ``docs/reference/structure_only_capabilities.md``.
 
     Examples
     --------
@@ -1077,6 +1096,7 @@ class CaptureOptions:
     save_budget: SaveBudgetOption = "auto"
     distributed_witness: str = "none"
     raise_on_nan: bool = False
+    structure_only: bool = False
     _specified_fields: frozenset[str] = field(default_factory=frozenset, init=False, repr=False)
 
     def __init__(
@@ -1127,6 +1147,7 @@ class CaptureOptions:
         distributed_witness: str | MissingType = MISSING,
         raise_on_nan: bool | MissingType = MISSING,
         *,
+        structure_only: bool | MissingType = MISSING,
         mark_layer_depths: bool | MissingType = MISSING,
         num_context_lines: int | MissingType = MISSING,
         capture_output_structure: bool | MissingType = MISSING,
@@ -1297,6 +1318,9 @@ class CaptureOptions:
             ),
             "raise_on_nan": _resolve_option_value(
                 "raise_on_nan", raise_on_nan, False, specified_fields
+            ),
+            "structure_only": _resolve_option_value(
+                "structure_only", structure_only, False, specified_fields
             ),
         }
         _validate_capture_values(values)

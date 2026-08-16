@@ -99,6 +99,11 @@ EXPECTED_GATED_CAPABILITIES: dict[str, dict[str, bool]] = {
         "interventions": True,
         "rng_replay": True,
         "streaming": True,
+        # Lifted 2026-08 (L7a wave 0): structure-only capture with the typed
+        # chokepoint in torchlens.capture.structure_only
+        # (tests/test_structure_only_entry.py); DOCUMENTED-UNSTABLE pending
+        # naming-session/S2 ratification.
+        "structure_only_capture": True,
     },
     "mlx": {
         "backward_capture": False,
@@ -109,6 +114,7 @@ EXPECTED_GATED_CAPABILITIES: dict[str, dict[str, bool]] = {
         "interventions": True,
         "rng_replay": False,
         "streaming": False,
+        "structure_only_capture": False,
     },
     "jax": {
         "backward_capture": False,
@@ -116,6 +122,7 @@ EXPECTED_GATED_CAPABILITIES: dict[str, dict[str, bool]] = {
         "interventions": False,
         "rng_replay": False,
         "streaming": False,
+        "structure_only_capture": False,
     },
     "tinygrad": {
         "backward_capture": False,
@@ -123,6 +130,7 @@ EXPECTED_GATED_CAPABILITIES: dict[str, dict[str, bool]] = {
         "interventions": False,
         "rng_replay": False,
         "streaming": False,
+        "structure_only_capture": False,
     },
     "paddle": {
         "backward_capture": False,
@@ -133,6 +141,7 @@ EXPECTED_GATED_CAPABILITIES: dict[str, dict[str, bool]] = {
         "interventions": True,
         "rng_replay": False,
         "streaming": False,
+        "structure_only_capture": False,
     },
     "tf": {
         "backward_capture": False,
@@ -143,6 +152,7 @@ EXPECTED_GATED_CAPABILITIES: dict[str, dict[str, bool]] = {
         "interventions": True,
         "rng_replay": False,
         "streaming": False,
+        "structure_only_capture": False,
     },
 }
 

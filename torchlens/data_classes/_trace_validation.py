@@ -160,6 +160,9 @@ class TraceValidationMixin(_TraceMixinBase):
         # N3/N5: a live refresh re-drives the FULL native forward against the
         # recorded graph, which a halted/failed/unproven capture cannot honor.
         require_capture_capability(self, "live_replay")
+        from ..capture.structure_only import require_structure_only_capability
+
+        require_structure_only_capability(self, "live_replay")
         model = unwrap_compiled_model(model)
 
         return _impl(
@@ -245,6 +248,9 @@ class TraceValidationMixin(_TraceMixinBase):
         # exemption neither widens nor narrows, and legacy UNATTESTED
         # artifacts deliberately keep entry OPEN (the tripwire stays armed).
         require_capture_capability(self, "validation_entry")
+        from ..capture.structure_only import require_structure_only_capability
+
+        require_structure_only_capability(self, "validation_entry")
         status = self.validation_replay_status
         if bool(getattr(self, "_loaded_from_bundle", False)) and not status.available:
             setattr(self, "_validation_replay_status", status)
@@ -321,6 +327,9 @@ class TraceValidationMixin(_TraceMixinBase):
         from ..capture.outcome import require_capture_capability
 
         require_capture_capability(self, "live_replay")
+        from ..capture.structure_only import require_structure_only_capability
+
+        require_structure_only_capability(self, "live_replay")
         replay_options = merge_replay_options(
             replay=replay,
             strict=strict,
@@ -382,6 +391,9 @@ class TraceValidationMixin(_TraceMixinBase):
         from ..capture.outcome import require_capture_capability
 
         require_capture_capability(self, "live_replay")
+        from ..capture.structure_only import require_structure_only_capability
+
+        require_structure_only_capability(self, "live_replay")
         replay_options = merge_replay_options(replay=replay, strict=strict)
 
         from ..intervention.replay import push_from as _impl
@@ -538,6 +550,9 @@ class TraceValidationMixin(_TraceMixinBase):
             CaptureStatus.UNKNOWN,
         ):
             require_capture_capability(self, "live_replay")
+            from ..capture.structure_only import require_structure_only_capability
+
+            require_structure_only_capability(self, "live_replay")
         readiness = self._runnable.readiness
         loaded_provider = getattr(readiness, "provider", None)
         use_unified_provider = inputs is not MISSING or (
@@ -590,6 +605,9 @@ class TraceValidationMixin(_TraceMixinBase):
                 # prefix DAG under pause_logging(), so the live-replay failure
                 # mode cannot occur; failed/unproven captures still refuse.
                 require_capture_capability(self, "loaded_sparse_run")
+                from ..capture.structure_only import require_structure_only_capability
+
+                require_structure_only_capability(self, "live_replay")
                 if fast:
                     from .._fast_run import run_fast_loaded_trace
 
@@ -607,6 +625,9 @@ class TraceValidationMixin(_TraceMixinBase):
                 # analysis refusal's remedy ("save a runnable artifact") is a
                 # dead end N4 forbids for halted captures.
                 require_capture_capability(self, "live_replay")
+                from ..capture.structure_only import require_structure_only_capability
+
+                require_structure_only_capability(self, "live_replay")
                 from .._runnable_execution import raise_analysis_run_unavailable
 
                 raise_analysis_run_unavailable(self)
@@ -614,6 +635,9 @@ class TraceValidationMixin(_TraceMixinBase):
             # re-drives the full native forward, which halted/failed/unproven
             # captures cannot honor.
             require_capture_capability(self, "live_replay")
+            from ..capture.structure_only import require_structure_only_capability
+
+            require_structure_only_capability(self, "live_replay")
             from .._runnable_execution import run_live_trace
 
             source_ref = getattr(self, "_source_model_ref", None)
@@ -645,6 +669,9 @@ class TraceValidationMixin(_TraceMixinBase):
         from ..capture.outcome import require_capture_capability
 
         require_capture_capability(self, "live_replay")
+        from ..capture.structure_only import require_structure_only_capability
+
+        require_structure_only_capability(self, "live_replay")
 
         run_model: nn.Module | None
         if isinstance(model, nn.Module):
@@ -807,6 +834,9 @@ class TraceValidationMixin(_TraceMixinBase):
         from ..capture.outcome import require_capture_capability
 
         require_capture_capability(self, "validation_entry")
+        from ..capture.structure_only import require_structure_only_capability
+
+        require_structure_only_capability(self, "validation_entry")
         from ..validation.invariants import check_metadata_invariants as _impl
 
         return _impl(self)
@@ -927,6 +957,9 @@ class TraceValidationMixin(_TraceMixinBase):
         # forward graph; HALTED stays allowed (the autograd graph of a halted
         # capture IS the captured prefix).
         require_capture_capability(self, "backward")
+        from ..capture.structure_only import require_structure_only_capability
+
+        require_structure_only_capability(self, "backward_grads")
         spec = get_backend_spec(getattr(self, "backend", "torch"))
         if not spec.capabilities.backward_capture:
             raise BackendUnsupportedError(
@@ -968,6 +1001,9 @@ class TraceValidationMixin(_TraceMixinBase):
         from ..capture.outcome import require_capture_capability
 
         require_capture_capability(self, "backward")
+        from ..capture.structure_only import require_structure_only_capability
+
+        require_structure_only_capability(self, "backward_grads")
         spec = get_backend_spec(getattr(self, "backend", "torch"))
         if not spec.capabilities.backward_capture:
             raise BackendUnsupportedError(

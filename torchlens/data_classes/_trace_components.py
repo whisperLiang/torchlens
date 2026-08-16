@@ -73,6 +73,11 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "_source_bundle_manifest_sha256": "source_metadata",
     "_source_bundle_path": "source_metadata",
     "capture_mode": "header",
+    # L7a mode marker: witness-owned per the memo (sibling of
+    # capture_verified); stamped from the validated flag at entry today, by
+    # the settlement witness machinery after S2 ratification (seam labeled in
+    # user_funcs.py).
+    "structure_only": "witness",
     "_runnable": "runnable",
     "_fast_run_session": "graph",
     "escape_detector_mode": "witness",

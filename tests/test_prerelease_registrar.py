@@ -33,6 +33,7 @@ from torchlens._io.prerelease import (
     validate_prerelease_state,
 )
 from torchlens._io.scrub import scrub_for_save
+from torchlens.data_classes.aten_op import AtenOp
 from torchlens.data_classes.trace import Trace
 
 pytestmark = pytest.mark.smoke
@@ -40,6 +41,94 @@ pytestmark = pytest.mark.smoke
 #: Existing declared-DROP scalar Trace field used as the planted gated field.
 #: Any declared-DROP field works; this one is a plain session-time int.
 _PLANT_FIELD = "_tl_save_selector_fire_count"
+
+#: STANDING lane registrations: real sprint-gated fields registered at import
+#: time and retired only at the coordinated tlspec bump. Inventory assertions
+#: are made RELATIVE to this ledger so each new writer lane lands here as a
+#: reviewed one-line diff (registrar keeps the live inventory).
+# Importing the facade deliberately installs every L3 registration before the
+# exact standing-inventory assertions run.
+_STANDING_REGISTRATIONS: dict[str, tuple[str, ...]] = {
+    AtenOp.__name__: (
+        "algorithmic_flops",
+        "autocast_context",
+        "backward_epoch_index",
+        "capture_phase",
+        "decomposition_slot",
+        "dispatch_key_context",
+        "exception_type",
+        "execution_context",
+        "flop_formula_source",
+        "flop_formula_version",
+        "flop_status",
+        "forward_pass_index",
+        "grad_fn_link_provenance",
+        "grad_fn_link_status",
+        "grad_fn_ref",
+        "input_tensor_facts",
+        "label",
+        "module_call_stack",
+        "mutation_kind",
+        "namespace",
+        "operator",
+        "outcome",
+        "output_tensor_facts",
+        "overload",
+        "owner_func_call_id",
+        "owner_status",
+        "parent_grad_fn_call_ref",
+        "parent_op_refs",
+        "schema",
+        "schema_fingerprint",
+        "sequence",
+        "view_copy_kind",
+    ),
+    "OpRef": ("func_call_id", "op_label", "op_row_index"),
+    "Trace": ("_primitive_op_profile", "structure_only"),
+    "_AtenExecutionContext": (
+        "autocast",
+        "backend",
+        "compile_stance",
+        "completeness_witness_mode",
+        "deterministic_algorithms",
+        "device_capability",
+        "device_model",
+        "grad_mode",
+        "inference_mode",
+        "module_training_summary",
+        "owner_thread_coverage",
+        "pytorch_version",
+        "sdpa_policy",
+        "tf32_matmul_policy",
+    ),
+    "_AtenTensorFact": (
+        "container_path",
+        "device",
+        "dtype",
+        "layout",
+        "logical_version",
+        "requires_grad",
+        "shape",
+        "storage_alias_group",
+        "stride",
+        "tensor_impl_capability",
+    ),
+    "_ModePausedInteriorGap": (
+        "capture_phase",
+        "kind",
+        "owner_func_call_id",
+        "parent_op_refs",
+        "reason",
+        "sequence_after",
+        "sequence_before",
+    ),
+    "_PrimitiveOpProfile": (
+        "_event_owner_evidence",
+        "aten_event_watermark",
+        "mode_paused_interior",
+        "primitive_ops",
+    ),
+}
 
 
 @pytest.fixture
@@ -62,7 +151,6 @@ def _tiny_trace() -> Trace:
 
 
 def test_registration_requires_declared_drop_policy() -> None:
-    inventory_before = registered_prerelease_fields()
     keep_field = next(
         name for name, policy in Trace.PORTABLE_STATE_SPEC.items() if policy is FieldPolicy.KEEP
     )
@@ -72,22 +160,17 @@ def test_registration_requires_declared_drop_policy() -> None:
         register_prerelease_field(Trace, "_no_such_field_anywhere")
     with pytest.raises(ValueError, match="no-op"):
         register_prerelease_field(Trace, _PLANT_FIELD, persisted_policy=FieldPolicy.DROP)
-    assert registered_prerelease_fields() == inventory_before
+    # No refused registration may have landed; only STANDING lane
+    # registrations (real sprint-gated fields awaiting the coordinated bump,
+    # e.g. L7a's Trace.structure_only) are present.
+    assert registered_prerelease_fields() == _STANDING_REGISTRATIONS
 
 
 def test_registry_inventory_and_unregister(planted_field: str) -> None:
-    inventory_with_plant = registered_prerelease_fields()
-    assert planted_field in inventory_with_plant["Trace"]
+    inventory = registered_prerelease_fields()
+    assert planted_field in inventory["Trace"]
     unregister_prerelease_field(Trace, planted_field)
-    inventory_without_plant = dict(inventory_with_plant)
-    remaining_trace_fields = tuple(
-        name for name in inventory_without_plant["Trace"] if name != planted_field
-    )
-    if remaining_trace_fields:
-        inventory_without_plant["Trace"] = remaining_trace_fields
-    else:
-        del inventory_without_plant["Trace"]
-    assert registered_prerelease_fields() == inventory_without_plant
+    assert registered_prerelease_fields() == _STANDING_REGISTRATIONS
     # Fixture teardown unregisters again; must be idempotent.
 
 

@@ -54,6 +54,26 @@ avoids a rescue forward. The historical broad `sys.modules` crawler is deleted;
 | Module nesting exceeds Python's recursion limit. | Traversal may raise `RecursionError`. | Flatten the hierarchy or deliberately raise `sys.setrecursionlimit`. |
 | A buffer is reassigned through `buffer.data = value`. | End-of-capture reconciliation raises `RuntimeError`. | Use `self.buffer = value` or `self.buffer.copy_(value)`. |
 
+## Structure-only capture
+
+`structure_only=True` (DOCUMENTED-UNSTABLE surface; L7a wave 0, D8-default)
+records the op graph, module hierarchy, parameter geometry, and per-op
+shape/dtype as HYPOTHESES, never tensor values. The capability contract lives
+in [structure_only_capabilities.md](structure_only_capabilities.md).
+
+| When it can occur | What you see | Remedy |
+| --- | --- | --- |
+| Your model branches on a tensor VALUE (`if x.sum() > 0:`, `.item()`, `bool(...)`, `tolist`/`numpy`/storage escapes) from user code — meta OR real tensor. | `ValueDependentBranchError` (`value_dependent_branch_unsupported`) naming the exact user source line and branch kind. A value branch would make every claim downstream a guess about WHICH graph exists. | Run a real capture (`tl.trace` without `structure_only`) to resolve the branch, or restructure the branch to be shape-derived. Shape/metadata reads (`shape`, `numel`, `dim`, `stride`) never refuse. |
+| An op has no meta kernel on a meta-context tensor. | `MetaKernelUnavailableError` (`meta_kernel_unavailable`) at the failing callsite, with torch's original error chained. | Run a real capture, or upgrade torch for broader meta-kernel coverage. |
+| `structure_only=True` combined with `raise_on_nan`, `intervention_ready`, or a not-provably-value-free `halt=`. | `structure_only_option_conflict` at entry. | Drop the conflicting option; use structured value-free selectors as `halt=`. |
+| Any value-payload request (save selection, gradients, streaming sinks, raw input/output retention, output decoding). | `structure_only_values_unsupported` at entry. | Drop the payload request or run a real capture. |
+| Saving / replaying / validating / backward on a structure-only trace. | Typed `structure_only_*_unsupported` refusals via the capability chokepoint; persistence unlocks at the coordinated tlspec bump. | Keep the trace in-session; verify hypotheses with `trace.discharge_against(real_trace)`. |
+| A meta-materialized model (HF `device_map='meta'`). | The entry gate refuses unchanged (`unsupported_tensor_variant`): admission is decision point D8, unruled. | Materialize on a real device, or wait for a D8 ruling. |
+
+Unenumerated REAL-value escapes in form (b) do not die and cannot be
+intercepted; that residual is exactly why every value-bearing claim stays a
+HYPOTHESIS until discharged against a real capture.
+
 ## Memory, payloads, and object lifetime
 
 | When it can occur | What you see | Remedy |

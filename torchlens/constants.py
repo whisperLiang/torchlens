@@ -77,6 +77,7 @@ MODEL_LOG_FIELD_ORDER = [
     "param_source",
     "derived_grads",
     "capture_mode",
+    "structure_only",
     "_runnable",
     "_fast_run_session",
     "escape_detector_mode",
