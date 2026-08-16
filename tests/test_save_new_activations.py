@@ -819,3 +819,65 @@ def test_buffer_value_changed_none_fails_closed():
         assert "unproven" in str(exc_info.value)
     finally:
         log.cleanup()
+
+
+@pytest.mark.smoke
+def test_state_restore_does_not_loosen_projector():
+    """5.2 red-stays-red: snapshot-restore never loosens the buffer-sink refusal.
+
+    Snapshot-restore fixes VALUES; the buffer-sink refusal is about ROUTING
+    analysis and keeps its own authority. A train-mode BatchNorm (genuine
+    value-changing buffer writes) still refuses on the default run() path
+    after the restore bracket ships.
+    """
+
+    from torchlens.errors import BufferSinkRoutingError
+
+    model = _BatchNormModel()
+    model.train()
+    log = trace_fn(model, torch.randn(3, 4))
+    try:
+        with pytest.raises(BufferSinkRoutingError) as exc_info:
+            log.run(inputs=torch.randn(3, 4))
+        _assert_buffer_sink_refusal(exc_info)
+    finally:
+        log.cleanup()
+
+
+class _RoutingFlipModel(nn.Module):
+    """Halves its weights each forward; routing flips once they decay enough."""
+
+    def __init__(self):
+        super().__init__()
+        self.lin = nn.Linear(4, 4)
+        self.threshold = float(self.lin.weight.abs().sum()) * 0.375
+
+    def forward(self, x):
+        h = self.lin(x)
+        if float(self.lin.weight.abs().sum()) > self.threshold:
+            out = torch.relu(h)
+        else:
+            out = torch.tanh(h)
+        with torch.no_grad():
+            self.lin.weight.mul_(0.5)
+        return out
+
+
+@pytest.mark.smoke
+def test_carry_state_then_routing_change_still_refuses():
+    """5.3 red-stays-red: carried state that changes routing refuses next run.
+
+    carry_state never touches verification: the NEXT run() from mutated state
+    faces every gate as usual, so a mutation-driven routing change trips the
+    graph-change tripwire with the pinned term.
+    """
+
+    model = _RoutingFlipModel()
+    log = trace_fn(model, torch.randn(2, 4))
+    try:
+        first = log.run(inputs=torch.randn(2, 4), carry_state=True)
+        assert first.report.state_carried is True
+        with pytest.raises(ValueError, match="computational graph changed"):
+            log.run(inputs=torch.randn(2, 4), carry_state=True)
+    finally:
+        log.cleanup()

@@ -1438,6 +1438,11 @@ class RunReport:
     numeric_attestation: NumericAttestationStatus
     poisoned: bool
     nondeterministic_sources: tuple[str, ...]
+    #: PROVISIONAL (documented-unstable, rides naming/S2): ``True`` when the
+    #: live run was invoked with ``carry_state=True`` and declared-state
+    #: mutations were deliberately left on the live model (the default run
+    #: snapshot-restores declared state and reports ``False``).
+    state_carried: bool = False
 
 
 @dataclass(frozen=True, slots=True)

@@ -26,7 +26,14 @@ def test_training_mode_stateless_model_does_not_warn() -> None:
 
 
 def test_live_run_warns_once_and_batchnorm_stats_mutate() -> None:
-    """Default live execution should warn before mutating BatchNorm state."""
+    """Default live execution warns once; the restore bracket undoes BN stats.
+
+    Historically the failed train-BN run left mutated running stats on the
+    model; the L4 5.2 snapshot-restore bracket (declared-breaks ledger, D24a
+    batch) now restores declared state in finally on every path, so the model
+    is bit-identical after the refused run. The warn-once TEXT pins are
+    unchanged.
+    """
 
     model = nn.BatchNorm1d(3).train()
     captured = tl.trace(model, torch.randn(4, 3))
@@ -44,7 +51,7 @@ def test_live_run_warns_once_and_batchnorm_stats_mutate() -> None:
     assert "running_mean, running_var, num_batches_tracked on module '<root>'" in str(
         observed[0].message
     )
-    assert not torch.equal(model.running_mean, before)
+    assert torch.equal(model.running_mean, before)
     with warnings.catch_warnings(record=True) as observed:
         with pytest.raises(ValueError, match="fast=True"):
             captured.run(inputs=torch.randn(4, 3))

@@ -1462,7 +1462,25 @@ first_mismatch: RunnableDiagnostic | None
 numeric_attestation: NumericAttestationStatus
 poisoned: bool
 nondeterministic_sources: tuple[str, ...]
+state_carried: bool = False
 ```
+
+`state_carried` (L4; PROVISIONAL spelling, documented-unstable pending naming ratification) is
+`True` only when a LIVE run was invoked with `carry_state=True`, deliberately leaving
+declared-state mutations on the live model. The DEFAULT live run brackets execution with a
+declared-state snapshot-restore (named parameters plus every registered buffer, one clone and
+one restore per alias group with `a is b` preserved, restore in `finally` on every path), so
+repeated `run()` calls leave the model bit-identical and report `False`. The snapshot is taken
+and validated BEFORE any forward runs: enumeration failure, an unprovable or overlapping alias
+topology, and a clone/allocation failure each refuse typed (`run_state_snapshot_unsupported`,
+fail-before-execute). A restore that fails AFTER execution poisons the transactional fork,
+stamps a session-scoped state-compromised latch on the source trace (NOT the poison bit --
+the trace's recorded path facts are not a lie; the live MODEL's state is), and raises typed
+(`run_state_restore_failed`, chaining the restore exception with the failed slot name and the
+count of alias groups restored); the latch refuses later live/fast runs while loaded-sparse
+runs of a saved artifact stay legal (staged clones never read the live model). `carry_state=`
+never touches verification: the next run from mutated state faces every gate as usual,
+including the mode-aware buffer-sink projector.
 
 `ContractCheck` is `name: str`, `passed: bool`, `diagnostic: RunnableDiagnostic | None`, ordered by
 execution. Random reports name the policy and every random-filled slot, including alias members,

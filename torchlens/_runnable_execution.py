@@ -392,6 +392,9 @@ _execute_loaded_sparse_transaction = _rebind_function(
     _runnable_transaction._execute_loaded_sparse_transaction, globals()
 )
 run_live_trace = _rebind_function(_runnable_transaction.run_live_trace, globals())
+_restore_declared_state_or_mark = _rebind_function(
+    _runnable_transaction._restore_declared_state_or_mark, globals()
+)
 _live_runtime_input_leaves = _rebind_function(
     _runnable_transaction._live_runtime_input_leaves, globals()
 )

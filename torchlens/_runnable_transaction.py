@@ -435,6 +435,7 @@ def run_live_trace(
     *,
     seed: int | None,
     on_divergence: DivergencePolicy | str = DivergencePolicy.RAISE,
+    carry_state: bool = False,
 ) -> RunResult:
     """Run the live-model refresh provider on a transactional fork.
 
@@ -480,6 +481,15 @@ def run_live_trace(
             code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
             provider=RunProvider.LIVE,
         )
+    # L4 5.2 snapshot-restore bracket: the default live run leaves the model
+    # bit-identical. The snapshot is taken and VALIDATED before the fork and
+    # before any forward (fail-before-execute, typed run_state_snapshot_unsupported);
+    # carry_state=True is the sole opt-in that skips the whole bracket.
+    state_snapshot = None
+    if not carry_state:
+        from ._runnable_state import snapshot_live_declared_state
+
+        state_snapshot = snapshot_live_declared_state(model)
     prior_log_ids = {id(log) for log in _state.list_logs()}
     fork = trace._fork_trace(name=_run_fork_name(trace))
     try:
@@ -571,6 +581,7 @@ def run_live_trace(
             numeric_attestation=NumericAttestationStatus.NOT_PRESENT,
             divergence_policy=divergence_policy,
             nondeterministic_sources=nondeterministic_sources,
+            state_carried=carry_state,
         )
     except BaseException:
         _state._unregister_log(fork)
@@ -578,6 +589,53 @@ def run_live_trace(
             if id(log) not in prior_log_ids:
                 _state._unregister_log(log)
         raise
+    finally:
+        # L4 5.2: RESTORE runs in finally on EVERY path (success, divergence,
+        # callable exception, rollback), symmetric with the RNG fork/restore
+        # discipline. A SECONDARY restore failure marks and raises typed (5.4).
+        if state_snapshot is not None:
+            _restore_declared_state_or_mark(trace, fork, state_snapshot)
+
+
+def _restore_declared_state_or_mark(trace: Any, fork: Any, snapshot: Any) -> None:
+    """Restore the declared-state snapshot; on failure, mark both traces and raise.
+
+    L4 5.4 restore-failure policy: the transactional FORK is poisoned (its run
+    genuinely failed) and unregistered; the SOURCE Trace gets the session-scoped
+    STATE-COMPROMISED latch (deliberately NOT the poison bit -- the live MODEL's
+    state is unknown, not the trace's recorded path facts), which refuses the
+    live and fast run doors typed while loaded-sparse runs of a saved artifact
+    stay legal. The typed exception carries the failed slot name, the count of
+    alias groups restored before the failure, and chains the restore exception.
+    """
+
+    from ._runnable_state import LiveStateRestoreFailure, restore_live_declared_state
+    from .errors import StateBindingError
+    from .runnable import mark_trace_path_status
+
+    try:
+        restore_live_declared_state(snapshot)
+    except LiveStateRestoreFailure as exc:
+        mark_trace_path_status(fork, PathFaithfulness.UNVERIFIABLE, None)
+        _state._unregister_log(fork)
+        runnable_state = getattr(trace, "_runnable", None)
+        if runnable_state is not None:
+            runnable_state.state_compromised = {
+                "state_dict_name": exc.state_dict_name,
+                "groups_restored": exc.groups_restored,
+            }
+        raise StateBindingError(
+            "Restoring the live model's declared state failed AFTER execution: "
+            f"restore stopped at state entry {exc.state_dict_name!r} with "
+            f"{exc.groups_restored} alias group(s) already restored, so the live "
+            "model's declared state is now UNKNOWN. Later live/fast run() calls on "
+            "this trace refuse until the state is re-established. Remedy: reload "
+            "known-good weights onto the model (or re-capture), then run again",
+            code="run_state_restore_failed",
+            detection_stage="state_restore",
+            state_dict_name=exc.state_dict_name,
+            groups_restored=exc.groups_restored,
+        ) from exc
 
 
 def _live_runtime_input_leaves(input_args: Any, input_kwargs: Any) -> list[torch.Tensor] | None:

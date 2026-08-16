@@ -61,6 +61,34 @@ _MLX_VALIDATION_REPLAY_BACKEND = "mlx"
 _TINYGRAD_VALIDATION_REPLAY_BACKEND = "tinygrad"
 
 
+def _refuse_state_compromised_live_run(trace: Any) -> None:
+    """Refuse live/fast execution after a failed declared-state restore (L4 5.4).
+
+    The session-scoped STATE-COMPROMISED latch means a prior run()'s restore
+    failed mid-bracket, so the LIVE MODEL's declared state is unknown -- every
+    door that reads the live model (default live, fast live, legacy rerun)
+    refuses typed. Loaded-sparse runs of a saved artifact stay legal: they
+    execute against staged clones and never read the live model.
+    """
+
+    runnable_state = getattr(trace, "_runnable", None)
+    compromised = getattr(runnable_state, "state_compromised", None)
+    if compromised is None:
+        return
+    from ..errors import StateBindingError
+
+    raise StateBindingError(
+        "A prior run() failed while RESTORING this trace's live model state "
+        f"(stopped at state entry {compromised.get('state_dict_name')!r}), so the "
+        "live model's declared state is unknown and live/fast execution would "
+        "misreport. Remedy: reload known-good weights onto the model (or "
+        "re-capture / re-stage state), then run again",
+        code="run_state_restore_failed",
+        detection_stage="state_restore",
+        **dict(compromised),
+    )
+
+
 def _warn_stateful_live_run_once(trace: Any, model: nn.Module) -> None:
     """Warn once when a live rerun has an obvious model-state mutation risk.
 
@@ -432,6 +460,7 @@ class TraceValidationMixin(_TraceMixinBase):
         inputs: Any | MissingType = MISSING,
         seed: int | None = None,
         fast: bool = False,
+        carry_state: bool = False,
         on_divergence: DivergencePolicy = DivergencePolicy.RAISE,
         append: bool | MissingType = MISSING,
         chunk_size: int | None | MissingType = MISSING,
@@ -464,6 +493,17 @@ class TraceValidationMixin(_TraceMixinBase):
             loaded provider performs one ordinary verified run, then reuses staged state
             and compiled argument binders. Unlike the default transactional provider, later
             fast iterations reuse one result Trace in place.
+        carry_state:
+            PROVISIONAL spelling (documented-unstable). Default ``False``: the
+            live provider snapshot-restores the model's declared state (named
+            parameters, registered buffers, alias topology preserved) around
+            the run, so repeated ``run()`` calls leave the model bit-identical.
+            ``True`` skips the restore: declared-state mutations persist on the
+            live model (episode/rollout state accumulation). The report
+            discloses the choice (``report.state_carried``); verification is
+            untouched -- the NEXT run from mutated state faces every gate as
+            usual. Refuses typed with ``fast=True`` and on loaded providers
+            (staged clones have no live model for state to carry into).
         on_divergence:
             Strict divergence behavior or the sole poison-return opt-in.
         append:
@@ -597,6 +637,28 @@ class TraceValidationMixin(_TraceMixinBase):
                     remedy="use on_divergence='raise' with fast=True, or drop fast=",
                     argument="on_divergence",
                 )
+            if fast and carry_state:
+                raise InvalidArgumentError(
+                    "carry_state=True cannot combine with fast=True: fast mode's "
+                    "cached-oracle contract already forbids declared-state mutation",
+                    code="run_fast_carry_state_unsupported",
+                    remedy="drop carry_state= (fast mode never restores state it "
+                    "forbids mutating) or drop fast=",
+                    argument="carry_state",
+                )
+            if carry_state and loaded_provider in {
+                RunProvider.LOADED_SPARSE,
+                RunProvider.LOADED_ANALYSIS,
+            }:
+                raise InvalidArgumentError(
+                    "carry_state=True requires a live model: the loaded provider "
+                    "mutates STAGED CLONES, never a live model, so there is no "
+                    "model for state to carry into (a silent no-op would "
+                    "misreport what persisted)",
+                    code="run_carry_state_requires_live_model",
+                    remedy="drop carry_state= on loaded traces, or run the live model",
+                    argument="carry_state",
+                )
             from ..capture.outcome import require_capture_capability
 
             if loaded_provider is RunProvider.LOADED_SPARSE:
@@ -640,6 +702,7 @@ class TraceValidationMixin(_TraceMixinBase):
             require_structure_only_capability(self, "live_replay")
             from .._runnable_execution import run_live_trace
 
+            _refuse_state_compromised_live_run(self)
             source_ref = getattr(self, "_source_model_ref", None)
             live_model = source_ref() if source_ref is not None else None
             if live_model is not None:
@@ -655,6 +718,7 @@ class TraceValidationMixin(_TraceMixinBase):
                 run_inputs,
                 seed=seed,
                 on_divergence=on_divergence,
+                carry_state=carry_state,
             )
 
         if fast:
@@ -664,6 +728,15 @@ class TraceValidationMixin(_TraceMixinBase):
                 remedy="call trace.run(inputs=..., fast=True) instead of the legacy surface",
                 argument="fast",
             )
+        if carry_state:
+            raise KeywordConflictError(
+                "carry_state= is a unified-run option and cannot mix with the "
+                "legacy run surface (which never snapshot-restores state)",
+                code="run_legacy_options_conflict",
+                remedy="call trace.run(inputs=..., carry_state=True) instead of the legacy surface",
+                argument="carry_state",
+            )
+        _refuse_state_compromised_live_run(self)
 
         # N3/N5 (legacy live rerun surface): same live-provider rule.
         from ..capture.outcome import require_capture_capability

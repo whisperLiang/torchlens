@@ -154,6 +154,7 @@ def _run_report(
     first_mismatch: RunnableDiagnostic | None,
     numeric_attestation: NumericAttestationStatus,
     nondeterministic_sources: Iterable[str] = (),
+    state_carried: bool = False,
 ) -> RunReport:
     """Build the settled run-report surface -- the ONE report finalizer (r37 corr2-5).
 
@@ -194,6 +195,7 @@ def _run_report(
         numeric_attestation=numeric_attestation,
         poisoned=poisoned,
         nondeterministic_sources=declared_sources,
+        state_carried=bool(state_carried),
     )
 
 
