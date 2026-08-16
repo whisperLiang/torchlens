@@ -188,10 +188,12 @@ class _ShimOnExecLoader:
                 # a no-op and nothing must be left patched.
                 return
             records: list[tuple[Any, str, Any]] = []
+            enrolled_before = set(_live_shims)
             try:
                 _install_causal_bias_shim(records)
             except Exception:
                 _restore(records)
+                _purge_enrolled_since(enrolled_before)
                 raise
             _installed.extend(records)
 
@@ -251,6 +253,19 @@ def _register_shim(fn: Any) -> Any:
     return fn
 
 
+def _purge_enrolled_since(enrolled_before: set[int]) -> None:
+    """Drop registry entries enrolled after ``enrolled_before`` was snapshotted.
+
+    Failure-unwind companion to :func:`_register_shim` (r8 R56-3): the
+    install handlers restore the patched SITES but the registry kept this
+    attempt's shim objects alive (and answering "is ours") until the next
+    unwrap.
+    """
+
+    for shim_id in set(_live_shims) - enrolled_before:
+        _live_shims.pop(shim_id, None)
+
+
 def _is_shimmed(value: Any) -> bool:
     """Return whether ``value`` (function or classmethod) is one of our shims."""
 
@@ -303,14 +318,17 @@ def install_identity_shims() -> None:
         # must not stand in for the whole family.
         _ensure_import_hook()
         late_records: list[tuple[Any, str, Any]] = []
+        late_enrolled_before = set(_live_shims)
         try:
             _install_causal_bias_shim(late_records)
         except Exception:
             _restore(late_records)
+            _purge_enrolled_since(late_enrolled_before)
             raise
         _installed.extend(late_records)
         return
     records: list[tuple[Any, str, Any]] = []
+    enrolled_before = set(_live_shims)
     try:
         _install_transformer_ctor_shims(records)
         _install_causal_bias_shim(records)
@@ -322,6 +340,11 @@ def install_identity_shims() -> None:
         _install_protocol_identity_shims(records)
     except Exception:
         _restore(records)
+        # r8 R56-3: the failure unwind restored the patched sites but left
+        # this attempt's shims enrolled in the identity registry until the
+        # next unwrap -- memory residue plus a stale "is ours" answer for
+        # detached objects.
+        _purge_enrolled_since(enrolled_before)
         raise
     _installed.extend(records)
     _family_installed = True
@@ -835,6 +858,31 @@ class _LedgerResolvingDefaultTable(collections.defaultdict):
         return default
 
 
+def _original_keyed_snapshot(table: Any) -> Any:
+    """Return ``table`` re-keyed through the ledger (wrapper -> original).
+
+    A post-``cache_clear`` upstream rebuild reads the CURRENT (wrapped)
+    namespaces, so its keys and per-namespace member lists hold torchlens
+    wrappers. Resolving both through the ledger restores the pristine
+    original-keyed shape the pre-warm guaranteed; for a pristine table every
+    resolve is an identity no-op. The container type is preserved
+    (``defaultdict`` keeps its factory for the auto-vivification contract).
+    """
+
+    if not isinstance(table, dict):
+        return table
+    if isinstance(table, collections.defaultdict):
+        normalized: Any = collections.defaultdict(table.default_factory)
+    else:
+        normalized = {}
+    for key, members in table.items():
+        resolved_key = _resolve(key)
+        if isinstance(members, list):
+            members = [_resolve(member) for member in members]
+        normalized[resolved_key] = members
+    return normalized
+
+
 def _install_overrides_membership_shims(records: list[tuple[Any, str, Any]]) -> None:
     """Shim the two cached ``torch.overrides`` table accessors for membership.
 
@@ -865,8 +913,18 @@ def _install_overrides_membership_shims(records: list[tuple[Any, str, Any]]) -> 
                 """Return the accessor's table wrapped in a ledger-resolving view."""
 
                 table = orig()
-                view = cache.get(id(table))
+                table_key = id(table)
+                view = cache.get(table_key)
                 if view is None:
+                    # r8 R56 (opus F1): forwarding ``cache_clear`` let one
+                    # call discard the decorate-time pre-warm; the upstream
+                    # rebuild then read CURRENT namespaces -- WRAPPER-keyed --
+                    # so the pristine original fell OUT of the table and the
+                    # view's own keys()-stay-original invariant went false.
+                    # Normalize keys and member lists through the ledger at
+                    # view build (a no-op for the pre-warmed pristine table),
+                    # so a post-clear rebuild is original-keyed again.
+                    table = _original_keyed_snapshot(table)
                     if isinstance(table, collections.defaultdict):
                         # Preserve the upstream auto-vivification contract
                         # (grind-r6 b8 R56 opus residue: the plain-dict view
@@ -886,7 +944,7 @@ def _install_overrides_membership_shims(records: list[tuple[Any, str, Any]]) -> 
                     else:
                         view = _LedgerResolvingTable(table)
                     cache.clear()  # underlying cache rebuilt: drop stale views
-                    cache[id(table)] = view
+                    cache[table_key] = view
                 return view
 
             # The upstream accessors are @functools.lru_cache functions;
@@ -968,6 +1026,22 @@ def _install_protocol_identity_shims(records: list[tuple[Any, str, Any]]) -> Non
             continue  # absent, already shimmed, or foreign-patched: hands off
         setattr(module, "handle_torch_function", handle_torch_function_shim)  # noqa: B010
         records.append((module, "handle_torch_function", real_handle))
+    # r8 R56-1 (fable): 12 wrapped pure-Python functionals dispatch
+    # ATTRIBUTE-style -- ``torch.overrides.handle_torch_function(...)`` (the
+    # four wrapped ``torch.nn.init.*`` and the ``torch.sym_*`` family) --
+    # resolving the module attribute at call time and reaching the UNPATCHED
+    # real handle, so user handlers keyed on originals saw the torchlens
+    # WRAPPER for exactly those sites (an identity-inconsistent epoch,
+    # bare-name vs attribute-style dispatchers). Patch the authority itself:
+    # attribute-style callers resolve the shim at call time, translation is a
+    # no-op for a non-wrapper ``public_api``, and the bare-name importers
+    # patched above cannot double-translate (a translated original is never
+    # in the wrapper ledger). Side bonus: ``functools.wraps`` points pickle's
+    # save-by-reference at this exact slot, so re-exported
+    # ``handle_torch_function`` names pickle again during the epoch.
+    if vars(overrides_module).get("handle_torch_function") is real_handle:
+        setattr(overrides_module, "handle_torch_function", handle_torch_function_shim)  # noqa: B010
+        records.append((overrides_module, "handle_torch_function", real_handle))
 
 
 def _make_conv_picker_shim(orig_picker: Callable[..., Any]) -> Callable[..., Any]:
