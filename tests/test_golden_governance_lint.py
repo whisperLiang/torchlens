@@ -1178,3 +1178,26 @@ def test_backend_parity_update_flag_arms_on_exact_one_only(
         # Digest mismatch proves the disarmed flag COMPARED instead of writing.
         parity._assert_projection_matches_golden("probe", {"a": 1})
     assert '"a": 1' in (tmp_path / "probe.json").read_text(), "disarmed flag must not rewrite"
+
+
+@pytest.mark.smoke
+def test_session_warmup_carveout_matches_every_golden_flag_prefix() -> None:
+    """r7 R77 (fable b2 MED): the warmup skip must honor ALL golden prefixes.
+
+    The session warmup capture wraps torch before any test runs; SF-53
+    wrap-state-guarded golden families therefore need the warmup skipped when
+    ANY declared golden flag is armed. The fixwave-5 carve-out hardcoded
+    ``TORCHLENS_UPDATE_`` and left the ``TORCHLENS_REGEN_`` families'
+    documented regen recipes hard-failing at their own guard. Pin: the
+    conftest predicate derives from ``GOLDEN_FLAG_PREFIXES``, never a
+    hand-copied prefix literal.
+    """
+
+    conftest_text = (Path(__file__).resolve().parent / "conftest.py").read_text(encoding="utf-8")
+    assert "key.startswith(GOLDEN_FLAG_PREFIXES)" in conftest_text, (
+        "the session-warmup golden carve-out no longer derives from "
+        "_oracle_env.GOLDEN_FLAG_PREFIXES"
+    )
+    assert 'key.startswith("TORCHLENS_UPDATE_")' not in conftest_text, (
+        "a hand-copied single-prefix carve-out is back in conftest.py"
+    )

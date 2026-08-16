@@ -82,7 +82,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
     # A CI run must never mutate goldens: any armed update/regen/record flag
     # would silently rebaseline instead of verifying (b7 R53-3 / b10 R78-8).
-    from _oracle_env import golden_mutation_flags_armed_under_ci
+    from _oracle_env import GOLDEN_FLAG_PREFIXES, golden_mutation_flags_armed_under_ci
 
     armed = golden_mutation_flags_armed_under_ci(os.environ)
     if armed:
@@ -122,8 +122,12 @@ def pytest_configure(config: pytest.Config) -> None:
     # families guard that generation starts on UNWRAPPED torch (SF-53), and
     # this warmup capture would trip that guard before any test ran, making
     # the documented single-family regen recipe impossible to execute.
+    # r7 R77 (fable b2 MED): match EVERY declared golden-flag prefix, not one
+    # hardcoded spelling -- the TORCHLENS_REGEN_ families (export goldens) are
+    # SF-53 wrap-state-guarded too, and the UPDATE_-only carve-out left their
+    # documented regen recipe hard-failing at its own guard.
     golden_update_armed = any(
-        key.startswith("TORCHLENS_UPDATE_") and value == "1" for key, value in os.environ.items()
+        key.startswith(GOLDEN_FLAG_PREFIXES) and value == "1" for key, value in os.environ.items()
     )
     if not config.option.collectonly and not golden_update_armed:
         import warnings as _warnings
