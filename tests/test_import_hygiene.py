@@ -75,6 +75,9 @@ _EAGER_TORCHLENS_MODULES = frozenset(
         "torchlens._deprecations",
         "torchlens._errors",
         "torchlens._io",
+        # stdlib-only (os/contextlib) pre-release field registrar; eager because
+        # torchlens._io.read_tlspec_version validates its marker on every load.
+        "torchlens._io.prerelease",
         "torchlens._literals",
         "torchlens._save_budget",
         "torchlens._state",

@@ -21,6 +21,7 @@ from typing import Any, NamedTuple
 import torch
 
 from ..errors._base import CompatibilityError, TorchLensWarning
+from .prerelease import validate_prerelease_state
 
 # v6 adds persisted ModuleCall forward-pre-hook provenance value objects.
 # v7 adds the persisted capture outcome (`_capture_outcome`, string-only payload).
@@ -46,6 +47,17 @@ class ArtifactVersionBelowFloorError(TorchLensIOError):
     (``tlspec_version >= 6``). Older artifacts refuse with this error rather
     than being partially reconstructed; re-save them with a torchlens release
     in the ``2.33``-to-``2.34`` range that can still read them.
+    """
+
+
+class PreReleaseArtifactError(TorchLensIOError):
+    """Raised when a pre-release-marked artifact loads without the switch.
+
+    Sprint-gated fields persist only under the test-only activation switch
+    (:mod:`torchlens._io.prerelease`), and every state written under the
+    switch carries the pre-release marker. Loading such an artifact as a real
+    current-version artifact refuses with this error so switched and real
+    writes are never indistinguishable.
     """
 
 
@@ -216,6 +228,7 @@ def read_tlspec_version(state: dict[str, Any], *, cls_name: str) -> int:
         is not an integer.
     """
 
+    validate_prerelease_state(state, cls_name=cls_name)
     version = state.pop("tlspec_version", None)
     if version is None:
         _raise_below_floor(cls_name, "no tlspec_version (predates portable I/O versioning)")
