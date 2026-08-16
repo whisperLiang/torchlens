@@ -539,13 +539,11 @@ def apply_tf_module_intervention(
         decision = site.predicate(context)
         if decision is None:
             continue
-        current = _map_tensor_leaves(
-            current,
-            tf,
-            lambda tensor, site=site: _fire_site(
-                plan, session, tf, site, tensor, _producer_label(session, tensor)
-            ),
-        )
+
+        def _fire_for_site(tensor: Any, site: TFInterventionSite = site) -> Any:
+            return _fire_site(plan, session, tf, site, tensor, _producer_label(session, tensor))
+
+        current = _map_tensor_leaves(current, tf, _fire_for_site)
     return current
 
 
