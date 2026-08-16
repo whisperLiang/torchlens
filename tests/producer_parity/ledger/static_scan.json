@@ -2728,6 +2728,22 @@
   "via_getattr": true
  },
  {
+  "ambiguous": false,
+  "field": "func_call_id",
+  "file": "torchlens/data_classes/_trace_intervention.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": true,
+  "field": "kind",
+  "file": "torchlens/data_classes/_trace_intervention.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
   "ambiguous": true,
   "field": "modules",
   "file": "torchlens/data_classes/_trace_intervention.py",
@@ -3534,6 +3550,14 @@
   "has_default": true,
   "sites": 1,
   "via_getattr": true
+ },
+ {
+  "ambiguous": false,
+  "field": "func_call_id",
+  "file": "torchlens/intervention/edge_substitution.py",
+  "has_default": false,
+  "sites": 2,
+  "via_getattr": false
  },
  {
   "ambiguous": true,
@@ -4689,6 +4713,14 @@
  },
  {
   "ambiguous": true,
+  "field": "kind",
+  "file": "torchlens/observers.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": true,
   "field": "parents",
   "file": "torchlens/partial/__init__.py",
   "has_default": true,
@@ -5650,6 +5682,38 @@
  {
   "ambiguous": true,
   "field": "kind",
+  "file": "torchlens/selection.py",
+  "has_default": false,
+  "sites": 9,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": true,
+  "field": "params",
+  "file": "torchlens/selection.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": false,
+  "field": "pass_index",
+  "file": "torchlens/selection.py",
+  "has_default": false,
+  "sites": 4,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": false,
+  "field": "pass_index",
+  "file": "torchlens/selection.py",
+  "has_default": true,
+  "sites": 6,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": true,
+  "field": "kind",
   "file": "torchlens/semantic/facets.py",
   "has_default": false,
   "sites": 9,
@@ -6428,7 +6492,7 @@
   "field": "func_call_id",
   "file": "torchlens/validation/core.py",
   "has_default": false,
-  "sites": 1,
+  "sites": 2,
   "via_getattr": false
  },
  {

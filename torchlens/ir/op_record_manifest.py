@@ -67,6 +67,8 @@ CELL_SOURCE_MANIFEST: dict[str, str] = {
     'dropped_edge_tensor_args': 'FACET:graph',
     'dtype': 'JOIN:payload',
     'dtype_ref': 'DERIVED:init',
+    'edge_replacement_stamps': 'DEFAULT',
+    'edge_substitutions': 'DEFAULT',
     'equivalence_class': 'FACET:graph',
     'equivalent_ops': 'JOIN:equivalence',
     'flops_backward': 'FACET:function',
