@@ -171,6 +171,29 @@ def _validate_boundary(entry: dict[str, Any], index: int, source: str) -> None:
         not isinstance(my_group_rank, int) or isinstance(my_group_rank, bool)
     ):
         raise _refuse(f"{where} my_group_rank is not an integer or null", source=source)
+    # The group rank is definitionally the position of my_global_rank in the
+    # recorded (c10d-ordered) rank list -- the writer reads it from
+    # ``dist.get_group_rank`` over the same group whose
+    # ``get_process_group_ranks`` list it records. A permuted or out-of-range
+    # value rebinds this rank's slice pairings in the gather/scatter/all_to_all
+    # witness derivation (and used to reach the engine's list indexing as a raw
+    # IndexError), so incoherence is tamper, never honest evidence (R18-2).
+    if my_group_rank is not None and my_group_rank != global_ranks.index(group["my_global_rank"]):
+        raise _refuse(
+            f"{where} my_group_rank {my_group_rank} does not equal the position "
+            f"of my_global_rank {group['my_global_rank']} in its own recorded "
+            f"group membership {global_ranks}",
+            source=source,
+        )
+    # ``size`` is written by the recorder as len(global_ranks) and was never
+    # validated: a forged size is a second, contradictory membership claim.
+    size = group.get("size")
+    if isinstance(size, bool) or not isinstance(size, int) or size != len(global_ranks):
+        raise _refuse(
+            f"{where} group size {size!r} does not equal its recorded "
+            f"membership of {len(global_ranks)} rank(s)",
+            source=source,
+        )
     backend = group.get("backend")
     if backend is not None and not isinstance(backend, str):
         raise _refuse(f"{where} group backend is not a string or null", source=source)
@@ -203,6 +226,7 @@ def _validate_boundary(entry: dict[str, Any], index: int, source: str) -> None:
             "honest evidence",
             source=source,
         )
+    seen_role_indexes: dict[str, set[int]] = {}
     for role_index, role in enumerate(roles):
         if not isinstance(role, dict):
             raise _refuse(f"{where} role entry {role_index} is not a mapping", source=source)
@@ -221,6 +245,27 @@ def _validate_boundary(entry: dict[str, Any], index: int, source: str) -> None:
                 "(a list of non-negative integers)",
                 source=source,
             )
+        # ``index`` is the recorder's tensor POSITION (input position for
+        # contribution/contribution_destination, output position for
+        # destination). Positions are unique per exact role name; they are NOT
+        # required dense 0..n-1 because a tensor serving as both contribution
+        # and destination keeps its input position and leaves a hole in the
+        # destination positions -- an honest recorder shape (R18-1 ii).
+        index_value = role.get("index")
+        if isinstance(index_value, bool) or not isinstance(index_value, int) or index_value < 0:
+            raise _refuse(
+                f"{where} role entry {role_index} has no non-negative integer index",
+                source=source,
+            )
+        used = seen_role_indexes.setdefault(str(role.get("role")), set())
+        if index_value in used:
+            raise _refuse(
+                f"{where} role entry {role_index} duplicates index {index_value} "
+                f"within role {role.get('role')!r}; the recorder emits each "
+                "tensor position at most once per role",
+                source=source,
+            )
+        used.add(index_value)
     # Reduce-op cardinality vs kind (sibling of the roles-deletion escape):
     # uniform deletion of ``reduce_op`` from every rank core vacuously
     # satisfied the reduce-op agreement check the same way.
@@ -235,6 +280,10 @@ def _validate_boundary(entry: dict[str, Any], index: int, source: str) -> None:
     # A tampered non-integer seq crashed the engine's delta arithmetic with a
     # raw TypeError instead of the promised typed refusal (the load-side
     # descriptor check in _artifact already enforced this; parse now matches).
+    # The KEY itself is required: the recorder always writes it (null when the
+    # probe is absent), so a deleted key is tamper, not honest absence (R18-3).
+    if "c10d_group_seq" not in entry:
+        raise _refuse(f"{where} lacks its c10d_group_seq record", source=source)
     c10d_group_seq = entry.get("c10d_group_seq")
     if c10d_group_seq is not None and (
         isinstance(c10d_group_seq, bool) or not isinstance(c10d_group_seq, int)
@@ -371,6 +420,36 @@ def _validate_boundary(entry: dict[str, Any], index: int, source: str) -> None:
         raise _refuse(f"{where} lacks op_labels_raw back-references", source=source)
     if any(not isinstance(label, str) for label in op_labels_raw):
         raise _refuse(f"{where} op_labels_raw contains a non-string label", source=source)
+    # Back-reference cardinality vs kind (R18-1 i): the recorder emits an op
+    # node (>= 1 labeled output tensor) for EVERY op-bearing kind and none for
+    # tensorless kinds, and each label names a DISTINCT logged output tensor.
+    # An empty list on an op-bearing boundary, labels on a journal-only
+    # boundary, or duplicate labels are all shapes no honest recorder writes;
+    # they used to parse silently and derive top verdicts over lying
+    # back-references. A FABRICATED but well-formed label list still parses
+    # here (parse never dereferences the member trace); it is caught typed at
+    # ``MergedTrace.join_ops()``, which fail-closed resolves every recorded
+    # label through the core's own raw-to-final seam.
+    if kind in TENSORLESS_KINDS:
+        if op_labels_raw:
+            raise _refuse(
+                f"{where} is a journal-only {kind} boundary carrying op-label "
+                "back-references; tensorless kinds never emit an op node",
+                source=source,
+            )
+    elif not op_labels_raw:
+        raise _refuse(
+            f"{where} is an op-bearing {kind} boundary with zero op-label "
+            "back-references; a successful call of this kind always logs at "
+            "least one boundary output tensor",
+            source=source,
+        )
+    if len(set(op_labels_raw)) != len(op_labels_raw):
+        raise _refuse(
+            f"{where} op_labels_raw contains duplicate labels; each "
+            "back-reference names a distinct logged output tensor",
+            source=source,
+        )
     lifetime = entry.get("lifetime_evidence")
     if not isinstance(lifetime, dict) or lifetime.get("install_epoch") not in _INSTALL_EPOCHS:
         raise _refuse(
@@ -425,10 +504,67 @@ def extract_rank_evidence(trace: Any, source: str) -> RankEvidence:
         )
     ranks: set[int] = set()
     seen_correlation_keys: set[tuple[str, int, str, int]] = set()
+    group_rank_absence: dict[tuple[str, int], bool] = {}
+    seq_seen_value = False
+    seq_dropped = False
     for index, entry in enumerate(boundaries):
         if not isinstance(entry, dict):
             raise _refuse(f"boundary {index} of {source} is not a mapping", source=source)
         _validate_boundary(entry, index, source)
+        # my_group_rank None-ness is UNIFORM per group within one rank core:
+        # the writer mints None only when ``dist.get_group_rank`` raises -- a
+        # group-level fact -- so mixed presence within one core+group is
+        # tamper. Without this, stripping my_group_rank from one boundary of a
+        # slice-witnessed join silently deleted its value_divergence finding
+        # (R18-2; findings must never disappear by record deletion).
+        uid = (
+            entry["correlation"]["membership_digest"],
+            entry["correlation"]["lifetime_ordinal"],
+        )
+        group_rank_is_none = entry["group"].get("my_group_rank") is None
+        if uid in group_rank_absence and group_rank_absence[uid] != group_rank_is_none:
+            raise _refuse(
+                f"boundary {index} of {source} mixes my_group_rank presence and "
+                f"absence within one group {uid}; group-rank readability is a "
+                "group-level fact, so selective absence is tamper",
+                source=source,
+            )
+        group_rank_absence.setdefault(uid, group_rank_is_none)
+        # c10d_group_seq follows the recorder's process-global LATCH shape: a
+        # prefix of values, at most ONE disclosing read-failure boundary, then
+        # an all-null suffix. Selective nulling of a value (the cheap tamper
+        # that deleted a correlation_delta_mismatch finding) refuses here;
+        # uniformly-absent cores stay finding-free per the contract ("absence
+        # of the probe never demotes anything") -- an all-null rewrite is the
+        # documented coherent-reauthoring boundary, not an open residual.
+        seq_value = entry["c10d_group_seq"]
+        seq_disclosed = "c10d_group_seq_read_failed" in entry["disclosures"]
+        if seq_value is not None:
+            if seq_dropped:
+                raise _refuse(
+                    f"boundary {index} of {source} carries a c10d_group_seq value "
+                    "after an earlier boundary of this core recorded none; the "
+                    "probe never recovers within one capture",
+                    source=source,
+                )
+            seq_seen_value = True
+        elif not seq_dropped:
+            if seq_seen_value and not seq_disclosed:
+                raise _refuse(
+                    f"boundary {index} of {source} drops c10d_group_seq without "
+                    "the c10d_group_seq_read_failed disclosure while earlier "
+                    "boundaries of this core carry values; an undisclosed drop "
+                    "is tamper, not honest probe absence",
+                    source=source,
+                )
+            seq_dropped = True
+        elif seq_disclosed:
+            raise _refuse(
+                f"boundary {index} of {source} repeats the "
+                "c10d_group_seq_read_failed disclosure after the probe already "
+                "latched off; the recorder discloses the failed read exactly once",
+                source=source,
+            )
         # A rank has exactly ONE install epoch; a boundary claiming a
         # different one is a forged record trying to promote (or demote) its
         # own lifetime completeness independently of the rank's arming record.
@@ -491,6 +627,45 @@ def extract_rank_evidence(trace: Any, source: str) -> RankEvidence:
     )
 
 
+def _require_mergeable_outcome(trace: Any, source: str) -> None:
+    """Refuse typed when a member core's settled capture outcome cannot merge.
+
+    R06c: ``merge_ranks`` never consulted member capture outcomes, so a FAILED
+    or UNKNOWN member core merged into ``aligned``/``attested_complete`` with
+    zero findings. FAILED / ABORTED_NONFINITE / UNKNOWN members refuse here at
+    the one input chokepoint (live traces and path-loaded bundles alike);
+    HALTED and legacy UNATTESTED members merge and are DISCLOSED through
+    ``MergedTrace.member_outcomes`` and ``summary()`` (demote-only: the
+    disclosure is presenter-side and never edits the derivation). A trace
+    object carrying no settled outcome sidecar (hand-built evidence carriers)
+    makes no outcome claim and is not refused here -- the boundary-journal
+    parse remains its gate.
+    """
+
+    from ..capture.outcome import CaptureStatus, outcome_for
+
+    outcome = outcome_for(trace)
+    if outcome is None:
+        return
+    if outcome.status in (
+        CaptureStatus.FAILED,
+        CaptureStatus.ABORTED_NONFINITE,
+        CaptureStatus.UNKNOWN,
+    ):
+        raise MergeInputError(
+            f"Merge input {source} carries a settled capture outcome "
+            f"{outcome.status.value!r}; a failed, aborted, or unprovable rank "
+            "capture cannot join a cross-rank merge.",
+            code=MergedErrorCode.MERGE_INPUT_INVALID,
+            reason="member_outcome_not_mergeable",
+            member_status=outcome.status.value,
+            remedy=(
+                "re-capture the rank to a settled complete (or halted) outcome and merge that core"
+            ),
+            source=source,
+        )
+
+
 def resolve_rank_inputs(inputs: Sequence[Any]) -> dict[int, tuple[RankEvidence, Any]]:
     """Resolve merge inputs (traces or bundle paths) into per-rank evidence.
 
@@ -538,6 +713,7 @@ def resolve_rank_inputs(inputs: Sequence[Any]) -> dict[int, tuple[RankEvidence, 
             trace = item
             source = f"live[{position}]"
         evidence = extract_rank_evidence(trace, source)
+        _require_mergeable_outcome(trace, source)
         if evidence.rank in resolved:
             raise MergeInputError(
                 f"Merge inputs contain global rank {evidence.rank} twice "
