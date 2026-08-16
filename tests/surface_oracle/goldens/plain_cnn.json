@@ -7,8 +7,8 @@
   "layers": {
    "conv2d_1_1": {
     "_param_barcodes": [
-     "EuWcY20S",
-     "8ZlxjLIn"
+     "dsU1LzZK",
+     "oDRCwlms"
     ],
     "_param_logs": [
      {
@@ -97,7 +97,7 @@
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
     "edges_vary_across_ops": false,
-    "equivalence_class": "conv2d_8ZlxjLIn_EuWcY20Sconv",
+    "equivalence_class": "conv2d_dsU1LzZK_oDRCwlmsconv",
     "equivalent_ops": {
      "__set__": [
       "\"conv2d_1_1:1\""
@@ -1846,8 +1846,8 @@
     "_label_raw": "conv2d_1_2_raw",
     "_layer_label_raw": "conv2d_1_2_raw",
     "_param_barcodes": [
-     "EuWcY20S",
-     "8ZlxjLIn"
+     "dsU1LzZK",
+     "oDRCwlms"
     ],
     "_param_logs": [
      {
@@ -1952,7 +1952,7 @@
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
-    "equivalence_class": "conv2d_8ZlxjLIn_EuWcY20Sconv",
+    "equivalence_class": "conv2d_dsU1LzZK_oDRCwlmsconv",
     "equivalent_ops": {
      "__set__": [
       "\"conv2d_1_1:1\""
@@ -2239,8 +2239,8 @@
      "\"kwargs\"": {}
     },
     "parent_param_ops": {
-     "\"8ZlxjLIn\"": 1,
-     "\"EuWcY20S\"": 1
+     "\"dsU1LzZK\"": 1,
+     "\"oDRCwlms\"": 1
     },
     "parent_params": [],
     "parents": [
@@ -3405,7 +3405,7 @@
      "conv"
     ],
     "backend_address": "conv.bias",
-    "barcode": "8ZlxjLIn",
+    "barcode": "oDRCwlms",
     "co_parent_params": [
      "conv.weight"
     ],
@@ -3489,7 +3489,7 @@
      "conv"
     ],
     "backend_address": "conv.weight",
-    "barcode": "EuWcY20S",
+    "barcode": "dsU1LzZK",
     "co_parent_params": [
      "conv.bias"
     ],
@@ -4240,7 +4240,7 @@
    "num_uncalled_modules": 0,
    "observer_spans": [],
    "op_equivalence_classes": {
-    "\"conv2d_8ZlxjLIn_EuWcY20S\"": {
+    "\"conv2d_dsU1LzZK_oDRCwlms\"": {
      "__set__": [
       "\"conv2d_1_1:1\""
      ]
@@ -4294,7 +4294,7 @@
    },
    "profile_enabled": false,
    "raise_on_nan": false,
-   "random_seed": 228121367,
+   "random_seed": 20260812,
    "raw_input": null,
    "raw_output": null,
    "readiness": null,
@@ -4375,8 +4375,8 @@
   "layers": {
    "conv2d_1_1": {
     "_param_barcodes": [
-     "EuWcY20S",
-     "8ZlxjLIn"
+     "dsU1LzZK",
+     "oDRCwlms"
     ],
     "_param_logs": [
      {
@@ -4465,7 +4465,7 @@
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
     "edges_vary_across_ops": false,
-    "equivalence_class": "conv2d_8ZlxjLIn_EuWcY20Sconv",
+    "equivalence_class": "conv2d_dsU1LzZK_oDRCwlmsconv",
     "equivalent_ops": {
      "__set__": [
       "\"conv2d_1_1:1\""
@@ -6214,8 +6214,8 @@
     "_label_raw": "conv2d_1_2_raw",
     "_layer_label_raw": "conv2d_1_2_raw",
     "_param_barcodes": [
-     "EuWcY20S",
-     "8ZlxjLIn"
+     "dsU1LzZK",
+     "oDRCwlms"
     ],
     "_param_logs": [
      {
@@ -6320,7 +6320,7 @@
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
-    "equivalence_class": "conv2d_8ZlxjLIn_EuWcY20Sconv",
+    "equivalence_class": "conv2d_dsU1LzZK_oDRCwlmsconv",
     "equivalent_ops": {
      "__set__": [
       "\"conv2d_1_1:1\""
@@ -6607,8 +6607,8 @@
      "\"kwargs\"": {}
     },
     "parent_param_ops": {
-     "\"8ZlxjLIn\"": 1,
-     "\"EuWcY20S\"": 1
+     "\"dsU1LzZK\"": 1,
+     "\"oDRCwlms\"": 1
     },
     "parent_params": [],
     "parents": [
@@ -7773,7 +7773,7 @@
      "conv"
     ],
     "backend_address": "conv.bias",
-    "barcode": "8ZlxjLIn",
+    "barcode": "oDRCwlms",
     "co_parent_params": [
      "conv.weight"
     ],
@@ -7857,7 +7857,7 @@
      "conv"
     ],
     "backend_address": "conv.weight",
-    "barcode": "EuWcY20S",
+    "barcode": "dsU1LzZK",
     "co_parent_params": [
      "conv.bias"
     ],
@@ -8608,7 +8608,7 @@
    "num_uncalled_modules": 0,
    "observer_spans": [],
    "op_equivalence_classes": {
-    "\"conv2d_8ZlxjLIn_EuWcY20S\"": {
+    "\"conv2d_dsU1LzZK_oDRCwlms\"": {
      "__set__": [
       "\"conv2d_1_1:1\""
      ]
@@ -8663,7 +8663,7 @@
    "parent_trace": null,
    "profile_enabled": false,
    "raise_on_nan": false,
-   "random_seed": 228121367,
+   "random_seed": 20260812,
    "raw_input": null,
    "raw_output": null,
    "readiness": null,
@@ -8746,8 +8746,8 @@
   "layers": {
    "conv2d_1_1": {
     "_param_barcodes": [
-     "EuWcY20S",
-     "8ZlxjLIn"
+     "dsU1LzZK",
+     "oDRCwlms"
     ],
     "_param_logs": [
      {
@@ -8836,7 +8836,7 @@
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
     "edges_vary_across_ops": false,
-    "equivalence_class": "conv2d_8ZlxjLIn_EuWcY20Sconv",
+    "equivalence_class": "conv2d_dsU1LzZK_oDRCwlmsconv",
     "equivalent_ops": {
      "__set__": [
       "\"conv2d_1_1:1\""
@@ -10585,8 +10585,8 @@
     "_label_raw": "conv2d_1_2_raw",
     "_layer_label_raw": "conv2d_1_2_raw",
     "_param_barcodes": [
-     "EuWcY20S",
-     "8ZlxjLIn"
+     "dsU1LzZK",
+     "oDRCwlms"
     ],
     "_param_logs": [
      {
@@ -10691,7 +10691,7 @@
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
-    "equivalence_class": "conv2d_8ZlxjLIn_EuWcY20Sconv",
+    "equivalence_class": "conv2d_dsU1LzZK_oDRCwlmsconv",
     "equivalent_ops": {
      "__set__": [
       "\"conv2d_1_1:1\""
@@ -10978,8 +10978,8 @@
      "\"kwargs\"": {}
     },
     "parent_param_ops": {
-     "\"8ZlxjLIn\"": 1,
-     "\"EuWcY20S\"": 1
+     "\"dsU1LzZK\"": 1,
+     "\"oDRCwlms\"": 1
     },
     "parent_params": [],
     "parents": [
@@ -12144,7 +12144,7 @@
      "conv"
     ],
     "backend_address": "conv.bias",
-    "barcode": "8ZlxjLIn",
+    "barcode": "oDRCwlms",
     "co_parent_params": [
      "conv.weight"
     ],
@@ -12198,7 +12198,7 @@
      "conv"
     ],
     "backend_address": "conv.weight",
-    "barcode": "EuWcY20S",
+    "barcode": "dsU1LzZK",
     "co_parent_params": [
      "conv.bias"
     ],
@@ -12913,7 +12913,7 @@
    "num_uncalled_modules": 0,
    "observer_spans": [],
    "op_equivalence_classes": {
-    "\"conv2d_8ZlxjLIn_EuWcY20S\"": {
+    "\"conv2d_dsU1LzZK_oDRCwlms\"": {
      "__set__": [
       "\"conv2d_1_1:1\""
      ]
@@ -12964,7 +12964,7 @@
    "parent_trace": null,
    "profile_enabled": false,
    "raise_on_nan": false,
-   "random_seed": 228121367,
+   "random_seed": 20260812,
    "raw_input": null,
    "raw_output": null,
    "readiness": null,
@@ -13042,8 +13042,8 @@
   "layers": {
    "conv2d_1_1": {
     "_param_barcodes": [
-     "EuWcY20S",
-     "8ZlxjLIn"
+     "dsU1LzZK",
+     "oDRCwlms"
     ],
     "_param_logs": [
      {
@@ -13132,7 +13132,7 @@
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
     "edges_vary_across_ops": false,
-    "equivalence_class": "conv2d_8ZlxjLIn_EuWcY20Sconv",
+    "equivalence_class": "conv2d_dsU1LzZK_oDRCwlmsconv",
     "equivalent_ops": {
      "__set__": [
       "\"conv2d_1_1:1\""
@@ -14881,8 +14881,8 @@
     "_label_raw": "conv2d_1_2_raw",
     "_layer_label_raw": "conv2d_1_2_raw",
     "_param_barcodes": [
-     "EuWcY20S",
-     "8ZlxjLIn"
+     "dsU1LzZK",
+     "oDRCwlms"
     ],
     "_param_logs": [
      {
@@ -14987,7 +14987,7 @@
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
-    "equivalence_class": "conv2d_8ZlxjLIn_EuWcY20Sconv",
+    "equivalence_class": "conv2d_dsU1LzZK_oDRCwlmsconv",
     "equivalent_ops": {
      "__set__": [
       "\"conv2d_1_1:1\""
@@ -15274,8 +15274,8 @@
      "\"kwargs\"": {}
     },
     "parent_param_ops": {
-     "\"8ZlxjLIn\"": 1,
-     "\"EuWcY20S\"": 1
+     "\"dsU1LzZK\"": 1,
+     "\"oDRCwlms\"": 1
     },
     "parent_params": [],
     "parents": [
@@ -16440,7 +16440,7 @@
      "conv"
     ],
     "backend_address": "conv.bias",
-    "barcode": "8ZlxjLIn",
+    "barcode": "oDRCwlms",
     "co_parent_params": [
      "conv.weight"
     ],
@@ -16524,7 +16524,7 @@
      "conv"
     ],
     "backend_address": "conv.weight",
-    "barcode": "EuWcY20S",
+    "barcode": "dsU1LzZK",
     "co_parent_params": [
      "conv.bias"
     ],
@@ -17275,7 +17275,7 @@
    "num_uncalled_modules": 0,
    "observer_spans": [],
    "op_equivalence_classes": {
-    "\"conv2d_8ZlxjLIn_EuWcY20S\"": {
+    "\"conv2d_dsU1LzZK_oDRCwlms\"": {
      "__set__": [
       "\"conv2d_1_1:1\""
      ]
@@ -17329,7 +17329,7 @@
    },
    "profile_enabled": false,
    "raise_on_nan": false,
-   "random_seed": 228121367,
+   "random_seed": 20260812,
    "raw_input": null,
    "raw_output": null,
    "readiness": null,
