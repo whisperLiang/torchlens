@@ -1062,3 +1062,105 @@ def test_bool_output_models_still_validate_true_end_to_end() -> None:
     assert _quiet_validate(_BoolMix(), torch.randn(3, 4)) is True
     torch.manual_seed(0)
     assert _quiet_validate(_FarThresholdGate(), torch.randn(3, 4)) is True
+
+
+class _PredicateZoo(nn.Module):
+    """Bool-output NON-comparison ops: the R08-2 residual family.
+
+    ``isnan``/``isfinite``/``logical_and``/``any``/``bitwise_not`` each get a
+    perturbable float (or derived-bool) parent so the spurious-edge freeze
+    harness and the honest controls run on real captured edges.
+    """
+
+    def __init__(self, func_name: str) -> None:
+        super().__init__()
+        self.func_name = func_name
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = x * 2.0
+        if self.func_name == "isnan":
+            return torch.isnan(h).float()
+        if self.func_name == "isfinite":
+            return torch.isfinite(h).float()
+        if self.func_name == "logical_and":
+            return torch.logical_and(h > 0, h < 1.0e30).float()
+        if self.func_name == "any":
+            return torch.any(h > 0).float()
+        if self.func_name == "bitwise_not":
+            return torch.bitwise_not(h > 0).float()
+        raise AssertionError(self.func_name)
+
+
+@pytest.mark.parametrize("func_name", ["isnan", "isfinite", "logical_and", "any", "bitwise_not"])
+def test_bool_predicate_spurious_edge_now_fails(func_name: str) -> None:
+    """Armed-proof (r7 R08-2): a dead edge on a NON-comparison bool op fails.
+
+    Round-6 residual of the R08 comparison fix: freezing the replay callable
+    of ``logical_and``/``isnan``/``isfinite``/``any``/``bitwise_not`` settled
+    ``exempted``/``discrete_bool_output`` with an empty justification -- the
+    ``probe is None`` fallback was still a blanket pass, so a capture bug
+    that drops or invents a parent edge on the predicate family was
+    unfalsifiable by perturbation. The substitution-battery probe now proves
+    no value influence and the tripwire fires (red-capable: pre-fix every
+    parametrization settles ``exempted``).
+    """
+
+    from torchlens.validation.core import (
+        _check_whether_func_on_saved_parents_yields_saved_tensor,
+    )
+
+    trace, _ground_truth = _capture(_PredicateZoo(func_name), torch.randn(3, 4))
+    target = [op for op in trace.layer_list if op.func_name == func_name][0]
+    saved = target.out.detach().clone()
+    object.__setattr__(target, "func", lambda *args, **kwargs: saved.clone())
+    parent_label = target.parents[0]
+
+    result = _check_whether_func_on_saved_parents_yields_saved_tensor(
+        trace, target.label, perturb=True, layers_to_perturb=[parent_label]
+    )
+    assert result.decision == "failed", (func_name, result.decision, result.reason)
+    assert result.reason == "perturbation_insensitive"
+
+
+@pytest.mark.parametrize("func_name", ["isnan", "isfinite", "logical_and", "any", "bitwise_not"])
+def test_bool_predicate_honest_edge_stays_green(func_name: str) -> None:
+    """Honest control: the real edge validates (rungs) or exempts WITH
+    battery evidence -- never the evidence-free blanket, never a failure."""
+
+    from torchlens.validation.core import (
+        _check_whether_func_on_saved_parents_yields_saved_tensor,
+    )
+
+    trace, _ground_truth = _capture(_PredicateZoo(func_name), torch.randn(3, 4))
+    target = [op for op in trace.layer_list if op.func_name == func_name][0]
+    parent_label = target.parents[0]
+
+    result = _check_whether_func_on_saved_parents_yields_saved_tensor(
+        trace, target.label, perturb=True, layers_to_perturb=[parent_label]
+    )
+    assert result.decision in ("validated", "exempted"), (
+        func_name,
+        result.decision,
+        result.reason,
+    )
+    if result.decision == "exempted" and result.reason == "discrete_bool_output":
+        assert result.justification, (
+            f"{func_name}: honest edge exempted through the evidence-free blanket"
+        )
+
+
+def test_validate_forward_pass_accepts_a_bare_ground_truth_tensor() -> None:
+    """r7 b1-opus R08-3: ``validate_forward_pass(model(x))`` must not FAIL.
+
+    A bare tensor was iterated as rows, so the arity check counted the BATCH
+    as expected outputs and a byte-correct capture reported
+    ``ground_truth_missing_out`` ("1 logged vs N expected") -- a validation
+    FAILURE for a caller-arity slip. The bare tensor now normalizes to
+    ``[tensor]`` (red-capable: pre-fix this asserts False).
+    """
+
+    model = _FarThresholdGate()
+    x = torch.randn(4, 3)
+    trace, ground_truth = _capture(model, x)
+    assert trace.validate_forward_pass(ground_truth) is True
+    assert trace.validate_forward_pass([ground_truth]) is True

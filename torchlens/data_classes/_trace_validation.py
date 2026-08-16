@@ -205,7 +205,7 @@ class TraceValidationMixin(_TraceMixinBase):
 
     def validate_forward_pass(
         self: "Trace",
-        ground_truth_output_tensors: list[torch.Tensor],
+        ground_truth_output_tensors: list[torch.Tensor] | torch.Tensor,
         verbose: bool = False,
         validate_metadata: bool = True,
     ) -> Union[bool, "ValidationReplayStatus"]:
@@ -213,7 +213,15 @@ class TraceValidationMixin(_TraceMixinBase):
 
         Parameters
         ----------
-        ground_truth_output_tensors, verbose, validate_metadata:
+        ground_truth_output_tensors:
+            Ground-truth model outputs. A bare tensor -- what
+            ``model(x)`` naturally produces for a single-output model -- is
+            normalized to ``[tensor]``: iterating it directly counted the
+            tensor's ROWS as expected outputs, so a byte-correct capture
+            reported a validation FAILURE (``"1 logged vs <batch> expected"``)
+            for a caller-arity slip (r7 b1-opus R08-3). A tripwire that fails
+            on correct captures trains users to ignore it.
+        verbose, validate_metadata:
             Forwarded unchanged to
             :func:`torchlens.validation.core.validate_saved_outs`.
 
@@ -227,6 +235,9 @@ class TraceValidationMixin(_TraceMixinBase):
         from ..backends import get_backend_spec
         from ..capture.outcome import require_capture_capability
         from ..runnable import refuse_poisoned_trace
+
+        if isinstance(ground_truth_output_tensors, torch.Tensor):
+            ground_truth_output_tensors = [ground_truth_output_tensors]
 
         refuse_poisoned_trace(self, "validation")
         # N2: refusing ENTRY for failed/unproven captures is not a check

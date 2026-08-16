@@ -1830,6 +1830,111 @@ def _bool_comparison_straddle_probe(layer: Op, layers_to_perturb: list[str]) -> 
     return False
 
 
+def _bool_probe_battery(parent_saved: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    """Return dtype-directed substitutes chosen to flip a value-transmitting predicate.
+
+    Sign / zero / extreme / non-finite / inversion coverage: ``isnan``/``isfinite``
+    flip on the non-finite rows, ``logical_*`` and ``any``/``all`` on the
+    all-False/all-True rows, ``signbit``-style predicates on the sign rows, and
+    magnitude thresholds on the extreme rows.
+    """
+
+    if parent_saved.dtype == torch.bool:
+        return (
+            torch.zeros_like(parent_saved),
+            torch.ones_like(parent_saved),
+            ~parent_saved,
+        )
+    if parent_saved.is_complex():
+        return (
+            torch.zeros_like(parent_saved),
+            torch.ones_like(parent_saved),
+            torch.full_like(parent_saved, complex(0.0, 1.0)),
+            torch.full_like(parent_saved, complex(float("nan"), 0.0)),
+        )
+    if parent_saved.is_floating_point():
+        return (
+            torch.zeros_like(parent_saved),
+            torch.ones_like(parent_saved),
+            -torch.ones_like(parent_saved),
+            -parent_saved,
+            torch.full_like(parent_saved, float("nan")),
+            torch.full_like(parent_saved, float("inf")),
+            torch.full_like(parent_saved, float("-inf")),
+            torch.full_like(parent_saved, torch.finfo(parent_saved.dtype).max / 2),
+        )
+    info = torch.iinfo(parent_saved.dtype)
+    substitutes = [
+        torch.zeros_like(parent_saved),
+        torch.ones_like(parent_saved),
+        torch.full_like(parent_saved, info.max),
+        torch.full_like(parent_saved, info.min),
+    ]
+    if info.min < 0:
+        substitutes.append(-torch.ones_like(parent_saved))
+    return tuple(substitutes)
+
+
+def _bool_predicate_influence_probe(layer: Op, layers_to_perturb: list[str]) -> bool | None:
+    """Probe a NON-comparison bool-output op with a substitution battery (R08-2).
+
+    The comparison family gets the threshold-straddle probe; the rest of the
+    bool universe (``logical_*``, ``isnan``/``isfinite``, ``any``/``all``,
+    ``bitwise_*`` masks) used to fall back to the blanket
+    ``discrete_bool_output`` pass with no evidence, so a capture bug that
+    drops or invents a parent edge on a predicate op was unfalsifiable by
+    perturbation (round-6 armed proof: a frozen replay callable settled
+    ``exempted`` while its comparison sibling failed). Re-execute the op with
+    the perturbed slot substituted by :func:`_bool_probe_battery`; any flip
+    proves the recorded edge transmits value, and a battery-wide pin proves
+    the recorded parent has no value influence -- the caller then falls
+    through to the ``perturbation_insensitive`` failure exactly like the
+    comparison family.
+
+    Returns
+    -------
+    bool | None
+        ``True`` (edge transmits value), ``False`` (provably no influence),
+        or ``None`` when the probe cannot run (comparison func -- the
+        straddle owns those -- kwargs, multi-slot operands, non-tensor
+        parent/output, execution failure); the caller then falls back to the
+        disclosed heuristic exemption.
+    """
+
+    func = getattr(layer, "func", None)
+    if func is None or layer.func_name in _ELEMENTWISE_COMPARISON_FUNCS:
+        return None
+    args: tuple[Any, ...] = tuple(layer.saved_args or ())
+    kwargs = dict(getattr(layer, "saved_kwargs", None) or {})
+    if kwargs or not args:
+        return None
+    positions = _perturbed_parent_arg_positions(layer, layers_to_perturb)
+    if len(positions) != 1:
+        return None
+    parent_index = next(iter(positions))
+    if not (0 <= parent_index < len(args)):
+        return None
+    parent_saved = args[parent_index]
+    saved_output = layer.out
+    if not isinstance(parent_saved, torch.Tensor) or not isinstance(saved_output, torch.Tensor):
+        return None
+    try:
+        with torch.no_grad():
+            from ..utils.tensor_utils import tensor_nanequal
+
+            for substitute in _bool_probe_battery(parent_saved):
+                probe_args = list(args)
+                probe_args[parent_index] = substitute
+                probe_output = func(*probe_args)
+                if not isinstance(probe_output, torch.Tensor):
+                    return None
+                if not tensor_nanequal(probe_output, saved_output, allow_tolerance=False):
+                    return True
+    except Exception:
+        return None
+    return False
+
+
 def _posthoc_discrete_output_decision(
     layer: Op, layers_to_perturb: list[str]
 ) -> PosthocPerturbDecision:
@@ -1864,6 +1969,21 @@ def _posthoc_discrete_output_decision(
                 "threshold-straddle probe flipped the output: the recorded edge "
                 "transmits value; the original perturbation magnitude did not "
                 "cross the comparison threshold",
+            )
+        # R08-2: the straddle covers comparisons only; the rest of the bool
+        # universe gets the substitution-battery probe so a provably spurious
+        # edge on a logical/predicate op falls through to the failure instead
+        # of the old evidence-free blanket pass.
+        predicate_probe = _bool_predicate_influence_probe(layer, layers_to_perturb)
+        if predicate_probe is False:
+            return PosthocPerturbDecision(False, "bool_predicate_no_value_influence")
+        if predicate_probe is True:
+            return PosthocPerturbDecision(
+                True,
+                "discrete_bool_output",
+                "substitution battery flipped the output: the recorded edge "
+                "transmits value; the original perturbation magnitude did not "
+                "cross the predicate's decision boundary",
             )
         return PosthocPerturbDecision(True, "discrete_bool_output")
     if layer.func_name in ("topk", "sort", "max", "min") and layer.dtype in (
