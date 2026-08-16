@@ -132,6 +132,7 @@ class _ScrubOptions:
     include_rng_states: bool
     include_source: bool = True
     include_custom_attributes: bool = True
+    include_buffer_values: bool = True
     sparse_runnable: bool = False
     backend_name: str = "torch"
     payload_materialization: bool = True
@@ -152,6 +153,7 @@ def scrub_for_save(
     include_rng_states: bool = False,
     include_source: bool = True,
     include_custom_attributes: bool = True,
+    include_buffer_values: bool = True,
     backend_name: str | None = None,
     payload_materialization: bool = True,
     sparse_runnable: bool = False,
@@ -187,6 +189,12 @@ def scrub_for_save(
         public attribute), so ``False`` drops the whole channel from the
         artifact. Values are NEVER rewritten or partially scrubbed: the
         channel ships verbatim or not at all.
+    include_buffer_values:
+        Whether captured pre-forward buffer values
+        (``Trace._buffer_initial_values``: the value each registered buffer
+        held before the forward overwrote it) are persisted. These are
+        training-data-derived state (running statistics, counters, caches),
+        so ``False`` drops the whole channel; values are never rewritten.
     backend_name:
         Backend identifier for payload audit records. Defaults to
         ``trace.backend`` when present.
@@ -209,6 +217,7 @@ def scrub_for_save(
         include_rng_states=include_rng_states,
         include_source=include_source,
         include_custom_attributes=include_custom_attributes,
+        include_buffer_values=include_buffer_values,
         sparse_runnable=sparse_runnable,
         backend_name=str(backend_name or getattr(trace, "backend", "torch")),
         payload_materialization=payload_materialization,
@@ -1725,6 +1734,11 @@ def _effective_policy(
     }:
         return FieldPolicy.DROP
 
+    if field_name == "_buffer_initial_values" and not options.include_buffer_values:
+        # R62 buffer extension: pre-forward buffer values shipped at EVERY
+        # save level (audit included) with no opt-out. Same whole-channel
+        # shape as custom_attributes below: drop entirely, never rewrite.
+        return FieldPolicy.DROP
     if field_name == "custom_attributes" and not options.include_custom_attributes:
         # Ungated the harvested module instance attributes were a silent
         # portable-privacy channel (disputed-r2 b8/R62). The gate is

@@ -989,3 +989,52 @@ def test_restore_changed_state_is_nan_aware() -> None:
     changed = _restore_changed_state(model, snapshot)
     assert changed == ("buffer:stat",)
     assert model.stat[0].item() == 1.0
+
+
+def test_nan_state_does_not_false_flag_the_state_audit() -> None:
+    """R16: IEEE ``torch.equal`` returns False for NaN==NaN, so a model
+    legitimately holding a NaN parameter/buffer was falsely accused of a
+    double-applied state write by the untouched-model audit -- the rescue
+    trace was discarded and the user warned about writes that never happened.
+    The audit must be NaN-safe (byte-exact, never tolerant)."""
+
+    from torchlens.backends.torch.rescue import (
+        _restore_changed_state,
+        _snapshot_declared_state,
+    )
+
+    model = nn.Linear(2, 2)
+    with torch.no_grad():
+        model.weight[0, 0] = float("nan")
+    model.register_buffer("nan_buffer", torch.tensor([float("nan"), 1.0]))
+
+    snapshot = _snapshot_declared_state(model)
+    assert snapshot is not None
+    changed = _restore_changed_state(model, snapshot)
+    assert changed == (), (
+        "nothing wrote model state between snapshot and audit, yet the audit "
+        f"reported changes: {changed!r} (NaN-blind torch.equal compare)"
+    )
+
+
+def test_nan_holding_model_still_flags_a_real_state_write() -> None:
+    """Positive control for the NaN-safe audit: a genuine write on a model
+    that also holds NaN state is still detected and restored byte-exactly."""
+
+    from torchlens.backends.torch.rescue import (
+        _restore_changed_state,
+        _snapshot_declared_state,
+    )
+
+    model = nn.Linear(2, 2)
+    model.register_buffer("nan_buffer", torch.tensor([float("nan"), 1.0]))
+
+    snapshot = _snapshot_declared_state(model)
+    assert snapshot is not None
+    with torch.no_grad():
+        model.nan_buffer[1] = 7.0
+        model.weight.add_(1.0)
+    changed = _restore_changed_state(model, snapshot)
+    assert set(changed) == {"buffer:nan_buffer", "param:weight"}
+    assert torch.equal(model.weight, snapshot["param:weight"]), "the flagged write was not restored"
+    assert model.nan_buffer[1].item() == 1.0

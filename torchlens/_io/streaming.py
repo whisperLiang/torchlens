@@ -96,6 +96,7 @@ class BundleStreamWriter:
         *,
         strict: bool = True,
         include_custom_attributes: bool = True,
+        include_buffer_values: bool = True,
     ) -> None:
         """Create the temp bundle directory used for streaming writes.
 
@@ -108,6 +109,10 @@ class BundleStreamWriter:
         include_custom_attributes:
             Whether harvested module attributes are persisted in the streamed
             bundle (the tl.save opt-out, mirrored for streaming -- R62).
+        include_buffer_values:
+            Whether captured pre-forward buffer values are persisted in the
+            streamed bundle (the tl.save opt-out, mirrored for streaming --
+            R62 buffer extension).
 
         Raises
         ------
@@ -119,6 +124,7 @@ class BundleStreamWriter:
             raise TorchLensIOError("Streaming out save is always strict.")
 
         self.include_custom_attributes = include_custom_attributes
+        self.include_buffer_values = include_buffer_values
         self.final_path = Path(path)
         if self.final_path.is_symlink():
             raise TorchLensIOError(f"Refusing symlinked save target: {self.final_path}.")
@@ -503,10 +509,17 @@ class BundleStreamWriter:
         # the same embedding warning as tl.save (the reopened hf_token class:
         # a canary token used to ship in the streamed bundle with zero
         # warnings and no way to withhold it).
-        from .bundle import _custom_attributes_disclosure, _warn_custom_attribute_embedding
+        from .bundle import (
+            _buffer_values_disclosure,
+            _custom_attributes_disclosure,
+            _warn_buffer_value_embedding,
+            _warn_custom_attribute_embedding,
+        )
 
         disclosure = _custom_attributes_disclosure(trace, included=self.include_custom_attributes)
         _warn_custom_attribute_embedding(disclosure)
+        buffer_disclosure = _buffer_values_disclosure(trace, included=self.include_buffer_values)
+        _warn_buffer_value_embedding(buffer_disclosure)
 
         return Manifest(
             tlspec_version=TLSPEC_VERSION,
@@ -528,6 +541,7 @@ class BundleStreamWriter:
             tensors=tensor_entries,
             unsupported_tensors=unsupported,
             custom_attributes_disclosure=disclosure,
+            buffer_values_disclosure=buffer_disclosure,
         )
 
     def _ensure_writable(self) -> None:

@@ -529,3 +529,38 @@ def test_f3a_halted_frontier_recovery_precedes_cleanup(monkeypatch) -> None:
     trace = tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=_halt_without_frontier)
     assert trace.halted is True
     assert order  # cleanup ran (after the scan; a broken order crashes above)
+
+
+def test_run_on_cleaned_up_husk_refuses_with_the_n_gate(recwarn) -> None:
+    """R06: the outcome gate is the FIRST authority on run(), husks included.
+
+    Fail-before: ``run()`` read ``self._runnable`` before any N-gate, so a
+    cleanup()-husked trace (settled UNKNOWN by the structural lattice) raised
+    ``TraceCleanedUpError`` and callers branching on ``fields["code"] ==
+    "N3"`` -- the documented contract -- never saw the outcome refusal.
+    """
+
+    trace = tl.trace(ThreeStageModel(), torch.ones(1, 3))
+    trace.cleanup()
+    with pytest.raises(CaptureOutcomeError) as excinfo:
+        trace.run(inputs=torch.ones(1, 3))
+    assert excinfo.value.fields["code"] == "N3"
+    assert excinfo.value.fields["status"] == "unknown"
+
+
+def test_run_on_halted_analysis_load_refuses_n5(tmp_path) -> None:
+    """R06: a HALTED analysis-only load refuses N5, not a dead-end remedy.
+
+    Fail-before: the generic analysis refusal fired first with the remedy
+    "save a runnable artifact" -- which N4 forbids for halted captures, so
+    the user was sent down a dead end and the N5 contract code never fired.
+    """
+
+    halted = tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=halt_on_relu)
+    assert halted.outcome.status is CaptureStatus.HALTED
+    bundle = tmp_path / "halted_analysis"
+    tl.save(halted, bundle, level="audit", overwrite=True)
+    loaded = tl.load(bundle)
+    with pytest.raises(CaptureOutcomeError) as excinfo:
+        loaded.run(inputs=torch.ones(1, 3))
+    assert excinfo.value.fields["code"] == "N5"

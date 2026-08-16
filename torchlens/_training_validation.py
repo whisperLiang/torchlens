@@ -113,7 +113,8 @@ def validate_training_compatibility(
         raise TrainingModeConfigError(
             "inference_only=True cannot be combined with backward-related capture "
             f"({offending}); these require the autograd graph that inference_only discards. "
-            "Drop inference_only or drop the backward flag."
+            "Remedy: drop inference_only or drop the backward flag.",
+            code="inference_only_conflict",
         )
 
     if not backward_ready:
@@ -122,14 +123,20 @@ def validate_training_compatibility(
     streaming_bundle_path = getattr(streaming, "bundle_path", None)
     if save_outs_to is not None or streaming_bundle_path is not None:
         raise TrainingModeConfigError(
-            "backward_ready=True is not compatible with slow/replay out disk saves"
+            "backward_ready=True is not compatible with slow/replay out disk saves. "
+            "Remedy: drop the disk-save option or drop backward_ready=True.",
+            code="backward_ready_conflict",
         )
     if detach_saved_activations is True:
         raise TrainingModeConfigError(
-            "backward_ready=True requires detach_saved_activations=False so grads can propagate"
+            "backward_ready=True requires detach_saved_activations=False so grads can propagate. "
+            "Remedy: pass detach_saved_activations=False or drop backward_ready=True.",
+            code="backward_ready_conflict",
         )
     if inference_mode_active is True:
         raise TrainingModeConfigError(
             "backward_ready=True cannot run while PyTorch inference mode is active; "
-            "inference tensors cannot retain autograd history"
+            "inference tensors cannot retain autograd history. "
+            "Remedy: capture outside torch.inference_mode() or drop backward_ready=True.",
+            code="backward_ready_conflict",
         )

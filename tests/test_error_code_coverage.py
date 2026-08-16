@@ -138,7 +138,6 @@ UNPROVOKED_BASELINE: frozenset[str] = frozenset(
         "run_input_missing",
         "run_legacy_options_conflict",
         "run_source_model_collected",
-        "save_mode_invalid",
         "selector_function_pattern_type_invalid",
         "skip_fn_boundary_invalid",
         "stack_ordinals_duplicate",

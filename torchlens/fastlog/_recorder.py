@@ -176,11 +176,15 @@ def _resolve_train_mode_default(
     if value is True:
         raise TrainingModeConfigError(
             f"backward_ready=True conflicts with {field_name}=True because True uses "
-            "keep_grad=False; use CaptureSpec(keep_grad=True) or omit the default"
+            "keep_grad=False; use CaptureSpec(keep_grad=True) or omit the default. "
+            "Remedy: pass CaptureSpec(keep_grad=True) or omit the default.",
+            code="backward_ready_conflict",
         )
     if isinstance(value, CaptureSpec) and not value.keep_grad:
         raise TrainingModeConfigError(
-            f"backward_ready=True conflicts with {field_name}=CaptureSpec(keep_grad=False)"
+            f"backward_ready=True conflicts with {field_name}=CaptureSpec(keep_grad=False). "
+            "Remedy: pass CaptureSpec(keep_grad=True) or omit the default.",
+            code="backward_ready_conflict",
         )
     return value
 

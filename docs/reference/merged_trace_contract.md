@@ -26,6 +26,17 @@ Merged replay does not exist (`merge_run_unsupported`); merged runnable
 export, merged `validate()`, receptive/projective fields, and intervention
 chaining are refused typed. Backward/gradient merging is fork F1 (deferred).
 
+Member cores must carry a mergeable settled capture outcome: a member whose
+settled outcome is FAILED, ABORTED_NONFINITE, or UNKNOWN refuses typed at
+input resolution (`merge_input_invalid`, reason
+`member_outcome_not_mergeable`) for live traces and path-loaded bundles
+alike. HALTED (and legacy UNATTESTED) members merge and are DISCLOSED —
+`MergedTrace.member_outcomes` maps each rank to its settled status string and
+`summary()` carries the non-complete disclosure ahead of the witness-coverage
+line, so the presenter never claims `attested_complete` silently over a
+halted prefix. The disclosure is presenter-side and never edits the
+derivation or the descriptor cache.
+
 ## 2. Principles (binding)
 
 - **P1 — rank cores are single truth.** A merged artifact CONTAINS N per-rank
@@ -143,7 +154,13 @@ interchangeable refuse.
 - The redundant `c10d_group_seq` cross-check compares as deltas from the
   first joined key; disagreement is the structural
   `correlation_delta_mismatch` finding (the backend's own ordering contradicts
-  the join alignment). Absence of the probe never demotes anything.
+  the join alignment). Absence of the probe never demotes anything. Within
+  one rank core, recorded `c10d_group_seq` presence must follow the
+  recorder's latch shape — a prefix of values, at most one boundary
+  disclosing `c10d_group_seq_read_failed`, then an all-null suffix — so
+  selective nulling of a value refuses at parse (`merged_schema_invalid`)
+  instead of silently deleting a cross-check finding; a uniformly-absent
+  core remains the honest capability-absent shape and stays finding-free.
 - Presence expectations and gaps derive from the group memberships recorded
   INSIDE the surviving rank cores' boundary records. A declared
   `expected_ranks` input can only WIDEN expectations, never narrow them.

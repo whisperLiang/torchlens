@@ -172,6 +172,7 @@ _STREAMING_FIELDS: Final[tuple[str, ...]] = (
     "retain_in_memory",
     "out_callback",
     "include_custom_attributes",
+    "include_buffer_values",
 )
 
 _CAPTURE_FLAT_TO_GROUP: Final[dict[str, str]] = {
@@ -1954,6 +1955,11 @@ class StreamingOptions:
         counterpart of ``tl.save(..., include_custom_attributes=)`` (R62:
         the streaming path had no opt-out and reopened the token-leak class
         the save-path fix closed).
+    include_buffer_values:
+        Whether captured pre-forward buffer values
+        (``Trace._buffer_initial_values``) are persisted in the streamed
+        bundle. The streamed-bundle counterpart of
+        ``tl.save(..., include_buffer_values=)`` (R62 buffer extension).
 
     Examples
     --------
@@ -1966,6 +1972,7 @@ class StreamingOptions:
     retain_in_memory: bool = True
     out_callback: Callable[[str, torch.Tensor], None] | None = None
     include_custom_attributes: bool = True
+    include_buffer_values: bool = True
     _specified_fields: frozenset[str] = field(default_factory=frozenset, init=False, repr=False)
 
     def __init__(
@@ -1975,6 +1982,7 @@ class StreamingOptions:
         out_callback: Callable[[str, torch.Tensor], None] | None | MissingType = MISSING,
         *,
         include_custom_attributes: bool | MissingType = MISSING,
+        include_buffer_values: bool | MissingType = MISSING,
         save_outs_to: str | Path | None | MissingType = MISSING,
         keep_outs_in_memory: bool | MissingType = MISSING,
         out_sink: Callable[[str, torch.Tensor], None] | None | MissingType = MISSING,
@@ -2014,6 +2022,9 @@ class StreamingOptions:
             "include_custom_attributes": _resolve_option_value(
                 "include_custom_attributes", include_custom_attributes, True, specified_fields
             ),
+            "include_buffer_values": _resolve_option_value(
+                "include_buffer_values", include_buffer_values, True, specified_fields
+            ),
         }
         _set_frozen_fields(self, _STREAMING_FIELDS, values)
         object.__setattr__(self, "_specified_fields", frozenset(specified_fields))
@@ -2047,6 +2058,7 @@ def to_disk(
     *,
     retain_in_memory: bool = False,
     include_custom_attributes: bool = True,
+    include_buffer_values: bool = True,
 ) -> StreamingOptions:
     """Return storage options that stream selected payloads to a bundle.
 
@@ -2058,6 +2070,9 @@ def to_disk(
         Whether streamed payloads should also remain as RAM copies.
     include_custom_attributes:
         Whether harvested module attributes are persisted verbatim in the
+        streamed bundle (the ``tl.save`` opt-out, mirrored for streaming).
+    include_buffer_values:
+        Whether captured pre-forward buffer values are persisted in the
         streamed bundle (the ``tl.save`` opt-out, mirrored for streaming).
 
     Returns
@@ -2071,6 +2086,7 @@ def to_disk(
         bundle_path=path,
         retain_in_memory=retain_in_memory,
         include_custom_attributes=include_custom_attributes,
+        include_buffer_values=include_buffer_values,
     )
 
 

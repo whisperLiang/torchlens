@@ -56,6 +56,7 @@ _OPTIONAL_KEYS = frozenset(
         "unsupported_tensors",
         "provenance",
         "custom_attributes_disclosure",
+        "buffer_values_disclosure",
         "kind",
     }
 )
@@ -101,7 +102,14 @@ def _rewrite_manifest(artifact: Path, mutate) -> None:
 
 
 def test_every_toplevel_key_deletion_is_adjudicated(seed_artifact: Path, tmp_path: Path) -> None:
-    """Deleting each discovered key: typed refusal, ledgered tolerance, or wart."""
+    """Deleting each discovered key: typed refusal or ledgered tolerance.
+
+    ``tlspec_version`` deletion needs no special arm anymore: an artifact
+    that classifies as a v2.16 intervention bundle but carries no
+    ``spec.json`` refuses typed at the dispatch
+    (``tlspec_format_markers_incoherent``; formerly an untyped
+    ``FileNotFoundError`` wart, R73).
+    """
 
     outcomes: list[str] = []
     for key in _manifest_keys(seed_artifact):
@@ -178,14 +186,24 @@ def test_seeded_truncations_are_typed_refusals(seed_artifact: Path, tmp_path: Pa
         artifact = _corrupt_copy(seed_artifact, tmp_path)
         cut = rng.randrange(1, len(manifest_bytes))
         (artifact / "manifest.json").write_bytes(manifest_bytes[:cut])
-        with pytest.raises(TorchLensIOError):
+        try:
             tl.load(str(artifact))
+        except TorchLensIOError:
+            continue
+        pytest.fail(
+            f"manifest truncated at byte {cut} loaded silently (seed {_TRUNCATION_SEED}; reproduce with TORCHLENS_FUZZ_SEED)"
+        )
     for _ in range(4):
         artifact = _corrupt_copy(seed_artifact, tmp_path)
         cut = rng.randrange(1, len(metadata_bytes))
         (artifact / "metadata.pkl").write_bytes(metadata_bytes[:cut])
-        with pytest.raises(TorchLensIOError):
+        try:
             tl.load(str(artifact))
+        except TorchLensIOError:
+            continue
+        pytest.fail(
+            f"metadata truncated at byte {cut} loaded silently (seed {_TRUNCATION_SEED}; reproduce with TORCHLENS_FUZZ_SEED)"
+        )
 
 
 def test_seeded_manifest_byte_flips_never_escape_untyped(

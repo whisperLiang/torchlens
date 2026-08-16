@@ -2833,6 +2833,23 @@ union of top-level key names (names only, never values). Sparse runnable cores a
 field regardless of the flag (it is in the sparse DROP set), and their disclosure records
 `included: false`.
 
+### Captured pre-forward buffer values and `include_buffer_values` (privacy disclosure)
+
+When a forward pass overwrites a registered buffer (BatchNorm running statistics, step counters,
+caches), capture records the value the buffer held BEFORE the forward in
+`Trace._buffer_initial_values`, and every save level -- audit included -- shipped those tensors
+verbatim with no flag, warning, or manifest row. Buffer values are training-data-derived state,
+so the channel gets the same belt as custom attributes: `include_buffer_values: bool = True` on
+`tl.save`/`Trace.save` (and `tl.to_disk` for streaming) is the opt-out; `False` drops the entire
+channel from the artifact, values are never rewritten or partially scrubbed, and the live `Trace`
+is untouched. Every save writes a `buffer_values_disclosure` entry in `manifest.json` (the
+effective `included` flag, `buffer_count`, and the bounded sorted `buffer_names` -- names only,
+never values), and a save that actually embeds captured buffer values warns the saver. Sparse
+runnable cores always drop the field regardless of the flag; used non-persistent buffers ship
+there separately as the REQUIRED, independently disclosed `runnable_nonpersistent_buffer_v1`
+family. A dropped channel degrades `Buffer.initial_value` on the loaded trace to its
+version-node fallback; it never invents a value.
+
 The complete implementation includes `load_state_dict`, transient state sources, initializer
 reporting, `run`, `RunResult`, transactional run forks, sparse input/call/output reconstruction,
 three-state `path_faithfulness`, strict divergence rollback, monotonically poisoned opt-in results,

@@ -46,6 +46,62 @@ _SYMMETRY_TOLERANCE = 1e-10
 _SCATTER_CANVAS_SIZE = 420
 
 
+def _symmetry_tolerance(array: np.ndarray) -> float:
+    """Return the scale-aware absolute tolerance for symmetry-family gates.
+
+    ``_SYMMETRY_TOLERANCE`` is a RELATIVE budget measured against the
+    largest magnitude in the matrix (the ``_positive_rank_tolerance``
+    idiom). The former fixed absolute ``1e-10`` was broken in both
+    directions: 66% relative asymmetry at scale ``1e-10`` read as symmetric,
+    while ``1e-15``-relative float64 round-off at scale ``1e7`` was
+    rejected. Scaling by ``max|x|`` keeps the gate at ~``1e-10`` relative at
+    every scale: strictly tighter than the old absolute gate below O(1)
+    scale (fail-toward-strict) and no longer false-failing float64 noise
+    above it. Used by the symmetry, zero-diagonal, non-negativity, and
+    ambiguity-disclosure comparisons.
+
+    Parameters
+    ----------
+    array:
+        Matrix whose magnitude sets the tolerance scale.
+
+    Returns
+    -------
+    float
+        Absolute tolerance proportional to the matrix's largest magnitude.
+    """
+
+    max_abs = float(np.max(np.abs(array))) if array.size else 0.0
+    return _SYMMETRY_TOLERANCE * max_abs
+
+
+def _near_zero_tolerance(array: np.ndarray) -> float:
+    """Return the scale-aware tolerance for closeness-to-zero REFUSAL gates.
+
+    Duplicate-distance and zero-norm detection REFUSE input when a value
+    sits within tolerance of zero, so a LARGER tolerance is the strict
+    direction (more refusals) and a smaller one widens acceptance. This
+    tolerance therefore keeps the O(1) floor -- ``max(1.0, max_abs)`` --
+    so behavior below O(1) scale is unchanged from the historical absolute
+    ``1e-10`` (never widening acceptance there), while above O(1) scale a
+    value that is ~``1e-10``-relative-to-max close to zero is now correctly
+    refused instead of slipping past a vanishing absolute gate.
+
+    Parameters
+    ----------
+    array:
+        Values whose magnitude sets the tolerance scale.
+
+    Returns
+    -------
+    float
+        Absolute tolerance with an O(1) scale floor.
+    """
+
+    max_abs = float(np.max(np.abs(array))) if array.size else 0.0
+    return _SYMMETRY_TOLERANCE * max(1.0, max_abs)
+
+
 def _as_numpy_array(value: Any) -> np.ndarray:
     """Return ``value`` as a CPU float64 NumPy array.
 
@@ -101,9 +157,10 @@ def _looks_like_distance_matrix(array: np.ndarray) -> bool:
 
     if array.ndim != 2 or array.shape[0] != array.shape[1]:
         return False
+    tolerance = _symmetry_tolerance(array)
     return bool(
-        np.allclose(array, array.T, atol=_SYMMETRY_TOLERANCE, rtol=0.0)
-        and np.allclose(np.diag(array), 0.0, atol=_SYMMETRY_TOLERANCE, rtol=0.0)
+        np.allclose(array, array.T, atol=tolerance, rtol=0.0)
+        and np.allclose(np.diag(array), 0.0, atol=tolerance, rtol=0.0)
     )
 
 
@@ -124,11 +181,12 @@ def _check_square_distances(distances: np.ndarray) -> None:
     if distances.ndim != 2 or distances.shape[0] != distances.shape[1]:
         raise ValueError("distances must be a square pairwise distance matrix.")
     _validate_finite(distances, "distances")
-    if not np.allclose(distances, distances.T, atol=_SYMMETRY_TOLERANCE, rtol=0.0):
+    tolerance = _symmetry_tolerance(distances)
+    if not np.allclose(distances, distances.T, atol=tolerance, rtol=0.0):
         raise ValueError("distances must be symmetric.")
-    if not np.allclose(np.diag(distances), 0.0, atol=_SYMMETRY_TOLERANCE, rtol=0.0):
+    if not np.allclose(np.diag(distances), 0.0, atol=tolerance, rtol=0.0):
         raise ValueError("distances must have a zero diagonal.")
-    if np.any(distances < -_SYMMETRY_TOLERANCE):
+    if np.any(distances < -tolerance):
         raise ValueError("distances must be non-negative.")
 
 
@@ -171,7 +229,7 @@ def _has_duplicate_distances(distances: np.ndarray) -> bool:
         True when off-diagonal distances indicate duplicate stimuli.
     """
 
-    off_diagonal_zero = np.isclose(distances, 0.0, atol=_SYMMETRY_TOLERANCE, rtol=0.0)
+    off_diagonal_zero = np.isclose(distances, 0.0, atol=_near_zero_tolerance(distances), rtol=0.0)
     np.fill_diagonal(off_diagonal_zero, False)
     return bool(np.any(off_diagonal_zero))
 
@@ -376,7 +434,7 @@ def _angular_dissimilarity(features: np.ndarray, *, center_rows: bool) -> np.nda
 
     working = features - features.mean(axis=1, keepdims=True) if center_rows else features.copy()
     norms = np.linalg.norm(working, axis=1, keepdims=True)
-    if np.any(norms <= _SYMMETRY_TOLERANCE):
+    if np.any(norms <= _near_zero_tolerance(norms)):
         metric_name = "correlation" if center_rows else "cosine"
         raise ValueError(f"{metric_name} distance is undefined for zero-norm stimuli.")
     normalized = working / norms
@@ -445,7 +503,7 @@ def classical_mds(
         if input_is_distances and not np.allclose(
             activation_distance_matrix(array, metric="euclidean"),
             array,
-            atol=_SYMMETRY_TOLERANCE,
+            atol=_symmetry_tolerance(array),
             rtol=0.0,
         ):
             warnings.warn(

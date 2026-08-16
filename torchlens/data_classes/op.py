@@ -1374,12 +1374,16 @@ def validate_train_mode_transform_output(
     if not isinstance(transformed_tensor, torch.Tensor):
         raise TrainingModeConfigError(
             f"{transform_kind}_transform must return a torch.Tensor while backward_ready=True "
-            f"for layer {label}."
+            f"for layer {label}. "
+            "Remedy: return a differentiable torch.Tensor from the transform.",
+            code="transform_not_differentiable",
         )
     if transformed_tensor.dtype in _NON_GRAD_DTYPES:
         raise TrainingModeConfigError(
             f"backward_ready=True with non-grad dtype {transformed_tensor.dtype} on layer "
-            f"{label}. Integer and bool dtypes cannot propagate grads."
+            f"{label}. Integer and bool dtypes cannot propagate grads. "
+            "Remedy: return a floating-dtype tensor from the transform.",
+            code="transform_not_differentiable",
         )
     if not transformed_tensor.requires_grad or (
         transformed_tensor.grad_fn is None and transformed_tensor is not raw_tensor
@@ -1387,7 +1391,9 @@ def validate_train_mode_transform_output(
         raise TrainingModeConfigError(
             f"{transform_kind}_transform returned a tensor disconnected from the autograd "
             "graph (grad_fn is None) while backward_ready=True. The transformed out "
-            "must remain differentiable."
+            "must remain differentiable. "
+            "Remedy: keep the transform on the autograd graph (no detach/no_grad).",
+            code="transform_not_differentiable",
         )
 
 
