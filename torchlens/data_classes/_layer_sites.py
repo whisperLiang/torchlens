@@ -60,10 +60,16 @@ def layer_site_key(layer: Layer) -> str:
     keys = {op.site_key for op in _pass_ordered_ops(layer)}
     if keys == {None}:
         raise InvalidArgumentError(
-            f"Layer '{layer.layer_label}' carries no site keys: this trace "
-            "was captured/saved before site_key_v1 existed.",
+            f"Layer '{layer.layer_label}' carries no site keys: this artifact "
+            "predates the site_key_v1 grouping surface. Site keys are minted "
+            "at capture time and their persisted row is pre-release-gated "
+            "under tlspec v7, so loaded artifacts (any tlspec v6 artifact, "
+            "and v7 artifacts written before the coordinated persistence "
+            "bump) read keyless.",
             code="site_key_unavailable",
-            remedy="re-capture with a current TorchLens to mint site keys",
+            remedy=(
+                "re-capture the model with a current TorchLens and read site_key on the live trace"
+            ),
             layer_label=layer.layer_label,
         )
     keys.discard(None)
@@ -99,9 +105,16 @@ def layer_site_peers(layer: Layer) -> tuple[Layer, ...]:
     if not own_keys or trace is None:
         raise InvalidArgumentError(
             f"Layer '{layer.layer_label}' has no valid site key to index "
-            "peers by (legacy artifact or detached layer).",
+            "peers by: either the layer is detached from its trace, or this "
+            "artifact predates the site_key_v1 grouping surface (site keys "
+            "are minted at capture time; their persisted row is "
+            "pre-release-gated under tlspec v7, so loaded artifacts read "
+            "keyless).",
             code="site_key_unavailable",
-            remedy="re-capture with a current TorchLens to mint site keys",
+            remedy=(
+                "re-capture the model with a current TorchLens and read "
+                "site_peers on the live trace"
+            ),
             layer_label=layer.layer_label,
         )
     peers: list[Layer] = []

@@ -13,3 +13,11 @@ reason: backfill for the reasonless 2026-08-14T15:52 record above (written
 env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 recorded: 2026-08-15 (backfill entry)
+---
+generator: tests/godobject_oracle legacy
+flag: TORCHLENS_UPDATE_LEGACY_ARTIFACT_ORACLE=1
+reason: wave-0 L1 grouping merge: Layer gained site_key/site_peers (typed teaching refusal on pre-site-key artifacts) and derived shape_summary; legacy loaded surface legitimately grows exactly these three accessors
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: e7fd6f167976165adefe30918162bebc9897f72c (dirty)
+recorded: 2026-08-16T22:24:39.620351+00:00

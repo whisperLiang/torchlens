@@ -127,10 +127,12 @@ def site_profile(trace: Any) -> SiteProfile:
         witnesses.setdefault(key, set()).add(operation_witness(op))
     if not keys:
         raise InvalidArgumentError(
-            "This trace carries no site keys: it was captured/saved before "
-            "site_key_v1 existed and cannot join on sites.",
+            "This trace carries no site keys and cannot join on sites: it "
+            "predates the site_key_v1 grouping surface. Site keys are minted "
+            "at capture time and their persisted row is pre-release-gated "
+            "under tlspec v7, so loaded artifacts read keyless.",
             code="site_key_unavailable",
-            remedy="re-capture with a current TorchLens to mint site keys",
+            remedy=("re-capture the model with a current TorchLens and join on the live traces"),
         )
     return SiteProfile(
         keys=keys,
