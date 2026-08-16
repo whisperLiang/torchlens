@@ -49,3 +49,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 23ae097ab99b23bf16a2913959f80747ee15e74a (clean)
 recorded: 2026-08-16T15:23:26.253140+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: reviewed refresh after main merge into featmega/l5-channel: L3 aten primitive_op wave adds func_call_id/pass_index/seq/kind read sites (_aten_capture, _primitive_profile, _invariants_primitive_ops) and bumps completeness_witness func_call_id + wrappers kind counts; L7a adds structure_only_belt kind site; L5 channel adds one kind read in visualization/_encoding.py
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: e11090c1932ce6ea4f61180edd456ddfa9f8ba0c (dirty)
+recorded: 2026-08-16T21:18:19.735073+00:00
