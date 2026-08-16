@@ -1336,7 +1336,9 @@ class _NotADigestableRng(Exception):
     """Internal sentinel: the value is not a digestable numpy/`random` generator."""
 
 
-_RNG_TRUSTED_DEFINER_TOPS: frozenset[str] = frozenset({"random", "_random", "numpy", "builtins"})
+_RNG_TRUSTED_DEFINER_TOPS: frozenset[str] = frozenset(
+    {"random", "_random", "numpy", "builtins", "torch"}
+)
 """Top-level modules whose classes may define an RNG's witnessed draw/state surface.
 
 The monitor's three witnesses (base-class method patches, ``c_call`` receiver
@@ -1374,6 +1376,7 @@ def _untrusted_rng_override(holder_type: type) -> str | None:
         random.SystemRandom,
         np.random.Generator,
         np.random.RandomState,
+        torch.Generator,
     ):
         return None
     base_names: set[str] = set()
@@ -1383,6 +1386,11 @@ def _untrusted_rng_override(holder_type: type) -> str | None:
             base_names.update(name for name in dir(base) if not name.startswith("_"))
     if issubclass(holder_type, np.random.BitGenerator):
         base_names.update(name for name in dir(np.random.BitGenerator) if not name.startswith("_"))
+    if issubclass(holder_type, torch.Generator):
+        # r7 b8-sol R57: torch.Generator is subclassable; a user override of
+        # its draw/state surface (get_state/manual_seed/seed/...) would
+        # shadow the C state the digest reads, exactly the numpy false-clean.
+        base_names.update(name for name in dir(torch.Generator) if not name.startswith("_"))
     for name in sorted(base_names):
         for cls in holder_type.__mro__:
             if name in vars(cls):
@@ -1454,6 +1462,13 @@ def _rng_exempt_instances() -> tuple[Any, ...]:
     np_singleton = getattr(getattr(np.random, "mtrand", None), "_rand", None)
     if np_singleton is not None:
         exempt.append(np_singleton)
+    # r7 b8-sol R57: torch.Generator holders are digestable now, so the
+    # REPLAYABLE global torch engine must be identity-exempt exactly like the
+    # random/numpy module singletons -- its state is seeded and snapshot-
+    # replayed by capture, and a seeded torch draw must never ceiling.
+    torch_singleton = getattr(torch, "default_generator", None)
+    if torch_singleton is not None:
+        exempt.append(torch_singleton)
     try:
         from .hashing import _BARCODE_RNG
 
@@ -2029,7 +2044,7 @@ class host_nondeterminism_monitor:
 
     Entropy / instance / construction / clock positives mark from any COVERED thread. A
     REALISTIC pre-existing-thread RNG use (a background worker drawing from a MODEL-HELD
-    Generator/RandomState/BitGenerator -- held anywhere the inert-reachability walk can
+    Generator/RandomState/BitGenerator/``torch.Generator`` -- held anywhere the inert-reachability walk can
     follow WITHOUT executing user code, incl. class descriptors, weakrefs, and callable
     interiors; r53 corr/F1 -- or reachable from an in-window profiled frame's roots; B4)
     is witnessed thread-independently by the state digests, and an unseeded construction
@@ -3910,7 +3925,8 @@ class host_nondeterminism_monitor:
         """Return a comparable state digest for one RNG holder.
 
         Covers numpy ``Generator``/``RandomState``/bare ``BitGenerator``,
-        bare ``SeedSequence`` holders, and ``random.Random``. Generator and
+        bare ``SeedSequence`` holders, ``torch.Generator`` (state bytes plus
+        device identity), and ``random.Random``. Generator and
         BitGenerator digests fold in the underlying SeedSequence spawn state
         so ``spawn()`` -- which advances no sampled state -- is witnessed. A
         stateless ``Random`` subclass whose ``getstate()``
@@ -3936,6 +3952,17 @@ class host_nondeterminism_monitor:
         # verdict-steering mutation as ``Generator.spawn()``.
         if isinstance(holder, np.random.SeedSequence):
             return host_nondeterminism_monitor._seed_seq_state_fragment(holder)
+        if isinstance(holder, torch.Generator):
+            # r7 b8-sol R57: a model-held ``torch.Generator`` drawn on a
+            # pre-existing (non-hooked) thread advanced state with NO witness
+            # while the numpy analog was digest-caught, so the residual
+            # enumeration's "only an EXTERNALLY-HELD generator" claim was
+            # false. Digest the exact state bytes plus device identity so the
+            # before/after sweeps witness any draw thread-independently. A
+            # state-read failure propagates to the fail-closed inventory
+            # error path, downgrading completeness rather than reading clean.
+            state_bytes = holder.get_state().cpu().numpy().tobytes()
+            return exact(("torch.Generator", str(holder.device), state_bytes))
         if isinstance(holder, random.Random):
             try:
                 state = holder.getstate()

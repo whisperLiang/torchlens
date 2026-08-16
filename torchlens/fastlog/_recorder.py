@@ -451,7 +451,10 @@ class Recorder:
             # RecordingState for the window until its inner refusal unwound,
             # projecting the winner's events into the loser's state. The inner
             # orchestration re-enters the reservation same-thread (passthrough).
-            with _state.capture_reservation(), active_recording_state(self._state):
+            with (
+                _state.capture_reservation() as reservation_token,
+                active_recording_state(self._state),
+            ):
                 output = trace._run_and_log_inputs_through_model(
                     self.model,
                     input_args,
@@ -460,6 +463,7 @@ class Recorder:
                     grad_layers_to_save=[],
                     random_seed=self.options.random_seed,
                     postprocess=False,
+                    reservation_resume=reservation_token,
                 )
         except HaltSignal as halt_exc:
             captured_run_core = trace.__dict__.pop("_fastlog_captured_run_core", None)

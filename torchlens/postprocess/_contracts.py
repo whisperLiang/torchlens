@@ -1188,10 +1188,25 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         "Consumes module build data and layer logs; rebuilds Module/ModuleCall logs.",
         # Reviewed widening (sol finding 6 in-place audit): module-log
         # building mutates the _param_logs containers in place.
+        #
+        # Reviewed widening (r7 b1-opus R04-2): on any module CALL with more
+        # than one output entry (LSTM/GRU cells, tuple-returning submodules)
+        # ``_assign_output_roles`` reads ``multi_output_name`` (role dedup
+        # against the ingest-scattered value) and ``_source_trace_ref``
+        # (``output.source_trace`` to mirror the role onto the parent layer).
+        # Both columns are written at capture ingress (step-0 ingest scatter /
+        # op adoption), never by a pipeline step, so the widen adds NO
+        # ordering edges -- it makes the derivation authority match the read
+        # the executor's own audit proved. The defensive None-branch WRITE of
+        # ``multi_output_name`` at finalization._assign_output_roles stays
+        # deliberately UNDECLARED: no constructed axis reaches it (round-6
+        # instrumentation intercepted zero writes), so if one ever does, the
+        # write audit must fire as a fresh finding rather than be pre-blessed.
         writes=frozenset(("_param_logs",)),
         reads=frozenset(
             (
                 "_grad_records",
+                "_source_trace_ref",
                 "address",
                 "container_spec",
                 "has_saved_activation",
@@ -1202,6 +1217,7 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "label",
                 "layer_label",
                 "module_call_stack",
+                "multi_output_name",
                 "output_of_module_calls",
                 "raw_index",
             )

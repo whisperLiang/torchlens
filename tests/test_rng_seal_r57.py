@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import pickle
+import random
 import time
 
 import numpy as np
@@ -21,6 +23,7 @@ import pytest
 import torch
 from torch import nn
 
+import torchlens as tl
 from torchlens.utils.rng import _skip_retired_hooks, host_nondeterminism_monitor
 
 _HELD_LOCALTIME = time.localtime  # pre-window held alias (module import time)
@@ -176,4 +179,159 @@ def test_skip_retired_hooks_follows_the_dead_links_own_chain() -> None:
     assert resolved is sentinel_threading_predecessor, (
         "restoring the sys slot through a dead threading hook resolved the "
         "dead owner's SYS predecessor instead of its threading chain"
+    )
+
+
+class _TinyNet(nn.Module):
+    """Minimal deterministic model for the restore-half assertions."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lin = nn.Linear(3, 2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(self.lin(x))
+
+
+class _RaisesInForward(nn.Module):
+    """Model whose forward raises after consuming RNG-free work."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        raise RuntimeError("injected forward failure for the RNG restore path")
+
+
+def _global_rng_fingerprint() -> tuple[bytes, bytes, bytes]:
+    """Byte-exact snapshot of the three global engines' states."""
+
+    return (
+        pickle.dumps(random.getstate()),
+        pickle.dumps(np.random.get_state()),
+        bytes(torch.random.get_rng_state().tolist()),
+    )
+
+
+@pytest.mark.smoke
+def test_capture_restores_user_global_rng_streams() -> None:
+    """``tl.trace`` must not leave the process reseeded (r7 restore half).
+
+    Capture seeding reseeds ``random``/``numpy``/``torch`` at entry; the
+    refresh and fast-run siblings snapshot and restore around their reseeds,
+    but the primary capture left the user's global streams permanently on the
+    capture's stream -- every post-capture ``randn``/``randint`` in user code
+    silently changed meaning. With an explicit seed the capture must restore
+    all three engines byte-exactly.
+    """
+
+    model = _TinyNet()  # parameter init draws torch RNG; construct first
+    random.seed(20260816)
+    np.random.seed(4711)
+    torch.manual_seed(99)
+    before = _global_rng_fingerprint()
+    tl.trace(model, torch.ones(2, 3), random_seed=1234)
+    assert _global_rng_fingerprint() == before, (
+        "capture left the user's global RNG engines reseeded"
+    )
+
+
+@pytest.mark.smoke
+def test_failed_capture_restores_user_global_rng_streams() -> None:
+    """A capture failing mid-forward restores the streams on the unwind."""
+
+    model = _RaisesInForward()
+    random.seed(313)
+    np.random.seed(626)
+    torch.manual_seed(939)
+    before = _global_rng_fingerprint()
+    with pytest.raises(RuntimeError, match="injected forward failure"):
+        tl.trace(model, torch.ones(2, 3), random_seed=77)
+    assert _global_rng_fingerprint() == before, (
+        "failed capture leaked the seeded RNG engines to the user"
+    )
+
+
+@pytest.mark.smoke
+def test_auto_seed_freshness_survives_the_restore() -> None:
+    """Auto-seeded captures still draw FRESH seeds after the restore.
+
+    The seed pick (``random.randint``) deliberately stays OUTSIDE the restore
+    bracket: restoring the pick too would make every ``random_seed=None``
+    capture reuse the identical seed, silently correlating dropout patterns
+    across runs.
+    """
+
+    random.seed(555)
+    first = tl.trace(_TinyNet(), torch.ones(2, 3))
+    second = tl.trace(_TinyNet(), torch.ones(2, 3))
+    assert first.random_seed != second.random_seed, (
+        "restore bracket swallowed the auto-seed draw; captures now reuse one seed"
+    )
+
+
+@pytest.mark.smoke
+def test_torch_generator_draw_changes_state_digest() -> None:
+    """A model-held ``torch.Generator`` is digestable like the numpy analog.
+
+    r7 b8-sol: the digest raised ``_NotADigestableRng`` for torch.Generator,
+    so a model-held instance drawn on a pre-existing (non-hooked) thread
+    advanced state with NO witness while ``np.random.default_rng`` analogs
+    were digest-caught -- and the residual enumeration claimed the residual
+    was "only an EXTERNALLY-HELD generator".
+    """
+
+    generator = torch.Generator()
+    generator.manual_seed(7)
+    before = host_nondeterminism_monitor._digest_rng_instance(generator)
+    torch.randn(4, generator=generator)
+    after = host_nondeterminism_monitor._digest_rng_instance(generator)
+    assert before != after, "torch.Generator draw left the state digest unchanged"
+
+
+@pytest.mark.smoke
+def test_model_held_torch_generator_pre_existing_thread_draw_is_witnessed() -> None:
+    """The exact sol scenario: pre-existing thread draws from a model-held
+    ``torch.Generator`` mid-window -- the window must NOT settle clean."""
+
+    import threading
+
+    class _TorchGenModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.gen = torch.Generator()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x
+
+    model = _TorchGenModel()
+    start = threading.Event()
+    done = threading.Event()
+
+    def worker() -> None:
+        start.wait(10.0)
+        torch.randn(4, generator=model.gen)
+        done.set()
+
+    thread = threading.Thread(target=worker)
+    thread.start()  # pre-existing (never-hooked) thread
+    try:
+        with host_nondeterminism_monitor(model) as result:
+            start.set()
+            assert done.wait(10.0)
+    finally:
+        thread.join(10.0)
+    assert result.channels or result.uncertain, (
+        "model-held torch.Generator drawn on a pre-existing thread settled "
+        "channels=[] / uncertain=False (false-VERIFIED escape)"
+    )
+
+
+@pytest.mark.smoke
+def test_seeded_global_torch_draw_stays_clean() -> None:
+    """The replayable global torch engine stays identity-exempt (no
+    over-trigger): a seeded ``torch.randn`` model draw must not ceiling."""
+
+    torch.manual_seed(3)
+    with host_nondeterminism_monitor(nn.Identity()) as result:
+        torch.randn(4)
+    assert not any("torch" in channel.lower() for channel in result.channels), (
+        f"seeded global torch draw over-triggered: {sorted(result.channels)!r}"
     )

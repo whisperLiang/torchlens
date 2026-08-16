@@ -652,6 +652,35 @@ def _restore_lazy_capability_probes() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _restore_public_registries() -> Iterator[None]:
+    """Restore the public registration registries after every test (r7 R76).
+
+    ``tl.register_container`` and ``utils.register_op_rule`` are plain global
+    dict writes with no public unregister, so per-test registrations
+    (``custom_test_op``, input-walk local container classes) leaked into
+    every later test in the process -- full-suite and targeted runs saw
+    different registry contents, an order-dependence seed. Snapshot both
+    registries before the test and restore them after, under the container
+    registry's own lock (the writer/iterator race fix owns it).
+    """
+
+    from torchlens.capture import flops as flops_mod
+    from torchlens.ir import container as container_mod
+
+    with container_mod._CONTAINER_REGISTRY_LOCK:
+        container_snapshot = dict(container_mod._CONTAINER_REGISTRY)
+    flops_snapshot = dict(flops_mod._CUSTOM_OP_RULES)
+    try:
+        yield
+    finally:
+        with container_mod._CONTAINER_REGISTRY_LOCK:
+            container_mod._CONTAINER_REGISTRY.clear()
+            container_mod._CONTAINER_REGISTRY.update(container_snapshot)
+        flops_mod._CUSTOM_OP_RULES.clear()
+        flops_mod._CUSTOM_OP_RULES.update(flops_snapshot)
+
+
+@pytest.fixture(autouse=True)
 def _reset_rng_state() -> Iterator[None]:
     """Seed each test deterministically and restore all incoming RNG settings."""
 

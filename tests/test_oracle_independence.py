@@ -610,3 +610,87 @@ def test_independence_table_has_no_untested_shared_rows() -> None:
         if line.startswith("|") and "none yet" in line
     ]
     assert offenders == [], f"table rows without an arming/boundary test: {offenders}"
+
+
+_EXPECTED_ORACLE_ROWS = 13
+"""Reviewed oracle count (r7 b9-opus R75r6-F1 gap 3).
+
+The table's own contract is "a new oracle ... edits this file in the same
+change", but nothing made ADDING an oracle red -- an unreviewed 14th row (or
+a silently dropped one) sailed. Adding or removing an oracle must bump this
+constant in the same change.
+"""
+
+
+def _independence_table_rows() -> list[str]:
+    """Return the table's data rows (header and separator dropped)."""
+
+    lines = [line for line in _independence_table_text().splitlines() if line.startswith("|")]
+    return [line for line in lines[2:] if line.strip("|- ")]
+
+
+def test_independence_table_row_count_is_reviewed() -> None:
+    """Adding/removing an oracle must edit the reviewed count constant."""
+
+    rows = _independence_table_rows()
+    assert len(rows) == _EXPECTED_ORACLE_ROWS, (
+        f"oracle table has {len(rows)} rows but the reviewed count is "
+        f"{_EXPECTED_ORACLE_ROWS}; a new/removed oracle must update "
+        "_EXPECTED_ORACLE_ROWS in the same change"
+    )
+
+
+def test_independence_table_every_row_cites_an_arming_test() -> None:
+    """Standing rule 2 as a PROPERTY, not a phrase match (R75r6-F1 gap 2).
+
+    The 'none yet' grep is evaded by "not yet", "TBD", or an empty cell;
+    what the rule actually requires is that every row's arming column names
+    at least one test file or test identifier.
+    """
+
+    import re
+
+    offenders = []
+    for row in _independence_table_rows():
+        arming_cell = row.rstrip("|").rsplit("|", 1)[-1]
+        if not re.search(r"tests/[a-z0-9_/]+\.py|\btest_[a-z0-9_]+\b", arming_cell):
+            offenders.append(row.split("|")[1].strip()[:50])
+    assert offenders == [], f"table rows with no arming-test citation: {offenders}"
+
+
+def test_independence_table_cited_symbols_resolve() -> None:
+    """Cited test FUNCTIONS, classes, and constants must still exist (gap 1).
+
+    The file-level lockstep catches deletions; what actually rots is a
+    RENAME -- a renamed arming test leaves the table asserting a proof that
+    no longer exists. Resolve every cited ``test_*`` function name,
+    ``Test*`` class name, and backticked ALL-CAPS constant against the live
+    source trees.
+    """
+
+    import re
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[1]
+    text = _independence_table_text()
+
+    corpus_parts: list[str] = []
+    for tree in (repo / "tests", repo / "torchlens"):
+        for path in tree.rglob("*.py"):
+            try:
+                corpus_parts.append(path.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+    corpus = "\n".join(corpus_parts)
+
+    missing: list[str] = []
+    for func_name in sorted(set(re.findall(r"\b(test_[a-z0-9_]+)\b(?!\.py)", text))):
+        if f"def {func_name}(" not in corpus:
+            missing.append(func_name)
+    for class_name in sorted(set(re.findall(r"\bTest[A-Z][A-Za-z0-9]+\b", text))):
+        if f"class {class_name}" not in corpus:
+            missing.append(class_name)
+    for constant in sorted(set(re.findall(r"`([A-Z][A-Z0-9_]{2,})`", text))):
+        if constant not in corpus:
+            missing.append(constant)
+    assert missing == [], f"independence table cites symbols that no longer resolve: {missing}"

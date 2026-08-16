@@ -220,3 +220,33 @@ def test_legacy_validator_positionals(model_and_input: tuple[TinyModel, torch.Te
     assert isinstance(forward_result, bool)
     assert isinstance(saved_result, bool)
     assert isinstance(backward_result, bool)
+
+
+def test_validate_scope_end_trims_the_host_allocator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """r7 b6-opus R33: validate must trim AFTER its comparison/report phase.
+
+    The internal ``second_trace.cleanup()`` trims run BEFORE validate's
+    highest-water phase reallocates, so ~180-225 MB of freed glibc arena
+    stayed resident per call (a manual ``malloc_trim`` recovered it). The
+    scope now trims once more on exit; this pins the call count -- the two
+    internal cleanup trims plus the scope-end trim (red-capable: pre-fix
+    exactly the two internal trims fire).
+    """
+
+    from torch import nn
+
+    from torchlens.data_classes import cleanup as cleanup_mod
+
+    calls = {"n": 0}
+    real_trim = cleanup_mod._trim_host_allocator
+
+    def counting_trim() -> None:
+        calls["n"] += 1
+        real_trim()
+
+    monkeypatch.setattr(cleanup_mod, "_trim_host_allocator", counting_trim)
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
+    assert tl.validate(model, torch.randn(2, 4), scope="forward", random_seed=0) is True
+    assert calls["n"] >= 3, f"only {calls['n']} allocator trims ran; the scope-end trim is missing"

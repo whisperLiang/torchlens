@@ -41,6 +41,10 @@ _SCOPED_CAPTURE_STATE = frozenset(
         # effect, released in run_and_log's outermost finally (refused-loser
         # data-quality fix, hunt-b2 R54).
         ("torchlens/_state.py", "_capture_reserved_by"),
+        # Continuation token minted with the reservation claim and cleared
+        # with its release: same-thread re-entry must present it, so a nested
+        # public capture inside the reserved window refuses typed (r7 R55).
+        ("torchlens/_state.py", "_capture_reservation_token"),
         ("torchlens/_state.py", "_dynamo_warning_emitted"),
         ("torchlens/_state.py", "_func_call_id_iter"),
         ("torchlens/_state.py", "_function_call_counts"),
@@ -1543,12 +1547,14 @@ def test_log_backward_refuses_foreign_live_window_instead_of_wedging() -> None:
 
 
 def test_capture_reservation_is_released_on_failure_and_nested_same_thread() -> None:
-    """The reservation never leaks (wedging admission) and nests same-thread.
+    """The reservation never leaks (wedging admission) and gates re-entry.
 
     A capture failing anywhere between the reservation claim and teardown must
     release the slot, or every later capture refuses forever. Same-thread
-    nesting is a passthrough (the recorder reserves around the inner
-    orchestration's own reservation); a foreign thread's claim refuses typed.
+    nesting passes through ONLY with the yielded continuation token (the
+    recorder hands it to the inner orchestration); a bare same-thread re-entry
+    is a nested public capture from user code inside the reserved window and
+    refuses typed (R55), as does a foreign thread's claim.
     """
 
     with pytest.raises(RuntimeError, match="injected mid-capture failure"):
@@ -1557,11 +1563,25 @@ def test_capture_reservation_is_released_on_failure_and_nested_same_thread() -> 
     recovered = tl.trace(nn.ReLU(), torch.ones(2))
     assert any(op.func_name == "relu" for op in recovered.compute_ops)
 
-    with _state.capture_reservation():
+    with _state.capture_reservation() as token:
         assert _state._capture_reserved_by == threading.get_ident()
-        with _state.capture_reservation():  # nested same-thread passthrough
+        # Sanctioned re-entry: presenting the live token passes through.
+        with _state.capture_reservation(resume=token):
             assert _state._capture_reserved_by == threading.get_ident()
         # The inner exit must not release the outer claim.
+        assert _state._capture_reserved_by == threading.get_ident()
+
+        # R55: a bare same-thread re-entry (no token) is a nested PUBLIC
+        # capture started inside the reserved window -- both captures used to
+        # run to completion; it must refuse typed instead.
+        with pytest.raises(_state.ReentrantTraceError):
+            with _state.capture_reservation():
+                pass  # pragma: no cover - refused above
+        # A stale/forged token refuses identically.
+        with pytest.raises(_state.ReentrantTraceError):
+            with _state.capture_reservation(resume=object()):
+                pass  # pragma: no cover - refused above
+        # The refusals must not release or corrupt the live claim.
         assert _state._capture_reserved_by == threading.get_ident()
 
         foreign_error: list[BaseException] = []
@@ -1581,6 +1601,147 @@ def test_capture_reservation_is_released_on_failure_and_nested_same_thread() -> 
         assert len(foreign_error) == 1
         assert isinstance(foreign_error[0], _state.ReentrantTraceError)
     assert _state._capture_reserved_by is None
+
+
+def test_nested_public_capture_inside_reserved_window_refuses_typed() -> None:
+    """A nested ``tl.trace`` from user code inside the reserved window refuses.
+
+    R55 (r7 b8-sol): the same-thread reservation passthrough keyed on thread
+    ident alone, so user code running inside the outer capture's reserved
+    pre-admission window (here: a tensor-subclass ``__torch_function__`` fired
+    by input setup) could start a nested PUBLIC capture that ran to completion
+    -- BOTH captures settled (probe ``OUTER_OK``/``INNER_COMPLETED`` at the
+    hunt-6 pin) instead of the documented ``ReentrantTraceError``. The
+    passthrough now requires the recorder's continuation token; the nested
+    entry holds none and refuses typed, and the refusal releases nothing it
+    does not own.
+    """
+
+    fired: dict[str, object] = {"result": None}
+
+    class _NestedTraceTensor(torch.Tensor):
+        @classmethod
+        def __torch_function__(
+            cls, func: object, types: object, args: tuple = (), kwargs: dict | None = None
+        ) -> object:
+            kwargs = kwargs or {}
+            if fired["result"] is None and _state._capture_reserved_by is not None:
+                fired["result"] = "fired"
+                try:
+                    tl.trace(nn.ReLU(), torch.ones(2))
+                    fired["result"] = "inner_completed"
+                except _state.ReentrantTraceError:
+                    fired["result"] = "inner_refused"
+                    raise
+            return super().__torch_function__(func, types, args, kwargs)
+
+    inputs = torch.randn(2, 3).as_subclass(_NestedTraceTensor)
+    with pytest.raises(_state.ReentrantTraceError):
+        tl.trace(nn.Linear(3, 2), inputs)
+    assert fired["result"] == "inner_refused"
+    assert _state._capture_reserved_by is None
+    # The refusal left admission clean: a fresh capture is admitted.
+    recovered = tl.trace(nn.ReLU(), torch.ones(2))
+    assert any(op.func_name == "relu" for op in recovered.compute_ops)
+
+
+def test_auto_name_counter_is_atomic_under_racing_threads() -> None:
+    """Racing pre-admission ``_auto_name`` calls never mint duplicate names.
+
+    R54 (r7 b8-sol): ``_auto_name`` runs during capture setup BEFORE
+    admission, outside ``active_logging()``'s guard, and its unlocked
+    read-modify-write let two threads read the same counter value and stamp
+    two captures with the SAME auto name. The get+increment is now atomic
+    under ``_state._naming_lock``.
+    """
+
+    class _RaceNamed:
+        pass
+
+    _state.reset_naming_counter("_racenamed")
+    switch_interval = sys.getswitchinterval()
+    names: list[str] = []
+    names_lock = threading.Lock()
+    barrier = threading.Barrier(4)
+
+    def mint(count: int) -> None:
+        barrier.wait()
+        local = [_state._auto_name(_RaceNamed()) for _ in range(count)]
+        with names_lock:
+            names.extend(local)
+
+    sys.setswitchinterval(1e-6)
+    try:
+        workers = [threading.Thread(target=mint, args=(2000,)) for _ in range(4)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=30.0)
+    finally:
+        sys.setswitchinterval(switch_interval)
+        _state.reset_naming_counter("_racenamed")
+    assert len(names) == 8000
+    assert len(set(names)) == 8000, "duplicate auto names minted under the race"
+
+
+def test_register_container_racing_lookup_never_breaks_iteration() -> None:
+    """``register_container`` racing a lookup never raises mid-iteration.
+
+    R54 (r7 b2-sol): ``get_registered_container`` iterated the LIVE registry
+    dict while public ``register_container`` mutated it from another thread --
+    a registration landing mid-capture raised ``RuntimeError: dictionary
+    changed size during iteration`` inside the forward walk. The reader now
+    snapshots under the registry lock.
+    """
+
+    from torchlens.ir import container as container_mod
+
+    registered_types: list[type] = []
+    errors: list[BaseException] = []
+    stop = threading.Event()
+    switch_interval = sys.getswitchinterval()
+
+    class _LookupProbe:
+        pass
+
+    def writer() -> None:
+        try:
+            for index in range(400):
+                if stop.is_set():
+                    break
+                fresh = type(f"_RaceContainer{index}", (), {})
+                registered_types.append(fresh)
+                tl.register_container(
+                    fresh,
+                    lambda value: ([], None),
+                    lambda aux, children: object(),
+                )
+        except BaseException as error:  # pragma: no cover - the defect signal
+            errors.append(error)
+
+    def reader() -> None:
+        try:
+            while not stop.is_set():
+                container_mod.get_registered_container(_LookupProbe)
+        except BaseException as error:  # pragma: no cover - the defect signal
+            errors.append(error)
+
+    sys.setswitchinterval(1e-6)
+    try:
+        reader_thread = threading.Thread(target=reader)
+        writer_thread = threading.Thread(target=writer)
+        reader_thread.start()
+        writer_thread.start()
+        writer_thread.join(timeout=30.0)
+        stop.set()
+        reader_thread.join(timeout=30.0)
+    finally:
+        sys.setswitchinterval(switch_interval)
+        stop.set()
+        with container_mod._CONTAINER_REGISTRY_LOCK:
+            for registered in registered_types:
+                container_mod._CONTAINER_REGISTRY.pop(registered, None)
+    assert errors == [], f"registry race surfaced: {errors!r}"
 
 
 def test_foreign_thread_pause_does_not_blind_the_owner_capture() -> None:

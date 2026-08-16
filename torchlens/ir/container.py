@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import sys
+import threading
 import types
 from collections import OrderedDict, defaultdict
 from collections.abc import Callable
@@ -1365,6 +1366,17 @@ class RegisteredContainer:
 
 _CONTAINER_REGISTRY: dict[type[Any], RegisteredContainer] = {}
 
+_CONTAINER_REGISTRY_LOCK = threading.Lock()
+"""Serializes registry writes against reader snapshots (r7 b2-sol R54).
+
+``register_container`` is public API callable from any thread; the lookup
+used to iterate the live dict, so a registration racing a capture's walk
+raised ``RuntimeError: dictionary changed size during iteration`` mid-forward.
+Writers mutate under the lock and readers snapshot under it; ``issubclass``
+resolution (which can invoke user ``__subclasshook__`` code) runs OUTSIDE the
+lock on the snapshot.
+"""
+
 
 def register_container(
     container_type: type[Any],
@@ -1389,9 +1401,10 @@ def register_container(
         extra ``__dict__`` state instead of dropping it silently on replay.
     """
 
-    _CONTAINER_REGISTRY[container_type] = RegisteredContainer(
-        flatten, unflatten, state_complete=state_complete
-    )
+    with _CONTAINER_REGISTRY_LOCK:
+        _CONTAINER_REGISTRY[container_type] = RegisteredContainer(
+            flatten, unflatten, state_complete=state_complete
+        )
 
 
 def get_registered_container(container_type: type[Any]) -> RegisteredContainer | None:
@@ -1420,7 +1433,9 @@ def get_registered_container(container_type: type[Any]) -> RegisteredContainer |
 
     best_type: type[Any] | None = None
     best_registration: RegisteredContainer | None = None
-    for registered_type, registration in _CONTAINER_REGISTRY.items():
+    with _CONTAINER_REGISTRY_LOCK:
+        registry_snapshot = list(_CONTAINER_REGISTRY.items())
+    for registered_type, registration in registry_snapshot:
         if not issubclass(container_type, registered_type):
             continue
         if best_type is None or (

@@ -45,8 +45,10 @@ only declared columns; `TORCHLENS_POSTPROCESS_READ_AUDIT=enforce`
 additionally verifies reads stay inside declared reads+probes (the write
 audit keeps a read-free class so enforcing writes never pays a `cell_get`
 override). The read-audit knob only acts inside the assertion-armed audit
-windows, so it does NOTHING unless `TORCHLENS_POSTPROCESS_ASSERTIONS` is
-also set. All three knobs parse against a closed vocabulary and REFUSE
+windows; setting it without `TORCHLENS_POSTPROCESS_ASSERTIONS` REFUSES at
+postprocess entry (r7 R04-1 — the silently-inert combination read as
+enforcement while checking nothing). All three knobs parse against a closed
+vocabulary and REFUSE
 unrecognized values (a typo can no longer silently disarm an audit). The audit covers assignment/deletion AND in-place container
 mutation (per-step order-canonical content fingerprints of mutable
 dict/list/set cells on rows that existed at step begin). Whole-row lifecycle

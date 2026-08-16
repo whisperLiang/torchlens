@@ -91,6 +91,7 @@ from .._trace_core.relation_views import (
 )
 from .._trace_state import TraceState
 from .._training_validation import _NON_GRAD_DTYPES, TrainingModeConfigError
+from .._transport import to_cpu_contiguous
 from ..backends.torch._tl import mark_detached_saved_activation
 from ..constants import ARG_EXPRESSIONS_FIELD, LAYER_PASS_LOG_FIELD_ORDER, RAW_LABEL_SUFFIX
 from ..intervention.errors import DirectActivationWriteWarning
@@ -121,7 +122,6 @@ from ..utils.tensor_utils import (
     get_memory_amount_from_metadata,
     is_functorch_wrapped_tensor,
     print_override,
-    safe_copy,
     safe_to,
 )
 from ._accessor_base import Accessor
@@ -1549,24 +1549,32 @@ def _tensor_content_hash(value: torch.Tensor) -> str:
 
     Notes
     -----
-    The digest frames the LOGICAL dtype, captured before the bf16 -> float32
-    transport upcast numpy requires: framing the post-upcast dtype made a
-    bfloat16 tensor collide with the float32 tensor of the same values, so
-    content-mode dedup could alias payloads across dtypes. The payload is
-    hashed through the buffer protocol (no whole-payload ``tobytes`` copy);
-    digest bytes are unchanged for non-bf16 tensors.
+    The digest frames the LOGICAL dtype so a bfloat16 tensor can never
+    collide with the float32 tensor of the same values (content-mode dedup
+    aliasing across dtypes). The payload is hashed through the buffer
+    protocol (no whole-payload ``tobytes`` copy), the transport is the
+    shared zero-copy-when-possible ``to_cpu_contiguous`` (r7 b5 R35-1: the
+    old ``safe_copy(...).cpu().contiguous()`` paid one unconditional full
+    clone for an already-contiguous CPU tensor and materialized twice for a
+    CUDA/permuted source), and bf16 hashes its OWN bytes -- the uint8
+    reinterpret view needs no numpy-transport upcast (R35 fable: the
+    bf16->f32 copy was pointless once the logical dtype was framed; this
+    digest is process-local, so the byte change is invisible).
     """
 
     if is_functorch_wrapped_tensor(value):
         return f"functorch_wrapped_tensor:{id(value)}"
 
     with pause_logging():
-        tensor = safe_copy(value, detach_tensor=True).cpu().contiguous()
+        tensor = value
+        if tensor.is_conj() or tensor.is_neg():
+            # ``safe_copy`` used to materialize lazy conj/neg; the zero-copy
+            # transport must resolve them first or the uint8 view refuses.
+            tensor = tensor.resolve_conj().resolve_neg()
+        tensor = to_cpu_contiguous(tensor)
         logical_dtype = str(tensor.dtype)
-        if tensor.dtype is torch.bfloat16:
-            tensor = tensor.to(torch.float32)
         shape = tuple(tensor.shape)
-        payload = memoryview(tensor.reshape(-1).view(torch.uint8).numpy()).cast("B")
+        payload = tensor.reshape(-1).view(torch.uint8).numpy().data
         hasher = hashlib.sha256()
         hasher.update(repr((shape, logical_dtype)).encode("utf-8"))
         hasher.update(payload)

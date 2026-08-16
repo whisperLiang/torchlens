@@ -475,6 +475,18 @@ def validate(
                 _LAST_RUN_PEAKS["cuda_peak_allocated_bytes"] = (
                     cuda_peak_after if cuda_peak_after > cuda_peak_before else 0
                 )
+            # R33 (r7 b6-opus, 3rd round): validate's high-water phase sits on
+            # the WRONG side of the internal trims -- the comparison/report
+            # phase reallocates AFTER second_trace.cleanup() trimmed, so
+            # ~180-225 MB of freed glibc arena stayed resident per call
+            # (measured: manual malloc_trim recovered it). One more trim at
+            # the END of the scope; correctness-neutral (releases only
+            # allocator-free pages, ~1 ms next to a multi-second validate),
+            # and after the peak reads above, which are high-water maxima the
+            # trim cannot lower.
+            from ..data_classes.cleanup import _trim_host_allocator
+
+            _trim_host_allocator()
         if passed is False:
             # R67: the bare ``False`` used to be silent while the rich
             # structured diagnosis sat unreferenced in the module side channel.

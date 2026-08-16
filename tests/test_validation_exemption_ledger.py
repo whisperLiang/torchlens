@@ -196,9 +196,12 @@ EXEMPTION_LEDGER: tuple[Exemption, ...] = (
         proof="torchlens.validation.exemptions:_posthoc_discrete_output_decision",
         refuses=(
             "a floating/complex output, where a value perturbation must show up; "
-            "and (R08) an elementwise comparison whose threshold-straddle probe "
+            "(R08) an elementwise comparison whose threshold-straddle probe "
             "proves the recorded parent has no value influence -- that op falls "
-            "through to the perturbation_insensitive failure. Bool-output "
+            "through to the perturbation_insensitive failure; and (R08-2) a "
+            "non-comparison predicate op whose substitution battery (sign/zero/"
+            "extreme/non-finite/inversion) pins the output across every "
+            "substitute -- same fall-through. Bool-output "
             "children also run the negate/zero/NaN + magnitude-ladder retry "
             "rungs BEFORE any exemption is consulted, so a real edge validates "
             "instead of exempting"

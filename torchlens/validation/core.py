@@ -914,6 +914,18 @@ def _comparator_self_test() -> None:
         nan_vs_number = torch.tensor([0.25, 1.0])
         neg_zero = torch.tensor([-0.0, 1.0])
         pos_zero = torch.tensor([0.0, 1.0])
+        # R74r6-F1: bound the EFFECTIVE fp32 band from BOTH sides, not just
+        # non-vacuity. The loosest sentinel above is a 1/3 relative gap, so
+        # any rtol below 0.333 used to pass -- a 5,461x-loosened band ran
+        # this self-test green and blessed 30% corruption of every replayed
+        # activation. The literal pairs below pin the band's order of
+        # magnitude: a 1e-3 relative gap (16x the shipped 512-ULP fp32 row)
+        # must read UNEQUAL, and a 1e-6 gap (well inside the row) must read
+        # EQUAL so a pathologically TIGHTENED band that would false-fail
+        # every replay is caught too.
+        band_probe = torch.tensor([1.0, -1.0, 0.5, 2.0])
+        band_reject = band_probe * (1.0 + 1.0e-3)
+        band_accept = band_probe * (1.0 + 1.0e-6)
         healthy = (
             bool(tensor_nanequal(base, base.clone(), allow_tolerance=True))
             and not bool(tensor_nanequal(base, unequal, allow_tolerance=True))
@@ -925,6 +937,8 @@ def _comparator_self_test() -> None:
             and not bool(tensor_nanequal(neg_zero, pos_zero))
             and bool(tensor_nanequal(neg_zero, pos_zero, allow_tolerance=True))
             and bool(tensor_nanequal(neg_zero, neg_zero.clone()))
+            and not bool(tensor_nanequal(band_probe, band_reject, allow_tolerance=True))
+            and bool(tensor_nanequal(band_probe, band_accept, allow_tolerance=True))
         )
     if not healthy:
         raise RuntimeError(

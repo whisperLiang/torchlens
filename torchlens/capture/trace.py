@@ -71,7 +71,12 @@ if TYPE_CHECKING:
     from ..data_classes.trace import Trace
 from ..data_classes._lookup_keys import _give_user_feedback_about_lookup_key
 from ..utils.display import _timed_phase, _vprint
-from ..utils.rng import host_rng_advanced, snapshot_host_rng
+from ..utils.rng import (
+    host_rng_advanced,
+    log_current_rng_states,
+    set_rng_from_saved_states,
+    snapshot_host_rng,
+)
 
 _ACTIVE_CAPTURE_BACKEND: CaptureBackend | None = None
 
@@ -1346,6 +1351,7 @@ def run_and_log_inputs_through_model(
     grad_layers_to_save: str | list[str | int] | None = "all",
     random_seed: int | None = None,
     postprocess: bool = True,
+    reservation_resume: object | None = None,
 ) -> Any:
     """Core orchestration: run a forward pass and log everything into Trace.
 
@@ -1427,21 +1433,46 @@ def run_and_log_inputs_through_model(
             combined = set(layer_nums_to_save) | output_parent_nums
             self._layer_nums_to_save = sorted(combined)
 
-    backend.seed_rng(self, random_seed)
-    input_args, input_kwargs, input_arg_names, model_device = backend.setup_inputs_and_device(
-        self,
-        model,
-        input_args,
-        input_kwargs,
-    )
-    # B3R4-R12-1: a non-total namedtuple `_fields` schema on any input site
-    # refuses typed HERE, for every capture. The tensor-extraction BFS cannot
-    # see positional slots of tuple subclasses, so such an input used to lose
-    # its tensor leaves silently (no input node, parents dropped, the gap
-    # misattributed to a stale-reference escape) while settling COMPLETE.
-    from torchlens._input_walk import refuse_nontotal_namedtuple_inputs
+    # R57 (restore half): capture seeding reseeds the USER'S three global RNG
+    # engines (random / numpy / torch, plus CUDA); the sibling refresh and
+    # fast-run paths snapshot and restore around their reseeds, but the
+    # primary capture used to leave the process reseeded permanently -- code
+    # after ``tl.trace()`` silently continued from the capture's stream, not
+    # the user's. Snapshot the pre-seed states here and restore them on EVERY
+    # settlement path (the outermost ``finally`` below, plus the two
+    # pre-``try`` failure windows). The reseed POLICY itself (whether capture
+    # seeds at all) is the fenced R21 fork and is deliberately unchanged.
+    pre_capture_rng_states = log_current_rng_states()
+    rng_restore_pending = [True]
 
-    refuse_nontotal_namedtuple_inputs(input_args, input_kwargs)
+    def _restore_user_global_rng() -> None:
+        """Restore the user's pre-capture global RNG streams exactly once."""
+
+        if rng_restore_pending[0]:
+            rng_restore_pending[0] = False
+            set_rng_from_saved_states(pre_capture_rng_states)
+
+    backend.seed_rng(self, random_seed)
+    try:
+        input_args, input_kwargs, input_arg_names, model_device = backend.setup_inputs_and_device(
+            self,
+            model,
+            input_args,
+            input_kwargs,
+        )
+        # B3R4-R12-1: a non-total namedtuple `_fields` schema on any input site
+        # refuses typed HERE, for every capture. The tensor-extraction BFS cannot
+        # see positional slots of tuple subclasses, so such an input used to lose
+        # its tensor leaves silently (no input node, parents dropped, the gap
+        # misattributed to a stale-reference escape) while settling COMPLETE.
+        from torchlens._input_walk import refuse_nontotal_namedtuple_inputs
+
+        refuse_nontotal_namedtuple_inputs(input_args, input_kwargs)
+    except BaseException:
+        # A pre-reservation setup failure exits before the outermost
+        # ``finally`` exists; the seeded engines must not leak to the user.
+        _restore_user_global_rng()
+        raise
 
     self.capture_start_time = time.time()
     # Settlement state for this pass: the phase marker attributes failures to
@@ -1461,9 +1492,11 @@ def run_and_log_inputs_through_model(
     # concurrent capture destined for the typed ``ReentrantTraceError`` used
     # to run those mutations first and orphan the admitted winner's session
     # (runtime-probed ``capture_verified=False``). Same-thread re-entry from
-    # the recorder's outer reservation passes through; the reservation is
-    # released in the outermost ``finally`` below.
-    capture_slot = _state.capture_reservation()
+    # the recorder's outer reservation passes through only by presenting the
+    # recorder's continuation token (R55: a bare same-thread re-entry is a
+    # nested public capture from user code inside the window and refuses);
+    # the reservation is released in the outermost ``finally`` below.
+    capture_slot = _state.capture_reservation(resume=reservation_resume)
     capture_slot.__enter__()
     try:
         compiled_capture_context = (
@@ -1476,6 +1509,7 @@ def run_and_log_inputs_through_model(
         # A raise between the reservation claim and the outer ``try`` would
         # otherwise leak the reservation and wedge every later admission.
         capture_slot.__exit__(None, None, None)
+        _restore_user_global_rng()
         raise
 
     try:
@@ -2082,5 +2116,9 @@ def run_and_log_inputs_through_model(
             raise
         finally:
             # Outermost: a teardown double-fault must not leak the capture
-            # reservation, or every later admission refuses forever.
-            capture_slot.__exit__(None, None, None)
+            # reservation, or every later admission refuses forever. The RNG
+            # restore (R57) runs first but can never displace the release.
+            try:
+                _restore_user_global_rng()
+            finally:
+                capture_slot.__exit__(None, None, None)

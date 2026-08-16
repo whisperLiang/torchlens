@@ -315,6 +315,39 @@ def _axis_factory_source_output() -> Any:
     return tl.trace(FactorySourceOutputModel(), torch.randn(4, 4))
 
 
+class MultiOutputModuleModel(nn.Module):
+    """A module CALL with more than one output entry (r7 R04-2 axis).
+
+    ``_assign_output_roles`` early-returns at one output entry, so the whole
+    enforcement matrix ran green while step 16's undeclared
+    ``multi_output_name``/``_source_trace_ref`` reads sat on the
+    LSTM/GRU-cell and tuple-returning-submodule family. Both sub-shapes ride
+    this one axis: the LSTMCell (real multi-output cell) feeds a submodule
+    that returns a plain 2-tuple.
+    """
+
+    class _TupleHead(nn.Module):
+        def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            return x * 2, x + 1
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cell = nn.LSTMCell(4, 8)
+        self.head = self._TupleHead()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        hidden = torch.zeros(x.shape[0], 8)
+        context = torch.zeros(x.shape[0], 8)
+        hidden, context = self.cell(x, (hidden, context))
+        doubled, shifted = self.head(hidden)
+        return doubled + shifted + context
+
+
+def _axis_multi_output_module() -> Any:
+    _seed_everything()
+    return tl.trace(MultiOutputModuleModel(), torch.randn(2, 4))
+
+
 def _axis_buffer_pressure() -> Any:
     _seed_everything()
     return tl.trace(DoubleBufferModel().train(), torch.randn(3, 4))
@@ -458,6 +491,7 @@ def iter_axes(tmp_dir: str | None = None) -> list[tuple[str, Callable[[], Any]]]
         ("orphan_remove", _axis_orphan_remove),
         ("transform", _axis_transform),
         ("container_structure", _axis_container_structure),
+        ("multi_output_module", _axis_multi_output_module),
         ("internal_source", _axis_internal_source),
         ("factory_source_output", _axis_factory_source_output),
         ("buffer_pressure", _axis_buffer_pressure),
