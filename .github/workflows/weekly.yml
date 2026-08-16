@@ -45,6 +45,15 @@ jobs:
           uv pip check
           python -c 'import torch; assert torch.__version__.startswith("2.7."), torch.__version__; print(torch.__version__)'
 
+      - name: Bridge adapters and cairosvg collision gate (executed floor)
+        # The whole point is that these STOP skipping here: a floor of one
+        # executed test per family keeps the leg from going vacuously green
+        # if an importorskip cascade returns.
+        run: |
+          pytest tests/test_bridges_launch.py tests/test_label_geometry.py \
+            --junitxml="${{ runner.temp }}/bridge.junit.xml" --tb=short -q
+          python scripts/check_ci_executed_tests.py "${{ runner.temp }}/bridge.junit.xml" 5
+
       - name: Run slow tests
         run: |
           pytest tests/ -m slow --tb=short \

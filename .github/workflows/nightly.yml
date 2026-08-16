@@ -160,6 +160,37 @@ jobs:
         run: |
           python scripts/check_ci_executed_tests.py "${{ runner.temp }}/fast-tier.junit.xml" 6000
 
+      - name: Record skip outcomes
+        # r7 R79: skips were invisible in CI output -- an importorskip
+        # cascade below the executed floor left no audit trail of WHAT
+        # stopped running. The junit ships as an artifact and the top skip
+        # reasons land in the job summary.
+        if: always()
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import collections
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("${{ runner.temp }}/fast-tier.junit.xml").getroot()
+          reasons = collections.Counter()
+          for case in root.iter("testcase"):
+              skipped = case.find("skipped")
+              if skipped is not None:
+                  reasons[(skipped.get("message") or "?")[:120]] += 1
+          print("## Fast-tier skip outcomes")
+          print(f"total skips: {sum(reasons.values())}")
+          for reason, count in reasons.most_common(20):
+              print(f"- {count} x {reason}")
+          PY
+
+      - name: Upload fast-tier junit (skip audit trail)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fast-tier-junit
+          path: ${{ runner.temp }}/fast-tier.junit.xml
+          retention-days: 30
+
       - name: Fresh-seed generative property sweep
         # r7 R73 (6th pass): TORCHLENS_FUZZ_SEED was wired into ZERO
         # workflows, so the generative suites ran only their fixed default
@@ -671,6 +702,31 @@ jobs:
               tl.save(trace, path)
               loaded = tl.load(path)
               assert loaded.layer_labels == trace.layer_labels
+
+          # r7 R85 (sol MED): the canary's model/input lived on the default
+          # CPU, so MPS had ZERO executable coverage while device-specific
+          # claims ship. On the Apple-silicon runner the capability assertion
+          # is HARD (it cannot vacuously skip): MPS must be available, and a
+          # capture + save/load round-trip must work on it. CUDA remains
+          # CI-dark by disclosed limitation (no GPU runners; see
+          # docs/reference/limitations.md "CI-attested platforms").
+          import platform
+
+          if platform.system() == "Darwin" and platform.machine() == "arm64":
+              assert torch.backends.mps.is_available(), (
+                  "Apple-silicon runner without MPS: the device canary would "
+                  "silently stop covering the mps path"
+              )
+              mps_model = nn.Sequential(nn.Linear(4, 4), nn.ReLU()).to("mps")
+              mps_input = torch.randn(2, 4, device="mps")
+              mps_trace = tl.trace(mps_model, mps_input, save=tl.func("relu"))
+              assert mps_trace["relu_1_2"].out.device.type == "mps"
+              with tempfile.TemporaryDirectory() as tmp:
+                  mps_path = os.path.join(tmp, "canary-mps.tlspec")
+                  tl.save(mps_trace, mps_path)
+                  mps_loaded = tl.load(mps_path)
+                  assert mps_loaded.layer_labels == mps_trace.layer_labels
+              print("mps canary OK")
 
           print("platform canary OK:", tl.__version__)
           PY
