@@ -516,18 +516,19 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     # Pre-fill whole-tree scan caches during collection (uncharged time): a
     # module may expose `warm_scan_caches()` when its scanners' one-time parse
     # cost (~5-8s of genuine CPU) would otherwise land in whichever of its
-    # tests runs first and sit on the duration-budget boundary. Gated on the
-    # marker-lint tests being IN session: they are the budget's enforcement
-    # point, so sessions without them (targeted runs, nested pytest
-    # subprocesses like the -O leg probe) skip the warm cost entirely.
-    if lint_tests:
-        warmed: set[int] = set()
-        for item in items:
-            module = getattr(item, "module", None)
-            warm = getattr(module, "warm_scan_caches", None)
-            if warm is not None and id(module) not in warmed:
-                warmed.add(id(module))
-                warm()
+    # tests runs first and sit on the duration-budget boundary. UNCONDITIONAL:
+    # the budget tripwire enforces at sessionfinish in EVERY session, so a
+    # targeted run of a scanner module (no marker-lint collected) must warm
+    # too or its first test eats the parse cost and trips the always-on gate.
+    # Only sessions that collected a warm-capable module pay the cost, and
+    # they would pay it inside a charged test window otherwise.
+    warmed: set[int] = set()
+    for item in items:
+        module = getattr(item, "module", None)
+        warm = getattr(module, "warm_scan_caches", None)
+        if warm is not None and id(module) not in warmed:
+            warmed.add(id(module))
+            warm()
 
 
 def _coverage_requested(config: pytest.Config) -> bool:
