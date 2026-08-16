@@ -7,25 +7,25 @@ manifest schema instead of a hand-list:
 * the key sweeps parametrize over whatever top-level keys a freshly saved
   manifest actually carries — a NEW manifest key automatically enters the
   required-key contract and forces a conscious ledger decision;
-* the seeded sweeps (truncations, byte flips) draw offsets from a fixed-seed
-  RNG, deterministic across runs but not hand-chosen.
+* the seeded sweeps (truncations, byte flips) draw offsets from a seeded
+  RNG — deterministic by default, and ``TORCHLENS_FUZZ_SEED`` re-seeds them
+  for the nightly fresh-seed leg (the R73 "exploration, not just pinning"
+  half; failures name the seed for local reproduction).
 
 Contract, pinned from the probed loader surface (2026-08-15): every
 structural corruption must be refused with a torchlens-typed
 ``TorchLensIOError`` — never a silent success, never an untyped stack trace.
-The two ledgered tolerances:
-
-* ``_OPTIONAL_KEYS`` may be ABSENT (legacy-manifest compatibility) but still
-  type-check when present;
-* deleting ``tlspec_version`` routes the loader down the legacy-format
-  dispatch and currently surfaces an UNTYPED ``FileNotFoundError`` for
-  ``spec.json`` (relayed to the IO lane); the sweep pins "some exception,
-  never a silent success" for that one key until the dispatch is hardened.
+The one ledgered tolerance: ``_OPTIONAL_KEYS`` may be ABSENT
+(legacy-manifest compatibility) but still type-check when present. The
+former ``tlspec_version``-deletion wart (untyped ``FileNotFoundError`` out
+of the legacy-format dispatch) is FIXED — incoherent format markers now
+refuse typed at the dispatch (``tlspec_format_markers_incoherent``).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import random
 import shutil
 from collections.abc import Iterator
@@ -40,6 +40,13 @@ from torchlens.errors import TorchLensIOError
 
 pytestmark = pytest.mark.heavy
 
+#: Deterministic defaults; the nightly fresh-seed leg overrides via env. The
+#: two sweeps use distinct streams (base and base+1) so a shared seed never
+#: replays identical offsets across them.
+_FUZZ_SEED_ENV = os.environ.get("TORCHLENS_FUZZ_SEED")
+_TRUNCATION_SEED = 1973 if _FUZZ_SEED_ENV is None else int(_FUZZ_SEED_ENV)
+_BYTE_FLIP_SEED = 2026 if _FUZZ_SEED_ENV is None else int(_FUZZ_SEED_ENV) + 1
+
 #: Top-level manifest keys that may legitimately be ABSENT (older manifests
 #: predate them; the loader defaults them). Deleting any OTHER key must be a
 #: typed refusal — a new manifest key lands in the required contract until
@@ -52,10 +59,6 @@ _OPTIONAL_KEYS = frozenset(
         "kind",
     }
 )
-
-#: Deleting this key re-routes format dispatch (legacy spec.json probe) and
-#: currently raises an untyped FileNotFoundError — ledgered, relayed.
-_LEGACY_DISPATCH_KEY = "tlspec_version"
 
 
 @pytest.fixture(scope="module")
@@ -104,12 +107,7 @@ def test_every_toplevel_key_deletion_is_adjudicated(seed_artifact: Path, tmp_pat
     for key in _manifest_keys(seed_artifact):
         artifact = _corrupt_copy(seed_artifact, tmp_path)
         _rewrite_manifest(artifact, lambda data, key=key: data.pop(key))
-        if key == _LEGACY_DISPATCH_KEY:
-            # The typed refusal OR the ledgered legacy-dispatch wart (a raw
-            # FileNotFoundError for spec.json); never a silent success.
-            with pytest.raises((TorchLensIOError, FileNotFoundError)):
-                tl.load(str(artifact))
-        elif key in _OPTIONAL_KEYS:
+        if key in _OPTIONAL_KEYS:
             loaded = tl.load(str(artifact))
             assert type(loaded).__name__ == "Trace"
             loaded.cleanup()
@@ -173,7 +171,7 @@ def test_tensor_entry_mutations_are_typed_refusals(
 def test_seeded_truncations_are_typed_refusals(seed_artifact: Path, tmp_path: Path) -> None:
     """Seeded truncations of manifest and metadata must refuse typed."""
 
-    rng = random.Random(1973)
+    rng = random.Random(_TRUNCATION_SEED)
     manifest_bytes = (seed_artifact / "manifest.json").read_bytes()
     metadata_bytes = (seed_artifact / "metadata.pkl").read_bytes()
     for _ in range(8):
@@ -200,7 +198,7 @@ def test_seeded_manifest_byte_flips_never_escape_untyped(
     parse path.
     """
 
-    rng = random.Random(2026)
+    rng = random.Random(_BYTE_FLIP_SEED)
     manifest_bytes = (seed_artifact / "manifest.json").read_bytes()
     escapes: list[str] = []
     for index in range(12):
@@ -217,7 +215,10 @@ def test_seeded_manifest_byte_flips_never_escape_untyped(
             escapes.append(f"case {index} offset {offset}: {type(exc).__name__}: {exc}")
         else:
             loaded.cleanup()
-    assert not escapes, f"manifest byte flips escaped the typed surface: {escapes}"
+    assert not escapes, (
+        f"manifest byte flips escaped the typed surface (seed {_BYTE_FLIP_SEED}; reproduce "
+        f"with TORCHLENS_FUZZ_SEED): {escapes}"
+    )
 
 
 def test_non_utf8_manifest_byte_is_typed_refusal(seed_artifact: Path, tmp_path: Path) -> None:

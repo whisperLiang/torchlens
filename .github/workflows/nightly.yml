@@ -199,10 +199,15 @@ jobs:
         # the run id makes every nightly a new seed while the failure output
         # names the seed for deterministic local reproduction
         # (TORCHLENS_FUZZ_SEED=<n> pytest tests/test_generative_properties_r73.py).
+        # r7 R73 (fixwave-7): the tlspec parse-fuzz sweeps joined the seeded
+        # surface (their truncation/byte-flip offsets now honor
+        # TORCHLENS_FUZZ_SEED) -- run them under the same fresh seeds so
+        # loader robustness gets standing exploration too.
         run: |
           for offset in 0 1 2 3; do
             TORCHLENS_FUZZ_SEED="$(( ${{ github.run_id }} % 1000000000 + offset ))" \
-              pytest tests/test_generative_properties_r73.py -q --tb=short -p no:randomly
+              pytest tests/test_generative_properties_r73.py tests/test_tlspec_parse_fuzz.py \
+                -q --tb=short -p no:randomly
           done
 
   coverage:

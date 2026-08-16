@@ -312,6 +312,37 @@ def test_canonical_json_bytes_is_key_order_invariant() -> None:
     assert canonical_json_bytes({"a": 1}) != canonical_json_bytes({"a": 2})
 
 
+def test_canonical_json_bytes_refuses_the_known_bad_classes() -> None:
+    """Known-bad payload classes refuse loudly, never mint ambiguous bytes.
+
+    r7 R73: ``json.dumps`` coerces int/float/bool/None mapping keys to
+    strings, so ``{1: v}`` and ``{"1": v}`` would share canonical bytes,
+    ``{"1": a, 1: b}`` would emit DUPLICATE keys, and int-keyed maps sort
+    numerically while their coerced forms sort lexicographically — for a
+    hash-authority encoding every one of those is a forgery seam. NaN and
+    the infinities are non-JSON and already refused (``allow_nan=False``);
+    this pins all three classes.
+    """
+
+    for bad_float in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError):
+            canonical_json_bytes({"x": bad_float})
+    bad_key_payloads: list = [
+        {1: "v"},
+        {True: "v"},
+        {None: "v"},
+        {"outer": [{"inner": {2.5: "v"}}]},
+        {"1": "same-coerced-form", 1: "different-object"},
+    ]
+    for payload in bad_key_payloads:
+        with pytest.raises(ValueError, match="non-string mapping key"):
+            canonical_json_bytes(payload)
+    with pytest.raises(TypeError):
+        canonical_json_bytes({"x": object()})
+    # The string-keyed spelling stays valid — the refusal is precise.
+    assert canonical_json_bytes({"1": "v"}) == b'{"1":"v"}\n'
+
+
 def test_fresh_seed_leg_stays_wired_into_ci() -> None:
     """r7 R73 (6th pass): the fuzz leg keeps getting unwired -- pin it.
 
@@ -333,4 +364,9 @@ def test_fresh_seed_leg_stays_wired_into_ci() -> None:
     )
     assert "test_generative_properties_r73.py" in text, (
         "the fresh-seed leg no longer targets the generative property suite"
+    )
+    assert "test_tlspec_parse_fuzz.py" in text, (
+        "the fresh-seed leg no longer targets the tlspec parse-fuzz suite; its "
+        "truncation/byte-flip sweeps honor TORCHLENS_FUZZ_SEED and must keep "
+        "getting fresh seeds (r7 R73)"
     )

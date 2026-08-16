@@ -1241,6 +1241,23 @@ def load(
         if tlspec_format in {"v2.16_intervention", "v2.16_intervention_with_kind"}:
             from ..intervention.save import load_intervention_spec
 
+            # Typed boundary (r7 R73): a trace manifest whose ``tlspec_version``
+            # key was lost still carries ``kind``, so format detection
+            # classifies it as a v2.16 intervention spec and the spec loader
+            # then surfaced a RAW FileNotFoundError for the spec.json the
+            # artifact never had. Incoherent format markers are a corrupt
+            # artifact and must refuse typed at the dispatch.
+            if bundle_path.is_dir() and not (bundle_path / "spec.json").exists():
+                raise TorchLensIOError(
+                    f"Artifact at {bundle_path} classifies as {tlspec_format} "
+                    "(its manifest carries 'kind' without 'tlspec_version') but "
+                    "contains no spec.json — the format markers are incoherent, "
+                    "which means the manifest lost required keys or the "
+                    "artifact is corrupt. Remedy: restore the manifest's "
+                    "tlspec_version key or re-save the artifact from its "
+                    "source trace.",
+                    code="tlspec_format_markers_incoherent",
+                )
             return load_intervention_spec(
                 bundle_path,
                 trust_custom_callables=trust_custom_callables,
