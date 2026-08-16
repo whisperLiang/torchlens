@@ -2738,6 +2738,7 @@ def _trace_torch_model(
     chunk_size: int | None | MissingType = MISSING,
     chunk_paths: Iterable[Any] | None | MissingType = MISSING,
     retain_output_parents_for_layers_to_save: bool = False,
+    _selective_layers_to_save_request: object | None = None,
 ) -> Trace:
     """Run the registry-owned torch trace implementation.
 
@@ -3553,7 +3554,9 @@ def _trace_torch_model(
             retain_output_parents_for_layers_to_save or uses_selective_layers_to_save
         ),
         _selective_layers_to_save_request=(
-            requested_layers_to_save if uses_selective_layers_to_save else None
+            _selective_layers_to_save_request
+            if _selective_layers_to_save_request is not None
+            else (requested_layers_to_save if uses_selective_layers_to_save else None)
         ),
         _deferred_retention_selector=(
             requested_layers_to_save
