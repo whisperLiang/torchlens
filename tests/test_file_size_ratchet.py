@@ -19,6 +19,18 @@ hook. This ratchet freezes the frontier:
 GENERATED modules (self-declared via a ``GENERATED`` marker on the first
 docstring line, same convention as the ruff extend-exclude lockstep) are
 exempt: their generator is the authority for their size.
+
+r7 R43-F1 (opus MED): ``tests/`` joins the ratchet with its own ledger — it
+had grown +5,711 lines in 112 commits with no gate, and the repo's largest
+file was the tripwire corpus itself (``test_validation.py``, 8,477 lines,
+1.6x the worst package god file; its collection alone costs 6.35s, paid by
+every one of the 223 mutants in a campaign).
+
+r7 R43-F2 (opus LOW-MED): ceilings carry a RE-KEY OBLIGATION — a row sitting
+more than ``_MAX_LEDGER_SLACK`` under its ceiling must be re-keyed down to
+the next 50-line step, so a successful split can never rot into permanent
+regrowth budget (headroom had doubled 1,090 -> 2,162 before the fixwave-5
+re-key practice; this makes the practice structural).
 """
 
 from __future__ import annotations
@@ -68,15 +80,15 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/postprocess/_contracts.py": 3200,
     "torchlens/backends/torch/model_prep.py": 3200,
     "torchlens/data_classes/module.py": 2950,
-    "torchlens/visualization/auto_collapse.py": 3000,
+    "torchlens/visualization/auto_collapse.py": 2400,
     "torchlens/validation/exemptions.py": 2850,
     "torchlens/backends/paddle/backend.py": 2700,
     "torchlens/_runnable_state.py": 2700,
     "torchlens/capture/arg_positions.py": 2650,
     "torchlens/backends/jax/jaxpr.py": 2550,
-    "torchlens/_capture_state_helpers.py": 2600,
+    "torchlens/_capture_state_helpers.py": 2350,
     "torchlens/bundle/__init__.py": 2450,
-    "torchlens/data_classes/layer.py": 2450,
+    "torchlens/data_classes/layer.py": 2350,
     "torchlens/postprocess/loop_grouping_adapter.py": 2500,
     "torchlens/visualization/_render_leaf.py": 2350,
     "torchlens/visualization/_render_edges.py": 2350,
@@ -95,6 +107,29 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
 }
 
 
+#: Maximum slack a ledger row may hold before it must be re-keyed down
+#: (r7 R43-F2). Generous enough for one wave of reviewed defensive fixes,
+#: small enough that a split's headroom cannot silently become regrowth
+#: budget.
+_MAX_LEDGER_SLACK = 100
+
+#: Frozen ceilings for the tests/ frontier (r7 R43-F1 census, 2026-08-16,
+#: next 50-line step above measurement). Same doctrine as the package
+#: ledger: shrink freely, raise consciously with a reason, leave at <= 2000.
+_TEST_FILE_CEILINGS: dict[str, int] = {
+    "tests/test_validation.py": 8500,
+    "tests/example_models.py": 5500,
+    "tests/test_real_world_models.py": 4850,
+    "tests/test_toy_models.py": 4050,
+    "tests/test_auto_collapse_metrics.py": 3200,
+    "tests/test_backward.py": 2500,
+    "tests/validation_goldens/test_validation_exemption_hardening.py": 2400,
+    "tests/test_global_state_inventory.py": 2300,
+    "tests/test_conditional_branches.py": 2150,
+    "tests/test_tlspec_runnable_r41_crossthread_witness.py": 2050,
+}
+
+
 def _is_generated_module(path: Path) -> bool:
     """Return whether a module self-declares as GENERATED (generator authority)."""
 
@@ -107,11 +142,11 @@ def _is_generated_module(path: Path) -> bool:
     return False
 
 
-def _line_counts() -> dict[str, int]:
-    """Return line counts for every non-generated package module."""
+def _line_counts(root: Path = _PACKAGE_ROOT) -> dict[str, int]:
+    """Return line counts for every non-generated module under ``root``."""
 
     counts: dict[str, int] = {}
-    for path in sorted(_PACKAGE_ROOT.rglob("*.py")):
+    for path in sorted(root.rglob("*.py")):
         if _is_generated_module(path):
             continue
         relative = path.relative_to(_PROJECT_ROOT).as_posix()
@@ -156,6 +191,29 @@ def _stale_ledger_rows(counts: dict[str, int], ceilings: dict[str, int]) -> list
     return stale
 
 
+def _overslack_rows(
+    counts: dict[str, int], ceilings: dict[str, int], max_slack: int = _MAX_LEDGER_SLACK
+) -> list[str]:
+    """Return ledger rows whose ceiling sits too far above the measurement.
+
+    r7 R43-F2: a shrink-only ratchet converts every successful split into
+    permanent regrowth budget unless the ceiling follows the file down.
+    """
+
+    overslack = []
+    for relative, ceiling in sorted(ceilings.items()):
+        lines = counts.get(relative)
+        if lines is None or lines <= _NEW_FILE_LINE_CAP:
+            continue  # the staleness check owns these
+        if ceiling - lines > max_slack:
+            step = lines + (50 - lines % 50) % 50 or lines
+            overslack.append(
+                f"{relative}: ceiling {ceiling} sits {ceiling - lines} lines above the "
+                f"measured {lines} — re-key the row down to the next 50-line step ({step})"
+            )
+    return overslack
+
+
 def test_no_package_module_exceeds_its_size_ceiling() -> None:
     """Every torchlens module respects the cap or its frozen ledger ceiling."""
 
@@ -166,11 +224,32 @@ def test_no_package_module_exceeds_its_size_ceiling() -> None:
     )
 
 
+def test_no_test_module_exceeds_its_size_ceiling() -> None:
+    """Every tests/ module respects the cap or its frozen ledger ceiling."""
+
+    violations = _ratchet_violations(_line_counts(_PROJECT_ROOT / "tests"), _TEST_FILE_CEILINGS)
+    assert not violations, (
+        "tests/ file-size ratchet violations (r7 R43-F1 — the tripwire corpus "
+        "is not exempt from its own doctrine):\n  " + "\n  ".join(violations)
+    )
+
+
 def test_god_file_ledger_has_no_stale_rows() -> None:
     """A ledger row must leave when its file shrinks below the cap or vanishes."""
 
     stale = _stale_ledger_rows(_line_counts(), _GOD_FILE_CEILINGS)
+    stale += _stale_ledger_rows(_line_counts(_PROJECT_ROOT / "tests"), _TEST_FILE_CEILINGS)
     assert not stale, "stale god-file ledger rows:\n  " + "\n  ".join(stale)
+
+
+def test_ledger_rows_carry_no_excess_slack() -> None:
+    """Ceilings follow files down: no row may hoard more than the slack budget."""
+
+    overslack = _overslack_rows(_line_counts(), _GOD_FILE_CEILINGS)
+    overslack += _overslack_rows(_line_counts(_PROJECT_ROOT / "tests"), _TEST_FILE_CEILINGS)
+    assert not overslack, (
+        "ledger rows holding excess regrowth budget (r7 R43-F2):\n  " + "\n  ".join(overslack)
+    )
 
 
 def test_file_size_ratchet_is_red_capable() -> None:
@@ -186,3 +265,9 @@ def test_file_size_ratchet_is_red_capable() -> None:
     assert len(stale) == 1 and "delete its ledger row" in stale[0]
     missing = _stale_ledger_rows({}, ceilings)
     assert len(missing) == 1 and "no longer exists" in missing[0]
+    overslack = _overslack_rows({"torchlens/ledgered.py": 2400}, {"torchlens/ledgered.py": 2500})
+    assert overslack == []  # exactly at the slack budget
+    overslack = _overslack_rows({"torchlens/ledgered.py": 2380}, {"torchlens/ledgered.py": 2500})
+    assert len(overslack) == 1 and "re-key" in overslack[0] and "2400" in overslack[0]
+    # A shrunken-below-cap file is the staleness check's finding, never slack.
+    assert _overslack_rows({"torchlens/ledgered.py": 1500}, {"torchlens/ledgered.py": 2500}) == []
