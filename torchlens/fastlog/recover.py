@@ -268,12 +268,17 @@ def _read_index_lines(path: Path) -> list[str]:
                     f"Fastlog index at {path} exceeds the {_INDEX_MAX_BYTES}-byte ceiling.",
                     code="fastlog_index_too_large",
                 )
-            data = handle.read(_INDEX_MAX_BYTES + 1)
+            # Stat-sized bounded read (R33-1): reading CEILING+1 pre-allocated
+            # a transient ~512 MiB buffer for every index regardless of its
+            # actual size. One sentinel byte over the stat size detects growth
+            # between fstat and read; the ceiling refusal above stays the
+            # authority for over-ceiling files.
+            data = handle.read(stat_size + 1)
     except OSError as exc:
         raise RecoveryError("no recoverable index") from exc
-    if len(data) > _INDEX_MAX_BYTES:
+    if len(data) > stat_size:
         raise TorchLensIOError(
-            f"Fastlog index at {path} exceeds the {_INDEX_MAX_BYTES}-byte ceiling.",
+            f"Fastlog index at {path} grew between its size check and read.",
             code="fastlog_index_too_large",
         )
     return data.decode("utf-8", errors="replace").splitlines()
