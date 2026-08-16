@@ -461,13 +461,27 @@ def _check_graph_topology(ml: Trace) -> None:
         # which pass's edge is corrupt.
         label = max(lpl_aliases, key=len)
 
-        # Parent-child bidirectionality
+        # Parent-child bidirectionality. Stored edge labels must EXACT-MATCH a
+        # canonical layer/op label, and that membership test fires BEFORE any
+        # ``ml[...]`` resolution (B3R7-R05 sol): ``Trace.__getitem__`` is the
+        # user-facing INTELLIGENT lookup, so a corrupted-but-fuzzy-resolvable
+        # spelling (``'input'`` for ``'input_1'``) resolves successfully and a
+        # post-resolution guard on the RESOLVED record's ``layer_label`` can
+        # never fire -- the check would bless a stored (and portable) edge
+        # table that exact-match consumers (CSR relations, artifact readers)
+        # cannot resolve. Pre-resolution membership also keeps a dangling
+        # label from escaping as ``__getitem__``'s user-facing
+        # ``InvalidArgumentError``: an invariant check must report the owning
+        # contract, not leak the lookup error.
         for p in lpl.parents:
-            parent = ml[p]
-            if p not in label_set and parent.layer_label not in label_set:
+            if p not in label_set:
                 raise MetadataInvariantError(
-                    name, f"Layer {label} has parent {p} not in layer_labels"
+                    name,
+                    f"Layer {label} stores parent label {p!r}, which is not a "
+                    f"canonical layer or op label (stored edge labels must "
+                    f"exact-match; fuzzy resolvability does not count)",
                 )
+            parent = ml[p]
             if not lpl_aliases.intersection(parent.children):
                 raise MetadataInvariantError(
                     name,
@@ -475,11 +489,14 @@ def _check_graph_topology(ml: Trace) -> None:
                 )
 
         for c in lpl.children:
-            child = ml[c]
-            if c not in label_set and child.layer_label not in label_set:
+            if c not in label_set:
                 raise MetadataInvariantError(
-                    name, f"Layer {label} has child {c} not in layer_labels"
+                    name,
+                    f"Layer {label} stores child label {c!r}, which is not a "
+                    f"canonical layer or op label (stored edge labels must "
+                    f"exact-match; fuzzy resolvability does not count)",
                 )
+            child = ml[c]
             if not lpl_aliases.intersection(child.parents):
                 raise MetadataInvariantError(
                     name,
@@ -515,6 +532,19 @@ def _check_graph_topology(ml: Trace) -> None:
         for parent_label in lpl.parents:
             parent_entry = ml[parent_label]
             parent_alias_set.update(label_aliases(parent_entry, parent_label))
+        # The arg map's top-level domain is CLOSED: every writer uses exactly
+        # the "args"/"kwargs" buckets, and the per-entry checks below iterate
+        # only those two, so a foreign top-level key (e.g. a label used as a
+        # domain, the B3R7-R05-2 plant shape) would otherwise never be
+        # examined at all -- an unguarded domain on relation metadata.
+        foreign_domains = set(lpl.parent_arg_positions) - {"args", "kwargs"}
+        if foreign_domains:
+            raise MetadataInvariantError(
+                name,
+                f"Layer {label}: parent_arg_positions has foreign top-level "
+                f"keys {sorted(foreign_domains)!r}; the only domains are "
+                f"'args' and 'kwargs'",
+            )
         for arg_domain in ("args", "kwargs"):
             for position, attributed_label in lpl.parent_arg_positions.get(arg_domain, {}).items():
                 try:

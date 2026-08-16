@@ -357,6 +357,80 @@ def test_w33_derived_flag_properties_are_read_only_truths() -> None:
 
 
 # ---------------------------------------------------------------------------
+# B3R7-R05: stored edge labels must be canonical PRE-resolution
+# ---------------------------------------------------------------------------
+
+
+def _op_by_layer_label(trace, layer_label: str):
+    """Return the raw op record (stored labels, no canonicalizing view)."""
+
+    for record in trace.layer_list:
+        if record.layer_label == layer_label:
+            return record
+    raise KeyError(layer_label)
+
+
+def test_r05_fuzzy_resolvable_corrupt_parent_label_fails_graph_topology() -> None:
+    """FAIL-AFTER-WHERE-PASSED-BEFORE: a truncated stored parent label is caught.
+
+    Before this hardening ``_check_graph_topology`` resolved every stored edge
+    label through ``Trace.__getitem__``'s intelligent lookup, so a corrupted
+    non-canonical spelling that stays uniquely substring-resolvable
+    (``'input'`` for ``'input_1'``) was repaired in-flight and BLESSED -- while
+    the stored (portable) edge table kept the spelling exact-match consumers
+    cannot resolve. The membership test must fire before any resolution.
+    """
+
+    trace, _ = _capture(_Diamond(), torch.randn(3, 4))
+    mul_op = _op_by_layer_label(trace, "mul_1_1")
+    assert "input_1" in mul_op.parents
+    mul_op.parents = tuple("input" if label == "input_1" else label for label in mul_op.parents)
+
+    with pytest.raises(MetadataInvariantError) as exc_info:
+        check_metadata_invariants(trace)
+    assert exc_info.value.check_name == "graph_topology"
+    assert "'input'" in str(exc_info.value)
+
+
+def test_r05_dangling_edge_label_reports_owning_contract() -> None:
+    """A dangling stored child label fails as ``MetadataInvariantError``.
+
+    Before this hardening the bare ``ml[c]`` lookup at the top of the loop
+    leaked the user-facing ``InvalidArgumentError`` ("Did you mean ...?")
+    instead of the owning contract's error: consolidated status aggregation
+    branching on ``MetadataInvariantError`` misclassified real metadata
+    corruption as an internal validation crash.
+    """
+
+    trace, _ = _capture(_Diamond(), torch.randn(3, 4))
+    input_op = _op_by_layer_label(trace, "input_1")
+    input_op.children = ("zz_nonexistent_9_9",) + tuple(input_op.children)
+
+    with pytest.raises(MetadataInvariantError) as exc_info:
+        check_metadata_invariants(trace)
+    assert exc_info.value.check_name == "graph_topology"
+    assert "zz_nonexistent_9_9" in str(exc_info.value)
+
+
+def test_r05_parent_arg_positions_foreign_domain_fails() -> None:
+    """FAIL-AFTER-WHERE-PASSED-BEFORE: the arg map's top-level domain is closed.
+
+    The per-entry checks iterate only the ``"args"``/``"kwargs"`` buckets, so a
+    foreign top-level key (an op label used as a domain -- the B3R7-R05-2 plant
+    shape) was never examined by ANY invariant and passed silently.
+    """
+
+    trace, _ = _capture(_Diamond(), torch.randn(3, 4))
+    relu_op = [op for op in trace.layer_list if op.func_name == "relu"][0]
+    relu_op.parent_arg_positions["nosuchop_9_9"] = {"args": [0]}
+
+    with pytest.raises(MetadataInvariantError) as exc_info:
+        check_metadata_invariants(trace)
+    assert exc_info.value.check_name == "graph_topology"
+    assert "nosuchop_9_9" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
 # W3-4: silently dropped aten op must not be blessed
 # ---------------------------------------------------------------------------
 
