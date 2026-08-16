@@ -565,6 +565,16 @@ def capture_scalar_escape_warning(trace: Any) -> Iterator[None]:
     if bool(getattr(trace, "intervention_ready", False)):
         yield
         return
+    if bool(getattr(trace, "structure_only", False)):
+        # L7a: structure-only sessions run the ESCALATED belt
+        # (structure_only_belt.structure_only_escape_belt), which raises typed
+        # teaching refusals instead of aggregating a warning; installing this
+        # record-and-warn belt underneath it would be dead weight. The
+        # intervention_ready early-exit above is UNREACHABLE in-mode (the
+        # structure_only + intervention_ready combination refuses at entry
+        # with structure_only_option_conflict), pinned by the entry tests.
+        yield
+        return
 
     state = _PlainScalarEscapeState(trace=trace, owner_thread_id=threading.get_ident())
     restores: dict[str, tuple[bool, Any]] = {}
