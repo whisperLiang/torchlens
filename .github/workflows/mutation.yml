@@ -71,6 +71,7 @@ jobs:
             --index-strategy unsafe-best-match \
             -e ".[test]" \
             "torch==2.8.0+cpu" \
+            "torchvision==0.23.0+cpu" \
             "pydot==4.0.1" \
             "graphviz==0.21"
 

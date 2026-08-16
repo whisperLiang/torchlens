@@ -448,3 +448,83 @@ def test_mutation_workflow_rotation_contract() -> None:
     assert re.search(r"case \"\$INPUT_FAMILY\" in", workflow), (
         "dispatch input validation removed from the slot step"
     )
+
+    # r7 R74 (sol MED): the two mutation legs must score against ONE
+    # canonical interpreter env -- a torch release flipping a survivor on an
+    # unrelated upstream event makes historical verdicts incomparable.
+    weekly = (_REPO_ROOT / ".github" / "workflows" / "weekly.yml").read_text(encoding="utf-8")
+    for package in ("torch", "torchvision"):
+        pins = {
+            name: set(re.findall(rf'"{package}==([0-9][^"]*)"', text))
+            for name, text in (("mutation.yml", workflow), ("weekly.yml", weekly))
+        }
+        assert all(len(v) == 1 for v in pins.values()), (
+            f"each mutation leg needs exactly one {package} pin: {pins}"
+        )
+        assert pins["mutation.yml"] == pins["weekly.yml"], (
+            f"the mutation legs disagree on {package}: {pins} -- both must "
+            "install the canonical pinned CPU pair"
+        )
+
+
+@pytest.mark.smoke
+def test_armed_arm_count_is_a_visible_growing_ratchet() -> None:
+    """r7 R74 F2 (opus MED): 'N of 161 arms armed' is a tracked number, not a discovery.
+
+    The r5 corpus fix armed exactly the 12 sampled survivor arms (+1); the
+    other ~148 have never been scored, and opus measured 4/4 fresh arms
+    SURVIVING -- so the scheduled arm campaign is expected red until the
+    burn-down completes. This ratchet publishes the armed count and refuses
+    to let it shrink: every per-arm minimal plant is a ``test_corruption_arm_*``
+    test, the template being the 13 that landed in 369078e1. Raise the floor
+    with every burn-down batch. (The plant-writing burn-down itself is
+    validation-domain work -- relayed to the validation lane in fixwave-6.)
+    """
+
+    import re
+
+    corpus = "".join(
+        path.read_text(encoding="utf-8") for path in sorted((_REPO_ROOT / "tests").glob("*.py"))
+    )
+    armed = len(set(re.findall(r"def (test_corruption_arm_\w+)", corpus)))
+    floor = 13  # r7 baseline: the 12 r5-proven survivors + the reciprocity mirror
+    assert armed >= floor, (
+        f"armed per-arm plant count fell to {armed} (floor {floor}): "
+        "per-arm killers must never be deleted without a replacement"
+    )
+
+
+@pytest.mark.smoke
+def test_operator_label_matches_the_applied_disarm_keyword(tmp_path: Path) -> None:
+    """r7 R74 F3 (opus LOW): the archived record labels the operator actually applied.
+
+    ``module_containment_logic``-style while-exit arms are disarmed with
+    ``break`` (termination preserved); the verdict row said ``pass`` for
+    them unconditionally -- a lie in the one place operator choice is
+    load-bearing.
+    """
+
+    driver = _load_driver_module()
+    module = tmp_path / "checker.py"
+    module.write_text(
+        "def _check(items):\n"
+        "    pending = list(items)\n"
+        "    while pending:\n"
+        "        row = pending.pop()\n"
+        "        if row is None:\n"
+        "            raise MetadataInvariantError('none row')\n"
+        "    if not items:\n"
+        "        raise MetadataInvariantError('empty')\n",
+        encoding="utf-8",
+    )
+    src = module.read_text(encoding="utf-8")
+    assert driver.arm_disarm_keyword(src, "_check", 0) == "break"
+    assert driver.arm_disarm_keyword(src, "_check", 1) == "pass"
+    with pytest.raises(SystemExit, match="no index 9"):
+        driver.arm_disarm_keyword(src, "_check", 9)
+    # main() derives the label from the same helper, in the applied spelling.
+    driver_source = (_REPO_ROOT / "tests" / "support" / "mutation_driver.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'operator = f"{keyword} replacing raise arm {arm_index}"' in driver_source
+    assert 'operator = f"pass replacing raise arm' not in driver_source

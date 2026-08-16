@@ -475,12 +475,27 @@ def neuter_raise_arm(path: Path, func: str, index: int) -> str:
     if index >= len(arms):
         raise SystemExit(f"{func} in {path} has {len(arms)} arms; no index {index}")
     lineno, end_lineno, col = arms[index]
-    keyword = "break" if (lineno, end_lineno, col) in while_exit_arm_keys(src, func) else "pass"
+    keyword = arm_disarm_keyword(src, func, index)
     lines = src.splitlines(keepends=True)
     replacement = f"{' ' * col}{keyword}  # R74-ARM-MUTANT\n"
     lines[lineno - 1 : end_lineno] = [replacement]
     path.write_text("".join(lines), encoding="utf-8")
     return src
+
+
+def arm_disarm_keyword(src: str, func: str, index: int) -> str:
+    """Return the disarm keyword (``break``/``pass``) for one raise arm.
+
+    Exposed separately so the archived verdict record can label the operator
+    it ACTUALLY applied (r7 R74 F3: the record said "pass replacing raise
+    arm 0" for the one while-exit arm where ``break`` was applied -- the very
+    arm whose operator choice is load-bearing).
+    """
+
+    arms = enumerate_raise_arms(src, func)
+    if index >= len(arms):
+        raise SystemExit(f"{func} has {len(arms)} arms; no index {index}")
+    return "break" if arms[index] in while_exit_arm_keys(src, func) else "pass"
 
 
 def derive_arm_mutants(
@@ -864,8 +879,9 @@ def main() -> None:
         rel, func, marker, value, arm_index = plan[mid]
         path = sandbox / rel
         if arm_index is not None:
+            keyword = arm_disarm_keyword(path.read_text(encoding="utf-8"), func, arm_index)
             original = neuter_raise_arm(path, func, arm_index)
-            operator = f"pass replacing raise arm {arm_index}"
+            operator = f"{keyword} replacing raise arm {arm_index}"
         elif marker is None:
             original = neuter(path, func, value)
             operator = f"return {value}"
