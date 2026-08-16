@@ -72,6 +72,17 @@ _NEW_FILE_LINE_CAP = 2000
 #: 2950->3000, auto_collapse 2400->2450) -- reviewed fixwave-7 growth
 #: (buffer-value channel gating, R29 lazy pair generation, admission
 #: ordering, collapse-ceiling honesty) landing in already-ledgered files.
+#: 2026-08-16 FEATURE MEGASPRINT wave-0 settle: seven ceilings re-stepped to the
+#: next 50 above the merged-tree measurement. UNLIKE the fixwave raises above,
+#: this growth is NEW FEATURE MASS by design (L1 grouping, L2 episode capture,
+#: L3 aten layer, L4 S1 contract, L5 encoding channel, L7a structure-only, L8
+#: census), landing in already-ledgered files. The METAPLAN defers the DEBLOAT
+#: pass to the post-features mega-hardening round, so this is a conscious raise
+#: with a DEBT RECORD, not an accepted new normal. PRE-SPRINT BASELINE at
+#: kickoff 75439a67 (the debloat pass's target to return to or beat):
+#:   _io/bundle.py 4450 | backends/torch/backward.py 3800
+#:   bundle/__init__.py 2450 | capture/trace.py 2200
+#:   data_classes/trace.py 3750 | options.py 2425 | user_funcs.py 3900
 _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/validation/core.py": 5300,
     "torchlens/data_classes/op.py": 5200,
@@ -79,27 +90,15 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/utils/rng.py": 4950,
     "torchlens/visualization/collapse_optimizer.py": 4600,
     "torchlens/backends/jax/backend.py": 4400,
-    # 4450 -> 4550: pre-existing red inherited from main's L2 episode merge
-    # (bundle.py landed at 4497 without a ledger raise); re-keyed by L1.
-    "torchlens/_io/bundle.py": 4550,
+    "torchlens/_io/bundle.py": 4500,
     "torchlens/_io/runnable_load.py": 3850,
-    # 3900 -> 4200: pre-existing reds inherited from main's wave-0 merges
-    # (L7a's structure_only entry contract landed user_funcs.py at 4071 and
-    # L2's episode entry at 4153, each without a ledger raise); L1 adds ~20
-    # lines (grouping= knob + docs).
     "torchlens/user_funcs.py": 4200,
-    # 3800 -> 3900: pre-existing red inherited from main's wave-0 merges
-    # (L4-run/L8/L7a landed backward.py at 3869 without a ledger raise);
-    # re-keyed by the L1 lane, not L1 growth.
     "torchlens/backends/torch/backward.py": 3900,
-    # 3750 -> 3850: main's L3/L7a merges landed trace.py at 3783 without a
-    # ledger raise; L1 adds ~30 lines (grouping fields + stamp settlement).
+    # 3800 -> 3850: L1 adds the grouping knob mirror + grouping_policy stamp
+    # settlement (~25 lines) on top of the re-stepped feature-sprint baseline.
     "torchlens/data_classes/trace.py": 3850,
     "torchlens/utils/_torch_compat.py": 3450,
-    # 3400 -> 3450: pre-existing red inherited from the mnv3 capture fix
-    # (d86bf2d1, +18 lines of positional-inplace interception landed at 3418
-    # without a ledger raise); re-keyed by the L1 lane, not L1 growth.
-    "torchlens/backends/torch/wrappers.py": 3450,
+    "torchlens/backends/torch/wrappers.py": 3400,
     "torchlens/backends/tinygrad/backend.py": 3300,
     "torchlens/backends/mlx/backend.py": 3250,
     "torchlens/postprocess/_contracts.py": 3250,
@@ -112,9 +111,6 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/capture/arg_positions.py": 2650,
     "torchlens/backends/jax/jaxpr.py": 2550,
     "torchlens/_capture_state_helpers.py": 2350,
-    # 2450 -> 2750: pre-existing red inherited from main's L2 episode merge
-    # (S6 member-relation table landed bundle/__init__.py at 2719 without a
-    # ledger raise); re-keyed by L1.
     "torchlens/bundle/__init__.py": 2750,
     "torchlens/data_classes/layer.py": 2350,
     "torchlens/postprocess/loop_grouping_adapter.py": 2600,
@@ -125,9 +121,6 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     # every feature lane's grouped options must land on, so reviewed
     # per-merge raises here are the ratchet working as intended (growth
     # noticed, reason stated), not silent god-file regrowth.
-    # 2425 -> 2550: pre-existing red inherited from main's L2 episode merge
-    # (episode declaration options landed options.py at 2504 without a
-    # ledger raise); re-keyed by L1.
     "torchlens/options.py": 2550,
     "torchlens/intervention/save.py": 2350,
     "torchlens/_io/scrub.py": 2400,
@@ -138,8 +131,6 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/visualization/_render_nodes.py": 2150,
     "torchlens/_io/_safe_unpickle.py": 2100,
     "torchlens/visualization/_render_flow.py": 2100,
-    # 2200 -> 2250: pre-existing red inherited from main's wave-0 merges
-    # (capture/trace.py landed at 2203); re-keyed by the L1 lane.
     "torchlens/capture/trace.py": 2250,
     "torchlens/backends/torch/completeness_witness.py": 2050,
 }
