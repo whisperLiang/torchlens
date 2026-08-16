@@ -167,3 +167,50 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
           git checkout -- .pre-commit-config.yaml
+
+  optimized-verdict-identity:
+    # r7 R24 (sol MED, 4th pass): 97 shipped asserts remain behind the
+    # shrink-only S101 ceiling, validation strips assertion checks under
+    # python -O (validation/backward.py), and NO leg proved the verdict
+    # surface survives optimized mode -- a load-bearing assert converts a
+    # FAIL verdict into silent green exactly where users run -O. This leg
+    # executes the verdict-adjacent suites (the planted-corruption corpus
+    # asserts FAIL verdicts, so an -O-stripped tripwire goes RED here) under
+    # python -O. Measured locally: 368 passed in 2m27s.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install graphviz
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphviz
+
+      - name: Install canonical CPU test environment
+        run: |
+          uv pip install --system \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e ".[dev,test,tabular]" \
+            "torch==2.8.0+cpu" \
+            "torchvision==0.23.0+cpu"
+          uv pip check
+
+      - name: Verdict identity under python -O
+        # requires_assertions-marked tests self-skip under -O (their whole
+        # point is needing `assert`); everything else must reach identical
+        # verdicts with assertions stripped.
+        run: |
+          python -O -c "assert True or False; print('assertions stripped:', not __debug__)"
+          python -O -m pytest tests/test_validation.py tests/validation_goldens/ \
+            -q --tb=short -p no:randomly
