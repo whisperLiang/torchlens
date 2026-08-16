@@ -89,14 +89,24 @@ REASON_SENTINEL = "REASON.txt"
 # to avoid refusing a real save.
 _MAX_METADATA_PKL_BYTES = 512 * 1024**2
 # Object-count ceiling for ``metadata.pkl`` (R60/F6): the byte cap alone does not
-# bound allocation -- a pickle of tiny values expands ~5x its byte size into RSS
-# BEFORE any structural check can refuse it (measured: 76 MiB of ints -> ~390 MiB;
-# the old 4 GiB byte cap projected to ~20 GiB). This is the same lesson the JSON
+# bound allocation -- a pickle of tiny values expands its byte size into RSS
+# BEFORE any structural check can refuse it. This is the same lesson the JSON
 # boundary's ``_MAX_JSON_NODES`` prescan already encodes, carried to the sibling
 # pickle boundary. The prescan walks the opcode stream (pickletools.genops, no
-# object allocation) with an early stop, so its own worst case is bounded CPU
-# (~0.6 us/opcode, <1 min at the ceiling), never unbounded memory.
-_MAX_METADATA_PKL_OPCODES = 64_000_000
+# object allocation) with an early stop, so its own worst case is bounded CPU,
+# never unbounded memory.
+#
+# CALIBRATION (r6 R60-F1 recalibration): the original 64M value was derived
+# from a ~5x bytes->RSS expansion assumption, but the measured worst case for
+# dict-of-tiny-dict payloads is 22-26x -- about 70 BYTES OF RSS PER OPCODE --
+# so a within-ceiling hostile artifact still projected to ~2.8 GiB of RSS and
+# minutes of CPU inside ``tl.load()``. The ceiling is now derived from that
+# measured per-opcode cost against a ~1.6 GiB worst-case allocation budget:
+# 24M opcodes x ~70 B/opcode ~= 1.6 GiB, with in-ceiling wall time under a
+# minute. Still far above any honest save: structural metadata at this opcode
+# count would be a multi-hundred-MB pickle, an order of magnitude beyond the
+# largest real traces (tensor payloads live in separate safetensors blobs).
+_MAX_METADATA_PKL_OPCODES = 24_000_000
 # Prescan only files large enough to matter: below this, worst-case expansion is
 # a few hundred MiB and the prescan would tax every real load for nothing.
 _METADATA_PKL_PRESCAN_BYTES = 8 * 1024**2
