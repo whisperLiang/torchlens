@@ -55,6 +55,7 @@ merged_descriptor_tamper
 merge_run_unsupported
 merged_selector_unsupported
 merged_surface_unsupported
+merged_member_released
 ```
 
 ### 3.2 Merge finding kinds
@@ -245,8 +246,22 @@ members is byte-identical across runs; the determinism test pins this.
 `MergedTrace` holds each rank-core handle strongly for as long as the presenter
 is reachable. Dropping the presenter releases those handles; like ordinary
 `Trace` objects, member traces can contain cycles and may require Python's cyclic
-collector before memory is reclaimed. This release has no separate merged
-`cleanup()` surface; adding one is a future presenter contract change.
+collector before memory is reclaimed.
+
+`MergedTrace.release()` is the explicit counterpart of `Trace.cleanup()` for the
+presenter: it drops every rank-core handle so member traces (and their retained
+activations) can be reclaimed without waiting for the presenter itself to become
+unreachable. After `release()`:
+
+- The derivation record stays readable: `alignment` / `value_status` (stored and
+  effective), `rank_ids`, `expected_ranks`, `joins`, `gaps`, `findings`,
+  `report`, `load_degradations`, `summary()`, `to_pandas()`, and
+  `happens_before()` all keep working.
+- Every surface that must resolve a member trace — `ranks`, `__getitem__` (all
+  spellings), `super_op()`, `join_ops()`, and `save()` — refuses typed with
+  `fields["code"] = "merged_member_released"`. A released presenter never
+  presents as a zero-member merge and never leaks a bare `KeyError`.
+- `release()` is idempotent.
 
 `tl.distributed.arm()` intentionally keeps the process-wide group-lifecycle
 ledger for the whole armed interval because old generations are evidence needed

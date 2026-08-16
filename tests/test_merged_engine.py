@@ -668,6 +668,82 @@ class TestSweepFieldValidation:
         assert {site.kind for site in COLLECTIVE_SITES if site.has_reduce_op} == REDUCE_OP_KINDS
 
 
+class TestReleaseContract:
+    """Contract section 8: release() refuses typed, never lies about members.
+
+    Fail-before (opus R18 [W]): release() landed contradicting the contract
+    doc ("no separate cleanup surface"), post-release member access raised
+    bare ``KeyError`` from the emptied handle dict, and ``merged.ranks``
+    presented a released presenter as a ZERO-MEMBER merge (empty mapping,
+    ``len() == 0``) while ``rank_ids`` still listed the ranks -- a silent
+    presence lie.
+    """
+
+    def _merged(self):
+        from torchlens.merged import merge_ranks
+
+        return merge_ranks(
+            [
+                trace_for_boundaries([boundary(0, 0)], seeded_ledger()),
+                trace_for_boundaries([boundary(1, 0)], seeded_ledger()),
+            ]
+        )
+
+    def _assert_released_refusal(self, call) -> None:
+        from torchlens.merged._errors import MergedSurfaceUnsupportedError
+
+        with pytest.raises(MergedSurfaceUnsupportedError) as excinfo:
+            call()
+        assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_MEMBER_RELEASED.value
+
+    def test_member_surfaces_refuse_typed_after_release(self, tmp_path):
+        merged = self._merged()
+        merged.release()
+        self._assert_released_refusal(lambda: merged.ranks)
+        self._assert_released_refusal(lambda: merged["anything"])
+        self._assert_released_refusal(lambda: merged.super_op("anything"))
+        self._assert_released_refusal(lambda: merged.save(tmp_path / "released"))
+
+    def test_join_ops_refuses_typed_after_release(self):
+        merged = self._merged()
+        (join,) = merged.joins
+        merged.release()
+        self._assert_released_refusal(lambda: merged.join_ops(join))
+
+    def test_release_never_presents_zero_members(self):
+        """A released presenter must not read as an empty merge."""
+
+        merged = self._merged()
+        merged.release()
+        with pytest.raises(Exception) as excinfo:
+            len(merged.ranks)
+        assert getattr(excinfo.value, "fields", {}).get("code") == (
+            MergedErrorCode.MERGED_MEMBER_RELEASED.value
+        )
+
+    def test_verdicts_stay_readable_after_release(self):
+        merged = self._merged()
+        before = (merged.alignment, merged.value_status, merged.rank_ids)
+        merged.release()
+        assert (merged.alignment, merged.value_status, merged.rank_ids) == before
+        assert merged.report.alignment is before[0]
+        assert merged.joins and merged.gaps == merged._derivation.gap_findings
+        assert isinstance(merged.findings, tuple)
+        assert "MergedTrace" in repr(merged)
+        assert "alignment" in merged.summary()
+
+    def test_release_is_idempotent(self):
+        merged = self._merged()
+        merged.release()
+        merged.release()
+        self._assert_released_refusal(lambda: merged.ranks)
+
+    def test_pre_release_member_access_unchanged(self):
+        merged = self._merged()
+        assert set(merged.ranks) == {0, 1}
+        assert merged.ranks[0] is not None
+
+
 class TestWitnessCompletionCoherence:
     """R18 fixwave-6: forged witness/completion/disclosure records refuse at parse.
 
