@@ -19,8 +19,10 @@ eviction plus parameter-reference release. Step order is load-bearing.
 | `control_flow.py` | 5-6 | Conditional attribution and buffer dedup |
 | `loop_detection.py` | 7 adapter | Adapt Trace state and apply recurrence assignments |
 | `loop_grouping_adapter.py` | 7 implementation | Backend-neutral recurrence grouping |
-| `labeling.py` | 8-11 | Final labels, renaming, lookup keys, retained layer lists, field ordering |
-| `finalization.py` | 12-20 | Undecorate, params, layers, modules, hash, streaming finalization/eviction, ref release |
+| `labeling.py` | 8-11 | Final labels, renaming, lookup keys, retained layer lists (field reordering was REMOVED — see step 10 note below) |
+| `finalization.py` | 12-20 | Undecorate, params, layers, modules, streaming finalization/eviction. Steps it orchestrates but does NOT implement: the step-16.5 hash lives in `utils/hashing.py` (`compute_graph_shape_hash`), the step-20 ref release in `data_classes/_trace_validation.py` (`release_param_refs`), and the step-13 CUDA cache clear inline in the executor (`_executor.py`) |
+| `_ingest_contract.py` | 0 support | Step-0 ingest contract helpers |
+| `saved_summary.py` | 11 support | Saved-output summary refresh helpers |
 | `incremental.py` | fastlog enrichment | Adds module paths to sparse recordings; `add_param_addresses` is DEAD on current builds (ActivationRecord carries no `parent_param_addresses` field, so it always raises `RecordingConfigError`) |
 
 ## Step Contracts and the Derived Order (M10 + design-ppdag-v3)
@@ -62,9 +64,11 @@ writes content-effective vs no-op (a permanent no-op writer cannot
 discharge a read-before-write finding). The recording/enforcement axes
 matrix lives in `tests/support/postprocess_axes.py`; per-axis enforcement
 and the phantom-declaration/no-op-writer union reports run in
-`tests/test_postprocess_enforcement.py`. Known day-1 findings are pinned by
-name in `tests/test_postprocess_dag.py` (step 3 reads `label`/`layer_label`
-as data — root-cause pending, never silenced). Disclosed residuals:
+`tests/test_postprocess_enforcement.py`. THE day-1 finding is pinned by
+name in `tests/test_postprocess_dag.py` (`PINNED_FINDINGS = {("3", "label")}`:
+step 3 reads `label` as data before its step-8 writer — root-cause pending,
+never silenced; the formerly co-pinned `layer_label` read was split off as
+the `_label_for_reference_removal` fallback PROBE it actually is). Disclosed residuals:
 mutables nested inside non-builtin custom objects; kind-table cells; the
 `is OpRowStore` swap guard silently skips fork `OpStoreView`s and sealed
 stores (sealing happens after step 20, outside every window). Transient

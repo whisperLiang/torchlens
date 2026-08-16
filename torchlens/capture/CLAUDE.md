@@ -19,7 +19,7 @@ partial diagnostics, and fastlog's lightweight `RecordContext` construction.
 | `flops.py` | Forward and backward FLOPs estimates with registry hooks |
 | `outcome.py` | SINGLE authority for terminal capture truth: `CaptureOutcome`/`CaptureStatus`/`CapturePhase`/`FailureOrigin` plus the N1-N5 capability chokepoint |
 | `session.py` | Capture-session lifecycle state |
-| `projectors.py` | Projection helper callables used by `projections.py` |
+| `projectors.py` | Projector CLASSES over a sealed capture core — `RefreshProjector` (consumed by `capture/trace.py` refresh runs) and `RecordingProjection`/`RecordingProjector` (consumed by `fastlog/types.py`), not helper callables for `projections.py` |
 | `plan.py` | Capture planning helpers |
 | `__init__.py` | Empty package marker |
 

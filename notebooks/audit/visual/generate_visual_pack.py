@@ -681,7 +681,7 @@ AXES: dict[str, str] = {
     # --- label grammar ---
     "label:xN": "'(xN)' true recurrence multiplier (same params)",
     "label:plusN": "'+N more Class' ellipsis (distinct same-type instances)",
-    "label:remainder": "collapsed-box 'N layers total' remainder (incl. buffers)",
+    "label:remainder": "collapsed-box 'N ops + M buffers' contents remainder",
     "label:segment_range": "segment box address-range label",
     "label:arm": "conditional IF/ELIF/ELSE arm labels",
     # --- control flow / structure ---
@@ -1090,7 +1090,7 @@ SECTIONS: list[Section] = [
                     "vis_call_depth caps how deep module boxes nest. LEFT: unlimited (default 1000) shows "
                     "inner_module containing loop_module at full detail. RIGHT: depth 1 keeps only the "
                     "outermost module level -- modules deeper than the cap COLLAPSE into single summary "
-                    "boxes carrying an honest 'N layers total' remainder (the same collapsed-box element "
+                    "boxes carrying an honest 'N ops + M buffers' contents remainder (the same collapsed-box element "
                     "as Section E).\n"
                     "CHECK: at depth 1 no box appears INSIDE another box, and the collapsed inner_module "
                     "box reports the layer/param count it swallowed."
@@ -1124,7 +1124,7 @@ SECTIONS: list[Section] = [
                 caption=(
                     "collapse_fn is a module predicate: subtrees for which it returns True render as a single "
                     "collapsed representative box. Here every SmallResBlock in an 8-block stack is collapsed.\n"
-                    "CHECK: each collapsed box states its class and an honest 'N layers total' remainder "
+                    "CHECK: each collapsed box states its class and an honest 'N ops + M buffers' "
                     "count -- the count includes buffer leaves (each block hides conv+bn+relu+add AND the "
                     "batch-norm buffer reads). No block internals leak out."
                 ),
@@ -1541,11 +1541,11 @@ SECTIONS: list[Section] = [
             ),
             Page(
                 label="e7_remainder_labels",
-                title="Remainder labels: 'N layers total' includes buffer leaves",
+                title="Remainder labels: 'N ops + M buffers' accounts for buffer leaves",
                 caption=(
                     "block_stack at collapse='auto' (all 8 blocks as collapsed boxes) and at collapse='max' "
                     "(the same blocks condensed further into segment ranges). Collapsed boxes and segments "
-                    "must account for EVERYTHING they hide: the 'N layers total' remainder on each collapsed "
+                    "must account for EVERYTHING they hide: the 'N ops + M buffers' remainder on each collapsed "
                     "box counts ops AND buffer leaves (each block's batch-norm reads its running stats), and "
                     "the segment labels' block/op totals must add up to the whole stack.\n"
                     "CHECK: per-box layer counts are consistent with one uncollapsed block (conv, bn, relu, "
@@ -1554,7 +1554,7 @@ SECTIONS: list[Section] = [
                 ),
                 panels=[
                     Panel(
-                        "collapse='auto' -- per-block 'N layers total'",
+                        "collapse='auto' -- per-block 'N ops + M buffers'",
                         "block_stack",
                         kwargs={"collapse": "auto"},
                     ),
@@ -2343,7 +2343,7 @@ def _toc_body(plan: list[tuple[str, object]]) -> str:
         "Visual-grammar cheat sheet:",
         "  '(xN)'          true recurrence: the SAME parameters applied N times (rolled mode)",
         "  '+N more Class' ellipsis: N further DISTINCT same-class instances (run folding)",
-        "  'N layers total' collapsed-box remainder: everything hidden inside, incl. buffers",
+        "  'N ops + M buffers' collapsed-box remainder: everything hidden inside, buffers counted",
         "  dashed segment  adjacency-only range: consecutive siblings, NOT a real module",
         "  double border   this op has hidden buffer dependencies (peripheries=2)",
         "  yellow node     runtime boolean that decided a branch; IF/THEN/ELIF/ELSE edge",

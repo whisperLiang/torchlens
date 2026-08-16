@@ -15,6 +15,8 @@ predicate (plus `default_op=`/`default_module=` defaults).
 - `dry_run()` - predicate trace without payload retention.
 - `preview()` - visualization overlay from `visualization.fastlog_preview`.
 - `load()`, `recover()`, `cleanup_partial()` - disk bundle management.
+- `halt()` / `HaltSignal` - user-invoked early-stop from inside a predicate
+  (defined in `_halt.py`, surfaced top-level as `tl.halt`).
 
 ## Files
 
@@ -25,7 +27,7 @@ predicate (plus `default_op=`/`default_module=` defaults).
 | `_record_one_shot.py` | Public `record()` implementation |
 | `_recorder.py` | Public `Recorder` context manager and repeated rollout orchestration |
 | `_storage_resolver.py` | Tensor copy/detach/RAM/disk routing |
-| `_halt.py` | Halt outcome helpers shared by one-shot and repeated recording |
+| `_halt.py` | The public `halt()` entry point + `HaltSignal`, plus halt outcome helpers shared by one-shot and repeated recording |
 | `_indexes.py` | Recording index helpers |
 | `_validation.py` | Option validation |
 | `storage_ram.py` | In-memory backend |

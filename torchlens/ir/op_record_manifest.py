@@ -137,7 +137,7 @@ CELL_SOURCE_MANIFEST: dict[str, str] = {
     'min_distance_from_input': 'DEFAULT',
     'min_distance_to_output': 'DEFAULT',
     'module': 'FACET:modules',
-    'module_call_stack': 'JOIN:module_enter',
+    'module_call_stack': 'FACET:modules',
     'module_entry_arg_keys': 'JOIN:module_enter',
     'modules': 'FACET:modules',
     'multi_output_index': 'CORE',

@@ -236,3 +236,81 @@ def test_source_locations_keep_repr_plain_and_expose_html_links() -> None:
     )
     assert "\033]8;;file://" not in repr(location)
     assert "vscode://file/" in location.to_html_link()
+
+
+# ---------------------------------------------------------------------------
+# Round-7 R67/R88: reports must never present an unverified capture as clean
+# ---------------------------------------------------------------------------
+
+
+def test_explain_surfaces_halted_capture_status() -> None:
+    """FAIL-AFTER-WHERE-PASSED-BEFORE: a HALTED capture no longer reads complete.
+
+    ``_base_json`` HARDCODED ``capture_status="complete"`` for every
+    non-partial log, so ``explain(format="json")`` presented a halted capture
+    as clean -- the exact thing report/AGENTS.md's honesty contract forbids.
+    """
+
+    from fixtures.capture_outcome_models import ThreeStageModel, halt_on_relu
+
+    trace = tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=halt_on_relu)
+    assert trace.outcome.status.value == "halted"
+
+    report = tl.report.explain(trace, format="json")
+    assert report["capture_status"] == "halted"
+
+    text = tl.report.explain(trace)
+    assert "Capture outcome: halted." in text
+
+
+def test_explain_surfaces_unverified_capture() -> None:
+    """A ceilinged capture (capture_verified=False) stays visible everywhere."""
+
+    log = _captured_log()
+    log.capture_verified = False
+    log.capture_verification_reason = "dynamo_region_not_logged"
+
+    report = tl.report.explain(log, format="json")
+    assert report["capture_verified"] is False
+    assert report["capture_verification_reason"] == "dynamo_region_not_logged"
+
+    text = tl.report.explain(log)
+    assert "UNVERIFIED" in text
+    assert "dynamo_region_not_logged" in text
+
+
+def test_profile_surfaces_unverified_capture() -> None:
+    """Profile output discloses verification state per the honesty contract."""
+
+    log = _captured_log()
+    log.capture_verified = False
+    log.capture_verification_reason = "mode_rescue_rerun"
+    log.rescue_rerun = True
+
+    profile = tl.report.build_profile(log)
+    assert profile.capture_verified is False
+    assert profile.capture_verification_reason == "mode_rescue_rerun"
+    assert profile.rescue_rerun is True
+    assert profile.frame.attrs["capture_verified"] is False
+    assert profile.honesty().attrs["capture_verified"] is False
+    rendered = repr(profile)
+    assert "UNVERIFIED" in rendered
+    assert "mode_rescue_rerun" in rendered
+
+    clean = tl.report.build_profile(_captured_log())
+    assert clean.capture_verified is None
+    assert "UNVERIFIED" not in repr(clean)
+
+
+def test_summary_surfaces_unverified_capture() -> None:
+    """Trace.summary() discloses a ceilinged capture instead of clean output."""
+
+    log = _captured_log()
+    clean_text = log.summary()
+    assert "UNVERIFIED" not in clean_text
+
+    log.capture_verified = False
+    log.capture_verification_reason = "dynamo_region_not_logged"
+    text = log.summary()
+    assert "UNVERIFIED" in text
+    assert "dynamo_region_not_logged" in text

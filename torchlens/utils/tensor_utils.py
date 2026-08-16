@@ -15,7 +15,6 @@ to wrapped versions.
 """
 
 import copy
-import os
 import threading
 import warnings
 import weakref
@@ -29,6 +28,7 @@ import torch
 from ..backends.torch._tl import get_tensor_label, set_tensor_label
 from ._torch_compat import get_fp8_dtypes, get_functorch_wrapped_tensor_checker
 from ._torch_symbols import torch_attr
+from .env_flags import closed_bool_env
 
 SaveMode = Literal["copy", "reference", "view", "cpu_async"]
 
@@ -1010,13 +1010,13 @@ def _safe_get_memory_format(t: torch.Tensor) -> torch.memory_format:
 # guidance must never recommend the runtime spelling). Promotion to a
 # session-time CaptureOptions knob spans options.py + wrappers.py and ships
 # with their owning lanes.
-_DEFER_ENABLED: bool = os.environ.get("TORCHLENS_EAGER_PAYLOAD_CLONE", "0") != "1"
+_DEFER_ENABLED: bool = not closed_bool_env("TORCHLENS_EAGER_PAYLOAD_CLONE")
 
 # Opt-in: TORCHLENS_DEFER_GRAD_PAYLOADS=1 extends deferral to graph-connected
 # payloads (the default grad-enabled capture regime). OFF by default because of
 # residual H3 above; H1/H2 are closed unconditionally by the mint and rebind.
 # Same import-time latch caveat as above (R47-4).
-_DEFER_GRAD_ENABLED: bool = os.environ.get("TORCHLENS_DEFER_GRAD_PAYLOADS", "0") == "1"
+_DEFER_GRAD_ENABLED: bool = closed_bool_env("TORCHLENS_DEFER_GRAD_PAYLOADS")
 
 # storage key -> list of pending aliases. NEVER rebound (only mutated), so the
 # wrapper can bind the dict object once and use plain truthiness on its hot

@@ -399,19 +399,29 @@ def _check_op_log_fields(ml: Trace) -> None:
                 f"derived as modules[-1], so an empty roster with a named module means "
                 f"the module attribution was DROPPED",
             )
-        # ``module_call_stack`` is otherwise unvalidated: a stack naming module
-        # addresses that do not exist in the trace passes silently. Membership is the
-        # only claim checked here -- the field's ENTRY-vs-ACTIVE semantics are a
-        # separate spec question (O-B3-R02-1, a JMT fork).
-        known_module_addresses = {module.address for module in ml.modules}
-        for entry in lpl.module_call_stack:
-            address = str(entry).rsplit(":", 1)[0]
-            if address not in known_module_addresses:
-                raise MetadataInvariantError(
-                    name,
-                    f"Layer {label}: module_call_stack names {entry!r}, which is not a "
-                    f"module address recorded on this trace",
-                )
+        # B3R7-R05-1: ``module_call_stack`` is the root-first ModuleCall
+        # labels ACTIVE for this op (the glossary sentence), i.e. exactly the
+        # containment fact ``modules`` carries -- the historical tri-fact
+        # (fed-call stack for module inputs, containment addresses for module
+        # outputs, empty otherwise) is gone. The three facts are tied here so
+        # the class cannot regress: the stack must equal ``modules`` entry for
+        # entry, and ``module_call_depth`` must be its length. Membership of
+        # the entries themselves is ``module_containment_logic``'s check (via
+        # ``modules``); equality makes it cover this field too.
+        if tuple(lpl.module_call_stack) != tuple(lpl.modules):
+            raise MetadataInvariantError(
+                name,
+                f"Layer {label}: module_call_stack={tuple(lpl.module_call_stack)!r} "
+                f"!= modules={tuple(lpl.modules)!r}; the stack must be the "
+                f"root-first ModuleCall labels active for this op (a fed-call "
+                f"or address-form value is the retired tri-fact bug)",
+            )
+        if lpl.module_call_depth != len(lpl.module_call_stack):
+            raise MetadataInvariantError(
+                name,
+                f"Layer {label}: module_call_depth={lpl.module_call_depth} != "
+                f"len(module_call_stack)={len(lpl.module_call_stack)}",
+            )
 
         # Label format: pass-qualified label has ":" iff multi-pass
         if lpl.num_passes > 1 and ":" not in lpl.label:

@@ -8,9 +8,10 @@ Single-module package (`__init__.py`) exporting `Bundle` and `AmbiguousLabelErro
   or directly as `tl.Bundle(...)`.
 - `AmbiguousLabelError` fires on cross-member label lookups that match more than one
   aligned site.
-- The bundle namespace is dual-homed by design: rendering for bundles lives in
-  `visualization/bundle_diff.py` (`tl.show_bundle_graph` routes through
-  `user_funcs.py` / `_user_public_impls.py`), not here. Keep graph/render logic out
-  of this package.
+- The bundle namespace is dual-homed by design: the bundle GRAPH construction
+  behind `tl.show_bundle_graph` lives in `_user_public_impls.py` (the
+  `_add_bundle_forward_nodes` / supergraph-walk helpers, routed via
+  `user_funcs.py`), while `visualization/bundle_diff.py` is the paired-trace
+  DIFF renderer. Keep graph/render logic out of this package either way.
 - Public-name changes here must update the glossary and root docs in the same change
   (see the lockstep rule in the root `CLAUDE.md`).

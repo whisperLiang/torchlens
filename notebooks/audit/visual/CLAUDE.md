@@ -65,9 +65,12 @@ These three claims look similar and must never be conflated:
   live here" — NOT a real module, never carries a single class name for mixed
   content (Section E).
 
-Also: collapsed boxes carry an honest `N layers total` remainder that includes
-buffer leaves; ops with hidden buffer dependencies get a double border
-(`peripheries=2`).
+Also: collapsed boxes carry an honest contents remainder in the
+`N ops + M buffers` form (`format_collapsed_module_contents` in
+`visualization/_render_common.py`; the old `N layers total` label is
+test-FORBIDDEN — `tests/test_buffer_visibility.py` and
+`tests/test_auto_collapse_metrics.py` assert it never renders); ops with
+hidden buffer dependencies get a double border (`peripheries=2`).
 
 ## How to extend when a new visual feature ships
 
@@ -83,8 +86,11 @@ it is in this pack:
 4. Re-run the script; confirm the console reports no GAPs and
    `coverage_matrix.md` has no `UNCOVERED — DEFECT` rows.
 5. Re-run the two critic passes (see below) before calling it shipped.
-6. Commit script + regenerated `coverage_matrix.md` together
-   (`feat(audit-viz): ...`).
+6. Commit script + regenerated `coverage_matrix.md` together. Use a
+   NON-RELEASING commit type such as `docs(audit-viz): ...` or
+   `chore(audit-viz): ...` — NEVER `feat`/`fix`/`perf`, which trigger
+   semantic-release (the parser has no scope exclusions; see
+   `notebooks/audit/CLAUDE.md` and `.github/AGENTS.md`).
 
 ### Critic passes
 

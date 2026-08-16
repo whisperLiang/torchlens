@@ -33,8 +33,8 @@ Accessors (`LayerAccessor`, `ModuleAccessor`, `ParamAccessor`, `BufferAccessor`,
 | `_compaction.py` | Freeze-seam Op metadata pooling (M11 fold) + M14 duplicate/empty container-cell pooling (`PooledCell`, hydrate-on-read) + singleton label-list compaction (bare str + identity-gated store registry, kind tables only) |
 | `_layer_spec.py` | `_LAYER_MIRROR_SPEC` and the Layer mirror-field spec (split out of `layer.py`) |
 | `_schema_bindings.py` | GENERATED per-field `StorageBinding` axes — DO NOT EDIT; regenerate with `tools/generate_record_schema.py` |
-| `_trace_components.py` | Declared `TRACE_FIELD_OWNERSHIP` component map over the 220 forwarded fields |
-| `_trace_stack.py` | Trace stack/context helpers |
+| `_trace_components.py` | Declared `TRACE_FIELD_OWNERSHIP` component map — 316 entries, pinned equal to the `FIELD_POLICY` key set (the 220-name `MODEL_LOG_FIELD_ORDER` is a strict subset) |
+| `_trace_stack.py` | Order-aligned activation stacking for completed traces |
 | `_trace_rehydrate.py` | Load-side Trace rehydration |
 | `_backend_capability_guards.py` | Backend capability guard helpers |
 | `_nonfinite.py` | Nonfinite scan/abort helpers |
@@ -60,7 +60,7 @@ Accessors (`LayerAccessor`, `ModuleAccessor`, `ParamAccessor`, `BufferAccessor`,
 | `_module_role_hints.py` | Module input/output role hint helpers |
 | `_repr.py` | Shared formatting helpers for user-facing reprs |
 | `_runtime_handles.py` | Runtime object handle resolution helpers |
-| `_state_adapter.py` | Trace build-state iteration and deletion adapters |
+| `_state_adapter.py` | Class-agnostic live-state enumeration/restore adapters (`state_items`/`state_new`/`state_restore`; the flat build-state they once adapted dissolved in M10) |
 | `_summary.py` | Small formatting helpers for summaries |
 | `internal_types.py` | Internal dataclasses such as `FuncExecutionContext` |
 | `cleanup.py` | Cycle breaking and field scrubbing after layer removal |
@@ -152,7 +152,11 @@ Trace -> Module -> _source_trace -> Trace     (weakref: Module._source_trace_ref
 Param -> _param_ref -> nn.Parameter
 ```
 
-The two Trace back-references are stored as `weakref.ref` in `_source_trace_ref` slots
+(The two rows above are representative, not exhaustive: `Op`, `Module`,
+`Param`, `Buffer`, `GradFn`, and their call-record kinds all carry a
+`_source_trace_ref`/`_source_ref` weak back-reference of the same shape.)
+
+The Trace back-references are stored as `weakref.ref` in `_source_trace_ref` slots
 (`FieldPolicy.WEAKREF_STRIP`), so these back-references themselves do NOT form strong
 cycles; reading one after the Trace dies yields `None` (and consumers that need it, such
 as `ModuleCall.module`, raise). Other strong reference cycles remain (core/facade

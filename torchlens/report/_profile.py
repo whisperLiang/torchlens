@@ -43,6 +43,13 @@ class TraceProfile:
     level: ProfileLevel
     _honesty_frame: pd.DataFrame | None = None
     _tree_text: str = ""
+    # Capture-level verification facts (round-7 R67/R88): the report honesty
+    # contract requires a rescued/ceilinged capture to stay visible in profile
+    # output, so these are stamped from the source trace at build time.
+    capture_status: str = "unknown"
+    capture_verified: bool | None = None
+    capture_verification_reason: str | None = None
+    rescue_rerun: bool = False
 
     def to_pandas(self) -> pd.DataFrame:
         """Return a copy of the underlying profile dataframe.
@@ -66,7 +73,31 @@ class TraceProfile:
 
         display_frame = self.frame.copy()
         display_frame["time"] = display_frame["time"].map(_format_duration)
-        return display_frame.to_string(index=False)
+        table = display_frame.to_string(index=False)
+        banner = self._verification_banner()
+        return f"{banner}\n{table}" if banner else table
+
+    def _verification_banner(self) -> str:
+        """Return the mandatory disclosure line for a non-clean capture.
+
+        Returns
+        -------
+        str
+            One-line disclosure when the capture is unverified, rescued, or
+            settled non-complete; empty for a clean complete capture.
+        """
+
+        notes = []
+        if self.capture_status not in ("complete", "unknown"):
+            notes.append(f"capture outcome: {self.capture_status}")
+        if self.capture_verified is False:
+            reason = self.capture_verification_reason or "unrecorded reason"
+            notes.append(f"capture UNVERIFIED ({reason})")
+        if self.rescue_rerun:
+            notes.append("rescue re-run result (mode_rescue_rerun)")
+        if not notes:
+            return ""
+        return "! " + "; ".join(notes) + " -- rows below may undercount what ran"
 
     def honesty(self) -> pd.DataFrame:
         """Return index-aligned evidence labels for resource quantities.
@@ -468,9 +499,27 @@ def build_profile(
     )
     if top_k is not None:
         frame.attrs["top_k"] = top_k
+    outcome = getattr(trace, "outcome", None)
+    status_value = getattr(getattr(outcome, "status", None), "value", None)
+    capture_status = str(status_value) if status_value is not None else "unknown"
+    capture_verified = getattr(trace, "capture_verified", None)
+    capture_verification_reason = getattr(trace, "capture_verification_reason", None)
+    rescue_rerun = bool(getattr(trace, "rescue_rerun", None) or False)
+    verification = {
+        "capture_status": capture_status,
+        "capture_verified": capture_verified,
+        "capture_verification_reason": capture_verification_reason,
+        "rescue_rerun": rescue_rerun,
+    }
+    frame.attrs.update(verification)
+    honesty_frame.attrs.update(verification)
     return TraceProfile(
         frame=frame,
         level=level,
         _honesty_frame=honesty_frame,
         _tree_text=_build_call_tree(trace),
+        capture_status=capture_status,
+        capture_verified=capture_verified,
+        capture_verification_reason=capture_verification_reason,
+        rescue_rerun=rescue_rerun,
     )

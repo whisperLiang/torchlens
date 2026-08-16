@@ -15173,7 +15173,7 @@
     "module": "encoder:1",
     "module_call_depth": 1,
     "module_call_stack": [
-     "encoder.norm1"
+     "encoder:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.norm1:1\"": [
@@ -15577,7 +15577,7 @@
     "module": "encoder:1",
     "module_call_depth": 1,
     "module_call_stack": [
-     "encoder.norm2"
+     "encoder:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.norm2:1\"": [
@@ -15981,7 +15981,10 @@
     "min_distance_to_output": 16,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -16393,8 +16396,8 @@
     "module": "encoder.dropout1:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.dropout1"
+     "encoder:1",
+     "encoder.dropout1:1"
     ],
     "module_entry_arg_keys": {},
     "modules": [
@@ -16813,8 +16816,8 @@
     "module": "encoder.dropout:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.dropout"
+     "encoder:1",
+     "encoder.dropout:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.linear2:1\"": [
@@ -17235,8 +17238,8 @@
     "module": "encoder.dropout2:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.dropout2"
+     "encoder:1",
+     "encoder.dropout2:1"
     ],
     "module_entry_arg_keys": {},
     "modules": [
@@ -17640,7 +17643,10 @@
     "min_distance_to_output": 15,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -18041,7 +18047,10 @@
     "min_distance_to_output": 15,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -18442,7 +18451,10 @@
     "min_distance_to_output": 15,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -18783,10 +18795,7 @@
     "min_distance_to_output": 5,
     "module": null,
     "module_call_depth": 0,
-    "module_call_stack": [
-     "encoder",
-     "encoder.self_attn"
-    ],
+    "module_call_stack": [],
     "module_entry_arg_keys": {
      "\"encoder.self_attn:1\"": [
       0,
@@ -19220,8 +19229,8 @@
     "module": "encoder.norm1:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.norm1"
+     "encoder:1",
+     "encoder.norm1:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.linear1:1\"": [
@@ -19679,8 +19688,8 @@
     "module": "encoder.norm2:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.norm2"
+     "encoder:1",
+     "encoder.norm2:1"
     ],
     "module_entry_arg_keys": {},
     "modules": [
@@ -20123,7 +20132,10 @@
     "min_distance_to_output": 21,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -20549,7 +20561,10 @@
     "min_distance_to_output": 8,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -20975,8 +20990,8 @@
     "module": "encoder.linear1:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.linear1"
+     "encoder:1",
+     "encoder.linear1:1"
     ],
     "module_entry_arg_keys": {},
     "modules": [
@@ -21416,8 +21431,8 @@
     "module": "encoder.linear2:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.linear2"
+     "encoder:1",
+     "encoder.linear2:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.dropout2:1\"": [
@@ -22219,7 +22234,10 @@
     "min_distance_to_output": 10,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -22620,7 +22638,7 @@
     "module": "encoder:1",
     "module_call_depth": 1,
     "module_call_stack": [
-     "encoder.dropout"
+     "encoder:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.dropout:1\"": [
@@ -23021,7 +23039,10 @@
     "min_distance_to_output": 9,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -23461,7 +23482,10 @@
     "min_distance_to_output": 11,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -23873,7 +23897,10 @@
     "min_distance_to_output": 17,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -24274,7 +24301,10 @@
     "min_distance_to_output": 22,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -24685,7 +24715,10 @@
     "min_distance_to_output": 18,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -25096,7 +25129,10 @@
     "min_distance_to_output": 13,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -25501,7 +25537,10 @@
     "min_distance_to_output": 13,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -25906,7 +25945,10 @@
     "min_distance_to_output": 13,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -26312,8 +26354,8 @@
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.self_attn"
+     "encoder:1",
+     "encoder.self_attn:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.dropout1:1\"": [
@@ -26729,7 +26771,10 @@
     "min_distance_to_output": 20,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -27137,7 +27182,10 @@
     "min_distance_to_output": 19,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -27544,7 +27592,10 @@
     "min_distance_to_output": 14,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -27947,7 +27998,10 @@
     "min_distance_to_output": 14,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -28350,7 +28404,10 @@
     "min_distance_to_output": 14,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -28758,7 +28815,10 @@
     "min_distance_to_output": 12,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -29170,7 +29230,10 @@
     "min_distance_to_output": 12,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -29582,7 +29645,10 @@
     "min_distance_to_output": 12,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -29986,7 +30052,10 @@
     "min_distance_to_output": 7,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -50418,7 +50487,7 @@
     "module": "encoder:1",
     "module_call_depth": 1,
     "module_call_stack": [
-     "encoder.norm1"
+     "encoder:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.norm1:1\"": [
@@ -50822,7 +50891,7 @@
     "module": "encoder:1",
     "module_call_depth": 1,
     "module_call_stack": [
-     "encoder.norm2"
+     "encoder:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.norm2:1\"": [
@@ -51226,7 +51295,10 @@
     "min_distance_to_output": 16,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -51638,8 +51710,8 @@
     "module": "encoder.dropout1:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.dropout1"
+     "encoder:1",
+     "encoder.dropout1:1"
     ],
     "module_entry_arg_keys": {},
     "modules": [
@@ -52058,8 +52130,8 @@
     "module": "encoder.dropout:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.dropout"
+     "encoder:1",
+     "encoder.dropout:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.linear2:1\"": [
@@ -52480,8 +52552,8 @@
     "module": "encoder.dropout2:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.dropout2"
+     "encoder:1",
+     "encoder.dropout2:1"
     ],
     "module_entry_arg_keys": {},
     "modules": [
@@ -52885,7 +52957,10 @@
     "min_distance_to_output": 15,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -53286,7 +53361,10 @@
     "min_distance_to_output": 15,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -53687,7 +53765,10 @@
     "min_distance_to_output": 15,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -54028,10 +54109,7 @@
     "min_distance_to_output": 5,
     "module": null,
     "module_call_depth": 0,
-    "module_call_stack": [
-     "encoder",
-     "encoder.self_attn"
-    ],
+    "module_call_stack": [],
     "module_entry_arg_keys": {
      "\"encoder.self_attn:1\"": [
       0,
@@ -54465,8 +54543,8 @@
     "module": "encoder.norm1:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.norm1"
+     "encoder:1",
+     "encoder.norm1:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.linear1:1\"": [
@@ -54924,8 +55002,8 @@
     "module": "encoder.norm2:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.norm2"
+     "encoder:1",
+     "encoder.norm2:1"
     ],
     "module_entry_arg_keys": {},
     "modules": [
@@ -55368,7 +55446,10 @@
     "min_distance_to_output": 21,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -55794,7 +55875,10 @@
     "min_distance_to_output": 8,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -56220,8 +56304,8 @@
     "module": "encoder.linear1:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.linear1"
+     "encoder:1",
+     "encoder.linear1:1"
     ],
     "module_entry_arg_keys": {},
     "modules": [
@@ -56661,8 +56745,8 @@
     "module": "encoder.linear2:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.linear2"
+     "encoder:1",
+     "encoder.linear2:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.dropout2:1\"": [
@@ -57464,7 +57548,10 @@
     "min_distance_to_output": 10,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -57865,7 +57952,7 @@
     "module": "encoder:1",
     "module_call_depth": 1,
     "module_call_stack": [
-     "encoder.dropout"
+     "encoder:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.dropout:1\"": [
@@ -58266,7 +58353,10 @@
     "min_distance_to_output": 9,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -58706,7 +58796,10 @@
     "min_distance_to_output": 11,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -59118,7 +59211,10 @@
     "min_distance_to_output": 17,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -59519,7 +59615,10 @@
     "min_distance_to_output": 22,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -59930,7 +60029,10 @@
     "min_distance_to_output": 18,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -60341,7 +60443,10 @@
     "min_distance_to_output": 13,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -60746,7 +60851,10 @@
     "min_distance_to_output": 13,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -61151,7 +61259,10 @@
     "min_distance_to_output": 13,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -61557,8 +61668,8 @@
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.self_attn"
+     "encoder:1",
+     "encoder.self_attn:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.dropout1:1\"": [
@@ -61974,7 +62085,10 @@
     "min_distance_to_output": 20,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -62382,7 +62496,10 @@
     "min_distance_to_output": 19,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -62789,7 +62906,10 @@
     "min_distance_to_output": 14,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -63192,7 +63312,10 @@
     "min_distance_to_output": 14,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -63595,7 +63718,10 @@
     "min_distance_to_output": 14,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -64003,7 +64129,10 @@
     "min_distance_to_output": 12,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -64415,7 +64544,10 @@
     "min_distance_to_output": 12,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -64827,7 +64959,10 @@
     "min_distance_to_output": 12,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -65231,7 +65366,10 @@
     "min_distance_to_output": 7,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -85727,7 +85865,7 @@
     "module": "encoder:1",
     "module_call_depth": 1,
     "module_call_stack": [
-     "encoder.norm1"
+     "encoder:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.norm1:1\"": [
@@ -86131,7 +86269,7 @@
     "module": "encoder:1",
     "module_call_depth": 1,
     "module_call_stack": [
-     "encoder.norm2"
+     "encoder:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.norm2:1\"": [
@@ -86535,7 +86673,10 @@
     "min_distance_to_output": 16,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -86947,8 +87088,8 @@
     "module": "encoder.dropout1:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.dropout1"
+     "encoder:1",
+     "encoder.dropout1:1"
     ],
     "module_entry_arg_keys": {},
     "modules": [
@@ -87367,8 +87508,8 @@
     "module": "encoder.dropout:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.dropout"
+     "encoder:1",
+     "encoder.dropout:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.linear2:1\"": [
@@ -87789,8 +87930,8 @@
     "module": "encoder.dropout2:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.dropout2"
+     "encoder:1",
+     "encoder.dropout2:1"
     ],
     "module_entry_arg_keys": {},
     "modules": [
@@ -88194,7 +88335,10 @@
     "min_distance_to_output": 15,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -88595,7 +88739,10 @@
     "min_distance_to_output": 15,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -88996,7 +89143,10 @@
     "min_distance_to_output": 15,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -89337,10 +89487,7 @@
     "min_distance_to_output": 5,
     "module": null,
     "module_call_depth": 0,
-    "module_call_stack": [
-     "encoder",
-     "encoder.self_attn"
-    ],
+    "module_call_stack": [],
     "module_entry_arg_keys": {
      "\"encoder.self_attn:1\"": [
       0,
@@ -89774,8 +89921,8 @@
     "module": "encoder.norm1:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.norm1"
+     "encoder:1",
+     "encoder.norm1:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.linear1:1\"": [
@@ -90233,8 +90380,8 @@
     "module": "encoder.norm2:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.norm2"
+     "encoder:1",
+     "encoder.norm2:1"
     ],
     "module_entry_arg_keys": {},
     "modules": [
@@ -90677,7 +90824,10 @@
     "min_distance_to_output": 21,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -91103,7 +91253,10 @@
     "min_distance_to_output": 8,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -91529,8 +91682,8 @@
     "module": "encoder.linear1:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.linear1"
+     "encoder:1",
+     "encoder.linear1:1"
     ],
     "module_entry_arg_keys": {},
     "modules": [
@@ -91970,8 +92123,8 @@
     "module": "encoder.linear2:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.linear2"
+     "encoder:1",
+     "encoder.linear2:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.dropout2:1\"": [
@@ -92773,7 +92926,10 @@
     "min_distance_to_output": 10,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -93174,7 +93330,7 @@
     "module": "encoder:1",
     "module_call_depth": 1,
     "module_call_stack": [
-     "encoder.dropout"
+     "encoder:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.dropout:1\"": [
@@ -93575,7 +93731,10 @@
     "min_distance_to_output": 9,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -94015,7 +94174,10 @@
     "min_distance_to_output": 11,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -94427,7 +94589,10 @@
     "min_distance_to_output": 17,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -94828,7 +94993,10 @@
     "min_distance_to_output": 22,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -95239,7 +95407,10 @@
     "min_distance_to_output": 18,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -95650,7 +95821,10 @@
     "min_distance_to_output": 13,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -96055,7 +96229,10 @@
     "min_distance_to_output": 13,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -96460,7 +96637,10 @@
     "min_distance_to_output": 13,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -96866,8 +97046,8 @@
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
     "module_call_stack": [
-     "encoder",
-     "encoder.self_attn"
+     "encoder:1",
+     "encoder.self_attn:1"
     ],
     "module_entry_arg_keys": {
      "\"encoder.dropout1:1\"": [
@@ -97283,7 +97463,10 @@
     "min_distance_to_output": 20,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -97691,7 +97874,10 @@
     "min_distance_to_output": 19,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -98098,7 +98284,10 @@
     "min_distance_to_output": 14,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -98501,7 +98690,10 @@
     "min_distance_to_output": 14,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -98904,7 +99096,10 @@
     "min_distance_to_output": 14,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -99312,7 +99507,10 @@
     "min_distance_to_output": 12,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -99724,7 +99922,10 @@
     "min_distance_to_output": 12,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -100136,7 +100337,10 @@
     "min_distance_to_output": 12,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",
@@ -100540,7 +100744,10 @@
     "min_distance_to_output": 7,
     "module": "encoder.self_attn:1",
     "module_call_depth": 2,
-    "module_call_stack": [],
+    "module_call_stack": [
+     "encoder:1",
+     "encoder.self_attn:1"
+    ],
     "module_entry_arg_keys": {},
     "modules": [
      "encoder:1",

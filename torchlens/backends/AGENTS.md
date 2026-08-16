@@ -23,8 +23,8 @@ options that the registry does not declare.
 
 ## Tier 2: Shared CaptureBackend Protocol
 
-`CaptureBackend` is the lower-level adapter used by the shared eager orchestrator in
-`capture/trace.py`. A backend should expose `BackendSpec.capture_backend` only when it
+`CaptureBackend` (defined in `backends/_protocol.py`) is the lower-level adapter used by
+the shared eager orchestrator in `capture/trace.py`. A backend should expose `BackendSpec.capture_backend` only when it
 implements the full protocol: input normalization, source logging, RNG hooks, inference
 context, output extraction, intervention hooks, cleanup hooks, and producer-policy hooks.
 

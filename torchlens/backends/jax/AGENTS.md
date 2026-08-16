@@ -31,7 +31,8 @@ the `BackendSpec` in `../default_specs.py` is the only capability truth.
   `PURE_JIT_CALL_PRIMITIVES` classify callback and jit-call equations.
 
 ## modules.py
-- Module helpers for Equinox and Flax NNX roots (`EquinoxModuleTree`);
+- Module helpers for Equinox and Flax NNX roots — `EquinoxModuleTree` for
+  Equinox and the separate `NnxModuleTree` for NNX;
   `decode_module_scope()` / `decode_module_call_scope()` decode the `tlm_` /
   `tlc_` scope-label prefixes that thread module identity through the jaxpr.
 

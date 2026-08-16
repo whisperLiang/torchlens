@@ -2898,6 +2898,33 @@ def test_strict_mode_never_keys_on_ambient_pytest_marker(
     assert strict_collapse_checks_enabled() is True
 
 
+def test_strict_mode_env_parse_is_closed_vocabulary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FAIL-AFTER-WHERE-PASSED-BEFORE: a typo can no longer disarm strictness.
+
+    Round-7 b7 R47 (sol MED + fable LM, same site): the exact-``"1"`` parse
+    mapped ``=true`` and any typo to ``False``, silently leaving the
+    collapse/sibling-order verification tripwire OFF while the exporter
+    believed it was armed. The knob now parses a closed vocabulary and
+    REFUSES unrecognized values, matching the postprocess audit knobs.
+    """
+
+    from torchlens._errors import InvalidArgumentError
+    from torchlens.visualization._render_common import strict_collapse_checks_enabled
+
+    for spelling in ("true", "TRUE", "yes", "on", "1", " 1 "):
+        monkeypatch.setenv("TORCHLENS_COLLAPSE_STRICT", spelling)
+        assert strict_collapse_checks_enabled() is True, spelling
+    for spelling in ("0", "false", "no", "off", ""):
+        monkeypatch.setenv("TORCHLENS_COLLAPSE_STRICT", spelling)
+        assert strict_collapse_checks_enabled() is False, spelling
+    monkeypatch.setenv("TORCHLENS_COLLAPSE_STRICT", "typo")
+    with pytest.raises(InvalidArgumentError) as exc_info:
+        strict_collapse_checks_enabled()
+    assert exc_info.value.fields["code"] == "env_flag_invalid"
+
+
 def test_incremental_count_mismatch_warns_once_outside_strict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
