@@ -717,6 +717,13 @@ def run_live_trace(
         Optional refresh seed.
     on_divergence:
         Divergence policy threaded from the public ``run`` surface.
+    carry_state:
+        When ``True``, the run's declared-state mutations survive on the live
+        model instead of being restored by the snapshot-restore bracket.
+    until:
+        Optional static site selection (layer labels / module addresses /
+        ``"saved"``); resolved against the source trace's settled final
+        labels, installing a run-scoped halt latch on the refresh capture.
 
     Returns
     -------

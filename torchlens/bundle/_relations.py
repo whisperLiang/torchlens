@@ -117,12 +117,11 @@ def _validated_params(kind: str, params: Any) -> dict[str, Any]:
                 raise ValueError(
                     f"bundle-relation param 'episode_id' must be a non-empty string, got {value!r}"
                 )
-        elif key == "role":
-            if value not in _EPISODE_ROLES:
-                raise ValueError(
-                    f"bundle-relation param 'role' is {value!r}, outside the closed "
-                    f"vocabulary {sorted(_EPISODE_ROLES)}"
-                )
+        elif key == "role" and value not in _EPISODE_ROLES:
+            raise ValueError(
+                f"bundle-relation param 'role' is {value!r}, outside the closed "
+                f"vocabulary {sorted(_EPISODE_ROLES)}"
+            )
         validated[key] = value
     return validated
 

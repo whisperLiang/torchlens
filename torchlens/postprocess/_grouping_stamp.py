@@ -211,9 +211,12 @@ def validate_grouping_policy_stamp(
     if effective is False and policy != "unknown":
         return "C3"
     # C5: stamp/recurrence_detection coherence (params_only <-> False).
-    if recurrence_detection is not None and policy in ("structural", "params_only"):
-        if (policy == "params_only") != (recurrence_detection is False):
-            return "C5"
+    if (
+        recurrence_detection is not None
+        and policy in ("structural", "params_only")
+        and (policy == "params_only") != (recurrence_detection is False)
+    ):
+        return "C5"
     # C6: mirror coherence with the requested-knob field.
     if grouping is not None and requested != "unknown" and requested != grouping:
         return "C6"

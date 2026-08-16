@@ -163,8 +163,9 @@ def layer_shape_summary(layer: Layer) -> str | None:
         ]
         if len(varying_axes) == 1:
             axis_values = [shape[varying_axes[0]] for shape in shapes]
-            ascending = all(a <= b for a, b in zip(axis_values, axis_values[1:]))
-            descending = all(a >= b for a, b in zip(axis_values, axis_values[1:]))
+            pairs = list(zip(axis_values, axis_values[1:], strict=False))
+            ascending = all(a <= b for a, b in pairs)
+            descending = all(a >= b for a, b in pairs)
             if ascending or descending:
                 return f"{axis_values[0]}->{axis_values[-1]}"
             return f"{min(axis_values)}-{max(axis_values)}"

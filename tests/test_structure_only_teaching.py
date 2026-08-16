@@ -14,6 +14,7 @@ from __future__ import annotations
 import sys
 import warnings
 from contextlib import nullcontext
+from pathlib import Path
 
 import pytest
 import torch
@@ -228,7 +229,7 @@ class DelegatedHelperKernel(nn.Module):
 
 _HELPER_LINE = next(
     offset
-    for offset, line in enumerate(open(__file__, encoding="utf-8").read().splitlines(), start=1)
+    for offset, line in enumerate(Path(__file__).read_text(encoding="utf-8").splitlines(), start=1)
     if "HELPER_LINE anchor" in line
 )
 

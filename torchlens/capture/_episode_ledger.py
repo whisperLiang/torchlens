@@ -1278,7 +1278,7 @@ def write_episode_ledger(trace: Any, resolved: ResolvedEpisode) -> EpisodeLedger
     try:
         module_record = trace.modules[resolved.address]
         calls = list(module_record.calls)
-    except Exception:
+    except (LookupError, AttributeError, TypeError, ValueError):
         calls = []
     started = len(calls)
 

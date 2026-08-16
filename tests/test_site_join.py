@@ -48,10 +48,8 @@ class _FlatBranch(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.flag:
-            y = torch.tanh(x)
-        else:
-            y = torch.tanh(x)
-        return y
+            return torch.tanh(x)
+        return torch.tanh(x)
 
 
 class _NestedInner(nn.Module):
@@ -65,10 +63,8 @@ class _NestedInner(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.flag:
-            y = torch.tanh(x)
-        else:
-            y = torch.tanh(x)
-        return y
+            return torch.tanh(x)
+        return torch.tanh(x)
 
 
 class _NestedOuter(nn.Module):

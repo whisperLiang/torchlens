@@ -78,6 +78,10 @@ def run_loaded_sparse_trace(
     on_divergence:
         Frozen Stage-6 policy argument. Stage 5 reports faithfulness but does
         not yet enforce divergence behavior.
+    until:
+        Optional static site selection (layer labels / module addresses /
+        ``"saved"``); resolved against the loaded trace's settled labels
+        before anything binds or executes, truncating the scheduled cut.
 
     Returns
     -------

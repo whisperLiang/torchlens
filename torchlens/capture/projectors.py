@@ -250,7 +250,7 @@ class RefreshProjector:
                 refreshed,
                 "raw/final layer labels no longer align during refresh projection",
             )
-        for layer, preserved in zip(self.target.layer_list, preserved_states):
+        for layer, preserved in zip(self.target.layer_list, preserved_states, strict=False):
             for field_name, value in preserved.items():
                 if field_name not in self._DYNAMIC_OP_FIELDS:
                     layer._internal_set(field_name, value)
@@ -318,14 +318,14 @@ class RefreshProjector:
                 "the executed prefix of the truncated rerun does not match the "
                 f"recorded prefix (expected {len(target_signature)} prefix op(s), "
                 f"got {len(refreshed_signature)}; first divergence at "
-                f"{next((expected[0] for expected, actual in zip(target_signature, refreshed_signature) if expected != actual), 'op count')!r})",
+                f"{next((expected[0] for expected, actual in zip(target_signature, refreshed_signature, strict=False) if expected != actual), 'op count')!r})",
             )
         from ..data_classes._state_adapter import state_items
 
         preserved_states = [dict(state_items(layer)) for layer in target_prefix]
-        for layer, new_layer in zip(target_prefix, refreshed_prefix):
+        for layer, new_layer in zip(target_prefix, refreshed_prefix, strict=True):
             self.target._refresh_rerun_op_from(layer, new_layer)
-        for layer, preserved in zip(target_prefix, preserved_states):
+        for layer, preserved in zip(target_prefix, preserved_states, strict=True):
             for field_name, value in preserved.items():
                 if field_name not in self._DYNAMIC_OP_FIELDS:
                     layer._internal_set(field_name, value)
@@ -482,7 +482,9 @@ class RefreshProjector:
         )
         # Belt: recorded mode claims must agree with the write evidence where
         # both exist; a contradiction refuses typed, never resolved permissively.
-        for sink_layer, (raw_label, value_changed, _) in zip(target_sinks, target_rows):
+        for sink_layer, (raw_label, value_changed, _) in zip(
+            target_sinks, target_rows, strict=True
+        ):
             if value_changed is None:
                 continue
             for authority, claim in self._buffer_sink_mode_claims(self.target, sink_layer):
@@ -554,7 +556,7 @@ class RefreshProjector:
             return (
                 f"layer count changed: expected {len(target_layers)}, got {len(refreshed_layers)}"
             )
-        for target_layer, refreshed_layer in zip(target_layers, refreshed_layers):
+        for target_layer, refreshed_layer in zip(target_layers, refreshed_layers, strict=True):
             if target_layer._layer_label_raw != refreshed_layer._layer_label_raw:
                 return (
                     "raw label order changed: "
@@ -716,7 +718,7 @@ class RecordingProjection:
 
         from ..backends.torch._tl import get_tensor_label, set_tensor_label
 
-        for tensor, label in zip(self.output_tensors, self.output_labels):
+        for tensor, label in zip(self.output_tensors, self.output_labels, strict=False):
             if label is not None and get_tensor_label(tensor) is None:
                 set_tensor_label(tensor, label)
 

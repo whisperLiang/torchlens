@@ -266,9 +266,12 @@ def _link_forward_grad_fn_rows(trace: Any, profile: _PrimitiveOpProfile) -> None
     ops = list(trace.ops)
     partitions: dict[int, list[AtenOp]] = defaultdict(list)
     for row in profile.primitive_ops:
-        if row.capture_phase == "forward" and row.owner_status == "forward_op":
-            if row.owner_func_call_id is not None:
-                partitions[row.owner_func_call_id].append(row)
+        if (
+            row.capture_phase == "forward"
+            and row.owner_status == "forward_op"
+            and row.owner_func_call_id is not None
+        ):
+            partitions[row.owner_func_call_id].append(row)
     for rows in partitions.values():
         grad_fn_ids = {
             getattr(ops[ref.op_row_index], "grad_fn_object_id", None)

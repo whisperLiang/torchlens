@@ -136,12 +136,14 @@ def _check_primitive_row(
         _primitive_failure(f"{row.label} has invalid outcome {row.outcome!r}")
     if not isinstance(row.decomposition_slot, int) or row.decomposition_slot < 0:
         _primitive_failure(f"{row.label} has invalid decomposition_slot")
-    if row.capture_phase == "forward":
-        if row.forward_pass_index is None or row.backward_epoch_index is not None:
-            _primitive_failure(f"{row.label} has incoherent forward phase indices")
-    if row.capture_phase == "backward":
-        if row.forward_pass_index is not None or row.backward_epoch_index is None:
-            _primitive_failure(f"{row.label} has incoherent backward phase indices")
+    if row.capture_phase == "forward" and (
+        row.forward_pass_index is None or row.backward_epoch_index is not None
+    ):
+        _primitive_failure(f"{row.label} has incoherent forward phase indices")
+    if row.capture_phase == "backward" and (
+        row.forward_pass_index is not None or row.backward_epoch_index is None
+    ):
+        _primitive_failure(f"{row.label} has incoherent backward phase indices")
     if owner_evidence.get(row.sequence, object()) != row.owner_func_call_id:
         _primitive_failure(f"{row.label} disagrees with its observation-time owner evidence")
     refs = tuple(row.parent_op_refs)
