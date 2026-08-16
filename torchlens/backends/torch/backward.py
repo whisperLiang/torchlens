@@ -241,6 +241,68 @@ _BACKWARD_TRACE_SLOTS = weakref.WeakKeyDictionary()
 Values hold the trace only WEAKLY, so this table never pins its own keys.
 """
 
+_FIRE_TIMING_STAMPS: weakref.WeakKeyDictionary[Any, dict[int, list[tuple[int, float]]]]
+_FIRE_TIMING_STAMPS = weakref.WeakKeyDictionary()
+"""Per-trace ``grad_fn_object_id -> keyed start-stamp LIFO`` for per-fire timing.
+
+Each list is the per-node keyed LIFO (L9 memo 1.3) shared by that node's
+timing prehook and its posthook: the prehook appends ``(call_index,
+time.perf_counter())`` and the posthook pops entries until it finds a
+``call_index`` match, discarding stale entries above the match. Per-node
+sequential firing on one engine worker thread is the same assumption the
+shipped aten-marker LIFO already makes. The registry exists so pass
+boundaries can clear retry debris; hooks close over their own list.
+"""
+
+_PENDING_BACKWARD_FINALIZE: weakref.WeakKeyDictionary[Any, bool] = weakref.WeakKeyDictionary()
+"""Traces whose implicit-close FINALIZE step (D2H fence + projection) is owed.
+
+Set by the journal step of :func:`_close_implicit_backward_pass_if_open` and
+cleared only after BOTH finalize sub-steps complete outside any engine
+invocation (L9 memo 1.2). Weak-keyed so it never pins a trace.
+"""
+
+
+def _fire_timing_stamp_list(trace: Any, grad_fn_object_id: int) -> list[tuple[int, float]]:
+    """Return (and lazily build) one node's keyed start-stamp LIFO."""
+
+    by_node = _FIRE_TIMING_STAMPS.get(trace)
+    if by_node is None:
+        by_node = {}
+        _FIRE_TIMING_STAMPS[trace] = by_node
+    return by_node.setdefault(grad_fn_object_id, [])
+
+
+def _clear_fire_timing_stamps(trace: Any) -> None:
+    """Clear every per-node start-stamp LIFO at a pass boundary.
+
+    Stale entries (a prehook fired but its node raised; a caught-and-retried
+    backward) must not survive into a later pass, where the restarting
+    ``call_index`` sequence could otherwise collide with retry debris.
+    """
+
+    by_node = _FIRE_TIMING_STAMPS.get(trace)
+    if not by_node:
+        return
+    for stamps in by_node.values():
+        stamps.clear()
+
+
+def _pop_matching_fire_start(stamps: list[tuple[int, float]], call_index: int) -> float | None:
+    """Pop the keyed LIFO until a ``call_index`` match; return its stamp.
+
+    Stale entries above the match are DISCARDED, never paired; no match or an
+    empty LIFO returns ``None`` (an untimed fire), so a posthook that runs
+    without its prehook can never inherit a stale stamp as a wrong positive
+    span.
+    """
+
+    while stamps:
+        key, stamp = stamps.pop()
+        if key == call_index:
+            return stamp
+    return None
+
 
 def _backward_registry_slot(trace: Any) -> tuple[weakref.ReferenceType[Any], set[int]]:
     """Return (and lazily build) one trace's backward-registry slot.
@@ -396,6 +458,7 @@ def _close_implicit_backward_pass_if_open(trace: Any) -> None:
     # strand the implicit pass marked open after its End event was journaled.
     trace._implicit_backward_pass_open = False
     _clear_pending_accumulate_grad_records(trace)
+    _clear_fire_timing_stamps(trace)
     # Fence in-flight cpu_async D2H grad copies before projections make the
     # payloads reachable: the forward finalize seam already ran, so backward
     # is the only remaining producer of pending non_blocking copies.
@@ -1926,6 +1989,7 @@ def _make_grad_fn_hook(
     *,
     is_accumulate_grad: bool = False,
     aten_marker_tokens: list[Any] | None = None,
+    fire_start_stamps: list[tuple[int, float]] | None = None,
 ) -> Callable[..., tuple[torch.Tensor | None, ...] | None]:
     """Build a runtime hook for one autograd grad_fn_handle.
 
@@ -1939,6 +2003,9 @@ def _make_grad_fn_hook(
         Whether this hook is attached to an AccumulateGrad node.
     aten_marker_tokens:
         LIFO marker tokens installed by the private ATen GradFn prehook.
+    fire_start_stamps:
+        Keyed per-node start-stamp LIFO fed by the timing prehook. ``None``
+        when timing registration failed for this node (untimed fires).
 
     Returns
     -------
@@ -1950,6 +2017,10 @@ def _make_grad_fn_hook(
 
     def hook(*hook_args: Any) -> tuple[torch.Tensor | None, ...] | None:
         """Record one autograd grad_fn hook firing and apply live interventions."""
+        # Finish stamp FIRST, before any logging work, so TorchLens overhead
+        # stays outside the measured span (L9 memo 1.3). Same clock as the
+        # prehook stamp -- perf_counter, never the wall `timestamp`.
+        fire_finished_monotonic = time.perf_counter()
         if aten_marker_tokens:
             from ._aten_capture import _end_backward_grad_fn
 
@@ -1972,6 +2043,15 @@ def _make_grad_fn_hook(
         logged_call = grad_fn_handle.calls[-1]
         stored_grad_inputs = logged_call.grad_inputs
         stored_grad_outputs = logged_call.grad_outputs
+        # Pair the fire span from the keyed LIFO: match -> timed fire; empty,
+        # key mismatch, or failed timing registration -> (None, None), never a
+        # stale stamp or a cross-fire pair.
+        fire_started_monotonic: float | None = None
+        if fire_start_stamps is not None:
+            fire_started_monotonic = _pop_matching_fire_start(fire_start_stamps, call_index)
+        paired_finished_monotonic = (
+            fire_finished_monotonic if fire_started_monotonic is not None else None
+        )
         events = _ensure_backward_event_stream(live_trace)
         event_timestamp = time.time()
         pass_index = int(
@@ -2002,6 +2082,8 @@ def _make_grad_fn_hook(
                     grad_output_refs=stored_grad_outputs,
                     intervention_fire_ref=fire_ref,
                     timestamp=event_timestamp,
+                    fire_started_monotonic=fire_started_monotonic,
+                    fire_finished_monotonic=paired_finished_monotonic,
                 )
             )
             param_address = getattr(live_trace, "_grad_fn_param_refs_by_object_id", {}).get(
@@ -2071,11 +2153,68 @@ def _make_grad_fn_hook(
                 grad_output_refs=stored_grad_outputs,
                 intervention_fire_ref=fire_ref,
                 timestamp=event_timestamp,
+                fire_started_monotonic=fire_started_monotonic,
+                fire_finished_monotonic=paired_finished_monotonic,
             )
         )
         return result
 
     return hook
+
+
+def _make_timing_grad_fn_prehook(
+    trace: Any,
+    grad_fn_object_id: int,
+    fire_start_stamps: list[tuple[int, float]],
+) -> Callable[..., None]:
+    """Build the lightweight per-fire timing prehook (L9 memo 1.3).
+
+    The prehook dispatches no tensor ops -- one ``perf_counter`` call and one
+    list append -- so its registration order can never sweep a foreign aten
+    dispatch into the marker bracket; it is registered BEFORE the aten marker
+    prehook only so the measured span covers the whole fire.
+    """
+
+    trace_ref = weakref.ref(trace)
+
+    def timing_prehook(*hook_args: Any) -> None:
+        """Push a keyed ``(call_index, perf_counter)`` start stamp."""
+
+        del hook_args
+        live_trace = trace_ref()
+        if live_trace is None:
+            return None
+        grad_fn_record = getattr(live_trace, "grad_fn_logs", {}).get(grad_fn_object_id)
+        if grad_fn_record is None:
+            return None
+        fire_start_stamps.append((len(grad_fn_record.calls) + 1, time.perf_counter()))
+        return None
+
+    return timing_prehook
+
+
+def _register_fire_timing_prehook(
+    trace: Any,
+    grad_fn_handle: Any,
+    grad_fn_object_id: int,
+    fire_start_stamps: list[tuple[int, float]],
+) -> Any | None:
+    """Register the timing prehook on one node; failure degrades to untimed.
+
+    The timing registration gets ITS OWN try/except, separate from the
+    shipped registration block whose ``except RuntimeError`` converts a node
+    into a fail-closed ``BackwardCoverageGap``: an optional measurement must
+    never turn a complete-coverage node into a coverage gap (L9 memo 1.3,
+    opus m2-r2). Failure returns ``None`` and the node's fires stay untimed
+    (the posthook's keyed LIFO simply never matches).
+    """
+
+    try:
+        return grad_fn_handle.register_prehook(
+            _make_timing_grad_fn_prehook(trace, grad_fn_object_id, fire_start_stamps)
+        )
+    except RuntimeError:
+        return None
 
 
 def _make_aten_grad_fn_prehook(
@@ -2623,6 +2762,7 @@ def _walk_and_hook_backward_graph(
                 parent_layer.grad_fn = grad_fn_record
         try:
             aten_marker_tokens: list[Any] = []
+            fire_start_stamps = _fire_timing_stamp_list(trace, grad_fn_object_id)
             with pause_logging():
                 handles.append(
                     grad_fn_handle.register_hook(
@@ -2631,6 +2771,7 @@ def _walk_and_hook_backward_graph(
                             grad_fn_object_id,
                             is_accumulate_grad=is_accumulate_grad,
                             aten_marker_tokens=aten_marker_tokens,
+                            fire_start_stamps=fire_start_stamps,
                         )
                     )
                 )
@@ -2638,6 +2779,17 @@ def _walk_and_hook_backward_graph(
                 handles.append(
                     grad_fn_handle.register_prehook(_make_grad_fn_prehook(trace, grad_fn_object_id))
                 )
+            # Timing prehook registers BEFORE the aten marker prehook so the
+            # measured span covers the whole fire including its aten
+            # dispatches; a registration failure degrades this node to
+            # untimed fires only (own try/except inside the helper).
+            timing_handle = _register_fire_timing_prehook(
+                trace, grad_fn_handle, grad_fn_object_id, fire_start_stamps
+            )
+            if timing_handle is not None:
+                handles.append(timing_handle)
+                if getattr(trace, "grad_fn_timing_provenance", None) in (None, "unmeasured"):
+                    trace.grad_fn_timing_provenance = "perf_counter"
             event_stream = _ensure_backward_event_stream(trace)
             if getattr(event_stream, "aten_recording_enabled", False):
                 handles.append(
@@ -3222,6 +3374,8 @@ def _run_backward_with_capture(
             )
             with contextlib.suppress(BaseException):
                 _clear_pending_accumulate_grad_records(trace)
+            with contextlib.suppress(BaseException):
+                _clear_fire_timing_stamps(trace)
             for handle in handles:
                 with contextlib.suppress(BaseException):
                     handle.remove()
@@ -3243,6 +3397,10 @@ def _run_backward_with_capture(
             _clear_pending_accumulate_grad_records(trace)
         except BaseException as exc:
             cleanup_error = exc
+        try:
+            _clear_fire_timing_stamps(trace)
+        except BaseException as exc:
+            cleanup_error = cleanup_error if cleanup_error is not None else exc
         # SUCCESS path: there is no primary exception whose precedence would
         # justify discarding a failure here, so fold it into cleanup_error
         # like the sibling steps. suppress(BaseException) silently discarded

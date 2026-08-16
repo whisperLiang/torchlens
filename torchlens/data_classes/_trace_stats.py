@@ -1156,6 +1156,72 @@ class TraceStatsMixin(_TraceMixinBase):
         return TraceGradFnCallAccessor(calls)
 
     @property
+    def grad_fn_fire_timings(self: "Trace") -> "OrderedDict[str, Duration | None]":
+        """Return live per-fire backward timing spans keyed like ``grad_fn_calls``.
+
+        DOCUMENTED-UNSTABLE spelling (L9 memo 1.3; pending naming-session
+        ratification). Serves the paired ``time.perf_counter()`` stamps
+        carried by the runtime ``GradFnFired`` events: a timed fire yields
+        its span as a :class:`~torchlens.quantities.Duration`, an untimed
+        fire (empty keyed LIFO, stale-key discard, or timing-registration
+        failure) yields ``None`` -- never a false zero. Keys are
+        ``"<grad_fn_label>:<call_index>"`` in fold order.
+
+        Raises
+        ------
+        InvalidArgumentError
+            ``grad_fn_fire_timing_unavailable`` on a trace without its
+            runtime capture event stream (loaded artifacts, cleaned traces):
+            events never persist, so such a read has no timing evidence
+            until the coordinated tlspec bump persists the pairs.
+        """
+
+        from ..ir.events import GradFnFired
+
+        stream = self.__dict__.get("capture_events") or self.__dict__.get("_capture_events")
+        fired = [
+            event
+            for event in getattr(stream, "backward_events", ())
+            if isinstance(event, GradFnFired)
+        ]
+        # Evidence test, not a load flag: a rehydrated trace owns a fresh
+        # EMPTY stream, so backward records without any fire event mean the
+        # runtime evidence did not travel (loaded artifact or cleaned trace).
+        if stream is None or (not fired and getattr(self, "grad_fn_logs", {})):
+            raise InvalidArgumentError(
+                "Per-fire backward timing is served from the runtime capture "
+                "event stream, which never persists: this trace (loaded from "
+                "an artifact, or already cleaned up) carries no per-fire "
+                "timing evidence for its backward records.",
+                code="grad_fn_fire_timing_unavailable",
+                remedy=(
+                    "read grad_fn_fire_timings on the live capturing trace; "
+                    "persisted per-fire timing activates at the coordinated "
+                    "tlspec version bump"
+                ),
+            )
+        timings: OrderedDict[str, Duration | None] = OrderedDict()
+        per_object_ordinals: dict[int, int] = {}
+        grad_fn_logs = getattr(self, "grad_fn_logs", {})
+        # Mirrors the _fold_fired_events sort key and per-object ordinal walk
+        # so keys line up 1:1 with trace.grad_fn_calls.
+        for event in sorted(fired, key=lambda item: (item.pass_index, item.timestamp, item.seq)):
+            record = grad_fn_logs.get(event.object_id)
+            if record is None:
+                continue
+            ordinal = per_object_ordinals.get(event.object_id, 0) + 1
+            per_object_ordinals[event.object_id] = ordinal
+            started = event.fire_started_monotonic
+            finished = event.fire_finished_monotonic
+            span = (
+                None
+                if started is None or finished is None
+                else Duration(max(0.0, finished - started))
+            )
+            timings[f"{record.label}:{ordinal}"] = span
+        return timings
+
+    @property
     def backward_passes(self: "Trace") -> BackwardPassAccessor:
         """Access backward pass records by 0-based position or named pass number."""
 

@@ -92,9 +92,12 @@ _STANDING_REGISTRATIONS: dict[str, tuple[str, ...]] = {
     ),
     "OpRef": ("func_call_id", "op_label", "op_row_index"),
     # L1 wave 0: the grouping knob mirror + grouping-policy stamp; L3:
-    # _primitive_op_profile; L7a: structure_only.
+    # _primitive_op_profile; L7a: structure_only; L9: timing clock
+    # provenance + checkpoint-invocation witness (memo 1.3 / 2.3).
     "Trace": (
         "_primitive_op_profile",
+        "checkpoint_invocation_witness",
+        "grad_fn_timing_provenance",
         "grouping",
         "grouping_policy",
         "intervention_audit",  # L6 resolved-intervention audit record

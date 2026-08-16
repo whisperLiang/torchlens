@@ -201,6 +201,14 @@ TF traces are forward eager-capture records only. `trace.log_backward(...)`,
 `trace.backward_passes`, `trace.saved_grad_ops`, and `op.grads` raise on JAX, MLX, tinygrad,
 Paddle, and TensorFlow traces.
 
-Future follow-ups are filed for real per-fire timing via prehooks and better implicit-boundary
-detection. Current `GradFnCall` timing is a single hook timestamp, and implicit passes are closed
-at synchronization points rather than at an engine boundary that TorchLens did not observe.
+Real per-fire timing is measured on every hooked node (universal path): a lightweight timing
+prehook and the hook entry stamp pair one `time.perf_counter()` span per fire, served LIVE by
+`trace.grad_fn_fire_timings` (DOCUMENTED-UNSTABLE spelling; keys match `trace.grad_fn_calls`,
+untimed fires read `None`, and loaded traces refuse typed with
+`grad_fn_fire_timing_unavailable` because the runtime event stream never persists). The
+persisted `GradFnCall` timing fields keep their shipped single wall-stamp values until the
+coordinated tlspec bump activates the paired monotonic semantics together with the
+`grad_fn_timing_provenance` discriminator; `backward_duration`'s nullable contract change rides
+that same bump. A follow-up remains filed for better implicit-boundary detection: implicit
+passes are closed at synchronization points rather than at an engine boundary that TorchLens
+did not observe.

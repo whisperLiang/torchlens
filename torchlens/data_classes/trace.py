@@ -1368,6 +1368,11 @@ class Trace(
         # (S3 discipline); flips to persisting at the coordinated bump.
         "grouping": FieldPolicy.DROP,
         "grouping_policy": FieldPolicy.DROP,
+        # L9 backward-residuals surface: DROP under tlspec v7, prerelease-
+        # registered (S3 discipline); both flip to persisting at the
+        # coordinated bump. Value vocabularies provisional (E-L9-4 routing).
+        "grad_fn_timing_provenance": FieldPolicy.DROP,
+        "checkpoint_invocation_witness": FieldPolicy.DROP,
         "verbose": FieldPolicy.KEEP,
         "profile_enabled": FieldPolicy.KEEP,
         "has_gradients": FieldPolicy.KEEP,
@@ -1854,6 +1859,12 @@ class Trace(
         # written by each producer once step-7 grouping settles.
         self.grouping = "structural"
         self.grouping_policy: dict[str, Any] | None = None
+        # L9 backward residuals: per-fire timing clock provenance
+        # ("unmeasured" until a timing prehook arms) and the checkpoint-
+        # invocation witness summary (None until torch capture builds it).
+        # Both DROP-gated pre-bump; spellings DOCUMENTED-UNSTABLE.
+        self.grad_fn_timing_provenance: str = "unmeasured"
+        self.checkpoint_invocation_witness: dict[str, Any] | None = None
         self.verbose = verbose
         self.profile_enabled = False
         self.has_gradients = False
@@ -3263,6 +3274,11 @@ class Trace(
         # explicit None, bypassing default fill).
         if self.__dict__.get("grouping") is None:
             self.__dict__["grouping"] = "structural"
+        # L9: a DROP-scrubbed timing-provenance field restores as an explicit
+        # None; normalize to the honest "unmeasured" state (a loaded pre-bump
+        # artifact carries no timing evidence). The witness stays None.
+        if self.__dict__.get("grad_fn_timing_provenance") is None:
+            self.__dict__["grad_fn_timing_provenance"] = "unmeasured"
         from ..postprocess._grouping_stamp import settle_loaded_grouping_policy
 
         self.__dict__["grouping_policy"] = settle_loaded_grouping_policy(self.__dict__)
@@ -3834,3 +3850,11 @@ register_prerelease_field(Trace, "intervention_audit", persisted_policy=FieldPol
 # wave-3 coordinated bump.
 register_prerelease_field(Trace, "grouping")
 register_prerelease_field(Trace, "grouping_policy")
+
+# L9 backward-residuals surface: the per-fire timing clock-provenance marker
+# and the checkpoint-invocation witness, declared FieldPolicy.DROP above and
+# registered so the portability exit gates can round-trip them under the
+# test-only switch; flipped to persisting at the wave-3 coordinated bump
+# (memo 1.3 / 2.3; value vocabularies ride E-L9-4 routing).
+register_prerelease_field(Trace, "grad_fn_timing_provenance")
+register_prerelease_field(Trace, "checkpoint_invocation_witness")
