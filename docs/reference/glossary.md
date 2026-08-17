@@ -636,3 +636,48 @@ shim owed*
 **Encoding refusal codes** — *unstable — no deprecation shim owed*
 : `encoding_source_invalid`, `encoding_value_invalid`,
   `encoding_callable_error`, `encoding_requires_dot_layout`.
+
+**trace.grad_fn_fire_timings** — *unstable — no deprecation shim owed*
+: Live-trace-only per-fire backward timing spans, keyed like
+  `trace.grad_fn_calls` (`"<grad_fn_label>:<call_index>"`). Both stamps of
+  every span come from `time.perf_counter()`, paired at capture time by a
+  per-node keyed LIFO (stale entries are discarded, never paired); untimed
+  fires read `None`, never a false zero. Served from the runtime
+  `GradFnFired` event stream, which never persists: loaded or cleaned traces
+  refuse typed `grad_fn_fire_timing_unavailable`. The persisted `GradFnCall`
+  timing fields keep their shipped wall-stamp semantics until the
+  coordinated tlspec bump.
+
+**Trace.grad_fn_timing_provenance** — *unstable — no deprecation shim owed*
+: The per-fire timing clock-provenance marker: `"unmeasured"` until a timing
+  prehook arms, `"perf_counter"` on the universal path
+  (`"perf_counter_grad_saved_only"` reserved for the D15 fallback mode).
+  `FieldPolicy.DROP` under tlspec v7 (prerelease-registered; activates with
+  the in-place timing semantics at the coordinated bump).
+
+**Trace.checkpoint_invocation_witness** — *unstable — no deprecation shim owed*
+: The projected checkpoint-invocation summary: token count, per-token pack
+  counts / unpack window evidence / BACKWARD-DERIVED site-key candidates,
+  degrade flags (`classifier_unavailable`, `patch_unavailable`,
+  `exotic_subclass`, `unmatched_backward_warn`, `reentrant_node_discovered`,
+  `unwitnessed_checkpoint_enter`), and an evidence-scoped completeness
+  verdict — any flag withdraws the affirmative no-checkpoint claim. Tokens
+  are minted only for classified non-reentrant `_checkpoint_hook` enters on
+  the armed owner thread outside any engine invocation; reentrant
+  checkpointing is token-free and affirmatively sentinel-flagged.
+  `FieldPolicy.DROP` under tlspec v7 (prerelease-registered). The typed
+  checkpoint-ambiguity refusal is S2-authored (R-L9-1) and not yet shipped.
+
+**trace.grad_fn_site_summary** — *unstable — no deprecation shim owed*
+: The grouped-backward floor: a read-only per-`site_key` rollup of
+  GradFn/GradFnCall facts (labels, fire counts, pass coverage, and live
+  per-fire timing totals when evidence exists). Grad-fns without an op FK
+  aggregate under the `None` key; op-backed grad-fns on a keyless legacy
+  artifact refuse typed `site_key_unavailable`. Accessor-level only — no
+  persisted fields.
+
+**BackwardPassEnd.close_path** — *unstable — no deprecation shim owed*
+: Sidecar-event-only implicit-pass close-path disclosure: `"engine_drain"`
+  when the queued final callback journaled the close, `"sync_point"` for
+  every backstop path, `None` on explicit passes. The projected
+  `BackwardPass` record field waits for the wave-3 bump.

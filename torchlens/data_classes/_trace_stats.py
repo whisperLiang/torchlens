@@ -1222,6 +1222,84 @@ class TraceStatsMixin(_TraceMixinBase):
         return timings
 
     @property
+    def grad_fn_site_summary(self: "Trace") -> "OrderedDict[str | None, dict[str, Any]]":
+        """Return the read-only per-site rollup of backward grad-fn facts.
+
+        DOCUMENTED-UNSTABLE spelling (L9 memo 1.1 grouped-backward floor;
+        pending naming-session ratification). Aggregates GradFn/GradFnCall
+        facts per L1 ``site_key`` (read-only L1 consumption -- reused-module
+        grad-fns share one entry): per entry ``grad_fn_labels``,
+        ``fire_count``, ``pass_coverage``, and -- when live per-fire timing
+        evidence exists -- ``timed_fire_count`` plus ``total_fire_duration``
+        (``None`` when no fire carries timing evidence, never a false zero).
+        Grad-fns without an op FK (AccumulateGrad and other unattributed
+        nodes) aggregate under the ``None`` key. Accessor-level only: no
+        persisted fields.
+
+        Raises
+        ------
+        InvalidArgumentError
+            ``site_key_unavailable`` when op-backed grad-fns exist but no op
+            carries a site key (legacy pre-site-key artifact) -- consistent
+            with the L1 site accessors, never a silently keyless rollup.
+        """
+
+        self._sync_backward_projection_if_needed()
+        try:
+            fire_timings: OrderedDict[str, Duration | None] | None = self.grad_fn_fire_timings
+        except InvalidArgumentError:
+            # Loaded/cleaned traces carry no runtime timing evidence; the
+            # count/coverage rollup still stands on the persisted records.
+            fire_timings = None
+        summary: OrderedDict[str | None, dict[str, Any]] = OrderedDict()
+        any_op_backed = False
+        any_keyed = False
+        layer_lookup = getattr(self, "layer_dict_all_keys", {})
+        for grad_fn_record in getattr(self, "grad_fn_logs", {}).values():
+            site_key: str | None = None
+            if getattr(grad_fn_record, "has_op", False) and grad_fn_record.op_label is not None:
+                any_op_backed = True
+                op = layer_lookup.get(grad_fn_record.op_label)
+                site_key = getattr(op, "site_key", None)
+                if site_key is not None:
+                    any_keyed = True
+            entry = summary.setdefault(
+                site_key,
+                {
+                    "grad_fn_labels": [],
+                    "fire_count": 0,
+                    "pass_coverage": set(),
+                    "timed_fire_count": 0,
+                    "total_fire_duration": None,
+                },
+            )
+            entry["grad_fn_labels"].append(grad_fn_record.label)
+            for call_index, call in grad_fn_record.calls.items():
+                entry["fire_count"] += 1
+                if call.backward_pass_index is not None:
+                    entry["pass_coverage"].add(int(call.backward_pass_index))
+                if fire_timings is not None:
+                    span = fire_timings.get(f"{grad_fn_record.label}:{call_index}")
+                    if span is not None:
+                        entry["timed_fire_count"] += 1
+                        previous = entry["total_fire_duration"]
+                        entry["total_fire_duration"] = Duration(
+                            (0.0 if previous is None else float(previous)) + float(span)
+                        )
+        if any_op_backed and not any_keyed:
+            raise InvalidArgumentError(
+                "This trace's op-backed grad-fns carry no site keys: it was "
+                "captured/saved before site_key_v1 existed, so a per-site "
+                "backward rollup would be silently empty.",
+                code="site_key_unavailable",
+                remedy="re-capture with a current TorchLens to mint site keys",
+            )
+        for entry in summary.values():
+            entry["grad_fn_labels"] = tuple(sorted(entry["grad_fn_labels"]))
+            entry["pass_coverage"] = tuple(sorted(entry["pass_coverage"]))
+        return summary
+
+    @property
     def backward_passes(self: "Trace") -> BackwardPassAccessor:
         """Access backward pass records by 0-based position or named pass number."""
 
