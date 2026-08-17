@@ -35,11 +35,10 @@ for name, model in models.items():
 
 | Model | Rows | Non-pass rows |
 | --- | ---: | --- |
-| `linear_mlp` | 24 | `Runtime capability snapshot` |
-| `conv_pool` | 24 | `Runtime capability snapshot` |
+| `linear_mlp` | 24 | none |
+| `conv_pool` | 24 | none |
 
-Non-pass rows above name the checks that did not report `pass`; every other check
-reported `pass`. The full check list:
+Both representative models report `pass` for every check:
 
 - HF Transformers wrapper
 - Accelerate device_map='auto'
