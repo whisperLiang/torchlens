@@ -54,7 +54,7 @@ _MAX_REPR_TUPLE_LENGTH = 4096
 
 
 def validate_persisted_forgery_surfaces(trace: Trace) -> None:
-    """Validate the six persisted claim families before load returns.
+    """Validate the persisted claim families before load returns.
 
     Parameters
     ----------
@@ -74,6 +74,7 @@ def validate_persisted_forgery_surfaces(trace: Trace) -> None:
     _validate_checkpoint_witness(trace)
     _validate_intervention_audit(trace)
     _validate_kernel_telemetry(trace)
+    _validate_structure_only_coherence(trace)
 
 
 def _refuse(
@@ -362,8 +363,6 @@ def _validate_checkpoint_witness(trace: Trace) -> None:
 
     token_count = witness["token_count"]
     tokens = witness["tokens"]
-    flags = witness["degrade_flags"]
-    verdict = witness["verdict"]
     if not _is_int(token_count) or token_count < 0:
         _checkpoint_invalid(f"token_count must be a non-negative int, got {token_count!r}", "count")
     if not isinstance(tokens, Mapping):
@@ -373,6 +372,28 @@ def _validate_checkpoint_witness(trace: Trace) -> None:
             "token keys must be the contiguous per-trace ordinals 1..token_count",
             "token_ordinals",
         )
+    _validate_checkpoint_verdict(token_count, witness["degrade_flags"], witness["verdict"])
+
+    site_keys = {
+        key for op in _trace_ops(trace) if isinstance((key := getattr(op, "site_key", None)), str)
+    }
+    for token, record in tokens.items():
+        _validate_checkpoint_token_record(token, record, site_keys)
+
+
+def _validate_checkpoint_verdict(token_count: int, flags: Any, verdict: Any) -> None:
+    """Validate degrade flags and the evidence-scoped verdict coherence rule.
+
+    Parameters
+    ----------
+    token_count:
+        Validated non-negative token count.
+    flags:
+        Candidate degrade-flag sequence.
+    verdict:
+        Candidate evidence-scoped verdict.
+    """
+
     if not _is_sequence(flags) or any(not isinstance(flag, str) for flag in flags):
         _checkpoint_invalid("degrade_flags must be a sequence of strings", "degrade_flags")
     if list(flags) != sorted(set(flags)) or not set(flags) <= _CHECKPOINT_FLAGS:
@@ -400,12 +421,6 @@ def _validate_checkpoint_witness(trace: Trace) -> None:
             f"degrade_flags={list(flags)!r}; expected {expected_verdict!r}",
             "verdict_coherence",
         )
-
-    site_keys = {
-        key for op in _trace_ops(trace) if isinstance((key := getattr(op, "site_key", None)), str)
-    }
-    for token, record in tokens.items():
-        _validate_checkpoint_token_record(token, record, site_keys)
 
 
 def _validate_checkpoint_token_record(
@@ -465,16 +480,31 @@ def _validate_checkpoint_token_record(
             "site_relation",
         )
 
-    windows = record["window_evidence"]
+    _validate_checkpoint_windows(token, record["window_evidence"], record["unpack_evidence_count"])
+
+
+def _validate_checkpoint_windows(token: Any, windows: Any, expected_count: Any) -> None:
+    """Validate one token's unpack window-evidence rows.
+
+    Parameters
+    ----------
+    token:
+        Owning token ordinal used in diagnostics.
+    windows:
+        Candidate window-evidence sequence.
+    expected_count:
+        Validated ``unpack_evidence_count`` the row count must equal.
+    """
+
     if not _is_sequence(windows):
         _checkpoint_invalid(
             f"token {token!r} window_evidence must be a sequence",
             "window_evidence",
         )
-    if len(windows) != record["unpack_evidence_count"]:
+    if len(windows) != expected_count:
         _checkpoint_invalid(
             f"token {token!r} has {len(windows)} window rows but "
-            f"unpack_evidence_count={record['unpack_evidence_count']!r}",
+            f"unpack_evidence_count={expected_count!r}",
             "window_count",
         )
     for window in windows:
@@ -829,6 +859,95 @@ def _validate_selection_recipe(index: int, recipe: Mapping[str, Any]) -> tuple[s
     return digest, "ACT", str(recipe["site_key"])
 
 
+#: Op payload fields whose presence contradicts the structure-only marker
+#: (a structure-only capture never retains values). Version metadata and
+#: RNG-state families are deliberately not in this set.
+_OP_VALUE_PAYLOAD_FIELDS = (
+    "out",
+    "saved_args",
+    "saved_kwargs",
+    "transformed_out",
+    "grad",
+    "transformed_grad",
+)
+
+
+def _structure_only_invalid(message: str, reason: str) -> NoReturn:
+    """Raise a typed structure-only marker-coherence load refusal.
+
+    Parameters
+    ----------
+    message:
+        Structural violation detail.
+    reason:
+        Machine-readable failure class.
+
+    Raises
+    ------
+    TorchLensIOError
+        Always.
+    """
+
+    _refuse(
+        message,
+        code="artifact_structure_only_incoherent",
+        field="Trace.structure_only",
+        reason=reason,
+        remedy=(
+            "re-capture and re-save with one current TorchLens version; do "
+            "not hand-edit the structure-only marker, payloads, or the "
+            "verification verdict"
+        ),
+    )
+
+
+def _validate_structure_only_coherence(trace: Trace) -> None:
+    """Validate the structure-only marker's coherence rules (M-C2/M-C3).
+
+    M-C2: a marked trace carrying ANY retained value payload is incoherent
+    (structure-only captures retain no values). M-C3: a marked trace claiming
+    ``capture_verified=True`` is incoherent (verification requires values);
+    this runs BEFORE the ``__setstate__`` no-claim degradation, so the forged
+    positive claim refuses loudly rather than degrading silently.
+
+    SCOPE STATEMENT (M-C1, form (a)): a stripped-marker structure-only
+    artifact carries no load-visible anchor on the current persistence
+    surface — its input digests are absent (no payloads to hash), its
+    param/buffer geometry records are device-neutral, and payload-free
+    ordinary captures are legal — so marker ABSENCE is undetectable without
+    refusing legal artifacts (the same t3b conclusion the L7a memo states
+    for form (b)). Coherence therefore validates the marker's PRESENCE,
+    never its absence.
+
+    Parameters
+    ----------
+    trace:
+        Loaded trace carrying the optional structure-only marker.
+    """
+
+    marker = trace.__dict__.get("structure_only")
+    if marker in (None, False):
+        return
+    if marker is not True:
+        _structure_only_invalid(
+            f"expected a bool marker, got {marker!r}",
+            "type",
+        )
+    if trace.__dict__.get("capture_verified") is True:
+        _structure_only_invalid(
+            "capture_verified=True on a structure-only capture (verification requires values)",
+            "verification_claim",
+        )
+    for op in _trace_ops(trace):
+        for field_name in _OP_VALUE_PAYLOAD_FIELDS:
+            if getattr(op, field_name, None) is not None:
+                _structure_only_invalid(
+                    f"op {getattr(op, 'label', '<unknown>')!r} retains a value "
+                    f"payload in {field_name!r} under the structure-only marker",
+                    "value_payload_present",
+                )
+
+
 def _kernel_invalid(message: str, reason: str) -> NoReturn:
     """Raise a typed kernel-telemetry load refusal.
 
@@ -886,8 +1005,32 @@ def _validate_kernel_telemetry(trace: Trace) -> None:
         _kernel_invalid(
             "_relations must be a sequence of (sequence, launch_index) pairs", "relations_type"
         )
+    _validate_kernel_relations(trace, relations, launches)
+    if not available and (len(launches) != 1 or not _is_unavailable_launch(launches[0])):
+        _kernel_invalid(
+            "_available=False must carry exactly one fact-free 'unavailable' launch row",
+            "unavailable_coherence",
+        )
 
-    profile = getattr(trace, "_primitive_op_profile", None)
+
+def _validate_kernel_relations(
+    trace: Trace,
+    relations: Sequence[Any],
+    launches: Sequence[Any],
+) -> None:
+    """Validate telemetry relation rows against their two foreign-key spaces.
+
+    Parameters
+    ----------
+    trace:
+        Loaded trace carrying the primitive profile the rows cite.
+    relations:
+        Candidate ``(sequence, launch_index)`` relation rows.
+    launches:
+        Validated launch rows the indices must land in.
+    """
+
+    profile = trace.__dict__.get("_primitive_op_profile")
     primitive_rows = tuple(getattr(profile, "primitive_ops", ()) or ())
     primitive_sequences = {
         sequence for row in primitive_rows if _is_int(sequence := getattr(row, "sequence", None))
@@ -913,12 +1056,6 @@ def _validate_kernel_telemetry(trace: Trace) -> None:
         if normalized in seen_relations:
             _kernel_invalid(f"duplicate relation row {normalized!r}", "duplicate_relation")
         seen_relations.add(normalized)
-    if not available:
-        if len(launches) != 1 or not _is_unavailable_launch(launches[0]):
-            _kernel_invalid(
-                "_available=False must carry exactly one fact-free 'unavailable' launch row",
-                "unavailable_coherence",
-            )
 
 
 def _validate_kernel_launch(index: int, launch: Any) -> None:

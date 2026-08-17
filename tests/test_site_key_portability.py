@@ -160,11 +160,15 @@ def test_g4_marked_streaming_artifact_refuses_switch_off(tmp_path) -> None:
 
 
 @pytest.mark.smoke
-def test_g5_legacy_v7_artifact_loads_keyless_and_refuses_typed(tmp_path) -> None:
-    trace = tl.trace(_Tied(), torch.randn(2, 8))
-    path = tmp_path / "legacy.tlspec"
-    tl.save(trace, str(path))  # ordinary v7 write: site_key is DROPped
-    loaded = tl.load(str(path))
+def test_g5_legacy_v7_artifact_loads_keyless_and_refuses_typed() -> None:
+    import warnings
+    from pathlib import Path
+
+    fixture = Path(__file__).parent / "fixtures" / "tlspec_v7" / "tiny_v7.tlspec"
+    with warnings.catch_warnings():
+        # The checked-in pre-bump artifact loads with the age advisory.
+        warnings.simplefilter("ignore")
+        loaded = tl.load(str(fixture))  # real v7 write: site_key was DROPped
     assert set(_keys(loaded).values()) == {None}
     # Out of the invariant's declared domain: validation skips, never reds.
     assert check_metadata_invariants(loaded)

@@ -12,7 +12,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens import _state
-from torchlens._io import PreReleaseArtifactError, TorchLensIOError
+from torchlens._io import TorchLensIOError
 from torchlens._io.prerelease import activate_prerelease_fields
 from torchlens.backends.torch._aten_capture import _activate_aten_recording_for_tests
 from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
@@ -396,25 +396,17 @@ def test_slash_module_address_does_not_enter_parent_or_opaque_aten_labels() -> N
         assert all("/" not in ref.op_label for ref in row.parent_op_refs)
 
 
-def test_prerelease_round_trip_and_default_drop(tmp_path: Path) -> None:
-    """The registrar switch round-trips rows while ordinary v7 omits them."""
+def test_plain_v8_round_trip_persists_the_profile(tmp_path: Path) -> None:
+    """tlspec v8: the primitive profile persists on a PLAIN save/load."""
 
     trace = _armed_trace()
-    switched_path = tmp_path / "switched.tlspec"
     default_path = tmp_path / "default.tlspec"
-
-    with activate_prerelease_fields():
-        tl.save(trace, switched_path)
-        loaded = tl.load(switched_path)
+    tl.save(trace, default_path)
+    loaded = tl.load(default_path)
     assert len(loaded._primitive_op_profile.primitive_ops) == len(
         trace._primitive_op_profile.primitive_ops
     )
     assert check_metadata_invariants(loaded)
-    with pytest.raises(PreReleaseArtifactError):
-        tl.load(switched_path)
-
-    tl.save(trace, default_path)
-    assert tl.load(default_path)._primitive_op_profile is None
 
 
 @pytest.mark.parametrize("tamper_kind", ["dangling", "forged"])

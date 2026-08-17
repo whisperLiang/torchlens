@@ -21,10 +21,6 @@ from typing import Any, ClassVar
 import torch
 
 from ._io import FieldPolicy, _json
-from ._io.prerelease import (
-    register_prerelease_annotations_key,
-    register_prerelease_field,
-)
 from .data_classes.aten_op import AtenOp
 from .data_classes.op import Op
 
@@ -53,12 +49,12 @@ class KernelLaunch:
     attribution_status: str
 
     PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
-        "launch_name": FieldPolicy.DROP,
-        "device": FieldPolicy.DROP,
-        "stream": FieldPolicy.DROP,
-        "duration": FieldPolicy.DROP,
-        "runtime_correlation": FieldPolicy.DROP,
-        "attribution_status": FieldPolicy.DROP,
+        "launch_name": FieldPolicy.KEEP,
+        "device": FieldPolicy.KEEP,
+        "stream": FieldPolicy.KEEP,
+        "duration": FieldPolicy.KEEP,
+        "runtime_correlation": FieldPolicy.KEEP,
+        "attribution_status": FieldPolicy.KEEP,
     }
 
 
@@ -81,9 +77,9 @@ class _TelemetryPayload:
     _relations: tuple[tuple[int, int], ...]
 
     PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
-        "_available": FieldPolicy.DROP,
-        "_launches": FieldPolicy.DROP,
-        "_relations": FieldPolicy.DROP,
+        "_available": FieldPolicy.KEEP,
+        "_launches": FieldPolicy.KEEP,
+        "_relations": FieldPolicy.KEEP,
     }
 
 
@@ -674,16 +670,10 @@ def _profile_trace_with_cuda_kernels(factory: Callable[[], Any]) -> Any:
     return trace
 
 
-def _register_prerelease_rows() -> None:
-    """Register telemetry rows and their private annotation section with S3."""
-
-    for owner in (KernelLaunch, _TelemetryPayload):
-        for field_name in owner.PORTABLE_STATE_SPEC:
-            register_prerelease_field(owner, field_name, persisted_policy=FieldPolicy.KEEP)
-    register_prerelease_annotations_key(_ANNOTATION_KEY, owner="L3 kernel telemetry")
-
-
-_register_prerelease_rows()
+# The tlspec v8 coordinated bump retired the telemetry S3 pre-release rows:
+# KernelLaunch/_TelemetryPayload declare FieldPolicy.KEEP directly and the
+# private annotations section persists plainly, validated at load by
+# torchlens/_io/forgery_validation.py.
 _install_gpu_kernel_properties()
 
 __all__ = ["KernelLaunch"]

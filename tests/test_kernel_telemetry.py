@@ -15,7 +15,7 @@ from torch import nn
 import torchlens as tl
 from torchlens import kernel_telemetry as telemetry
 from torchlens._io import FieldPolicy
-from torchlens._io.prerelease import activate_prerelease_fields, registered_prerelease_fields
+from torchlens._io.prerelease import registered_prerelease_fields
 from torchlens.kernel_telemetry import KernelLaunch
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -232,7 +232,7 @@ def test_scoped_marker_instrumentation_restores_exact_core_functions() -> None:
 
 @pytest.mark.smoke
 def test_cpu_host_records_unavailable_views_and_drop_gated_annotation(tmp_path: Path) -> None:
-    """CPU capture discloses NOT-RUN and ordinary v7 drops the telemetry section."""
+    """CPU capture discloses NOT-RUN; plain v8 saves persist the telemetry section."""
 
     if torch.cuda.is_available():
         pytest.skip("CPU-only NOT-RUN disclosure row applies only without CUDA")
@@ -256,25 +256,23 @@ def test_cpu_host_records_unavailable_views_and_drop_gated_annotation(tmp_path: 
 
     default_path = tmp_path / "default.tlspec"
     tl.save(trace, default_path)
-    assert "_kernel_telemetry" not in tl.load(default_path).annotations
-
-    switched_path = tmp_path / "switched.tlspec"
-    with activate_prerelease_fields():
-        tl.save(trace, switched_path)
-        loaded = tl.load(switched_path)
+    loaded = tl.load(default_path)
+    # tlspec v8: the telemetry annotation section persists on a plain save.
+    assert "_kernel_telemetry" in loaded.annotations
     telemetry._bind_trace_telemetry(loaded)
     assert loaded.ops[0].gpu_kernels[0].attribution_status == "unavailable"
 
 
 @pytest.mark.smoke
-def test_kernel_rows_are_registered_drop_gated_with_the_s3_registrar() -> None:
-    """Every telemetry field and annotation section enters via the registrar."""
+def test_kernel_rows_persist_and_registrations_are_retired() -> None:
+    """tlspec v8: telemetry rows declare KEEP directly; registrations retired."""
 
     inventory = registered_prerelease_fields()
-    assert inventory["KernelLaunch"] == tuple(sorted(KernelLaunch.PORTABLE_STATE_SPEC))
-    assert inventory["_TelemetryPayload"] == ("_available", "_launches", "_relations")
-    assert "_kernel_telemetry" in inventory["Trace.annotations"]
-    assert set(KernelLaunch.PORTABLE_STATE_SPEC.values()) == {FieldPolicy.DROP}
+    assert "KernelLaunch" not in inventory
+    assert "_TelemetryPayload" not in inventory
+    assert "Trace.annotations" not in inventory
+    assert set(KernelLaunch.PORTABLE_STATE_SPEC.values()) == {FieldPolicy.KEEP}
+    assert set(telemetry._TelemetryPayload.PORTABLE_STATE_SPEC.values()) == {FieldPolicy.KEEP}
 
 
 def _imported_modules(path: Path) -> set[str]:

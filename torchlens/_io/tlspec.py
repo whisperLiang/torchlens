@@ -361,41 +361,18 @@ class _TlSpecWriter:
 
     @staticmethod
     def _add_gated_member_relations(bundle: Any, bundle_metadata: dict[str, Any]) -> None:
-        """Write the GATED S6 ``member_relations`` key into ``bundle.json``.
+        """Write the S6 ``member_relations`` key into ``bundle.json``.
 
-        S3 version discipline: the key is a NEW persistence write path under
-        the frozen tlspec version, so it rides an artifact ONLY beneath the
-        test-only pre-release switch — stamped with the pre-release marker so
-        the load path refuses it typed outside the switch. With the switch
-        inactive, a non-empty table is DROPPED from the artifact with one
-        disclosed :class:`TorchLensWarning` (sanctioned disclosed truth loss
-        until the coordinated wave-3 bump).
+        The key persists plainly as of the tlspec v8 coordinated bump; the
+        load side validates it against the closed S6 row schema and re-checks
+        R1 against the loaded member names. An empty table writes nothing
+        (S6 R7: absence means a plain bundle).
         """
 
         relation_table = getattr(bundle, "_member_relations", None)
         if relation_table is None or len(relation_table.rows) == 0:
             return
-        from .prerelease import PRERELEASE_MARKER, PRERELEASE_STATE_KEY, prerelease_fields_active
-
-        if prerelease_fields_active():
-            bundle_metadata["member_relations"] = relation_table.to_payload()
-            bundle_metadata[PRERELEASE_STATE_KEY] = {
-                "marker": PRERELEASE_MARKER,
-                "fields": ["Bundle.member_relations"],
-            }
-            return
-        import warnings
-
-        from ..errors import TorchLensWarning
-
-        warnings.warn(
-            "This bundle carries member relations, which do not persist under "
-            "the current tlspec version: the 'member_relations' key is dropped "
-            "from the artifact and a reload yields a plain Bundle without "
-            "relations. The coordinated tlspec version bump activates the key.",
-            TorchLensWarning,
-            stacklevel=4,
-        )
+        bundle_metadata["member_relations"] = relation_table.to_payload()
 
     @classmethod
     def _write_bundle_members(

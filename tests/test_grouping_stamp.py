@@ -17,6 +17,7 @@ import torch.nn as nn
 
 import torchlens as tl
 from torchlens._errors import InvalidArgumentError
+from torchlens._io import ArtifactSchemaAgeWarning
 from torchlens._io.prerelease import activate_prerelease_fields
 from torchlens.errors._base import TorchLensWarning
 from torchlens.postprocess._grouping_stamp import (
@@ -251,14 +252,27 @@ def test_g3_degraded_settlement_roundtrips_byte_stable(tmp_path) -> None:
 
 
 @pytest.mark.smoke
-def test_g5_legacy_v7_artifact_settles_silently(tmp_path) -> None:
-    trace = _tiny_trace()
-    path = tmp_path / "legacy.tlspec"
-    tl.save(trace, str(path))  # ordinary v7 write: the stamp is DROPped
+def test_g5_legacy_v7_artifact_settles_silently() -> None:
+    from pathlib import Path
+
+    fixture = Path(__file__).parent / "fixtures" / "tlspec_v7" / "tiny_v7.tlspec"
     with warnings.catch_warnings():
+        # Silent wrt TorchLensWarning; the version-age advisory is expected.
         warnings.simplefilter("error", TorchLensWarning)
-        loaded = tl.load(str(path))
+        warnings.simplefilter("default", ArtifactSchemaAgeWarning)
+        loaded = tl.load(str(fixture))  # real v7 write: the stamp was DROPped
     assert loaded.grouping_policy == degraded_grouping_policy_stamp("legacy")
     assert loaded.grouping_policy["settlement_note"] == "grouping_stamp_legacy"
     # The mirror field restores its default.
+    assert loaded.grouping == "structural"
+
+
+def test_healthy_stamp_persists_on_plain_v8_round_trip(tmp_path) -> None:
+    trace = _tiny_trace()
+    path = tmp_path / "fresh.tlspec"
+    tl.save(trace, str(path))  # tlspec v8: the stamp persists plainly
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", TorchLensWarning)
+        loaded = tl.load(str(path))
+    assert loaded.grouping_policy == trace.grouping_policy
     assert loaded.grouping == "structural"

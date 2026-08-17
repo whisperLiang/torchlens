@@ -1,4 +1,4 @@
-"""DROP-gated primitive-operation records for the wave-0 ATen profile."""
+"""Primitive-operation records for the ATen profile (persisted, tlspec v8)."""
 
 from __future__ import annotations
 
@@ -6,10 +6,8 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 from .._io import TLSPEC_VERSION, FieldPolicy, read_tlspec_version
-from .._io.prerelease import register_prerelease_field
 from .._trace_core.record_rows import install_record_facade as _install_record_facade
 from ..constants import PRIMITIVE_OP_FIELD_ORDER
-from ..ir.events import _AtenExecutionContext, _AtenTensorFact
 from .field_policy import build_record_field_policy_table, portable_state_spec_from_policy
 
 
@@ -22,9 +20,9 @@ class OpRef:
     func_call_id: int
 
     PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
-        "op_row_index": FieldPolicy.DROP,
-        "op_label": FieldPolicy.DROP,
-        "func_call_id": FieldPolicy.DROP,
+        "op_row_index": FieldPolicy.KEEP,
+        "op_label": FieldPolicy.KEEP,
+        "func_call_id": FieldPolicy.KEEP,
     }
 
 
@@ -41,19 +39,19 @@ class _ModePausedInteriorGap:
     reason: str
 
     PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
-        "kind": FieldPolicy.DROP,
-        "capture_phase": FieldPolicy.DROP,
-        "sequence_before": FieldPolicy.DROP,
-        "sequence_after": FieldPolicy.DROP,
-        "owner_func_call_id": FieldPolicy.DROP,
-        "parent_op_refs": FieldPolicy.DROP,
-        "reason": FieldPolicy.DROP,
+        "kind": FieldPolicy.KEEP,
+        "capture_phase": FieldPolicy.KEEP,
+        "sequence_before": FieldPolicy.KEEP,
+        "sequence_after": FieldPolicy.KEEP,
+        "owner_func_call_id": FieldPolicy.KEEP,
+        "parent_op_refs": FieldPolicy.KEEP,
+        "reason": FieldPolicy.KEEP,
     }
 
 
 @dataclass
 class _PrimitiveOpProfile:
-    """DROP-gated Trace section carrying primitive rows and disclosure gaps."""
+    """Trace section carrying primitive rows and disclosure gaps."""
 
     primitive_ops: list[AtenOp] = field(default_factory=list)
     mode_paused_interior: list[_ModePausedInteriorGap] = field(default_factory=list)
@@ -61,10 +59,10 @@ class _PrimitiveOpProfile:
     _event_owner_evidence: tuple[tuple[int, int | None], ...] = ()
 
     PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
-        "primitive_ops": FieldPolicy.DROP,
-        "mode_paused_interior": FieldPolicy.DROP,
-        "aten_event_watermark": FieldPolicy.DROP,
-        "_event_owner_evidence": FieldPolicy.DROP,
+        "primitive_ops": FieldPolicy.KEEP,
+        "mode_paused_interior": FieldPolicy.KEEP,
+        "aten_event_watermark": FieldPolicy.KEEP,
+        "_event_owner_evidence": FieldPolicy.KEEP,
     }
 
 
@@ -106,7 +104,7 @@ class AtenOp:
     execution_context: Any = None
 
     _PORTABLE_STATE_POLICY: ClassVar[dict[str, FieldPolicy]] = dict.fromkeys(
-        PRIMITIVE_OP_FIELD_ORDER, FieldPolicy.DROP
+        PRIMITIVE_OP_FIELD_ORDER, FieldPolicy.KEEP
     )
     FIELD_POLICY = build_record_field_policy_table(
         PRIMITIVE_OP_FIELD_ORDER,
@@ -162,23 +160,10 @@ class AtenOp:
 _PRIMITIVE_OP_STORE_LAYOUT = _install_record_facade(AtenOp, tuple(PRIMITIVE_OP_FIELD_ORDER))
 
 
-def _register_primitive_prerelease_fields() -> None:
-    """Register every gated primitive-profile field with the S3 registrar."""
-
-    owners: tuple[tuple[type, tuple[str, ...]], ...] = (
-        (AtenOp, tuple(PRIMITIVE_OP_FIELD_ORDER)),
-        (OpRef, tuple(OpRef.PORTABLE_STATE_SPEC)),
-        (_ModePausedInteriorGap, tuple(_ModePausedInteriorGap.PORTABLE_STATE_SPEC)),
-        (_PrimitiveOpProfile, tuple(_PrimitiveOpProfile.PORTABLE_STATE_SPEC)),
-        (_AtenTensorFact, tuple(_AtenTensorFact.PORTABLE_STATE_SPEC)),
-        (_AtenExecutionContext, tuple(_AtenExecutionContext.PORTABLE_STATE_SPEC)),
-    )
-    for owner, names in owners:
-        for name in names:
-            register_prerelease_field(owner, name, persisted_policy=FieldPolicy.KEEP)
-
-
-_register_primitive_prerelease_fields()
+# The tlspec v8 coordinated bump retired the primitive-profile S3 pre-release
+# registrations: every profile record class above declares FieldPolicy.KEEP
+# directly, and loaded profiles validate through
+# validate_loaded_primitive_profile whenever present.
 
 
 __all__ = ["AtenOp", "OpRef", "PRIMITIVE_OP_FIELD_ORDER"]

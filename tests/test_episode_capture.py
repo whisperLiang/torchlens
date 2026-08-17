@@ -18,8 +18,6 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
-from torchlens._io import PreReleaseArtifactError
-from torchlens._io.prerelease import activate_prerelease_fields
 from torchlens.capture._episode_ledger import (
     EpisodeLedger,
     derive_episode_status,
@@ -438,28 +436,18 @@ def test_value_mode_all_complete_ledger_requires_tokens():
 # ---------------------------------------------------------------------------
 
 
-def test_episode_key_never_rides_v7_artifacts(tmp_path):
+def test_episode_key_rides_plain_v8_artifacts(tmp_path):
+    """tlspec v8: the episode ledger persists on a PLAIN save/load, byte-
+    faithful, with no pre-release marker riding the artifact."""
+
     log = _capture_episode(n_steps=2)
     path = tmp_path / "plain.tlspec"
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         tl.save(log, path)
     loaded = tl.load(path)
-    assert "episode" not in loaded.annotations
+    assert loaded.annotations["episode"] == log.annotations["episode"]
     assert "episode" in log.annotations  # live trace keeps its session ledger
-
-
-def test_episode_key_roundtrips_under_activation_switch(tmp_path):
-    log = _capture_episode(n_steps=2)
-    path = tmp_path / "switched.tlspec"
-    with activate_prerelease_fields():
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            tl.save(log, path)
-        loaded = tl.load(path)
-        assert loaded.annotations["episode"] == log.annotations["episode"]
-    with pytest.raises(PreReleaseArtifactError):
-        tl.load(path)  # switched artifact refuses without the switch
 
 
 # ---------------------------------------------------------------------------

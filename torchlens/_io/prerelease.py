@@ -299,11 +299,6 @@ def validate_prerelease_state(state: dict[str, Any], *, cls_name: str) -> None:
 # ---------------------------------------------------------------------------
 # Live sprint-gated registrations (S3 registrar inventory rows). Each row is
 # retired at the coordinated tlspec version bump that activates its family.
+# The tlspec v8 bump (2026-08-17) retired every feature-megasprint row; the
+# registry is empty again until the next sprint gates a new family here.
 # ---------------------------------------------------------------------------
-
-#: S7 episode ledger home (L2): ``trace.annotations["episode"]`` carries the
-#: capture_kind=episode marker + per-step status ledger; gated off under the
-#: frozen tlspec version, activated at the wave-3 coordinated bump.
-register_prerelease_annotations_key(
-    "episode", owner="L2 episode ledger (capture_kind=episode, S7 contract)"
-)

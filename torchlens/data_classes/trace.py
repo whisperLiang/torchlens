@@ -67,7 +67,6 @@ from .._io import (
     default_fill_state,
     read_tlspec_version,
 )
-from .._io.prerelease import register_prerelease_field
 from .._runnable_seam import (
     RunnableTraceState,
     normalize_runnable_trace_state,
@@ -1229,17 +1228,15 @@ class Trace(
         "tlspec_version": FieldPolicy.KEEP,
         "_tracing_finished": FieldPolicy.KEEP,
         "capture_mode": FieldPolicy.KEEP,
-        # L7a structure-only mode marker (S3 registrar discipline): declared
-        # DROP under tlspec v7 and registered with the pre-release registrar
-        # (see the register_prerelease_field call after this class body); the
-        # wave-3 coordinated bump flips it to KEEP together with the M-C1..C3
-        # load-validation rows. Never a silent v7 schema change.
-        "structure_only": FieldPolicy.DROP,
-        # L6 resolved-intervention audit record (S3 registrar discipline):
-        # DROP under v7, registered with the pre-release registrar; the
-        # wave-3 bump flips it to KEEP (reprs/identities/digests only, never
-        # raw values). Never a silent v7 schema change.
-        "intervention_audit": FieldPolicy.DROP,
+        # L7a structure-only mode marker: persists as of tlspec v8 (the
+        # coordinated bump) with the marker-coherence load-validation rows in
+        # torchlens/_io/forgery_validation.py (M-C2/M-C3; M-C1's form-(a)
+        # stripped-marker case is a documented scope statement there).
+        "structure_only": FieldPolicy.KEEP,
+        # L6 resolved-intervention audit record: persists as of tlspec v8
+        # (reprs/identities/digests only, never raw values) with its load
+        # validation in torchlens/_io/forgery_validation.py.
+        "intervention_audit": FieldPolicy.KEEP,
         "_runnable": FieldPolicy.DROP,
         "_fast_run_session": FieldPolicy.DROP,
         "_distributed_plane_p": FieldPolicy.DROP,
@@ -1369,21 +1366,20 @@ class Trace(
         "save_code_context": FieldPolicy.KEEP,
         "save_rng_states": FieldPolicy.KEEP,
         "recurrence_detection": FieldPolicy.KEEP,
-        # L1 grouping surface: DROP under tlspec v7, prerelease-registered
-        # (S3 discipline); flips to persisting at the coordinated bump.
-        "grouping": FieldPolicy.DROP,
-        "grouping_policy": FieldPolicy.DROP,
-        # L8/F6 shard-local capture marker (merge-ranks C2 substrate): declared
-        # DROP under tlspec v7 and registered with the S3 pre-release registrar
-        # below; the wave-3 coordinated bump flips it to persisting WITH the
-        # marker-coherence load-validation rows. Value vocabulary
+        # L1 grouping surface: persists as of tlspec v8; the grouping-policy
+        # stamp validates at load (C1-C8, postprocess/_grouping_stamp.py).
+        "grouping": FieldPolicy.KEEP,
+        "grouping_policy": FieldPolicy.KEEP,
+        # L8/F6 shard-local capture marker (merge-ranks C2 substrate):
+        # persists as of tlspec v8 with the closed-vocabulary load validation
+        # in torchlens/_io/forgery_validation.py. Value vocabulary
         # ("rank_local_shard") is DOCUMENTED-UNSTABLE pending its S2 amendment.
-        "distributed_scope": FieldPolicy.DROP,
-        # L9 backward-residuals surface: DROP under tlspec v7, prerelease-
-        # registered (S3 discipline); both flip to persisting at the
-        # coordinated bump. Value vocabularies provisional (E-L9-4 routing).
-        "grad_fn_timing_provenance": FieldPolicy.DROP,
-        "checkpoint_invocation_witness": FieldPolicy.DROP,
+        "distributed_scope": FieldPolicy.KEEP,
+        # L9 backward-residuals surface: both persist as of tlspec v8 with
+        # closed-vocabulary load validation in _io/forgery_validation.py.
+        # Value vocabularies provisional (E-L9-4 routing).
+        "grad_fn_timing_provenance": FieldPolicy.KEEP,
+        "checkpoint_invocation_witness": FieldPolicy.KEEP,
         "verbose": FieldPolicy.KEEP,
         "profile_enabled": FieldPolicy.KEEP,
         "has_gradients": FieldPolicy.KEEP,
@@ -1506,9 +1502,9 @@ class Trace(
         # from its own state, and .tlspec artifacts stay object-shaped until
         # the M11 direct semantic serialization.
         "_trace_core": FieldPolicy.DROP,
-        # Wave-0 primitive profile: the S3 registrar substitutes KEEP only
-        # beneath its pytest-only activation switch. Ordinary tlspec v7 omits it.
-        "_primitive_op_profile": FieldPolicy.DROP,
+        # L3 primitive-op profile: persists as of tlspec v8; loaded profiles
+        # validate through validate_loaded_primitive_profile whenever present.
+        "_primitive_op_profile": FieldPolicy.KEEP,
         "_pre_forward_rng_states": FieldPolicy.DROP,
         # r63 C1: pre-clone per-slot state metadata signatures (producer-side only,
         # never portable) and the buffer storage-pointer attribution index.
@@ -3225,9 +3221,9 @@ class Trace(
         # retain the previous trace's events and re-serialize them later).
         state.pop("_capture_events", None)
         self.__dict__.update(state)
-        from .._io.prerelease import prerelease_fields_active
-
-        if prerelease_fields_active() and self.__dict__.get("_primitive_op_profile") is not None:
+        # A persisted primitive-op profile (tlspec v8) is hostile artifact
+        # input: validate its foreign keys whenever one is present.
+        if self.__dict__.get("_primitive_op_profile") is not None:
             from ..validation._invariants_primitive_ops import validate_loaded_primitive_profile
 
             validate_loaded_primitive_profile(self)
@@ -3861,37 +3857,7 @@ class Trace(
 Trace.FIELD_FORK_POLICY = fork_policy_from_policy(Trace.FIELD_POLICY)  # type: ignore[attr-defined]
 Trace.DEFAULT_FILL_STATE = default_fill_state_from_policy(Trace.FIELD_POLICY)  # type: ignore[attr-defined]
 
-# S3-gated wave-0 primitive profile hook. The registrar accepts only the
-# declared DROP policy above and substitutes KEEP solely in its pytest switch.
-register_prerelease_field(Trace, "_primitive_op_profile", persisted_policy=FieldPolicy.KEEP)
-
-# L7a mode marker rides the S3 pre-release registrar: declared FieldPolicy.DROP
-# above (no schema change under tlspec v7), registered here so portability exit
-# gates can round-trip it under the test-only activation switch, and flipped to
-# the persisting policy at the wave-3 coordinated bump (which retires this
-# registration together with the M-C1..C3 load-validation rows).
-register_prerelease_field(Trace, "structure_only", persisted_policy=FieldPolicy.KEEP)
-register_prerelease_field(Trace, "intervention_audit", persisted_policy=FieldPolicy.KEEP)
-
-# L1 grouping surface: the knob mirror + the grouping-policy stamp, declared
-# FieldPolicy.DROP above and registered so the portability exit gates can
-# round-trip them under the test-only switch; flipped to persisting at the
-# wave-3 coordinated bump.
-register_prerelease_field(Trace, "grouping")
-register_prerelease_field(Trace, "grouping_policy")
-
-# L8/F6 shard-local marker (merge-ranks C2 substrate): declared FieldPolicy.DROP
-# above, registered so the portability exit gates can round-trip it under the
-# test-only switch; flipped to persisting at the wave-3 coordinated bump
-# TOGETHER with the marker-coherence load-validation rows (census plan 3.2b/3.3
-# -- the ordinary-save erasure-prevention invariant in _io/bundle.py keys on
-# exactly this policy state).
-register_prerelease_field(Trace, "distributed_scope")
-
-# L9 backward-residuals surface: the per-fire timing clock-provenance marker
-# and the checkpoint-invocation witness, declared FieldPolicy.DROP above and
-# registered so the portability exit gates can round-trip them under the
-# test-only switch; flipped to persisting at the wave-3 coordinated bump
-# (memo 1.3 / 2.3; value vocabularies ride E-L9-4 routing).
-register_prerelease_field(Trace, "grad_fn_timing_provenance")
-register_prerelease_field(Trace, "checkpoint_invocation_witness")
+# The tlspec v8 coordinated bump retired this class's S3 pre-release
+# registrations: every formerly gated Trace field above now declares its
+# persisting policy directly. The registrar mechanism itself stays for
+# future sprints (torchlens/_io/prerelease.py).

@@ -103,15 +103,22 @@ def test_binding_axes_are_coherent(schema_key: str) -> None:
 
 
 @pytest.mark.smoke
-def test_primitive_candidate_bindings_are_isolated_from_installed_runtime_rows() -> None:
-    """S3 candidate kinds are auditable without activating physical bindings."""
+def test_primitive_bindings_match_the_promoted_candidate_kinds() -> None:
+    """The tlspec v8 bump installed the S3 candidate kinds for real.
+
+    Pre-bump this pinned the installed rows to all-RUNTIME (DROP policies)
+    with the candidate table isolated; the bump promoted every primitive
+    policy to KEEP, so the installed bindings must now equal the candidate
+    classification exactly.
+    """
 
     from tools.generate_record_schema import collect_primitive_candidate_bindings
 
     candidate = collect_primitive_candidate_bindings()
-    assert {binding.kind for binding in STORAGE_BINDINGS["primitive_op"].values()} == {
-        StorageKind.RUNTIME
+    installed = {
+        name: binding.kind.name for name, binding in STORAGE_BINDINGS["primitive_op"].items()
     }
+    assert installed == candidate
     assert candidate["parent_op_refs"] == "EDGE"
     assert candidate["module_call_stack"] == "EDGE"
     assert candidate["input_tensor_facts"] == "SCALAR"

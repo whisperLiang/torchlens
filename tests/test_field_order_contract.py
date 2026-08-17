@@ -48,7 +48,16 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
         # lockstep); ops_with_params left this set when 00bc67d3 flipped the
         # computed field KEEP->DROP (recomputed on load, nothing portable left
         # to document).
-        portable_only_fields=frozenset({"_buffer_initial_values"}),
+        # The tlspec v8 bump made three unordered runtime rows portable:
+        # the L3 primitive profile and the two L9 backward-residual markers.
+        portable_only_fields=frozenset(
+            {
+                "_buffer_initial_values",
+                "_primitive_op_profile",
+                "checkpoint_invocation_witness",
+                "grad_fn_timing_provenance",
+            }
+        ),
         dropped_display_fields=frozenset(
             {
                 "_code_context_cache",
@@ -98,34 +107,16 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
                 "escape_diagnostics",
                 "facet_registry_snapshot",
                 "grad_transform",
-                # grouping / grouping_policy are the L1 wave-0 grouping
-                # surface: the request mirror and the grouping_policy_v1
-                # stamp are ordered display fields but stay session-time
-                # (FieldPolicy.DROP, pre-release-registered) until the
-                # coordinated tlspec v7 persistence bump; loads settle the
-                # canonical legacy degraded representation instead.
-                "grouping",
-                "grouping_policy",
-                # distributed_scope is the L8/F6 trace-wide shard-local
-                # marker: ordered for disclosure, but DROP and prerelease-
-                # registered until the coordinated persistence bump.
-                "distributed_scope",
-                # intervention_audit is the L6 selection do() audit trail
-                # (query repr + resolve digest + relations): an ordered
-                # display field, session-time (FieldPolicy.DROP,
-                # pre-release-registered) until the coordinated tlspec v7
-                # persistence bump.
-                "intervention_audit",
+                # grouping/grouping_policy, distributed_scope,
+                # intervention_audit, and structure_only left this ledger at
+                # the tlspec v8 coordinated bump: all five now persist
+                # (FieldPolicy.KEEP) with load validation.
                 "last_run",
                 "layer_visualizers",
                 "module_filter",
                 "num_modules",
                 "parent_run",
                 "replay_frontier",
-                # structure_only is the L7a wave-0 hypothesis-capture flag:
-                # an ordered display field, session-time (FieldPolicy.DROP,
-                # pre-release-registered) until the wave-3 persistence bump.
-                "structure_only",
             }
         ),
     ),
@@ -140,14 +131,9 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
                 "activation_transform",
                 "arg_expressions",
                 "args_template",
-                # edge_substitutions / edge_replacement_stamps are the L6
-                # stage-3 tier-(ii) edge-substitution store and its stamps:
-                # ordered display fields, session-time (FieldPolicy.DROP,
-                # pre-release-registered) until the coordinated tlspec v7
-                # persistence bump (the v7 save boundary refuses typed while
-                # entries are present).
-                "edge_replacement_stamps",
-                "edge_substitutions",
+                # edge_substitutions / edge_replacement_stamps and site_key
+                # left this ledger at the tlspec v8 coordinated bump: all
+                # three now persist with load validation.
                 "func",
                 "grad_fn",
                 "grad_fn_handle",
@@ -166,12 +152,6 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
                 "kwargs_template",
                 "num_inputs",
                 "raw_label",
-                # site_key is the L1 wave-0 per-op structural-position
-                # identity: an ordered display field, session-time
-                # (FieldPolicy.DROP, pre-release-registered) until the
-                # coordinated tlspec v7 persistence bump; loaded ops read
-                # None and site consumers refuse typed.
-                "site_key",
                 "source_trace",
             }
         ),

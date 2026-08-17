@@ -604,9 +604,19 @@ class GradFn:
 
     @property
     def total_backward_duration(self) -> Duration:
-        """Return total backward duration across all calls for this GradFn."""
+        """Return total backward duration across the MEASURED calls.
 
-        return Duration(sum(call.backward_duration for call in self.calls.values()))
+        Untimed fires (``backward_duration is None``) contribute nothing
+        rather than poisoning the sum; a wholly untimed GradFn totals 0.
+        """
+
+        return Duration(
+            sum(
+                duration
+                for call in self.calls.values()
+                if (duration := call.backward_duration) is not None
+            )
+        )
 
     def _log_call(self, grad_inputs: Any, grad_outputs: Any, timestamp: float) -> None:
         """Append one runtime hook firing to this grad_fn_handle log.

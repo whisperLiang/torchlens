@@ -55,16 +55,16 @@ class _AtenTensorFact:
     requires_grad: bool
 
     PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
-        "container_path": FieldPolicy.DROP,
-        "tensor_impl_capability": FieldPolicy.DROP,
-        "logical_version": FieldPolicy.DROP,
-        "storage_alias_group": FieldPolicy.DROP,
-        "shape": FieldPolicy.DROP,
-        "stride": FieldPolicy.DROP,
-        "dtype": FieldPolicy.DROP,
-        "device": FieldPolicy.DROP,
-        "layout": FieldPolicy.DROP,
-        "requires_grad": FieldPolicy.DROP,
+        "container_path": FieldPolicy.KEEP,
+        "tensor_impl_capability": FieldPolicy.KEEP,
+        "logical_version": FieldPolicy.KEEP,
+        "storage_alias_group": FieldPolicy.KEEP,
+        "shape": FieldPolicy.KEEP,
+        "stride": FieldPolicy.KEEP,
+        "dtype": FieldPolicy.KEEP,
+        "device": FieldPolicy.KEEP,
+        "layout": FieldPolicy.KEEP,
+        "requires_grad": FieldPolicy.KEEP,
     }
 
 
@@ -88,20 +88,20 @@ class _AtenExecutionContext:
     completeness_witness_mode: str
 
     PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
-        "pytorch_version": FieldPolicy.DROP,
-        "backend": FieldPolicy.DROP,
-        "device_model": FieldPolicy.DROP,
-        "device_capability": FieldPolicy.DROP,
-        "grad_mode": FieldPolicy.DROP,
-        "inference_mode": FieldPolicy.DROP,
-        "module_training_summary": FieldPolicy.DROP,
-        "autocast": FieldPolicy.DROP,
-        "deterministic_algorithms": FieldPolicy.DROP,
-        "tf32_matmul_policy": FieldPolicy.DROP,
-        "sdpa_policy": FieldPolicy.DROP,
-        "compile_stance": FieldPolicy.DROP,
-        "owner_thread_coverage": FieldPolicy.DROP,
-        "completeness_witness_mode": FieldPolicy.DROP,
+        "pytorch_version": FieldPolicy.KEEP,
+        "backend": FieldPolicy.KEEP,
+        "device_model": FieldPolicy.KEEP,
+        "device_capability": FieldPolicy.KEEP,
+        "grad_mode": FieldPolicy.KEEP,
+        "inference_mode": FieldPolicy.KEEP,
+        "module_training_summary": FieldPolicy.KEEP,
+        "autocast": FieldPolicy.KEEP,
+        "deterministic_algorithms": FieldPolicy.KEEP,
+        "tf32_matmul_policy": FieldPolicy.KEEP,
+        "sdpa_policy": FieldPolicy.KEEP,
+        "compile_stance": FieldPolicy.KEEP,
+        "owner_thread_coverage": FieldPolicy.KEEP,
+        "completeness_witness_mode": FieldPolicy.KEEP,
     }
 
 

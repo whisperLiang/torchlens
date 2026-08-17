@@ -73,10 +73,6 @@ _CONSTANT_SPELLED_CODES: dict[str, tuple[str, str]] = {
     # rows (require_structure_only_capability reads row.refusal_code), so the
     # inline-literal scanner cannot see them; each is spelled as a module
     # constant beside the table.
-    "structure_only_save_unsupported": (
-        "torchlens/capture/structure_only.py",
-        "STRUCTURE_ONLY_SAVE_UNSUPPORTED",
-    ),
     "structure_only_runnable_unsupported": (
         "torchlens/capture/structure_only.py",
         "STRUCTURE_ONLY_RUNNABLE_UNSUPPORTED",

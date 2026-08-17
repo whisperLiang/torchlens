@@ -8,7 +8,6 @@ from enum import Enum
 from typing import Any, ClassVar, Literal, TypeAlias
 
 from .._io import FieldPolicy
-from .._io.prerelease import register_prerelease_field
 from ..ir.container import (
     ContainerSpec,
     DataclassField,
@@ -184,11 +183,11 @@ class HelperSpec:
         "direction": FieldPolicy.KEEP,
         "batch_independent": FieldPolicy.KEEP,
         "compatible_with_append": FieldPolicy.KEEP,
-        # L6 Query-Selection recipe family (S3 registrar discipline): declared
-        # DROP under tlspec v7 and pre-release-registered; the wave-3 bump
-        # flips it to BLOB_RECURSIVE (recipe ASTs may embed unit-term masks).
-        # NEVER smuggled through the KEEP args/kwargs fields.
-        "selection_recipe": FieldPolicy.DROP,
+        # L6 Query-Selection recipe family: persists as of tlspec v8 as
+        # BLOB_RECURSIVE (recipe ASTs may embed unit-term masks), with the
+        # audit digest relation validated at load. NEVER smuggled through
+        # the KEEP args/kwargs fields.
+        "selection_recipe": FieldPolicy.BLOB_RECURSIVE,
     }
 
     helper_name: str
@@ -415,9 +414,8 @@ class FireRecord:
         "tuple_index": FieldPolicy.KEEP,
         "replaced": FieldPolicy.KEEP,
         # L6 stage 3: (child_func_call_id, arg_kind, arg_path) occurrence
-        # address on edge-substitution FireRecords. DROP under v7,
-        # pre-release-registered (KEEP at the wave-3 bump).
-        "edge_address": FieldPolicy.DROP,
+        # address on edge-substitution FireRecords; persists as of tlspec v8.
+        "edge_address": FieldPolicy.KEEP,
     }
 
     target_label: str = ""
@@ -882,10 +880,8 @@ LAYER_PASS_LOG_FIELD_FORK_POLICY = _build_op_log_fork_policy()
 #: (stable surface, no removal scheduled).
 Edit = HelperSpec
 
-register_prerelease_field(
-    HelperSpec, "selection_recipe", persisted_policy=FieldPolicy.BLOB_RECURSIVE
-)
-register_prerelease_field(FireRecord, "edge_address", persisted_policy=FieldPolicy.KEEP)
+# The tlspec v8 coordinated bump retired this module's S3 pre-release
+# registrations (HelperSpec.selection_recipe, FireRecord.edge_address).
 
 __all__ = [
     "Edit",
