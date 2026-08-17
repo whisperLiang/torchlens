@@ -191,6 +191,7 @@ add names to the top-level `torchlens` namespace:
 | `metric_tensor_type_invalid` | Metric operand is not a tensor | Pass tensor operands |
 | `metric_type_invalid` | Metric selector is neither a name nor callable | Pass a registered name or callable |
 | `module_call_ambiguous` | Single-call accessor on a multi-call module | Access one call via `module.calls[N]` |
+| `multipass_bare_label_ambiguous` | A bare layer label (exact string, `tl.label`, or `do`/`attach_hooks`/`push_from` string target) addressed a multi-pass (recurrence-grouped) layer: every pass is a distinct op, and a single-op consumer must never guess a pass (`SiteAmbiguityError`; the teaching message names the layer, its pass count, and every pass-qualified spelling; spelling DOCUMENTED-UNSTABLE). `tl.units` refuses the same case as `selection_unresolvable` / `multipass_bare_label` | Address one pass with a pass-qualified label (`label:pass`), or select every pass explicitly with the Layer selection (`log[label].__selection__()`) |
 | `node_label_field_invalid` | Node label field name is unknown | Pass documented label field names |
 | `node_overlay_invalid` | Node overlay name is unknown | Choose a supported overlay |
 | `op_lookup_index_out_of_range` | Integer layer index is out of range | Pass an in-range index |

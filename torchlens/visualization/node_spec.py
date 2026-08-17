@@ -345,9 +345,10 @@ def make_intervention_node_spec_fn(
     """
 
     # Build BOTH a pass-qualified site set (for unrolled per-pass Op nodes) and an
-    # aggregate site set (for rolled multi-pass Layer nodes). The cone stays
-    # layer-level -- cone_of_effect traverses by layer_label -- so reuse the
-    # aggregate cone labels from the stable public helper.
+    # aggregate site set (for rolled multi-pass Layer nodes). cone_of_effect
+    # traverses pass-qualified, but this overlay deliberately AGGREGATES the
+    # cone to layer_label (rolled nodes are layer-level), reusing the stable
+    # public helper's layer-label sets.
     site_ops = intervention_sites_for_log(trace)
     site_pass_labels: set[str] = set()
     site_agg_labels: set[str] = set()

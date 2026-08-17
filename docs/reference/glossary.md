@@ -378,7 +378,13 @@ attribution-target alias. See the [attribution reference](attribution.md).
   pre-mutated site; `tl.run` performs a full-forward run with the log's active
   intervention spec; `tl.sweep` captures one intervened trace per swept replacement
   value. `tl.replay`, `tl.replay_from`, and `tl.rerun` are deprecated aliases of `push`,
-  `push_from`, and `run`.
+  `push_from`, and `run`. The replay engine operates on pass-qualified op labels
+  (`label:pass`): cone traversal, the replay overlay, hook targets, and commits are
+  keyed per pass, so edits on multi-pass (recurrence-grouped) layers touch exactly the
+  addressed pass and recompute every downstream pass; a bare label naming a multi-pass
+  layer refuses `multipass_bare_label_ambiguous` (single-pass bare labels stay
+  accepted). Replay disclosures (`last_run` origins/cone, `replay_frontier` keys) spell
+  multi-pass ops pass-qualified and keep bare labels for single-pass layers.
 
 ## Extraction, observers, and admin
 
@@ -650,8 +656,15 @@ shim owed; S2-gated*
   `selection_trace_mismatch`, `selection_bool_ambiguous`,
   `selection_kind_incompatible`, `selection_unresolvable` (closed reason set
   `site_not_in_trace | value_not_saved | non_tensor_site | no_index_space |
-  mask_shape_mismatch | facet_write_mask_unavailable | population_too_small`),
-  and `selection_apply_invalid` (stage 2).
+  mask_shape_mismatch | facet_write_mask_unavailable | population_too_small |
+  multipass_bare_label`),
+  and `selection_apply_invalid` (stage 2). The `multipass_bare_label` reason
+  is the `tl.units` face of the multi-pass bare-label ambiguity refusal: a
+  bare layer label addresses only single-pass layers, and each pass of a
+  recurrence-grouped layer must be named pass-qualified (`label:pass`); the
+  string/`tl.label` addressing face is `multipass_bare_label_ambiguous` on
+  `SiteAmbiguityError` (both teaching refusals name every pass-qualified
+  spelling; spellings DOCUMENTED-UNSTABLE).
 
 **tl.Edit / do(selection, edit)** — *Edit ratified (slate 5.5, subject to D7
 default-keep); mask-application semantics documented-unstable*
