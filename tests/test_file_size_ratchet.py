@@ -90,8 +90,11 @@ _NEW_FILE_LINE_CAP = 2000
 #: the v7 save boundary in _io/bundle). PRE-SPRINT BASELINE at 75439a67:
 #:   validation/core.py 5300 | data_classes/op.py 5200
 #:   (_io/bundle.py already listed above at 4450; L6 re-steps 4500 -> 4550)
+#: 2026-08-17 gov-sweep settle: the L6 edge-boundary check family moved out
+#: of validation/core into validation/_edge_boundary.py; core re-keyed
+#: 5450 -> 5350 (measured 5325).
 _GOD_FILE_CEILINGS: dict[str, int] = {
-    "torchlens/validation/core.py": 5450,
+    "torchlens/validation/core.py": 5350,
     "torchlens/data_classes/op.py": 5250,
     "torchlens/_io/runnable.py": 5000,
     "torchlens/utils/rng.py": 4950,
