@@ -573,10 +573,14 @@ print(tl.compat.report(model, x).to_markdown())
   in the edge family (LiteralTensor template components, not EdgeUseRecords),
   so `intervention/param_substitution.py` DERIVES the addresses
   (`Param.used_by_ops` + template identity/barcode match, FAIL-CLOSED:
-  nested positions, released legacy captures, and multi-pass/
-  recurrence-grouped consumers — tied weights — refuse
-  `param_substitution_occurrence_underivable`, a named v1 engine limitation)
-  and drives the SAME tier-(ii) engine: entries marked
+  nested positions, released legacy captures, bare pass-ambiguous
+  multi-pass consumer spellings, and consumer inventories omitting a pass
+  refuse `param_substitution_occurrence_underivable`). Recurrently reused
+  params (tied weights, multi-pass consumers) ARE substitutable: consumers
+  stage pass-qualified and the edit lands at EVERY consumption (a
+  parameter has one identity across passes; contrast the bare-LAYER-label
+  ambiguity, which stays a refusal). Derivation drives the SAME tier-(ii)
+  engine: entries marked
   `substitution_kind="param"`, edit-then-scatter masking over the param
   space, ONE replay pass over all consumer origins whose cone recomputation
   RE-SPLICES param-kind entries (edge-kind entries keep shipped no-re-splice
@@ -610,9 +614,11 @@ print(tl.compat.report(model, x).to_markdown())
   `layer_log` snapshot carries `label` + `pass_index`. Replay disclosures
   (`last_run` origins/cone, `replay_frontier` keys) spell multi-pass ops
   pass-qualified and keep bare labels for single-pass layers. The
-  param-substitution multi-pass refusal
-  (`param_substitution_occurrence_underivable`) is deliberately unchanged —
-  narrowing it is a follow-on lane.
+  param-substitution multi-pass refusal is NARROWED on this engine (tied /
+  recurrently-reused params substitute at every consumption, staged
+  pass-qualified); `param_substitution_occurrence_underivable` still fires
+  fail-closed on bare pass-ambiguous consumer spellings and
+  pass-incomplete consumer inventories.
 - BACKWARD RESIDUALS (L9; every spelling DOCUMENTED-UNSTABLE pending
   naming-session/E-L9-4 routing): PER-FIRE TIMING -- every hooked grad_fn
   gets a timing prehook; ONE clock (`perf_counter`) paired at capture by a

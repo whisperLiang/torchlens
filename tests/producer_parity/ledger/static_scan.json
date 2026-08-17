@@ -3648,6 +3648,14 @@
   "via_getattr": true
  },
  {
+  "ambiguous": false,
+  "field": "pass_index",
+  "file": "torchlens/intervention/param_substitution.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
   "ambiguous": true,
   "field": "kind",
   "file": "torchlens/intervention/predicates.py",
