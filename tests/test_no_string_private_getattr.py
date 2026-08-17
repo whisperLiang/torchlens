@@ -84,7 +84,15 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # 15 -> 16 (2026-08-15 fw3settle reconcile, fe2444e3 fix/runnable-r4): the
     # fast-provider host-RNG declaration reads the optional `_runnable` seam in
     # _fast_run.py, the same f2bc65a6 idiom already ledgered here and at _io.
-    "<root>": 16,
+    # 16 -> 19 (2026-08-17 privprobes reconcile): kernel_telemetry.py
+    # (a56cef72, L3 telemetry lane) reads the optional DROP-gated
+    # `_primitive_op_profile` store (x2; absent on non-aten / loaded traces,
+    # so the None default is the correct "no primitive layer" reading -- the
+    # idiom already ledgered at postprocess/validation for that exact field),
+    # and _runnable_transaction.py (79607e17, declared-state snapshot-restore)
+    # latches state_compromised onto the optional `_runnable` seam after a
+    # failed live restore (absent = the trace never ran, nothing to latch).
+    "<root>": 19,
     # 24 -> 25 (2026-08-15 r3settle reconcile): bundle.py reads the optional
     # `_runnable` seam (absent on non-runnable traces; None default correct),
     # the same f2bc65a6 idiom already ledgered at <root>.
@@ -126,7 +134,10 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # workspace (x2) and `_capture_events` stream (x2); both are absent
     # outside a live capture window, so the None default is the correct
     # "no active capture" reading (aten recording then no-ops).
-    "backends/torch": 124,
+    # 124 -> 123 (2026-08-17 privprobes reconcile, d4a2b8a6): the standalone
+    # `_warned_implicit_backward_pass` read in tensor_tracking.py was
+    # discharged by the one-shot-warning consolidation into `_warned_once`.
+    "backends/torch": 123,
     "bridge": 1,
     "bundle": 1,
     # 20 -> 22 (2026-08-16 l2 episode, f2228f46 S7 suite): the episode
@@ -135,7 +146,11 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # FAILED partial trace; either may legitimately be absent at the point of
     # failure, so the None default is the correct "nothing to disclose"
     # reading (the row degrades to interrupted/absent, never guesses).
-    "capture": 22,
+    # 22 -> 23 (2026-08-17 privprobes reconcile, a5eced2d D18 buffer-sink
+    # projector): projectors.py reads `module_training_modes` through the
+    # optional `_runnable` seam (f2bc65a6 idiom); absent on never-run traces,
+    # so the empty-modes default is the correct "no recorded modes" reading.
+    "capture": 23,
     # 25 -> 27 (2026-08-14 fix-wave reconcile, 7f90a885 fix/walkers): the
     # linear ordinal_index cache keys its per-trace memo on the session-time
     # `_backward_projection_revision` counter in grad_fn_call.py (x2); absent
@@ -152,10 +167,18 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # accountant settle): op.py's release path reads the optional
     # session-time `_save_budget_accountant`, the idiom already ledgered at
     # backends/torch for that exact field.
-    "data_classes": 31,
+    # 31 -> 32 (2026-08-17 privprobes reconcile, 79607e17 declared-state
+    # snapshot-restore): _trace_validation.py reads the state-compromised
+    # latch through the optional `_runnable` seam; absent means no prior
+    # run() ever latched, so the None default correctly passes the gate.
+    "data_classes": 32,
     "experimental": 1,
     "fastlog": 2,
-    "intervention": 43,
+    # 43 -> 44 (2026-08-17 privprobes reconcile, d4a2b8a6 one-shot-warning
+    # consolidation): the replay.py refresh scrub discards one key from the
+    # consolidated `_warned_once` set; absent on traces that never warned, so
+    # the empty-set default is the correct "nothing to discard" reading.
+    "intervention": 44,
     "ir": 2,
     # 5 -> 8 (2026-08-16 l2/l3 merge-gate reconcile, 5f0a4f8d aten wave 0):
     # _primitive_profile.py reads the optional DROP-gated
@@ -184,7 +207,10 @@ _TRACE_REACHIN_LEDGER: dict[str, int] = {
     # check, and the non-torch invariant asserts it IS absent) and the
     # `_tracing_finished` marker (x2) that scopes the unresolved-ownership
     # check to completed traces; both defaults are the correct readings.
-    "validation": 30,
+    # 30 -> 29 (2026-08-17 privprobes reconcile): the l2/l3 row above landed
+    # with ONE `_tracing_finished` read in _invariants_primitive_ops.py, not
+    # two -- correcting the overcount (profile x3 + tracing_finished x1).
+    "validation": 29,
     # 20 -> 23 (2026-08-14 fixwave-2 reconcile): intended R19/R40 rendering
     # additions (node-overlay names/scores, source-code blob, `_visualizer_dir`
     # consolidation into _render_dot.py) against removed `_raw_layer_dict` /
