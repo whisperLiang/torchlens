@@ -1998,6 +1998,78 @@ def _is_rolled_congested_recurrence_forward_edge(
     )
 
 
+def _is_rolled_cycle_body_edge(
+    child_node: "Layer",
+    parent_node: "Layer",
+    maps: "_RolledEdgeMaps",
+) -> bool:
+    """Returns True for a forward body edge of a >=3-op rolled cycle.
+
+    Both endpoints are recurrent and there is no direct reverse edge: a
+    direct reverse edge means a two-op cycle, which lays out straight and is
+    handled by the back-edge midpoint merge.  The cycle's merged back-edge
+    midpoint label bows the whole forward chain, so these edges carry tuned
+    tangent-relative placement attrs (``_ROLLED_CYCLE_HEAD_LABEL_PLACEMENT``
+    / ``_ROLLED_CYCLE_TAIL_LABEL_PLACEMENT``).
+
+    Args:
+        child_node: The destination Layer of the edge.
+        parent_node: The source Layer of the edge.
+        maps: Per-draw memo of the rolled-edge map properties.
+    """
+    p_step = parent_node.step_index
+    c_step = child_node.step_index
+    if not isinstance(p_step, int) or not isinstance(c_step, int):
+        return False
+    return (
+        0 < p_step < c_step
+        and parent_node.num_passes > 1
+        and child_node.num_passes > 1
+        and parent_node.layer_label not in maps.child_ops_per_layer(child_node)
+    )
+
+
+def _is_rolled_multistep_skip_edge(
+    child_node: "Layer",
+    parent_node: "Layer",
+    maps: "_RolledEdgeMaps",
+) -> bool:
+    """Returns True for a multi-step skip edge touching a self-loop layer.
+
+    These long skip edges (e.g. input -> loop op) bow around the ranks they
+    skip, so an endpoint head/tail label -- which Graphviz reserves no layout
+    space for -- has no safe spot: audit sweeps found no
+    ``labeldistance``/``labelangle`` pair that clears the node, spline, and
+    arrowhead on all engines without orphaning the label past the 9pt band,
+    and the winning pairs differed between macOS/Times and Linux/Liberation
+    font metrics.  Single-annotation skip edges therefore midpoint-merge
+    (like buffer edges) instead of taking placement attrs.  Cycle body edges
+    take precedence: those keep their tuned endpoint placement.  Edges into
+    output layers run straight to the top rank and stay default.
+
+    Args:
+        child_node: The destination Layer of the edge.
+        parent_node: The source Layer of the edge.
+        maps: Per-draw memo of the rolled-edge map properties.
+    """
+    p_step = parent_node.step_index
+    c_step = child_node.step_index
+    if not isinstance(p_step, int) or not isinstance(c_step, int):
+        return False
+    if _is_rolled_cycle_body_edge(child_node, parent_node, maps):
+        return False
+    span = c_step - p_step
+    return (
+        0 <= p_step < c_step
+        and 2 <= span <= 4
+        and (
+            _layer_has_rolled_self_loop(parent_node, maps)
+            or _layer_has_rolled_self_loop(child_node, maps)
+        )
+        and child_node.layer_type != "output"
+    )
+
+
 def _is_rolled_buffer_edge(child_node: "Layer", parent_node: "Layer") -> bool:
     """Returns True if either endpoint of a rolled edge is a buffer layer.
 
@@ -2050,28 +2122,14 @@ def _rolled_pass_label_placement(
     maps = rolled_maps if rolled_maps is not None else _RolledEdgeMaps()
     span = c_step - p_step
     forward = 0 < p_step < c_step
-    # Body edge of a >=3-op cycle: both endpoints recurrent, no direct
-    # reverse edge (a direct reverse edge means a two-op cycle, which lays
-    # out straight and is handled by the back-edge midpoint merge).
-    if (
-        forward
-        and parent_node.num_passes > 1
-        and child_node.num_passes > 1
-        and parent_node.layer_label not in maps.child_ops_per_layer(child_node)
-    ):
-        return _ROLLED_CYCLE_HEAD_LABEL_PLACEMENT if has_head else _ROLLED_OBLIQUE_LABEL_PLACEMENT
-    # Multi-step skip edge attached to a self-loop layer (bowed long curve);
-    # edges into output layers run straight to the top rank and stay default.
-    if (
-        0 <= p_step < c_step
-        and 2 <= span <= 4
-        and (
-            _layer_has_rolled_self_loop(parent_node, maps)
-            or _layer_has_rolled_self_loop(child_node, maps)
+    # Body edge of a >=3-op cycle (multi-step skip edges never reach here:
+    # single-annotation skip edges midpoint-merge upstream in
+    # ``_label_rolled_call_indexs`` because no placement pair is safe for
+    # them across engines and font stacks).
+    if _is_rolled_cycle_body_edge(child_node, parent_node, maps):
+        return (
+            _ROLLED_CYCLE_HEAD_LABEL_PLACEMENT if has_head else _ROLLED_CYCLE_TAIL_LABEL_PLACEMENT
         )
-        and child_node.layer_type != "output"
-    ):
-        return _ROLLED_OBLIQUE_LABEL_PLACEMENT
     # Adjacent forward edge into a self-loop layer: the self-loop arc sits
     # where the default head label would go.
     if has_head and forward and span == 1 and _layer_has_rolled_self_loop(child_node, maps):
@@ -2173,10 +2231,17 @@ def _label_rolled_call_indexs(
         edge_dict["label"] = _html_combined_recurrence_label(top, bottom)
         return
     single_label = out_label if out_label is not None else in_label
-    if is_buffer_edge and allow_midpoint_merge and single_label is not None:
+    is_single_merge_edge = is_buffer_edge or (
+        not is_self_loop and _is_rolled_multistep_skip_edge(child_node, parent_node, maps)
+    )
+    if is_single_merge_edge and allow_midpoint_merge and single_label is not None:
         # A buffer edge with a single annotation still merges: its read and
         # write edges run anti-parallel in a narrow band, where a head/tail
         # label collides with the opposing edge's spline and arrowhead.
+        # Single-annotation multi-step skip edges merge for the same reason a
+        # midpoint label is the structural fix: the bowed long curve leaves
+        # no endpoint spot that clears node, spline, and arrowhead on every
+        # engine and font stack (see ``_is_rolled_multistep_skip_edge``).
         edge_dict["label"] = _html_combined_recurrence_label(single_label)
         return
 
@@ -2312,7 +2377,9 @@ __all__ = [
     "_is_noise_buffer",
     "_is_rolled_buffer_edge",
     "_is_rolled_congested_recurrence_forward_edge",
+    "_is_rolled_cycle_body_edge",
     "_is_rolled_loop_carried_self_edge",
+    "_is_rolled_multistep_skip_edge",
     "_is_rolled_recurrence_back_edge",
     "_is_run_fold_representative",
     "_label_node_arguments_if_needed",
