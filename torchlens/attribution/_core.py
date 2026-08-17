@@ -11,7 +11,9 @@ import torch
 from torch import Tensor
 from torch.nn import Module
 
-TargetSpec: TypeAlias = int | Callable[[Any], Tensor]
+# Kept private and deliberately distinct from the selector-serialization
+# ``torchlens.intervention.types.TargetSpec``.
+_AttributionTarget: TypeAlias = int | Callable[[Any], Tensor]
 AttributionValueTree: TypeAlias = Tensor | tuple[Any, ...] | list[Any] | dict[str, Any]
 InputKwargs: TypeAlias = dict[str, Any] | None
 
@@ -506,7 +508,7 @@ def _replace_unattributed_with_none(tree: Any, replacements: list[Tensor]) -> An
     return None
 
 
-def _target_repr(target: TargetSpec) -> str:
+def _target_repr(target: _AttributionTarget) -> str:
     """Return a compact target representation for result metadata.
 
     Parameters
@@ -528,7 +530,7 @@ def _target_repr(target: TargetSpec) -> str:
     return repr(target)
 
 
-def _scalarize_output(output: Any, target: TargetSpec) -> Tensor:
+def _scalarize_output(output: Any, target: _AttributionTarget) -> Tensor:
     """Convert a model output to a scalar tensor using ``target``.
 
     Integer targets select ``output[..., target]`` and sum all selected values to
@@ -581,7 +583,7 @@ def _gradient_for_inputs(
     model: Module,
     inputs: _PreparedInputs,
     input_leaves: tuple[Tensor, ...],
-    target: TargetSpec,
+    target: _AttributionTarget,
 ) -> tuple[tuple[Tensor, ...], Tensor]:
     """Compute gradients of a scalarized model output with respect to input leaves.
 
@@ -833,7 +835,7 @@ def saliency(
     inputs: Any,
     input_kwargs: InputKwargs = None,
     *,
-    target: TargetSpec,
+    target: _AttributionTarget,
 ) -> AttributionResult:
     """Compute absolute input gradients for a scalar target.
 
@@ -875,7 +877,7 @@ def input_x_grad(
     inputs: Any,
     input_kwargs: InputKwargs = None,
     *,
-    target: TargetSpec,
+    target: _AttributionTarget,
 ) -> AttributionResult:
     """Compute gradient times input for a scalar target.
 
@@ -920,7 +922,7 @@ def integrated_gradients(
     inputs: Any,
     input_kwargs: InputKwargs = None,
     *,
-    target: TargetSpec,
+    target: _AttributionTarget,
     n_steps: int = 50,
     baseline: Any | None = None,
 ) -> AttributionResult:
@@ -967,6 +969,14 @@ def integrated_gradients(
     gradients_by_step: list[tuple[Tensor, ...]] = []
 
     with _temporarily_eval(model):
+        baseline_leaves = _interned_path_leaves(prepared_inputs, baseline_tensors, deltas, 0.0)
+        input_leaves = _interned_path_leaves(prepared_inputs, baseline_tensors, deltas, 1.0)
+        baseline_scalar = _scalarize_output(
+            _call_model(model, prepared_inputs, baseline_leaves), target
+        ).detach()
+        input_scalar = _scalarize_output(
+            _call_model(model, prepared_inputs, input_leaves), target
+        ).detach()
         for step in range(n_steps):
             alpha = (step + 0.5) / n_steps
             path_leaves = _interned_path_leaves(prepared_inputs, baseline_tensors, deltas, alpha)
@@ -988,6 +998,9 @@ def integrated_gradients(
         (delta * mean_gradient).detach()
         for delta, mean_gradient in zip(deltas, mean_gradients, strict=True)
     )
+    attribution_sum = sum((value.sum() for value in values), start=torch.zeros_like(input_scalar))
+    target_delta = input_scalar - baseline_scalar
+    completeness_residual = attribution_sum - target_delta
     return AttributionResult(
         method="integrated_gradients",
         values=_value_tree_from_leaves(prepared_inputs, values),
@@ -995,6 +1008,9 @@ def integrated_gradients(
         extra={
             "n_steps": n_steps,
             "baseline": _value_tree_from_leaves(prepared_inputs, baseline_tensors),
+            "attribution_sum": attribution_sum.detach(),
+            "target_delta": target_delta.detach(),
+            "completeness_residual": completeness_residual.detach(),
         },
     )
 
@@ -1004,7 +1020,7 @@ def smoothgrad(
     inputs: Any,
     input_kwargs: InputKwargs = None,
     *,
-    target: TargetSpec,
+    target: _AttributionTarget,
     n_samples: int = 25,
     noise_level: float = 0.1,
     seed: int | None = None,

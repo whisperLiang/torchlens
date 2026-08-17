@@ -103,7 +103,7 @@ def show(
     base = _base_image(view, descriptor, image, rendered_axes)
     if gradient_result is not None:
         heatmap = _gradient_image(gradient_result, rendered_axes, slice, base.size, cmap)
-        base = Image.blend(base, heatmap, alpha)
+        base = _blend_heatmap(base, heatmap, alpha=alpha)
     if box is not None and box.status in {
         ReceptiveFieldStatus.EXACT,
         ReceptiveFieldStatus.WHOLE_INPUT,
@@ -117,6 +117,46 @@ def show(
             color=box_color,
         )
     return base
+
+
+def _blend_heatmap(
+    base: Image.Image,
+    heatmap: Image.Image,
+    *,
+    alpha: float,
+    disclosure: str | None = None,
+) -> Image.Image:
+    """Blend a heatmap through the receptive-field overlay path.
+
+    Parameters
+    ----------
+    base
+        RGB source image.
+    heatmap
+        RGB heatmap with the same pixel dimensions.
+    alpha
+        Heatmap opacity in ``[0, 1]``.
+    disclosure
+        Optional text rendered into a permanent footer below the overlay.
+
+    Returns
+    -------
+    PIL.Image.Image
+        Blended image, with a visible disclosure footer when requested.
+    """
+
+    blended = Image.blend(base.convert("RGB"), heatmap.convert("RGB"), alpha)
+    if disclosure is None:
+        return blended
+    footer_height = 20
+    probe = ImageDraw.Draw(Image.new("RGB", (1, 1), "white"))
+    text_box = probe.textbbox((0, 0), disclosure)
+    footer_width = max(blended.width, int(text_box[2] - text_box[0]) + 8)
+    artifact = Image.new("RGB", (footer_width, blended.height + footer_height), "white")
+    artifact.paste(blended, (0, 0))
+    ImageDraw.Draw(artifact).text((4, blended.height + 3), disclosure, fill="#111827")
+    artifact.info["torchlens_disclosure"] = disclosure
+    return artifact
 
 
 def node_spec(
