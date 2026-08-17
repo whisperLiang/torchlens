@@ -388,13 +388,33 @@ def test_forced_bundle_without_edge_corroboration_fails_validation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Bypassing the save guard cannot manufacture a validation-green bundle."""
+    """Bypassing the save guard cannot manufacture a validation-green bundle.
+
+    The guard matters in the REGRESSED-schema world (tlspec v8 persists the
+    edge carriers, so an un-bypassed ordinary save now simply keeps the
+    provenance): force the carrier policy back to DROP AND bypass the guard,
+    then prove the resulting provenance-free artifact still cannot pass the
+    divergence oracle.
+    """
+
+    from dataclasses import replace
+
+    from torchlens._io import FieldPolicy
+    from torchlens.data_classes.op import Op
 
     model, x, trace = capture
     fork = trace.fork()
     fork.do(_edge(trace).__selection__(), tl.zero_ablate())
     bundle_module = importlib.import_module("torchlens._io.bundle")
     monkeypatch.setattr(bundle_module, "_refuse_edge_intervened_save", lambda _trace: None)
+    for field_name in ("edge_substitutions", "edge_replacement_stamps"):
+        monkeypatch.setitem(
+            Op.FIELD_POLICY,
+            field_name,
+            replace(Op.FIELD_POLICY[field_name], portable_policy=FieldPolicy.DROP),
+        )
+    monkeypatch.setitem(Op.PORTABLE_STATE_SPEC, "edge_substitutions", FieldPolicy.DROP)
+    monkeypatch.setitem(Op.PORTABLE_STATE_SPEC, "edge_replacement_stamps", FieldPolicy.DROP)
     path = tmp_path / "forced_edge.tlspec"
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
