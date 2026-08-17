@@ -52,6 +52,10 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
         dropped_display_fields=frozenset(
             {
                 "_code_context_cache",
+                # _distributed_plane_p is the L8/C2 session-only physical
+                # dispatch journal used by the capture-fidelity census. It is
+                # ordered for diagnostic visibility but never persisted.
+                "_distributed_plane_p",
                 "_fast_run_session",
                 "_intervention_spec",
                 "_last_hook_handle_ids",
@@ -102,6 +106,10 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
                 # canonical legacy degraded representation instead.
                 "grouping",
                 "grouping_policy",
+                # distributed_scope is the L8/F6 trace-wide shard-local
+                # marker: ordered for disclosure, but DROP and prerelease-
+                # registered until the coordinated persistence bump.
+                "distributed_scope",
                 # intervention_audit is the L6 selection do() audit trail
                 # (query repr + resolve digest + relations): an ordered
                 # display field, session-time (FieldPolicy.DROP,

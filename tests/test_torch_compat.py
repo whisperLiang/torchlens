@@ -421,6 +421,12 @@ def test_torch_capability_snapshot_contract() -> None:
         "HAS_VARIABLE_FUNCTIONS_CLASS": True,
         "HAS_FAKE_TENSOR_MODE": tc.HAS_FAKE_TENSOR_MODE,
         "HAS_DTENSOR_SHARD_GEOMETRY": tc.HAS_DTENSOR_SHARD_GEOMETRY,
+        # L8/C2 funcol boundary capture degrades independently when group
+        # resolution or dispatcher-level wait interposition is unavailable.
+        # Both named flags are included in every diagnostic snapshot while
+        # retaining their lazy-probe lifecycle.
+        "HAS_FUNCOL_GROUP_RESOLUTION": tc.HAS_FUNCOL_GROUP_RESOLUTION,
+        "HAS_FUNCOL_WAIT_INTERPOSITION": tc.HAS_FUNCOL_WAIT_INTERPOSITION,
         "HAS_TRACING_TENSOR_TYPES": tc.HAS_TRACING_TENSOR_TYPES,
         # Compile rung-2 probes: set_stance (torch >= 2.6) lets capture run
         # compiled callables through their original eager Python, and Dynamo's

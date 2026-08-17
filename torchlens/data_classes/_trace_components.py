@@ -81,6 +81,9 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "intervention_audit": "session",
     "_runnable": "runnable",
     "_fast_run_session": "graph",
+    # L8/C2 physical-dispatch evidence is part of capture fidelity, so it
+    # belongs with the other witness journals rather than the semantic graph.
+    "_distributed_plane_p": "witness",
     "escape_detector_mode": "witness",
     "escape_detector_verified": "witness",
     "escape_diagnostics": "witness",
@@ -180,6 +183,9 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "recurrence_detection": "capture_config",
     "grouping": "capture_config",
     "grouping_policy": "capture_config",
+    # L8/F6 is a trace-wide semantic-scope marker, not a user capture knob.
+    # It belongs to the header beside backend and identity-mode facts.
+    "distributed_scope": "header",
     # L9 backward residuals: timing clock provenance + checkpoint witness are
     # capture-evidence disclosures, not graph structure.
     "grad_fn_timing_provenance": "witness",
