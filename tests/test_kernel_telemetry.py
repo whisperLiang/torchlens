@@ -222,11 +222,10 @@ def test_scoped_marker_instrumentation_restores_exact_core_functions() -> None:
 
     prepare = _aten_capture._prepare_aten_call
     finish = _aten_capture._finish_aten_call
-    with pytest.raises(RuntimeError, match="planned"):
-        with telemetry._instrument_aten_markers():
-            assert _aten_capture._prepare_aten_call is not prepare
-            assert _aten_capture._finish_aten_call is not finish
-            raise RuntimeError("planned")
+    with pytest.raises(RuntimeError, match="planned"), telemetry._instrument_aten_markers():
+        assert _aten_capture._prepare_aten_call is not prepare
+        assert _aten_capture._finish_aten_call is not finish
+        raise RuntimeError("planned")
     assert _aten_capture._prepare_aten_call is prepare
     assert _aten_capture._finish_aten_call is finish
 

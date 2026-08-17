@@ -12,6 +12,7 @@ from torch import Tensor, nn
 from torch.utils.weak import WeakIdKeyDictionary
 
 from ... import _state
+from ...utils._torch_compat import get_async_collective_tensor_type
 
 __all__ = [
     "TorchLensMeta",
@@ -901,10 +902,6 @@ def _ensure_tensor_meta(t: Any) -> TensorMeta:
     return meta
 
 
-_ASYNC_COLLECTIVE_TENSOR_CLASS: Any = False
-"""Lazily probed AsyncCollectiveTensor class (``False`` unprobed, ``None`` unavailable)."""
-
-
 def _async_collective_elem(t: Any) -> Any | None:
     """Return an AsyncCollectiveTensor's inner ``.elem``, else ``None``.
 
@@ -918,17 +915,17 @@ def _async_collective_elem(t: Any) -> Any | None:
     Any | None
         The plain inner tensor when ``t`` is a funcol ACT wrapper; ``None``
         for every other value or on builds without functional collectives.
+
+    Notes
+    -----
+    The ACT class resolves through the compat chokepoint
+    (``get_async_collective_tensor_type``), which stays ``sys.modules``-
+    deferred: this runs on the per-tensor label hot path and never pays the
+    ``torch.distributed`` import on plain captures.
     """
 
-    global _ASYNC_COLLECTIVE_TENSOR_CLASS
-    if _ASYNC_COLLECTIVE_TENSOR_CLASS is False:
-        try:
-            from torch.distributed._functional_collectives import AsyncCollectiveTensor
-
-            _ASYNC_COLLECTIVE_TENSOR_CLASS = AsyncCollectiveTensor
-        except Exception:
-            _ASYNC_COLLECTIVE_TENSOR_CLASS = None
-    if _ASYNC_COLLECTIVE_TENSOR_CLASS is not None and isinstance(t, _ASYNC_COLLECTIVE_TENSOR_CLASS):
+    act_cls = get_async_collective_tensor_type()
+    if act_cls is not None and isinstance(t, act_cls):
         return t.elem
     return None
 

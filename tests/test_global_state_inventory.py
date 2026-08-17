@@ -316,14 +316,27 @@ _CAPABILITY_PROBE_STATE = frozenset(
         ("torchlens/utils/_torch_compat.py", "_FP8_DTYPES_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_FSDP_WRAPPER_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_FSDP_WRAPPER_TYPE"),
-        # Lazily probed AsyncCollectiveTensor class behind the label
-        # chokepoint's ACT->elem delegation (False unprobed, None unavailable).
-        ("torchlens/backends/torch/_tl.py", "_ASYNC_COLLECTIVE_TENSOR_CLASS"),
         ("torchlens/utils/_torch_compat.py", "HAS_FUNCOL_GROUP_RESOLUTION"),
         ("torchlens/utils/_torch_compat.py", "HAS_FUNCOL_WAIT_INTERPOSITION"),
         ("torchlens/utils/_torch_compat.py", "_FUNCOL_GROUP_RESOLVERS"),
         ("torchlens/utils/_torch_compat.py", "_FUNCOL_GROUP_RESOLUTION_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_FUNCOL_WAIT_INTERPOSITION_PROBED"),
+        # fix/private-probe-routing: the L8/C2 funcol + L9 backward private
+        # touches now resolve through compat, each a lazy HAS_* family (the
+        # _tl.py-local _ASYNC_COLLECTIVE_TENSOR_CLASS memo moved here).
+        ("torchlens/utils/_torch_compat.py", "_FUNCOL_WAIT_REDISPATCH"),
+        ("torchlens/utils/_torch_compat.py", "HAS_FUNCOL_MODULE"),
+        ("torchlens/utils/_torch_compat.py", "_FUNCOL_MODULE_OBJ"),
+        ("torchlens/utils/_torch_compat.py", "_FUNCOL_MODULE_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "HAS_ASYNC_COLLECTIVE_TENSOR"),
+        ("torchlens/utils/_torch_compat.py", "_ASYNC_COLLECTIVE_TENSOR_TYPE"),
+        ("torchlens/utils/_torch_compat.py", "_ASYNC_COLLECTIVE_TENSOR_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "HAS_CHECKPOINT_HOOK_CLASS"),
+        ("torchlens/utils/_torch_compat.py", "_CHECKPOINT_HOOK_CLASS"),
+        ("torchlens/utils/_torch_compat.py", "_CHECKPOINT_HOOK_CLASS_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "HAS_AUTOGRAD_ENGINE_QUEUE_CALLBACK"),
+        ("torchlens/utils/_torch_compat.py", "_AUTOGRAD_ENGINE_QUEUE_CALLBACK"),
+        ("torchlens/utils/_torch_compat.py", "_AUTOGRAD_ENGINE_QUEUE_CALLBACK_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_JIT_SCHEMA_ENUMERATION_FN"),
         ("torchlens/utils/_torch_compat.py", "_JIT_SCHEMA_ENUMERATION_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_PIPELINING_PROBED"),

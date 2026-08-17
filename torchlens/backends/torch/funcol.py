@@ -212,13 +212,15 @@ FUNCOL_SITES: tuple[FuncolSite, ...] = (
 
 
 def _act_type() -> type[Any] | None:
-    """Return the AsyncCollectiveTensor class, or ``None`` off-build."""
+    """Return the AsyncCollectiveTensor class, or ``None`` off-build.
 
-    try:
-        from torch.distributed._functional_collectives import AsyncCollectiveTensor
-    except Exception:
-        return None
-    return AsyncCollectiveTensor
+    Routed through the compat chokepoint (lazy, ``sys.modules``-deferred);
+    absence flips ``HAS_ASYNC_COLLECTIVE_TENSOR`` there.
+    """
+
+    from ...utils._torch_compat import get_async_collective_tensor_type
+
+    return get_async_collective_tensor_type()
 
 
 def _inner_tensor(value: torch.Tensor) -> torch.Tensor:
@@ -368,21 +370,20 @@ class _FuncolCaptureSession:
         completion disclosure.
         """
 
-        from ...utils._torch_compat import probe_funcol_wait_interposition
+        from ...utils._torch_compat import get_funcol_wait_redispatch
 
-        if not probe_funcol_wait_interposition():
+        redispatch = get_funcol_wait_redispatch()
+        if redispatch is None:
             self.interposition_status = "unavailable: HAS_FUNCOL_WAIT_INTERPOSITION is False"
             return
+        wait_op, exclude_cpu_guard = redispatch
         try:
             library = torch.library.Library("_c10d_functional", "IMPL")  # noqa: TOR901
 
             def observed_wait_tensor(tensor: torch.Tensor) -> torch.Tensor:
                 """Redispatch ``wait_tensor`` below this key, then bind completion."""
 
-                wait_op = torch.ops._c10d_functional.wait_tensor.default
-                with torch._C._ExcludeDispatchKeyGuard(
-                    torch._C.DispatchKeySet(torch._C.DispatchKey.CPU)
-                ):
+                with exclude_cpu_guard():
                     result = wait_op(tensor)
                 self.record_completion(tensor)
                 return result
@@ -919,9 +920,10 @@ def install_funcol_wraps(originals: dict[tuple[Any, str], Any]) -> None:
 
     if not torch.distributed.is_available():
         return
-    try:
-        import torch.distributed._functional_collectives as funcol_module
-    except Exception:
+    from ...utils._torch_compat import get_funcol_module
+
+    funcol_module = get_funcol_module()
+    if funcol_module is None:
         return
     for site in FUNCOL_SITES:
         current = getattr(funcol_module, site.attr, None)
@@ -942,9 +944,10 @@ def remove_funcol_wraps(originals: dict[tuple[Any, str], Any]) -> None:
 
     from torchlens.distributed._lifecycle import restore_wrapped_attr
 
-    try:
-        import torch.distributed._functional_collectives as funcol_module
-    except Exception:
+    from ...utils._torch_compat import get_funcol_module
+
+    funcol_module = get_funcol_module()
+    if funcol_module is None:
         return
     first_failure: Exception | None = None
     for (module, attr), original in list(originals.items()):
