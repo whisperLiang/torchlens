@@ -357,7 +357,13 @@ last-run slots are overwritten per run and never steer a verdict.
 _WEAK_SUBJECT_TABLES = frozenset(
     {
         ("torchlens/_state.py", "_log_registry"),
+        # L9 runtime journals are keyed by the owning Trace and contain only
+        # timing/token/finalization bookkeeping. They must disappear with
+        # that Trace and never become process-lifetime caches.
         ("torchlens/backends/torch/backward.py", "_BACKWARD_TRACE_SLOTS"),
+        ("torchlens/backends/torch/backward.py", "_CHECKPOINT_TOKEN_STATE"),
+        ("torchlens/backends/torch/backward.py", "_FIRE_TIMING_STAMPS"),
+        ("torchlens/backends/torch/backward.py", "_PENDING_BACKWARD_FINALIZE"),
         ("torchlens/backends/torch/completeness_witness.py", "_ALIAS_MUTATION_CANDIDATE_LABELS"),
         ("torchlens/backends/torch/completeness_witness.py", "_DATA_ALIAS_MUTATION_TRACES"),
         (
@@ -1062,6 +1068,9 @@ _WEAKLY_HELD = frozenset(
         # release registration must never pin the released model itself.
         ("torchlens/backends/torch/_held_refs.py", "_RELEASED_MODELS"),
         ("torchlens/backends/torch/backward.py", "_BACKWARD_TRACE_SLOTS"),
+        ("torchlens/backends/torch/backward.py", "_CHECKPOINT_TOKEN_STATE"),
+        ("torchlens/backends/torch/backward.py", "_FIRE_TIMING_STAMPS"),
+        ("torchlens/backends/torch/backward.py", "_PENDING_BACKWARD_FINALIZE"),
         ("torchlens/backends/torch/buffer_writes.py", "_PARAM_BYTE_WITNESS_NOT_ARMED"),
         ("torchlens/backends/torch/completeness_witness.py", "_ALIAS_MUTATION_CANDIDATE_LABELS"),
         ("torchlens/backends/torch/completeness_witness.py", "_CAPTURED_STORAGE_PTRS"),
