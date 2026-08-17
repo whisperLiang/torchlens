@@ -131,29 +131,27 @@ def _axis_matches(arg_value: Any, shape: tuple[int, ...], axis: str) -> bool:
     """Return whether ``arg_value`` equals the claimed dimension of ``shape``."""
 
     if axis == "last":
-        if len(shape) < 1:
-            return False
-        return (
-            isinstance(arg_value, int)
-            and not isinstance(arg_value, bool)
-            and (arg_value == shape[-1])
-        )
+        return _scalar_axis_matches(arg_value, shape, -1)
     if axis == "channel":
         # PyTorch module contract: channel = LOGICAL axis 1 (channels_last is
         # a memory format that permutes strides, not the logical shape).
-        if len(shape) < 2:
-            return False
-        return (
-            isinstance(arg_value, int)
-            and not isinstance(arg_value, bool)
-            and (arg_value == shape[1])
-        )
+        return _scalar_axis_matches(arg_value, shape, 1)
     if axis == "trailing":
         dims = _usable_shape(arg_value if not isinstance(arg_value, int) else (arg_value,))
         if dims is None or len(dims) == 0 or len(dims) > len(shape):
             return False
         return tuple(shape[-len(dims) :]) == dims
     return False
+
+
+def _scalar_axis_matches(arg_value: Any, shape: tuple[int, ...], axis: int) -> bool:
+    """Return whether an integer argument equals one available shape axis."""
+
+    if not (-len(shape) <= axis < len(shape)):
+        return False
+    return (
+        isinstance(arg_value, int) and not isinstance(arg_value, bool) and arg_value == shape[axis]
+    )
 
 
 def suppressed_arg_keys_for_record(

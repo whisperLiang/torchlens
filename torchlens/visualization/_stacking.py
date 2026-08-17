@@ -47,6 +47,14 @@ STACK_AUTO_DISPLAY = "pass_index (auto)"
 NOTE_STACK_CALLABLE = "stack values from user callable"
 
 
+def _require_stack_spec(state: EncodingState) -> EncodingChannelSpec:
+    """Return the active stack spec or fail on an internal phase-order bug."""
+
+    if state.stack_spec is None:
+        raise RuntimeError("stack resolution requires an active stack spec")
+    return state.stack_spec
+
+
 def resolve_stack_by(stack_by: Any, vis_mode: str) -> EncodingChannelSpec | None:
     """Validate ``stack_by`` at option validation, before any render work.
 
@@ -194,8 +202,7 @@ def check_lockstep_license(trace: Trace) -> None:
 def _stack_value_for_node(state: EncodingState, node: Any) -> Any:
     """Resolve one node's stack annotation value (None = un-annotated)."""
 
-    spec = state.stack_spec
-    assert spec is not None
+    spec = _require_stack_spec(state)
     if spec.source_kind == "auto":
         if int(getattr(node, "num_passes", 1) or 1) <= 1:
             # Single-pass stem/head ops stay un-annotated so they do not

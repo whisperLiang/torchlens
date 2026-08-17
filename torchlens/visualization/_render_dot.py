@@ -1067,10 +1067,8 @@ def draw(
         request = attach_encoding_state(
             request,
             theme,
-            color_spec=encoding_channel_spec,
-            size_spec=size_channel_spec,
+            channel_specs=(encoding_channel_spec, size_channel_spec, stack_channel_spec),
             size_scale=size_scale,
-            stack_spec=stack_channel_spec,
         )
     show_buffer_layers = request.show_buffer_layers
 

@@ -141,6 +141,42 @@ def _legacy_conditional_else_entry_edges(
     ]
 
 
+def _grad_fn_site_key(
+    grad_fn_record: Any, layer_lookup: Mapping[str, Any]
+) -> tuple[str | None, bool]:
+    """Return one grad-fn's site key and whether it is op-backed."""
+
+    if not getattr(grad_fn_record, "has_op", False) or grad_fn_record.op_label is None:
+        return None, False
+    op = layer_lookup.get(grad_fn_record.op_label)
+    return getattr(op, "site_key", None), True
+
+
+def _accumulate_grad_fn_site_record(
+    entry: dict[str, Any],
+    grad_fn_record: Any,
+    fire_timings: Mapping[str, Duration | None] | None,
+) -> None:
+    """Accumulate one grad-fn record into an existing per-site summary row."""
+
+    entry["grad_fn_labels"].append(grad_fn_record.label)
+    for call_index, call in grad_fn_record.calls.items():
+        entry["fire_count"] += 1
+        if call.backward_pass_index is not None:
+            entry["pass_coverage"].add(int(call.backward_pass_index))
+        span = (
+            fire_timings.get(f"{grad_fn_record.label}:{call_index}")
+            if fire_timings is not None
+            else None
+        )
+        if span is not None:
+            entry["timed_fire_count"] += 1
+            previous = entry["total_fire_duration"]
+            entry["total_fire_duration"] = Duration(
+                (0.0 if previous is None else float(previous)) + float(span)
+            )
+
+
 class TraceStatsMixin(_TraceMixinBase):
     """``Trace`` computed-statistics surface: derived counts, edges, and summaries."""
 
@@ -1256,13 +1292,9 @@ class TraceStatsMixin(_TraceMixinBase):
         any_keyed = False
         layer_lookup = getattr(self, "layer_dict_all_keys", {})
         for grad_fn_record in getattr(self, "grad_fn_logs", {}).values():
-            site_key: str | None = None
-            if getattr(grad_fn_record, "has_op", False) and grad_fn_record.op_label is not None:
-                any_op_backed = True
-                op = layer_lookup.get(grad_fn_record.op_label)
-                site_key = getattr(op, "site_key", None)
-                if site_key is not None:
-                    any_keyed = True
+            site_key, op_backed = _grad_fn_site_key(grad_fn_record, layer_lookup)
+            any_op_backed = any_op_backed or op_backed
+            any_keyed = any_keyed or site_key is not None
             entry = summary.setdefault(
                 site_key,
                 {
@@ -1273,19 +1305,7 @@ class TraceStatsMixin(_TraceMixinBase):
                     "total_fire_duration": None,
                 },
             )
-            entry["grad_fn_labels"].append(grad_fn_record.label)
-            for call_index, call in grad_fn_record.calls.items():
-                entry["fire_count"] += 1
-                if call.backward_pass_index is not None:
-                    entry["pass_coverage"].add(int(call.backward_pass_index))
-                if fire_timings is not None:
-                    span = fire_timings.get(f"{grad_fn_record.label}:{call_index}")
-                    if span is not None:
-                        entry["timed_fire_count"] += 1
-                        previous = entry["total_fire_duration"]
-                        entry["total_fire_duration"] = Duration(
-                            (0.0 if previous is None else float(previous)) + float(span)
-                        )
+            _accumulate_grad_fn_site_record(entry, grad_fn_record, fire_timings)
         if any_op_backed and not any_keyed:
             raise InvalidArgumentError(
                 "This trace's op-backed grad-fns carry no site keys: it was "

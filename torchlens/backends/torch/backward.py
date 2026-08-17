@@ -3506,7 +3506,8 @@ def _run_backward_with_capture(
             cleanup_error = exc
         try:
             _clear_fire_timing_stamps(trace)
-        except BaseException as exc:
+        # Cleanup must preserve the first failure, including cancellation.
+        except BaseException as exc:  # noqa: BLE001
             cleanup_error = cleanup_error if cleanup_error is not None else exc
         # SUCCESS path: there is no primary exception whose precedence would
         # justify discarding a failure here, so fold it into cleanup_error
@@ -3874,64 +3875,70 @@ def _observe_saved_tensors_hooks_enter(context: Any) -> None:
     _refresh_checkpoint_witness(trace)
 
 
-def _refresh_checkpoint_witness(trace: Any) -> None:
-    """Project the runtime token state onto the DROP-gated witness field.
+def _checkpoint_token_summary(
+    record: dict[str, Any],
+    evidence_lock: threading.Lock,
+    grad_fn_logs: dict[int, Any],
+    layer_lookup: dict[str, Any],
+) -> dict[str, Any]:
+    """Return one checkpoint token's count, site, and backward-window summary."""
 
-    Contents are a summary (counts, backward-derived site-key candidates,
-    window-evidence refs into pass/call coordinates, degrade flags, and the
-    evidence-scoped completeness verdict) -- never payloads. The verdict
-    claims only what the channels cover: "no checkpoint invocation OBSERVED
-    BY CLASSIFIER OR SENTINEL", and any degrade flag withdraws it.
-    """
+    with evidence_lock:
+        evidence = list(record["unpack_evidence"])
+    site_candidates: set[str] = set()
+    window_refs: list[tuple[int | None, str | None, int | None]] = []
+    for point in evidence:
+        bracket = point.get("fire_bracket")
+        if bracket is None:
+            window_refs.append((point.get("pass_index"), None, None))
+            continue
+        bracket_object_id, bracket_call_index, bracket_pass_index = bracket
+        grad_fn_record = grad_fn_logs.get(bracket_object_id)
+        label = getattr(grad_fn_record, "label", None)
+        window_refs.append((bracket_pass_index, label, bracket_call_index))
+        if grad_fn_record is not None and getattr(grad_fn_record, "has_op", False):
+            op = layer_lookup.get(grad_fn_record.op_label)
+            site_key = getattr(op, "site_key", None)
+            if site_key is not None:
+                site_candidates.add(site_key)
+    return {
+        "pack_count": record["pack_count"],
+        "unpack_evidence_count": len(evidence),
+        "site_key_candidates": sorted(site_candidates),
+        "window_evidence": window_refs,
+    }
+
+
+def _checkpoint_witness_verdict(flags: set[str], token_count: int) -> str:
+    """Return the evidence-scoped checkpoint witness verdict."""
+
+    if flags:
+        return "evidence_incomplete"
+    if token_count:
+        return "checkpoint_invocations_observed"
+    return "no_checkpoint_invocation_observed"
+
+
+def _refresh_checkpoint_witness(trace: Any) -> None:
+    """Project the runtime token state onto the DROP-gated witness field."""
 
     state = _CHECKPOINT_TOKEN_STATE.get(trace)
-    if state is None:
-        flags: set[str] = set()
-        token_records: dict[int, dict[str, Any]] = {}
-        evidence_lock: threading.Lock | None = None
-    else:
-        flags = set(state["flags"])
-        token_records = state["tokens"]
-        evidence_lock = state["lock"]
+    flags = set(state["flags"]) if state is not None else set()
     if not HAS_SAVED_TENSORS_HOOKS_PATCHABLE or not _SAVED_TENSORS_HOOKS_INIT_PATCHED:
         flags.add(_CHECKPOINT_FLAG_PATCH_UNAVAILABLE)
-    grad_fn_logs = getattr(trace, "grad_fn_logs", {})
-    layer_lookup = getattr(trace, "layer_dict_all_keys", {})
-    tokens_summary: dict[int, dict[str, Any]] = {}
-    for token, record in token_records.items():
-        if evidence_lock is not None:
-            with evidence_lock:
-                evidence = list(record["unpack_evidence"])
-        else:  # the lock exists whenever tokens exist
-            evidence = []
-        site_candidates: set[str] = set()
-        window_refs: list[tuple[int | None, str | None, int | None]] = []
-        for point in evidence:
-            bracket = point.get("fire_bracket")
-            if bracket is None:
-                window_refs.append((point.get("pass_index"), None, None))
-                continue
-            bracket_object_id, bracket_call_index, bracket_pass_index = bracket
-            grad_fn_record = grad_fn_logs.get(bracket_object_id)
-            label = getattr(grad_fn_record, "label", None)
-            window_refs.append((bracket_pass_index, label, bracket_call_index))
-            if grad_fn_record is not None and getattr(grad_fn_record, "has_op", False):
-                op = layer_lookup.get(grad_fn_record.op_label)
-                site_key = getattr(op, "site_key", None)
-                if site_key is not None:
-                    site_candidates.add(site_key)
-        tokens_summary[token] = {
-            "pack_count": record["pack_count"],
-            "unpack_evidence_count": len(evidence),
-            "site_key_candidates": sorted(site_candidates),
-            "window_evidence": window_refs,
-        }
-    if flags:
-        verdict = "evidence_incomplete"
-    elif tokens_summary:
-        verdict = "checkpoint_invocations_observed"
+    if state is None:
+        tokens_summary: dict[int, dict[str, Any]] = {}
     else:
-        verdict = "no_checkpoint_invocation_observed"
+        tokens_summary = {
+            token: _checkpoint_token_summary(
+                record,
+                state["lock"],
+                getattr(trace, "grad_fn_logs", {}),
+                getattr(trace, "layer_dict_all_keys", {}),
+            )
+            for token, record in state["tokens"].items()
+        }
+    verdict = _checkpoint_witness_verdict(flags, len(tokens_summary))
     trace.checkpoint_invocation_witness = {
         "token_count": len(tokens_summary),
         "tokens": tokens_summary,

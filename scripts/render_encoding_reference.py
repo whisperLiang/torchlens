@@ -159,7 +159,8 @@ def render_channel_gallery() -> None:
     try:
         try:
             _render(chained, "stack_by_auto_refused", stack_by=True)
-        except Exception as error:
+        # The reference generator records any renderer refusal for inspection.
+        except Exception as error:  # noqa: BLE001
             print(f"stack_by=True on chained loops refused as designed: {error}")
         _render(
             chained,
