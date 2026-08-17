@@ -1156,6 +1156,150 @@ class TraceStatsMixin(_TraceMixinBase):
         return TraceGradFnCallAccessor(calls)
 
     @property
+    def grad_fn_fire_timings(self: "Trace") -> "OrderedDict[str, Duration | None]":
+        """Return live per-fire backward timing spans keyed like ``grad_fn_calls``.
+
+        DOCUMENTED-UNSTABLE spelling (L9 memo 1.3; pending naming-session
+        ratification). Serves the paired ``time.perf_counter()`` stamps
+        carried by the runtime ``GradFnFired`` events: a timed fire yields
+        its span as a :class:`~torchlens.quantities.Duration`, an untimed
+        fire (empty keyed LIFO, stale-key discard, or timing-registration
+        failure) yields ``None`` -- never a false zero. Keys are
+        ``"<grad_fn_label>:<call_index>"`` in fold order.
+
+        Raises
+        ------
+        InvalidArgumentError
+            ``grad_fn_fire_timing_unavailable`` on a trace without its
+            runtime capture event stream (loaded artifacts, cleaned traces):
+            events never persist, so such a read has no timing evidence
+            until the coordinated tlspec bump persists the pairs.
+        """
+
+        from ..ir.events import GradFnFired
+
+        stream = self.__dict__.get("capture_events") or self.__dict__.get("_capture_events")
+        fired = [
+            event
+            for event in getattr(stream, "backward_events", ())
+            if isinstance(event, GradFnFired)
+        ]
+        # Evidence test, not a load flag: a rehydrated trace owns a fresh
+        # EMPTY stream, so backward records without any fire event mean the
+        # runtime evidence did not travel (loaded artifact or cleaned trace).
+        if stream is None or (not fired and getattr(self, "grad_fn_logs", {})):
+            raise InvalidArgumentError(
+                "Per-fire backward timing is served from the runtime capture "
+                "event stream, which never persists: this trace (loaded from "
+                "an artifact, or already cleaned up) carries no per-fire "
+                "timing evidence for its backward records.",
+                code="grad_fn_fire_timing_unavailable",
+                remedy=(
+                    "read grad_fn_fire_timings on the live capturing trace; "
+                    "persisted per-fire timing activates at the coordinated "
+                    "tlspec version bump"
+                ),
+            )
+        timings: OrderedDict[str, Duration | None] = OrderedDict()
+        per_object_ordinals: dict[int, int] = {}
+        grad_fn_logs = getattr(self, "grad_fn_logs", {})
+        # Mirrors the _fold_fired_events sort key and per-object ordinal walk
+        # so keys line up 1:1 with trace.grad_fn_calls.
+        for event in sorted(fired, key=lambda item: (item.pass_index, item.timestamp, item.seq)):
+            record = grad_fn_logs.get(event.object_id)
+            if record is None:
+                continue
+            ordinal = per_object_ordinals.get(event.object_id, 0) + 1
+            per_object_ordinals[event.object_id] = ordinal
+            started = event.fire_started_monotonic
+            finished = event.fire_finished_monotonic
+            span = (
+                None
+                if started is None or finished is None
+                else Duration(max(0.0, finished - started))
+            )
+            timings[f"{record.label}:{ordinal}"] = span
+        return timings
+
+    @property
+    def grad_fn_site_summary(self: "Trace") -> "OrderedDict[str | None, dict[str, Any]]":
+        """Return the read-only per-site rollup of backward grad-fn facts.
+
+        DOCUMENTED-UNSTABLE spelling (L9 memo 1.1 grouped-backward floor;
+        pending naming-session ratification). Aggregates GradFn/GradFnCall
+        facts per L1 ``site_key`` (read-only L1 consumption -- reused-module
+        grad-fns share one entry): per entry ``grad_fn_labels``,
+        ``fire_count``, ``pass_coverage``, and -- when live per-fire timing
+        evidence exists -- ``timed_fire_count`` plus ``total_fire_duration``
+        (``None`` when no fire carries timing evidence, never a false zero).
+        Grad-fns without an op FK (AccumulateGrad and other unattributed
+        nodes) aggregate under the ``None`` key. Accessor-level only: no
+        persisted fields.
+
+        Raises
+        ------
+        InvalidArgumentError
+            ``site_key_unavailable`` when op-backed grad-fns exist but no op
+            carries a site key (legacy pre-site-key artifact) -- consistent
+            with the L1 site accessors, never a silently keyless rollup.
+        """
+
+        self._sync_backward_projection_if_needed()
+        try:
+            fire_timings: OrderedDict[str, Duration | None] | None = self.grad_fn_fire_timings
+        except InvalidArgumentError:
+            # Loaded/cleaned traces carry no runtime timing evidence; the
+            # count/coverage rollup still stands on the persisted records.
+            fire_timings = None
+        summary: OrderedDict[str | None, dict[str, Any]] = OrderedDict()
+        any_op_backed = False
+        any_keyed = False
+        layer_lookup = getattr(self, "layer_dict_all_keys", {})
+        for grad_fn_record in getattr(self, "grad_fn_logs", {}).values():
+            site_key: str | None = None
+            if getattr(grad_fn_record, "has_op", False) and grad_fn_record.op_label is not None:
+                any_op_backed = True
+                op = layer_lookup.get(grad_fn_record.op_label)
+                site_key = getattr(op, "site_key", None)
+                if site_key is not None:
+                    any_keyed = True
+            entry = summary.setdefault(
+                site_key,
+                {
+                    "grad_fn_labels": [],
+                    "fire_count": 0,
+                    "pass_coverage": set(),
+                    "timed_fire_count": 0,
+                    "total_fire_duration": None,
+                },
+            )
+            entry["grad_fn_labels"].append(grad_fn_record.label)
+            for call_index, call in grad_fn_record.calls.items():
+                entry["fire_count"] += 1
+                if call.backward_pass_index is not None:
+                    entry["pass_coverage"].add(int(call.backward_pass_index))
+                if fire_timings is not None:
+                    span = fire_timings.get(f"{grad_fn_record.label}:{call_index}")
+                    if span is not None:
+                        entry["timed_fire_count"] += 1
+                        previous = entry["total_fire_duration"]
+                        entry["total_fire_duration"] = Duration(
+                            (0.0 if previous is None else float(previous)) + float(span)
+                        )
+        if any_op_backed and not any_keyed:
+            raise InvalidArgumentError(
+                "This trace's op-backed grad-fns carry no site keys: it was "
+                "captured/saved before site_key_v1 existed, so a per-site "
+                "backward rollup would be silently empty.",
+                code="site_key_unavailable",
+                remedy="re-capture with a current TorchLens to mint site keys",
+            )
+        for entry in summary.values():
+            entry["grad_fn_labels"] = tuple(sorted(entry["grad_fn_labels"]))
+            entry["pass_coverage"] = tuple(sorted(entry["pass_coverage"]))
+        return summary
+
+    @property
     def backward_passes(self: "Trace") -> BackwardPassAccessor:
         """Access backward pass records by 0-based position or named pass number."""
 
@@ -1180,12 +1324,18 @@ class TraceStatsMixin(_TraceMixinBase):
         if not getattr(self, "backward_events", ()):
             return
         from ..backends.torch.backward import (
+            _backward_finalize_pending,
             _close_implicit_backward_pass_if_open,
             _materialize_backward_projections,
         )
 
         _close_implicit_backward_pass_if_open(self)
-        _materialize_backward_projections(self)
+        # A read from INSIDE an engine invocation journals but must not
+        # materialize while the close's FINALIZE step is still pending:
+        # materializing there would publish records ahead of the R36-1 D2H
+        # fence (L9 memo 1.2). The first post-pass read finalizes fully.
+        if not _backward_finalize_pending(self):
+            _materialize_backward_projections(self)
 
     @property
     def num_grad_fn_calls(self: "Trace") -> int:

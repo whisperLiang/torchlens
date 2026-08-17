@@ -180,6 +180,10 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "recurrence_detection": "capture_config",
     "grouping": "capture_config",
     "grouping_policy": "capture_config",
+    # L9 backward residuals: timing clock provenance + checkpoint witness are
+    # capture-evidence disclosures, not graph structure.
+    "grad_fn_timing_provenance": "witness",
+    "checkpoint_invocation_witness": "witness",
     "verbose": "capture_config",
     "profile_enabled": "capture_config",
     "has_gradients": "totals",

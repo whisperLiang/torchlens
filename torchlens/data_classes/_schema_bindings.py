@@ -260,6 +260,8 @@ STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {
         "measure_python_peak_memory": StorageBinding(StorageKind.RUNTIME),
         "distributed_witness": StorageBinding(StorageKind.RUNTIME),
         "save_budget": StorageBinding(StorageKind.RUNTIME),
+        "grad_fn_timing_provenance": StorageBinding(StorageKind.RUNTIME),
+        "checkpoint_invocation_witness": StorageBinding(StorageKind.RUNTIME),
         "_warned_once": StorageBinding(StorageKind.RUNTIME),
         "_predicate_save_options": StorageBinding(StorageKind.RUNTIME),
         "_predicate_history_size": StorageBinding(StorageKind.RUNTIME),

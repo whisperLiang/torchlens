@@ -512,6 +512,34 @@ print(tl.compat.report(model, x).to_markdown())
   not silently reorder another owner's refusal). `tap(resolved_selection)`
   stores per-site masks on TapRecords; `values(masked=True)` returns fresh
   masked copies.
+- BACKWARD RESIDUALS (L9; every spelling DOCUMENTED-UNSTABLE pending
+  naming-session/E-L9-4 routing): PER-FIRE TIMING -- every hooked grad_fn
+  gets a timing prehook; ONE clock (`perf_counter`) paired at capture by a
+  per-node keyed LIFO (stale entries discarded, untimed fires `(None,
+  None)`, never a cross-clock pair); stamps ride the runtime `GradFnFired`
+  event only, served by live-trace-only `trace.grad_fn_fire_timings`
+  (loaded/cleaned traces refuse `grad_fn_fire_timing_unavailable`); NOTHING
+  NEW PERSISTS PRE-BUMP -- persisted `GradFnCall` timing fields keep shipped
+  wall-stamp semantics until the coordinated bump flips them WITH the
+  DROP-gated `Trace.grad_fn_timing_provenance` discriminator; timing
+  registration failure degrades to untimed, never a coverage gap (D15 A/B
+  measured ~4-5%, under the 10% gate; universal path shipped). CHECKPOINT
+  TOKENS -- classified non-reentrant `_checkpoint_hook` enters mint one
+  per-trace ordinal token (armed owner thread, outside engine invocations;
+  fail-closed one-way); pack evidence count-only (forward slot->op binding
+  NOT claimed), unpack evidence backward-derived (fire bracket -> user-op
+  pairing -> L1 site keys); DROP-gated `Trace.checkpoint_invocation_witness`
+  carries counts/candidates/degrade-flags D1-D6/evidence-scoped verdict; the
+  ambiguity REFUSAL is S2-authored (R-L9-1 filed) -- identity-read accessors
+  are NOT shipped until it lands. IMPLICIT-BOUNDARY --
+  `_close_implicit_backward_pass_if_open` is a journal/scavenge/finalize
+  split with the finalize guard IN-ROUTINE (D2H fence + projection never run
+  inside an engine invocation; mid-engine reads journal without
+  materializing); implicit opens enqueue an identity-checked engine-drain
+  final callback with the sync-point backstop always armed; the
+  `BackwardPassEnd.close_path` disclosure is sidecar-event-only in wave 2.
+  GROUPED FLOOR -- `trace.grad_fn_site_summary` rolls backward facts up per
+  L1 site_key (read-only; keyless legacy refuses `site_key_unavailable`).
 - PREDICATE RUNTIME EXTENSION POINT (S4 seam; every spelling
   DOCUMENTED-UNSTABLE pending naming-session ratification):
   `torchlens.ir.predicate_registry` is the ONE documented door through which

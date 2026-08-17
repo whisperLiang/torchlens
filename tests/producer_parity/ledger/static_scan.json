@@ -2785,6 +2785,22 @@
  },
  {
   "ambiguous": false,
+  "field": "pass_index",
+  "file": "torchlens/data_classes/_trace_stats.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": true,
+  "field": "seq",
+  "file": "torchlens/data_classes/_trace_stats.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": false,
   "field": "layer_type",
   "file": "torchlens/data_classes/_trace_validation.py",
   "has_default": false,

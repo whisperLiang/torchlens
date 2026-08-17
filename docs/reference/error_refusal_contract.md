@@ -133,6 +133,7 @@ add names to the top-level `torchlens` namespace:
 | `graphviz_binary_unavailable` | The Graphviz executable is not on PATH, so no render subprocess can start (`GraphvizUnavailableError`, `RuntimeError` lineage) | Install the Graphviz system package (`apt install graphviz` / `brew install graphviz`) |
 | `graphviz_render_failed` | Graphviz did not produce a usable rendered artifact (`GraphvizRenderError`, `RuntimeError` lineage) | Lower dpi, render direct SVG, or cap the graph size |
 | `gradient_pass_ambiguous` | Gradient query spans multiple backward passes | Pick one pass or record positionally |
+| `grad_fn_fire_timing_unavailable` | `trace.grad_fn_fire_timings` read on a trace without its runtime capture event stream (loaded artifact or cleaned trace); per-fire timing evidence never persists pre-bump (spelling provisional pending the naming session / S2 routing) | Read on the live capturing trace; persisted per-fire timing activates at the coordinated tlspec bump |
 | `grouping_invalid` | `grouping=` value is outside the closed vocabulary | Choose a documented grouping policy value |
 | `grouping_policy_unavailable` | `grouping=` value is legal vocabulary but not entry-legal for this capture kind/wave (spelling provisional pending the S2 vocabulary amendment) | Use the default `grouping='structural'` |
 | `halt_predicate_type_invalid` | `tl.trace` `halt` is not callable (`ArgumentTypeError`, `TypeError` lineage; the `tl.record` twin is `recording_halt_predicate_type_invalid`) | Pass a predicate or `None` |
