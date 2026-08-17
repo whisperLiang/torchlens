@@ -148,9 +148,6 @@ def apply_edge_substitution_do(
     hooks_module = importlib.import_module("torchlens.intervention.hooks")
 
     family = {edge_address_of(record): record for record in _trace_edge_records(trace)}
-    ops_by_label = {op.label: op for op in trace.layer_dict_all_keys.values()}
-    del ops_by_label  # labels resolve through the trace mapping below
-
     applied: list[dict[str, Any]] = []
     committed: list[tuple[Any, tuple[Any, ...]]] = []
     try:
@@ -192,41 +189,21 @@ def apply_edge_substitution_do(
             substituted = hook_callable(consumed, hook=context)
             substituted = _validate_edited(substituted, consumed, record.child_label)
 
-            # SESSION splice: reconstruct the child's call from capture truth,
-            # substitute at exactly the occurrence address, re-execute.
-            template = replay_module._template_for_site(child_op)
-            args, kwargs = replay_module._reconstruct_args_from_template(
-                template, child_op, trace, {}, strict=strict
-            )
-            if arg_kind == "positional":
-                position = int(arg_path[0])
-                args = args[:position] + (substituted,) + args[position + 1 :]
-            else:
-                kwargs = dict(kwargs)
-                kwargs[arg_path[0]] = substituted
-            output = replay_module._execute_replay_func_strict(child_op, args, kwargs)
-            new_out = replay_module._slice_output_by_path(
-                output, tuple(child_op.container_path or ())
+            new_out = _reexecute_child_with_substitution(
+                trace, child_op, address, substituted, strict=strict
             )
 
-            # Tier (ii): the occurrence-granular intervention-owned store,
-            # with the save-time corroboration stamp.
             store_key = (arg_kind, tuple(arg_path))
-            store = dict(getattr(child_op, "edge_substitutions", None) or {})
-            store[store_key] = {
-                "value": substituted.detach().clone(),
-                "parent_label": record.parent_label,
-                "resolve_digest": resolved.resolve_digest,
-                "helper_name": helper_name,
-            }
-            stamps = dict(getattr(child_op, "edge_replacement_stamps", None) or {})
-            stamps[store_key] = {
-                "verdict": True,
-                "value_digest": _value_digest(substituted),
-                "resolve_digest": resolved.resolve_digest,
-            }
-            child_op._internal_set("edge_substitutions", store)
-            child_op._internal_set("edge_replacement_stamps", stamps)
+            value_digest = _record_edge_substitution(
+                child_op,
+                store_key,
+                substituted,
+                meta={
+                    "parent_label": record.parent_label,
+                    "resolve_digest": resolved.resolve_digest,
+                    "helper_name": helper_name,
+                },
+            )
             committed.append((child_op, store_key))
 
             fire_record = FireRecord(
@@ -267,21 +244,76 @@ def apply_edge_substitution_do(
                     "edge_address": repr(tuple(address)),
                     "parent": record.parent_label,
                     "child": record.child_label,
-                    "value_digest": stamps[store_key]["value_digest"],
+                    "value_digest": value_digest,
                 }
             )
     except Exception:
-        # Roll back tier-(ii) entries for occurrences that did not complete.
-        for child_op, store_key in committed:
-            store = dict(getattr(child_op, "edge_substitutions", None) or {})
-            stamps = dict(getattr(child_op, "edge_replacement_stamps", None) or {})
-            if not any(
-                item["edge_address"] == repr((child_op.func_call_id,) + store_key)
-                for item in applied
-            ):
-                store.pop(store_key, None)
-                stamps.pop(store_key, None)
-                child_op._internal_set("edge_substitutions", store or None)
-                child_op._internal_set("edge_replacement_stamps", stamps or None)
+        _rollback_uncommitted_edges(committed, applied)
         raise
     return {"edges": applied}
+
+
+def _reexecute_child_with_substitution(
+    trace: Trace, child_op: Any, address: Any, substituted: Any, *, strict: bool
+) -> Any:
+    """SESSION splice: rebuild the child's call from capture truth, substitute
+    at exactly the occurrence address, re-execute, and slice its output."""
+
+    import importlib
+
+    replay_module = importlib.import_module("torchlens.intervention.replay")
+    _child_func_call_id, arg_kind, arg_path = address
+    template = replay_module._template_for_site(child_op)
+    args, kwargs = replay_module._reconstruct_args_from_template(
+        template, child_op, trace, {}, strict=strict
+    )
+    if arg_kind == "positional":
+        position = int(arg_path[0])
+        args = args[:position] + (substituted,) + args[position + 1 :]
+    else:
+        kwargs = dict(kwargs)
+        kwargs[arg_path[0]] = substituted
+    output = replay_module._execute_replay_func_strict(child_op, args, kwargs)
+    return replay_module._slice_output_by_path(output, tuple(child_op.container_path or ()))
+
+
+def _record_edge_substitution(
+    child_op: Any, store_key: tuple[Any, ...], substituted: Any, *, meta: dict[str, Any]
+) -> Any:
+    """Tier (ii): write the occurrence-granular intervention-owned store entry
+    with the save-time corroboration stamp; return the stamped value digest."""
+
+    store = dict(getattr(child_op, "edge_substitutions", None) or {})
+    store[store_key] = {
+        "value": substituted.detach().clone(),
+        "parent_label": meta["parent_label"],
+        "resolve_digest": meta["resolve_digest"],
+        "helper_name": meta["helper_name"],
+    }
+    value_digest = _value_digest(substituted)
+    stamps = dict(getattr(child_op, "edge_replacement_stamps", None) or {})
+    stamps[store_key] = {
+        "verdict": True,
+        "value_digest": value_digest,
+        "resolve_digest": meta["resolve_digest"],
+    }
+    child_op._internal_set("edge_substitutions", store)
+    child_op._internal_set("edge_replacement_stamps", stamps)
+    return value_digest
+
+
+def _rollback_uncommitted_edges(
+    committed: list[tuple[Any, tuple[Any, ...]]], applied: list[dict[str, Any]]
+) -> None:
+    """Roll back tier-(ii) entries for occurrences that did not complete."""
+
+    for child_op, store_key in committed:
+        store = dict(getattr(child_op, "edge_substitutions", None) or {})
+        stamps = dict(getattr(child_op, "edge_replacement_stamps", None) or {})
+        if not any(
+            item["edge_address"] == repr((child_op.func_call_id,) + store_key) for item in applied
+        ):
+            store.pop(store_key, None)
+            stamps.pop(store_key, None)
+            child_op._internal_set("edge_substitutions", store or None)
+            child_op._internal_set("edge_replacement_stamps", stamps or None)

@@ -1609,6 +1609,17 @@ def _check_edge_intervention_boundary(
     entries = getattr(target_op, "edge_substitutions", None) or {}
     if not entries:
         return None
+    failure = _fail_uncorroborated_edge_entries(trace, target_op, entries)
+    if failure is not None:
+        return failure
+    return _reexecute_edge_boundary(trace, target_op, entries)
+
+
+def _fail_uncorroborated_edge_entries(
+    trace: "Trace", target_op: "Op", entries: dict[Any, Any]
+) -> ValidationCheckResult | None:
+    """Fail any tier-(ii) entry missing its FireRecord address or stamp verdict."""
+
     from .diagnostics import CHECK_REPLAY, ValidationFailure, record_validation_failure
 
     stamps = getattr(target_op, "edge_replacement_stamps", None) or {}
@@ -1635,10 +1646,16 @@ def _check_edge_intervention_boundary(
                 ),
             )
             return ValidationCheckResult.failed_result("edge_substitution_uncorroborated")
+    return None
 
-    input_args, unverified_reason = _prepare_input_args_for_validating_layer(trace, target_op, [])
-    if input_args is None:
-        return ValidationCheckResult.unverified(unverified_reason or "missing_saved_args")
+
+def _splice_edge_substitution_args(
+    trace: "Trace", target_op: "Op", entries: dict[Any, Any], input_args: dict[str, Any]
+) -> tuple[dict[str, Any] | None, ValidationCheckResult | None]:
+    """Splice tier-(ii) substituted values into the captured call arguments."""
+
+    from .diagnostics import CHECK_REPLAY, ValidationFailure, record_validation_failure
+
     args = list(input_args["args"])
     kwargs = dict(input_args["kwargs"])
     for store_key, payload in entries.items():
@@ -1654,17 +1671,32 @@ def _check_edge_intervention_boundary(
                     message=f"edge-substitution payload at {store_key!r} is not a tensor",
                 ),
             )
-            return ValidationCheckResult.failed_result("edge_substitution_payload_invalid")
+            failed = ValidationCheckResult.failed_result("edge_substitution_payload_invalid")
+            return None, failed
         if arg_kind == "positional":
             args[int(arg_path[0])] = value
         else:
             kwargs[arg_path[0]] = value
-    input_args = dict(input_args)
-    input_args["args"] = tuple(args)
-    input_args["kwargs"] = kwargs
-    recomputed = _execute_func_with_restored_state(
-        target_op, input_args, [], target_op.label, False
-    )
+    spliced = dict(input_args)
+    spliced["args"] = tuple(args)
+    spliced["kwargs"] = kwargs
+    return spliced, None
+
+
+def _reexecute_edge_boundary(
+    trace: "Trace", target_op: "Op", entries: dict[Any, Any]
+) -> ValidationCheckResult:
+    """Re-execute the child from the spliced tier-(ii) values and compare outputs."""
+
+    from .diagnostics import CHECK_REPLAY, ValidationFailure, record_validation_failure
+
+    input_args, unverified_reason = _prepare_input_args_for_validating_layer(trace, target_op, [])
+    if input_args is None:
+        return ValidationCheckResult.unverified(unverified_reason or "missing_saved_args")
+    spliced, failure = _splice_edge_substitution_args(trace, target_op, entries, input_args)
+    if spliced is None:
+        return failure if failure is not None else ValidationCheckResult.unverified("unknown")
+    recomputed = _execute_func_with_restored_state(target_op, spliced, [], target_op.label, False)
     saved_output = _saved_out_payload(target_op)
     if recomputed is None or saved_output is None:
         return ValidationCheckResult.unverified("edge_boundary_replay_unavailable")
