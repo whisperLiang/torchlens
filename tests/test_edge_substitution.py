@@ -236,6 +236,13 @@ def test_v7_persistence_boundary_switch_on_round_trip(capture, tmp_path):
         loaded = tl.load(path)
         child = loaded["conv2d_2_3"].ops[0]
         assert child.edge_substitutions and child.edge_replacement_stamps
+        # The store's payload must materialize back into REAL tensors --
+        # presence alone is a skip-shaped acceptance (prebump lane finding:
+        # rehydration once handed back dead BlobRefs here).
+        live_child = fork["conv2d_2_3"].ops[0]
+        for key, entry in child.edge_substitutions.items():
+            assert isinstance(entry["value"], torch.Tensor)
+            assert torch.equal(entry["value"], live_child.edge_substitutions[key]["value"])
     from torchlens._io import PreReleaseArtifactError
 
     with pytest.raises(PreReleaseArtifactError):

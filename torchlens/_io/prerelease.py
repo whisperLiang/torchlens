@@ -203,6 +203,43 @@ def activate_prerelease_fields() -> Iterator[None]:
         _ACTIVE = previous
 
 
+def effective_policy(owner_type: type, field_name: str, declared: FieldPolicy) -> FieldPolicy:
+    """Return the policy persistence consumers must honor for one field NOW.
+
+    The activation switch flips a registered DROP-declared field to its
+    intended persisting policy on EVERY side of the persistence seam: scrub
+    (write), rehydration (blob materialization at load), and the nested
+    ``BlobRef`` resave guard. The write side alone is not enough -- a
+    switched save of a ``BLOB_RECURSIVE``-registered field emits nested
+    ``BlobRef`` leaves that only materialize back into tensors if the load
+    side resolves the SAME effective policy (prebump acceptance finding,
+    2026-08-17: ``Op.edge_substitutions`` loaded as dead ``BlobRef`` objects
+    because rehydration consulted only the declared ``DROP``).
+
+    Parameters
+    ----------
+    owner_type:
+        Record class owning the field.
+    field_name:
+        Declared field name.
+    declared:
+        The field's declared policy from ``PORTABLE_STATE_SPEC``.
+
+    Returns
+    -------
+    FieldPolicy
+        ``declared``, unless the switch is active and the field is
+        registered, in which case the registered persisting policy.
+    """
+
+    from . import FieldPolicy
+
+    if declared is not FieldPolicy.DROP or not _ACTIVE:
+        return declared
+    override = persisted_policy_override(owner_type, field_name)
+    return declared if override is None else override
+
+
 def persisted_policy_override(owner_type: type, field_name: str) -> FieldPolicy | None:
     """Return the switched-on persisting policy for one field, else ``None``.
 

@@ -25,7 +25,7 @@ from ..backends import BackendRuntimeCompatibilityError
 from ..data_classes._state_adapter import state_items
 from ..data_classes.trace import Trace
 from ..ir.workspaces import LEGACY_TRACE_BUILD_STATE_KEYS
-from . import BlobRef, FieldPolicy, PayloadLoadHints, TorchLensIOError
+from . import BlobRef, FieldPolicy, PayloadLoadHints, TorchLensIOError, prerelease as _prerelease
 from ._torch_symbols import torch_attr
 from .accessor_rebuild import rebuild_trace_accessors
 from .lazy import LazyActivationRef, _file_identity
@@ -561,7 +561,11 @@ def _rehydrate_object(
     for field_name, field_value in list(state_items(value)):
         if field_name not in spec:
             continue
-        policy = spec[field_name]
+        # Registered pre-release fields materialize under their SWITCHED-ON
+        # persisting policy, mirroring scrub's write-side override -- a
+        # declared-DROP field saved BLOB_RECURSIVE under the switch must
+        # rehydrate its nested BlobRefs, not hand them back dead.
+        policy = _prerelease.effective_policy(value_type, field_name, spec[field_name])
         if policy == FieldPolicy.BLOB:
             if isinstance(field_value, BlobRef):
                 ref_field_name = _lazy_ref_field_name(field_name)
@@ -1413,7 +1417,9 @@ def _rehydrate_nested_object(
     for field_name, field_value in list(state_items(value)):
         if field_name not in spec:
             continue
-        policy = spec[field_name]
+        # Same switched-on override as the top-level walk: nested records'
+        # registered pre-release fields rehydrate with their persisting policy.
+        policy = _prerelease.effective_policy(type(value), field_name, spec[field_name])
         if policy == FieldPolicy.BLOB_RECURSIVE:
             _assign_rehydrated_field(
                 value,
