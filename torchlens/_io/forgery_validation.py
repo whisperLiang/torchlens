@@ -191,6 +191,7 @@ def _validate_site_keys(trace: Trace) -> None:
         Loaded trace carrying zero or more ``site_key_v1`` values.
     """
 
+    from ..backends.registry import JAX_BACKEND_NAME
     from ..postprocess._site_key import SiteKeyMinter, parse_site_key
 
     ops = _trace_ops(trace)
@@ -235,7 +236,7 @@ def _validate_site_keys(trace: Trace) -> None:
     minter = SiteKeyMinter()
     backend = str(getattr(trace, "backend", "torch") or "torch")
     for op, key in zip(ops, keys, strict=True):
-        if backend == "jax":
+        if backend == JAX_BACKEND_NAME:
             from ..backends.jax._site_dialect import _jax_site_components
 
             module_site, call_instance = _jax_site_components(op)
