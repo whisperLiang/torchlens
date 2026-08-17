@@ -259,7 +259,8 @@ def _license_verdict(model: nn.Module) -> str:
     try:
         check_lockstep_license(log)
         return "accepts"
-    except Exception as error:
+    # The matrix verifies TorchLens' structured code across refusal subclasses.
+    except Exception as error:  # noqa: BLE001
         assert error.fields["code"] == "stack_by_auto_underivable"
         return "refuses"
     finally:

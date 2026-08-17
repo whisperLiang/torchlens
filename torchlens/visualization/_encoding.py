@@ -564,6 +564,22 @@ class EncodingState:
         return DARK_RAMP if self.dark_theme else LIGHT_RAMP
 
 
+def _require_channel_spec(state: EncodingState) -> EncodingChannelSpec:
+    """Return the active color spec or fail on an internal phase-order bug."""
+
+    if state.spec is None:
+        raise RuntimeError("color encoding resolution requires an active color spec")
+    return state.spec
+
+
+def _require_size_spec(state: EncodingState) -> EncodingChannelSpec:
+    """Return the active size spec or fail on an internal phase-order bug."""
+
+    if state.size_spec is None:
+        raise RuntimeError("size encoding resolution requires an active size spec")
+    return state.size_spec
+
+
 def _encoding_error(
     problem: str, *, code: str, remedy: str, **context: Any
 ) -> InvalidArgumentError:
@@ -813,18 +829,16 @@ def _coerce_scalar(
     value: Any,
     *,
     argument: str = "color_by",
-    display_name: str | None = None,
-    note: Any = None,
 ) -> float | None:
     """Apply the closed value/type rules (memo 2.2) to one resolved value.
 
-    ``argument``/``display_name``/``note`` select the owning channel so both
-    color and size share ONE closed failure table.
+    ``argument`` selects the owning channel so color and size share ONE
+    closed failure table.
     """
 
-    record_note = note if note is not None else state.note
-    if display_name is None:
-        display_name = state.spec.display_name if state.spec is not None else argument
+    channel_spec = state.size_spec if argument == "size_by" else state.spec
+    record_note = state.size_note if argument == "size_by" else state.note
+    display_name = channel_spec.display_name if channel_spec is not None else argument
     if value is None:
         record_note(NOTE_NA_UNENCODED)
         return None
@@ -862,8 +876,6 @@ def _coerce_scalar(
                 node,
                 item(),
                 argument=argument,
-                display_name=display_name,
-                note=record_note,
             )
         raise _encoding_error(
             f"{argument} source {display_name!r} produced a non-scalar "
@@ -1025,8 +1037,7 @@ def _resolve_field_on_rolled(state: EncodingState, node: Any, field_name: str) -
 def _resolve_source_value(state: EncodingState, trace: Trace, node: Any) -> float | None:
     """Resolve one node's raw color value (Phase A, exactly once per node)."""
 
-    spec = state.spec
-    assert spec is not None
+    spec = _require_channel_spec(state)
     if spec.source_kind == "callable":
         try:
             value = spec.source(node)
@@ -1100,15 +1111,9 @@ def _size_rolled_refusal(node: Any, field_name: str, why: str) -> InvalidArgumen
     )
 
 
-def _resolve_size_field_on_rolled(state: EncodingState, node: Any, field_name: str) -> float | None:
-    """Resolve a FIELD size source on a rolled multi-pass Layer.
+def _require_size_rolled_row(node: Any, field_name: str) -> str:
+    """Return a declared rolled-size row or raise the typed source refusal."""
 
-    Size REFUSES where color degrades: every verdict below that unencodes for
-    color is a typed ``size_by_rolled_varying`` refusal here (memo 3.1).
-    """
-
-    spec = state.size_spec
-    assert spec is not None
     row = LAYER_SOURCE_ROWS.get(field_name)
     if row is None:
         raise _encoding_error(
@@ -1123,6 +1128,18 @@ def _resolve_size_field_on_rolled(state: EncodingState, node: Any, field_name: s
             ),
             argument="size_by",
         )
+    return row
+
+
+def _resolve_size_field_on_rolled(state: EncodingState, node: Any, field_name: str) -> float | None:
+    """Resolve a FIELD size source on a rolled multi-pass Layer.
+
+    Size REFUSES where color degrades: every verdict below that unencodes for
+    color is a typed ``size_by_rolled_varying`` refusal here (memo 3.1).
+    """
+
+    _require_size_spec(state)
+    row = _require_size_rolled_row(node, field_name)
     coerce = _size_coerce(state)
     marker = _varying_marker(node)
     if row == ROW_RECONCILED:
@@ -1144,24 +1161,10 @@ def _resolve_size_field_on_rolled(state: EncodingState, node: Any, field_name: s
             node, field_name, "the stored value is an unreconciled first-pass projection"
         )
     if row == ROW_DERIVED:
-        for input_name in _DERIVED_COMPOSITE_INPUTS[field_name]:
-            if LAYER_SOURCE_ROWS.get(input_name) == ROW_MIRRORED_PER_CALL:
-                raise _size_rolled_refusal(
-                    node,
-                    field_name,
-                    f"input {input_name!r} is an unreconciled first-pass projection",
-                )
-            if input_name in marker:
-                raise _size_rolled_refusal(node, field_name, f"input {input_name!r} varies")
+        _validate_derived_size_inputs(node, field_name, marker)
         return coerce(node, getattr(node, field_name, None))
     if row == ROW_STRUCTURAL:
-        op_field = _mirror_backed_op_field(field_name)
-        if op_field is not None:
-            per_pass = [getattr(node.ops.get(index), op_field, None) for index in sorted(node.ops)]
-            if len({repr(value) for value in per_pass}) > 1:
-                raise _size_rolled_refusal(
-                    node, field_name, "per-pass values disagree (defensive check)"
-                )
+        _validate_structural_size_value(node, field_name)
         return coerce(node, getattr(node, field_name, None))
     if row == ROW_PER_PASS:
         raise _size_rolled_refusal(
@@ -1174,11 +1177,35 @@ def _resolve_size_field_on_rolled(state: EncodingState, node: Any, field_name: s
     return coerce(node, get_multipass_attr(node, field_name, None, multipass=None))
 
 
+def _validate_derived_size_inputs(node: Any, field_name: str, marker: dict[str, Any]) -> None:
+    """Refuse a derived rolled size whose input is not provably single-valued."""
+
+    for input_name in _DERIVED_COMPOSITE_INPUTS[field_name]:
+        if LAYER_SOURCE_ROWS.get(input_name) == ROW_MIRRORED_PER_CALL:
+            raise _size_rolled_refusal(
+                node,
+                field_name,
+                f"input {input_name!r} is an unreconciled first-pass projection",
+            )
+        if input_name in marker:
+            raise _size_rolled_refusal(node, field_name, f"input {input_name!r} varies")
+
+
+def _validate_structural_size_value(node: Any, field_name: str) -> None:
+    """Refuse a structural rolled size when its per-pass source values disagree."""
+
+    op_field = _mirror_backed_op_field(field_name)
+    if op_field is None:
+        return
+    per_pass = [getattr(node.ops.get(index), op_field, None) for index in sorted(node.ops)]
+    if len({repr(value) for value in per_pass}) > 1:
+        raise _size_rolled_refusal(node, field_name, "per-pass values disagree (defensive check)")
+
+
 def _size_coerce(state: EncodingState) -> Any:
     """Return a size-channel scalar coercion closure."""
 
-    spec = state.size_spec
-    assert spec is not None
+    _require_size_spec(state)
 
     def coerce(node: Any, value: Any) -> float | None:
         """Coerce one node's ``size_by`` value to a float, or None if unusable."""
@@ -1187,8 +1214,6 @@ def _size_coerce(state: EncodingState) -> Any:
             node,
             value,
             argument="size_by",
-            display_name=spec.display_name,
-            note=state.size_note,
         )
 
     return coerce
@@ -1247,8 +1272,7 @@ def _non_batch_numel(shape: tuple[int, ...]) -> float:
 def _resolve_size_source_value(state: EncodingState, trace: Trace, node: Any) -> float | None:
     """Resolve one node's raw size value (Phase A, exactly once per node)."""
 
-    spec = state.size_spec
-    assert spec is not None
+    spec = _require_size_spec(state)
     if spec.source_kind == "callable":
         try:
             value = spec.source(node)
@@ -1328,17 +1352,8 @@ def _compute_size_geometry(state: EncodingState) -> None:
         state.sizes[key] = (round(width, 3), round(height, 3))
 
 
-def populate_encoding_state(state: EncodingState, trace: Trace, universe: Any) -> None:
-    """PHASE A: collect values over the visible-node universe and normalize.
-
-    Runs exactly once per draw (``build_render_ir`` calls it before any
-    per-node spec resolution). User callables are invoked exactly once per
-    visible eligible node here; Phase B only reads the precomputed map.
-    """
-
-    if state.populated:
-        return
-    state.populated = True
+def _collect_encoding_values(state: EncodingState, trace: Trace, universe: Any) -> dict[str, float]:
+    """Collect color and size values over the visible eligible node universe."""
 
     raw_values: dict[str, float] = {}
     for unit in universe.units:
@@ -1357,21 +1372,15 @@ def populate_encoding_state(state: EncodingState, trace: Trace, universe: Any) -
             size_value = _resolve_size_source_value(state, trace, node)
             if size_value is not None:
                 state.size_values[_node_key(node)] = size_value
+    return raw_values
 
-    if state.size_spec is not None:
-        _compute_size_geometry(state)
 
-    if state.stack_spec is not None:
-        from ._stacking import compute_stack_groups
+def _normalize_color_values(state: EncodingState, raw_values: dict[str, float]) -> None:
+    """Normalize collected color values into the configured sequential ramp."""
 
-        compute_stack_groups(state, trace, universe)
-
-    if state.spec is None:
-        return
     if not raw_values:
         state.note(NOTE_NA_UNENCODED)
         return
-
     low = min(raw_values.values())
     high = max(raw_values.values())
     state.domain = (low, high)
@@ -1387,6 +1396,32 @@ def populate_encoding_state(state: EncodingState, trace: Trace, universe: Any) -
     }
 
 
+def populate_encoding_state(state: EncodingState, trace: Trace, universe: Any) -> None:
+    """PHASE A: collect values over the visible-node universe and normalize.
+
+    Runs exactly once per draw (``build_render_ir`` calls it before any
+    per-node spec resolution). User callables are invoked exactly once per
+    visible eligible node here; Phase B only reads the precomputed map.
+    """
+
+    if state.populated:
+        return
+    state.populated = True
+    raw_values = _collect_encoding_values(state, trace, universe)
+
+    if state.size_spec is not None:
+        _compute_size_geometry(state)
+
+    if state.stack_spec is not None:
+        from ._stacking import compute_stack_groups
+
+        compute_stack_groups(state, trace, universe)
+
+    if state.spec is None:
+        return
+    _normalize_color_values(state, raw_values)
+
+
 def _format_domain_value(state: EncodingState, value: float) -> str:
     """Format a domain endpoint for the legend (builtin-aware)."""
 
@@ -1400,19 +1435,71 @@ def _format_domain_value(state: EncodingState, value: float) -> str:
     return f"{value:.4g}"
 
 
+def _color_legend_rows(state: EncodingState) -> list[Any]:
+    """Return color-channel title and ramp rows for the disclosure legend."""
+
+    from .node_spec import NodeSpec
+
+    if state.spec is None:
+        return []
+    title_lines = [
+        f"color_by: {state.spec.display_name}",
+        "linear min-max",
+        *state.aggregation_lines,
+        *state.notes,
+    ]
+    rows = [NodeSpec(lines=title_lines, shape="box", style="filled,rounded")]
+    if state.domain is None:
+        return rows
+    low, high = state.domain
+    start, end = state.ramp
+    mid = (low + high) / 2.0
+    for tag, fraction, value in (("min", 0.0, low), ("mid", 0.5, mid), ("max", 1.0, high)):
+        rows.append(
+            NodeSpec(
+                lines=[f"{tag}: {_format_domain_value(state, value)}"],
+                shape="box",
+                fillcolor=interpolate_hex(start, end, fraction),
+            )
+        )
+    return rows
+
+
+def _non_color_legend_rows(state: EncodingState) -> list[Any]:
+    """Return active size and stack disclosure rows."""
+
+    from .node_spec import NodeSpec
+
+    rows: list[NodeSpec] = []
+    if state.size_spec is not None:
+        size_lines = [
+            f"size_by: {state.size_spec.display_name}",
+            f"size ~ {state.size_scale}({state.size_spec.display_name}), min-max, clamped",
+            *state.size_aggregation_lines,
+            *state.size_notes,
+        ]
+        if state.size_domain is not None:
+            low, high = state.size_domain
+            size_lines.append(
+                f"min {_format_size_domain_value(low)} .. max {_format_size_domain_value(high)}"
+            )
+        rows.append(NodeSpec(lines=size_lines, shape="box", style="filled,rounded"))
+    if state.stack_spec is not None:
+        stack_lines = [
+            f"stack_by: {state.stack_spec.display_name}",
+            "same rank = same annotation value",
+            *state.stack_notes,
+        ]
+        rows.append(NodeSpec(lines=stack_lines, shape="box", style="filled,rounded"))
+    return rows
+
+
 def add_channel_legend_to_graphviz(
     dot: graphviz.Digraph, theme: VisualizationTheme, state: EncodingState
 ) -> None:
-    """Emit the channel disclosure legend (memo 2.3 disclosure contract).
-
-    Every legend drawn states the active channel's transform ("linear
-    min-max"), its source, min/mid/max swatch rows with formatted values,
-    and any rolled-aggregate / unencoded notes. All text routes through the
-    NodeSpec choke point (escaped like every node label).
-    """
+    """Emit the channel disclosure legend (memo 2.3 disclosure contract)."""
 
     from ._render_leaf import _node_spec_to_graphviz_args
-    from .node_spec import NodeSpec
     from .themes import apply_theme_to_spec
 
     with dot.subgraph(name="cluster_torchlens_encoding_legend") as legend:
@@ -1423,56 +1510,7 @@ def add_channel_legend_to_graphviz(
             fontcolor=theme.default_font,
             style="rounded",
         )
-        start, end = state.ramp
-        rows: list[NodeSpec] = []
-        if state.spec is not None:
-            title_lines = [f"color_by: {state.spec.display_name}", "linear min-max"]
-            for line in state.aggregation_lines:
-                title_lines.append(line)
-            for note in state.notes:
-                title_lines.append(note)
-            rows.append(NodeSpec(lines=title_lines, shape="box", style="filled,rounded"))
-            if state.domain is not None:
-                low, high = state.domain
-                mid = (low + high) / 2.0
-                for tag, fraction, value in (
-                    ("min", 0.0, low),
-                    ("mid", 0.5, mid),
-                    ("max", 1.0, high),
-                ):
-                    rows.append(
-                        NodeSpec(
-                            lines=[f"{tag}: {_format_domain_value(state, value)}"],
-                            shape="box",
-                            fillcolor=interpolate_hex(start, end, fraction),
-                        )
-                    )
-        if state.size_spec is not None:
-            # Disclosure contract: every legend drawn states the size scale
-            # transform and clamps (D4 wording: "size ~ sqrt(dims), clamped").
-            size_lines = [
-                f"size_by: {state.size_spec.display_name}",
-                f"size ~ {state.size_scale}({state.size_spec.display_name}), min-max, clamped",
-            ]
-            for line in state.size_aggregation_lines:
-                size_lines.append(line)
-            for note in state.size_notes:
-                size_lines.append(note)
-            if state.size_domain is not None:
-                low, high = state.size_domain
-                size_lines.append(
-                    f"min {_format_size_domain_value(low)} .. max {_format_size_domain_value(high)}"
-                )
-            rows.append(NodeSpec(lines=size_lines, shape="box", style="filled,rounded"))
-        if state.stack_spec is not None:
-            # Rank rule (memo 2.3): the legend names the annotation used.
-            stack_lines = [
-                f"stack_by: {state.stack_spec.display_name}",
-                "same rank = same annotation value",
-            ]
-            for note in state.stack_notes:
-                stack_lines.append(note)
-            rows.append(NodeSpec(lines=stack_lines, shape="box", style="filled,rounded"))
+        rows = [*_color_legend_rows(state), *_non_color_legend_rows(state)]
         for index, spec in enumerate(rows):
             node_args = _node_spec_to_graphviz_args(apply_theme_to_spec(spec, theme))
             node_args["name"] = f"tl_encoding_legend_{index}"
@@ -1503,15 +1541,18 @@ def attach_encoding_state(
     request: Any,
     theme: Any,
     *,
-    color_spec: EncodingChannelSpec | None = None,
-    size_spec: EncodingChannelSpec | None = None,
+    channel_specs: tuple[
+        EncodingChannelSpec | None,
+        EncodingChannelSpec | None,
+        EncodingChannelSpec | None,
+    ],
     size_scale: str = "sqrt",
-    stack_spec: EncodingChannelSpec | None = None,
 ) -> Any:
     """Return ``request`` with a fresh per-draw :class:`EncodingState` attached."""
 
     from dataclasses import replace
 
+    color_spec, size_spec, stack_spec = channel_specs
     return replace(
         request,
         encoding=EncodingState(

@@ -113,6 +113,16 @@ pins the high-risk members against exception and interruption paths.
 
 _INSTALL_STATE_AND_CACHES = frozenset(
     {
+        # S3 pre-release field registrar (wave -0.5). _REGISTRY and
+        # _ANNOTATIONS_KEY_REGISTRY are DECLARATION tables populated at import
+        # by register_prerelease_field (DROP-only, refuses non-DROP), so they are
+        # install-time facts, not caches. _ACTIVE is the TEST-ONLY activation
+        # flag: activate_prerelease_fields refuses outside pytest and restores
+        # it, and every switch-on write is marker-stamped so a leak cannot pass
+        # as a real v7 artifact.
+        ("torchlens/_io/prerelease.py", "_ACTIVE"),
+        ("torchlens/_io/prerelease.py", "_ANNOTATIONS_KEY_REGISTRY"),
+        ("torchlens/_io/prerelease.py", "_REGISTRY"),
         # Wrapper-lifecycle slots rebound only through the module object
         # (visible since the cross-module rebind detector, hunt-b2-sol R54).
         ("torchlens/_state.py", "_decorated_identity"),
@@ -357,7 +367,13 @@ last-run slots are overwritten per run and never steer a verdict.
 _WEAK_SUBJECT_TABLES = frozenset(
     {
         ("torchlens/_state.py", "_log_registry"),
+        # L9 runtime journals are keyed by the owning Trace and contain only
+        # timing/token/finalization bookkeeping. They must disappear with
+        # that Trace and never become process-lifetime caches.
         ("torchlens/backends/torch/backward.py", "_BACKWARD_TRACE_SLOTS"),
+        ("torchlens/backends/torch/backward.py", "_CHECKPOINT_TOKEN_STATE"),
+        ("torchlens/backends/torch/backward.py", "_FIRE_TIMING_STAMPS"),
+        ("torchlens/backends/torch/backward.py", "_PENDING_BACKWARD_FINALIZE"),
         ("torchlens/backends/torch/completeness_witness.py", "_ALIAS_MUTATION_CANDIDATE_LABELS"),
         ("torchlens/backends/torch/completeness_witness.py", "_DATA_ALIAS_MUTATION_TRACES"),
         (
@@ -433,6 +449,10 @@ _PUBLIC_REGISTRATION_STATE = frozenset(
         ("torchlens/semantic/facets.py", "_REGISTRY"),
         ("torchlens/semantic/facets.py", "_REGISTRY_VERSION"),
         ("torchlens/semantic/facets.py", "_TRANSFORMERLENS_ALIASES_ENABLED"),
+        # L6/S4 predicate runtime extension point: the public registration hook
+        # mutates this table, so a leaked entry changes predicate resolution for
+        # the rest of the process exactly like a registered facet or RF rule.
+        ("torchlens/ir/predicate_registry.py", "_USER_PREDICATES"),
     }
 )
 """Process state a PUBLIC API mutates: registries, rule tables, feature toggles.
@@ -1062,6 +1082,9 @@ _WEAKLY_HELD = frozenset(
         # release registration must never pin the released model itself.
         ("torchlens/backends/torch/_held_refs.py", "_RELEASED_MODELS"),
         ("torchlens/backends/torch/backward.py", "_BACKWARD_TRACE_SLOTS"),
+        ("torchlens/backends/torch/backward.py", "_CHECKPOINT_TOKEN_STATE"),
+        ("torchlens/backends/torch/backward.py", "_FIRE_TIMING_STAMPS"),
+        ("torchlens/backends/torch/backward.py", "_PENDING_BACKWARD_FINALIZE"),
         ("torchlens/backends/torch/buffer_writes.py", "_PARAM_BYTE_WITNESS_NOT_ARMED"),
         ("torchlens/backends/torch/completeness_witness.py", "_ALIAS_MUTATION_CANDIDATE_LABELS"),
         ("torchlens/backends/torch/completeness_witness.py", "_CAPTURED_STORAGE_PTRS"),

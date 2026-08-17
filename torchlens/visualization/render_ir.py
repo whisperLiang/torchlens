@@ -63,6 +63,17 @@ class RenderIRNode:
 
 
 @dataclass(frozen=True)
+class _NodeDecisionInputs:
+    """Per-draw inputs shared by every render-node presentation decision."""
+
+    universe: Any
+    repeat_folds: Mapping[str, ModuleRepeatFold] | None
+    segment_lookup: _SegmentLookup
+    sibling_counts: Mapping[str, int] | None
+    suppressed_args: Mapping[int, frozenset[str]]
+
+
+@dataclass(frozen=True)
 class RenderIREdge:
     """Resolved forward edge independent of DOT emission.
 
@@ -343,16 +354,19 @@ def build_render_ir(
     from ._render_nodes import _atomic_module_sibling_counts
 
     sibling_counts = _atomic_module_sibling_counts(trace)
+    decision_inputs = _NodeDecisionInputs(
+        universe=universe,
+        repeat_folds=repeat_folds,
+        segment_lookup=segment_lookup,
+        sibling_counts=sibling_counts,
+        suppressed_args=suppressed_args,
+    )
     nodes = tuple(
         _node_from_unit(
             trace,
             unit,
             resolved_context,
-            universe,
-            repeat_folds,
-            segment_lookup,
-            sibling_counts,
-            suppressed_args,
+            decision_inputs,
         )
         for unit in universe.units
     )
@@ -735,11 +749,7 @@ def _node_from_unit(
     trace: Trace,
     unit: NodeUnit,
     context: RenderContext,
-    universe: Any,
-    repeat_folds: Mapping[str, ModuleRepeatFold] | None,
-    segment_lookup: _SegmentLookup,
-    sibling_counts: Mapping[str, int] | None = None,
-    suppressed_args: Mapping[int, frozenset[str]] | None = None,
+    inputs: _NodeDecisionInputs,
 ) -> RenderIRNode:
     """Decorate one structural node-universe unit as a render-IR node."""
 
@@ -775,11 +785,7 @@ def _node_from_unit(
             trace,
             emission,
             context,
-            universe,
-            repeat_folds,
-            segment_lookup,
-            sibling_counts,
-            suppressed_args,
+            inputs,
         )
         modules = list(emission.node.modules)
         if emission.kind == "module_box":
@@ -808,11 +814,7 @@ def _resolve_node_decision(
     trace: Trace,
     emission: RenderedNodeEmission,
     context: RenderContext,
-    universe: Any,
-    repeat_folds: Mapping[str, ModuleRepeatFold] | None,
-    segment_lookup: _SegmentLookup,
-    sibling_counts: Mapping[str, int] | None = None,
-    suppressed_args: Mapping[int, frozenset[str]] | None = None,
+    inputs: _NodeDecisionInputs,
 ) -> tuple[
     tuple[Any, ...],
     tuple[tuple[str, dict[str, Any]], ...],
@@ -830,10 +832,8 @@ def _resolve_node_decision(
         Visible structural emission being decorated.
     context:
         Fully resolved render request.
-    universe:
-        Presentation-free universe that selected the node.
-    sibling_counts:
-        Optional per-draw atomic-module sibling counts shared across nodes.
+    inputs:
+        Per-draw structural maps shared across node decisions.
 
     Returns
     -------
@@ -855,14 +855,14 @@ def _resolve_node_decision(
     node = emission.node
     if node is None:
         return (), (), "black", None, ()
-    if _segment_for_node(node, segment_lookup) is not None:
+    if _segment_for_node(node, inputs.segment_lookup) is not None:
         return (), (), "black", None, ()
     recorder = _RenderIRDecisionBuilder()
     module_nodes: dict[str, Any] = defaultdict(dict)
     show_buffers = _normalize_buffer_visibility(context.show_buffer_layers)
     collapsed_containers = _collapsed_container_leaf_nodes(
         trace,
-        universe.source_graph.entries_to_plot,
+        inputs.universe.source_graph.entries_to_plot,
         vis_mode=context.vis_mode,
         show_containers=context.show_containers,
         container_max_inline=context.container_max_inline,
@@ -884,7 +884,7 @@ def _resolve_node_decision(
             context.node_mode,
             context.collapsed_node_spec_fn,
             theme,
-            repeat_folds,
+            inputs.repeat_folds,
             context.collapse_fn,
             resolved_specs,
         )
@@ -906,9 +906,9 @@ def _resolve_node_decision(
             collapsed_containers,
             context.show_input_transform_summary,
             resolved_specs,
-            sibling_counts,
+            inputs.sibling_counts,
             encoding=getattr(context, "encoding", None),
-            suppressed_args=suppressed_args,
+            suppressed_args=inputs.suppressed_args,
         )
     owned = tuple(
         (owner, dict(args))

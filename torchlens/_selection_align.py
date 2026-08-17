@@ -57,11 +57,18 @@ _SAME_POLICY_AXES: tuple[str, ...] = ("policy", "folded_sites", "site_join")
 
 
 def _alignment_invalid(reason: str, message: str, **fields: Any) -> Exception:
-    """Build the closed-reason cross-run alignment refusal."""
+    """Build the closed-reason cross-run alignment refusal.
+
+    Raises
+    ------
+    ValueError
+        If ``reason`` is outside the closed alignment-reason vocabulary.
+    """
 
     from .selection import SelectionError
 
-    assert reason in ALIGNMENT_REASONS
+    if reason not in ALIGNMENT_REASONS:
+        raise ValueError(f"unknown selection alignment reason: {reason!r}")
     return SelectionError(
         message,
         code="selection_alignment_invalid",
