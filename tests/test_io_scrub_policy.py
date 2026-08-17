@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+import inspect
 import pickle
 from pathlib import Path
 from typing import Any
@@ -230,6 +232,91 @@ def test_portable_state_specs_cover_every_live_attribute() -> None:
             missing_by_class[cls.__name__] = missing
 
     assert missing_by_class == {}
+
+
+def _all_record_instances(live_log: Trace) -> list[Any]:
+    """Return every record instance a public read could poke state onto."""
+
+    return [
+        live_log,
+        *live_log.layer_list,
+        *live_log.layer_logs.values(),
+        *live_log.modules,
+        *live_log.modules._pass_dict.values(),
+        *live_log.param_logs,
+        *live_log.buffers,
+    ]
+
+
+def _sweep_public_accessors(record: Any) -> None:
+    """Read every public attribute on ``record``, ignoring raising accessors.
+
+    A raising accessor cannot have handed the user a value, but it may still
+    have partially populated a cache before raising, so the sweep never skips
+    a name preemptively.
+    """
+
+    for name in sorted(set(dir(type(record)))):
+        if name.startswith("_"):
+            continue
+        try:
+            getattr(record, name)
+        except Exception:  # noqa: BLE001 - unreadable accessors are not the subject
+            continue
+
+
+def test_public_accessor_reads_never_poison_save(tmp_path: Path) -> None:
+    """A read-only public accessor sweep must leave the trace saveable.
+
+    Fail-before: ``ModuleCall.facets`` / ``Module.facets`` cached a FacetView
+    in ``__dict__["_facets_cache"]`` with no PORTABLE_STATE_SPEC row, so one
+    documented read made every later ``tl.save`` refuse with an error naming
+    an internal cache the user never touched. The sibling completeness test
+    above checks live state straight after capture, which is exactly why the
+    lazily-populated caches slipped past it: they appear only after a read.
+    """
+
+    live_log = _build_live_log()
+    records = _all_record_instances(live_log)
+    for record in records:
+        _sweep_public_accessors(record)
+
+    undeclared_by_class: dict[str, list[str]] = {}
+    for record in records:
+        spec = getattr(type(record), "PORTABLE_STATE_SPEC", None)
+        if spec is None:
+            continue
+        undeclared = sorted(
+            field_name
+            for field_name, _ in state_items(record)
+            if field_name not in spec
+            and not isinstance(
+                inspect.getattr_static(type(record), field_name, None),
+                functools.cached_property,
+            )
+        )
+        if undeclared:
+            undeclared_by_class.setdefault(type(record).__name__, undeclared)
+    assert undeclared_by_class == {}, (
+        "public accessor reads populated live state with no scrub policy; "
+        f"declare each field (usually FieldPolicy.DROP): {undeclared_by_class}"
+    )
+
+    tl.save(live_log, str(tmp_path / "after_sweep.tlspec"))
+
+
+def test_intervention_ready_accessor_sweep_still_saves(tmp_path: Path) -> None:
+    """The sweep also holds for intervention-ready captures (edge family armed)."""
+
+    log = trace_fn(
+        _TinyIOModel(),
+        torch.randn(2, 4),
+        capture=tl.options.CaptureOptions(intervention_ready=True),
+    )
+    _ = log.edges
+    for record in _all_record_instances(log):
+        _sweep_public_accessors(record)
+    tl.save(log, str(tmp_path / "after_armed_sweep.tlspec"))
 
 
 @pytest.mark.smoke
