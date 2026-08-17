@@ -160,7 +160,10 @@ def _scan_external_writes() -> dict[str, list[str]]:
     return {attr: sorted(sites) for attr, sites in found.items()}
 
 
-@pytest.mark.smoke
+# Whole-package AST census cost (shared lru_cache with the census tests
+# below, but whichever consumer runs FIRST pays the ~5.7s scan): heavy per
+# the 5-20s marker partition, same call as the L1-merge re-tier below.
+@pytest.mark.heavy
 def test_every_external_private_write_is_declared_or_exempted() -> None:
     """No package attaches an undeclared private field to the Trace."""
 
@@ -181,7 +184,10 @@ def test_every_external_private_write_is_declared_or_exempted() -> None:
     )
 
 
-@pytest.mark.smoke
+# heavy by measured cost, not preference: the package-wide external-write
+# scan crossed the 5s smoke boundary as the feature-sprint lanes grew the
+# tree (5.7s standalone, 2026-08-17); the 5-20s partition places it heavy.
+@pytest.mark.heavy
 def test_exemption_ledger_is_shrink_only() -> None:
     """Every exemption row corresponds to a real, still-present external write."""
 
