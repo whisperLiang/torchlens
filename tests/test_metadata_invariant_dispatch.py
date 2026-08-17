@@ -13,7 +13,12 @@ from torchlens.validation import invariants
 # ADDED three checks (receptive_field_metadata for every backend,
 # pass_count_consistency for torch, and backend_neutral_graph_topology for
 # non-torch) without dropping or reordering any pre-refactor check; the expected
-# sequences include those additions.
+# sequences include those additions. L1 wave 0 (6f417b43) ADDED
+# site_key_invariants to both backends -- torch: after loop_detection_invariants
+# (site keys are minted at grouping time, so recurrence metadata is a
+# precondition) and before graph_topology; non-torch: after
+# backend_neutral_module_mode_invariants -- again without dropping or
+# reordering any pre-refactor check.
 PRE_REFACTOR_TORCH_SEQUENCE = (
     "backend_identity_invariants",
     "trace_self_consistency",
@@ -68,14 +73,18 @@ PRE_REFACTOR_NON_TORCH_SEQUENCE = (
 )
 
 EXPECTED_TORCH_SEQUENCE = (
-    *PRE_REFACTOR_TORCH_SEQUENCE[:12],
+    *PRE_REFACTOR_TORCH_SEQUENCE[:8],
+    "site_key_invariants",
+    *PRE_REFACTOR_TORCH_SEQUENCE[8:12],
     "primitive_op_invariants",
     *PRE_REFACTOR_TORCH_SEQUENCE[12:],
 )
 EXPECTED_NON_TORCH_SEQUENCE = (
     *PRE_REFACTOR_NON_TORCH_SEQUENCE[:4],
     "non_torch_primitive_op_inert",
-    *PRE_REFACTOR_NON_TORCH_SEQUENCE[4:],
+    *PRE_REFACTOR_NON_TORCH_SEQUENCE[4:7],
+    "site_key_invariants",
+    *PRE_REFACTOR_NON_TORCH_SEQUENCE[7:],
 )
 
 
