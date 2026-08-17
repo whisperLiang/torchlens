@@ -820,6 +820,10 @@ class TraceInterventionMixin(_TraceMixinBase):
             return self._apply_selection_edge_do(
                 selection, lifted, edit, engine=engine, strict=strict
             )
+        if lifted is not None and lifted.kind == "PARAM":
+            return self._apply_selection_param_do(
+                selection, lifted, edit, engine=engine, strict=strict
+            )
         resolved, plan, audit = build_selection_do_plan(self, selection, edit)
         leaf_items = [item for item in plan if item["is_leaf"]]
         hook_items = [item for item in plan if not item["is_leaf"]]
@@ -898,6 +902,56 @@ class TraceInterventionMixin(_TraceMixinBase):
                 "kind": "EDGE",
                 "selection_repr": repr(selection),
                 "resolve_digest": resolved_edges.resolve_digest,
+                "edit": getattr(edit, "helper_name", getattr(edit, "__name__", "value")),
+                **payload,
+            }
+        )
+        return "selection_replayed"
+
+    def _apply_selection_param_do(
+        self: "Trace",
+        selection: Any,
+        lifted: Any,
+        edit: Any,
+        *,
+        engine: str,
+        strict: bool,
+    ) -> str:
+        """Apply one PARAM-kind selection edit through parameter substitution.
+
+        The edit is applied "as if" the parameter were changed: every
+        consumption of the parameter is substituted at its derived occurrence
+        address on the replay engine, and the live parameter object is never
+        written (JMT ruling 2026-08-17, superseding the D3 typed-refusal
+        default on the replay path; rerun/set_only keep refusing typed).
+        """
+
+        from ..selection import ResolvedSelection, SelectionError
+
+        if edit is None:
+            raise ValueError(
+                "do(selection, edit) requires an edit: pass an Edit/HelperSpec, "
+                "a hook callable, or a replacement tensor."
+            )
+        if isinstance(lifted, ResolvedSelection):
+            if lifted._trace is not self:
+                raise SelectionError(
+                    "the resolved parameter selection is bound to a different trace.",
+                    code="selection_trace_mismatch",
+                )
+            resolved_params = lifted
+        else:
+            resolved_params = lifted.resolve(self)
+        from ..intervention.param_substitution import apply_param_substitution_do
+
+        payload = apply_param_substitution_do(
+            self, resolved_params, edit, engine=engine, strict=strict
+        )
+        self.intervention_audit.append(
+            {
+                "kind": "PARAM",
+                "selection_repr": repr(selection),
+                "resolve_digest": resolved_params.resolve_digest,
                 "edit": getattr(edit, "helper_name", getattr(edit, "__name__", "value")),
                 **payload,
             }

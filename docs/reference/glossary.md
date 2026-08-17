@@ -666,7 +666,9 @@ default-keep); mask-application semantics documented-unstable*
   v1; shape/dtype/device/broadcast mismatches and ineligible sites refuse
   `selection_apply_invalid` (closed reason set
   `shape | dtype | device | broadcast | not_maskable`). Learned-parameter
-  edits refuse typed (D3 activation-path narrowing, default keep). Each
+  edits route through PARAMETER SUBSTITUTION on the replay engine (see the
+  entry below; the JMT 2026-08-17 ruling supersedes the D3 typed-refusal
+  default there — rerun/set_only keep refusing typed). Each
   Selection-targeted do() appends an audit record (query repr + resolve
   digest + per-site relations) to `trace.intervention_audit` (persisted as
   of tlspec v8 with its load-validated digest relation).
@@ -703,6 +705,33 @@ S2/S3-gated*
   as a schema-regression tripwire (re-firing at ALL four save levels,
   preceding `artifact_save_level_unsupported`, if the carrier policy ever
   drops again).
+
+**parameter substitution (do over PARAM selections)** — *unstable — no
+deprecation shim owed*
+: `fork.do(tl.params(name, mask=None), edit)` applies the edit "as if" the
+  parameter were changed, FOR REPLAY ONLY: the value each consuming op sees
+  is substituted at its derived occurrence address, and the live
+  `nn.Parameter` object is NEVER written (bit-identical before and after —
+  pinned). Parameters are not in the dataflow edge family (they classify as
+  `LiteralTensor` template components), so the occurrence addresses are
+  DERIVED — `Param.used_by_ops` + template-component identity/barcode
+  matching, FAIL-CLOSED (`param_substitution_occurrence_underivable` when
+  any consumption cannot be addressed: nested container positions,
+  released legacy captures, and multi-pass/recurrence-grouped consumers —
+  recurrently reused params such as tied weights are a named v1 engine
+  limitation). The substitution then drives the shipped edge-substitution
+  engine: tier-(ii) `Op.edge_substitutions` entries marked
+  `substitution_kind="param"`, edit-then-scatter masking over the param
+  index space, one replay pass over all consumer origins (cone
+  recomputation RE-SPLICES param-kind entries so later pushes never
+  silently revert the edit; edge-kind entries keep their shipped
+  no-re-splice semantics), and the same validation boundary
+  (`edge_intervention_boundary` — a different check, never no check;
+  uncorroborated entries FAIL). Replay/push engine ONLY:
+  rerun/set_only refuse `param_substitution_engine_unsupported`. The audit
+  record (kind `PARAM`) discloses "substituted at consumption … live
+  parameters unchanged" — the product is DERIVED-class, never a blessed
+  VERIFIED reproduction of the original weights.
 
 **TapObserver.values(masked=True)** — *unstable — no deprecation shim owed*
 : `tap(resolved_selection)` stores each firing site's mask on the

@@ -561,6 +561,27 @@ print(tl.compat.report(model, x).to_markdown())
   not silently reorder another owner's refusal). `tap(resolved_selection)`
   stores per-site masks on TapRecords; `values(masked=True)` returns fresh
   masked copies.
+- PARAMETER SUBSTITUTION (param-operand, JMT-ruled 2026-08-17, supersedes the
+  D3 typed-refusal default on the replay path; DOCUMENTED-UNSTABLE):
+  `fork.do(tl.params(name, mask=None), edit)` applies the edit "AS IF" the
+  parameter were changed, for replay only — the value each consuming op sees
+  is substituted at its derived occurrence address and the live
+  `nn.Parameter` is NEVER written (bit-identical pinned). Parameters are NOT
+  in the edge family (LiteralTensor template components, not EdgeUseRecords),
+  so `intervention/param_substitution.py` DERIVES the addresses
+  (`Param.used_by_ops` + template identity/barcode match, FAIL-CLOSED:
+  nested positions, released legacy captures, and multi-pass/
+  recurrence-grouped consumers — tied weights — refuse
+  `param_substitution_occurrence_underivable`, a named v1 engine limitation)
+  and drives the SAME tier-(ii) engine: entries marked
+  `substitution_kind="param"`, edit-then-scatter masking over the param
+  space, ONE replay pass over all consumer origins whose cone recomputation
+  RE-SPLICES param-kind entries (edge-kind entries keep shipped no-re-splice
+  semantics; later pushes never silently revert the edit), and the SAME
+  validation boundary (`edge_intervention_boundary`; uncorroborated FAIL).
+  Replay/push engine ONLY: rerun/set_only refuse
+  `param_substitution_engine_unsupported`. The audit record (kind `PARAM`)
+  discloses "substituted at consumption ... live parameters unchanged".
 - BACKWARD RESIDUALS (L9; every spelling DOCUMENTED-UNSTABLE pending
   naming-session/E-L9-4 routing): PER-FIRE TIMING -- every hooked grad_fn
   gets a timing prehook; ONE clock (`perf_counter`) paired at capture by a

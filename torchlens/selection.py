@@ -1733,9 +1733,10 @@ def build_selection_do_plan(
     """Resolve a selection target and derive the per-site edit plan.
 
     Returns ``(resolved, [{"op", "entry", "is_leaf", "edit"}, ...], audit_record)``.
-    ACT selections only: PARAM edits are typed-refused pending the D3 ruling
-    (differentiability narrowed to the activation path); EDGE selections are
-    stage-3 edge-substitution territory.
+    ACT selections only: PARAM edits route through parameter substitution
+    (``intervention/param_substitution.py`` — the value each consumer sees is
+    substituted on the replay engine, the live parameter is never written);
+    EDGE selections are stage-3 edge-substitution territory.
     """
 
     if edit is None:
@@ -1819,9 +1820,10 @@ def _resolve_do_target(trace: Any, selection_like: Any) -> ResolvedSelection:
     if resolved.kind == "PARAM":
         raise _apply_invalid(
             "not_maskable",
-            "learned-parameter edits are outside the stage-2 activation path "
-            "(differentiability is narrowed to activations pending the D3 "
-            "ruling; the wave-2 default is a typed refusal).",
+            "learned-parameter edits do not ride the node-edit plan: PARAM "
+            "selections apply through parameter SUBSTITUTION on the replay "
+            "engine (do(tl.params(...), edit) substitutes the value each "
+            "consuming op sees; the live parameter is never written).",
         )
     if resolved.kind == "EDGE":
         raise _apply_invalid(
