@@ -225,3 +225,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: d79305f6d0f957518f2166b786f266c8420ae4bb (dirty)
 recorded: 2026-08-17T05:21:02.469260+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: fix/private-probe-routing: funcol/backward/_tl private-touch sites moved behind _torch_compat accessors (no producer/consumer semantics changed)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 272cc1fd024662c38fd39f153daad12bde3c702f (dirty)
+recorded: 2026-08-17T07:22:50.355534+00:00

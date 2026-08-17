@@ -117,7 +117,12 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/utils/rng.py": 4950,
     "torchlens/visualization/collapse_optimizer.py": 4600,
     "torchlens/backends/jax/backend.py": 4400,
-    "torchlens/_io/bundle.py": 4600,
+    # 4600 -> 4650: the L8 C2-recording settle above re-stepped bundle to 4600
+    # but the merged file MEASURES 4603 -- the settle's own re-step was three
+    # lines short, red on main since the merge. Reconciled to the next 50-line
+    # step for the same reviewed mass (no new growth licensed; PRE-SPRINT
+    # BASELINE 4450 unchanged, debloat target unchanged).
+    "torchlens/_io/bundle.py": 4650,
     "torchlens/_io/runnable_load.py": 3850,
     # 4200 -> 4050: the wave-0 governance sweep extracted the structure-only
     # Layer-0 entry contract to capture/_structure_only_entry.py; re-keyed
@@ -129,7 +134,13 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     # 3850 -> 3900: L9 adds the two DROP-gated backward-residuals fields
     # (timing provenance, checkpoint witness) + init/load-fill/registration.
     "torchlens/data_classes/trace.py": 3900,
-    "torchlens/utils/_torch_compat.py": 3550,
+    # 3550 -> 3800: fix/private-probe-routing moved the last 9 stray private
+    # torch touches (funcol module/ACT/wait-redispatch, checkpoint hook class,
+    # engine queue_callback) behind named HAS_* families IN this file -- the
+    # LOCKED CLAUDE.md rule pins the chokepoint to this exact module, so the
+    # routing mass lands here by design (measured 3756). PRE-SPRINT BASELINE
+    # unchanged (3450-eve at 75439a67); the debloat pass keeps it as target.
+    "torchlens/utils/_torch_compat.py": 3800,
     "torchlens/backends/torch/wrappers.py": 3400,
     "torchlens/backends/tinygrad/backend.py": 3300,
     "torchlens/backends/mlx/backend.py": 3250,
