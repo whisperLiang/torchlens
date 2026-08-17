@@ -184,6 +184,11 @@ test = [
     # the fleet recorded reds from exactly that fork. Widen an adapter band
     # and this extra IN THE SAME CHANGE, never one side alone.
     "lightning~=2.4",
+    # TRIPWIRE_GUARD deps (tests/test_skip_audit.py): absence silently disarms
+    # correctness gates for rendered label geometry, PDF visibility, and plots.
+    "cairosvg>=2.7,<3",
+    "pymupdf>=1.24,<2",
+    "matplotlib>=3.8,<4",
     # PIN AUTHORITY for pydot: the DOT-render goldens embed the pydot version as
     # a fingerprint KEY, so an environment that resolves pydot freely (nightly/
     # weekly install .[test]) drifts off the goldens' recording environment and
