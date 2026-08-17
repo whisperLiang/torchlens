@@ -389,7 +389,8 @@ def test_slash_module_address_does_not_enter_parent_or_opaque_aten_labels() -> N
     with _activate_aten_recording_for_tests():
         trace = tl.trace(_SlashModuleModel(), torch.ones(2))
 
-    assert any("a/b" in address for address in trace.modules.keys())
+    module_addresses = list(trace.modules.keys())
+    assert any("a/b" in address for address in module_addresses)
     for row in trace._primitive_op_profile.primitive_ops:
         assert "/" not in row.label
         assert all("/" not in ref.op_label for ref in row.parent_op_refs)

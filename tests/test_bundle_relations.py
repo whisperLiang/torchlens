@@ -105,7 +105,7 @@ def _episode_ledger(n_declared: int, n_rows: int) -> EpisodeLedger:
 # ---------------------------------------------------------------------------
 
 
-def test_r1_ctor_refuses_row_naming_absent_member(tiny_trace: Any) -> None:
+def test_ctor_refuses_row_naming_absent_member(tiny_trace: Any) -> None:
     """Constructing a Bundle with a relation naming a non-member refuses typed."""
 
     with pytest.raises(BundleRelationError) as excinfo:
@@ -117,7 +117,7 @@ def test_r1_ctor_refuses_row_naming_absent_member(tiny_trace: Any) -> None:
     assert excinfo.value.fields["missing_member"] == "ghost"
 
 
-def test_r1_relate_refuses_absent_member_and_keeps_table(tiny_trace: Any) -> None:
+def test_relate_refuses_absent_member_and_keeps_table(tiny_trace: Any) -> None:
     """relate() with a dangling row refuses typed and leaves the table unchanged."""
 
     bundle = tl.bundle({"a": tiny_trace, "b": tiny_trace})
@@ -153,7 +153,7 @@ def test_r1_relate_refuses_absent_member_and_keeps_table(tiny_trace: Any) -> Non
         },
     ],
 )
-def test_r2_off_schema_rows_refuse(tiny_trace: Any, payload: dict) -> None:
+def test_off_schema_rows_refuse(tiny_trace: Any, payload: dict) -> None:
     """Off-schema rows raise ValueError at parse level, typed via public wiring."""
 
     with pytest.raises(ValueError):
@@ -163,7 +163,7 @@ def test_r2_off_schema_rows_refuse(tiny_trace: Any, payload: dict) -> None:
     assert excinfo.value.fields["code"] == "bundle_relation_schema_invalid"
 
 
-def test_r3_episode_member_invariants(tiny_trace: Any) -> None:
+def test_episode_member_invariants(tiny_trace: Any) -> None:
     """Duplicate at_step / missing prefill-at-0 refuse as schema-invalid (R3)."""
 
     with pytest.raises(BundleRelationError) as excinfo:
@@ -188,7 +188,7 @@ def test_r3_episode_member_invariants(tiny_trace: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_r4_view_identity_stability_and_new_version(tiny_trace: Any) -> None:
+def test_view_identity_stability_and_new_version(tiny_trace: Any) -> None:
     """member_relations is the SAME tuple across reads; relate() swaps it."""
 
     bundle = tl.bundle(
@@ -210,7 +210,7 @@ def test_r4_view_identity_stability_and_new_version(tiny_trace: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_r5_remove_refuses_then_cascades_exactly(tiny_trace: Any) -> None:
+def test_remove_refuses_then_cascades_exactly(tiny_trace: Any) -> None:
     """remove() refuses typed BEFORE removal; cascade drops only rows naming it."""
 
     bundle = tl.bundle(
@@ -231,7 +231,7 @@ def test_r5_remove_refuses_then_cascades_exactly(tiny_trace: Any) -> None:
     assert remaining[0].member == "c"
 
 
-def test_r5_clear_and_remove_except_guards(tiny_trace: Any) -> None:
+def test_clear_and_remove_except_guards(tiny_trace: Any) -> None:
     """clear()/remove_except() refuse typed, then cascade rows of removed members."""
 
     def build() -> Any:
@@ -260,7 +260,7 @@ def test_r5_clear_and_remove_except_guards(tiny_trace: Any) -> None:
     assert bundle.member_relations == ()
 
 
-def test_r5_capacity_eviction_refuses_typed(tiny_trace: Any) -> None:
+def test_capacity_eviction_refuses_typed(tiny_trace: Any) -> None:
     """LRU eviction of a related member refuses typed, never silently orphans."""
 
     bundle = tl.bundle(

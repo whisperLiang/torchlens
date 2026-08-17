@@ -1901,6 +1901,25 @@ def _retained_grad_payload_refs(
     return payloads
 
 
+def _resolve_live_grad_fn(trace_ref: Any, grad_fn_object_id: int) -> tuple[Any, Any] | None:
+    """Resolve the live (trace, grad_fn record) target for one hook firing.
+
+    A cleaned-up trace disarms its triggers but cannot remove hooks already
+    registered on the user's live graph; firing must no-op rather than raise
+    inside the user's autograd engine.
+    """
+
+    live_trace = trace_ref()
+    if live_trace is None:
+        return None
+    if getattr(live_trace, "_tl_backward_triggers_disarmed", False):
+        return None
+    grad_fn_handle = getattr(live_trace, "grad_fn_logs", {}).get(grad_fn_object_id)
+    if grad_fn_handle is None:
+        return None
+    return live_trace, grad_fn_handle
+
+
 def _make_grad_fn_hook(
     trace: Any,
     grad_fn_object_id: int,
@@ -1935,17 +1954,10 @@ def _make_grad_fn_hook(
             from ._aten_capture import _end_backward_grad_fn
 
             _end_backward_grad_fn(aten_marker_tokens.pop())
-        live_trace = trace_ref()
-        if live_trace is None:
+        resolved = _resolve_live_grad_fn(trace_ref, grad_fn_object_id)
+        if resolved is None:
             return None
-        # A cleaned-up trace disarms its triggers but cannot remove hooks
-        # already registered on the user's live graph; firing must no-op
-        # rather than raise inside the user's autograd engine.
-        if getattr(live_trace, "_tl_backward_triggers_disarmed", False):
-            return None
-        grad_fn_handle = getattr(live_trace, "grad_fn_logs", {}).get(grad_fn_object_id)
-        if grad_fn_handle is None:
-            return None
+        live_trace, grad_fn_handle = resolved
         grad_inputs = hook_args[0] if len(hook_args) >= 1 else None
         grad_outputs = hook_args[1] if len(hook_args) >= 2 else None
         layer_label = grad_fn_handle.op.layer_label if grad_fn_handle.has_op else None

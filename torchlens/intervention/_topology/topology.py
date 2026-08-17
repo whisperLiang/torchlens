@@ -32,7 +32,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:  # pragma: no cover - typing-only
+if TYPE_CHECKING:
     from ...data_classes.layer import Layer
     from ...data_classes.trace import Trace
 

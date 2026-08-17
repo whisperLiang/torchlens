@@ -77,6 +77,8 @@ class SiteJoinRow:
 
     @property
     def joined(self) -> bool:
+        """Whether this key joined (corroborated or positional tier)."""
+
         return self.verdict in (_SiteJoinVerdict.CORROBORATED, _SiteJoinVerdict.POSITIONAL)
 
 
@@ -92,6 +94,8 @@ class SiteProfile:
     witnesses: dict[str, frozenset[_Witness | None]]
 
     def cohort_of(self, key: str) -> _Cohort:
+        """Return the key's cohort identity (the site key minus its ordinal)."""
+
         module_site, layer_type, output_slot, _ = parse_site_key(key)
         return (module_site, layer_type, output_slot)
 
@@ -127,10 +131,12 @@ def site_profile(trace: Any) -> SiteProfile:
         witnesses.setdefault(key, set()).add(operation_witness(op))
     if not keys:
         raise InvalidArgumentError(
-            "This trace carries no site keys: it was captured/saved before "
-            "site_key_v1 existed and cannot join on sites.",
+            "This trace carries no site keys and cannot join on sites: it "
+            "predates the site_key_v1 grouping surface. Site keys are minted "
+            "at capture time and their persisted row is pre-release-gated "
+            "under tlspec v7, so loaded artifacts read keyless.",
             code="site_key_unavailable",
-            remedy="re-capture with a current TorchLens to mint site keys",
+            remedy=("re-capture the model with a current TorchLens and join on the live traces"),
         )
     return SiteProfile(
         keys=keys,
@@ -140,6 +146,8 @@ def site_profile(trace: Any) -> SiteProfile:
 
 
 def _witness_known(values: frozenset[_Witness | None]) -> bool:
+    """Whether every op behind a key carries a source-location witness."""
+
     return bool(values) and None not in values
 
 
@@ -216,20 +224,41 @@ def fold_site_groups(rows: Iterable[FoldRow]) -> dict[str, frozenset[str]]:
     parent: dict[str, str] = {row.label: row.label for row in rows}
 
     def find(label: str) -> str:
+        """Return the component root of ``label`` with path compression."""
+
         while parent[label] != label:
             parent[label] = parent[parent[label]]
             label = parent[label]
         return label
 
     def union(a: str, b: str) -> None:
+        """Merge the components containing ``a`` and ``b``."""
+
         root_a, root_b = find(a), find(b)
         if root_a != root_b:
             parent[root_a] = root_b
+
+    _union_recurrence_edges(rows, parent, union)
+    _union_guarded_site_edges(rows, union)
+
+    groups: dict[str, list[str]] = {}
+    for row in rows:
+        groups.setdefault(find(row.label), []).append(row.label)
+    return {label: frozenset(groups[find(label)]) for label in parent}
+
+
+def _union_recurrence_edges(rows: list[FoldRow], parent: dict[str, str], union: Any) -> None:
+    """Union pass 1: the existing recurrence relation (in-roster members)."""
 
     for row in rows:
         for member in row.recurrent_labels:
             if member in parent:
                 union(row.label, member)
+
+
+def _union_guarded_site_edges(rows: list[FoldRow], union: Any) -> None:
+    """Union pass 2: same site_key AND same equivalence_class (the guard)."""
+
     by_guarded_site: dict[tuple[str, str], list[str]] = {}
     for row in rows:
         if row.site_key is None:
@@ -238,8 +267,3 @@ def fold_site_groups(rows: Iterable[FoldRow]) -> dict[str, frozenset[str]]:
     for members in by_guarded_site.values():
         for member in members[1:]:
             union(members[0], member)
-
-    groups: dict[str, list[str]] = {}
-    for row in rows:
-        groups.setdefault(find(row.label), []).append(row.label)
-    return {label: frozenset(groups[find(label)]) for label in parent}

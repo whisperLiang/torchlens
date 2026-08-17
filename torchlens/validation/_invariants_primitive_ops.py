@@ -91,6 +91,17 @@ def _check_primitive_row(
         Materialized GradFn labels available for FK resolution.
     """
 
+    _check_row_schema(row)
+    _check_row_grad_fn_linkage(row, grad_fn_labels)
+    _check_row_metrics(row)
+    if owner_evidence.get(row.sequence, object()) != row.owner_func_call_id:
+        _primitive_failure(f"{row.label} disagrees with its observation-time owner evidence")
+    _check_row_parent_links(row, ops)
+
+
+def _check_row_schema(row: Any) -> None:
+    """Row type, declared-field presence, label grammar, and vocabularies."""
+
     if not isinstance(row, AtenOp):
         _primitive_failure("primitive profile contains a non-AtenOp row")
     missing = [name for name in PRIMITIVE_OP_FIELD_ORDER if not hasattr(row, name)]
@@ -108,6 +119,11 @@ def _check_primitive_row(
         _primitive_failure(f"{row.label} has invalid mutation_kind {row.mutation_kind!r}")
     if row.view_copy_kind not in _VIEW_COPY_KINDS:
         _primitive_failure(f"{row.label} has invalid view_copy_kind {row.view_copy_kind!r}")
+
+
+def _check_row_grad_fn_linkage(row: Any, grad_fn_labels: set[str]) -> None:
+    """GradFn link status/provenance vocabulary and FK coherence."""
+
     if row.grad_fn_link_status not in _GRAD_LINK_STATUSES:
         _primitive_failure(
             f"{row.label} has invalid grad_fn_link_status {row.grad_fn_link_status!r}"
@@ -126,6 +142,11 @@ def _check_primitive_row(
         _primitive_failure(f"{row.label} has GradFn evidence without linked status")
     if row.grad_fn_link_status == "conflict":
         _primitive_failure(f"{row.label} has conflicting GradFn linkage")
+
+
+def _check_row_metrics(row: Any) -> None:
+    """FLOP/outcome/slot vocabularies and phase-index coherence."""
+
     if row.flop_status not in _FLOP_STATUSES:
         _primitive_failure(f"{row.label} has invalid flop_status {row.flop_status!r}")
     if row.algorithmic_flops is not None and (
@@ -136,14 +157,19 @@ def _check_primitive_row(
         _primitive_failure(f"{row.label} has invalid outcome {row.outcome!r}")
     if not isinstance(row.decomposition_slot, int) or row.decomposition_slot < 0:
         _primitive_failure(f"{row.label} has invalid decomposition_slot")
-    if row.capture_phase == "forward":
-        if row.forward_pass_index is None or row.backward_epoch_index is not None:
-            _primitive_failure(f"{row.label} has incoherent forward phase indices")
-    if row.capture_phase == "backward":
-        if row.forward_pass_index is not None or row.backward_epoch_index is None:
-            _primitive_failure(f"{row.label} has incoherent backward phase indices")
-    if owner_evidence.get(row.sequence, object()) != row.owner_func_call_id:
-        _primitive_failure(f"{row.label} disagrees with its observation-time owner evidence")
+    if row.capture_phase == "forward" and (
+        row.forward_pass_index is None or row.backward_epoch_index is not None
+    ):
+        _primitive_failure(f"{row.label} has incoherent forward phase indices")
+    if row.capture_phase == "backward" and (
+        row.forward_pass_index is not None or row.backward_epoch_index is None
+    ):
+        _primitive_failure(f"{row.label} has incoherent backward phase indices")
+
+
+def _check_row_parent_links(row: Any, ops: list[Any]) -> None:
+    """Parent Op FKs, wrapper-fire agreement, and ownership coherence."""
+
     refs = tuple(row.parent_op_refs)
     for ref in refs:
         _check_op_ref(ref, ops, row_label=row.label)
@@ -187,6 +213,56 @@ def _check_gap(gap: Any, ops: list[Any]) -> None:
         _primitive_failure("mode_paused_interior parent refs disagree with owner")
 
 
+def _check_profile_rows(trace: Trace, profile: Any) -> list[Any]:
+    """Shared evidence/row/partition/gap checks over one primitive profile.
+
+    Returns the row list so callers can run their own tail checks. Check
+    order is part of the contract: evidence duplication, evidence coverage,
+    per-row checks with uniqueness and partitioning, partition contiguity,
+    then gap disclosures.
+    """
+
+    rows = list(profile.primitive_ops)
+    evidence_rows = tuple(profile._event_owner_evidence)
+    evidence = dict(evidence_rows)
+    if len(evidence) != len(evidence_rows):
+        _primitive_failure("event-owner evidence contains duplicate sequences")
+    if set(evidence) != {row.sequence for row in rows}:
+        _primitive_failure("event-owner evidence does not exactly cover primitive rows")
+    ops = list(trace.ops)
+    grad_fn_labels = {
+        str(grad_fn.label) for grad_fn in (getattr(trace, "grad_fn_logs", {}) or {}).values()
+    }
+    labels: set[str] = set()
+    sequences: set[int] = set()
+    partitions: dict[tuple[str, object], list[int]] = defaultdict(list)
+    for row in rows:
+        _check_primitive_row(row, ops, evidence, grad_fn_labels)
+        if row.label in labels or row.sequence in sequences:
+            _primitive_failure("primitive labels and sequences must be unique")
+        labels.add(row.label)
+        sequences.add(row.sequence)
+        if row.owner_status == "forward_op":
+            partitions[("forward", row.owner_func_call_id)].append(row.decomposition_slot)
+        elif row.owner_status == "backward_grad_fn_call":
+            partitions[("backward", row.parent_grad_fn_call_ref)].append(row.decomposition_slot)
+    for key, slots in partitions.items():
+        if sorted(slots) != list(range(len(slots))):
+            _primitive_failure(f"primitive partition {key!r} has non-contiguous slots {slots!r}")
+    for gap in profile.mode_paused_interior:
+        _check_gap(gap, ops)
+    return rows
+
+
+def _check_unresolved_ownership(trace: Trace, rows: list[Any]) -> None:
+    """A completed trace may not retain unresolved primitive ownership."""
+
+    if getattr(trace, "_tracing_finished", False) and any(
+        row.owner_status == "unresolved" for row in rows
+    ):
+        _primitive_failure("completed trace retains unresolved primitive ownership")
+
+
 def _check_primitive_op_invariants(trace: Trace) -> None:
     """Validate primitive-profile rows, partitions, disclosures, and stores.
 
@@ -208,47 +284,14 @@ def _check_primitive_op_invariants(trace: Trace) -> None:
         if forward_store is not None:
             _primitive_failure("recording-off trace retains a primitive_op store")
         return
-    rows = list(profile.primitive_ops)
-    gaps = list(profile.mode_paused_interior)
-    evidence_rows = tuple(profile._event_owner_evidence)
-    evidence = dict(evidence_rows)
-    if len(evidence) != len(evidence_rows):
-        _primitive_failure("event-owner evidence contains duplicate sequences")
-    if set(evidence) != {row.sequence for row in rows}:
-        _primitive_failure("event-owner evidence does not exactly cover primitive rows")
-    ops = list(trace.ops)
-    grad_fn_labels = {
-        str(grad_fn.label) for grad_fn in (getattr(trace, "grad_fn_logs", {}) or {}).values()
-    }
-    labels: set[str] = set()
-    sequences: set[int] = set()
-    partitions: dict[tuple[str, object], list[int]] = defaultdict(list)
-    for row in rows:
-        _check_primitive_row(row, ops, evidence, grad_fn_labels)
-        if row.label in labels or row.sequence in sequences:
-            _primitive_failure("primitive labels and sequences must be unique")
-        labels.add(row.label)
-        sequences.add(row.sequence)
-        if row.owner_status == "forward_op":
-            key: object = row.owner_func_call_id
-            partitions[("forward", key)].append(row.decomposition_slot)
-        elif row.owner_status == "backward_grad_fn_call":
-            partitions[("backward", row.parent_grad_fn_call_ref)].append(row.decomposition_slot)
-    for key, slots in partitions.items():
-        if sorted(slots) != list(range(len(slots))):
-            _primitive_failure(f"primitive partition {key!r} has non-contiguous slots {slots!r}")
-    for gap in gaps:
-        _check_gap(gap, ops)
+    rows = _check_profile_rows(trace, profile)
     forward_rows = [row for row in rows if row.capture_phase == "forward"]
     if forward_rows:
         if forward_store is None or len(forward_store) != len(forward_rows):
             _primitive_failure("forward primitive store does not match profile rows")
     elif forward_store is not None and len(forward_store):
         _primitive_failure("present-empty forward profile has non-empty primitive store")
-    if getattr(trace, "_tracing_finished", False) and any(
-        row.owner_status == "unresolved" for row in rows
-    ):
-        _primitive_failure("completed trace retains unresolved primitive ownership")
+    _check_unresolved_ownership(trace, rows)
 
 
 def _check_non_torch_primitive_op_inert(trace: Trace) -> None:
@@ -300,41 +343,8 @@ def validate_loaded_primitive_profile(trace: Trace) -> None:
     if profile is None:
         return
     try:
-        rows = list(profile.primitive_ops)
-        evidence_rows = tuple(profile._event_owner_evidence)
-        evidence = dict(evidence_rows)
-        if len(evidence) != len(evidence_rows):
-            _primitive_failure("event-owner evidence contains duplicate sequences")
-        if set(evidence) != {row.sequence for row in rows}:
-            _primitive_failure("event-owner evidence does not exactly cover primitive rows")
-        ops = list(trace.ops)
-        grad_fn_labels = {
-            str(grad_fn.label) for grad_fn in (getattr(trace, "grad_fn_logs", {}) or {}).values()
-        }
-        partitions: dict[tuple[str, object], list[int]] = defaultdict(list)
-        labels: set[str] = set()
-        sequences: set[int] = set()
-        for row in rows:
-            _check_primitive_row(row, ops, evidence, grad_fn_labels)
-            if row.label in labels or row.sequence in sequences:
-                _primitive_failure("primitive labels and sequences must be unique")
-            labels.add(row.label)
-            sequences.add(row.sequence)
-            if row.owner_status == "forward_op":
-                partitions[("forward", row.owner_func_call_id)].append(row.decomposition_slot)
-            elif row.owner_status == "backward_grad_fn_call":
-                partitions[("backward", row.parent_grad_fn_call_ref)].append(row.decomposition_slot)
-        for key, slots in partitions.items():
-            if sorted(slots) != list(range(len(slots))):
-                _primitive_failure(
-                    f"primitive partition {key!r} has non-contiguous slots {slots!r}"
-                )
-        for gap in profile.mode_paused_interior:
-            _check_gap(gap, ops)
-        if getattr(trace, "_tracing_finished", False) and any(
-            row.owner_status == "unresolved" for row in rows
-        ):
-            _primitive_failure("completed trace retains unresolved primitive ownership")
+        rows = _check_profile_rows(trace, profile)
+        _check_unresolved_ownership(trace, rows)
     except (AttributeError, KeyError, TypeError, ValueError, MetadataInvariantError) as exc:
         detail = str(exc)
         fk_markers = (

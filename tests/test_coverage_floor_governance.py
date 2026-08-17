@@ -246,8 +246,15 @@ def test_package_percentage_aggregation_is_red_capable() -> None:
 #: docstring ledger, mutation-deselect expiry, size ledgers — carries one).
 #: Excluded lines leave the coverage denominator entirely, so unbounded
 #: growth is invisible to every floor above. Measured 2026-08-16: 57 sites,
-#: all guard-line scoped with inline reasons. SHRINK-ONLY.
-_PRAGMA_NO_COVER_CEILING = 57
+#: all guard-line scoped with inline reasons. SHRINK-ONLY. Re-measured
+#: 2026-08-16 (wave-0 governance sweep): 50 — the nine redundant
+#: ``if TYPE_CHECKING:`` pragmas were deleted (the 193-site majority
+#: convention carries no pragma; the guard line itself executes at import),
+#: and the one REACHABLE pragma'd raise (_runnable_transaction until=
+#: substring token) lost its pragma and gained a covering test. The one
+#: surviving wave-0 addition is the _encoding.py import-time two-row
+#: classification guard, unreachable while the completeness pin holds.
+_PRAGMA_NO_COVER_CEILING = 50
 
 
 def test_pragma_no_cover_census_never_grows() -> None:

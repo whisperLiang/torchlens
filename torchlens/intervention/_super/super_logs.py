@@ -10,7 +10,7 @@ import torch
 from ._accessor_base import SuperAccessor
 from ._base import _TENSOR_FIELD_LITERAL, Super, _TensorBearing
 
-if TYPE_CHECKING:  # pragma: no cover - typing-only
+if TYPE_CHECKING:
     from ...data_classes.buffer import Buffer
     from ...data_classes.grad_fn import GradFn
     from ...data_classes.grad_fn_call import GradFnCall

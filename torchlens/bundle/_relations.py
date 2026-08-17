@@ -107,24 +107,29 @@ def _validated_params(kind: str, params: Any) -> dict[str, Any]:
     validated: dict[str, Any] = {}
     for key in sorted(declared):
         value = params[key]
-        if key == "at_step":
-            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-                raise ValueError(
-                    f"bundle-relation param 'at_step' must be a non-negative int, got {value!r}"
-                )
-        elif key == "episode_id":
-            if not isinstance(value, str) or not value:
-                raise ValueError(
-                    f"bundle-relation param 'episode_id' must be a non-empty string, got {value!r}"
-                )
-        elif key == "role":
-            if value not in _EPISODE_ROLES:
-                raise ValueError(
-                    f"bundle-relation param 'role' is {value!r}, outside the closed "
-                    f"vocabulary {sorted(_EPISODE_ROLES)}"
-                )
+        _validate_param_value(key, value)
         validated[key] = value
     return validated
+
+
+def _validate_param_value(key: str, value: Any) -> None:
+    """Type/vocabulary check for one declared relation param value."""
+
+    if key == "at_step":
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(
+                f"bundle-relation param 'at_step' must be a non-negative int, got {value!r}"
+            )
+    elif key == "episode_id":
+        if not isinstance(value, str) or not value:
+            raise ValueError(
+                f"bundle-relation param 'episode_id' must be a non-empty string, got {value!r}"
+            )
+    elif key == "role" and value not in _EPISODE_ROLES:
+        raise ValueError(
+            f"bundle-relation param 'role' is {value!r}, outside the closed "
+            f"vocabulary {sorted(_EPISODE_ROLES)}"
+        )
 
 
 @dataclass(frozen=True)
