@@ -2890,6 +2890,12 @@ class Trace(
         state.pop("_receptive_field_solution", None)
         state.pop("_rf_source_solutions", None)
         state.pop("_rf_target_solutions", None)
+        # Render diagnostic from the last draw(): its EncodingChannelSpec can
+        # hold the RAW user callable a `color_by=lambda ...` passed in, so
+        # carrying it made pickle.dumps crash after an ordinary draw while
+        # tl.save succeeded on the same trace (the R10-7 raw-callable class).
+        # Runtime-only either way; it rebuilds on the next draw.
+        state.pop("_last_encoding_state", None)
         state.pop("_container_ordinals_by_output_op_label", None)
         state.pop("_container_ordinals_by_input_func_call_id", None)
         # B1-02: the semantic-output scratch never serializes. Plain pickle
