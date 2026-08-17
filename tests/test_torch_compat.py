@@ -423,7 +423,8 @@ def test_torch_capability_snapshot_contract() -> None:
         "HAS_DTENSOR_SHARD_GEOMETRY": tc.HAS_DTENSOR_SHARD_GEOMETRY,
         # L8/C2 funcol boundary capture degrades independently when group
         # resolution or dispatcher-level wait interposition is unavailable.
-        # Both probes are lazy, then forced by this diagnostic snapshot.
+        # Both named flags are included in every diagnostic snapshot while
+        # retaining their lazy-probe lifecycle.
         "HAS_FUNCOL_GROUP_RESOLUTION": tc.HAS_FUNCOL_GROUP_RESOLUTION,
         "HAS_FUNCOL_WAIT_INTERPOSITION": tc.HAS_FUNCOL_WAIT_INTERPOSITION,
         "HAS_TRACING_TENSOR_TYPES": tc.HAS_TRACING_TENSOR_TYPES,
