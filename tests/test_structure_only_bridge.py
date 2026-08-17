@@ -78,13 +78,28 @@ def test_bridge_is_entry_dark_and_rows_still_refuse() -> None:
 
 @smoke
 def test_bridge_module_is_imported_nowhere_in_the_package() -> None:
-    """Entry-dark means entry-dark: no torchlens module imports the bridge;
-    it becomes reachable only through the L7b amendment implementation PR."""
+    """Entry-dark means entry-dark: no torchlens module IMPORTS the bridge;
+    it becomes reachable only through the L7b amendment implementation PR.
+    (AST import scan — prose mentions, e.g. capability-row evidence cells,
+    are legal.)"""
+
+    import ast
 
     for path in TORCHLENS_DIR.rglob("*.py"):
         if path.name == "_structure_only_bridge.py":
             continue
-        assert "_structure_only_bridge" not in path.read_text(encoding="utf-8"), str(path)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                assert "_structure_only_bridge" not in module, str(path)
+                assert all("_structure_only_bridge" not in alias.name for alias in node.names), str(
+                    path
+                )
+            elif isinstance(node, ast.Import):
+                assert all("_structure_only_bridge" not in alias.name for alias in node.names), str(
+                    path
+                )
 
 
 # ---------------------------------------------------------------------------

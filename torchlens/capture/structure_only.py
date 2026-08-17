@@ -268,7 +268,11 @@ _ROWS: Final[tuple[CapabilityRow, ...]] = (
         ),
         status_v1="refuse:structure_only_option_conflict",
         flip_event="L7b amendment lands",
-        evidence="tests/test_structure_only_entry.py",
+        evidence=(
+            "tests/test_structure_only_entry.py; conflict lift rides the S2 "
+            "StateSource amendment (request R-L7B-1) with the belt-coverage "
+            "pin re-authored in the same change"
+        ),
         amend_owner="L7b",
         refusal_code="structure_only_option_conflict",
     ),
@@ -380,7 +384,12 @@ _ROWS: Final[tuple[CapabilityRow, ...]] = (
         ),
         status_v1="refuse:structure_only_runnable_unsupported",
         flip_event="L7b amendment lands",
-        evidence="tests/test_structure_only_capabilities.py",
+        evidence=(
+            "tests/test_structure_only_capabilities.py; entry-dark bridge + "
+            "mandatory bind-digest authority shipped: "
+            "tests/test_structure_only_bridge.py (flip blocked on the S2 "
+            "StateSource amendment, request R-L7B-1)"
+        ),
         amend_owner="L7b",
         refusal_code=STRUCTURE_ONLY_RUNNABLE_UNSUPPORTED,
     ),
@@ -392,7 +401,12 @@ _ROWS: Final[tuple[CapabilityRow, ...]] = (
         ),
         status_v1="refuse:structure_only_replay_unsupported",
         flip_event="L7b amendment lands",
-        evidence="tests/test_structure_only_capabilities.py",
+        evidence=(
+            "tests/test_structure_only_capabilities.py; entry-dark bridge + "
+            "S1 validator-reuse binding path shipped: "
+            "tests/test_structure_only_bridge.py (flip blocked on the S2 "
+            "StateSource amendment, request R-L7B-1)"
+        ),
         amend_owner="L7b",
         refusal_code=STRUCTURE_ONLY_REPLAY_UNSUPPORTED,
     ),
