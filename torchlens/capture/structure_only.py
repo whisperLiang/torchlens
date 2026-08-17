@@ -268,7 +268,11 @@ _ROWS: Final[tuple[CapabilityRow, ...]] = (
         ),
         status_v1="refuse:structure_only_option_conflict",
         flip_event="L7b amendment lands",
-        evidence="tests/test_structure_only_entry.py",
+        evidence=(
+            "tests/test_structure_only_entry.py; conflict lift rides the S2 "
+            "StateSource amendment (request R-L7B-1) with the belt-coverage "
+            "pin re-authored in the same change"
+        ),
         amend_owner="L7b",
         refusal_code="structure_only_option_conflict",
     ),
@@ -380,7 +384,12 @@ _ROWS: Final[tuple[CapabilityRow, ...]] = (
         ),
         status_v1="refuse:structure_only_runnable_unsupported",
         flip_event="L7b amendment lands",
-        evidence="tests/test_structure_only_capabilities.py",
+        evidence=(
+            "tests/test_structure_only_capabilities.py; entry-dark bridge + "
+            "mandatory bind-digest authority shipped: "
+            "tests/test_structure_only_bridge.py (flip blocked on the S2 "
+            "StateSource amendment, request R-L7B-1)"
+        ),
         amend_owner="L7b",
         refusal_code=STRUCTURE_ONLY_RUNNABLE_UNSUPPORTED,
     ),
@@ -392,7 +401,12 @@ _ROWS: Final[tuple[CapabilityRow, ...]] = (
         ),
         status_v1="refuse:structure_only_replay_unsupported",
         flip_event="L7b amendment lands",
-        evidence="tests/test_structure_only_capabilities.py",
+        evidence=(
+            "tests/test_structure_only_capabilities.py; entry-dark bridge + "
+            "S1 validator-reuse binding path shipped: "
+            "tests/test_structure_only_bridge.py (flip blocked on the S2 "
+            "StateSource amendment, request R-L7B-1)"
+        ),
         amend_owner="L7b",
         refusal_code=STRUCTURE_ONLY_REPLAY_UNSUPPORTED,
     ),
@@ -473,6 +487,27 @@ STRUCTURE_ONLY_CAPABILITIES: Final[Mapping[str, CapabilityRow]] = {row.key: row 
 
 
 _VALID_AMEND_OWNERS: Final[frozenset[str]] = frozenset({"L7a", "L7b", "S2-amendment", "P1"})
+
+_L7B_ROW_TEACHING: Final[Mapping[str, str]] = {
+    "save_runnable": (
+        "This is the L7b v1 floor: runnable save flips to the declared "
+        "late-bind posture (state slots declared at capture time, values "
+        "bound at run time with mandatory byte digests) when its S2 "
+        "StateSource amendment lands — this row's named flip event. Until "
+        "then, capture the real model with intervention_ready=True to "
+        "produce a runnable artifact."
+    ),
+    "live_replay": (
+        "A structure-only capture records no values to replay. Until the "
+        "L7b declared late-bind posture lands (this row's named flip "
+        "event), run the real model directly, or corroborate this trace "
+        "against a real capture via trace.discharge_against(real_trace)."
+    ),
+}
+"""Row-scoped teaching sentences for the L7b-owned rows (house rule: every
+refusal names the boundary and what to do instead). Amends refusal TEACHING
+only — claims, statuses, and codes are untouched; the entries are keyed to
+rows whose ``amend_owner`` is L7b."""
 
 
 def _validate_row_grammar(row: CapabilityRow) -> None:
@@ -582,6 +617,9 @@ def require_structure_only_capability(
         )
         if detail:
             message += f" {detail}"
+        teaching = _L7B_ROW_TEACHING.get(capability)
+        if teaching is not None:
+            message += f" {teaching}"
         message += (
             " Remedy: run a real capture (tl.trace without structure_only) "
             "for value-bearing surfaces, or see "

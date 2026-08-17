@@ -82,9 +82,16 @@ def _refuse_structure_only_conflicts(facts: _StructureOnlyEntryFacts) -> None:
             "structure_only=True cannot combine with intervention_ready=True: "
             "runnable eligibility disables the plain escape belt and runnable "
             "save is refused wholesale under the structure-only contract, so "
-            "the combination must be unreachable rather than quietly belt-less",
+            "the combination must be unreachable rather than quietly belt-less. "
+            "This is the capability table's runnable_ready_composition row; "
+            "its named flip event is the L7b declared late-bind amendment "
+            "(state slots declared at capture, values bound at run time)",
             code="structure_only_option_conflict",
-            remedy=conflict_remedy,
+            remedy=(
+                "capture the real model with intervention_ready=True (without "
+                "structure_only) for a runnable artifact today, or drop "
+                "intervention_ready to keep the structure-only capture"
+            ),
             arguments=("structure_only", "intervention_ready"),
         )
     if halt is not None:
