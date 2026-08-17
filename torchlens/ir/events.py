@@ -314,6 +314,24 @@ class GradFnFired:
 
 
 @dataclass(frozen=True, slots=True)
+class CheckpointInvocationObserved:
+    """Torch enrichment event minted for one classified checkpoint invocation.
+
+    L9 memo 2.3 (provisional spelling, DOCUMENTED-UNSTABLE): the token is a
+    per-trace monotonic ordinal minted ONLY in the patched
+    ``saved_tensors_hooks.__enter__`` for ``_checkpoint_hook`` instances on
+    the armed owner thread outside any engine invocation. Pack counts and
+    unpack window evidence accumulate in runtime token state, not on this
+    frozen event; the projected summary lands on the DROP-gated Trace
+    checkpoint-invocation witness field.
+    """
+
+    token: int
+    timestamp: float
+    seq: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class OutputRef:
     """Captured output metadata and optional payload references."""
 

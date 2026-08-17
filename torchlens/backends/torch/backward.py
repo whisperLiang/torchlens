@@ -35,6 +35,7 @@ from ...ir.events import (
     BackwardCoverageGap,
     BackwardPassEnd,
     BackwardPassStart,
+    CheckpointInvocationObserved,
     GradFnDiscovered,
     GradFnFired,
     OpGradObserved,
@@ -52,6 +53,7 @@ from ._tl import detached_saved_activation_label, get_tensor_label
 from .escape_detection import expected_original_call
 from .tensor_tracking import (
     _copy_grad_payload,
+    _current_backward_graph_task_id,
     _ensure_backward_event_stream,
     _forward_op_count_at_backward_trigger,
     _should_save_grad_payload,
@@ -1331,6 +1333,10 @@ def _backward_tail_is_foldable(state: _BackwardFoldState, tail: list[Any]) -> bo
         elif isinstance(event, (GradFnFired, OpGradObserved, ParamGradObserved)):
             if event.pass_index <= max_built:
                 return False
+        elif isinstance(event, CheckpointInvocationObserved):
+            # Projection-neutral: token evidence lives in runtime state and
+            # the witness field, never in the folded records.
+            continue
         else:
             return False
     return True
@@ -1359,6 +1365,10 @@ def _materialize_backward_projections(trace: Any) -> None:
     events = list(getattr(stream, "backward_events", ()))
     if not events:
         return
+    # Checkpoint witness (memo 2.3): every backward-capturing trace gets the
+    # projected summary, so the affirmative zero-token verdict is available
+    # even when no checkpoint enter or degrade flag ever fired.
+    _refresh_checkpoint_witness(trace)
     revision = getattr(stream, "backward_revision", None)
     if revision is None:
         # Legacy stream (e.g. unpickled from an older version) without a
@@ -2754,6 +2764,9 @@ def _walk_and_hook_backward_graph(
                 topology=tuple(id(next_fn) for next_fn in next_grad_fns),
             )
         )
+        # D5 reentrant sentinel: the discovery stream affirmatively witnesses
+        # reentrant checkpointing (token-free by definition, memo 2.3).
+        _flag_reentrant_checkpoint_if_sentinel(trace, grad_fn_record.class_qualname)
         if layer_label is not None:
             layer = trace.layer_dict_all_keys[layer_label]
             layer.grad_fn = grad_fn_record
@@ -2918,6 +2931,7 @@ def _emit_discovered_grad_fn(
             topology=tuple(id(next_fn) for next_fn in next_grad_fns),
         )
     )
+    _flag_reentrant_checkpoint_if_sentinel(trace, grad_fn_record.class_qualname)
 
 
 def _rewalk_higher_order_grad_fns(trace: Any) -> None:
@@ -3556,6 +3570,273 @@ def _capture_autograd_engine_call(
     return nested_call(0)
 
 
+# ---------------------------------------------------------------------------
+# Checkpoint invocation tokens (L9 memo 2.3). Every spelling below is
+# DOCUMENTED-UNSTABLE; the typed ambiguity REFUSAL is S2-authored (R-L9-1) and
+# NOT raised anywhere in this module -- only the capture machinery (classifier,
+# per-instance token-bearing closures, witness bookkeeping) ships pre-amendment.
+# ---------------------------------------------------------------------------
+
+_CHECKPOINT_TOKEN_STATE: weakref.WeakKeyDictionary[Any, dict[str, Any]] = (
+    weakref.WeakKeyDictionary()
+)
+"""Per-trace runtime token state: next ordinal, token records, degrade flags.
+
+Tokens die with the process (the witness summary on the DROP-gated Trace
+field is the only projected surface). Minting happens only on the armed owner
+thread (classifier condition 2), so the ordinal needs no lock; engine-thread
+unpack evidence appends go through the per-trace lock.
+"""
+
+#: Degrade-flag vocabulary (provisional strings, E-L9-4 routing): D1-D6.
+_CHECKPOINT_FLAG_CLASSIFIER_UNAVAILABLE = "classifier_unavailable"  # D1
+_CHECKPOINT_FLAG_PATCH_UNAVAILABLE = "patch_unavailable"  # D2
+_CHECKPOINT_FLAG_EXOTIC_SUBCLASS = "exotic_subclass"  # D3
+_CHECKPOINT_FLAG_UNMATCHED_BACKWARD_WARN = "unmatched_backward_warn"  # D4
+_CHECKPOINT_FLAG_REENTRANT_NODE_DISCOVERED = "reentrant_node_discovered"  # D5
+_CHECKPOINT_FLAG_UNWITNESSED_ENTER = "unwitnessed_checkpoint_enter"  # D6
+
+#: Reentrant checkpoint node qualname sentinel (venv-verified on torch 2.13,
+#: memo claim A22). GradFn class_qualname is stored module-qualified, so the
+#: sentinel matches on the trailing qualname segment.
+_REENTRANT_CHECKPOINT_QUALNAME = "CheckpointFunctionBackward"
+
+
+def _resolve_checkpoint_hook_cls() -> type | None:
+    """Return torch's private non-reentrant checkpoint hook class, or ``None``.
+
+    A torch without the private name yields ``None`` -> classifier
+    unavailable -> NO tokens (degrade class D1, fail-closed: an unrecognized
+    checkpoint variant can never mint a false token).
+    """
+
+    try:
+        import torch.utils.checkpoint as checkpoint_module
+    except ImportError:  # pragma: no cover - torch always ships the module
+        return None
+    resolved = getattr(checkpoint_module, "_checkpoint_hook", None)
+    return resolved if isinstance(resolved, type) else None
+
+
+def _checkpoint_token_state(trace: Any) -> dict[str, Any]:
+    """Return (and lazily build) one trace's runtime checkpoint-token state."""
+
+    state = _CHECKPOINT_TOKEN_STATE.get(trace)
+    if state is None:
+        state = {
+            "next_ordinal": 1,
+            "tokens": {},
+            "flags": set(),
+            "lock": threading.Lock(),
+        }
+        _CHECKPOINT_TOKEN_STATE[trace] = state
+    return state
+
+
+def _flag_checkpoint_degrade(trace: Any, flag: str) -> None:
+    """Set one degrade flag and refresh the projected witness summary."""
+
+    state = _checkpoint_token_state(trace)
+    if flag not in state["flags"]:
+        state["flags"].add(flag)
+        _refresh_checkpoint_witness(trace)
+
+
+def _flag_reentrant_checkpoint_if_sentinel(trace: Any, class_qualname: str | None) -> None:
+    """Set D5 when a discovered grad-fn is the reentrant checkpoint node."""
+
+    if class_qualname and class_qualname.rsplit(".", 1)[-1] == _REENTRANT_CHECKPOINT_QUALNAME:
+        _flag_checkpoint_degrade(trace, _CHECKPOINT_FLAG_REENTRANT_NODE_DISCOVERED)
+
+
+def _token_bearing_pack_hook(
+    trace: Any, token: int, inner: Callable[[Any], Any]
+) -> Callable[[Any], Any]:
+    """Wrap the (already-scoped) pack hook with count-only token evidence.
+
+    Runs on the owner thread during forward with logging paused by the inner
+    scoped body; this wrapper does dict bookkeeping only (no tensor ops), so
+    the r34-A/r33-F2 fences are untouched. The forward-side slot->op binding
+    is NOT claimed: pack evidence is a COUNT, never a producer-op join (the
+    pack hook runs before TorchLens logs the producing op).
+    """
+
+    trace_ref = weakref.ref(trace)
+
+    def pack_hook(value: Any) -> Any:
+        live_trace = trace_ref()
+        if live_trace is not None:
+            state = _CHECKPOINT_TOKEN_STATE.get(live_trace)
+            record = None if state is None else state["tokens"].get(token)
+            if record is not None:
+                record["pack_count"] += 1
+        return inner(value)
+
+    pack_hook.__tl_saved_tensors_hook_scoped__ = True  # type: ignore[attr-defined]
+    pack_hook.__tl_checkpoint_token__ = token  # type: ignore[attr-defined]
+    pack_hook.__tl_token_inner__ = inner  # type: ignore[attr-defined]
+    return pack_hook
+
+
+def _token_bearing_unpack_hook(
+    trace: Any, token: int, inner: Callable[[Any], Any]
+) -> Callable[[Any], Any]:
+    """Wrap the (already-scoped) unpack hook with window-evidence recording.
+
+    Unpack fires on the ENGINE thread during backward: each firing records an
+    evidence point (graph task id, active grad-fn fire bracket if any, pass
+    coordinates) under the per-trace lock. An unpack outside any fire bracket
+    contributes a task-id-only point, which can only widen ambiguity, never
+    resolve it (dependent reads refuse rather than guess).
+    """
+
+    trace_ref = weakref.ref(trace)
+
+    def unpack_hook(value: Any) -> Any:
+        live_trace = trace_ref()
+        if live_trace is not None:
+            state = _CHECKPOINT_TOKEN_STATE.get(live_trace)
+            record = None if state is None else state["tokens"].get(token)
+            if state is not None and record is not None:
+                from ._aten_capture import _ACTIVE_BACKWARD_GRAD_FN_REFS
+
+                active_refs = _ACTIVE_BACKWARD_GRAD_FN_REFS.get()
+                point = {
+                    "graph_task_id": _current_backward_graph_task_id(),
+                    "fire_bracket": active_refs[-1] if active_refs else None,
+                    "pass_index": getattr(live_trace, "_active_backward_pass_index", None),
+                }
+                with state["lock"]:
+                    record["unpack_evidence"].append(point)
+        return inner(value)
+
+    unpack_hook.__tl_saved_tensors_hook_scoped__ = True  # type: ignore[attr-defined]
+    unpack_hook.__tl_checkpoint_token__ = token  # type: ignore[attr-defined]
+    unpack_hook.__tl_token_inner__ = inner  # type: ignore[attr-defined]
+    return unpack_hook
+
+
+def _observe_saved_tensors_hooks_enter(context: Any) -> None:
+    """Classify one ``saved_tensors_hooks`` enter; mint or flag (memo 2.3).
+
+    Classifier (exact, conservative, fail-closed) -- a token is minted ONLY
+    when ALL of:
+
+    1. the context is a ``torch.utils.checkpoint._checkpoint_hook`` instance
+       (lazy private-name resolution; absence -> D1, no tokens);
+    2. capture-armed on the OWNER thread (same gate as the scoped hook body);
+    3. NOT inside an engine invocation (torch's graph-task witness).
+
+    ``_recomputation_hook`` instances, ordinary ``saved_tensors_hooks``,
+    ``save_on_cpu``, and user subclasses fail (1) and NEVER mint or flag.
+    A ``_checkpoint_hook`` enter failing (2)/(3) sets D6 instead of staying
+    silent: every checkpoint enter therefore either mints or flags.
+    """
+
+    trace = _state._active_trace
+    if trace is None:
+        return
+    checkpoint_cls = _resolve_checkpoint_hook_cls()
+    if checkpoint_cls is None:
+        _flag_checkpoint_degrade(trace, _CHECKPOINT_FLAG_CLASSIFIER_UNAVAILABLE)
+        return
+    if not isinstance(context, checkpoint_cls):
+        return
+    armed_on_owner_thread = (
+        _state._logging_enabled and _state._active_owner_thread_id == threading.get_ident()
+    )
+    if not armed_on_owner_thread or _current_backward_graph_task_id() is not None:
+        _flag_checkpoint_degrade(trace, _CHECKPOINT_FLAG_UNWITNESSED_ENTER)
+        return
+    state = _checkpoint_token_state(trace)
+    token = state["next_ordinal"]
+    state["next_ordinal"] = token + 1
+    state["tokens"][token] = {"pack_count": 0, "unpack_evidence": []}
+    # Install token-bearing wrappers on THIS instance (the shipped rescoping
+    # move already rewraps instance hooks in patched_enter). Re-entry mints a
+    # fresh token and installs FRESH wrappers: unwrap any prior token layer
+    # through its declared inner so counts never stack across invocations.
+    hook_owner: Any = context
+    hook_owner.pack_hook = _token_bearing_pack_hook(
+        trace, token, getattr(hook_owner.pack_hook, "__tl_token_inner__", hook_owner.pack_hook)
+    )
+    hook_owner.unpack_hook = _token_bearing_unpack_hook(
+        trace,
+        token,
+        getattr(hook_owner.unpack_hook, "__tl_token_inner__", hook_owner.unpack_hook),
+    )
+    _ensure_backward_event_stream(trace).append_backward(
+        CheckpointInvocationObserved(token=token, timestamp=time.time())
+    )
+    _refresh_checkpoint_witness(trace)
+
+
+def _refresh_checkpoint_witness(trace: Any) -> None:
+    """Project the runtime token state onto the DROP-gated witness field.
+
+    Contents are a summary (counts, backward-derived site-key candidates,
+    window-evidence refs into pass/call coordinates, degrade flags, and the
+    evidence-scoped completeness verdict) -- never payloads. The verdict
+    claims only what the channels cover: "no checkpoint invocation OBSERVED
+    BY CLASSIFIER OR SENTINEL", and any degrade flag withdraws it.
+    """
+
+    state = _CHECKPOINT_TOKEN_STATE.get(trace)
+    if state is None:
+        flags: set[str] = set()
+        token_records: dict[int, dict[str, Any]] = {}
+        evidence_lock: threading.Lock | None = None
+    else:
+        flags = set(state["flags"])
+        token_records = state["tokens"]
+        evidence_lock = state["lock"]
+    if not HAS_SAVED_TENSORS_HOOKS_PATCHABLE or not _SAVED_TENSORS_HOOKS_INIT_PATCHED:
+        flags.add(_CHECKPOINT_FLAG_PATCH_UNAVAILABLE)
+    grad_fn_logs = getattr(trace, "grad_fn_logs", {})
+    layer_lookup = getattr(trace, "layer_dict_all_keys", {})
+    tokens_summary: dict[int, dict[str, Any]] = {}
+    for token, record in token_records.items():
+        if evidence_lock is not None:
+            with evidence_lock:
+                evidence = list(record["unpack_evidence"])
+        else:  # pragma: no cover - the lock exists whenever tokens exist
+            evidence = []
+        site_candidates: set[str] = set()
+        window_refs: list[tuple[int | None, str | None, int | None]] = []
+        for point in evidence:
+            bracket = point.get("fire_bracket")
+            if bracket is None:
+                window_refs.append((point.get("pass_index"), None, None))
+                continue
+            bracket_object_id, bracket_call_index, bracket_pass_index = bracket
+            grad_fn_record = grad_fn_logs.get(bracket_object_id)
+            label = getattr(grad_fn_record, "label", None)
+            window_refs.append((bracket_pass_index, label, bracket_call_index))
+            if grad_fn_record is not None and getattr(grad_fn_record, "has_op", False):
+                op = layer_lookup.get(grad_fn_record.op_label)
+                site_key = getattr(op, "site_key", None)
+                if site_key is not None:
+                    site_candidates.add(site_key)
+        tokens_summary[token] = {
+            "pack_count": record["pack_count"],
+            "unpack_evidence_count": len(evidence),
+            "site_key_candidates": sorted(site_candidates),
+            "window_evidence": window_refs,
+        }
+    if flags:
+        verdict = "evidence_incomplete"
+    elif tokens_summary:
+        verdict = "checkpoint_invocations_observed"
+    else:
+        verdict = "no_checkpoint_invocation_observed"
+    trace.checkpoint_invocation_witness = {
+        "token_count": len(tokens_summary),
+        "tokens": tokens_summary,
+        "degrade_flags": sorted(flags),
+        "verdict": verdict,
+    }
+
+
 def _scoped_saved_tensors_hook(hook: Callable[[Any], Any]) -> Callable[[Any], Any]:
     """Wrap a user pack/unpack hook so its torch ops stay out of the capture.
 
@@ -3636,8 +3917,18 @@ def _install_saved_tensors_hooks_scope() -> None:
             self.unpack_hook = _scoped_saved_tensors_hook(self.unpack_hook)
         except AttributeError:
             # An exotic subclass without settable hook attributes degrades to
-            # the historical unscoped behavior rather than breaking entry.
-            pass
+            # the historical unscoped behavior rather than breaking entry --
+            # and flags D3 so the checkpoint witness never claims coverage a
+            # degraded patch cannot provide.
+            active_trace = _state._active_trace
+            if active_trace is not None:
+                _flag_checkpoint_degrade(active_trace, _CHECKPOINT_FLAG_EXOTIC_SUBCLASS)
+        else:
+            # Checkpoint-invocation classifier (L9 memo 2.3): mint-or-flag on
+            # every _checkpoint_hook enter, BEFORE original_enter pushes the
+            # instance hooks onto torch's stack so the pushed pair is the
+            # token-bearing one.
+            _observe_saved_tensors_hooks_enter(self)
         return original_enter(self)
 
     hooks_cls.__init__ = patched_init  # type: ignore[method-assign]
@@ -3970,6 +4261,10 @@ class RecordingBackward:
             # like a successfully-recorded empty pass (e.g. a graph rebuilt
             # under no_grad by reentrant checkpointing pins zero grad-fns).
             if not any(matched is trace for matched in _traces_for_roots(tensor_self)):
+                # D4: KEPT as an evidence-incompleteness flag, NOT a reentrant
+                # detector (its trigger is zero pinned grad-fns, which a
+                # partially-checkpointed model never trips).
+                _flag_checkpoint_degrade(trace, _CHECKPOINT_FLAG_UNMATCHED_BACKWARD_WARN)
                 if not self._warned_unmatched_backward:
                     self._warned_unmatched_backward = True
                     warnings.warn(

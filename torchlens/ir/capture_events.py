@@ -16,6 +16,7 @@ from .events import (
     BackwardPassEnd,
     BackwardPassStart,
     BufferWriteEvent,
+    CheckpointInvocationObserved,
     GradFnDiscovered,
     GradFnFired,
     InterventionAppliedEvent,
@@ -266,6 +267,7 @@ class CaptureEvents:
         | GradFnDiscovered
         | GradFnFired
         | BackwardCoverageGap
+        | CheckpointInvocationObserved
     ] = field(default_factory=list)
     aten_events: list[_AtenCallEvent | _ModePausedInteriorEvent] = field(default_factory=list)
     aten_recording_enabled: bool = False
@@ -1099,7 +1101,8 @@ class CaptureEvents:
         | BackwardPassEnd
         | GradFnDiscovered
         | GradFnFired
-        | BackwardCoverageGap,
+        | BackwardCoverageGap
+        | CheckpointInvocationObserved,
     ) -> None:
         """Append a backward sidecar event, stamping the global backward seq.
 

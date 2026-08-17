@@ -145,6 +145,25 @@ op-anchored nodes when possible. Post-forward loss-construction nodes before the
 node carry no module membership. `module_membership_source` is `"paired"`, `"inferred"`, or
 `None`.
 
+## Checkpoint Invocation Witness
+
+Non-reentrant `torch.utils.checkpoint` invocations are witnessed by capture-time TOKENS
+(DOCUMENTED-UNSTABLE surface): the patched `saved_tensors_hooks.__enter__` mints one per-trace
+ordinal token per classified `_checkpoint_hook` enter on the armed owner thread outside any
+engine invocation, and installs per-instance token-bearing pack/unpack wrappers. Pack evidence
+is count-only — the forward-side slot-to-op binding is deliberately NOT claimed (pack hooks run
+before TorchLens logs the producing op). Unpack evidence points are backward-derived: the
+grad-fn fire brackets containing them resolve through the shipped user-op pairing to L1 site-key
+candidates. The projected summary lives on `trace.checkpoint_invocation_witness` (DROP-gated
+until the coordinated tlspec bump): token count, per-token pack counts / unpack window evidence /
+site-key candidates, degrade flags, and an evidence-scoped completeness verdict. Degrade flags
+cover: classifier unavailable, patch unavailable, exotic subclass, the unmatched-backward warn,
+the reentrant node sentinel (`CheckpointFunctionBackward` in the discovery stream — reentrant
+checkpointing is definitionally token-free), and unwitnessed checkpoint enters (paused logging,
+non-owner thread, inside an engine invocation). Any flag withdraws the affirmative
+"no checkpoint invocation observed" verdict. The typed checkpoint-ambiguity refusal is an S2
+amendment (R-L9-1) and lands with the identity-read accessors once the amendment is ratified.
+
 ## Validation
 
 Backward validation checks parameter-gradient parity, module-output gradient parity through a
