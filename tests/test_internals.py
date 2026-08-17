@@ -99,6 +99,7 @@ class TestFieldOrderSync:
         that is simply forgotten is undeclared and still fails here, while a field that
         is declared non-user-facing on purpose is provably outside the ordering contract.
         """
+        from torchlens._io import FieldPolicy
         from torchlens.data_classes.trace import Trace
 
         init_attrs = self._init_assigned_attrs(Trace)
@@ -111,16 +112,31 @@ class TestFieldOrderSync:
         missing = user_facing - set(MODEL_LOG_FIELD_ORDER)
         assert not missing, f"Trace user-facing fields missing from FIELD_ORDER: {missing}"
         non_user_facing = public_attrs - user_facing
-        # The declared inventory of deliberate session-time knobs: public-named,
-        # FieldPolicy.DROP, absent from MODEL_LOG_FIELD_ORDER because they do
-        # not survive save/load. (``save_budget`` was already DROP when this
-        # assertion listed only ``measure_python_peak_memory``; that was a
-        # stale pin, red on the producer baseline, corrected here.)
-        assert non_user_facing == {
+        # The declared inventory of public-named fields outside the ordering
+        # contract, in two classes with different persistence guarantees.
+        # (``save_budget`` was already DROP when this assertion listed only
+        # ``measure_python_peak_memory``; that was a stale pin, red on the
+        # producer baseline, corrected here. The tlspec v8 bump then added the
+        # two L9 portable markers; the pin went stale the same way again.)
+        session_knobs = {
             "measure_python_peak_memory",
             "save_budget",
             "distributed_witness",
-        }, f"Trace public fields classified as non-user-facing changed: {non_user_facing}"
+        }
+        portable_unordered = {
+            "checkpoint_invocation_witness",
+            "grad_fn_timing_provenance",
+        }
+        assert non_user_facing == session_knobs | portable_unordered, (
+            f"Trace public fields classified as non-user-facing changed: {non_user_facing}"
+        )
+        # Session-time knobs stay FieldPolicy.DROP (never survive save/load);
+        # the L9 markers are KEEP-but-unordered per the v8 bump ruling (the
+        # portable_only_fields ledger in test_field_order_contract.py).
+        for name in session_knobs:
+            assert Trace.FIELD_POLICY[name].portable_policy is FieldPolicy.DROP, name
+        for name in portable_unordered:
+            assert Trace.FIELD_POLICY[name].portable_policy is FieldPolicy.KEEP, name
 
     def test_module_call_log_field_order_covers_init(self):
         from torchlens.data_classes.module import ModuleCall
