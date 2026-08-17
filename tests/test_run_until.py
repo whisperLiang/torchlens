@@ -9,6 +9,9 @@ fork (the r5 fork-proof rule).
 
 from __future__ import annotations
 
+from dataclasses import replace
+from pathlib import Path
+
 import pytest
 import torch
 import torch.nn as nn
@@ -16,7 +19,12 @@ import torch.nn as nn
 import torchlens as tl
 from torchlens.errors import RunCapabilityUnavailableError
 from torchlens.options import CaptureOptions
-from torchlens.runnable import NumericAttestationStatus, PathFaithfulness
+from torchlens.runnable import (
+    NumericAttestationStatus,
+    PathFaithfulness,
+    RunnableErrorCode,
+    TensorSlotRole,
+)
 
 pytestmark = pytest.mark.smoke
 
@@ -177,20 +185,28 @@ def test_truncated_run_never_settles_verified(tmp_path):
     assert full.report.truncated is False
 
 
-def test_seeded_prefix_bug_still_fails_under_until(tmp_path):
+def test_seeded_prefix_bug_still_fails_under_until(tmp_path: Path) -> None:
     """2.4(c): a contradiction INSIDE the executed prefix fails like the full run."""
 
     from torchlens.errors import PathDivergenceError
 
     loaded, x = _loaded_runnable(tmp_path)
-    # Tamper a recorded input-shape fact: a wrong-shaped input is an
-    # executed-prefix contradiction for both the full and the truncated run.
-    bad = torch.randn(2, 9)
-    with pytest.raises((PathDivergenceError, ValueError)) as full_exc:
-        loaded.run(inputs=bad)
-    with pytest.raises((PathDivergenceError, ValueError)) as until_exc:
-        loaded.run(inputs=bad, until=_type_label(loaded, "relu"))
-    assert type(until_exc.value) is type(full_exc.value)
+    descriptor = loaded.runnable_descriptor
+    assert descriptor is not None
+    # Plant the contradiction INSIDE the guard machinery: retain the real
+    # runtime input but forge the descriptor's recorded model-input shape.
+    tampered_slots = tuple(
+        replace(slot, shape=(99, 99)) if slot.role is TensorSlotRole.MODEL_INPUT else slot
+        for slot in descriptor.tensor_slots
+    )
+    loaded._runnable.descriptor = replace(descriptor, tensor_slots=tampered_slots)
+
+    with pytest.raises(PathDivergenceError) as full_exc:
+        loaded.run(inputs=x)
+    with pytest.raises(PathDivergenceError) as until_exc:
+        loaded.run(inputs=x, until=_type_label(loaded, "relu"))
+    assert full_exc.value.fields["code"] == RunnableErrorCode.INPUT_SHAPE_MISMATCH.value
+    assert until_exc.value.fields["code"] == full_exc.value.fields["code"]
 
 
 def test_prefix_projection_mismatch_refuses_like_full():
