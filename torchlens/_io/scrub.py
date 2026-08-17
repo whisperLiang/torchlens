@@ -1066,8 +1066,31 @@ def _scrub_value(
                 functools.cached_property,
             ):
                 continue
+            # Teach at the point of failure: an undeclared ``_<name>_cache``
+            # cell is almost always DERIVED state poked into ``__dict__`` by a
+            # lazily-caching public accessor read (the ModuleCall/Module
+            # ``.facets`` incident) -- name that accessor when it exists so the
+            # message points at the read that poisoned the save, not just an
+            # internal field the user never heard of.
+            accessor_hint = ""
+            if field_name.startswith("_") and field_name.endswith("_cache"):
+                accessor_name = field_name[1 : -len("_cache")]
+                if isinstance(
+                    inspect.getattr_static(type(value), accessor_name, None),
+                    property,
+                ):
+                    accessor_hint = (
+                        f" This cell was populated by reading the public "
+                        f"`.{accessor_name}` accessor; a lazy derived cache "
+                        f"must be declared FieldPolicy.DROP in "
+                        f"{type(value).__name__}.PORTABLE_STATE_SPEC so a "
+                        f"read-only access cannot poison a later save."
+                    )
             raise TorchLensIOError(
-                f"{type(value).__name__}.{field_name} is missing from PORTABLE_STATE_SPEC."
+                f"{type(value).__name__}.{field_name} is missing from "
+                f"PORTABLE_STATE_SPEC. Every live state field needs an "
+                f"explicit portability policy before it can be saved."
+                f"{accessor_hint}"
             )
         if field_name == "_is_in_conditional_body" and field_value is None:
             field_value = False

@@ -534,6 +534,10 @@ class ModuleCall:
         "call_children": FieldPolicy.KEEP,
         "_source_trace_strong": FieldPolicy.DROP,
         "_source_trace_ref": FieldPolicy.WEAKREF_STRIP,
+        # Lazily-populated facet-view cache: a public ``.facets`` read poked
+        # it into ``__dict__``, so an undeclared row made a read-only accessor
+        # poison every later ``tl.save``. DROP like Op's slot of the same name.
+        "_facets_cache": FieldPolicy.DROP,
     }
     FIELD_POLICY = build_record_field_policy_table(
         MODULE_PASS_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="module_call"
@@ -1276,6 +1280,7 @@ class ModuleCall:
         state = dict(state_items(self))
         state.pop("_source_trace_strong", None)
         state.pop("_source_trace_ref", None)
+        state.pop("_facets_cache", None)
         state["tlspec_version"] = TLSPEC_VERSION
         return state
 
@@ -1438,6 +1443,10 @@ class Module:
         "custom_attributes": FieldPolicy.BLOB_RECURSIVE,
         "custom_methods": FieldPolicy.KEEP,
         "_source_trace_ref": FieldPolicy.WEAKREF_STRIP,
+        # Lazily-populated facet-view cache: a public ``.facets`` read poked
+        # it into ``__dict__``, so an undeclared row made a read-only accessor
+        # poison every later ``tl.save``. DROP like Op's slot of the same name.
+        "_facets_cache": FieldPolicy.DROP,
     }
     FIELD_POLICY = build_record_field_policy_table(
         MODULE_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="module"
