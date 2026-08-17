@@ -529,6 +529,15 @@ print(tl.compat.report(model, x).to_markdown())
   `SelectionError` with `selection_unresolvable` + a closed reason set.
   Producers: `tl.units(site, indices)`, `tl.params(name, mask=None)`,
   `tl.random_selection(like=, within=, seed=)` (seeded size-matched control).
+  CROSS-RUN (L6 stage 4a; DOCUMENTED-UNSTABLE): `resolved.align_to(target)`
+  re-binds an ACT selection onto another trace keyed on the L1 structural
+  site keys each `SiteEntry` records (`structural_site_key`, now live data),
+  SAME-POLICY captures only per the L1 cross-stamp rule (healthy agreeing
+  grouping stamps both sides); refusals ride `selection_alignment_invalid`
+  with a closed six-reason set, `do()` keeps refusing foreign resolved
+  selections (`selection_trace_mismatch` -- alignment is the one explicit
+  door), and `align_to` + `tl.patch_from(source)` is the cross-run patching
+  spelling the acceptance gallery pins.
 - EDGE SUBSTITUTION (L6 stage 3; DOCUMENTED-UNSTABLE): `trace.edges` is the
   dataflow edge family (EdgeUseRecords; intervention_ready-gated, refusal
   `edge_provenance_unavailable`); canonical occurrence address

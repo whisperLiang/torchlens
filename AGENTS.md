@@ -55,7 +55,10 @@ Key entry points:
   producers (BaseSelector, RF box/gradient, FacetSpec, Op, Layer) implement
   `__selection__`; kinds ACT|PARAM|EDGE closed; refusals ride
   `SelectionError` (`selection_*` codes). Producers `tl.units`/`tl.params`/
-  `tl.random_selection`.
+  `tl.random_selection`. Cross-run (stage 4a): `resolved.align_to(target)`
+  re-binds ACT selections across runs on L1 site keys, same-policy captures
+  only (`selection_alignment_invalid`, closed six-reason set); `do()` still
+  refuses foreign resolved selections typed.
 - Backward residuals (L9; DOCUMENTED-UNSTABLE): per-fire timing -- one clock
   (`perf_counter`), per-node keyed-LIFO pairing, stamps on the runtime
   `GradFnFired` event only; live-only `trace.grad_fn_fire_timings` (loaded

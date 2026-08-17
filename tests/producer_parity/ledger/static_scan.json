@@ -330,6 +330,22 @@
  {
   "ambiguous": true,
   "field": "kind",
+  "file": "torchlens/_selection_align.py",
+  "has_default": false,
+  "sites": 3,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": false,
+  "field": "pass_index",
+  "file": "torchlens/_selection_align.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": true,
+  "field": "kind",
   "file": "torchlens/_trace_core/core.py",
   "has_default": false,
   "sites": 2,

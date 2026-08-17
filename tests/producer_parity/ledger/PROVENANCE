@@ -185,3 +185,19 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 7a2341a69d8ae0df5705a4090b619043d9ac135e (clean)
 recorded: 2026-08-17T01:36:28.015897+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: L6 stage 4a: _selection_align.py adds reviewed consumer sites for SiteEntry.kind (3 sites) and op.pass_index (1 getattr site) in the cross-run alignment path
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 2ec08f7280eed9e321aa84fac0160f4e390a9a46 (dirty)
+recorded: 2026-08-17T02:24:16.918956+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: L6 stage 4a: _selection_align.py adds reviewed consumer sites for SiteEntry.kind and op.pass_index in the cross-run alignment path
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 2ec08f7280eed9e321aa84fac0160f4e390a9a46 (dirty)
+recorded: 2026-08-17T02:26:13.491181+00:00
