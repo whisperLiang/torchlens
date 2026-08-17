@@ -146,6 +146,33 @@ An unavailable profiler session returns one fact-free row with
 the paused region is not profiled synthetically and no hidden launch is fabricated. See
 [Kernel telemetry](kernel_telemetry.md).
 
+### Documented-unstable attribution kit INDEX
+
+The L6 stage-4b attribution kit is a detachable orchestration layer over shipped gradient,
+Selection, intervention, and receptive-field visualization primitives. Every spelling below is
+documented unstable and may be renamed or removed without a compatibility alias.
+
+<!-- ATTRIBUTION-KIT-UNSTABLE-INDEX:START -->
+
+| Surface | Exact spelling or token | Stability |
+| --- | --- | --- |
+| Integrated Gradients method and controls | `integrated_gradients`, `target`, `n_steps`, `baseline` | unstable -- no deprecation shim owed |
+| Completeness evidence | `attribution_sum`, `target_delta`, `completeness_residual` | unstable -- no deprecation shim owed |
+| Occlusion method and controls | `occlusion`, `selection`, `score`, `blur_kernel_size` | unstable -- no deprecation shim owed |
+| Occlusion baseline policies | `zeros`, `mean`, `blur` | unstable -- no deprecation shim owed |
+| Occlusion evidence | `original_score`, `occluded_score`, `selection_digest` | unstable -- no deprecation shim owed |
+| CAM method and controls | `grad_cam`, `layer`, `relu`, `overlay`, `image`, `alpha`, `cmap` | unstable -- no deprecation shim owed |
+| CAM resolution evidence | `native_map_resolution`, `rendered_map_resolution`, `upsampling`, `bilinear_display_only` | unstable -- no deprecation shim owed |
+
+<!-- ATTRIBUTION-KIT-UNSTABLE-INDEX:END -->
+
+Integrated Gradients always reports its signed completeness residual against the exact endpoint
+target delta. Occlusion always names its replacement baseline. CAM overlays visibly state the
+native measured map resolution, while their larger display grid is labeled as interpolation.
+The callable/index annotation used inside `torchlens.attribution` is privately named
+`_AttributionTarget`; `TargetSpec` refers only to the intervention selector record and is not an
+attribution-target alias. See the [attribution reference](attribution.md).
+
 ## Selection and storage
 
 **Predicate**
