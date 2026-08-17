@@ -5263,6 +5263,7 @@
   "_capture_outcome": "<torchlens.capture.outcome.CaptureOutcome>",
   "_code_context_cache": "<skipped: internal cache keyed by runtime code-object ids>",
   "_containers": "<raises AttributeError>",
+  "_distributed_plane_p": null,
   "_fast_run_session": null,
   "_final_to_raw_layer_labels": {
    "\"conv2d_1_1\"": "conv2d_1_2_raw",
@@ -5600,6 +5601,7 @@
   "decoded_output": null,
   "derived_grads": "<torchlens.data_classes.derived_grad.DerivedGradAccessor>",
   "detach_saved_activations": false,
+  "distributed_scope": null,
   "edges": "<raises SelectionError>",
   "emit_nvtx": false,
   "escape_detector_backward_coverage": null,

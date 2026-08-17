@@ -102,6 +102,14 @@ _NEW_FILE_LINE_CAP = 2000
 #: + init/load-fill land in data_classes/trace.py (3850 -> 3900).
 #: PRE-SPRINT BASELINES unchanged (backward.py 3800, trace.py 3750 at
 #: 75439a67); the post-features debloat pass keeps both as targets.
+#: 2026-08-17 L8 C2-recording merge settle (same debt record): three ceilings
+#: re-stepped for reviewed merge-ranks C2 recording mass -- the plane-W
+#: shard-local erasure-prevention chokepoint in _io/bundle.py (4550 -> 4600),
+#: the plane-P record branch + rebinds in backends/torch/completeness_witness
+#: (2050 -> 2100), and the funcol group-resolution / wait-interposition
+#: capability probes in utils/_torch_compat.py (3450 -> 3550). PRE-SPRINT
+#: BASELINES unchanged (bundle 4450, _torch_compat 3450-eve, witness 2050-eve
+#: at 75439a67); the debloat pass keeps all three as targets.
 _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/validation/core.py": 5350,
     "torchlens/data_classes/op.py": 5250,
@@ -109,7 +117,7 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/utils/rng.py": 4950,
     "torchlens/visualization/collapse_optimizer.py": 4600,
     "torchlens/backends/jax/backend.py": 4400,
-    "torchlens/_io/bundle.py": 4550,
+    "torchlens/_io/bundle.py": 4600,
     "torchlens/_io/runnable_load.py": 3850,
     # 4200 -> 4050: the wave-0 governance sweep extracted the structure-only
     # Layer-0 entry contract to capture/_structure_only_entry.py; re-keyed
@@ -121,7 +129,7 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     # 3850 -> 3900: L9 adds the two DROP-gated backward-residuals fields
     # (timing provenance, checkpoint witness) + init/load-fill/registration.
     "torchlens/data_classes/trace.py": 3900,
-    "torchlens/utils/_torch_compat.py": 3450,
+    "torchlens/utils/_torch_compat.py": 3550,
     "torchlens/backends/torch/wrappers.py": 3400,
     "torchlens/backends/tinygrad/backend.py": 3300,
     "torchlens/backends/mlx/backend.py": 3250,
@@ -156,7 +164,7 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/_io/_safe_unpickle.py": 2100,
     "torchlens/visualization/_render_flow.py": 2100,
     "torchlens/capture/trace.py": 2250,
-    "torchlens/backends/torch/completeness_witness.py": 2050,
+    "torchlens/backends/torch/completeness_witness.py": 2100,
 }
 
 
