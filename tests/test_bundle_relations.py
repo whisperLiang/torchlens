@@ -17,7 +17,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens._io import PreReleaseArtifactError
-from torchlens._io.prerelease import PRERELEASE_MARKER, activate_prerelease_fields
+from torchlens._io.prerelease import PRERELEASE_MARKER
 from torchlens.bundle._relations import MemberRelationRow, MemberRelationTable
 from torchlens.capture._episode_ledger import (
     EpisodeLedger,
@@ -25,7 +25,7 @@ from torchlens.capture._episode_ledger import (
     EpisodeLedgerRow,
     derive_episode_status,
 )
-from torchlens.errors import BundleRelationError, TorchLensWarning
+from torchlens.errors import BundleRelationError
 
 pytestmark = pytest.mark.smoke
 
@@ -428,15 +428,14 @@ def _relation_bundle(tiny_trace: Any) -> Any:
     )
 
 
-def test_persistence_inactive_switch_drops_key_with_warning(
-    tiny_trace: Any, tmp_path: Path
-) -> None:
-    """Inactive-switch saves warn once, omit the key, and reload plain."""
+def test_persistence_empty_table_omits_the_key(tiny_trace: Any, tmp_path: Path) -> None:
+    """A relation-free bundle writes no key and reloads plain (S6 R7)."""
 
-    bundle = _relation_bundle(tiny_trace)
-    target = tmp_path / "inactive.tlspec"
-    with pytest.warns(TorchLensWarning, match="member relations"):
-        bundle.save(target)
+    from torchlens.bundle import Bundle
+
+    bundle = Bundle({"a": tiny_trace})
+    target = tmp_path / "plain.tlspec"
+    bundle.save(target)
     metadata = json.loads((target / "bundle.json").read_text(encoding="utf-8"))
     assert "member_relations" not in metadata
     assert "_tlspec_prerelease" not in metadata
@@ -444,47 +443,48 @@ def test_persistence_inactive_switch_drops_key_with_warning(
     assert loaded.member_relations == ()
 
 
-def test_persistence_active_round_trip_byte_faithful(tiny_trace: Any, tmp_path: Path) -> None:
-    """Under the active switch, relations round-trip byte-faithfully (R7)."""
+def test_persistence_plain_round_trip_byte_faithful(tiny_trace: Any, tmp_path: Path) -> None:
+    """tlspec v8: relations round-trip byte-faithfully on a PLAIN save (R7),
+    with no pre-release marker riding the artifact."""
 
     bundle = _relation_bundle(tiny_trace)
     target = tmp_path / "active.tlspec"
-    with activate_prerelease_fields():
-        bundle.save(target)
-        metadata = json.loads((target / "bundle.json").read_text(encoding="utf-8"))
-        assert metadata["_tlspec_prerelease"]["marker"] == PRERELEASE_MARKER
-        expected_payload = MemberRelationTable(bundle.member_relations).to_payload()
-        assert metadata["member_relations"] == expected_payload
-        loaded = tl.load(target)
-        assert [row.to_payload() for row in loaded.member_relations] == expected_payload
+    bundle.save(target)
+    metadata = json.loads((target / "bundle.json").read_text(encoding="utf-8"))
+    assert "_tlspec_prerelease" not in metadata
+    expected_payload = MemberRelationTable(bundle.member_relations).to_payload()
+    assert metadata["member_relations"] == expected_payload
+    loaded = tl.load(target)
+    assert [row.to_payload() for row in loaded.member_relations] == expected_payload
 
 
-def test_persistence_tampered_marker_refuses_typed(tiny_trace: Any, tmp_path: Path) -> None:
-    """A hand-edited artifact (key present, marker stripped) refuses typed."""
+def test_persistence_stale_marker_refuses_typed(tiny_trace: Any, tmp_path: Path) -> None:
+    """A switched-era artifact (marker present, switch off) still refuses."""
 
     bundle = _relation_bundle(tiny_trace)
     target = tmp_path / "tampered.tlspec"
-    with activate_prerelease_fields():
-        bundle.save(target)
-        metadata_path = target / "bundle.json"
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        del metadata["_tlspec_prerelease"]
-        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-        with pytest.raises(PreReleaseArtifactError):
-            tl.load(target)
+    bundle.save(target)
+    metadata_path = target / "bundle.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["_tlspec_prerelease"] = {
+        "marker": PRERELEASE_MARKER,
+        "fields": ["Bundle.member_relations"],
+    }
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    with pytest.raises(PreReleaseArtifactError):
+        tl.load(target)
 
 
 def test_persistence_dangling_member_refuses_typed(tiny_trace: Any, tmp_path: Path) -> None:
-    """A switch-written artifact naming a ghost member refuses R1-typed."""
+    """A plain v8 artifact naming a ghost member refuses R1-typed."""
 
     bundle = _relation_bundle(tiny_trace)
     target = tmp_path / "dangling.tlspec"
-    with activate_prerelease_fields():
-        bundle.save(target)
-        metadata_path = target / "bundle.json"
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        metadata["member_relations"] = [_pair_row(dst="ghost")]
-        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-        with pytest.raises(BundleRelationError) as excinfo:
-            tl.load(target)
-        assert excinfo.value.fields["code"] == "bundle_relation_member_missing"
+    bundle.save(target)
+    metadata_path = target / "bundle.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["member_relations"] = [_pair_row(dst="ghost")]
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    with pytest.raises(BundleRelationError) as excinfo:
+        tl.load(target)
+    assert excinfo.value.fields["code"] == "bundle_relation_member_missing"

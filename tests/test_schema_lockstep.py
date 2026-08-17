@@ -1173,7 +1173,11 @@ def test_facade_plumbing_allowance_stays_minimal() -> None:
 #: also update ``docs/reference/merged_trace_contract.md``, whose stated value
 #: is checked against the code below.
 VERSION_AUTHORITY_PINS: dict[str, int] = {
-    "TLSPEC_VERSION": 7,
+    # v8: the coordinated feature-sprint activation bump (2026-08-17) —
+    # every S3 pre-release-gated family flipped to its persisting policy
+    # together with its load-validation rows. MERGED_TLSPEC_VERSION versions
+    # the merged ROOT manifest independently and did not move.
+    "TLSPEC_VERSION": 8,
     "MIN_TLSPEC_VERSION": 6,
     "MERGED_TLSPEC_VERSION": 7,
 }

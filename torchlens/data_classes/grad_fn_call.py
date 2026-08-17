@@ -307,17 +307,20 @@ class GradFnCall:
         return self.grad_inputs is not None or self.grad_outputs is not None
 
     @property
-    def backward_duration(self) -> Duration:
+    def backward_duration(self) -> Duration | None:
         """Return the measured backward duration for this call.
 
         Returns
         -------
-        Duration
-            Seconds elapsed between ``_time_started`` and ``_time_finished``.
+        Duration | None
+            Seconds elapsed between ``_time_started`` and ``_time_finished``
+            (the per-fire ``perf_counter`` pair as of tlspec v8, discriminated
+            by ``Trace.grad_fn_timing_provenance``), or ``None`` for an
+            untimed fire -- never a false zero.
         """
 
         if self._time_started is None or self._time_finished is None:
-            return Duration(0)
+            return None
         return Duration(max(0.0, self._time_finished - self._time_started))
 
     def to_pandas(self) -> pd.DataFrame:

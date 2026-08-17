@@ -1859,6 +1859,10 @@ def _fold_fired_events(
             continue
         ordinal = state.per_object_ordinals.get(event.object_id, 0) + 1
         state.per_object_ordinals[event.object_id] = ordinal
+        # tlspec v8 (L9 bump-time flip): the persisted stamps carry the
+        # per-fire perf_counter pair, discriminated by the persisted
+        # Trace.grad_fn_timing_provenance; an untimed fire carries
+        # (None, None). The wall ``timestamp`` stays the ordering stamp.
         call = GradFnCall(
             call_index=ordinal,
             ordinal=ordinal,
@@ -1868,8 +1872,8 @@ def _fold_fired_events(
             grad_outputs=event.grad_output_refs,
             intervention_fire_ref=event.intervention_fire_ref,
             timestamp=event.timestamp,
-            _time_started=event.timestamp,
-            _time_finished=event.timestamp,
+            _time_started=event.fire_started_monotonic,
+            _time_finished=event.fire_finished_monotonic,
         )
         call.source_trace = trace
         grad_fn_record.calls[ordinal] = call

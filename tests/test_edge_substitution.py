@@ -21,7 +21,6 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
-from torchlens._io.prerelease import activate_prerelease_fields
 from torchlens.selection import SelectionError, edge_address_of
 from torchlens.validation.core import _check_edge_intervention_boundary
 
@@ -205,48 +204,54 @@ def test_validation_skip_shaped_acceptance_meta_test(capture):
     assert verdict.reason == "edge_boundary_reexecution_mismatch"
 
 
-def test_v7_persistence_boundary_level_exhaustive(capture, tmp_path):
-    """GATED (switch inactive): every public level refuses with the SAME
-    typed code, and the edge refusal PRECEDES artifact_save_level_unsupported
-    where both apply (runnable on a bundle artifact)."""
+def test_edge_save_refusal_refires_if_schema_regresses(capture, tmp_path, monkeypatch):
+    """The erasure-prevention invariant survives the bump as a tripwire.
+
+    tlspec v8 persists the edge carriers, so ordinary saves proceed; the
+    guard predicate keys on the ACTIVE policy, and a schema regression that
+    re-drops Op.edge_substitutions must re-fire the typed refusal on every
+    public level rather than silently erasing edge provenance.
+    """
+
+    from dataclasses import replace
+
+    from torchlens._io import FieldPolicy
+    from torchlens.data_classes.op import Op
 
     model, x, trace = capture
     fork = _identity_edge_fork(trace)
+    entry = Op.FIELD_POLICY["edge_substitutions"]
+    monkeypatch.setitem(
+        Op.FIELD_POLICY, "edge_substitutions", replace(entry, portable_policy=FieldPolicy.DROP)
+    )
     for index, level in enumerate(("audit", "executable_with_callables", "portable", "runnable")):
         with pytest.raises(Exception) as excinfo:
             tl.save(fork, tmp_path / f"edge_{index}.tlspec", level=level)
         assert getattr(excinfo.value, "fields", {}).get("code") == (
             "edge_intervention_save_unsupported"
         ), level
-    # non-edge saves are untouched
+    # non-edge saves are untouched even under the regressed schema
     tl.save(trace, tmp_path / "clean.tlspec", level="audit")
 
 
-def test_v7_persistence_boundary_switch_on_round_trip(capture, tmp_path):
-    """SWITCH-ON: the guard stands down BY THE STATED KEY (second conjunct
-    false), the occurrence carriers persist, the write carries the
-    pre-release marker, and the artifact refuses to load once the switch is
-    off (test-fixture exercise of the post-bump shape, non-production)."""
+def test_edge_carriers_persist_on_plain_v8_round_trip(capture, tmp_path):
+    """tlspec v8: the occurrence carriers persist on a PLAIN save/load, with
+    the store's payload materializing back into REAL tensors -- presence
+    alone is a skip-shaped acceptance (prebump lane finding: rehydration
+    once handed back dead BlobRefs here). No pre-release marker rides the
+    artifact."""
 
     model, x, trace = capture
     fork = _identity_edge_fork(trace)
-    path = tmp_path / "edge_switch.tlspec"
-    with activate_prerelease_fields():
-        tl.save(fork, path, level="portable")
-        loaded = tl.load(path)
-        child = loaded["conv2d_2_3"].ops[0]
-        assert child.edge_substitutions and child.edge_replacement_stamps
-        # The store's payload must materialize back into REAL tensors --
-        # presence alone is a skip-shaped acceptance (prebump lane finding:
-        # rehydration once handed back dead BlobRefs here).
-        live_child = fork["conv2d_2_3"].ops[0]
-        for key, entry in child.edge_substitutions.items():
-            assert isinstance(entry["value"], torch.Tensor)
-            assert torch.equal(entry["value"], live_child.edge_substitutions[key]["value"])
-    from torchlens._io import PreReleaseArtifactError
-
-    with pytest.raises(PreReleaseArtifactError):
-        tl.load(path)  # marker-bearing artifact refuses as a real v7 artifact
+    path = tmp_path / "edge_plain.tlspec"
+    tl.save(fork, path, level="portable")
+    loaded = tl.load(path)
+    child = loaded["conv2d_2_3"].ops[0]
+    assert child.edge_substitutions and child.edge_replacement_stamps
+    live_child = fork["conv2d_2_3"].ops[0]
+    for key, entry in child.edge_substitutions.items():
+        assert isinstance(entry["value"], torch.Tensor)
+        assert torch.equal(entry["value"], live_child.edge_substitutions[key]["value"])
 
 
 def test_tap_masked_values(capture):

@@ -21,7 +21,6 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens import kernel_telemetry as _kernel_telemetry
 from torchlens._io import FieldPolicy, PreReleaseArtifactError
 from torchlens._io.prerelease import (
     PRERELEASE_MARKER,
@@ -34,7 +33,6 @@ from torchlens._io.prerelease import (
     validate_prerelease_state,
 )
 from torchlens._io.scrub import scrub_for_save
-from torchlens.data_classes.aten_op import AtenOp
 from torchlens.data_classes.trace import Trace
 
 pytestmark = pytest.mark.smoke
@@ -46,122 +44,13 @@ _PLANT_FIELD = "_tl_save_selector_fire_count"
 #: STANDING lane registrations: real sprint-gated fields registered at import
 #: time and retired only at the coordinated tlspec bump. Inventory assertions
 #: are made RELATIVE to this ledger so each new writer lane lands here as a
-#: reviewed one-line diff (registrar keeps the live inventory).
-# Importing the facade deliberately installs every L3 registration before the
-# exact standing-inventory assertions run.
-_STANDING_REGISTRATIONS: dict[str, tuple[str, ...]] = {
-    "FireRecord": ("edge_address",),  # L6 edge-occurrence address on fire records
-    "HelperSpec": ("selection_recipe",),  # L6 Query-Selection recipe family
-    AtenOp.__name__: (
-        "algorithmic_flops",
-        "autocast_context",
-        "backward_epoch_index",
-        "capture_phase",
-        "decomposition_slot",
-        "dispatch_key_context",
-        "exception_type",
-        "execution_context",
-        "flop_formula_source",
-        "flop_formula_version",
-        "flop_status",
-        "forward_pass_index",
-        "grad_fn_link_provenance",
-        "grad_fn_link_status",
-        "grad_fn_ref",
-        "input_tensor_facts",
-        "label",
-        "module_call_stack",
-        "mutation_kind",
-        "namespace",
-        "operator",
-        "outcome",
-        "output_tensor_facts",
-        "overload",
-        "owner_func_call_id",
-        "owner_status",
-        "parent_grad_fn_call_ref",
-        "parent_op_refs",
-        "schema",
-        "schema_fingerprint",
-        "sequence",
-        "view_copy_kind",
-    ),
-    _kernel_telemetry.KernelLaunch.__name__: (
-        "attribution_status",
-        "device",
-        "duration",
-        "launch_name",
-        "runtime_correlation",
-        "stream",
-    ),
-    "Op": (
-        "edge_replacement_stamps",  # L6 save-time edge corroboration verdicts
-        "edge_substitutions",  # L6 tier-(ii) occurrence-granular edge store
-        "site_key",
-    ),
-    "OpRef": ("func_call_id", "op_label", "op_row_index"),
-    # L1 wave 0: the grouping knob mirror + grouping-policy stamp; L3:
-    # _primitive_op_profile; L7a: structure_only; L8/F6: the shard-local
-    # capture marker (census plan 3.1/3.2b); L9: timing clock provenance +
-    # checkpoint-invocation witness (memo 1.3 / 2.3).
-    "Trace": (
-        "_primitive_op_profile",
-        "checkpoint_invocation_witness",
-        "distributed_scope",
-        "grad_fn_timing_provenance",
-        "grouping",
-        "grouping_policy",
-        "intervention_audit",  # L6 resolved-intervention audit record
-        "structure_only",
-    ),
-    # L2 episode ledger and detachable L3 telemetry relation ride gated
-    # annotation sub-keys under the synthetic owner.
-    "Trace.annotations": ("_kernel_telemetry", "episode"),
-    "_AtenExecutionContext": (
-        "autocast",
-        "backend",
-        "compile_stance",
-        "completeness_witness_mode",
-        "deterministic_algorithms",
-        "device_capability",
-        "device_model",
-        "grad_mode",
-        "inference_mode",
-        "module_training_summary",
-        "owner_thread_coverage",
-        "pytorch_version",
-        "sdpa_policy",
-        "tf32_matmul_policy",
-    ),
-    "_AtenTensorFact": (
-        "container_path",
-        "device",
-        "dtype",
-        "layout",
-        "logical_version",
-        "requires_grad",
-        "shape",
-        "storage_alias_group",
-        "stride",
-        "tensor_impl_capability",
-    ),
-    "_ModePausedInteriorGap": (
-        "capture_phase",
-        "kind",
-        "owner_func_call_id",
-        "parent_op_refs",
-        "reason",
-        "sequence_after",
-        "sequence_before",
-    ),
-    "_PrimitiveOpProfile": (
-        "_event_owner_evidence",
-        "aten_event_watermark",
-        "mode_paused_interior",
-        "primitive_ops",
-    ),
-    _kernel_telemetry._TelemetryPayload.__name__: ("_available", "_launches", "_relations"),
-}
+#: reviewed one-line diff (registrar keeps the live inventory). The tlspec v8
+#: coordinated bump (2026-08-17) retired the entire feature-megasprint
+#: inventory (FireRecord/HelperSpec edge families, the AtenOp primitive
+#: profile constellation, kernel telemetry, Op site_key + edge stores, the
+#: eight Trace markers, and the episode/_kernel_telemetry annotation keys):
+#: the registry is EMPTY again until the next sprint gates a new family.
+_STANDING_REGISTRATIONS: dict[str, tuple[str, ...]] = {}
 
 
 @pytest.fixture
@@ -207,13 +96,11 @@ def test_registry_inventory_and_unregister(planted_field: str) -> None:
     # Fixture teardown unregisters again; must be idempotent.
 
 
-def test_live_episode_annotations_key_is_inventoried() -> None:
-    # The S7 episode-ledger home (L2) is a standing registrar row under the
-    # synthetic "Trace.annotations" owner until the coordinated bump retires it.
-    assert registered_prerelease_fields().get("Trace.annotations") == (
-        "_kernel_telemetry",
-        "episode",
-    )
+def test_annotations_keys_retired_at_the_bump() -> None:
+    # The S7 episode-ledger home and the L3 telemetry relation persisted
+    # plainly at the tlspec v8 bump; their gated annotation sub-keys are
+    # retired and no synthetic "Trace.annotations" owner remains.
+    assert "Trace.annotations" not in registered_prerelease_fields()
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +157,9 @@ def test_switched_write_persists_field_and_carries_marker(planted_field: str) ->
     assert f"Trace.{planted_field}" in marker["fields"]
 
 
-def test_marked_artifact_refuses_to_load_as_real_v7(planted_field: str, tmp_path) -> None:
+def test_marked_artifact_refuses_to_load_as_real_current_version(
+    planted_field: str, tmp_path
+) -> None:
     trace = _tiny_trace()
     setattr(trace, planted_field, 7)
     marked_path = tmp_path / "marked.tlspec"

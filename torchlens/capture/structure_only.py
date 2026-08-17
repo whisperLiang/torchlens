@@ -108,7 +108,6 @@ class StructureClaimStatus(str, enum.Enum):
 # S2-gated, DOCUMENTED-UNSTABLE.
 # ---------------------------------------------------------------------------
 
-STRUCTURE_ONLY_SAVE_UNSUPPORTED = "structure_only_save_unsupported"
 STRUCTURE_ONLY_RUNNABLE_UNSUPPORTED = "structure_only_runnable_unsupported"
 STRUCTURE_ONLY_REPLAY_UNSUPPORTED = "structure_only_replay_unsupported"
 STRUCTURE_ONLY_VALIDATION_UNSUPPORTED = "structure_only_validation_unsupported"
@@ -363,17 +362,15 @@ _ROWS: Final[tuple[CapabilityRow, ...]] = (
     CapabilityRow(
         key="save_analysis_artifact",
         claim=(
-            "Persisting a structure-only trace is refused UNTIL the "
-            "coordinated tlspec bump lands the marker + load rows; artifacts "
-            "are then marked and load-validated. Registrar exit gates "
-            "(test-only activation switch, fail-closed load marker) are the "
-            "one sanctioned round-trip path before the bump."
+            "Analysis-level artifacts persist the structure_only marker "
+            "plainly (tlspec v8); loads validate marker coherence (M-C2/M-C3 "
+            "in torchlens/_io/forgery_validation.py) and every value-claim "
+            "on the loaded trace stays a HYPOTHESIS."
         ),
-        status_v1="refuse:structure_only_save_unsupported",
-        flip_event="wave-3 bump",
+        status_v1="supported_structural",
+        flip_event="never",
         evidence="tests/test_structure_only_capabilities.py",
         amend_owner="P1",
-        refusal_code=STRUCTURE_ONLY_SAVE_UNSUPPORTED,
     ),
     CapabilityRow(
         key="save_runnable",
@@ -593,23 +590,14 @@ def require_structure_only_capability(
     refuses when a registered REFUTED discharge has flipped the trace's claim
     state (G5), and supported/verify rows return the row.
 
-    The ONE sanctioned bypass: while the S3 pre-release registrar's test-only
-    activation switch is on, the ``save_analysis_artifact`` row's refusal is
-    lifted so portability exit gates can round-trip the DROP-declared marker
-    — every switch-on write stamps the fail-closed pre-release marker, so a
-    switched artifact can never circulate as a real one (registrar contract,
-    torchlens/_io/prerelease.py).
+    The pre-bump ``save_analysis_artifact`` switch bypass is retired: the
+    marker persists plainly as of tlspec v8 and the row is supported.
     """
 
     if not bool(getattr(trace, "structure_only", False)):
         return None
     row = STRUCTURE_ONLY_CAPABILITIES[capability]
     if row.status_v1.startswith("refuse:"):
-        if capability == "save_analysis_artifact":
-            from .._io.prerelease import prerelease_fields_active
-
-            if prerelease_fields_active():
-                return row
         code = row.refusal_code or row.status_v1.split(":", 1)[1]
         message = (
             f"TorchLens refuses {capability!r} for a structure-only capture "

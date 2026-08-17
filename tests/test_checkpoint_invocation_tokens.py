@@ -22,8 +22,6 @@ from torch.utils.checkpoint import checkpoint
 
 import torchlens as tl
 from torchlens import _state
-from torchlens._io import PreReleaseArtifactError
-from torchlens._io.prerelease import activate_prerelease_fields
 from torchlens.backends.torch import backward as backward_mod
 from torchlens.backends.torch._aten_capture import _activate_aten_recording_for_tests
 from torchlens.ir.events import CheckpointInvocationObserved
@@ -264,22 +262,13 @@ def test_token_wrappers_unwrap_prior_layer_instead_of_stacking() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_witness_never_rides_ordinary_wave2_save(tmp_path) -> None:
+def test_witness_rides_ordinary_save_at_v8(tmp_path) -> None:
+    """tlspec v8: the checkpoint witness persists on a plain save/load."""
+
     trace = _captured(_OneCheckpoint(), torch.randn(3, 4))
     assert trace.checkpoint_invocation_witness["token_count"] == 1
     path = tmp_path / "ckpt_plain.tlspec"
     tl.save(trace, str(path))
     loaded = tl.load(str(path))
-    assert loaded.checkpoint_invocation_witness is None
-
-
-def test_witness_roundtrips_only_under_prerelease_switch(tmp_path) -> None:
-    trace = _captured(_OneCheckpoint(), torch.randn(3, 4))
-    path = tmp_path / "ckpt_prerelease.tlspec"
-    with activate_prerelease_fields():
-        tl.save(trace, str(path))
-        loaded = tl.load(str(path))
-        assert loaded.checkpoint_invocation_witness is not None
-        assert loaded.checkpoint_invocation_witness["token_count"] == 1
-    with pytest.raises(PreReleaseArtifactError):
-        tl.load(str(path))
+    assert loaded.checkpoint_invocation_witness is not None
+    assert loaded.checkpoint_invocation_witness["token_count"] == 1

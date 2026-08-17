@@ -251,20 +251,18 @@ class _FastCopySpec:
 
 
 def _refuse_edge_intervened_save(trace: Any) -> None:
-    """Refuse v7 saves of edge-intervened traces (two-conjunct key, L6 4.3).
+    """PERMANENT erasure-prevention invariant for edge substitutions (L6 4.3).
 
-    REFUSES iff tier-(ii) edge-substitution entries are PRESENT on the trace
-    AND the S3 pre-release switch is INACTIVE. Under the pytest-only switch
-    the guard stands down BY THE STATED KEY (second conjunct false — not a
-    bypass): the write is unconditionally marker-stamped and refuses to load
-    as a real v7 artifact, so no production artifact is created. The refusal
-    lifts for all four levels only with the coordinated wave-3 bump.
+    The tlspec v8 coordinated bump persists ``Op.edge_substitutions``
+    (BLOB_RECURSIVE) and ``Op.edge_replacement_stamps`` (KEEP), so ordinary
+    saves of edge-intervened traces now proceed. Like the shard-local guard
+    below, the predicate keys on the ACTIVE SCHEMA rather than being deleted:
+    it refuses typed IFF tier-(ii) entries are present AND the active policy
+    would drop them (a schema regression re-dropping the carrier, with the S3
+    switch inactive). Any such regression re-fires this refusal instead of
+    silently presenting post-edit values with zero edge provenance.
     """
 
-    from .prerelease import prerelease_fields_active
-
-    if prerelease_fields_active():
-        return
     carriers = [
         op.label
         for op in getattr(trace, "layer_list", ()) or ()
@@ -272,14 +270,23 @@ def _refuse_edge_intervened_save(trace: Any) -> None:
     ]
     if not carriers:
         return
+    from ..data_classes.op import Op as _Op
+    from . import FieldPolicy
+    from .prerelease import prerelease_fields_active
+
+    policy_entry = _Op.FIELD_POLICY.get("edge_substitutions")
+    portable_policy = getattr(policy_entry, "portable_policy", policy_entry)
+    if portable_policy is not None and portable_policy is not FieldPolicy.DROP:
+        return
+    if prerelease_fields_active():
+        return
     from .._errors import InvalidArgumentError
 
     raise InvalidArgumentError(
-        "this trace carries edge-substitution interventions, and tlspec v7 has "
-        "no occurrence-granular carrier at ANY save level: the artifact would "
-        "present post-edit values with zero edge provenance. Edge-intervened "
-        "traces are session-only in production until the coordinated wave-3 "
-        "schema bump ships the registered edge fields.",
+        "this trace carries edge-substitution interventions, and the active "
+        "schema has no occurrence-granular carrier at ANY save level: the "
+        "artifact would present post-edit values with zero edge provenance. "
+        "Edge-intervened traces are session-only under such a schema.",
         code="edge_intervention_save_unsupported",
         remedy="analyze in-session, or re-capture without the edge edit before saving",
         carriers=tuple(carriers),
@@ -2676,14 +2683,15 @@ def _load_unified_bundle_directory(
 
 
 def _load_gated_member_relations(metadata: dict[str, Any]) -> tuple[Any, ...] | None:
-    """Read the GATED S6 ``member_relations`` key from bundle metadata.
+    """Read the S6 ``member_relations`` key from bundle metadata.
 
-    Mirrors the Trace pre-release marker semantics through the one
-    validation chokepoint (:func:`torchlens._io.prerelease.validate_prerelease_state`):
-    a marker on an inactive switch refuses typed, a malformed marker refuses
-    even when active, and a ``member_relations`` key WITHOUT a valid marker
-    refuses typed — a hand-built gated key never loads as real truth. An
-    absent key is simply a plain (or gated-era) bundle (S6 R7).
+    The key persists plainly as of tlspec v8. Loads still route through the
+    one pre-release validation chokepoint
+    (:func:`torchlens._io.prerelease.validate_prerelease_state`) so a
+    switched-era artifact (marker present, switch inactive) keeps refusing
+    typed and a malformed marker refuses even under the switch; a marker-free
+    payload validates against the closed S6 row schema. An absent key is
+    simply a plain bundle (S6 R7).
 
     Returns
     -------
@@ -2694,27 +2702,18 @@ def _load_gated_member_relations(metadata: dict[str, Any]) -> tuple[Any, ...] | 
     Raises
     ------
     PreReleaseArtifactError
-        Marker present while the switch is inactive, malformed marker, or
-        a ``member_relations`` key without the marker.
+        Marker present while the switch is inactive, or a malformed marker.
     BundleRelationError
         ``bundle_relation_schema_invalid`` when the payload is outside the
         closed S6 row schema.
     """
 
-    from . import PreReleaseArtifactError
-    from .prerelease import PRERELEASE_STATE_KEY, validate_prerelease_state
+    from .prerelease import validate_prerelease_state
 
-    had_marker = PRERELEASE_STATE_KEY in metadata
     validate_prerelease_state(metadata, cls_name="Bundle")
     relations_payload = metadata.get("member_relations")
     if relations_payload is None:
         return None
-    if not had_marker:
-        raise PreReleaseArtifactError(
-            "bundle.json carries the gated 'member_relations' key without the "
-            f"pre-release marker ({PRERELEASE_STATE_KEY!r}): a hand-built gated "
-            "key never loads as real truth under the current tlspec version."
-        )
     from ..bundle._relations import MemberRelationTable
     from ..errors.episode import BundleRelationError
 

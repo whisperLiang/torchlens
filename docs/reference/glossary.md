@@ -72,9 +72,9 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
 
 ### Documented-unstable ATen profile INDEX
 
-The wave-0 ATen execution-profile core is gated off for ordinary callers and its fields remain
-`FieldPolicy.DROP`. Only the pytest prerelease switch can persist and reload these records; ordinary
-v7 artifacts contain no primitive profile. The public recorder, entity accessors, and absent-profile
+The wave-0 ATen execution-profile core is gated off for ordinary callers. As of the tlspec v8
+coordinated bump its fields persist (`FieldPolicy.KEEP`) and loaded profiles validate their
+foreign keys whenever present; older v6/v7 artifacts contain no primitive profile. The public recorder, entity accessors, and absent-profile
 refusal remain unavailable until the S2-owned capability amendment lands. The names below are the
 exact surface already introduced by the gated core. Each is documented unstable and may be renamed
 or removed without a compatibility alias. No validation or honesty tripwire may be weakened.
@@ -497,8 +497,8 @@ shims, by declared contract. Each carries the same tag at its definition.
   three-tier verdict (corroborated / positional / refused). Editing the
   model's `forward()` changes downstream sites: keys bridge captures of the
   SAME program, never a program diff. The `"s1"` prefix makes any future
-  re-keying a visible schema event. `FieldPolicy.DROP` under tlspec v7
-  (prerelease-registered; persists at the coordinated bump).
+  re-keying a visible schema event. Persists as of tlspec v8 with
+  byte-exact recomputation at load; older artifacts are wholly keyless.
 
 **Layer.site_key** — *unstable — no deprecation shim owed*
 : The layer's single site key iff every op in the layer shares exactly one.
@@ -551,8 +551,7 @@ vocabulary*
   round-trips byte-stable and stays degraded — verdicts only worsen across
   persistence. Legacy pre-stamp artifacts settle silently to
   `grouping_stamp_legacy`; degraded stamps refuse stamp-consuming
-  operations typed. `FieldPolicy.DROP` under tlspec v7
-  (prerelease-registered).
+  operations typed. Persists as of tlspec v8 with C1-C8 load validation.
 
 **L1 grouping refusal codes** — *unstable — no deprecation shim owed;
 S2-gated*
@@ -669,8 +668,8 @@ default-keep); mask-application semantics documented-unstable*
   `shape | dtype | device | broadcast | not_maskable`). Learned-parameter
   edits refuse typed (D3 activation-path narrowing, default keep). Each
   Selection-targeted do() appends an audit record (query repr + resolve
-  digest + per-site relations) to `trace.intervention_audit` (DROP-gated,
-  session-time under v7).
+  digest + per-site relations) to `trace.intervention_audit` (persisted as
+  of tlspec v8 with its load-validated digest relation).
 
 **tl.patch_from(source_trace)** — *unstable — no deprecation shim owed*
 : Edit factory patching targeted sites from another trace's recorded
@@ -699,10 +698,11 @@ S2/S3-gated*
   stamp) else FAIL; corroborated children are RE-EXECUTED with the
   substituted value spliced at the address and must match (verdict
   `edge_intervention_boundary` — a different check, never no check).
-  v7 PERSISTENCE BOUNDARY: an edge-intervened trace refuses
-  `edge_intervention_save_unsupported` at ALL four save levels while the
-  pre-release switch is inactive (session-only in production until the
-  wave-3 bump); the refusal precedes `artifact_save_level_unsupported`.
+  PERSISTENCE: the edge carriers persist as of tlspec v8, so ordinary
+  saves proceed. The `edge_intervention_save_unsupported` refusal survives
+  as a schema-regression tripwire (re-firing at ALL four save levels,
+  preceding `artifact_save_level_unsupported`, if the carrier policy ever
+  drops again).
 
 **TapObserver.values(masked=True)** — *unstable — no deprecation shim owed*
 : `tap(resolved_selection)` stores each firing site's mask on the
@@ -769,8 +769,9 @@ shim owed*
 : The per-fire timing clock-provenance marker: `"unmeasured"` until a timing
   prehook arms, `"perf_counter"` on the universal path
   (`"perf_counter_grad_saved_only"` reserved for the D15 fallback mode).
-  `FieldPolicy.DROP` under tlspec v7 (prerelease-registered; activates with
-  the in-place timing semantics at the coordinated bump).
+  Persists as of tlspec v8, where the persisted `GradFnCall` stamps carry
+  the per-fire `perf_counter` pair this marker discriminates; an untimed
+  fire persists `(None, None)` and reads a `None` duration.
 
 **Trace.checkpoint_invocation_witness** — *unstable — no deprecation shim owed*
 : The projected checkpoint-invocation summary: token count, per-token pack
@@ -782,8 +783,9 @@ shim owed*
   are minted only for classified non-reentrant `_checkpoint_hook` enters on
   the armed owner thread outside any engine invocation; reentrant
   checkpointing is token-free and affirmatively sentinel-flagged.
-  `FieldPolicy.DROP` under tlspec v7 (prerelease-registered). The typed
-  checkpoint-ambiguity refusal is S2-authored (R-L9-1) and not yet shipped.
+  Persists as of tlspec v8 with closed-vocabulary load validation. The
+  typed checkpoint-ambiguity refusal is S2-authored (R-L9-1) and not yet
+  shipped.
 
 **trace.grad_fn_site_summary** — *unstable — no deprecation shim owed*
 : The grouped-backward floor: a read-only per-`site_key` rollup of

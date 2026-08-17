@@ -219,8 +219,8 @@ print(tl.compat.report(model, x).to_markdown())
   entry_seed) at `trace.annotations["episode"]` after settlement. The ledger is a
   DISCLOSURE, never a settlement authority (outcome vocabulary and N1-N5 unchanged);
   loads validate fail-closed (illegal attachment refuses `episode_ledger_without_declaration`,
-  geometry violations quarantine `episode_ledger_incoherent`); persistence of the annotations
-  key AND the Bundle `member_relations` key is registrar-gated until the coordinated bump.
+  geometry violations quarantine `episode_ledger_incoherent`); the annotations key AND the
+  Bundle `member_relations` key persist plainly as of the tlspec v8 coordinated bump.
   DIAGNOSTIC-TIER cost, superlinear (gpt2-124M CPU: N=20 79 s / N=100 657 s, 947 MB, 5.4 GB
   RSS) — tens of steps, never hundreds; guarded-fast (`trace.run(fast=True)`) is the default
   engine and must reproduce wrapped tokens bit-exactly (pinned). Teacher forcing
@@ -482,7 +482,7 @@ print(tl.compat.report(model, x).to_markdown())
   load-validated `grouping_policy_v1` stamp (coherence rules C1-C8;
   invalid/legacy stamps settle to the canonical degraded representation and
   refuse stamp-consuming operations typed). All persisted rows are
-  FieldPolicy.DROP + prerelease-registered under tlspec v7. Invariants
+  persisted as of the tlspec v8 coordinated bump (load-validated). Invariants
   I-S1/I-S2/I-S3' are live tripwires; folding stays OFF everywhere except
   future episode products (D1 default) — the tier-(a) fold closure ships
   entry-dark as a pure function.
@@ -499,8 +499,8 @@ print(tl.compat.report(model, x).to_markdown())
   refuse `meta_kernel_unavailable`). Option conflicts (`raise_on_nan`,
   `intervention_ready`, not-provably-value-free `halt=`) refuse
   `structure_only_option_conflict` at entry. `trace.structure_only` mirrors
-  the flag (FieldPolicy.DROP + pre-release-registered; persists at the wave-3
-  bump); `trace.discharge_against(real_trace)` corroborates or refutes the
+  the flag (persisted as of the tlspec v8 bump with M-C2/M-C3 load-validation
+  rows); `trace.discharge_against(real_trace)` corroborates or refutes the
   hypotheses against a real capture, and a REFUTED discharge flips hypothesis
   consumers to typed refusals. Meta-materialized models (HF
   `device_map='meta'`) still refuse at the entry gate — admission is decision
@@ -548,7 +548,7 @@ print(tl.compat.report(model, x).to_markdown())
   substituted input (node-level `intervention_replaced` never fires for
   edges), the substituted value rides the DROP-gated tier-(ii) store
   `Op.edge_substitutions` (+ `edge_replacement_stamps`,
-  `FireRecord.edge_address`; all pre-release-registered), and capture truth
+  `FireRecord.edge_address`; all persisted as of tlspec v8), and capture truth
   (saved_args / out_versions_by_child / parent.out) is retained unmodified
   (parity-pinned). Validation: uncorroborated tier-(ii) entries FAIL;
   corroborated children re-execute from the spliced value and must match

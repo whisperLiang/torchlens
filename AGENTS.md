@@ -38,8 +38,9 @@ Key entry points:
   ("structural" default; others refuse typed pre-D1/S2) mirrored on
   `trace.grouping`, with the load-validated `grouping_policy_v1` stamp on
   `trace.grouping_policy` (C1-C8 coherence; degrade-settlement monotonic).
-  Persisted rows are DROP + prerelease-registered; join/fold machinery in
-  `torchlens/postprocess/_site_key.py` / `_site_join.py` / `_grouping_stamp.py`.
+  Persisted rows are live as of the tlspec v8 bump (load-validated); join/fold
+  machinery in `torchlens/postprocess/_site_key.py` / `_site_join.py` /
+  `_grouping_stamp.py`.
 - Structure-only capture (DOCUMENTED-UNSTABLE, D8-default):
   `tl.trace(model, x, capture=CaptureOptions(structure_only=True))` records
   structure + shape/dtype HYPOTHESES, never values; value consumers refuse
@@ -239,8 +240,8 @@ rf_image = armed_op.receptive_field.show(armed_unit, gradient=True)
 - EPISODE CAPTURE (torch-only, spellings DOCUMENTED-UNSTABLE): `tl.trace(episode_root, x,
   episode=tl.options.EpisodeSpec(stepped_module=model, n_steps=N))` captures one wrapped
   multi-step generation run as ONE product with a per-step status ledger at
-  `trace.annotations["episode"]` (disclosure, never a settlement authority; persistence
-  registrar-gated until the coordinated tlspec bump). DIAGNOSTIC-TIER: cost is superlinear
+  `trace.annotations["episode"]` (disclosure, never a settlement authority; persists
+  plainly as of the tlspec v8 coordinated bump, load-validated fail-closed). DIAGNOSTIC-TIER: cost is superlinear
   in step count — tens of steps, never hundreds. Bundles carry the optional S6
   member-relation table (`member_relations=`, `Bundle.relate`,
   `Bundle.derive_episode_status`). Doc of record: `docs/reference/episode_capture.md`;

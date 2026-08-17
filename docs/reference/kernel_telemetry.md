@@ -33,7 +33,7 @@ row, kernel, duration, stream, or correlation ID for the paused region.
 
 Launch rows and their private primitive-sequence relation are declared `FieldPolicy.DROP`. Their
 future persistence path is registered through the prerelease registrar and can round-trip only
-under the pytest activation switch; ordinary tlspec v7 artifacts omit the telemetry annotation.
+under the pytest activation switch pre-bump; as of tlspec v8 ordinary artifacts persist the telemetry annotation with closed-schema load validation.
 
 No package module imports the adapter, and no non-telemetry behavioral test depends on it. The
 central prerelease-registrar inventory and frozen public-surface oracle are the only governance

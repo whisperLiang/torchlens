@@ -69,7 +69,6 @@ from .._io import (
     default_fill_state,
     read_tlspec_version,
 )
-from .._io.prerelease import register_prerelease_field
 from .._save_budget import SaveBudgetExceededError
 from .._state import pause_logging
 from .._trace_core.fact_blocks import OP_FACT_FIELDS
@@ -2093,19 +2092,18 @@ class Op(_SelectionOperand):
         "equivalence_class": FieldPolicy.KEEP,
         "equivalent_ops": FieldPolicy.KEEP,
         "recurrent_ops": FieldPolicy.KEEP,
-        # site_key_v1 structural-position identity: DROP under tlspec v7,
-        # prerelease-registered (S3 discipline) -- persists KEEP only at the
-        # coordinated version bump.
-        "site_key": FieldPolicy.DROP,
+        # site_key_v1 structural-position identity: persists as of tlspec v8
+        # with byte-exact recomputation at load (_io/forgery_validation.py).
+        "site_key": FieldPolicy.KEEP,
         "parents": FieldPolicy.KEEP,
         "parent_arg_positions": FieldPolicy.KEEP,
         "_edge_uses": FieldPolicy.KEEP,
-        # L6 stage 3 (S3 registrar discipline): occurrence-granular edge-
-        # substitution store + save-time corroboration stamps. DROP under
-        # v7, pre-release-registered; the wave-3 bump flips them to
-        # BLOB_RECURSIVE / KEEP respectively. Never a silent v7 change.
-        "edge_substitutions": FieldPolicy.DROP,
-        "edge_replacement_stamps": FieldPolicy.DROP,
+        # L6 stage 3: occurrence-granular edge-substitution store + save-time
+        # corroboration stamps; persist as of tlspec v8 (BLOB_RECURSIVE may
+        # carry unit-term masks). Uncorroborated tier-(ii) entries FAIL
+        # validation; the audit digest relation validates at load.
+        "edge_substitutions": FieldPolicy.BLOB_RECURSIVE,
+        "edge_replacement_stamps": FieldPolicy.KEEP,
         "root_ancestors": FieldPolicy.KEEP,
         "children": FieldPolicy.KEEP,
         "has_children": FieldPolicy.KEEP,
@@ -5204,17 +5202,6 @@ def _compact_store_rows(store: Any, pool: dict[Any, Any]) -> None:
 TensorLog = Op
 
 
-register_prerelease_field(Op, "edge_substitutions", persisted_policy=FieldPolicy.BLOB_RECURSIVE)
-register_prerelease_field(Op, "edge_replacement_stamps", persisted_policy=FieldPolicy.KEEP)
-
-
-def _register_prerelease_fields() -> None:
-    """Register sprint-gated DROP fields (S3 registrar; site_key persists KEEP
-    only at the coordinated tlspec bump -- gates run under the test switch)."""
-
-    from .._io.prerelease import register_prerelease_field
-
-    register_prerelease_field(Op, "site_key")
-
-
-_register_prerelease_fields()
+# The tlspec v8 coordinated bump retired this class's S3 pre-release
+# registrations (site_key, edge_substitutions, edge_replacement_stamps);
+# their persisting policies are declared directly in FIELD_POLICY above.

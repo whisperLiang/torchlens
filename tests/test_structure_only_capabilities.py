@@ -168,11 +168,22 @@ def test_chokepoint_is_a_noop_on_ordinary_traces() -> None:
 
 
 @smoke
-def test_save_refuses_until_the_bump(tmp_path) -> None:
+def test_save_persists_the_marker_plainly(tmp_path) -> None:
+    """tlspec v8: analysis-level saves persist the structure_only marker.
+
+    The loaded trace stays a hypothesis product: the marker survives the
+    round trip, value-requiring consumers keep refusing through the one
+    chokepoint, and no pre-release marker rides the artifact.
+    """
+
     log = _structure_trace()
+    path = tmp_path / "structure.tlspec"
+    tl.save(log, path)
+    loaded = tl.load(path)
+    assert loaded.structure_only is True
     with pytest.raises(StructureOnlyCapabilityError) as excinfo:
-        tl.save(log, tmp_path / "structure.tlspec")
-    assert excinfo.value.fields["code"] == "structure_only_save_unsupported"
+        loaded.run(inputs=torch.randn(2, 4))
+    assert excinfo.value.fields["code"] == "structure_only_replay_unsupported"
 
 
 @smoke

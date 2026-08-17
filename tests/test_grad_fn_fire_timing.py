@@ -193,19 +193,31 @@ def test_register_fire_timing_prehook_own_try_except() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ordinary_wave2_save_carries_no_new_timing_values(tmp_path) -> None:
+def test_plain_v8_save_persists_per_fire_timing_semantics(tmp_path) -> None:
+    """tlspec v8 (L9 bump-time flip): persisted GradFnCall stamps carry the
+    per-fire perf_counter pair, discriminated by the persisted provenance
+    field; an untimed fire persists (None, None) and reads a None duration,
+    never a false zero. No pre-release marker rides the artifact."""
+
     trace = _backward_trace()
     path = tmp_path / "timing.tlspec"
     tl.save(trace, str(path))
     loaded = tl.load(str(path))
-    # The persisted GradFnCall fields keep the shipped single-wall-stamp
-    # semantics: both stamps equal, backward_duration reads 0 (class 2).
+    assert loaded.grad_fn_timing_provenance == "perf_counter"
+    live_spans = trace.grad_fn_fire_timings
+    timed = untimed = 0
     for call in loaded.grad_fn_calls:
-        assert call._time_started == call._time_finished
-        assert float(call.backward_duration) == 0.0
-    # The DROP-gated Trace fields never rode the artifact.
-    assert loaded.grad_fn_timing_provenance == "unmeasured"
-    assert loaded.checkpoint_invocation_witness is None
+        span = call.backward_duration
+        live_span = live_spans[f"{call.label}:{call.call_index}"]
+        if span is None:
+            untimed += 1
+            assert call._time_started is None and call._time_finished is None
+            assert live_span is None
+        else:
+            timed += 1
+            assert call._time_finished >= call._time_started
+            assert float(span) == pytest.approx(float(live_span))
+    assert timed >= 1  # the armed capture must measure at least one fire
     state = trace.__getstate__()
     assert PRERELEASE_STATE_KEY not in state
 
@@ -237,7 +249,13 @@ def test_live_accessor_refuses_typed_on_loaded_trace(tmp_path) -> None:
 def test_fold_sort_key_unchanged_and_projection_count_matches() -> None:
     trace = _backward_trace()
     assert len(trace.grad_fn_fire_timings) == len(trace.grad_fn_calls)
-    # Projection still writes the shipped wall-stamp pair (untouched in wave 2).
+    # tlspec v8: projection writes the per-fire monotonic pair; the wall
+    # timestamp stays the separate event-ordering stamp and is never a
+    # duration operand.
     for call in trace.grad_fn_calls:
-        assert call._time_started == call.timestamp
-        assert call._time_finished == call.timestamp
+        span = trace.grad_fn_fire_timings[f"{call.label}:{call.call_index}"]
+        if span is None:
+            assert call._time_started is None and call._time_finished is None
+        else:
+            assert call._time_finished - call._time_started == pytest.approx(float(span))
+            assert call._time_started != call.timestamp  # monotonic, not wall

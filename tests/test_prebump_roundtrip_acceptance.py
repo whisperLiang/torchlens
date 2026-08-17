@@ -1,25 +1,25 @@
-"""Pre-bump switched-on round-trip ACCEPTANCE pass over every S3-gated family.
+"""Post-bump round-trip ACCEPTANCE pass over every formerly S3-gated family.
 
-All new persistence this sprint rides the S3 test-only activation switch
-(:mod:`torchlens._io.prerelease`), so the first real exercise of the shipped
-physical schema would otherwise be deferred to the wave-3 coordinated bump --
-the sprint's most congested moment. This module pays that debt early: for
-EVERY registered DROP-gated family (enumerated from the registrar itself,
-never from memory) it proves, with REAL family data:
+The tlspec v8 coordinated bump activated every feature-sprint persistence
+family together; this module is the bump's regression net. For EVERY family
+the sprint gated (the ACCEPTANCE_COVERAGE ledger below, cross-checked against
+the owners' live declared policies) it proves, with REAL family data on REAL
+v8 artifacts -- no activation switch anywhere:
 
-1. the switched save -> load round trip preserves the persisted surface
-   exactly (bitwise for tensors, exact equality for scalar/dict payloads);
+1. the plain save -> load round trip preserves the persisted surface exactly
+   (bitwise for tensors, exact equality for scalar/dict payloads), with no
+   pre-release marker riding the artifact;
 2. a second-generation round trip is stable (no settle oscillation);
-3. the pre-release marker rides the switch-on write and the artifact REFUSES
-   to load as a real v7 artifact once the switch is off; and
+3. every family's load-boundary validation refuses (or degrades, typed) its
+   planted tamper on a plain v8 load -- the FORGERY_SURFACE_LEDGER below is
+   that census, one row per family; and
 4. the ratified S2 marker-combination table's reachable cells behave: every
-   TYPED REFUSE cell refuses, every LEGAL cell works.
+   TYPED REFUSE cell refuses, every LEGAL cell works
+   (tests/test_marker_combination_totality.py owns the full product).
 
-The FORGERY_SURFACE_LEDGER below is the tamper census (brief question 2):
-families whose load-time validation exists today are proven to refuse, and
-families whose validation is deferred to the coordinated bump are pinned as
-such -- flipping one to validated at the bump FAILS the pin until the ledger
-row is updated, so no field can slip into the bump unvalidated silently.
+Version proofs live at the bottom: a real checked-in v7 artifact still loads
+at its recorded schema, v8 artifacts are distinguishable, and a claimed v9
+refuses as newer-than-runtime.
 """
 
 from __future__ import annotations
@@ -33,11 +33,10 @@ import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
 import torchlens as tl
-from torchlens._io import FieldPolicy, PreReleaseArtifactError, TorchLensIOError
+from torchlens._io import TLSPEC_VERSION, FieldPolicy, TorchLensIOError
 from torchlens._io.prerelease import (
     PRERELEASE_STATE_KEY,
-    activate_prerelease_fields,
-    persisted_policy_override,
+    gated_annotations_keys,
     registered_prerelease_fields,
 )
 from torchlens._io.scrub import scrub_for_save
@@ -176,37 +175,52 @@ ACCEPTANCE_COVERAGE: dict[str, frozenset[str]] = {
 }
 
 
-@pytest.mark.smoke
-def test_acceptance_coverage_matches_registrar_inventory() -> None:
-    """Every registered gated row is claimed by exactly one acceptance family.
+#: The two annotations sub-keys the sprint gated; both persist plainly at v8.
+_ANNOTATION_ROWS = frozenset({"Trace.annotations.episode", "Trace.annotations._kernel_telemetry"})
 
-    A lane that registers a new pre-release field/annotations key must add an
-    acceptance row (round trip + tamper + marker) to this module in the same
-    change; this assertion is the forcing function.
+#: Owner-class resolution for the per-family activation check.
+_OWNER_CLASSES: dict[str, str] = {
+    "Trace": "torchlens.data_classes.trace",
+    "Op": "torchlens.data_classes.op",
+    "AtenOp": "torchlens.data_classes.aten_op",
+    "OpRef": "torchlens.data_classes.aten_op",
+    "_ModePausedInteriorGap": "torchlens.data_classes.aten_op",
+    "_PrimitiveOpProfile": "torchlens.data_classes.aten_op",
+    "_AtenTensorFact": "torchlens.ir.events",
+    "_AtenExecutionContext": "torchlens.ir.events",
+    "KernelLaunch": "torchlens.kernel_telemetry",
+    "_TelemetryPayload": "torchlens.kernel_telemetry",
+    "HelperSpec": "torchlens.intervention.types",
+    "FireRecord": "torchlens.intervention.types",
+}
+
+
+@pytest.mark.smoke
+def test_every_family_activated_and_registrar_retired() -> None:
+    """Per-family activation confirmation: every formerly gated row persists.
+
+    The tlspec v8 bump must be TOTAL: every row in ACCEPTANCE_COVERAGE now
+    declares a persisting (non-DROP) policy on its owner, the registrar
+    inventory is empty (all registrations retired), and no annotations
+    sub-key remains gated. Partial activation is the one outcome the S3
+    version discipline forbids; this test is its tripwire.
     """
 
-    # Registrations land at their owners' import time; import every lane
-    # module explicitly so the inventory is complete regardless of test order
-    # (same discipline as tests/test_prerelease_registrar.py).
-    import torchlens.data_classes.aten_op  # noqa: F401
-    import torchlens.intervention.types  # noqa: F401
-    import torchlens.kernel_telemetry  # noqa: F401
+    import importlib
 
-    inventory: set[str] = set()
-    for owner, fields in registered_prerelease_fields().items():
-        for name in fields:
-            if owner == "Trace.annotations":
-                inventory.add(f"Trace.annotations.{name}")
-            else:
-                inventory.add(f"{owner}.{name}")
-    claimed_lists = [row for rows in ACCEPTANCE_COVERAGE.values() for row in rows]
-    claimed = set(claimed_lists)
-    assert len(claimed_lists) == len(claimed), "a registrar row is claimed twice"
-    assert claimed == inventory, (
-        "acceptance coverage and registrar inventory diverged.\n"
-        f"registered but unclaimed: {sorted(inventory - claimed)}\n"
-        f"claimed but unregistered: {sorted(claimed - inventory)}"
-    )
+    still_dropped: list[str] = []
+    for rows in ACCEPTANCE_COVERAGE.values():
+        for row in rows:
+            if row in _ANNOTATION_ROWS:
+                continue
+            owner_name, field_name = row.rsplit(".", 1)
+            module = importlib.import_module(_OWNER_CLASSES[owner_name])
+            owner = getattr(module, owner_name)
+            if owner.PORTABLE_STATE_SPEC[field_name] is FieldPolicy.DROP:
+                still_dropped.append(row)
+    assert not still_dropped, f"families left inactive by the bump: {sorted(still_dropped)}"
+    assert registered_prerelease_fields() == {}, "the bump must retire every registration"
+    assert gated_annotations_keys() == frozenset(), "annotations sub-keys must be retired"
 
 
 # ---------------------------------------------------------------------------
@@ -218,8 +232,7 @@ def _persisted_eq(a: object, b: object) -> bool:
     """Deep equality over the PERSISTED surface: bitwise tensors, exact scalars.
 
     Objects declaring ``PORTABLE_STATE_SPEC`` compare field-wise over the
-    fields that persist under the active switch (declared non-DROP or
-    registrar-overridden); session-time DROP fields are excluded.
+    declared non-DROP fields; session-time DROP fields are excluded.
     """
 
     if isinstance(a, torch.Tensor) or isinstance(b, torch.Tensor):
@@ -233,7 +246,7 @@ def _persisted_eq(a: object, b: object) -> bool:
     spec = getattr(type(a), "PORTABLE_STATE_SPEC", None)
     if isinstance(spec, dict) and type(a) is type(b):
         for name, policy in spec.items():
-            if policy is FieldPolicy.DROP and persisted_policy_override(type(a), name) is None:
+            if policy is FieldPolicy.DROP:
                 continue
             if not _persisted_eq(getattr(a, name, None), getattr(b, name, None)):
                 return False
@@ -245,32 +258,28 @@ def _persisted_eq(a: object, b: object) -> bool:
     return bool(a == b)
 
 
-def _switched_roundtrip(trace: tl.Trace, tmp_path, name: str) -> tl.Trace:
-    """Save under the switch, prove the marker and the off-switch refusal, load.
+def _plain_roundtrip(trace: tl.Trace, tmp_path, name: str) -> tl.Trace:
+    """Save plainly, prove the v8 stamp and the marker's absence, load plainly.
 
-    Asserts (brief questions 1 and 3): the switch-on scrub state carries the
-    marker payload; the artifact loads under the switch; and the SAME artifact
-    refuses typed as a real v7 artifact once the switch is off.
+    The write must stamp ``tlspec_version == TLSPEC_VERSION`` (8) and carry NO
+    pre-release marker -- v8 artifacts are real current-version artifacts.
     """
 
     path = tmp_path / f"{name}.tlspec"
-    with activate_prerelease_fields():
-        state, _, _ = scrub_for_save(trace)
-        assert state[PRERELEASE_STATE_KEY]["marker"], "switch-on write must carry the marker"
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            tl.save(trace, str(path))
-            loaded = tl.load(str(path))
-    with pytest.raises(PreReleaseArtifactError):
-        tl.load(str(path))
-    return loaded
+    state, _, _ = scrub_for_save(trace)
+    assert state["tlspec_version"] == TLSPEC_VERSION
+    assert PRERELEASE_STATE_KEY not in state, "a plain v8 write never carries the marker"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        tl.save(trace, str(path))
+        return tl.load(str(path))
 
 
 def _second_generation(loaded: tl.Trace, tmp_path, name: str) -> tl.Trace:
-    """Re-save the LOADED trace under the switch and load again (stability)."""
+    """Re-save the LOADED trace plainly and load again (settle stability)."""
 
     path = tmp_path / f"{name}_gen2.tlspec"
-    with activate_prerelease_fields(), warnings.catch_warnings():
+    with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         tl.save(loaded, str(path))
         return tl.load(str(path))
@@ -443,7 +452,7 @@ def _telemetry_trace() -> tl.Trace:
 @pytest.mark.smoke
 def test_l1_grouping_family_roundtrip(tmp_path) -> None:
     trace = _tiny_trace()
-    loaded = _switched_roundtrip(trace, tmp_path, "grouping")
+    loaded = _plain_roundtrip(trace, tmp_path, "grouping")
     assert loaded.grouping == trace.grouping == "structural"
     assert loaded.grouping_policy == trace.grouping_policy
     gen2 = _second_generation(loaded, tmp_path, "grouping")
@@ -455,7 +464,7 @@ def test_l1_site_key_family_roundtrip(tmp_path) -> None:
     trace = _tiny_trace()
     live_keys = [op.site_key for op in trace.ops]
     assert any(key and key.startswith("s1|") for key in live_keys)
-    loaded = _switched_roundtrip(trace, tmp_path, "site_key")
+    loaded = _plain_roundtrip(trace, tmp_path, "site_key")
     assert [op.site_key for op in loaded.ops] == live_keys
     gen2 = _second_generation(loaded, tmp_path, "site_key")
     assert [op.site_key for op in gen2.ops] == live_keys
@@ -464,7 +473,7 @@ def test_l1_site_key_family_roundtrip(tmp_path) -> None:
 def test_l2_episode_family_roundtrip(tmp_path) -> None:
     trace = _episode_trace()
     assert trace.annotations["episode"]["header"]["capture_kind"] == "episode"
-    loaded = _switched_roundtrip(trace, tmp_path, "episode")
+    loaded = _plain_roundtrip(trace, tmp_path, "episode")
     assert loaded.annotations["episode"] == trace.annotations["episode"]
     gen2 = _second_generation(loaded, tmp_path, "episode")
     assert gen2.annotations["episode"] == trace.annotations["episode"]
@@ -474,7 +483,7 @@ def test_l3_aten_profile_family_roundtrip(tmp_path) -> None:
     trace = _armed_aten_trace()
     live_profile = trace._primitive_op_profile
     assert live_profile is not None and live_profile.primitive_ops
-    loaded = _switched_roundtrip(trace, tmp_path, "aten")
+    loaded = _plain_roundtrip(trace, tmp_path, "aten")
     assert _persisted_eq(loaded._primitive_op_profile, live_profile)
     gen2 = _second_generation(loaded, tmp_path, "aten")
     assert _persisted_eq(gen2._primitive_op_profile, live_profile)
@@ -485,7 +494,7 @@ def test_l3_kernel_telemetry_family_roundtrip(tmp_path) -> None:
 
     trace = _telemetry_trace()
     live_payload = trace.annotations["_kernel_telemetry"]
-    loaded = _switched_roundtrip(trace, tmp_path, "telemetry")
+    loaded = _plain_roundtrip(trace, tmp_path, "telemetry")
     assert _persisted_eq(loaded.annotations["_kernel_telemetry"], live_payload)
     telemetry._bind_trace_telemetry(loaded)
     assert loaded.ops[0].gpu_kernels[0].attribution_status in (
@@ -506,7 +515,7 @@ def test_l6_selection_family_roundtrip(tmp_path) -> None:
         if record.helper is not None
     )
     assert live_recipe["resolve_digest"]
-    loaded = _switched_roundtrip(fork, tmp_path, "selection")
+    loaded = _plain_roundtrip(fork, tmp_path, "selection")
     assert loaded.intervention_audit == live_audit
     loaded_recipe = next(
         record.helper.selection_recipe
@@ -528,7 +537,7 @@ def test_l6_edge_family_roundtrip(tmp_path) -> None:
     live_edge_address = next(
         record.edge_address for record in child.interventions if record.edge_address
     )
-    loaded = _switched_roundtrip(fork, tmp_path, "edges")
+    loaded = _plain_roundtrip(fork, tmp_path, "edges")
     loaded_child = loaded["conv2d_2_3"].ops[0]
     assert torch.equal(loaded_child.edge_substitutions[store_key]["value"], live_value)
     assert _persisted_eq(loaded_child.edge_replacement_stamps, live_stamps)
@@ -544,7 +553,7 @@ def test_l6_edge_family_roundtrip(tmp_path) -> None:
 def test_l7a_structure_only_family_roundtrip(tmp_path) -> None:
     trace = _structure_only_trace()
     assert trace.structure_only is True
-    loaded = _switched_roundtrip(trace, tmp_path, "structure_only")
+    loaded = _plain_roundtrip(trace, tmp_path, "structure_only")
     assert loaded.structure_only is True
     gen2 = _second_generation(loaded, tmp_path, "structure_only")
     assert gen2.structure_only is True
@@ -558,7 +567,7 @@ def test_l8_distributed_scope_family_roundtrip(tmp_path) -> None:
     lifecycle.disarm()
     trace = _tiny_trace()
     trace.distributed_scope = RANK_LOCAL_SHARD
-    loaded = _switched_roundtrip(trace, tmp_path, "distributed_scope")
+    loaded = _plain_roundtrip(trace, tmp_path, "distributed_scope")
     assert loaded.distributed_scope == RANK_LOCAL_SHARD
     gen2 = _second_generation(loaded, tmp_path, "distributed_scope")
     assert gen2.distributed_scope == RANK_LOCAL_SHARD
@@ -567,7 +576,7 @@ def test_l8_distributed_scope_family_roundtrip(tmp_path) -> None:
 def test_l9_timing_provenance_family_roundtrip(tmp_path) -> None:
     trace = _backward_trace()
     assert trace.grad_fn_timing_provenance == "perf_counter"
-    loaded = _switched_roundtrip(trace, tmp_path, "timing")
+    loaded = _plain_roundtrip(trace, tmp_path, "timing")
     assert loaded.grad_fn_timing_provenance == "perf_counter"
     gen2 = _second_generation(loaded, tmp_path, "timing")
     assert gen2.grad_fn_timing_provenance == "perf_counter"
@@ -577,7 +586,7 @@ def test_l9_checkpoint_witness_family_roundtrip(tmp_path) -> None:
     trace = _checkpoint_trace()
     live_witness = trace.checkpoint_invocation_witness
     assert live_witness["token_count"] == 1
-    loaded = _switched_roundtrip(trace, tmp_path, "checkpoint")
+    loaded = _plain_roundtrip(trace, tmp_path, "checkpoint")
     assert loaded.checkpoint_invocation_witness == live_witness
     gen2 = _second_generation(loaded, tmp_path, "checkpoint")
     assert gen2.checkpoint_invocation_witness == live_witness
@@ -606,6 +615,10 @@ FORGERY_SURFACE_LEDGER: dict[str, str] = {
     "Trace.checkpoint_invocation_witness": "validated_refuse_typed",
     "Trace.intervention_audit": "validated_refuse_typed",
     "Trace.annotations._kernel_telemetry": "validated_refuse_typed",
+    # v8 bump: the structure-only marker gained its M-C2/M-C3 coherence rows
+    # (torchlens/_io/forgery_validation.py). M-C1's stripped-marker form-(a)
+    # case is a documented scope statement there, not a silent gap.
+    "Trace.structure_only": "validated_refuse_typed",
 }
 
 
@@ -636,21 +649,17 @@ def _tampered_refuses(
     """
 
     path = tmp_path / f"{name}_tampered.tlspec"
-    with activate_prerelease_fields():
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            tl.save(trace, str(path))
-        with pytest.raises(TorchLensIOError) as excinfo:
-            tl.load(str(path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        tl.save(trace, str(path))
+    with pytest.raises(TorchLensIOError) as excinfo:
+        tl.load(str(path))
     refusal = excinfo.value
     assert refusal.fields["field"] == field
     assert refusal.fields["reason"]
     assert refusal.fields["remedy"]
     assert field in str(refusal)
     assert "Remedy:" in str(refusal)
-    # Pre-bump containment remains intact outside the activation switch.
-    with pytest.raises(PreReleaseArtifactError):
-        tl.load(str(path))
     return refusal
 
 
@@ -770,12 +779,11 @@ def test_tamper_grouping_policy_validated_degrades_typed(tmp_path) -> None:
     trace = _tiny_trace()
     trace.grouping_policy = {**trace.grouping_policy, "policy": "greedy"}
     path = tmp_path / "grouping_tampered.tlspec"
-    with activate_prerelease_fields():
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            tl.save(trace, str(path))
-        with pytest.warns(TorchLensWarning, match="grouping_policy stamp is invalid"):
-            loaded = tl.load(str(path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        tl.save(trace, str(path))
+    with pytest.warns(TorchLensWarning, match="grouping_policy stamp is invalid"):
+        loaded = tl.load(str(path))
     assert loaded.grouping_policy == degraded_grouping_policy_stamp("vocabulary")
 
 
@@ -856,3 +864,110 @@ def test_combination_plain_structure_only_absent_legal() -> None:
     trace = _structure_only_trace()
     assert trace.structure_only is True
     assert trace.ops  # structure recorded, values hypothesized
+
+
+# ---------------------------------------------------------------------------
+# v8 structure-only marker coherence tampers (M-C2 / M-C3, new at the bump).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.smoke
+def test_tamper_structure_only_with_payload_refuses_typed(tmp_path) -> None:
+    """M-C2: a marked trace carrying a retained value payload refuses."""
+
+    assert FORGERY_SURFACE_LEDGER["Trace.structure_only"] == "validated_refuse_typed"
+    trace = _tiny_trace()  # an ordinary VALUE capture with retained payloads
+    trace.structure_only = True  # forged marker over real payloads
+    refusal = _tampered_refuses(
+        trace,
+        tmp_path,
+        "structure_only_payload",
+        field="Trace.structure_only",
+    )
+    assert refusal.fields["code"] == "artifact_structure_only_incoherent"
+    assert refusal.fields["reason"] == "value_payload_present"
+
+
+@pytest.mark.smoke
+def test_tamper_structure_only_verified_claim_refuses_typed(tmp_path) -> None:
+    """M-C3: a marked trace claiming capture_verified=True refuses loudly."""
+
+    trace = _structure_only_trace()
+    trace.__dict__["capture_verified"] = True  # forged positive verdict
+    refusal = _tampered_refuses(
+        trace,
+        tmp_path,
+        "structure_only_verified",
+        field="Trace.structure_only",
+    )
+    assert refusal.fields["code"] == "artifact_structure_only_incoherent"
+    assert refusal.fields["reason"] == "verification_claim"
+
+
+@pytest.mark.smoke
+def test_tamper_structure_only_nonbool_marker_refuses_typed(tmp_path) -> None:
+    """A non-bool marker value refuses (closed type, never truthiness)."""
+
+    trace = _structure_only_trace()
+    trace.__dict__["structure_only"] = "yes"
+    refusal = _tampered_refuses(
+        trace,
+        tmp_path,
+        "structure_only_type",
+        field="Trace.structure_only",
+    )
+    assert refusal.fields["code"] == "artifact_structure_only_incoherent"
+    assert refusal.fields["reason"] == "type"
+
+
+# ---------------------------------------------------------------------------
+# Version proofs: v7 still loads, v8 is distinguishable, v9 refuses.
+# ---------------------------------------------------------------------------
+
+_V7_FIXTURE = Path(__file__).parent / "fixtures" / "tlspec_v7" / "tiny_v7.tlspec"
+
+
+@pytest.mark.smoke
+def test_real_v7_artifact_still_loads_at_recorded_schema() -> None:
+    """The checked-in pre-bump v7 byte snapshot loads correctly after the bump.
+
+    It loads at its RECORDED schema with one age advisory: version 7,
+    wholly-keyless site keys (legal at the v6/v7 boundary), no grouping
+    stamp, payloads intact.
+    """
+
+    from torchlens._io import ArtifactSchemaAgeWarning
+
+    with pytest.warns(ArtifactSchemaAgeWarning, match="older than runtime"):
+        loaded = tl.load(str(_V7_FIXTURE))
+    assert loaded.tlspec_version == 7
+    assert all(op.site_key is None for op in loaded.ops)
+    # The legacy stampless artifact settles to the canonical degraded
+    # grouping-policy representation, never a fabricated healthy stamp.
+    assert loaded.grouping_policy["policy"] == "unknown"
+    assert loaded["relu_1_2"].out is not None
+    assert loaded.structure_only in (None, False)
+
+
+@pytest.mark.smoke
+def test_v8_artifact_is_distinguishable_from_v7(tmp_path) -> None:
+    """A fresh save stamps tlspec_version 8; the v7 fixture stays 7."""
+
+    trace = _tiny_trace()
+    state, _, _ = scrub_for_save(trace)
+    assert state["tlspec_version"] == TLSPEC_VERSION == 8
+    path = tmp_path / "fresh_v8.tlspec"
+    tl.save(trace, str(path))
+    loaded = tl.load(str(path))
+    assert loaded.tlspec_version == 8
+    assert [op.site_key for op in loaded.ops] == [op.site_key for op in trace.ops]
+
+
+@pytest.mark.smoke
+def test_newer_than_runtime_version_refuses_typed() -> None:
+    """A claimed tlspec_version=9 state refuses as newer-than-runtime."""
+
+    from torchlens._io import read_tlspec_version
+
+    with pytest.raises(TorchLensIOError, match="only supports up to 8"):
+        read_tlspec_version({"tlspec_version": 9}, cls_name="Trace")

@@ -96,33 +96,32 @@ class TestShardedPredicate:
 
 
 class TestMarkerFieldSubstrate:
-    def test_field_declared_ordered_and_drop(self):
+    def test_field_declared_ordered_and_persisting(self):
         from torchlens._io import FieldPolicy
         from torchlens.constants import MODEL_LOG_FIELD_ORDER
         from torchlens.data_classes.trace import Trace
 
         assert "distributed_scope" in MODEL_LOG_FIELD_ORDER
         entry = Trace.FIELD_POLICY["distributed_scope"]
-        assert getattr(entry, "portable_policy", entry) is FieldPolicy.DROP
+        # tlspec v8: the marker persists (the erasure guard's second conjunct
+        # goes false by construction; see TestErasurePreventionInvariant).
+        assert getattr(entry, "portable_policy", entry) is FieldPolicy.KEEP
 
     def test_plain_capture_never_carries_the_marker(self):
         lifecycle.disarm()
         log = tl.trace(nn.Linear(4, 4), torch.randn(2, 4))
         assert log.distributed_scope is None
 
-    def test_prerelease_round_trip_preserves_the_marker(self, tmp_path):
-        """Tamper row (a) counterpart: under the pytest-only S3 switch the
-        marker persists (stamped pre-release) and survives load intact."""
-
-        from torchlens._io.prerelease import activate_prerelease_fields
+    def test_plain_round_trip_preserves_the_marker(self, tmp_path):
+        """Tamper row (a) counterpart: at tlspec v8 the marker persists on a
+        PLAIN save and survives load intact (validated closed-vocabulary)."""
 
         lifecycle.disarm()
         log = tl.trace(nn.Linear(4, 4), torch.randn(2, 4))
         log.distributed_scope = RANK_LOCAL_SHARD
         path = tmp_path / "shard-local.tlspec"
-        with activate_prerelease_fields():
-            tl.save(log, str(path))
-            loaded = tl.load(str(path))
+        tl.save(log, str(path))
+        loaded = tl.load(str(path))
         assert loaded.distributed_scope == RANK_LOCAL_SHARD
 
 
@@ -135,33 +134,36 @@ class TestErasurePreventionInvariant:
         log.distributed_scope = RANK_LOCAL_SHARD
         return log
 
-    def test_row_b_ordinary_save_refuses_typed_pre_bump(self, tmp_path):
-        from torchlens._errors import InvalidArgumentError
-
-        log = self._marked_trace()
-        with pytest.raises(InvalidArgumentError) as excinfo:
-            tl.save(log, str(tmp_path / "erasure.tlspec"))
-        assert excinfo.value.fields["code"] == "shard_local_persistence_unsupported"
-
-    def test_row_b_covers_every_save_level(self, tmp_path):
-        from torchlens._errors import InvalidArgumentError
+    def test_row_b_marked_save_proceeds_and_round_trips_at_v8(self, tmp_path):
+        """tlspec v8 persists the marker, so the guard's second conjunct is
+        false by construction and ordinary saves proceed with the disclosure
+        intact across the round trip -- the marker-free-artifact class stays
+        EMPTY through persistence rather than through refusal."""
 
         log = self._marked_trace()
         for level in ("portable", "audit"):
-            with pytest.raises(InvalidArgumentError) as excinfo:
-                tl.save(log, str(tmp_path / f"erasure-{level}.tlspec"), level=level)
-            assert excinfo.value.fields["code"] == "shard_local_persistence_unsupported"
+            path = tmp_path / f"marked-{level}.tlspec"
+            tl.save(log, str(path), level=level)
+            assert tl.load(str(path)).distributed_scope == RANK_LOCAL_SHARD
 
-    def test_row_e_forced_drop_refires_post_switch(self, tmp_path, monkeypatch):
+    def test_row_e_forced_drop_refires_post_bump(self, tmp_path, monkeypatch):
         """The predicate keys on the ACTUAL field-policy state: forcing the
-        policy back to DROP (the post-bump regression simulation) re-fires the
-        invariant -- the refusal was never deleted."""
+        policy back to DROP (the schema-regression simulation) re-fires the
+        invariant -- the refusal was never deleted at the bump."""
+
+        from dataclasses import replace
 
         from torchlens._errors import InvalidArgumentError
-        from torchlens._io import prerelease
+        from torchlens._io import FieldPolicy, prerelease
+        from torchlens.data_classes.trace import Trace
 
         log = self._marked_trace()
-        # Simulate the post-bump regression: switch inactive, policy DROP.
+        entry = Trace.FIELD_POLICY["distributed_scope"]
+        monkeypatch.setitem(
+            Trace.FIELD_POLICY,
+            "distributed_scope",
+            replace(entry, portable_policy=FieldPolicy.DROP),
+        )
         monkeypatch.setattr(prerelease, "_ACTIVE", False)
         with pytest.raises(InvalidArgumentError) as excinfo:
             tl.save(log, str(tmp_path / "regression.tlspec"))
