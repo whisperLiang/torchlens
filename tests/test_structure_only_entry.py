@@ -221,12 +221,21 @@ def test_explicit_metadata_only_save_stays_legal() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Mode-marker prep: S3 registrar discipline (DROP + registered)
+# Mode marker: ACTIVE since the coordinated tlspec v8 bump
 # ---------------------------------------------------------------------------
 
 
 @smoke
-def test_mode_marker_is_drop_declared_and_prerelease_registered() -> None:
-    assert Trace.PORTABLE_STATE_SPEC["structure_only"] is FieldPolicy.DROP
+def test_mode_marker_persists_and_left_the_prerelease_registrar() -> None:
+    """The marker is a live persisted field now, not a DROP-gated one.
+
+    Pre-bump this test asserted the inverse (DROP + prerelease-registered), which
+    was the correct invariant while the S3 registrar held the field. The
+    coordinated v8 bump flipped every gated family to its intended policy and
+    retired the registrar to empty, so the honest invariant is the opposite one:
+    the marker persists, and nothing still gates it.
+    """
+
+    assert Trace.PORTABLE_STATE_SPEC["structure_only"] is FieldPolicy.KEEP
     inventory = registered_prerelease_fields()
-    assert "structure_only" in inventory.get("Trace", ())
+    assert "structure_only" not in inventory.get("Trace", ())
