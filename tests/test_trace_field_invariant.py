@@ -116,6 +116,14 @@ def test_trace_field_set_subset_of_user_facing() -> None:
         # declared ``FieldPolicy.DROP`` with component owner "graph" and
         # popped in ``__getstate__``, so it never persists.
         "_op_accessor_cache",
+        # tlspec v8 bump: three unordered runtime rows made portable
+        # (FieldPolicy.KEEP, deliberately absent from MODEL_LOG_FIELD_ORDER --
+        # the portable_only_fields ledger in test_field_order_contract.py):
+        # the L3 primitive-op profile and the two L9 backward-residual
+        # disclosure markers.
+        "_primitive_op_profile",
+        "checkpoint_invocation_witness",
+        "grad_fn_timing_provenance",
     }
 
     actual = set(trace.__dict__.keys())

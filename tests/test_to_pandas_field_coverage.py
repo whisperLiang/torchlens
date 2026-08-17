@@ -124,6 +124,15 @@ _KEEP_FIELD_DESYNC_EXCLUSIONS: dict[type[Any], frozenset[str]] = {
             # no PORTABLE_STATE_SPEC entry at all -- this KEEP declaration is
             # confirmed-vestigial, not a live desync (cert7/cert8 MINOR-2).
             "ops_with_params",
+            # tlspec v8 bump: three unordered runtime rows made portable BY
+            # RULING (the portable_only_fields ledger in
+            # test_field_order_contract.py documents them as deliberate
+            # KEEP-without-FIELD_ORDER rows, so to_pandas() intentionally does
+            # not export them). Verified non-bug exceptions, not masks: the L3
+            # primitive-op profile and the two L9 backward-residual markers.
+            "_primitive_op_profile",
+            "checkpoint_invocation_witness",
+            "grad_fn_timing_provenance",
         }
     ),
 }
