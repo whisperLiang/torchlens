@@ -29,3 +29,27 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 1e6df24e33b4d2dbcba1fc3cd5e7d0a9ab3344e4 (clean)
 recorded: 2026-08-16T22:27:29.274624+00:00
+---
+generator: tests/test_state_keyset_contract.py
+flag: TORCHLENS_UPDATE_STATE_KEYSET_ORACLE=1
+reason: L6 stage-3 merge shipped edge_substitutions/edge_replacement_stamps (Op) and intervention_audit (Trace) as ordered pre-release-registered session fields; keysets grew accordingly
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: d61fc573a06d9f1d1e6da5205ead21d2ce53b728 (dirty)
+recorded: 2026-08-17T00:57:41.410353+00:00
+---
+generator: tests/godobject_oracle legacy
+flag: TORCHLENS_UPDATE_LEGACY_ARTIFACT_ORACLE=1
+reason: L6 stage-3 fields edge_substitutions/edge_replacement_stamps (+ Trace intervention_audit) now appear at defaults on loaded legacy surfaces; snapshot follows the shipped surface
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: d3c93d016124ac43ea6082aa576cd61354c0dff7 (clean)
+recorded: 2026-08-17T00:58:35.897051+00:00
+---
+generator: tests/test_state_keyset_contract.py
+flag: TORCHLENS_UPDATE_STATE_KEYSET_ORACLE=1
+reason: session component consolidation: _warned_nonfinite_check_unavailable + _warned_implicit_backward_pass folded into one _warned_once key set (component bound 62->61)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: aac26242e9bdd4fcc494426aa26808a27bff974e (dirty)
+recorded: 2026-08-17T01:06:48.324019+00:00

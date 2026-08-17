@@ -2848,6 +2848,8 @@
    "dropped_edge_tensor_args": [],
    "dtype": "torch.float32",
    "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+   "edge_replacement_stamps": {},
+   "edge_substitutions": {},
    "edge_uses": [
     "<torchlens.intervention.types.EdgeUseRecord>"
    ],
@@ -3258,6 +3260,8 @@
    "dropped_edge_tensor_args": [],
    "dtype": "torch.float32",
    "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+   "edge_replacement_stamps": {},
+   "edge_substitutions": {},
    "edge_uses": [],
    "equivalence_class": "input_1_1_4_4_torch.float32",
    "equivalent_ops": {
@@ -3623,6 +3627,8 @@
    "dropped_edge_tensor_args": [],
    "dtype": "torch.float32",
    "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+   "edge_replacement_stamps": {},
+   "edge_substitutions": {},
    "edge_uses": [
     "<torchlens.intervention.types.EdgeUseRecord>"
    ],
@@ -4003,6 +4009,8 @@
    "dropped_edge_tensor_args": [],
    "dtype": "torch.float32",
    "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+   "edge_replacement_stamps": {},
+   "edge_substitutions": {},
    "edge_uses": [
     "<torchlens.intervention.types.EdgeUseRecord>"
    ],
@@ -4361,6 +4369,8 @@
    "dropped_edge_tensor_args": [],
    "dtype": "torch.float32",
    "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+   "edge_replacement_stamps": {},
+   "edge_substitutions": {},
    "edge_uses": [],
    "equivalence_class": "output_1_1_3_torch.float32",
    "equivalent_ops": {
@@ -4713,6 +4723,8 @@
    "dropped_edge_tensor_args": [],
    "dtype": "torch.float32",
    "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+   "edge_replacement_stamps": {},
+   "edge_substitutions": {},
    "edge_uses": [
     "<torchlens.intervention.types.EdgeUseRecord>"
    ],
@@ -5570,6 +5582,7 @@
   "decoded_output": null,
   "derived_grads": "<torchlens.data_classes.derived_grad.DerivedGradAccessor>",
   "detach_saved_activations": false,
+  "edges": "<raises SelectionError>",
   "emit_nvtx": false,
   "escape_detector_backward_coverage": null,
   "escape_detector_callback_ns": null,
@@ -5668,6 +5681,7 @@
   "internal_source_layers": "<torchlens.data_classes.layer.LayerAccessor>",
   "internal_source_ops": [],
   "internally_terminated_bool_ops": [],
+  "intervention_audit": [],
   "intervention_ready": false,
   "is_appended": false,
   "is_branching": false,

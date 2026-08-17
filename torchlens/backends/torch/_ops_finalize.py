@@ -342,8 +342,8 @@ def _raise_if_nonfinite_requested(self: Any, tensor: torch.Tensor, entry: Any) -
         # them read an unchecked forward as a checked one. Warn once per capture
         # (naming the first skipped op) and keep going: an opt-in diagnostic must not
         # convert an exotic dtype into a failed capture.
-        if not getattr(self, "_warned_nonfinite_check_unavailable", False):
-            self._warned_nonfinite_check_unavailable = True
+        if "nonfinite_check_unavailable" not in self._warned_once:
+            self._warned_once.add("nonfinite_check_unavailable")
             warnings.warn(
                 "raise_on_nan could not check at least one activation: "
                 f"{type(exc).__name__}: {exc}. First skipped op "

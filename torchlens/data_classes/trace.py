@@ -201,7 +201,7 @@ _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
     "_has_direct_writes": False,
     "_warned_direct_write": False,
     "_warned_mutate_in_place": False,
-    "_warned_nonfinite_check_unavailable": False,
+    "_warned_once": set(),
     "_spec_revision": 0,
     "_out_recipe_revision": 0,
     "_annotation_blobs": None,
@@ -1380,7 +1380,7 @@ class Trace(
         "_has_direct_writes": FieldPolicy.KEEP,
         "_warned_direct_write": FieldPolicy.DROP,
         "_warned_mutate_in_place": FieldPolicy.DROP,
-        "_warned_nonfinite_check_unavailable": FieldPolicy.DROP,
+        "_warned_once": FieldPolicy.DROP,
         "_spec_revision": FieldPolicy.KEEP,
         "_out_recipe_revision": FieldPolicy.KEEP,
         "_append_sequence_id": FieldPolicy.KEEP,
@@ -1533,7 +1533,6 @@ class Trace(
         "_backward_projection_revision": FieldPolicy.DROP,
         "_backward_projection_fold_state": FieldPolicy.DROP,
         "_implicit_backward_pass_open": FieldPolicy.DROP,
-        "_warned_implicit_backward_pass": FieldPolicy.DROP,
         "_tl_backward_triggers_disarmed": FieldPolicy.DROP,
         # Idempotent-cleanup sentinel (b6-opus R25): stamped by cleanup() so a
         # second cleanup() early-returns and every reader of a husked trace
@@ -1868,7 +1867,7 @@ class Trace(
         self._has_direct_writes = False
         self._warned_direct_write = False
         self._warned_mutate_in_place = False
-        self._warned_nonfinite_check_unavailable = False
+        self._warned_once: set[str] = set()
         self._raw_transform_escape_detected = False
         self._raw_dynamo_region_detected = False
         self._spec_revision = 0

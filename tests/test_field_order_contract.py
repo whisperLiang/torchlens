@@ -102,6 +102,12 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
                 # canonical legacy degraded representation instead.
                 "grouping",
                 "grouping_policy",
+                # intervention_audit is the L6 selection do() audit trail
+                # (query repr + resolve digest + relations): an ordered
+                # display field, session-time (FieldPolicy.DROP,
+                # pre-release-registered) until the coordinated tlspec v7
+                # persistence bump.
+                "intervention_audit",
                 "last_run",
                 "layer_visualizers",
                 "module_filter",
@@ -126,6 +132,14 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
                 "activation_transform",
                 "arg_expressions",
                 "args_template",
+                # edge_substitutions / edge_replacement_stamps are the L6
+                # stage-3 tier-(ii) edge-substitution store and its stamps:
+                # ordered display fields, session-time (FieldPolicy.DROP,
+                # pre-release-registered) until the coordinated tlspec v7
+                # persistence bump (the v7 save boundary refuses typed while
+                # entries are present).
+                "edge_replacement_stamps",
+                "edge_substitutions",
                 "func",
                 "grad_fn",
                 "grad_fn_handle",
