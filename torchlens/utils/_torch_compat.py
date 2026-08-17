@@ -1632,6 +1632,8 @@ def get_torch_capability_snapshot() -> TorchCapabilitySnapshot:
     get_variable_functions_class()
     get_fake_tensor_mode_class()
     get_dtensor_shard_geometry_fn()
+    get_funcol_group_resolvers()
+    probe_funcol_wait_interposition()
     dynamo_is_compiling()
     _ensure_dynamo_orig_callable_marker_probed()
     get_dynamo_explain()
