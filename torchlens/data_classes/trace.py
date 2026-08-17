@@ -3269,6 +3269,12 @@ class Trace(
                 if op_passes is not None and hasattr(op_passes, "values"):
                     for layer_pass in op_passes.values():
                         layer_pass.grad_fn_handle = grad_fn_handle
+        # Persisted DROP-gated claim families become hostile artifact input at
+        # this boundary. Validate them before any consumer can observe or bind
+        # the restored values; wholly absent legacy families remain legal.
+        from .._io.forgery_validation import validate_persisted_forgery_surfaces
+
+        validate_persisted_forgery_surfaces(self)
         # grind-r5 P7: load-side twin of the __getstate__ sanitation -- a
         # tampered artifact claiming capture_verified=True (or any non-bool)
         # degrades to None/no-claim; only the producer's NEGATIVE claim (with
