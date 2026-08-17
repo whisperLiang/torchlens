@@ -54,6 +54,7 @@ import torch
 
 from ... import _state
 from ...errors._base import TorchLensError
+from ...utils._torch_symbols import torch_attr
 from ._tl import get_tensor_label
 from .completeness_witness import (
     _TORCHLENS_ROOT,
@@ -313,7 +314,7 @@ def _install_module_func_belt(
     """Wrap the ``torch.*`` module predicate escape surface."""
 
     for name in sorted(HOST_VALUE_ESCAPE_MODULE_FUNCS):
-        original = getattr(torch, name, None)
+        original = torch_attr(name)
         if original is None or not callable(original):
             continue
         try:

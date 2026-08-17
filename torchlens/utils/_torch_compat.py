@@ -1657,6 +1657,7 @@ def get_torch_capability_snapshot() -> TorchCapabilitySnapshot:
     get_pipelining_module_types(force_probe=True)
     get_tracing_tensor_types(force_probe=True)
     get_fp8_dtypes(force_probe=True)
+    get_funcol_group_resolvers(force_probe=True)
     get_dynamo_compile_counters(force_probe=True)
     probe_c10d_capabilities(force_probe=True)
     get_current_dispatch_mode_stack()
@@ -2179,8 +2180,17 @@ def get_dtensor_shard_geometry_fn() -> Callable[..., Any] | None:
     return _DTENSOR_SHARD_GEOMETRY_FN
 
 
-def get_funcol_group_resolvers() -> tuple[Callable[..., Any], Callable[..., Any]] | None:
+def get_funcol_group_resolvers(
+    *, force_probe: bool = False
+) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
     """Return funcol's group resolver plus the c10d name resolver, or ``None``.
+
+    Parameters
+    ----------
+    force_probe:
+        Re-run the probe even when it already ran this process. Passed by
+        :func:`get_torch_capability_snapshot` so the reported flag reflects the
+        live runtime rather than a cached earlier answer.
 
     Backs the functional-collective boundary wraps (merge-ranks C2 recording):
     ``torch.distributed._functional_collectives._resolve_group`` maps every
@@ -2197,7 +2207,7 @@ def get_funcol_group_resolvers() -> tuple[Callable[..., Any], Callable[..., Any]
     global HAS_FUNCOL_GROUP_RESOLUTION, _FUNCOL_GROUP_RESOLVERS
     global _FUNCOL_GROUP_RESOLUTION_PROBED
 
-    if not _FUNCOL_GROUP_RESOLUTION_PROBED:
+    if force_probe or not _FUNCOL_GROUP_RESOLUTION_PROBED:
         resolve_group = _import_module_attr_or_none(
             "torch.distributed._functional_collectives", "_resolve_group"
         )
