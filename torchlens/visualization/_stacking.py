@@ -39,7 +39,7 @@ from ._encoding import (
     is_record_derived_image_node,
 )
 
-if TYPE_CHECKING:  # pragma: no cover - typing only
+if TYPE_CHECKING:  # typing only
     from ..data_classes.trace import Trace
 
 #: Legend/caption disclosure wording (pinned by tests).

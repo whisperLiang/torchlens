@@ -3705,7 +3705,7 @@ def _resolve_checkpoint_hook_cls() -> type | None:
 
     try:
         import torch.utils.checkpoint as checkpoint_module
-    except ImportError:  # pragma: no cover - torch always ships the module
+    except ImportError:  # torch always ships the module
         return None
     resolved = getattr(checkpoint_module, "_checkpoint_hook", None)
     return resolved if isinstance(resolved, type) else None
@@ -3902,7 +3902,7 @@ def _refresh_checkpoint_witness(trace: Any) -> None:
         if evidence_lock is not None:
             with evidence_lock:
                 evidence = list(record["unpack_evidence"])
-        else:  # pragma: no cover - the lock exists whenever tokens exist
+        else:  # the lock exists whenever tokens exist
             evidence = []
         site_candidates: set[str] = set()
         window_refs: list[tuple[int | None, str | None, int | None]] = []

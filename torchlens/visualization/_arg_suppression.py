@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..backends.registry import TORCH_BACKEND_NAME
 
-if TYPE_CHECKING:  # pragma: no cover - typing only
+if TYPE_CHECKING:  # typing only
     from ..data_classes.trace import Trace
 
 #: side "output": check against the record's own captured output shape.
