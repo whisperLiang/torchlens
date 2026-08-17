@@ -14,7 +14,10 @@ masked-read kwarg.
 
 from __future__ import annotations
 
+import importlib
 import warnings
+from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
@@ -87,6 +90,110 @@ def test_edge_algebra_rows(capture):
     with pytest.raises(SelectionError) as excinfo:
         a | tl.units("relu_1_2", [(0, 0, 0, 0)])
     assert excinfo.value.fields["code"] == "selection_kind_incompatible"
+
+
+def _selection_for_kind_state(trace: tl.Trace, kind: str, state: str) -> Any:
+    """Build one query selection for a closure-matrix kind/state cell."""
+
+    if kind == "ACT":
+        first = tl.units("relu_1_2", [(0, 0, 0, 0)])
+        second = trace["conv2d_1_1"].__selection__()
+    elif kind == "PARAM":
+        first = tl.params("c1.weight")
+        second = tl.params("c2.weight")
+    else:
+        first = _edge(trace).__selection__()
+        second = _edge(trace, parent="conv2d_2_3").__selection__()
+    if state == "nonempty":
+        return first
+    if state == "element_empty":
+        return first - first
+    if state == "no_sites":
+        return first & second
+    raise AssertionError(f"unknown closure-matrix state {state!r}")
+
+
+def _selection_family(selection: Any) -> frozenset[Any]:
+    """Return the touched-site family of one resolved selection."""
+
+    return frozenset(entry.site_key for entry in selection)
+
+
+@pytest.mark.parametrize("operator", ["or", "and", "sub"])
+@pytest.mark.parametrize("left_state", ["no_sites", "element_empty", "nonempty"])
+@pytest.mark.parametrize("right_state", ["no_sites", "element_empty", "nonempty"])
+@pytest.mark.parametrize("level", ["query", "resolved"])
+def test_closure_matrix_edge_totality_cells(
+    capture: tuple[nn.Module, torch.Tensor, tl.Trace],
+    operator: str,
+    left_state: str,
+    right_state: str,
+    level: str,
+) -> None:
+    """Pin every EDGE same-kind operator/emptiness cell at both levels."""
+
+    _model, _x, trace = capture
+    left = _selection_for_kind_state(trace, "EDGE", left_state)
+    right = _selection_for_kind_state(trace, "EDGE", right_state)
+    if level == "resolved":
+        left = left.resolve(trace)
+        right = right.resolve(trace)
+    composed = {
+        "or": lambda: left | right,
+        "and": lambda: left & right,
+        "sub": lambda: left - right,
+    }[operator]()
+    resolved = composed.resolve(trace) if level == "query" else composed
+    resolved_left = left.resolve(trace) if level == "query" else left
+    resolved_right = right.resolve(trace) if level == "query" else right
+    expected_family = {
+        "or": _selection_family(resolved_left) | _selection_family(resolved_right),
+        "and": _selection_family(resolved_left) & _selection_family(resolved_right),
+        "sub": _selection_family(resolved_left),
+    }[operator]
+    assert resolved.kind == "EDGE"
+    assert _selection_family(resolved) == expected_family
+
+
+@pytest.mark.parametrize(
+    "left_kind,right_kind",
+    [
+        ("ACT", "PARAM"),
+        ("PARAM", "ACT"),
+        ("ACT", "EDGE"),
+        ("EDGE", "ACT"),
+        ("PARAM", "EDGE"),
+        ("EDGE", "PARAM"),
+    ],
+)
+@pytest.mark.parametrize("operator", ["or", "and", "sub"])
+@pytest.mark.parametrize("state", ["element_empty", "nonempty"])
+@pytest.mark.parametrize("level", ["query", "resolved"])
+def test_closure_matrix_all_mixed_kind_cells_refuse(
+    capture: tuple[nn.Module, torch.Tensor, tl.Trace],
+    left_kind: str,
+    right_kind: str,
+    operator: str,
+    state: str,
+    level: str,
+) -> None:
+    """Pin every ordered mixed-kind/operator/level/emptiness refusal cell."""
+
+    _model, _x, trace = capture
+    left = _selection_for_kind_state(trace, left_kind, state)
+    right = _selection_for_kind_state(trace, right_kind, state)
+    if level == "resolved":
+        left = left.resolve(trace)
+        right = right.resolve(trace)
+    with pytest.raises(SelectionError) as excinfo:
+        {
+            "or": lambda: left | right,
+            "and": lambda: left & right,
+            "sub": lambda: left - right,
+        }[operator]()
+    assert excinfo.value.fields["code"] == "selection_kind_incompatible"
+    assert excinfo.value.fields["left_kind"] == left_kind
+    assert excinfo.value.fields["right_kind"] == right_kind
 
 
 def test_edge_substitution_storage_fork_honesty(capture):
@@ -191,6 +298,28 @@ def test_validation_positive_invariant_forge_without_stamp(capture):
     assert verdict.reason == "edge_substitution_uncorroborated"
 
 
+def test_validation_captured_native_via_capture_surface_fails(capture: Any) -> None:
+    """A substituted value forged into capture truth cannot validate green."""
+
+    model, x, trace = capture
+    fork = trace.fork()
+    edge = _edge(trace)
+    fork.do(edge.__selection__(), tl.zero_ablate())
+    child = fork["conv2d_2_3"].ops[0]
+    parent = fork["relu_1_2"].ops[0]
+    child._internal_set("edge_substitutions", {})
+    child._internal_set("edge_replacement_stamps", {})
+    child._internal_set(
+        "interventions", [record for record in child.interventions if not record.edge_address]
+    )
+    # Present the substituted value as capture-native in ONE persisted
+    # consumed-value surface. The untouched saved_args twin contradicts it.
+    parent._internal_set("out_versions_by_child", {child.label: torch.zeros_like(parent.out)})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert fork.validate_forward_pass(model(x)) is False
+
+
 def test_validation_skip_shaped_acceptance_meta_test(capture):
     """A WRONG stored child output under a corroborated entry FAILS: the
     boundary is a DIFFERENT check, never NO check."""
@@ -252,6 +381,37 @@ def test_edge_carriers_persist_on_plain_v8_round_trip(capture, tmp_path):
     for key, entry in child.edge_substitutions.items():
         assert isinstance(entry["value"], torch.Tensor)
         assert torch.equal(entry["value"], live_child.edge_substitutions[key]["value"])
+
+
+def test_forced_bundle_without_edge_corroboration_fails_validation(
+    capture: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bypassing the save guard cannot manufacture a validation-green bundle."""
+
+    model, x, trace = capture
+    fork = trace.fork()
+    fork.do(_edge(trace).__selection__(), tl.zero_ablate())
+    bundle_module = importlib.import_module("torchlens._io.bundle")
+    monkeypatch.setattr(bundle_module, "_refuse_edge_intervened_save", lambda _trace: None)
+    path = tmp_path / "forced_edge.tlspec"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        tl.save(fork, path, level="executable_with_callables")
+    loaded = tl.load(path)
+    loaded_child = loaded["conv2d_2_3"].ops[0]
+    assert not loaded_child.edge_substitutions
+    assert not loaded_child.edge_replacement_stamps
+
+    # Trace func callables are DROP at this schema level. Reattach only the
+    # source callables so the forced artifact reaches the divergence oracle.
+    for loaded_op in loaded.layer_list:
+        source_op = fork[loaded_op.layer_label].ops[0]
+        loaded_op._internal_set("func", source_op.func)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert loaded.validate_forward_pass(model(x)) is False
 
 
 def test_tap_masked_values(capture):
