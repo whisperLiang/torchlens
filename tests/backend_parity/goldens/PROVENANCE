@@ -5,3 +5,27 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 9928a55073540928a9bff2a7a8172df45d878720 (dirty)
 recorded: 2026-08-15T23:36:33.429893+00:00
+---
+generator: tests/backend_parity/test_torch_parity_gates.py (tlspec_roundtrip_digest)
+flag: TORCHLENS_UPDATE_BACKEND_PARITY=1
+reason: wave-3 golden repair (tlspec roundtrip/manifest): coordinated tlspec v8 activation intentionally changes the manifest stamp and activates every v8 portable family while preserving the source/load projection contract
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 9fb0dac87004c577c24a6803dd6faf0c89067069 (dirty)
+recorded: 2026-08-17T10:55:30.414035+00:00
+---
+generator: tests/backend_parity/test_torch_parity_gates.py (tlspec_manifest_projection)
+flag: TORCHLENS_UPDATE_BACKEND_PARITY=1
+reason: wave-3 golden repair (tlspec roundtrip/manifest): coordinated tlspec v8 activation intentionally changes the manifest stamp and activates every v8 portable family while preserving the source/load projection contract
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 9fb0dac87004c577c24a6803dd6faf0c89067069 (dirty)
+recorded: 2026-08-17T10:55:30.429387+00:00
+---
+generator: tests/backend_parity/test_torch_parity_gates.py (field_order_dataframe_digest)
+flag: TORCHLENS_UPDATE_BACKEND_PARITY=1
+reason: wave-3 golden repair (field order/dataframe): accept intended L1 site/grouping, L6 selection/edge, L7a structure_only, L8 distributed_scope, and L3 AtenOp schema/public projection additions with their declared KEEP/DROP policies
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 9fb0dac87004c577c24a6803dd6faf0c89067069 (dirty)
+recorded: 2026-08-17T10:55:36.417723+00:00

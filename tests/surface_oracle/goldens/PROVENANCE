@@ -115,3 +115,51 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: f503a61cbd00436e2b276d1aae4e53766416196a (dirty)
 recorded: 2026-08-16T09:46:57.852604+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: wave-3 golden repair (recurrent): accept intended L1 site/grouping, L6 edge/selection/intervention-audit, L7a structure_only, L8 distributed-scope, and L9 timing-summary public fields plus the coordinated tlspec v8 stamp
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 9fb0dac87004c577c24a6803dd6faf0c89067069 (clean)
+recorded: 2026-08-17T10:54:12.984499+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: wave-3 golden repair (conditional): accept intended L1 site/grouping, L6 edge/selection/intervention-audit, L7a structure_only, L8 distributed-scope, and L9 timing-summary public fields plus the coordinated tlspec v8 stamp
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 9fb0dac87004c577c24a6803dd6faf0c89067069 (clean)
+recorded: 2026-08-17T10:54:25.863956+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: wave-3 golden repair (plain_cnn): accept intended L1 site/grouping, L6 edge/selection/intervention-audit, L7a structure_only, L8 distributed-scope, and L9 timing-summary public fields plus the coordinated tlspec v8 stamp
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 9fb0dac87004c577c24a6803dd6faf0c89067069 (clean)
+recorded: 2026-08-17T10:54:38.637306+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: wave-3 golden repair (tiny_transformer): accept intended L1 site/grouping, L6 edge/selection/intervention-audit, L7a structure_only, L8 distributed-scope, and L9 timing-summary public fields plus the coordinated tlspec v8 stamp
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 9fb0dac87004c577c24a6803dd6faf0c89067069 (clean)
+recorded: 2026-08-17T10:54:51.577288+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: wave-3 golden repair (in_place): accept intended L1 site/grouping, L6 edge/selection/intervention-audit, L7a structure_only, L8 distributed-scope, and L9 timing-summary public fields plus the coordinated tlspec v8 stamp
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 9fb0dac87004c577c24a6803dd6faf0c89067069 (clean)
+recorded: 2026-08-17T10:55:04.537625+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: wave-3 golden repair (train_batchnorm): accept intended L1 site/grouping, L6 edge/selection/intervention-audit, L7a structure_only, L8 distributed-scope, and L9 timing-summary fields plus tlspec v8; the run stage now gives the intended typed BufferSinkRoutingError for mutable train-mode buffers
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 9fb0dac87004c577c24a6803dd6faf0c89067069 (clean)
+recorded: 2026-08-17T10:55:17.426084+00:00

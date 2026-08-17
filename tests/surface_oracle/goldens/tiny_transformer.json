@@ -234,9 +234,12 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [
      "transpose_1_1"
     ],
+    "site_key": "s1|encoder|add||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -510,9 +513,12 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [
      "linear_3_29"
     ],
+    "site_key": "s1|encoder|add||2",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -810,7 +816,10 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|contiguous||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -1108,7 +1117,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.dropout1|dropout||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -1403,7 +1415,10 @@
      3,
      8
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.dropout|dropout||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -1700,7 +1715,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.dropout2|dropout||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -1986,10 +2004,13 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [
      "getitem_2_9",
      "getitem_3_10"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|getitem||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -2275,10 +2296,13 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [
      "getitem_1_8",
      "getitem_3_10"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|getitem||2",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -2564,10 +2588,13 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [
      "getitem_1_8",
      "getitem_2_9"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|getitem||3",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -2816,7 +2843,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||input||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -3143,7 +3173,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.norm1|layernorm||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -3467,7 +3500,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.norm2|layernorm||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -3784,7 +3820,10 @@
      2,
      12
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|linear||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -4095,7 +4134,10 @@
      6,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|linear||2",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -4411,9 +4453,12 @@
      3,
      8
     ],
+    "shape_summary": null,
     "siblings": [
      "add_2_34"
     ],
+    "site_key": "s1|encoder/encoder.linear1|linear||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -4730,7 +4775,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.linear2|linear||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -4996,7 +5044,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||output||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -5283,7 +5334,10 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|permute||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -5562,7 +5616,10 @@
      3,
      8
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder|relu||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -5843,7 +5900,10 @@
      6,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|reshape||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -6145,7 +6205,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|scaleddotproductattention||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -6436,7 +6499,10 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|squeeze||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -6720,9 +6786,12 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [
      "add_1_27"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -7017,7 +7086,10 @@
      1,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||2",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -7308,7 +7380,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||3",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -7597,7 +7672,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||4",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -7886,7 +7964,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||5",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -8175,7 +8256,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||6",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -8465,7 +8549,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|unflatten||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -8757,7 +8844,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|unsqueeze||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -9043,7 +9133,10 @@
      4,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -9327,7 +9420,10 @@
      4,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||2",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -9611,7 +9707,10 @@
      4,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||3",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -9900,7 +9999,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||4",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -10190,7 +10292,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||5",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -10480,7 +10585,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||6",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -10763,7 +10871,10 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||7",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -14992,6 +15103,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>",
      "<torchlens.intervention.types.EdgeUseRecord>"
@@ -15273,6 +15386,7 @@
     "siblings": [
      "transpose_1_1"
     ],
+    "site_key": "s1|encoder|add||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -15396,6 +15510,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>",
      "<torchlens.intervention.types.EdgeUseRecord>"
@@ -15677,6 +15793,7 @@
     "siblings": [
      "linear_3_29"
     ],
+    "site_key": "s1|encoder|add||2",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -15819,6 +15936,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -16078,6 +16197,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|contiguous||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -16227,6 +16347,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -16497,6 +16619,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.dropout1|dropout||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -16643,6 +16766,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -16921,6 +17046,7 @@
      8
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.dropout|dropout||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -17069,6 +17195,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -17339,6 +17467,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.dropout2|dropout||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -17479,6 +17608,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -17743,6 +17874,7 @@
      "getitem_2_9",
      "getitem_3_10"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|getitem||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -17883,6 +18015,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -18147,6 +18281,7 @@
      "getitem_1_8",
      "getitem_3_10"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|getitem||2",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -18287,6 +18422,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -18551,6 +18688,7 @@
      "getitem_1_8",
      "getitem_2_9"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|getitem||3",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -18661,6 +18799,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [],
     "equivalence_class": "input_2_3_4_torch.float32",
     "equivalent_ops": {
@@ -18889,6 +19029,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1||input||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -19050,6 +19191,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -19353,6 +19496,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.norm1|layernorm||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -19511,6 +19655,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -19810,6 +19956,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.norm2|layernorm||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -19968,6 +20115,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -20244,6 +20393,7 @@
      12
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|linear||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -20398,6 +20548,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -20671,6 +20823,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|linear||2",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -20823,6 +20976,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -21107,6 +21262,7 @@
     "siblings": [
      "add_2_34"
     ],
+    "site_key": "s1|encoder/encoder.linear1|linear||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -21260,6 +21416,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -21550,6 +21708,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.linear2|linear||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -21655,6 +21814,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [],
     "equivalence_class": "output_1_2_3_4_torch.float32",
     "equivalent_ops": {
@@ -21925,6 +22086,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1||output||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -22065,6 +22227,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -22336,6 +22500,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|permute||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -22472,6 +22637,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -22734,6 +22901,7 @@
      8
     ],
     "siblings": [],
+    "site_key": "s1|encoder|relu||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -22874,6 +23042,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -23135,6 +23305,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|reshape||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -23286,6 +23457,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>",
      "<torchlens.intervention.types.EdgeUseRecord>",
@@ -23587,6 +23760,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|scaleddotproductattention||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -23732,6 +23906,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -23996,6 +24172,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|squeeze||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -24134,6 +24311,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -24401,6 +24580,7 @@
     "siblings": [
      "add_1_27"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -24546,6 +24726,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -24817,6 +24999,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||2",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -24960,6 +25143,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -25227,6 +25412,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||3",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -25368,6 +25554,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -25635,6 +25823,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||4",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -25776,6 +25965,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -26043,6 +26234,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||5",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -26180,6 +26372,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -26459,6 +26653,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||6",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -26604,6 +26799,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -26874,6 +27071,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|unflatten||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -27018,6 +27216,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -27283,6 +27483,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|unsqueeze||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -27425,6 +27626,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -27691,6 +27894,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -27831,6 +28035,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -28097,6 +28303,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||2",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -28237,6 +28444,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -28503,6 +28712,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||3",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -28647,6 +28857,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -28917,6 +29129,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||4",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -29062,6 +29275,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -29332,6 +29547,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||5",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -29477,6 +29693,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -29747,6 +29965,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||6",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -29888,6 +30107,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -30151,6 +30372,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||7",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -31229,6 +31451,7 @@
    "_capture_outcome": "<torchlens.capture.outcome.CaptureOutcome>",
    "_code_context_cache": "<skipped: internal cache keyed by runtime code-object ids>",
    "_containers": "<raises AttributeError>",
+   "_distributed_plane_p": null,
    "_fast_run_session": null,
    "_final_to_raw_layer_labels": {
     "\"add_1_27\"": "add_1_28_raw",
@@ -32732,6 +32955,8 @@
    "decoded_output": null,
    "derived_grads": "<torchlens.data_classes.derived_grad.DerivedGradAccessor>",
    "detach_saved_activations": false,
+   "distributed_scope": null,
+   "edges": "<raises SelectionError>",
    "emit_nvtx": false,
    "escape_detector_backward_coverage": "not_armed",
    "escape_detector_callback_ns": 0,
@@ -32838,12 +33063,25 @@
    "forward_source_location": "<repo>/tests/capture_oracle/_models.py:240",
    "func_calls_duration": "<measured>",
    "grad_fn_calls": "<torchlens.data_classes._trace_accessors.TraceGradFnCallAccessor>",
+   "grad_fn_fire_timings": "<measured>",
    "grad_fn_logs": {},
    "grad_fn_order": [],
+   "grad_fn_site_summary": {},
    "grad_fns": "<torchlens.data_classes.grad_fn.GradFnAccessor>",
    "grad_transform": null,
    "grad_transform_repr": null,
    "graph_shape_hash": "b8f1b57db90204955c1bc81bc11fa4e1ee82999691c8e93fd671381dc69e2709",
+   "grouping": "structural",
+   "grouping_policy": {
+    "\"detector\"": "grouper_v1",
+    "\"effective\"": true,
+    "\"folded_sites\"": "none",
+    "\"policy\"": "structural",
+    "\"requested\"": "structural",
+    "\"schema\"": "grouping_policy_v1",
+    "\"settlement_note\"": null,
+    "\"site_join\"": "none"
+   },
    "halt_frontier": null,
    "halt_reason": null,
    "halted": false,
@@ -32874,6 +33112,7 @@
    "internal_source_layers": "<torchlens.data_classes.layer.LayerAccessor>",
    "internal_source_ops": [],
    "internally_terminated_bool_ops": [],
+   "intervention_audit": [],
    "intervention_ready": false,
    "is_appended": false,
    "is_branching": true,
@@ -35289,7 +35528,8 @@
    "sibling_events": [],
    "state": "TraceState.PRISTINE",
    "state_history": [],
-   "tlspec_version": 7,
+   "structure_only": false,
+   "tlspec_version": 8,
    "total_activation_memory": "<measured>",
    "total_autograd_memory": "<measured>",
    "total_backward_duration": "<measured>",
@@ -35548,9 +35788,12 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [
      "transpose_1_1"
     ],
+    "site_key": "s1|encoder|add||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -35824,9 +36067,12 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [
      "linear_3_29"
     ],
+    "site_key": "s1|encoder|add||2",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -36124,7 +36370,10 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|contiguous||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -36422,7 +36671,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.dropout1|dropout||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -36717,7 +36969,10 @@
      3,
      8
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.dropout|dropout||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -37014,7 +37269,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.dropout2|dropout||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -37300,10 +37558,13 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [
      "getitem_2_9",
      "getitem_3_10"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|getitem||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -37589,10 +37850,13 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [
      "getitem_1_8",
      "getitem_3_10"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|getitem||2",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -37878,10 +38142,13 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [
      "getitem_1_8",
      "getitem_2_9"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|getitem||3",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -38130,7 +38397,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||input||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -38457,7 +38727,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.norm1|layernorm||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -38781,7 +39054,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.norm2|layernorm||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -39098,7 +39374,10 @@
      2,
      12
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|linear||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -39409,7 +39688,10 @@
      6,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|linear||2",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -39725,9 +40007,12 @@
      3,
      8
     ],
+    "shape_summary": null,
     "siblings": [
      "add_2_34"
     ],
+    "site_key": "s1|encoder/encoder.linear1|linear||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -40044,7 +40329,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.linear2|linear||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -40310,7 +40598,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||output||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -40597,7 +40888,10 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|permute||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -40876,7 +41170,10 @@
      3,
      8
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder|relu||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -41157,7 +41454,10 @@
      6,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|reshape||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -41459,7 +41759,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|scaleddotproductattention||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -41750,7 +42053,10 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|squeeze||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -42034,9 +42340,12 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [
      "add_1_27"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -42331,7 +42640,10 @@
      1,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||2",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -42622,7 +42934,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||3",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -42911,7 +43226,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||4",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -43200,7 +43518,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||5",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -43489,7 +43810,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||6",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -43779,7 +44103,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|unflatten||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -44071,7 +44398,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|unsqueeze||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -44357,7 +44687,10 @@
      4,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -44641,7 +44974,10 @@
      4,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||2",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -44925,7 +45261,10 @@
      4,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||3",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -45214,7 +45553,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||4",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -45504,7 +45846,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||5",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -45794,7 +46139,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||6",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -46077,7 +46425,10 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||7",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -50306,6 +50657,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>",
      "<torchlens.intervention.types.EdgeUseRecord>"
@@ -50587,6 +50940,7 @@
     "siblings": [
      "transpose_1_1"
     ],
+    "site_key": "s1|encoder|add||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -50710,6 +51064,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>",
      "<torchlens.intervention.types.EdgeUseRecord>"
@@ -50991,6 +51347,7 @@
     "siblings": [
      "linear_3_29"
     ],
+    "site_key": "s1|encoder|add||2",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -51133,6 +51490,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -51392,6 +51751,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|contiguous||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -51541,6 +51901,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -51811,6 +52173,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.dropout1|dropout||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -51957,6 +52320,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -52235,6 +52600,7 @@
      8
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.dropout|dropout||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -52383,6 +52749,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -52653,6 +53021,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.dropout2|dropout||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -52793,6 +53162,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -53057,6 +53428,7 @@
      "getitem_2_9",
      "getitem_3_10"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|getitem||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -53197,6 +53569,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -53461,6 +53835,7 @@
      "getitem_1_8",
      "getitem_3_10"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|getitem||2",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -53601,6 +53976,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -53865,6 +54242,7 @@
      "getitem_1_8",
      "getitem_2_9"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|getitem||3",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -53975,6 +54353,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [],
     "equivalence_class": "input_2_3_4_torch.float32",
     "equivalent_ops": {
@@ -54203,6 +54583,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1||input||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -54364,6 +54745,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -54667,6 +55050,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.norm1|layernorm||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -54825,6 +55209,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -55124,6 +55510,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.norm2|layernorm||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -55282,6 +55669,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -55558,6 +55947,7 @@
      12
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|linear||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -55712,6 +56102,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -55985,6 +56377,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|linear||2",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -56137,6 +56530,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -56421,6 +56816,7 @@
     "siblings": [
      "add_2_34"
     ],
+    "site_key": "s1|encoder/encoder.linear1|linear||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -56574,6 +56970,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -56864,6 +57262,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.linear2|linear||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -56969,6 +57368,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [],
     "equivalence_class": "output_1_2_3_4_torch.float32",
     "equivalent_ops": {
@@ -57239,6 +57640,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1||output||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -57379,6 +57781,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -57650,6 +58054,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|permute||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -57786,6 +58191,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -58048,6 +58455,7 @@
      8
     ],
     "siblings": [],
+    "site_key": "s1|encoder|relu||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -58188,6 +58596,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -58449,6 +58859,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|reshape||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -58600,6 +59011,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>",
      "<torchlens.intervention.types.EdgeUseRecord>",
@@ -58901,6 +59314,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|scaleddotproductattention||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -59046,6 +59460,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -59310,6 +59726,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|squeeze||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -59448,6 +59865,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -59715,6 +60134,7 @@
     "siblings": [
      "add_1_27"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -59860,6 +60280,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -60131,6 +60553,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||2",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -60274,6 +60697,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -60541,6 +60966,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||3",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -60682,6 +61108,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -60949,6 +61377,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||4",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -61090,6 +61519,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -61357,6 +61788,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||5",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -61494,6 +61926,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -61773,6 +62207,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||6",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -61918,6 +62353,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -62188,6 +62625,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|unflatten||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -62332,6 +62770,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -62597,6 +63037,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|unsqueeze||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -62739,6 +63180,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -63005,6 +63448,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -63145,6 +63589,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -63411,6 +63857,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||2",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -63551,6 +63998,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -63817,6 +64266,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||3",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -63961,6 +64411,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -64231,6 +64683,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||4",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -64376,6 +64829,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -64646,6 +65101,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||5",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -64791,6 +65247,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -65061,6 +65519,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||6",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -65202,6 +65661,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -65465,6 +65926,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||7",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -66543,6 +67005,7 @@
    "_capture_outcome": "<torchlens.capture.outcome.CaptureOutcome>",
    "_code_context_cache": "<skipped: internal cache keyed by runtime code-object ids>",
    "_containers": "<raises AttributeError>",
+   "_distributed_plane_p": null,
    "_fast_run_session": null,
    "_final_to_raw_layer_labels": {
     "\"add_1_27\"": "add_1_28_raw",
@@ -68046,6 +68509,8 @@
    "decoded_output": null,
    "derived_grads": "<torchlens.data_classes.derived_grad.DerivedGradAccessor>",
    "detach_saved_activations": false,
+   "distributed_scope": null,
+   "edges": "<raises SelectionError>",
    "emit_nvtx": false,
    "escape_detector_backward_coverage": "not_armed",
    "escape_detector_callback_ns": 0,
@@ -68152,12 +68617,25 @@
    "forward_source_location": "<repo>/tests/capture_oracle/_models.py:240",
    "func_calls_duration": "<measured>",
    "grad_fn_calls": "<torchlens.data_classes._trace_accessors.TraceGradFnCallAccessor>",
+   "grad_fn_fire_timings": "<measured>",
    "grad_fn_logs": {},
    "grad_fn_order": [],
+   "grad_fn_site_summary": {},
    "grad_fns": "<torchlens.data_classes.grad_fn.GradFnAccessor>",
    "grad_transform": null,
    "grad_transform_repr": null,
    "graph_shape_hash": "b8f1b57db90204955c1bc81bc11fa4e1ee82999691c8e93fd671381dc69e2709",
+   "grouping": "structural",
+   "grouping_policy": {
+    "\"detector\"": "grouper_v1",
+    "\"effective\"": true,
+    "\"folded_sites\"": "none",
+    "\"policy\"": "structural",
+    "\"requested\"": "structural",
+    "\"schema\"": "grouping_policy_v1",
+    "\"settlement_note\"": null,
+    "\"site_join\"": "none"
+   },
    "halt_frontier": null,
    "halt_reason": null,
    "halted": false,
@@ -68188,6 +68666,7 @@
    "internal_source_layers": "<torchlens.data_classes.layer.LayerAccessor>",
    "internal_source_ops": [],
    "internally_terminated_bool_ops": [],
+   "intervention_audit": [],
    "intervention_ready": false,
    "is_appended": false,
    "is_branching": true,
@@ -70664,7 +71143,8 @@
    ],
    "state": "TraceState.PRISTINE",
    "state_history": [],
-   "tlspec_version": 7,
+   "structure_only": false,
+   "tlspec_version": 8,
    "total_activation_memory": "<measured>",
    "total_autograd_memory": "<measured>",
    "total_backward_duration": "<measured>",
@@ -70926,9 +71406,12 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [
      "transpose_1_1"
     ],
+    "site_key": "s1|encoder|add||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -71202,9 +71685,12 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [
      "linear_3_29"
     ],
+    "site_key": "s1|encoder|add||2",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -71502,7 +71988,10 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|contiguous||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -71800,7 +72289,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.dropout1|dropout||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -72095,7 +72587,10 @@
      3,
      8
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.dropout|dropout||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -72392,7 +72887,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.dropout2|dropout||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -72678,10 +73176,13 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [
      "getitem_2_9",
      "getitem_3_10"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|getitem||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -72967,10 +73468,13 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [
      "getitem_1_8",
      "getitem_3_10"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|getitem||2",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -73256,10 +73760,13 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [
      "getitem_1_8",
      "getitem_2_9"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|getitem||3",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -73508,7 +74015,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||input||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -73835,7 +74345,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.norm1|layernorm||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -74159,7 +74672,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.norm2|layernorm||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -74476,7 +74992,10 @@
      2,
      12
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|linear||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -74787,7 +75306,10 @@
      6,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|linear||2",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -75103,9 +75625,12 @@
      3,
      8
     ],
+    "shape_summary": null,
     "siblings": [
      "add_2_34"
     ],
+    "site_key": "s1|encoder/encoder.linear1|linear||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -75422,7 +75947,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.linear2|linear||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -75688,7 +76216,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||output||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -75975,7 +76506,10 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|permute||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -76254,7 +76788,10 @@
      3,
      8
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder|relu||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -76535,7 +77072,10 @@
      6,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|reshape||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -76837,7 +77377,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|scaleddotproductattention||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -77128,7 +77671,10 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|squeeze||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -77412,9 +77958,12 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [
      "add_1_27"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -77709,7 +78258,10 @@
      1,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||2",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -78000,7 +78552,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||3",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -78289,7 +78844,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||4",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -78578,7 +79136,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||5",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -78867,7 +79428,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||6",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -79157,7 +79721,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|unflatten||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -79449,7 +80016,10 @@
      3,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|unsqueeze||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -79735,7 +80305,10 @@
      4,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -80019,7 +80592,10 @@
      4,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||2",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -80303,7 +80879,10 @@
      4,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||3",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -80592,7 +81171,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||4",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -80882,7 +81464,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||5",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -81172,7 +81757,10 @@
      3,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||6",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -81455,7 +82043,10 @@
      2,
      4
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||7",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -85684,6 +86275,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>",
      "<torchlens.intervention.types.EdgeUseRecord>"
@@ -85965,6 +86558,7 @@
     "siblings": [
      "transpose_1_1"
     ],
+    "site_key": "s1|encoder|add||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -86088,6 +86682,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>",
      "<torchlens.intervention.types.EdgeUseRecord>"
@@ -86369,6 +86965,7 @@
     "siblings": [
      "linear_3_29"
     ],
+    "site_key": "s1|encoder|add||2",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -86511,6 +87108,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -86770,6 +87369,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|contiguous||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -86919,6 +87519,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -87189,6 +87791,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.dropout1|dropout||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -87335,6 +87938,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -87613,6 +88218,7 @@
      8
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.dropout|dropout||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -87761,6 +88367,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -88031,6 +88639,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.dropout2|dropout||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -88171,6 +88780,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -88435,6 +89046,7 @@
      "getitem_2_9",
      "getitem_3_10"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|getitem||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -88575,6 +89187,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -88839,6 +89453,7 @@
      "getitem_1_8",
      "getitem_3_10"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|getitem||2",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -88979,6 +89594,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -89243,6 +89860,7 @@
      "getitem_1_8",
      "getitem_2_9"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|getitem||3",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -89353,6 +89971,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [],
     "equivalence_class": "input_2_3_4_torch.float32",
     "equivalent_ops": {
@@ -89581,6 +90201,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1||input||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -89742,6 +90363,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -90045,6 +90668,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.norm1|layernorm||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -90203,6 +90827,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -90502,6 +91128,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.norm2|layernorm||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -90660,6 +91287,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -90936,6 +91565,7 @@
      12
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|linear||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -91090,6 +91720,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -91363,6 +91995,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|linear||2",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -91515,6 +92148,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -91799,6 +92434,7 @@
     "siblings": [
      "add_2_34"
     ],
+    "site_key": "s1|encoder/encoder.linear1|linear||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -91952,6 +92588,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -92242,6 +92880,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.linear2|linear||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -92347,6 +92986,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [],
     "equivalence_class": "output_1_2_3_4_torch.float32",
     "equivalent_ops": {
@@ -92617,6 +93258,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1||output||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -92757,6 +93399,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -93028,6 +93672,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|permute||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -93164,6 +93809,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -93426,6 +94073,7 @@
      8
     ],
     "siblings": [],
+    "site_key": "s1|encoder|relu||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -93566,6 +94214,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -93827,6 +94477,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|reshape||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -93978,6 +94629,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>",
      "<torchlens.intervention.types.EdgeUseRecord>",
@@ -94279,6 +94932,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|scaleddotproductattention||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -94424,6 +95078,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -94688,6 +95344,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|squeeze||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -94826,6 +95483,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -95093,6 +95752,7 @@
     "siblings": [
      "add_1_27"
     ],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -95238,6 +95898,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -95509,6 +96171,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||2",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -95652,6 +96315,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -95919,6 +96584,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||3",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -96060,6 +96726,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -96327,6 +96995,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||4",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -96468,6 +97137,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -96735,6 +97406,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||5",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -96872,6 +97544,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -97151,6 +97825,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|transpose||6",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -97296,6 +97971,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -97566,6 +98243,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|unflatten||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -97710,6 +98388,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -97975,6 +98655,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|unsqueeze||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -98117,6 +98798,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -98383,6 +99066,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -98523,6 +99207,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -98789,6 +99475,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||2",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -98929,6 +99616,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -99195,6 +99884,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||3",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -99339,6 +100029,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -99609,6 +100301,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||4",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -99754,6 +100447,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -100024,6 +100719,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||5",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -100169,6 +100865,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -100439,6 +101137,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||6",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -100580,6 +101279,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -100843,6 +101544,7 @@
      4
     ],
     "siblings": [],
+    "site_key": "s1|encoder/encoder.self_attn|view||7",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -101921,6 +102623,7 @@
    "_capture_outcome": "<torchlens.capture.outcome.CaptureOutcome>",
    "_code_context_cache": "<skipped: internal cache keyed by runtime code-object ids>",
    "_containers": "<raises AttributeError>",
+   "_distributed_plane_p": null,
    "_fast_run_session": null,
    "_final_to_raw_layer_labels": {
     "\"add_1_27\"": "add_1_28_raw",
@@ -103424,6 +104127,8 @@
    "decoded_output": null,
    "derived_grads": "<torchlens.data_classes.derived_grad.DerivedGradAccessor>",
    "detach_saved_activations": false,
+   "distributed_scope": null,
+   "edges": "<raises SelectionError>",
    "emit_nvtx": false,
    "escape_detector_backward_coverage": "not_armed",
    "escape_detector_callback_ns": 0,
@@ -103530,12 +104235,25 @@
    "forward_source_location": "<repo>/tests/capture_oracle/_models.py:240",
    "func_calls_duration": "<measured>",
    "grad_fn_calls": "<torchlens.data_classes._trace_accessors.TraceGradFnCallAccessor>",
+   "grad_fn_fire_timings": "<measured>",
    "grad_fn_logs": {},
    "grad_fn_order": [],
+   "grad_fn_site_summary": {},
    "grad_fns": "<torchlens.data_classes.grad_fn.GradFnAccessor>",
    "grad_transform": null,
    "grad_transform_repr": null,
    "graph_shape_hash": "b8f1b57db90204955c1bc81bc11fa4e1ee82999691c8e93fd671381dc69e2709",
+   "grouping": "structural",
+   "grouping_policy": {
+    "\"detector\"": "grouper_v1",
+    "\"effective\"": true,
+    "\"folded_sites\"": "none",
+    "\"policy\"": "structural",
+    "\"requested\"": "structural",
+    "\"schema\"": "grouping_policy_v1",
+    "\"settlement_note\"": null,
+    "\"site_join\"": "none"
+   },
    "halt_frontier": null,
    "halt_reason": null,
    "halted": false,
@@ -103566,6 +104284,7 @@
    "internal_source_layers": "<torchlens.data_classes.layer.LayerAccessor>",
    "internal_source_ops": [],
    "internally_terminated_bool_ops": [],
+   "intervention_audit": [],
    "intervention_ready": false,
    "is_appended": false,
    "is_branching": true,
@@ -105989,7 +106708,8 @@
      "\"timestamp\"": "<measured>"
     }
    ],
-   "tlspec_version": 7,
+   "structure_only": false,
+   "tlspec_version": 8,
    "total_activation_memory": "<measured>",
    "total_autograd_memory": "<measured>",
    "total_backward_duration": "<measured>",
