@@ -332,7 +332,19 @@ DOC_FENCE_EXEMPT: dict[str, str] = {
     "rank_layout.md": "pending execution coverage (graphviz layout demo)",
     "receptive_projective_fields.md": "pending execution coverage",
     "reference/hash.md": "pending execution coverage",
+    "reference/episode_capture.md": (
+        "the fence is a real usage example but is not self-contained (it references an "
+        "ambient stepped `model`/`prompt_ids` the canonical contract does not provide) "
+        "and episode capture is DIAGNOSTIC-TIER cost by the doc's own measurements "
+        "(N=20 is 79 s on gpt2-124M CPU), so executing it would buy a slow test and no "
+        "coverage the L2 episode suite does not already carry"
+    ),
     "reference/limitations.md": "illustrative failure-mode fragments, not runnable programs",
+    "reference/predicate_runtime.md": (
+        "the fence is a Protocol DECLARATION sketch (`...` bodies, and `Protocol`/"
+        "`RecordContext` deliberately unimported) -- there is no program to run; the "
+        "shipped protocol itself is pinned by the predicate-registry suite"
+    ),
     "reference/runnable_tlspec_contract.md": "contract fragments reference artifacts not in-repo",
     "semantic_io.md": "pending execution coverage (autoroute/facet demos)",
     "speed_optimized_defaults.md": "pending execution coverage",
