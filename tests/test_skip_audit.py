@@ -48,7 +48,7 @@ from pathlib import Path
 import pytest
 
 # NOTE: no module-level smoke pytestmark -- the -O subprocess test below is
-# `heavy`, and the tier markers are additive/disjoint (tests/test_marker_lint.py).
+# `slow`, and the tier markers are additive/disjoint (tests/test_marker_lint.py).
 TESTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TESTS_DIR.parent
 
@@ -1189,7 +1189,7 @@ def test_o_leg_sentinel_executes() -> None:
         pytest.fail("sentinel arithmetic failed")
 
 
-@pytest.mark.heavy
+@pytest.mark.slow
 def test_requires_assertions_marker_engages_under_python_O(tmp_path: Path) -> None:
     """``requires_assertions`` tests SKIP (never pass/fail) under ``python -O``.
 
