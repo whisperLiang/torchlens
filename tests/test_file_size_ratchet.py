@@ -90,6 +90,13 @@ _NEW_FILE_LINE_CAP = 2000
 #: the v7 save boundary in _io/bundle). PRE-SPRINT BASELINE at 75439a67:
 #:   validation/core.py 5300 | data_classes/op.py 5200
 #:   (_io/bundle.py already listed above at 4450; L6 re-steps 4500 -> 4550)
+#: 2026-08-17 label-geometry portability fix: _render_edges.py 2350 -> 2450
+#: (measured 2411) for the factored rolled-edge structural predicates
+#: (_is_rolled_cycle_body_edge / _is_rolled_multistep_skip_edge) whose
+#: docstrings carry the font-metric-portability rationale. The rolled-edge
+#: classification family (~400 lines incl. _RolledEdgeMaps and the merge
+#: predicates) is the natural split candidate for the post-features debloat
+#: pass.
 _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/validation/core.py": 5450,
     "torchlens/data_classes/op.py": 5250,
@@ -122,7 +129,7 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/data_classes/layer.py": 2350,
     "torchlens/postprocess/loop_grouping_adapter.py": 2600,
     "torchlens/visualization/_render_leaf.py": 2400,
-    "torchlens/visualization/_render_edges.py": 2350,
+    "torchlens/visualization/_render_edges.py": 2450,
     # Raised 2400 -> 2425 at the L5 channel-core merge (color_by + tri-state
     # show_legend): options.py is the ONE serialized shared option surface
     # every feature lane's grouped options must land on, so reviewed
