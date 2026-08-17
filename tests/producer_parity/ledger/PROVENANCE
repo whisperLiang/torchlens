@@ -121,3 +121,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 9d993ccbc76c9eb87e6f2649601d7a30d8b953b8 (dirty)
 recorded: 2026-08-16T22:22:33.153256+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: fix(viz) label-geometry portability: factored _is_rolled_cycle_body_edge/_is_rolled_multistep_skip_edge helpers in _render_edges.py add 4 step_index consumer sites (same reads, new function homes)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: ee50402f15d0b98429d9498eaff2b0670ca34197 (clean)
+recorded: 2026-08-17T00:43:01.723415+00:00
