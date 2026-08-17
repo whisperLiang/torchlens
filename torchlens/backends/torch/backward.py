@@ -553,10 +553,14 @@ def _enqueue_implicit_pass_drain_callback(
             return
         _close_implicit_backward_pass_if_open(live_trace, _close_path="engine_drain")
 
+    from ...utils._torch_compat import get_autograd_engine_queue_callback
+
+    queue_callback = get_autograd_engine_queue_callback()
+    if queue_callback is None:
+        return None
     try:
-        engine = torch.autograd.Variable._execution_engine
-        engine.queue_callback(_drain_callback)
-    except (AttributeError, RuntimeError, TypeError):
+        queue_callback(_drain_callback)
+    except (RuntimeError, TypeError):
         return None
     return _drain_callback
 
@@ -3701,15 +3705,13 @@ def _resolve_checkpoint_hook_cls() -> type | None:
 
     A torch without the private name yields ``None`` -> classifier
     unavailable -> NO tokens (degrade class D1, fail-closed: an unrecognized
-    checkpoint variant can never mint a false token).
+    checkpoint variant can never mint a false token). Routed through the
+    compat chokepoint; absence flips ``HAS_CHECKPOINT_HOOK_CLASS`` there.
     """
 
-    try:
-        import torch.utils.checkpoint as checkpoint_module
-    except ImportError:  # torch always ships the module
-        return None
-    resolved = getattr(checkpoint_module, "_checkpoint_hook", None)
-    return resolved if isinstance(resolved, type) else None
+    from ...utils._torch_compat import get_checkpoint_hook_class
+
+    return get_checkpoint_hook_class()
 
 
 def _checkpoint_token_state(trace: Any) -> dict[str, Any]:

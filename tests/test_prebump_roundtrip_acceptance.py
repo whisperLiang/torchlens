@@ -270,11 +270,10 @@ def _second_generation(loaded: tl.Trace, tmp_path, name: str) -> tl.Trace:
     """Re-save the LOADED trace under the switch and load again (stability)."""
 
     path = tmp_path / f"{name}_gen2.tlspec"
-    with activate_prerelease_fields():
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            tl.save(loaded, str(path))
-            return tl.load(str(path))
+    with activate_prerelease_fields(), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        tl.save(loaded, str(path))
+        return tl.load(str(path))
 
 
 def _tiny_trace() -> tl.Trace:

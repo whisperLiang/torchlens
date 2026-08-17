@@ -79,6 +79,10 @@ __all__ = [
     "HAS_FAKE_TENSOR_MODE",
     "HAS_FUNCOL_GROUP_RESOLUTION",
     "HAS_FUNCOL_WAIT_INTERPOSITION",
+    "HAS_FUNCOL_MODULE",
+    "HAS_ASYNC_COLLECTIVE_TENSOR",
+    "HAS_CHECKPOINT_HOOK_CLASS",
+    "HAS_AUTOGRAD_ENGINE_QUEUE_CALLBACK",
     "HAS_JIT_SCHEMA_ENUMERATION",
     "HAS_TENSORBASE_CLASS",
     "HAS_VARIABLE_FUNCTIONS_CLASS",
@@ -1342,6 +1346,19 @@ _FUNCOL_GROUP_RESOLVERS: tuple[Callable[..., Any], Callable[..., Any]] | None = 
 _FUNCOL_GROUP_RESOLUTION_PROBED: bool = False
 HAS_FUNCOL_WAIT_INTERPOSITION: bool = False
 _FUNCOL_WAIT_INTERPOSITION_PROBED: bool = False
+_FUNCOL_WAIT_REDISPATCH: tuple[Any, Callable[[], Any]] | None = None
+HAS_FUNCOL_MODULE: bool = False
+_FUNCOL_MODULE_OBJ: Any | None = None
+_FUNCOL_MODULE_PROBED: bool = False
+HAS_ASYNC_COLLECTIVE_TENSOR: bool = False
+_ASYNC_COLLECTIVE_TENSOR_TYPE: type[Any] | None = None
+_ASYNC_COLLECTIVE_TENSOR_PROBED: bool = False
+HAS_CHECKPOINT_HOOK_CLASS: bool = False
+_CHECKPOINT_HOOK_CLASS: type[Any] | None = None
+_CHECKPOINT_HOOK_CLASS_PROBED: bool = False
+HAS_AUTOGRAD_ENGINE_QUEUE_CALLBACK: bool = False
+_AUTOGRAD_ENGINE_QUEUE_CALLBACK: Callable[..., Any] | None = None
+_AUTOGRAD_ENGINE_QUEUE_CALLBACK_PROBED: bool = False
 
 _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_VARIABLE_FUNCTIONS",
@@ -1379,6 +1396,10 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_DTENSOR_SHARD_GEOMETRY",
     "HAS_FUNCOL_GROUP_RESOLUTION",
     "HAS_FUNCOL_WAIT_INTERPOSITION",
+    "HAS_FUNCOL_MODULE",
+    "HAS_ASYNC_COLLECTIVE_TENSOR",
+    "HAS_CHECKPOINT_HOOK_CLASS",
+    "HAS_AUTOGRAD_ENGINE_QUEUE_CALLBACK",
     "HAS_DYNAMO_IS_COMPILING",
     "HAS_SET_STANCE",
     "HAS_DYNAMO_COMPILE_COUNTERS",
@@ -1423,7 +1444,23 @@ _LAZY_PROBE_FAMILIES: dict[str, tuple[str, ...]] = {
         "HAS_FUNCOL_GROUP_RESOLUTION",
         "_FUNCOL_GROUP_RESOLVERS",
     ),
-    "_FUNCOL_WAIT_INTERPOSITION_PROBED": ("HAS_FUNCOL_WAIT_INTERPOSITION",),
+    "_FUNCOL_WAIT_INTERPOSITION_PROBED": (
+        "HAS_FUNCOL_WAIT_INTERPOSITION",
+        "_FUNCOL_WAIT_REDISPATCH",
+    ),
+    "_FUNCOL_MODULE_PROBED": ("HAS_FUNCOL_MODULE", "_FUNCOL_MODULE_OBJ"),
+    "_ASYNC_COLLECTIVE_TENSOR_PROBED": (
+        "HAS_ASYNC_COLLECTIVE_TENSOR",
+        "_ASYNC_COLLECTIVE_TENSOR_TYPE",
+    ),
+    "_CHECKPOINT_HOOK_CLASS_PROBED": (
+        "HAS_CHECKPOINT_HOOK_CLASS",
+        "_CHECKPOINT_HOOK_CLASS",
+    ),
+    "_AUTOGRAD_ENGINE_QUEUE_CALLBACK_PROBED": (
+        "HAS_AUTOGRAD_ENGINE_QUEUE_CALLBACK",
+        "_AUTOGRAD_ENGINE_QUEUE_CALLBACK",
+    ),
     "_DTENSOR_SHARD_GEOMETRY_PROBED": (
         "HAS_DTENSOR_SHARD_GEOMETRY",
         "_DTENSOR_SHARD_GEOMETRY_FN",
@@ -1635,6 +1672,15 @@ def get_torch_capability_snapshot() -> TorchCapabilitySnapshot:
     dynamo_is_compiling()
     _ensure_dynamo_orig_callable_marker_probed()
     get_dynamo_explain()
+    # L8/C2 + L9 privately-probed surfaces (fix/private-probe-routing): resolve
+    # so the snapshot reports real capabilities. The funcol pair imports
+    # torch.distributed like the DTensor/device-mesh forces above; the
+    # checkpoint/engine pair is a cheap always-shipped getattr chain.
+    get_funcol_module()
+    get_async_collective_tensor_type(force_probe=True)
+    probe_funcol_wait_interposition()
+    get_checkpoint_hook_class()
+    get_autograd_engine_queue_callback()
     snapshot = {name: bool(globals()[name]) for name in _CAPABILITY_ATTRS}
     snapshot["AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED"] = bool(AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED)
     return snapshot
@@ -2180,26 +2226,52 @@ def probe_funcol_wait_interposition() -> bool:
     ``torch.library.Library("_c10d_functional", "IMPL")`` wrapper for
     ``wait_tensor`` at the CPU key and redispatches below itself through
     ``torch._C._ExcludeDispatchKeyGuard`` (design-merge-ranks-c v5, 1.4c; probe
-    P3a). All four surfaces are feature-detected here; absence flips the named
+    P3a). All five surfaces (the guard trio, ``torch.library.Library``, and the
+    ``torch.ops._c10d_functional.wait_tensor.default`` op handle) are
+    feature-detected here; absence flips the named
     ``HAS_FUNCOL_WAIT_INTERPOSITION`` flag and funcol completions then stay
-    honestly ``unobserved`` (fail-closed disclosure, never a crash).
+    honestly ``unobserved`` (fail-closed disclosure, never a crash). The
+    resolved redispatch surfaces are served by
+    :func:`get_funcol_wait_redispatch`, so no caller ever touches the private
+    dispatcher spellings directly.
     """
 
     global HAS_FUNCOL_WAIT_INTERPOSITION, _FUNCOL_WAIT_INTERPOSITION_PROBED
+    global _FUNCOL_WAIT_REDISPATCH
 
     if not _FUNCOL_WAIT_INTERPOSITION_PROBED:
         library_cls = getattr(getattr(torch, "library", None), "Library", None)
         internals = getattr(torch, "_C", None)
-        HAS_FUNCOL_WAIT_INTERPOSITION = (
+        guard_cls = getattr(internals, "_ExcludeDispatchKeyGuard", None)
+        keyset_cls = getattr(internals, "DispatchKeySet", None)
+        cpu_key = getattr(getattr(internals, "DispatchKey", None), "CPU", None)
+        try:
+            wait_op: Any | None = torch.ops._c10d_functional.wait_tensor.default
+        except Exception:
+            wait_op = None
+        if (
             library_cls is not None
-            and getattr(internals, "_ExcludeDispatchKeyGuard", None) is not None
-            and getattr(internals, "DispatchKeySet", None) is not None
-            and getattr(getattr(internals, "DispatchKey", None), "CPU", None) is not None
+            and guard_cls is not None
+            and keyset_cls is not None
+            and cpu_key is not None
+            and wait_op is not None
             and _import_module_attr_or_none(
                 "torch.distributed._functional_collectives", "wait_tensor"
             )
             is not None
-        )
+        ):
+
+            def _exclude_cpu_dispatch_guard(
+                _guard_cls: Any = guard_cls, _keyset_cls: Any = keyset_cls, _cpu_key: Any = cpu_key
+            ) -> Any:
+                """Build the below-CPU-key redispatch guard for one wait call."""
+
+                return _guard_cls(_keyset_cls(_cpu_key))
+
+            _FUNCOL_WAIT_REDISPATCH = (wait_op, _exclude_cpu_dispatch_guard)
+        else:
+            _FUNCOL_WAIT_REDISPATCH = None
+        HAS_FUNCOL_WAIT_INTERPOSITION = _FUNCOL_WAIT_REDISPATCH is not None
         _FUNCOL_WAIT_INTERPOSITION_PROBED = True
     if not HAS_FUNCOL_WAIT_INTERPOSITION:
         mark_torch_capability_missing(
@@ -2208,6 +2280,163 @@ def probe_funcol_wait_interposition() -> bool:
             "(dispatcher wait interposition unavailable on this torch build)",
         )
     return HAS_FUNCOL_WAIT_INTERPOSITION
+
+
+def get_funcol_wait_redispatch() -> tuple[Any, Callable[[], Any]] | None:
+    """Return the wait-interposition redispatch surfaces, or ``None``.
+
+    Returns
+    -------
+    tuple[Any, Callable[[], Any]] | None
+        ``(wait_op, exclude_cpu_guard)`` where ``wait_op`` is the resolved
+        ``torch.ops._c10d_functional.wait_tensor.default`` op handle and
+        ``exclude_cpu_guard()`` builds a fresh
+        ``torch._C._ExcludeDispatchKeyGuard`` over the CPU dispatch key, or
+        ``None`` when :func:`probe_funcol_wait_interposition` reports the
+        capability absent (the flag flip and its disclosure happen there).
+    """
+
+    if not probe_funcol_wait_interposition():
+        return None
+    return _FUNCOL_WAIT_REDISPATCH
+
+
+def get_funcol_module() -> Any | None:
+    """Return ``torch.distributed._functional_collectives``, or ``None``.
+
+    Backs the funcol boundary wrap install/uninstall (merge-ranks C2
+    recording): the wraps must patch attributes on torch's REAL funcol module
+    object (a copy would never be consulted by user ``funcol.all_reduce``
+    calls), so this accessor hands out the module itself. The import is
+    eager on first call -- callers only reach it at distributed arm/disarm
+    time, never on the plain-capture hot path. Absence flips the named
+    ``HAS_FUNCOL_MODULE`` flag (visible in ``doctor()`` / ``compat.report()``)
+    and funcol calls then run unwrapped, exactly the pre-C2 disclosure class.
+    """
+
+    global HAS_FUNCOL_MODULE, _FUNCOL_MODULE_OBJ, _FUNCOL_MODULE_PROBED
+
+    if not _FUNCOL_MODULE_PROBED:
+        try:
+            import torch.distributed._functional_collectives as funcol_module
+
+            _FUNCOL_MODULE_OBJ = funcol_module
+        except Exception:
+            _FUNCOL_MODULE_OBJ = None
+        HAS_FUNCOL_MODULE = _FUNCOL_MODULE_OBJ is not None
+        _FUNCOL_MODULE_PROBED = True
+    if _FUNCOL_MODULE_OBJ is None:
+        mark_torch_capability_missing(
+            "HAS_FUNCOL_MODULE",
+            "functional-collective (funcol) calls run unwrapped; no funcol "
+            "boundary nodes are recorded (module unavailable on this build)",
+        )
+    return _FUNCOL_MODULE_OBJ
+
+
+def get_async_collective_tensor_type(*, force_probe: bool = False) -> type[Any] | None:
+    """Return funcol's ``AsyncCollectiveTensor`` class without an eager import.
+
+    Parameters
+    ----------
+    force_probe:
+        Import the funcol namespace even when it has never been imported in
+        this process. Diagnostic surfaces set this to report the real build
+        capability; capture paths keep the default.
+
+    Returns
+    -------
+    type[Any] | None
+        The ACT wrapper class, or ``None`` when unavailable or when the lazy
+        default defers the probe.
+
+    Notes
+    -----
+    Mirrors :func:`get_dtensor_type`: a live value can only *be* an ACT if
+    ``torch.distributed._functional_collectives`` is already in
+    ``sys.modules``, so the default path never pays the ``torch.distributed``
+    import on plain captures (the label chokepoint calls this per tensor
+    read). A probed absence flips the named ``HAS_ASYNC_COLLECTIVE_TENSOR``
+    flag: ACT unwrapping is then disabled and in-flight funcol destinations
+    would surface as opaque wrapper subclasses instead of their inner
+    tensors.
+    """
+
+    global HAS_ASYNC_COLLECTIVE_TENSOR, _ASYNC_COLLECTIVE_TENSOR_PROBED
+    global _ASYNC_COLLECTIVE_TENSOR_TYPE
+
+    if not _ASYNC_COLLECTIVE_TENSOR_PROBED:
+        if not force_probe and "torch.distributed._functional_collectives" not in sys.modules:
+            return None
+        act_type = _import_module_attr_or_none(
+            "torch.distributed._functional_collectives", "AsyncCollectiveTensor"
+        )
+        _ASYNC_COLLECTIVE_TENSOR_TYPE = act_type if isinstance(act_type, type) else None
+        HAS_ASYNC_COLLECTIVE_TENSOR = _ASYNC_COLLECTIVE_TENSOR_TYPE is not None
+        _ASYNC_COLLECTIVE_TENSOR_PROBED = True
+    if _ASYNC_COLLECTIVE_TENSOR_TYPE is None:
+        mark_torch_capability_missing(
+            "HAS_ASYNC_COLLECTIVE_TENSOR",
+            "AsyncCollectiveTensor unwrapping is disabled; in-flight funcol "
+            "destinations stay opaque wrapper values",
+        )
+    return _ASYNC_COLLECTIVE_TENSOR_TYPE
+
+
+def get_checkpoint_hook_class() -> type[Any] | None:
+    """Return torch's private non-reentrant checkpoint hook class, or ``None``.
+
+    Backs the L9 checkpoint-token classifier: a ``_checkpoint_hook`` context
+    enter is the identity basis for minting non-reentrant checkpoint tokens.
+    Absence flips the named ``HAS_CHECKPOINT_HOOK_CLASS`` flag and the
+    classifier degrades fail-closed (degrade class D1: NO tokens are minted,
+    so an unrecognized checkpoint variant can never mint a false token).
+    """
+
+    global HAS_CHECKPOINT_HOOK_CLASS, _CHECKPOINT_HOOK_CLASS
+    global _CHECKPOINT_HOOK_CLASS_PROBED
+
+    if not _CHECKPOINT_HOOK_CLASS_PROBED:
+        resolved = _import_module_attr_or_none("torch.utils.checkpoint", "_checkpoint_hook")
+        _CHECKPOINT_HOOK_CLASS = resolved if isinstance(resolved, type) else None
+        HAS_CHECKPOINT_HOOK_CLASS = _CHECKPOINT_HOOK_CLASS is not None
+        _CHECKPOINT_HOOK_CLASS_PROBED = True
+    if _CHECKPOINT_HOOK_CLASS is None:
+        mark_torch_capability_missing(
+            "HAS_CHECKPOINT_HOOK_CLASS",
+            "non-reentrant checkpoint token minting is disabled (fail-closed: "
+            "checkpoint invocation evidence degrades, no false token is minted)",
+        )
+    return _CHECKPOINT_HOOK_CLASS
+
+
+def get_autograd_engine_queue_callback() -> Callable[..., Any] | None:
+    """Return the autograd engine's ``queue_callback`` binding, or ``None``.
+
+    Backs the L9 implicit-backward engine-drain close path: a final callback
+    enqueued on ``torch.autograd.Variable._execution_engine`` closes the
+    implicit backward pass when the engine drains. Absence flips the named
+    ``HAS_AUTOGRAD_ENGINE_QUEUE_CALLBACK`` flag and the close falls back to
+    the always-armed sync-point backstop (a disclosure-path difference, never
+    a coverage gap).
+    """
+
+    global HAS_AUTOGRAD_ENGINE_QUEUE_CALLBACK, _AUTOGRAD_ENGINE_QUEUE_CALLBACK
+    global _AUTOGRAD_ENGINE_QUEUE_CALLBACK_PROBED
+
+    if not _AUTOGRAD_ENGINE_QUEUE_CALLBACK_PROBED:
+        engine = _nested_getattr_or_none(torch, ("autograd", "Variable", "_execution_engine"))
+        queue_callback = getattr(engine, "queue_callback", None) if engine is not None else None
+        _AUTOGRAD_ENGINE_QUEUE_CALLBACK = queue_callback if callable(queue_callback) else None
+        HAS_AUTOGRAD_ENGINE_QUEUE_CALLBACK = _AUTOGRAD_ENGINE_QUEUE_CALLBACK is not None
+        _AUTOGRAD_ENGINE_QUEUE_CALLBACK_PROBED = True
+    if _AUTOGRAD_ENGINE_QUEUE_CALLBACK is None:
+        mark_torch_capability_missing(
+            "HAS_AUTOGRAD_ENGINE_QUEUE_CALLBACK",
+            "implicit backward passes close at the next sync point instead of "
+            "at autograd engine drain (engine callback handle unavailable)",
+        )
+    return _AUTOGRAD_ENGINE_QUEUE_CALLBACK
 
 
 def get_torch_function_mode_stack_length() -> int | None:
