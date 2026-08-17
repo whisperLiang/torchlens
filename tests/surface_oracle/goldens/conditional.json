@@ -232,9 +232,12 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [
      "sum_1_3"
     ],
+    "site_key": "s1||add||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -477,7 +480,10 @@
     "saved_args": null,
     "saved_kwargs": null,
     "shape": [],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||gt||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -722,7 +728,10 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||input||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -974,7 +983,10 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||output||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -1226,7 +1238,10 @@
     "saved_args": null,
     "saved_kwargs": null,
     "shape": [],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||rand||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -1488,7 +1503,10 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||sigmoid||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -1742,9 +1760,12 @@
     "saved_args": null,
     "saved_kwargs": null,
     "shape": [],
+    "shape_summary": null,
     "siblings": [
      "add_1_2"
     ],
+    "site_key": "s1||sum||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -2218,6 +2239,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>",
      "<torchlens.intervention.types.EdgeUseRecord>"
@@ -2483,6 +2506,7 @@
     "siblings": [
      "sum_1_3"
     ],
+    "site_key": "s1||add||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -2598,6 +2622,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.bool",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -2839,6 +2865,7 @@
     "saved_kwargs": null,
     "shape": [],
     "siblings": [],
+    "site_key": "s1||gt||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -2950,6 +2977,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [],
     "equivalence_class": "input_2_2_torch.float32",
     "equivalent_ops": {
@@ -3161,6 +3190,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1||input||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -3265,6 +3295,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [],
     "equivalence_class": "output_1_2_2_torch.float32",
     "equivalent_ops": {
@@ -3526,6 +3558,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1||output||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -3653,6 +3686,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [],
     "equivalence_class": "rand_0b411e5e9e470b38",
     "equivalent_ops": {
@@ -3877,6 +3912,7 @@
     "saved_kwargs": null,
     "shape": [],
     "siblings": [],
+    "site_key": "s1||rand||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -4001,6 +4037,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -4254,6 +4292,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1||sigmoid||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -4374,6 +4413,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -4614,6 +4655,7 @@
     "siblings": [
      "add_1_2"
     ],
+    "site_key": "s1||sum||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -4666,6 +4708,7 @@
    "_capture_outcome": "<torchlens.capture.outcome.CaptureOutcome>",
    "_code_context_cache": "<skipped: internal cache keyed by runtime code-object ids>",
    "_containers": "<raises AttributeError>",
+   "_distributed_plane_p": null,
    "_fast_run_session": null,
    "_final_to_raw_layer_labels": {
     "\"add_1_2\"": "add_1_3_raw",
@@ -5036,6 +5079,8 @@
    "decoded_output": null,
    "derived_grads": "<torchlens.data_classes.derived_grad.DerivedGradAccessor>",
    "detach_saved_activations": false,
+   "distributed_scope": null,
+   "edges": "<raises SelectionError>",
    "emit_nvtx": false,
    "escape_detector_backward_coverage": "not_armed",
    "escape_detector_callback_ns": 0,
@@ -5092,12 +5137,25 @@
    "forward_source_location": "<repo>/tests/capture_oracle/_models.py:113",
    "func_calls_duration": "<measured>",
    "grad_fn_calls": "<torchlens.data_classes._trace_accessors.TraceGradFnCallAccessor>",
+   "grad_fn_fire_timings": "<measured>",
    "grad_fn_logs": {},
    "grad_fn_order": [],
+   "grad_fn_site_summary": {},
    "grad_fns": "<torchlens.data_classes.grad_fn.GradFnAccessor>",
    "grad_transform": null,
    "grad_transform_repr": null,
    "graph_shape_hash": "baff870bbc0a9f8ec8c3091eada3a5f40b55ffec5625f2dec6a8eb2489d20c13",
+   "grouping": "structural",
+   "grouping_policy": {
+    "\"detector\"": "grouper_v1",
+    "\"effective\"": true,
+    "\"folded_sites\"": "none",
+    "\"policy\"": "structural",
+    "\"requested\"": "structural",
+    "\"schema\"": "grouping_policy_v1",
+    "\"settlement_note\"": null,
+    "\"site_join\"": "none"
+   },
    "halt_frontier": null,
    "halt_reason": null,
    "halted": false,
@@ -5134,6 +5192,7 @@
    "internally_terminated_bool_ops": [
     "gt_1_4:1"
    ],
+   "intervention_audit": [],
    "intervention_ready": false,
    "is_appended": false,
    "is_branching": true,
@@ -5700,7 +5759,8 @@
    "sibling_events": [],
    "state": "TraceState.PRISTINE",
    "state_history": [],
-   "tlspec_version": 7,
+   "structure_only": false,
+   "tlspec_version": 8,
    "total_activation_memory": "<measured>",
    "total_autograd_memory": "<measured>",
    "total_backward_duration": "<measured>",
@@ -5955,9 +6015,12 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [
      "sum_1_3"
     ],
+    "site_key": "s1||add||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -6200,7 +6263,10 @@
     "saved_args": null,
     "saved_kwargs": null,
     "shape": [],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||gt||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -6445,7 +6511,10 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||input||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -6697,7 +6766,10 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||output||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -6949,7 +7021,10 @@
     "saved_args": null,
     "saved_kwargs": null,
     "shape": [],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||rand||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -7211,7 +7286,10 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||sigmoid||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -7465,9 +7543,12 @@
     "saved_args": null,
     "saved_kwargs": null,
     "shape": [],
+    "shape_summary": null,
     "siblings": [
      "add_1_2"
     ],
+    "site_key": "s1||sum||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -7941,6 +8022,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>",
      "<torchlens.intervention.types.EdgeUseRecord>"
@@ -8206,6 +8289,7 @@
     "siblings": [
      "sum_1_3"
     ],
+    "site_key": "s1||add||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -8321,6 +8405,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.bool",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -8562,6 +8648,7 @@
     "saved_kwargs": null,
     "shape": [],
     "siblings": [],
+    "site_key": "s1||gt||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -8673,6 +8760,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [],
     "equivalence_class": "input_2_2_torch.float32",
     "equivalent_ops": {
@@ -8884,6 +8973,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1||input||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -8988,6 +9078,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [],
     "equivalence_class": "output_1_2_2_torch.float32",
     "equivalent_ops": {
@@ -9249,6 +9341,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1||output||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -9376,6 +9469,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [],
     "equivalence_class": "rand_0b411e5e9e470b38",
     "equivalent_ops": {
@@ -9600,6 +9695,7 @@
     "saved_kwargs": null,
     "shape": [],
     "siblings": [],
+    "site_key": "s1||rand||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -9724,6 +9820,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -9977,6 +10075,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1||sigmoid||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -10097,6 +10196,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -10337,6 +10438,7 @@
     "siblings": [
      "add_1_2"
     ],
+    "site_key": "s1||sum||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -10389,6 +10491,7 @@
    "_capture_outcome": "<torchlens.capture.outcome.CaptureOutcome>",
    "_code_context_cache": "<skipped: internal cache keyed by runtime code-object ids>",
    "_containers": "<raises AttributeError>",
+   "_distributed_plane_p": null,
    "_fast_run_session": null,
    "_final_to_raw_layer_labels": {
     "\"add_1_2\"": "add_1_3_raw",
@@ -10759,6 +10862,8 @@
    "decoded_output": null,
    "derived_grads": "<torchlens.data_classes.derived_grad.DerivedGradAccessor>",
    "detach_saved_activations": false,
+   "distributed_scope": null,
+   "edges": "<raises SelectionError>",
    "emit_nvtx": false,
    "escape_detector_backward_coverage": "not_armed",
    "escape_detector_callback_ns": 0,
@@ -10815,12 +10920,25 @@
    "forward_source_location": "<repo>/tests/capture_oracle/_models.py:113",
    "func_calls_duration": "<measured>",
    "grad_fn_calls": "<torchlens.data_classes._trace_accessors.TraceGradFnCallAccessor>",
+   "grad_fn_fire_timings": "<measured>",
    "grad_fn_logs": {},
    "grad_fn_order": [],
+   "grad_fn_site_summary": {},
    "grad_fns": "<torchlens.data_classes.grad_fn.GradFnAccessor>",
    "grad_transform": null,
    "grad_transform_repr": null,
    "graph_shape_hash": "baff870bbc0a9f8ec8c3091eada3a5f40b55ffec5625f2dec6a8eb2489d20c13",
+   "grouping": "structural",
+   "grouping_policy": {
+    "\"detector\"": "grouper_v1",
+    "\"effective\"": true,
+    "\"folded_sites\"": "none",
+    "\"policy\"": "structural",
+    "\"requested\"": "structural",
+    "\"schema\"": "grouping_policy_v1",
+    "\"settlement_note\"": null,
+    "\"site_join\"": "none"
+   },
    "halt_frontier": null,
    "halt_reason": null,
    "halted": false,
@@ -10857,6 +10975,7 @@
    "internally_terminated_bool_ops": [
     "gt_1_4:1"
    ],
+   "intervention_audit": [],
    "intervention_ready": false,
    "is_appended": false,
    "is_branching": true,
@@ -11426,7 +11545,8 @@
    ],
    "state": "TraceState.PRISTINE",
    "state_history": [],
-   "tlspec_version": 7,
+   "structure_only": false,
+   "tlspec_version": 8,
    "total_activation_memory": "<measured>",
    "total_autograd_memory": "<measured>",
    "total_backward_duration": "<measured>",
@@ -11681,9 +11801,12 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [
      "sum_1_3"
     ],
+    "site_key": "s1||add||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -11926,7 +12049,10 @@
     "saved_args": null,
     "saved_kwargs": null,
     "shape": [],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||gt||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -12171,7 +12297,10 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||input||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -12423,7 +12552,10 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||output||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -12675,7 +12807,10 @@
     "saved_args": null,
     "saved_kwargs": null,
     "shape": [],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||rand||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -12937,7 +13072,10 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||sigmoid||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -13191,9 +13329,12 @@
     "saved_args": null,
     "saved_kwargs": null,
     "shape": [],
+    "shape_summary": null,
     "siblings": [
      "add_1_2"
     ],
+    "site_key": "s1||sum||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -13667,6 +13808,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": {},
+    "edge_substitutions": {},
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>",
      "<torchlens.intervention.types.EdgeUseRecord>"
@@ -13932,6 +14075,7 @@
     "siblings": [
      "sum_1_3"
     ],
+    "site_key": "s1||add||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -14047,6 +14191,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.bool",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": {},
+    "edge_substitutions": {},
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -14288,6 +14434,7 @@
     "saved_kwargs": null,
     "shape": [],
     "siblings": [],
+    "site_key": "s1||gt||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -14399,6 +14546,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": {},
+    "edge_substitutions": {},
     "edge_uses": [],
     "equivalence_class": "input_2_2_torch.float32",
     "equivalent_ops": {
@@ -14610,6 +14759,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1||input||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -14714,6 +14864,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": {},
+    "edge_substitutions": {},
     "edge_uses": [],
     "equivalence_class": "output_1_2_2_torch.float32",
     "equivalent_ops": {
@@ -14975,6 +15127,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1||output||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -15102,6 +15255,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": {},
+    "edge_substitutions": {},
     "edge_uses": [],
     "equivalence_class": "rand_0b411e5e9e470b38",
     "equivalent_ops": {
@@ -15326,6 +15481,7 @@
     "saved_kwargs": null,
     "shape": [],
     "siblings": [],
+    "site_key": "s1||rand||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -15450,6 +15606,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": {},
+    "edge_substitutions": {},
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -15703,6 +15861,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1||sigmoid||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -15823,6 +15982,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": {},
+    "edge_substitutions": {},
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -16063,6 +16224,7 @@
     "siblings": [
      "add_1_2"
     ],
+    "site_key": "s1||sum||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -16115,6 +16277,7 @@
    "_capture_outcome": "<torchlens.capture.outcome.CaptureOutcome>",
    "_code_context_cache": "<skipped: internal cache keyed by runtime code-object ids>",
    "_containers": "<raises AttributeError>",
+   "_distributed_plane_p": null,
    "_fast_run_session": null,
    "_final_to_raw_layer_labels": {
     "\"add_1_2\"": "add_1_3_raw",
@@ -16485,6 +16648,8 @@
    "decoded_output": null,
    "derived_grads": "<torchlens.data_classes.derived_grad.DerivedGradAccessor>",
    "detach_saved_activations": false,
+   "distributed_scope": null,
+   "edges": "<raises SelectionError>",
    "emit_nvtx": false,
    "escape_detector_backward_coverage": "not_armed",
    "escape_detector_callback_ns": 0,
@@ -16541,12 +16706,25 @@
    "forward_source_location": "<repo>/tests/capture_oracle/_models.py:113",
    "func_calls_duration": "<measured>",
    "grad_fn_calls": "<torchlens.data_classes._trace_accessors.TraceGradFnCallAccessor>",
+   "grad_fn_fire_timings": "<measured>",
    "grad_fn_logs": {},
    "grad_fn_order": [],
+   "grad_fn_site_summary": {},
    "grad_fns": "<torchlens.data_classes.grad_fn.GradFnAccessor>",
    "grad_transform": null,
    "grad_transform_repr": null,
    "graph_shape_hash": "baff870bbc0a9f8ec8c3091eada3a5f40b55ffec5625f2dec6a8eb2489d20c13",
+   "grouping": "structural",
+   "grouping_policy": {
+    "\"detector\"": "grouper_v1",
+    "\"effective\"": true,
+    "\"folded_sites\"": "none",
+    "\"policy\"": "structural",
+    "\"requested\"": "structural",
+    "\"schema\"": "grouping_policy_v1",
+    "\"settlement_note\"": null,
+    "\"site_join\"": "none"
+   },
    "halt_frontier": null,
    "halt_reason": null,
    "halted": false,
@@ -16583,6 +16761,7 @@
    "internally_terminated_bool_ops": [
     "gt_1_4:1"
    ],
+   "intervention_audit": [],
    "intervention_ready": false,
    "is_appended": false,
    "is_branching": true,
@@ -17143,7 +17322,8 @@
    "sibling_events": [],
    "state": "TraceState.PRISTINE",
    "state_history": [],
-   "tlspec_version": 7,
+   "structure_only": false,
+   "tlspec_version": 8,
    "total_activation_memory": "<measured>",
    "total_autograd_memory": "<measured>",
    "total_backward_duration": "<measured>",
@@ -17398,9 +17578,12 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [
      "sum_1_3"
     ],
+    "site_key": "s1||add||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -17643,7 +17826,10 @@
     "saved_args": null,
     "saved_kwargs": null,
     "shape": [],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||gt||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -17888,7 +18074,10 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||input||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -18140,7 +18329,10 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||output||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -18392,7 +18584,10 @@
     "saved_args": null,
     "saved_kwargs": null,
     "shape": [],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||rand||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -18654,7 +18849,10 @@
      2,
      2
     ],
+    "shape_summary": null,
     "siblings": [],
+    "site_key": "s1||sigmoid||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -18908,9 +19106,12 @@
     "saved_args": null,
     "saved_kwargs": null,
     "shape": [],
+    "shape_summary": null,
     "siblings": [
      "add_1_2"
     ],
+    "site_key": "s1||sum||1",
+    "site_peers": [],
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -19384,6 +19585,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>",
      "<torchlens.intervention.types.EdgeUseRecord>"
@@ -19649,6 +19852,7 @@
     "siblings": [
      "sum_1_3"
     ],
+    "site_key": "s1||add||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -19764,6 +19968,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.bool",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -20005,6 +20211,7 @@
     "saved_kwargs": null,
     "shape": [],
     "siblings": [],
+    "site_key": "s1||gt||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -20116,6 +20323,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [],
     "equivalence_class": "input_2_2_torch.float32",
     "equivalent_ops": {
@@ -20327,6 +20536,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1||input||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -20431,6 +20641,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [],
     "equivalence_class": "output_1_2_2_torch.float32",
     "equivalent_ops": {
@@ -20692,6 +20904,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1||output||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -20819,6 +21032,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [],
     "equivalence_class": "rand_0b411e5e9e470b38",
     "equivalent_ops": {
@@ -21043,6 +21258,7 @@
     "saved_kwargs": null,
     "shape": [],
     "siblings": [],
+    "site_key": "s1||rand||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -21167,6 +21383,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -21420,6 +21638,7 @@
      2
     ],
     "siblings": [],
+    "site_key": "s1||sigmoid||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -21540,6 +21759,8 @@
     "dropped_edge_tensor_args": [],
     "dtype": "torch.float32",
     "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+    "edge_replacement_stamps": null,
+    "edge_substitutions": null,
     "edge_uses": [
      "<torchlens.intervention.types.EdgeUseRecord>"
     ],
@@ -21780,6 +22001,7 @@
     "siblings": [
      "add_1_2"
     ],
+    "site_key": "s1||sum||1",
     "source_trace": {
      "__ref__": "Trace",
      "label": null
@@ -21832,6 +22054,7 @@
    "_capture_outcome": "<torchlens.capture.outcome.CaptureOutcome>",
    "_code_context_cache": "<skipped: internal cache keyed by runtime code-object ids>",
    "_containers": "<raises AttributeError>",
+   "_distributed_plane_p": null,
    "_fast_run_session": null,
    "_final_to_raw_layer_labels": {
     "\"add_1_2\"": "add_1_3_raw",
@@ -22202,6 +22425,8 @@
    "decoded_output": null,
    "derived_grads": "<torchlens.data_classes.derived_grad.DerivedGradAccessor>",
    "detach_saved_activations": false,
+   "distributed_scope": null,
+   "edges": "<raises SelectionError>",
    "emit_nvtx": false,
    "escape_detector_backward_coverage": "not_armed",
    "escape_detector_callback_ns": 0,
@@ -22258,12 +22483,25 @@
    "forward_source_location": "<repo>/tests/capture_oracle/_models.py:113",
    "func_calls_duration": "<measured>",
    "grad_fn_calls": "<torchlens.data_classes._trace_accessors.TraceGradFnCallAccessor>",
+   "grad_fn_fire_timings": "<measured>",
    "grad_fn_logs": {},
    "grad_fn_order": [],
+   "grad_fn_site_summary": {},
    "grad_fns": "<torchlens.data_classes.grad_fn.GradFnAccessor>",
    "grad_transform": null,
    "grad_transform_repr": null,
    "graph_shape_hash": "baff870bbc0a9f8ec8c3091eada3a5f40b55ffec5625f2dec6a8eb2489d20c13",
+   "grouping": "structural",
+   "grouping_policy": {
+    "\"detector\"": "grouper_v1",
+    "\"effective\"": true,
+    "\"folded_sites\"": "none",
+    "\"policy\"": "structural",
+    "\"requested\"": "structural",
+    "\"schema\"": "grouping_policy_v1",
+    "\"settlement_note\"": null,
+    "\"site_join\"": "none"
+   },
    "halt_frontier": null,
    "halt_reason": null,
    "halted": false,
@@ -22300,6 +22538,7 @@
    "internally_terminated_bool_ops": [
     "gt_1_4:1"
    ],
+   "intervention_audit": [],
    "intervention_ready": false,
    "is_appended": false,
    "is_branching": true,
@@ -22874,7 +23113,8 @@
      "\"timestamp\"": "<measured>"
     }
    ],
-   "tlspec_version": 7,
+   "structure_only": false,
+   "tlspec_version": 8,
    "total_activation_memory": "<measured>",
    "total_autograd_memory": "<measured>",
    "total_backward_duration": "<measured>",

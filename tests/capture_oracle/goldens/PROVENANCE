@@ -245,3 +245,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
 recorded: 2026-08-16T09:26:58.883190+00:00
+---
+generator: tests/capture_oracle (plain_cnn__intervene_trace)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: wave-3 golden repair (plain_cnn__intervene_trace): accept the intended L6 intervention fire-record edge_address field now exposed in the captured event projection
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 9fb0dac87004c577c24a6803dd6faf0c89067069 (dirty)
+recorded: 2026-08-17T10:55:51.644719+00:00
