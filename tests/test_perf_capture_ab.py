@@ -254,8 +254,21 @@ def _load_baseline() -> dict[str, Any]:
     return json.loads(BASELINE_PATH.read_text())
 
 
+@pytest.mark.serial
 def test_small_capture_overhead_within_gate() -> None:
-    """D15 gate: overhead ratio within 10% of the merge-base baseline."""
+    """D15 gate: overhead ratio within 10% of the merge-base baseline.
+
+    ``serial`` (the repo's remedy for load-sensitive ratio gates, precedent
+    ``test_pinned_small_capture_fixed_cost_ratio_gate``): the gated metric
+    divides by a tens-of-microseconds native forward, so parallel worker
+    load inflates the ratio directly. Serial does NOT close the quiet-box
+    variance, though — the mlp row's run-to-run spread measured ~30%
+    (ratios 220-313 over 5 quiet runs, 2026-08-17) against a ceiling only
+    10% above baseline, so occasional reds remain possible even unloaded.
+    The durable fix is a measurement-methodology change (more samples or a
+    min-based statistic), which requires a declared re-baselining point —
+    never a wider gate.
+    """
 
     baseline = _load_baseline()
     rows = capture_overhead_rows()
