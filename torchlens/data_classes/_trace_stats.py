@@ -1246,12 +1246,18 @@ class TraceStatsMixin(_TraceMixinBase):
         if not getattr(self, "backward_events", ()):
             return
         from ..backends.torch.backward import (
+            _backward_finalize_pending,
             _close_implicit_backward_pass_if_open,
             _materialize_backward_projections,
         )
 
         _close_implicit_backward_pass_if_open(self)
-        _materialize_backward_projections(self)
+        # A read from INSIDE an engine invocation journals but must not
+        # materialize while the close's FINALIZE step is still pending:
+        # materializing there would publish records ahead of the R36-1 D2H
+        # fence (L9 memo 1.2). The first post-pass read finalizes fully.
+        if not _backward_finalize_pending(self):
+            _materialize_backward_projections(self)
 
     @property
     def num_grad_fn_calls(self: "Trace") -> int:

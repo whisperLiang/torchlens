@@ -228,6 +228,14 @@ untimed fires read `None`, and loaded traces refuse typed with
 persisted `GradFnCall` timing fields keep their shipped single wall-stamp values until the
 coordinated tlspec bump activates the paired monotonic semantics together with the
 `grad_fn_timing_provenance` discriminator; `backward_duration`'s nullable contract change rides
-that same bump. A follow-up remains filed for better implicit-boundary detection: implicit
-passes are closed at synchronization points rather than at an engine boundary that TorchLens
-did not observe.
+that same bump. Implicit passes journal their close at the engine-drain boundary when torch's
+final-callback queue is available (the queued callback identity-checks its captured pass index
+and graph-task id, so a stale callback can never close a newer pass), with the
+synchronization-point backstop always armed — final callbacks skip the engine's error path, so
+the drain is opportunistic, never presumed. The close routine is a journal/scavenge/finalize
+split with the finalize guard IN-ROUTINE: the R36-1 D2H fence and the full projection never run
+inside an engine invocation; a deferred finalize runs at the next qualifying sync point or
+non-engine read, and a read from inside an engine invocation journals without materializing.
+The `BackwardPassEnd` sidecar event discloses which close path fired (`engine_drain` /
+`sync_point`, DOCUMENTED-UNSTABLE values, runtime-only in wave 2; the projected `BackwardPass`
+field waits for the coordinated bump).

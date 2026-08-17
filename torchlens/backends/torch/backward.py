@@ -424,48 +424,135 @@ def _purge_trace_from_backward_registry(trace: Any) -> None:
         slot[1].clear()
 
 
-def _close_implicit_backward_pass_if_open(trace: Any) -> None:
-    """Close an implicit backward bracket at a synchronization point.
+def _close_implicit_backward_pass_if_open(trace: Any, *, _close_path: str = "sync_point") -> None:
+    """Close an implicit backward bracket: journal + scavenge + guarded finalize.
+
+    L9 memo 1.2 journal/scavenge/finalize split. The public shape stays ONE
+    function with the same name and signature, so all three shipped call
+    sites (the ``_run_backward_with_capture`` sync point on the owner thread,
+    the tensor-hook task-id-change close on the ENGINE thread, and the lazy
+    read path on whatever thread reads) keep calling it unchanged and no
+    caller can bypass FINALIZE -- its deferral guard lives INSIDE this
+    routine:
+
+    - (J) JOURNAL-if-open: append the implicit ``BackwardPassEnd`` (with the
+      close-path disclosure on the sidecar event only, wave 2), bump the pass
+      counters, pop the implicit task-id entry, and set the pending-finalize
+      flag. Cheap; engine-safe.
+    - (S) SCAVENGE: clear the pending AccumulateGrad prehook records and the
+      per-fire timing stamp lists. MUST run at close time, before any later
+      pass can open -- deferring it is exactly the cross-pass
+      ``(grad_fn_object_id, call_index)`` stale-pop mis-attribution.
+    - (F) FINALIZE-if-pending: the R36-1 D2H fence + full projection, run iff
+      the pending flag is set AND ``_current_backward_graph_task_id()`` is
+      ``None`` (torch's own engine-invocation witness) -- NEVER inside an
+      engine invocation, hence never on the engine thread mid-drain. When
+      the guard fails the flag STAYS SET and the next qualifying call
+      finalizes; the flag clears only after BOTH steps complete.
 
     Parameters
     ----------
     trace:
         Trace that may have an orphan tensor-hook bracket open.
+    _close_path:
+        Close-path disclosure value for the journaled End event (private;
+        the engine-drain callback passes ``"engine_drain"``, every backstop
+        path keeps the ``"sync_point"`` default). Provisional vocabulary,
+        DOCUMENTED-UNSTABLE (E-L9-4 routing).
+    """
+
+    from .tensor_tracking import _IMPLICIT_BACKWARD_TASK_IDS
+
+    if getattr(trace, "_implicit_backward_pass_open", False):
+        pass_index = getattr(trace, "_active_backward_pass_index", None)
+        if pass_index is not None:
+            events = _ensure_backward_event_stream(trace)
+            events.append_backward(
+                BackwardPassEnd(
+                    pass_index=int(pass_index),
+                    duration=None,
+                    peak_memory=None,
+                    status="ok",
+                    order_attribution_coverage=None,
+                    close_path=_close_path,
+                )
+            )
+            trace.num_backward_passes = max(
+                int(getattr(trace, "num_backward_passes", 0)), int(pass_index)
+            )
+            trace.__dict__.pop("_active_backward_pass_index", None)
+            # Close the open-pass flag BEFORE the fallible record clear
+            # (R14-1 sibling ordering): a clear failure propagates loudly
+            # either way, but must not strand the implicit pass marked open
+            # after its End event was journaled.
+            trace._implicit_backward_pass_open = False
+            _IMPLICIT_BACKWARD_TASK_IDS.pop(trace, None)
+            _PENDING_BACKWARD_FINALIZE[trace] = True
+            # (S) SCAVENGE on every journaled close, on any thread.
+            _clear_pending_accumulate_grad_records(trace)
+            _clear_fire_timing_stamps(trace)
+    # (F) FINALIZE-if-pending, guarded in-routine so no caller can bypass it.
+    if _PENDING_BACKWARD_FINALIZE.get(trace) and _current_backward_graph_task_id() is None:
+        # Fence in-flight cpu_async D2H grad copies before projections make
+        # the payloads reachable: the forward finalize seam already ran, so
+        # backward is the only remaining producer of pending copies.
+        synchronize_pending_cpu_async_copies()
+        _materialize_backward_projections(trace)
+        _PENDING_BACKWARD_FINALIZE.pop(trace, None)
+
+
+def _backward_finalize_pending(trace: Any) -> bool:
+    """Return whether an implicit close's FINALIZE step is still owed."""
+
+    return bool(_PENDING_BACKWARD_FINALIZE.get(trace))
+
+
+def _enqueue_implicit_pass_drain_callback(
+    trace: Any, pass_index: int, graph_task_id: int | None
+) -> Callable[[], None] | None:
+    """Queue the engine-drain close for a freshly opened implicit pass.
+
+    Called at implicit-pass OPEN inside the tensor grad hook, i.e. provably
+    in-backward (``queue_callback`` raises outside one, so the availability
+    probe is the enqueue attempt itself). The callback binds to the graph
+    task CURRENT at open: on fire it calls the split close routine only if
+    BOTH captured values still match the trace's current open implicit state,
+    so a stale callback can never close a newer pass. Final callbacks do not
+    run on the engine's error path -- the drain is opportunistic, never
+    presumed, and the sync-point path stays armed as the guaranteed backstop.
 
     Returns
     -------
-    None
-        An implicit ``BackwardPassEnd`` is appended when needed.
+    Callable[[], None] | None
+        The enqueued callback (returned for tests), or ``None`` when the
+        private engine handle is unavailable or the enqueue raises (current
+        behavior unchanged; disclosure reports the sync-point path).
     """
 
-    if not getattr(trace, "_implicit_backward_pass_open", False):
-        return
-    pass_index = getattr(trace, "_active_backward_pass_index", None)
-    if pass_index is None:
-        return
-    events = _ensure_backward_event_stream(trace)
-    events.append_backward(
-        BackwardPassEnd(
-            pass_index=int(pass_index),
-            duration=None,
-            peak_memory=None,
-            status="ok",
-            order_attribution_coverage=None,
-        )
-    )
-    trace.num_backward_passes = max(int(getattr(trace, "num_backward_passes", 0)), int(pass_index))
-    trace.__dict__.pop("_active_backward_pass_index", None)
-    # Close the open-pass flag BEFORE the fallible record clear (R14-1 sibling
-    # ordering): a clear failure propagates loudly either way, but must not
-    # strand the implicit pass marked open after its End event was journaled.
-    trace._implicit_backward_pass_open = False
-    _clear_pending_accumulate_grad_records(trace)
-    _clear_fire_timing_stamps(trace)
-    # Fence in-flight cpu_async D2H grad copies before projections make the
-    # payloads reachable: the forward finalize seam already ran, so backward
-    # is the only remaining producer of pending non_blocking copies.
-    synchronize_pending_cpu_async_copies()
-    _materialize_backward_projections(trace)
+    if graph_task_id is None:
+        return None
+    from .tensor_tracking import _IMPLICIT_BACKWARD_TASK_IDS
+
+    trace_ref = weakref.ref(trace)
+
+    def _drain_callback() -> None:
+        live_trace = trace_ref()
+        if live_trace is None:
+            return
+        if not getattr(live_trace, "_implicit_backward_pass_open", False):
+            return
+        if getattr(live_trace, "_active_backward_pass_index", None) != pass_index:
+            return
+        if _IMPLICIT_BACKWARD_TASK_IDS.get(live_trace) != graph_task_id:
+            return
+        _close_implicit_backward_pass_if_open(live_trace, _close_path="engine_drain")
+
+    try:
+        engine = torch.autograd.Variable._execution_engine
+        engine.queue_callback(_drain_callback)
+    except (AttributeError, RuntimeError, TypeError):
+        return None
+    return _drain_callback
 
 
 def _root_tensors(value: Any) -> tuple[torch.Tensor, ...]:
