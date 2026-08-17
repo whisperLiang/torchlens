@@ -21,6 +21,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens import kernel_telemetry as _kernel_telemetry
 from torchlens._io import FieldPolicy, PreReleaseArtifactError
 from torchlens._io.prerelease import (
     PRERELEASE_MARKER,
@@ -85,6 +86,14 @@ _STANDING_REGISTRATIONS: dict[str, tuple[str, ...]] = {
         "sequence",
         "view_copy_kind",
     ),
+    _kernel_telemetry.KernelLaunch.__name__: (
+        "attribution_status",
+        "device",
+        "duration",
+        "launch_name",
+        "runtime_correlation",
+        "stream",
+    ),
     "Op": (
         "edge_replacement_stamps",  # L6 save-time edge corroboration verdicts
         "edge_substitutions",  # L6 tier-(ii) occurrence-granular edge store
@@ -103,9 +112,9 @@ _STANDING_REGISTRATIONS: dict[str, tuple[str, ...]] = {
         "intervention_audit",  # L6 resolved-intervention audit record
         "structure_only",
     ),
-    # L2 episode ledger: the gated annotations sub-key rides the synthetic
-    # "Trace.annotations" owner (see torchlens/_io/prerelease.py).
-    "Trace.annotations": ("episode",),
+    # L2 episode ledger and detachable L3 telemetry relation ride gated
+    # annotation sub-keys under the synthetic owner.
+    "Trace.annotations": ("_kernel_telemetry", "episode"),
     "_AtenExecutionContext": (
         "autocast",
         "backend",
@@ -149,6 +158,7 @@ _STANDING_REGISTRATIONS: dict[str, tuple[str, ...]] = {
         "mode_paused_interior",
         "primitive_ops",
     ),
+    _kernel_telemetry._TelemetryPayload.__name__: ("_available", "_launches", "_relations"),
 }
 
 
@@ -198,7 +208,10 @@ def test_registry_inventory_and_unregister(planted_field: str) -> None:
 def test_live_episode_annotations_key_is_inventoried() -> None:
     # The S7 episode-ledger home (L2) is a standing registrar row under the
     # synthetic "Trace.annotations" owner until the coordinated bump retires it.
-    assert registered_prerelease_fields().get("Trace.annotations") == ("episode",)
+    assert registered_prerelease_fields().get("Trace.annotations") == (
+        "_kernel_telemetry",
+        "episode",
+    )
 
 
 # ---------------------------------------------------------------------------

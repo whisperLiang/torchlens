@@ -177,6 +177,9 @@ _MAX_LEDGER_SLACK = 100
 #: the wave's reviewed invariant tripwires; test_merged_engine instead
 #: SPLIT (the r8 adversarial classes moved to
 #: test_merged_engine_hardening.py) and stays under the unledgered cap.
+#: 2026-08-17 FEATURE MEGASPRINT wave-0 settle debt record: the L3 telemetry
+#: weak-launch-relation lifecycle row lands after census-settle growth;
+#: test_global_state_inventory re-steps 2450->2500 pending the debloat pass.
 _TEST_FILE_CEILINGS: dict[str, int] = {
     "tests/test_validation.py": 8600,
     "tests/example_models.py": 5500,
@@ -185,7 +188,7 @@ _TEST_FILE_CEILINGS: dict[str, int] = {
     "tests/test_auto_collapse_metrics.py": 3200,
     "tests/test_backward.py": 2550,
     "tests/validation_goldens/test_validation_exemption_hardening.py": 2400,
-    "tests/test_global_state_inventory.py": 2450,
+    "tests/test_global_state_inventory.py": 2500,
     "tests/test_conditional_branches.py": 2150,
     "tests/test_tlspec_runnable_r41_crossthread_witness.py": 2050,
 }

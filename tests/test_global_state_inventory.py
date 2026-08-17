@@ -125,6 +125,12 @@ _INSTALL_STATE_AND_CACHES = frozenset(
         ("torchlens/_io/prerelease.py", "_REGISTRY"),
         # Wrapper-lifecycle slots rebound only through the module object
         # (visible since the cross-module rebind detector, hunt-b2-sol R54).
+        # Kernel-telemetry correlation installs by rebinding these two aten-call
+        # slots THROUGH THE MODULE OBJECT (kernel_telemetry.py:563-591) and
+        # restores the originals on exit -- the same wrapper-lifecycle pattern as
+        # the _state.py slots below, not a cache.
+        ("torchlens/backends/torch/_aten_capture.py", "_finish_aten_call"),
+        ("torchlens/backends/torch/_aten_capture.py", "_prepare_aten_call"),
         ("torchlens/_state.py", "_decorated_identity"),
         ("torchlens/_state.py", "_is_decorated"),
         ("torchlens/_state.py", "_wrap_epoch"),
@@ -416,6 +422,9 @@ _WEAK_SUBJECT_TABLES = frozenset(
         # Per-accessor param ordinal index, keyed weakly by the owning
         # accessor; entries die with it (mirror of _ORDINAL_POSITIONS_CACHE).
         ("torchlens/data_classes/param.py", "_ORDINAL_INDEX_CACHE"),
+        # Live telemetry relations are keyed by AtenOp facades and disappear
+        # with those rows; they never retain a Trace or profiler session.
+        ("torchlens/kernel_telemetry.py", "_ATEN_KERNELS"),
         ("torchlens/partial/__init__.py", "_FAILED_CAPTURE_RESULTS"),
         ("torchlens/visualization/auto_collapse.py", "_ANALYSIS_CACHE"),
         ("torchlens/visualization/auto_collapse.py", "_OP_ADJACENCY_INDEX_CACHE"),
@@ -1126,6 +1135,7 @@ _WEAKLY_HELD = frozenset(
         ("torchlens/data_classes/_nonfinite.py", "_MEMOS"),
         ("torchlens/data_classes/grad_fn_call.py", "_ORDINAL_POSITIONS_CACHE"),
         ("torchlens/data_classes/param.py", "_ORDINAL_INDEX_CACHE"),
+        ("torchlens/kernel_telemetry.py", "_ATEN_KERNELS"),
         ("torchlens/partial/__init__.py", "_FAILED_CAPTURE_RESULTS"),
         ("torchlens/visualization/auto_collapse.py", "_ANALYSIS_CACHE"),
         ("torchlens/visualization/auto_collapse.py", "_OP_ADJACENCY_INDEX_CACHE"),

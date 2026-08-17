@@ -118,6 +118,34 @@ distinguishes equal-schema coverage, different-schema coverage, proven sparse me
 coverage that is indeterminate because at least one member has an observation gap. Positional
 alignment is evidence, not semantic equivalence.
 
+### Documented-unstable kernel telemetry INDEX
+
+The optional CUDA/CUPTI adapter is the detachable trailing lane of the ATen execution profile. It
+is DROP-gated and is not imported by the capture core. Every spelling below is documented unstable
+and may be renamed or removed without a compatibility alias.
+
+<!-- KERNEL-TELEMETRY-UNSTABLE-INDEX:START -->
+
+| Surface | Exact spelling or token | Stability |
+| --- | --- | --- |
+| Facade and computed views | `KernelLaunch`, `AtenOp.gpu_kernels`, `Op.gpu_kernels` | unstable -- no deprecation shim owed |
+| Launch fields | `launch_name`, `device`, `stream`, `duration`, `runtime_correlation`, `attribution_status` | unstable -- no deprecation shim owed |
+| Attribution classes | `attributed`, `unavailable`, `ambiguous`, `unattributed` | unstable -- no deprecation shim owed |
+
+<!-- KERNEL-TELEMETRY-UNSTABLE-INDEX:END -->
+
+`KernelLaunch` is measured profiler evidence, not graph identity or replay authority. The adapter
+places a unique marker around each redispatched ATen call and joins CUDA runtime calls to kernels
+and memory copies through Kineto correlation identifiers; it never joins by operator or launch-name
+substring. `AtenOp.gpu_kernels` exposes the relation for one primitive row, while
+`Op.gpu_kernels` is the deduplicated union across that Op's observed primitive rows.
+
+An unavailable profiler session returns one fact-free row with
+`attribution_status="unavailable"`; it never reports zero kernels. When a parent has a
+`mode_paused_interior` disclosure, every launch set and any count derived from it is a lower bound:
+the paused region is not profiled synthetically and no hidden launch is fabricated. See
+[Kernel telemetry](kernel_telemetry.md).
+
 ## Selection and storage
 
 **Predicate**

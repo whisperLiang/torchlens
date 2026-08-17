@@ -911,6 +911,11 @@ _CUDA_DARK = (
 
 DEVICE_GATED_SKIPIF_LEDGER: dict[str, str] = {
     "test_hash_determinism.py::test_graph_shape_hash_matches_between_cpu_and_cuda": _CUDA_DARK,
+    "test_kernel_telemetry.py::test_real_cuda_cupti_correlation_matrix": (
+        "[2026-08-17] L3 telemetry OPTIONAL_INTEGRATION: the exact Kineto CUDA/CUPTI "
+        "correlation matrix is NOT-RUN-DISCLOSED on CPU-only CI and this no-NVIDIA host; "
+        "synthetic correlation graphs remain an always-executed honesty tripwire"
+    ),
     "test_param_as_input.py::test_cross_device_parameter_input_matches_plain_tensor_path_if_cuda_available": _CUDA_DARK,
     "test_perf_bundle.py::test_cuda_path_still_runs_when_available": _CUDA_DARK,
     "test_robustness_pr2.py::test_cuda_channels_last_safe_copy": _CUDA_DARK,
