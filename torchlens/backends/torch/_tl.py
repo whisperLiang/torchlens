@@ -901,6 +901,38 @@ def _ensure_tensor_meta(t: Any) -> TensorMeta:
     return meta
 
 
+_ASYNC_COLLECTIVE_TENSOR_CLASS: Any = False
+"""Lazily probed AsyncCollectiveTensor class (``False`` unprobed, ``None`` unavailable)."""
+
+
+def _async_collective_elem(t: Any) -> Any | None:
+    """Return an AsyncCollectiveTensor's inner ``.elem``, else ``None``.
+
+    Parameters
+    ----------
+    t : Any
+        Candidate tensor-like object.
+
+    Returns
+    -------
+    Any | None
+        The plain inner tensor when ``t`` is a funcol ACT wrapper; ``None``
+        for every other value or on builds without functional collectives.
+    """
+
+    global _ASYNC_COLLECTIVE_TENSOR_CLASS
+    if _ASYNC_COLLECTIVE_TENSOR_CLASS is False:
+        try:
+            from torch.distributed._functional_collectives import AsyncCollectiveTensor
+
+            _ASYNC_COLLECTIVE_TENSOR_CLASS = AsyncCollectiveTensor
+        except Exception:
+            _ASYNC_COLLECTIVE_TENSOR_CLASS = None
+    if _ASYNC_COLLECTIVE_TENSOR_CLASS is not None and isinstance(t, _ASYNC_COLLECTIVE_TENSOR_CLASS):
+        return t.elem
+    return None
+
+
 def set_tensor_label(t: Any, label: str) -> None:
     """Set the raw capture label on a tensor.
 
@@ -1000,6 +1032,17 @@ def get_tensor_label(t: Any) -> str | None:
     """
     meta = get_tensor_meta(t)
     if meta is None or meta.label_raw is None:
+        # AsyncCollectiveTensor is a transparent async view of its inner
+        # ``.elem`` (merge-ranks C2 recording): the funcol boundary labels the
+        # inner tensor through the ordinary relabel dance, while user code
+        # holds the ACT wrapper. Delegating the read here -- the ONE label
+        # chokepoint -- lets every consumer parent on the boundary without
+        # stamping the wrapper (whose storage pin would not validate). The
+        # ``.elem`` read is a wrapper attribute access and never triggers the
+        # ACT's wait.
+        inner = _async_collective_elem(t)
+        if inner is not None:
+            return get_tensor_label(inner)
         return None
     if _session_gate_blocks(meta) or _session_storage_gate_blocks(meta, t):
         return None

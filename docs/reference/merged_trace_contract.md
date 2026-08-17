@@ -20,7 +20,14 @@ Refused typed in this release, with `fields["code"] = "merge_scope_unsupported"`
   pairing is rung C3;
 - boundaries carrying DTensor dual geometry — sharded-topology capture stays
   refused until rung C2's capture-fidelity census is green (relaxation follows
-  fidelity, never the other way around).
+  fidelity, never the other way around);
+- functional-collective boundaries (the documented-unstable
+  `functional_collective_boundary_v0` payload recorded by the C2 recording
+  slice) — C1 joins the frozen `collective_boundary_v1` payload only; funcol
+  boundary joining is rung-C2 merged-side scope behind its own authorizing
+  ruling. Refusing the member core typed is strictly fail-closed: the
+  pre-recording alternative was a merge with the funcol traffic invisibly
+  absent.
 
 Merged replay does not exist (`merge_run_unsupported`); merged runnable
 export, merged `validate()`, receptive/projective fields, and intervention

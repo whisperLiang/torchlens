@@ -510,6 +510,25 @@ def extract_rank_evidence(trace: Any, source: str) -> RankEvidence:
     for index, entry in enumerate(boundaries):
         if not isinstance(entry, dict):
             raise _refuse(f"boundary {index} of {source} is not a mapping", source=source)
+        if entry.get("schema") == "functional_collective_boundary_v0":
+            # Merge-ranks C2 recording (fail-closed): funcol boundaries carry
+            # the documented-unstable v0 payload, which the frozen C1
+            # derivation cannot join. Refusing the CORE typed is strictly
+            # honest -- the shipped alternative was merging with the funcol
+            # traffic invisibly absent. The merged-side funcol join is C2
+            # merged-side work behind its own ruling (L8 plan 3.2c).
+            raise MergeInputError(
+                f"Merge input {source} records a functional-collective "
+                f"(funcol) boundary (index {index}, kind "
+                f"{entry.get('kind')!r}). C1 joins the frozen "
+                "collective_boundary_v1 payload only; funcol boundary joining "
+                "is rung-C2 merged-side scope and stays refused until its "
+                "capture-fidelity census and authorizing ruling land.",
+                code=MergedErrorCode.MERGE_SCOPE_UNSUPPORTED,
+                reason="functional_collective_boundary_unsupported",
+                source=source,
+                boundary_index=index,
+            )
         _validate_boundary(entry, index, source)
         # my_group_rank None-ness is UNIFORM per group within one rank core:
         # the writer mints None only when ``dist.get_group_rank`` raises -- a

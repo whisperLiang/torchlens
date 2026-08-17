@@ -366,6 +366,16 @@ def _log_output_tensor_info(
         import copy as _copy
 
         fields_dict["annotations"] = {"collective": _copy.deepcopy(collective_info)}
+        if collective_info.get("schema") == "functional_collective_boundary_v0":
+            # Plane-W settlement: funcol completions are observed AFTER this
+            # deep copy is taken (the wait fires later in the same forward),
+            # so the capture-scoped session tracks every per-record copy and
+            # syncs it from the settled master at session close.
+            from .funcol import active_funcol_session
+
+            session = active_funcol_session()
+            if session is not None:
+                session.register_annotation_copy(fields_dict["annotations"]["collective"])
     else:
         fields_dict["annotations"] = {}
     fields_dict["intervention_replaced"] = False

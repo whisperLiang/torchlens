@@ -935,10 +935,15 @@ class TestGroupNSelfHonesty:
         def completion_floor(events):
             return events.get("_c10d_functional::wait_tensor", 0) >= 1
 
-        # The funcol op is dispatcher-level and invisible to the shipped C1
-        # python-wrap capture: the captured leg completes with the provenance
-        # warning as its escape signal (the plane-P gap C2/wave-1 closes).
-        with pytest.warns(UserWarning, match="no graph/source provenance"):
+        # FLIPPED FOR FIDELITY (C2 recording, plane S/W): the funcol call used
+        # to be INVISIBLE to the C1 python-wrap capture -- the captured leg
+        # completed with the provenance warning as its escape signal. The
+        # funcol boundary wraps + the capture-scoped wait interposition now
+        # record it first-class, so the escape signal is asserted GONE and the
+        # boundary evidence asserted PRESENT (the row changed because capture
+        # fidelity changed, never by editing the expectation alone).
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
             control = run_census_row(
                 "N3d",
                 FuncolAsync,
@@ -950,7 +955,22 @@ class TestGroupNSelfHonesty:
         assert control.floors["completion"] == "met"
         assert control.completion_events["_c10d_functional::wait_tensor"] >= 1
 
-        with pytest.warns(UserWarning, match="no graph/source provenance"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            log = tl.trace(FuncolAsync(), torch.ones(3))
+        boundaries = log.annotations["distributed"]["boundaries"]
+        funcol_entries = [
+            entry
+            for entry in boundaries
+            if entry.get("schema") == "functional_collective_boundary_v0"
+        ]
+        assert len(funcol_entries) == 1 and funcol_entries[0]["kind"] == "all_reduce"
+        # The ACT wait fired inside the captured forward (reduced + 1), so the
+        # mode-independent completion authority must have observed it.
+        assert funcol_entries[0]["events"]["completion_binding"] == "observed_wait"
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
             suppressed = run_census_row(
                 "N3d",
                 FuncolAsync,

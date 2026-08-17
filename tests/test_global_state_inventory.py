@@ -65,6 +65,11 @@ _SCOPED_CAPTURE_STATE = frozenset(
         ("torchlens/backends/paddle/wrappers.py", "_ACTIVE_TAP_OBSERVER"),
         ("torchlens/backends/tinygrad/backend.py", "_ACTIVE_TINYGRAD_MODULE_STACK"),
         ("torchlens/backends/torch/_completeness_finalize.py", "_ACTIVE_WITNESS_STATE"),
+        # Plane-W funcol completion session: published by the capture-scoped
+        # distributed_recording_session context (armed captures only) and
+        # cleared in its finally -- a survivor past the capture is exactly the
+        # leaked-interposition class the session's teardown exists to prevent.
+        ("torchlens/backends/torch/funcol.py", "_ACTIVE_FUNCOL_SESSION"),
         ("torchlens/backends/torch/_tl.py", "_ACTIVE_LABEL_SESSION"),
         ("torchlens/backends/torch/buffer_writes.py", "_WITNESS_MARKER_STATE"),
         ("torchlens/backends/torch/completeness_witness.py", "_CAPTURED_STORAGE_PTRS"),
@@ -311,6 +316,14 @@ _CAPABILITY_PROBE_STATE = frozenset(
         ("torchlens/utils/_torch_compat.py", "_FP8_DTYPES_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_FSDP_WRAPPER_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_FSDP_WRAPPER_TYPE"),
+        # Lazily probed AsyncCollectiveTensor class behind the label
+        # chokepoint's ACT->elem delegation (False unprobed, None unavailable).
+        ("torchlens/backends/torch/_tl.py", "_ASYNC_COLLECTIVE_TENSOR_CLASS"),
+        ("torchlens/utils/_torch_compat.py", "HAS_FUNCOL_GROUP_RESOLUTION"),
+        ("torchlens/utils/_torch_compat.py", "HAS_FUNCOL_WAIT_INTERPOSITION"),
+        ("torchlens/utils/_torch_compat.py", "_FUNCOL_GROUP_RESOLVERS"),
+        ("torchlens/utils/_torch_compat.py", "_FUNCOL_GROUP_RESOLUTION_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "_FUNCOL_WAIT_INTERPOSITION_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_JIT_SCHEMA_ENUMERATION_FN"),
         ("torchlens/utils/_torch_compat.py", "_JIT_SCHEMA_ENUMERATION_PROBED"),
         ("torchlens/utils/_torch_compat.py", "_PIPELINING_PROBED"),

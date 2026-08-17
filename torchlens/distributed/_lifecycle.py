@@ -551,8 +551,10 @@ def _arm(source: str) -> ArmingRecord:
         try:
             _install_lifecycle_wraps(state)
             from ..backends.torch.collectives import install_collective_wraps
+            from ..backends.torch.funcol import install_funcol_wraps
 
             install_collective_wraps(state.originals)
+            install_funcol_wraps(state.originals)
         except BaseException as arm_error:
             # Arming installs TWO independent wrap families before publishing ``_STATE``.
             # A failure (or a Ctrl-C) between them left unguarded wraps installed with
