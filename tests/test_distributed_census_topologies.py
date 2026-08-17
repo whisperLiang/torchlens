@@ -230,7 +230,12 @@ class TestCensusReportGenerator:
         )
         assert payload["rows"][0]["product"] == "row green"
 
-    def test_criteria_2_through_4_are_honestly_unimplemented(self):
+    def test_criteria_2_through_4_refuse_without_plane_p(self):
+        """A green can never be vacuous: unarmed captures carry no plane-P
+        journal, so requesting criteria 2-4 on one raises instead of
+        silently passing (the wave-0 honesty property, wave-1 form)."""
+
+        lifecycle.disarm()
         with pytest.raises(NotImplementedError, match="C2"):
             run_census_row("A1", _dense_model, _dense_input, criteria=(1, 2, 3, 4))
 
@@ -532,6 +537,16 @@ def _a2_worker(rank: int, world_size: int, init_file: str, out_dir: str) -> None
     # The coalescing-manager leg joins the wave-1 full-criteria re-run; the
     # deferral is disclosed on the row, never silently dropped.
     result.not_run.append("coalescing-manager leg deferred to the wave-1 full-criteria re-run")
+    # Full-criteria A2 stays OWED (never silently green): its async c10d
+    # traffic completes via Work.wait, which is a C++ method invisible to BOTH
+    # ground-truth channels (unlike funcol's dispatcher-level wait_tensor), so
+    # the completion-event floor of plan rule 1.1(3) is not yet evaluable here.
+    # Widening completion observation to c10d Work objects is named plane-W
+    # follow-on work; until it lands, an A2 row-green claim would overstate.
+    result.not_run.append(
+        "full-criteria re-run blocked on c10d Work-level completion observation "
+        "(plane-W interposes funcol wait_tensor only)"
+    )
     payload = {
         "rank": rank,
         "product": result.product_name,
@@ -851,6 +866,118 @@ class TestGroupCRefusalParity:
         assert "distributed_scope" not in MODEL_LOG_FIELD_ORDER
         log = tl.trace(_dense_model(), _dense_input())
         assert not hasattr(log, "distributed_scope")
+
+
+# ===========================================================================
+# Wave-1 criteria 2-4 (C2 recording lane): A-row full-criteria re-run + the
+# red-first pinned constructions N2 / N3a / N4 (plan 1.5 wave 1).
+# ===========================================================================
+
+
+@pytest.mark.heavy
+class TestWave1FullCriteria:
+    def test_a1_full_criteria_is_the_first_row_green(self):
+        """A1 re-run to FULL criteria: the zero-interference anchor must be
+        row green (all four criteria, floors, ZI conjunct)."""
+
+        lifecycle.disarm()
+        lifecycle.arm()
+        try:
+            result = run_census_row(
+                "A1",
+                _dense_model,
+                _dense_input,
+                criteria=(1, 2, 3, 4),
+                content_floor=lambda ops: any("addmm" in op or "mm" in op for op in ops),
+                zi_gate_passed=True,
+            )
+        finally:
+            lifecycle.disarm()
+        assert result.failures == []
+        assert result.criteria_run == FULL_CRITERIA
+        assert result.row_green and result.product_name == "row green"
+
+    def _mixed_capture(self, dist):
+        import torch.distributed._functional_collectives as funcol
+
+        class Mixed(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc = nn.Linear(4, 4)
+
+            def forward(self, x):
+                hidden = self.fc(x)
+                dist.all_reduce(hidden)
+                reduced = funcol.all_reduce(hidden, "sum", dist.group.WORLD)
+                return reduced + 1
+
+        from tests.support.census_harness import _seq_counter_snapshot
+
+        lifecycle.arm()
+        seq_before = _seq_counter_snapshot()
+        log = tl.trace(Mixed(), torch.ones(2, 4))
+        seq_after = _seq_counter_snapshot()
+        return log, seq_before, seq_after
+
+    def test_k3_green_on_mixed_c10d_funcol_capture(self, single_rank_world):
+        """K3 passes on a real boundary-crossing capture: every collective
+        dispatch discharged, completions classified, seq deltas == journal."""
+
+        from tests.support.census_harness import (
+            run_census_criterion_3,
+            run_census_criterion_4,
+        )
+
+        log, seq_before, seq_after = self._mixed_capture(single_rank_world)
+        assert run_census_criterion_3(log, seq_before, seq_after) == []
+        assert run_census_criterion_4(log) == []
+
+    def test_n2_dropped_op_class_turns_k2_red(self, single_rank_world):
+        """N2: the zero-collective-Colwise regression formalized -- dropping a
+        captured compute-op class must fail K2."""
+
+        lifecycle.arm()
+        result = run_census_row(
+            "N2",
+            _dense_model,
+            _dense_input,
+            criteria=(1, 2),
+            drop_op_class="aten.addmm",
+            zi_gate_passed=True,
+        )
+        assert any(failure.startswith("K2:") for failure in result.failures)
+        assert not result.row_green and result.product_name == "red"
+
+    def test_n3a_double_tick_turns_k3_red(self, single_rank_world):
+        """N3a: a synthetic extra issue tick (the double-tick construction)
+        must violate the per-(group_uid, channel) seq invariant."""
+
+        from tests.support.census_harness import run_census_criterion_3
+
+        log, seq_before, seq_after = self._mixed_capture(single_rank_world)
+        failures = run_census_criterion_3(log, seq_before, seq_after, extra_ticks=1)
+        assert any("seq invariant" in failure for failure in failures)
+
+    def test_n3a_boundary_without_tick_turns_k3_red(self, single_rank_world):
+        """The seq invariant is two-sided: a journaled boundary with no
+        corresponding issue tick fails too."""
+
+        from tests.support.census_harness import run_census_criterion_3
+
+        log, seq_before, _seq_after = self._mixed_capture(single_rank_world)
+        failures = run_census_criterion_3(log, seq_before, seq_before)
+        assert any("seq invariant" in failure for failure in failures)
+
+    def test_n4_injected_orphan_turns_k4_red(self, single_rank_world):
+        """N4: an orphan interior record (no plane-S owner, no module context,
+        not discharged, not TorchLens-internal) must fail K4."""
+
+        from tests.support.census_harness import run_census_criterion_4
+
+        log, _before, _after = self._mixed_capture(single_rank_world)
+        orphan = ("aten.mm.default", None, False, False, False)
+        failures = run_census_criterion_4(log, injected_orphans=(orphan,))
+        assert any("orphan interior record" in failure for failure in failures)
 
 
 # ===========================================================================

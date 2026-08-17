@@ -81,6 +81,7 @@ MODEL_LOG_FIELD_ORDER = [
     "intervention_audit",
     "_runnable",
     "_fast_run_session",
+    "_distributed_plane_p",
     "escape_detector_mode",
     "escape_detector_verified",
     "escape_diagnostics",

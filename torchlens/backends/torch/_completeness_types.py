@@ -84,6 +84,14 @@ class _WitnessState:
     record_escapes: bool = False
     ledger: bool = False
     record_aten: bool = False
+    plane_p: bool = False
+    """Merge-ranks C2 plane-P: record EVERY dispatched op (any namespace,
+    paused windows included) for armed distributed captures. Feeds the
+    session-time ``trace._distributed_plane_p`` journal the capture-fidelity
+    census criteria 2-4 consume; never installed for unarmed captures."""
+    plane_p_events: list[tuple[str, int | None, bool, bool, bool]] = field(default_factory=list)
+    """Plane-P records: ``(qualified_op, owner_func_call_id, paused,
+    discharged_inside_boundary, has_module_context)``."""
     aten_events: Any = None
     capture_phase: str = "forward"
     backward_epoch_index: int | None = None

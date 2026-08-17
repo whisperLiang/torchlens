@@ -30,6 +30,7 @@ STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {
         "intervention_audit": StorageBinding(StorageKind.RUNTIME),
         "_runnable": StorageBinding(StorageKind.RUNTIME, annotation="<class 'torchlens._runnable_seam.RunnableTraceState'>"),
         "_fast_run_session": StorageBinding(StorageKind.RUNTIME, annotation='typing.Optional[typing.Any]'),
+        "_distributed_plane_p": StorageBinding(StorageKind.RUNTIME, annotation='typing.Optional[typing.Any]'),
         "escape_detector_mode": StorageBinding(StorageKind.RUNTIME),
         "escape_detector_verified": StorageBinding(StorageKind.RUNTIME),
         "escape_diagnostics": StorageBinding(StorageKind.RUNTIME),

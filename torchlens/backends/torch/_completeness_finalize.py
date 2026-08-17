@@ -370,6 +370,7 @@ def _build_witness_state(
     *,
     record_escapes: bool,
     record_aten: bool,
+    plane_p: bool,
     event_stream: Any,
 ) -> _WitnessState:
     """Construct the per-forward witness state for the dispatch mode."""
@@ -384,9 +385,42 @@ def _build_witness_state(
         record_escapes=record_escapes,
         ledger=record_escapes,
         record_aten=record_aten,
+        plane_p=plane_p,
         aten_events=event_stream,
         capture_phase="forward",
     )
+
+
+def _plane_p_requested() -> bool:
+    """Whether the distributed opt-in is armed (plane-P observes this capture).
+
+    Merge-ranks C2: plane-P physical dispatch observation rides the shared
+    TorchLens dispatch mode for ARMED captures only, so unarmed dense capture
+    keeps its exact pre-C2 dispatch-mode-free path (zero interference).
+    """
+
+    try:
+        from torchlens.distributed._lifecycle import armed_state
+
+        return armed_state() is not None
+    except Exception:
+        return False
+
+
+def _finalize_plane_p(state: _WitnessState) -> None:
+    """Publish the plane-P dispatch journal on the trace (session-only).
+
+    Stamps ``trace._distributed_plane_p`` (FieldPolicy.DROP, private-named,
+    never persisted) with the per-dispatch records the capture-fidelity census
+    criteria 2-4 consume. A no-op for states without plane-P.
+    """
+
+    if not state.plane_p:
+        return
+    state.trace._distributed_plane_p = {
+        "schema": "plane_p_dispatch_v0",
+        "records": tuple(state.plane_p_events),
+    }
 
 
 @contextmanager
@@ -415,10 +449,11 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
 
     record_escapes = bool(getattr(trace, "intervention_ready", False))
     record_aten = _aten_recording_requested()
+    plane_p = _plane_p_requested()
     event_stream = getattr(trace, "capture_events", None)
     if record_aten and event_stream is not None:
         event_stream.aten_recording_enabled = True
-    if mode == "off" and not record_escapes and not record_aten:
+    if mode == "off" and not record_escapes and not record_aten and not plane_p:
         try:
             yield
         finally:
@@ -429,10 +464,13 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
         mode,
         record_escapes=record_escapes,
         record_aten=record_aten,
+        plane_p=plane_p,
         event_stream=event_stream,
     )
     mode_context = _CompletenessDispatchMode(state)
-    with _state.aten_recording(record_aten):
+    # plane-P owner attribution needs the wrapper ownership tokens minted even
+    # when the aten recorder itself is off.
+    with _state.aten_recording(record_aten or plane_p):
         # A runnable capture additionally observes census-INVISIBLE ``.tolist()`` /
         # ``.numpy()`` / ``__array__`` escapes via a scoped method patch so every escape
         # mechanism feeds one uniform source-witness pass. The patch is a pure observer,
@@ -459,6 +497,7 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
                         else:
                             _finalize_input_semantics_without_census(trace)
                         _finalize_runnable_ledger(state)
+                        _finalize_plane_p(state)
             finally:
                 _ACTIVE_WITNESS_STATE = prior_active_state
                 _state._runnable_ledger_armed = prior_ledger_armed
@@ -471,6 +510,7 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
                     _finalize_census(state)
                 else:
                     _finalize_input_semantics_without_census(trace)
+                _finalize_plane_p(state)
 
 
 def _collect_authorized_internal_caller_modules() -> None:

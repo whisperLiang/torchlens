@@ -22,13 +22,26 @@ clean bare run; a harness self-check pins that the instrumented bare leg
 matches the clean leg bit-identically, which simultaneously proves the
 counters non-perturbing.
 
-Wave 0 (this build) lands: the row registry, the widened ``CensusResult``
-with the full-conjunction ``row_green`` gate, the dual-channel bare leg,
-criterion 1 (widened), the refusal-row runner, and the report generator.
-Criteria 2-4 are C2 work (they need plane-P capture) and raise
-``NotImplementedError`` so a green can never be vacuous about which criteria
-ran. The wave-0 per-row product is named "ZI baseline + criterion-1 green"
-and is NEVER called row green (plan rule 1.1(1) + phasing note).
+Wave 0 landed: the row registry, the widened ``CensusResult`` with the
+full-conjunction ``row_green`` gate, the dual-channel bare leg, criterion 1
+(widened), the refusal-row runner, and the report generator.
+
+Wave 1 (C2 recording lane) fills the criteria 2-4 BODIES over the plane-P
+dispatch journal armed captures now carry (``trace._distributed_plane_p``,
+session-only) plus the boundary journal and the issue-time seq counters:
+
+* K2 -- multiset coverage of the bare mode stream by the captured plane-P
+  accounting universe (live records plus boundary-discharged interiors;
+  TorchLens' own paused instrumentation reads are excluded);
+* K3 -- collective-namespace accounting: no undischarged collective dispatch,
+  completion bindings observed or typed-fallback, and the no-double-tick seq
+  invariant (per-(group_uid, channel) seq delta == journaled boundaries);
+* K4 -- linkage totality: zero orphan plane-P records (no wrapper owner, no
+  module context, not boundary-discharged, not TorchLens-internal).
+
+Requesting criteria 2-4 on a capture WITHOUT a plane-P journal (unarmed) still
+raises, so a green can never be vacuous about which criteria ran. The wave-0
+per-row product name and the row_green conjunction are unchanged.
 """
 
 from __future__ import annotations
@@ -462,6 +475,21 @@ CENSUS_ROWS: dict[str, CensusRowSpec] = _rows(
 
 
 @dataclass
+class CensusArtifacts:
+    """Session-only evidence from one captured census leg (never reported).
+
+    Feeds the criteria 2-4 bodies: the finished capture (plane-P journal +
+    boundary journal live on it) plus the issue-time seq-counter snapshots
+    bracketing the captured leg, so the no-double-tick invariant is evaluated
+    on THIS capture's ticks only.
+    """
+
+    trace: Any = None
+    seq_before: dict[tuple[str, int, str], int] = field(default_factory=dict)
+    seq_after: dict[tuple[str, int, str], int] = field(default_factory=dict)
+
+
+@dataclass
 class CensusResult:
     """Outcome of one census run for one topology/workload row."""
 
@@ -477,6 +505,7 @@ class CensusResult:
     interposition_channel: str = "absent"
     refusal_kinds: tuple[str, ...] = ()
     not_run: list[str] = field(default_factory=list)
+    artifacts: CensusArtifacts | None = None
 
     @property
     def green(self) -> bool:
@@ -767,12 +796,16 @@ def run_census_criterion_1(
     )
 
     # Leg 2: CAPTURED (interposition asserted absent: never installed here,
-    # and leg 1's teardown probe proved deregistration).
+    # and leg 1's teardown probe proved deregistration). The issue-time seq
+    # counters are snapshotted around the leg so criterion 3's no-double-tick
+    # invariant is evaluated against THIS capture's ticks only.
     torch.manual_seed(seed)
     random.seed(seed)
     captured_model = model_factory()
     captured_input = input_factory()
+    seq_before = _seq_counter_snapshot()
     log = tl.trace(captured_model, captured_input, **(capture_kwargs or {}))
+    seq_after = _seq_counter_snapshot()
     captured_tensors = [op.out for op in log.output_ops]
     failures.extend(_compare_outputs(clean_tensors, captured_tensors, "clean-bare vs captured"))
     if model_state_digest(captured_model) != clean_state:
@@ -787,6 +820,7 @@ def run_census_criterion_1(
         failures=failures,
         completion_events=completion_events,
         interposition_channel=interposition_channel,
+        artifacts=CensusArtifacts(trace=log, seq_before=seq_before, seq_after=seq_after),
     )
 
 
@@ -803,24 +837,20 @@ def run_census_row(
     zi_gate_passed: bool | None = None,
     interposition: bool = False,
     suppress_interposition: bool = False,
+    drop_op_class: str | None = None,
 ) -> CensusResult:
     """Run one census row to its requested criteria with floor enforcement.
 
-    Wave-0 rows request ``criteria=(1,)``; requesting 2-4 dispatches to the
-    honestly-unimplemented criterion bodies (C2 work) and raises. Floors are
-    evaluated over the row's ground-truth channels and every miss lands in
-    ``failures`` as a typed harness entry, wired INTO ``row_green``.
+    Criterion 1 always runs (it produces the captured leg the other criteria
+    evaluate); criteria 2-4 run over the capture's plane-P journal, boundary
+    journal, and seq snapshots, and raise honestly when the capture carries no
+    plane-P journal (unarmed). Floors are evaluated over the row's
+    ground-truth channels and every miss lands in ``failures`` as a typed
+    harness entry, wired INTO ``row_green``. ``drop_op_class`` is the N2 red
+    construction (K2 must fail when a captured op class is dropped).
     """
 
     spec = CENSUS_ROWS[row_id]
-    for criterion in criteria:
-        if criterion == 2:
-            run_census_criterion_2()
-        elif criterion == 3:
-            run_census_criterion_3()
-        elif criterion == 4:
-            run_census_criterion_4()
-
     result = run_census_criterion_1(
         model_factory,
         input_factory,
@@ -832,6 +862,25 @@ def run_census_row(
     result.row_id = row_id
     result.world = spec.world
     result.zi_gate_passed = zi_gate_passed
+
+    artifacts = result.artifacts
+    criteria_run: list[int] = [1]
+    for criterion in sorted(set(criteria) - {1}):
+        assert artifacts is not None and artifacts.trace is not None
+        if criterion == 2:
+            result.failures.extend(
+                run_census_criterion_2(
+                    result.ground_truth_ops, artifacts.trace, drop_op_class=drop_op_class
+                )
+            )
+        elif criterion == 3:
+            result.failures.extend(
+                run_census_criterion_3(artifacts.trace, artifacts.seq_before, artifacts.seq_after)
+            )
+        elif criterion == 4:
+            result.failures.extend(run_census_criterion_4(artifacts.trace))
+        criteria_run.append(criterion)
+    result.criteria_run = tuple(criteria_run)
 
     if content_floor is not None:
         met = bool(content_floor(result.ground_truth_ops))
@@ -892,32 +941,268 @@ def run_refusal_row(
 
 
 # --------------------------------------------------------------------------
-# Criteria 2-4: honestly unimplemented until the C2 recording lane (wave 1).
+# Criteria 2-4 bodies (wave 1, C2 recording lane): pure functions over the
+# captured leg's plane-P journal, boundary journal, and seq snapshots.
 # --------------------------------------------------------------------------
 
+#: The five enumerated collective dispatcher namespaces (recognizer set).
+COLLECTIVE_NAMESPACES: tuple[str, ...] = (
+    "c10d",
+    "_c10d_functional",
+    "_c10d_functional_autograd",
+    "c10d_functional",
+    "_dtensor",
+)
 
-def run_census_criterion_2(*_args: Any, **_kwargs: Any) -> None:
-    """Plane-P completeness: every ground-truth op accounted for. C2 work."""
-
-    raise NotImplementedError(
-        "census criterion 2 requires plane-P dispatcher capture (merge-ranks C2)"
-    )
-
-
-def run_census_criterion_3(*_args: Any, **_kwargs: Any) -> None:
-    """Collective-namespace accounting + no-double-tick. C2 work."""
-
-    raise NotImplementedError(
-        "census criterion 3 requires plane-P dispatcher capture (merge-ranks C2)"
-    )
+#: Completion-family ops: bound by an observed completion or a typed fallback
+#: on their boundary, never their own boundary (funcol event mapping, v5 1.4b).
+_COMPLETION_OP_BASES: frozenset[str] = frozenset(
+    {"_c10d_functional.wait_tensor", "c10d_functional.wait_tensor"}
+)
 
 
-def run_census_criterion_4(*_args: Any, **_kwargs: Any) -> None:
-    """Total plane-S/plane-P linkage. C2 work."""
+def _seq_counter_snapshot() -> dict[tuple[str, int, str], int]:
+    """Copy the armed state's issue-time seq counters (empty when unarmed)."""
 
-    raise NotImplementedError(
-        "census criterion 4 requires plane-P dispatcher capture (merge-ranks C2)"
-    )
+    from torchlens.distributed._lifecycle import armed_state
+
+    state = armed_state()
+    return dict(state.seq_counters) if state is not None else {}
+
+
+def _plane_p_records(trace: Any) -> tuple[tuple[str, int | None, bool, bool, bool], ...]:
+    """Return the capture's plane-P dispatch records, or raise honestly.
+
+    Raises
+    ------
+    NotImplementedError
+        When the capture carries no plane-P journal (an unarmed capture): the
+        criteria 2-4 bodies exist, but THIS capture cannot discharge them, and
+        a green must never be vacuous about that.
+    """
+
+    journal = getattr(trace, "_distributed_plane_p", None)
+    if not isinstance(journal, dict) or "records" not in journal:
+        raise NotImplementedError(
+            "census criteria 2-4 require the plane-P dispatch journal, which "
+            "only ARMED captures record (merge-ranks C2); this capture has none"
+        )
+    return tuple(journal["records"])
+
+
+def _accounting_universe(
+    records: tuple[tuple[str, int | None, bool, bool, bool], ...],
+) -> list[str]:
+    """K2's accounting universe: live records + boundary-discharged interiors.
+
+    TorchLens-internal instrumentation reads (paused AND not inside a public
+    collective boundary) are excluded so they can never mask a dropped user
+    op of the same class.
+    """
+
+    return [
+        name for (name, _owner, paused, discharged, _mod) in records if not paused or discharged
+    ]
+
+
+def run_census_criterion_2(
+    bare_ops: list[str],
+    trace: Any,
+    *,
+    drop_op_class: str | None = None,
+) -> list[str]:
+    """K2 plane-P completeness: bare mode stream covered by captured records.
+
+    Parameters
+    ----------
+    bare_ops:
+        The instrumented-bare leg's mode stream (any namespace).
+    trace:
+        The captured leg's finished Trace (plane-P journal required).
+    drop_op_class:
+        Census red construction N2: drop every captured record whose
+        qualified name starts with this prefix, simulating a compute-capture
+        hole; the criterion must then fail.
+
+    Returns
+    -------
+    list[str]
+        Typed K2 failure strings (empty = criterion passed).
+    """
+
+    from collections import Counter
+
+    records = _plane_p_records(trace)
+    if drop_op_class is not None:
+        records = tuple(r for r in records if not r[0].startswith(drop_op_class))
+    accounted = Counter(_accounting_universe(records))
+    failures: list[str] = []
+    for name, needed in sorted(Counter(bare_ops).items()):
+        have = accounted.get(name, 0)
+        if have < needed:
+            failures.append(
+                f"K2: ground-truth op {name} dispatched {needed}x but only "
+                f"{have}x accounted in the captured plane-P journal"
+            )
+    return failures
+
+
+def _boundary_journal(trace: Any) -> list[dict[str, Any]]:
+    """Return the trace's collective boundary journal entries (may be empty)."""
+
+    annotations = getattr(trace, "annotations", None)
+    if not isinstance(annotations, dict):
+        return []
+    distributed = annotations.get("distributed")
+    if not isinstance(distributed, dict):
+        return []
+    boundaries = distributed.get("boundaries")
+    return list(boundaries) if isinstance(boundaries, list) else []
+
+
+def run_census_criterion_3(
+    trace: Any,
+    seq_before: dict[tuple[str, int, str], int],
+    seq_after: dict[tuple[str, int, str], int],
+    *,
+    extra_ticks: int = 0,
+) -> list[str]:
+    """K3 collective + completion accounting with the no-double-tick invariant.
+
+    Three conjuncts, all evaluated on the captured leg's own evidence:
+
+    1. every collective-namespace plane-P dispatch is DISCHARGED against an
+       enclosing public boundary (v5's nesting rule below the python layer) or
+       is a completion-family op; an undischarged collective dispatch is a
+       capture hole and fails the criterion;
+    2. every journaled async boundary carries an OBSERVED completion binding
+       or the typed unobserved fallback with its disclosure -- a definite
+       claim about an unobserved completion is never accepted;
+    3. no-double-tick: per (group_uid, channel), the issue-time seq delta
+       across the captured leg equals the number of journaled boundaries on
+       that key -- a tick without a boundary or a boundary without a tick
+       both fail.
+
+    Parameters
+    ----------
+    trace:
+        The captured leg's finished Trace.
+    seq_before / seq_after:
+        Issue-time seq-counter snapshots bracketing the captured leg.
+    extra_ticks:
+        Census red construction N3a: pretend this many additional ticks were
+        observed (the synthetic double-tick); the seq invariant must fail.
+
+    Returns
+    -------
+    list[str]
+        Typed K3 failure strings (empty = criterion passed).
+    """
+
+    failures: list[str] = []
+    records = _plane_p_records(trace)
+    for name, _owner, _paused, discharged, _mod in records:
+        namespace, _, _rest = name.partition(".")
+        if namespace not in COLLECTIVE_NAMESPACES:
+            continue
+        base = name.rsplit(".", 1)[0] if name.count(".") >= 2 else name
+        if base in _COMPLETION_OP_BASES:
+            continue
+        if not discharged:
+            failures.append(
+                f"K3: collective-namespace dispatch {name} has no enclosing "
+                "public boundary (undischarged; would be its own untracked boundary)"
+            )
+
+    boundaries = _boundary_journal(trace)
+    for index, entry in enumerate(boundaries):
+        events = entry.get("events", {})
+        if not events.get("async_op", False):
+            continue
+        binding = events.get("completion_binding")
+        if binding == "observed_wait":
+            continue
+        if binding == "unobserved":
+            disclosures = entry.get("disclosures", [])
+            if (
+                "read_of_inflight_destination" in disclosures
+                or "async_unwaited_output_unwitnessed" in disclosures
+            ):
+                continue
+            failures.append(
+                f"K3: boundary {index} ({entry.get('kind')}) is async-unobserved "
+                "without the typed disclosure fallback"
+            )
+        else:
+            failures.append(
+                f"K3: boundary {index} ({entry.get('kind')}) carries "
+                f"unclassifiable completion binding {binding!r}"
+            )
+
+    ticked: dict[tuple[str, int, str], int] = {}
+    for key, value in seq_after.items():
+        delta = value - seq_before.get(key, 0)
+        if delta:
+            ticked[key] = delta
+    if extra_ticks:
+        if ticked:
+            first = next(iter(ticked))
+            ticked[first] += extra_ticks
+        else:
+            ticked[("synthetic", 0, "coll")] = extra_ticks
+    journaled: dict[tuple[str, int, str], int] = {}
+    for entry in boundaries:
+        correlation = entry.get("correlation", {})
+        key = (
+            correlation.get("membership_digest"),
+            correlation.get("lifetime_ordinal"),
+            correlation.get("channel"),
+        )
+        journaled[key] = journaled.get(key, 0) + 1
+    for key in sorted(set(ticked) | set(journaled), key=str):
+        if ticked.get(key, 0) != journaled.get(key, 0):
+            failures.append(
+                f"K3: seq invariant violated on {key}: {ticked.get(key, 0)} issue "
+                f"tick(s) vs {journaled.get(key, 0)} journaled boundary(ies)"
+            )
+    return failures
+
+
+def run_census_criterion_4(
+    trace: Any,
+    *,
+    injected_orphans: tuple[tuple[str, int | None, bool, bool, bool], ...] = (),
+) -> list[str]:
+    """K4 linkage totality: zero orphan plane-P interior records.
+
+    An orphan is a LIVE dispatch (not TorchLens-internal, not inside a public
+    boundary) with neither a wrapper-owner func_call_id nor an owning module
+    context -- physical work the semantic plane cannot account for.
+
+    Parameters
+    ----------
+    trace:
+        The captured leg's finished Trace.
+    injected_orphans:
+        Census red construction N4: synthetic orphan records appended to the
+        journal before evaluation; the criterion must then fail.
+
+    Returns
+    -------
+    list[str]
+        Typed K4 failure strings (empty = criterion passed).
+    """
+
+    records = _plane_p_records(trace) + tuple(injected_orphans)
+    failures: list[str] = []
+    for name, owner, paused, discharged, has_module_context in records:
+        if paused or discharged:
+            continue
+        if owner is None and not has_module_context:
+            failures.append(
+                f"K4: orphan interior record {name} (no plane-S owner, no module-hook boundary)"
+            )
+    return failures
 
 
 # --------------------------------------------------------------------------
