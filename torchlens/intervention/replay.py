@@ -506,6 +506,14 @@ def cone_of_effect(trace: Trace, origins: Iterable[Op]) -> list[Op]:
             frontier.append(key)
 
     def _enqueue_children(site: Op) -> None:
+        """Push one op's unvisited children onto the cone frontier, per pass.
+
+        Parameters
+        ----------
+        site:
+            The op whose child relations are being expanded.
+        """
+
         for child_label in _child_labels(site):
             # A pass-ambiguous child spelling (not produced by finished-trace
             # relations, but guarded against) expands to every pass: a
