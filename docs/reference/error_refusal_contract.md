@@ -35,8 +35,14 @@ add names to the top-level `torchlens` namespace:
 | `annotation_payload_missing` | `annotate()` received neither data nor image | Pass `data=`, `image=`, or both |
 | `annotation_tensor_not_portable` | Annotation tensor fails the payload codec | Pass a dense, codec-supported tensor |
 | `artifact_kind_mismatch` | Specialized loader received another artifact kind | Use the matching loader or generic `io.load` |
+| `artifact_checkpoint_witness_invalid` | Loaded `Trace.checkpoint_invocation_witness` violates its closed token schema, D1-D6 flag vocabulary, verdict coherence, count geometry, or retained-site relations | Re-run backward capture and re-save; do not hand-edit checkpoint evidence |
+| `artifact_distributed_scope_invalid` | Loaded `Trace.distributed_scope` is outside the closed `None` / `rank_local_shard` vocabulary | Re-save the source trace; do not invent distributed-scope markers |
+| `artifact_grad_fn_timing_provenance_invalid` | Loaded `Trace.grad_fn_timing_provenance` names no supported timing source | Re-run backward capture and re-save without editing the clock source |
+| `artifact_intervention_audit_invalid` | Loaded `Trace.intervention_audit` or `HelperSpec.selection_recipe` violates its closed row schema or their resolve-digest relation | Re-apply the intervention and re-save; do not hand-edit audit or recipe rows |
+| `artifact_kernel_telemetry_invalid` | Loaded kernel telemetry violates its closed launch schema or cites a nonexistent primitive sequence / launch index | Re-profile and re-save the trace; do not hand-edit launch or relation rows |
 | `artifact_save_level_invalid` | `.tlspec` save level is unknown | Choose a documented save level |
 | `artifact_save_level_unsupported` | Artifact kind cannot provide the requested save level | Choose a level supported by that kind |
+| `artifact_site_key_invalid` | Loaded `Op.site_key` is partial, malformed, or differs from the byte-exact `site_key_v1` recomputation over persisted op structure | Re-capture and re-save with one current TorchLens version; artifacts at the tlspec v6/v7 boundary may be wholly keyless |
 | `artifact_version_above_runtime` | Bundle `tlspec_version` is newer than this runtime supports | Upgrade torchlens to the release that wrote the artifact (or newer) |
 | `artifact_version_below_floor` | Artifact predates the rehydration floor (`tlspec_version` < 6 / torchlens < 2.33) | Load and re-save it with a torchlens release that still reads it |
 | `ambiguous_op_lookup` | Accessor key matches multiple pass-qualified objects | Use a full address, pass label, or call index |

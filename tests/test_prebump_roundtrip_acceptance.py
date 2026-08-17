@@ -25,6 +25,7 @@ row is updated, so no field can slip into the bump unvalidated silently.
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
 
 import pytest
 import torch
@@ -32,7 +33,7 @@ import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
 import torchlens as tl
-from torchlens._io import FieldPolicy, PreReleaseArtifactError
+from torchlens._io import FieldPolicy, PreReleaseArtifactError, TorchLensIOError
 from torchlens._io.prerelease import (
     PRERELEASE_STATE_KEY,
     activate_prerelease_fields,
@@ -588,122 +589,172 @@ def test_l9_checkpoint_witness_family_roundtrip(tmp_path) -> None:
 # VALIDATED-NOW families refuse (or degrade fail-closed, typed) at load; their
 # refusals are pinned by the owning lane suites and re-proven here where cheap.
 #
-# DEFERRED-TO-BUMP families persist tampered values verbatim today: their
-# load-validation rows land at the coordinated bump (registrar module
-# docstring), and pre-bump the marker refusal keeps every switched artifact
-# out of circulation, so the forgery surface is test-scope only. The ledger
-# pins the CURRENT truth loudly: when the bump adds a family's validation,
-# its pin here fails until the row moves to the validated class -- no family
-# can reach the bump with its validation silently forgotten.
+# Every row must stay synchronized with its planted tamper below. A validation
+# landing without its row move fails the test, as does a row move whose load
+# boundary does not actually refuse the planted forgery.
 # ---------------------------------------------------------------------------
 
-#: field row -> validation status TODAY. Every DEFERRED row is a bump-time
-#: obligation (escalated in results/prebump-acceptance.md).
+#: Field row -> validation status TODAY.
 FORGERY_SURFACE_LEDGER: dict[str, str] = {
     "Trace.grouping_policy": "validated_degrade_typed",  # C1-C8, test_grouping_stamp
     "Trace.annotations.episode": "validated_refuse_or_quarantine",  # test_episode_capture
     "Trace._primitive_op_profile": "validated_fk_refusal",  # test_aten_profile
     "Op.edge_substitutions": "validated_at_validation_time",  # boundary check, test_edge_substitution
-    "Op.site_key": "DEFERRED_TO_BUMP",
-    "Trace.distributed_scope": "DEFERRED_TO_BUMP",
-    "Trace.grad_fn_timing_provenance": "DEFERRED_TO_BUMP",
-    "Trace.checkpoint_invocation_witness": "DEFERRED_TO_BUMP",
-    "Trace.intervention_audit": "DEFERRED_TO_BUMP",
-    "Trace.annotations._kernel_telemetry": "DEFERRED_TO_BUMP",
+    "Op.site_key": "validated_refuse_typed",
+    "Trace.distributed_scope": "validated_refuse_typed",
+    "Trace.grad_fn_timing_provenance": "validated_refuse_typed",
+    "Trace.checkpoint_invocation_witness": "validated_refuse_typed",
+    "Trace.intervention_audit": "validated_refuse_typed",
+    "Trace.annotations._kernel_telemetry": "validated_refuse_typed",
 }
 
 
-def _tampered_loads_verbatim(trace: tl.Trace, tmp_path, name: str, reader, planted) -> None:
-    """Pin: the tamper persists verbatim today AND stays marker-contained."""
+def _tampered_refuses(
+    trace: tl.Trace,
+    tmp_path: Path,
+    name: str,
+    *,
+    field: str,
+) -> TorchLensIOError:
+    """Prove one planted tamper refuses teachingly and stays marker-contained.
+
+    Parameters
+    ----------
+    trace:
+        Trace carrying the planted invalid field value.
+    tmp_path:
+        Pytest temporary-path fixture.
+    name:
+        Artifact filename stem.
+    field:
+        Fully-qualified field name expected in the refusal.
+
+    Returns
+    -------
+    TorchLensIOError
+        The typed load-boundary refusal for code-specific assertions.
+    """
 
     path = tmp_path / f"{name}_tampered.tlspec"
-    with activate_prerelease_fields(), warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        tl.save(trace, str(path))
-        loaded = tl.load(str(path))
-    assert reader(loaded) == planted, (
-        f"{name}: load-time validation now fires for this family -- move its "
-        "FORGERY_SURFACE_LEDGER row to the validated class and add the typed-"
-        "refusal assertion here."
-    )
-    # Containment: the tampered artifact still refuses as a real v7 artifact.
+    with activate_prerelease_fields():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tl.save(trace, str(path))
+        with pytest.raises(TorchLensIOError) as excinfo:
+            tl.load(str(path))
+    refusal = excinfo.value
+    assert refusal.fields["field"] == field
+    assert refusal.fields["reason"]
+    assert refusal.fields["remedy"]
+    assert field in str(refusal)
+    assert "Remedy:" in str(refusal)
+    # Pre-bump containment remains intact outside the activation switch.
     with pytest.raises(PreReleaseArtifactError):
         tl.load(str(path))
+    return refusal
 
 
 @pytest.mark.smoke
-def test_tamper_site_key_deferred_to_bump(tmp_path) -> None:
-    assert FORGERY_SURFACE_LEDGER["Op.site_key"] == "DEFERRED_TO_BUMP"
+def test_tamper_site_key_refuses_typed(tmp_path) -> None:
+    """A parse-valid ``site_key_v1`` that disagrees with op facts refuses."""
+
+    assert FORGERY_SURFACE_LEDGER["Op.site_key"] == "validated_refuse_typed"
     trace = _tiny_trace()
     target = trace.ops[1]
-    target._internal_set("site_key", "forged-not-a-site-key")
-    _tampered_loads_verbatim(
-        trace, tmp_path, "site_key", lambda t: t.ops[1].site_key, "forged-not-a-site-key"
+    target._internal_set("site_key", "s1|forged|linear||1")
+    refusal = _tampered_refuses(
+        trace,
+        tmp_path,
+        "site_key",
+        field="Op.site_key",
     )
+    assert refusal.fields["code"] == "artifact_site_key_invalid"
 
 
 @pytest.mark.smoke
-def test_tamper_distributed_scope_deferred_to_bump(tmp_path) -> None:
+def test_tamper_distributed_scope_refuses_typed(tmp_path) -> None:
+    """A planted shard-scope vocabulary forgery refuses at load."""
+
     from torchlens.distributed import _lifecycle as lifecycle
 
-    assert FORGERY_SURFACE_LEDGER["Trace.distributed_scope"] == "DEFERRED_TO_BUMP"
+    assert FORGERY_SURFACE_LEDGER["Trace.distributed_scope"] == "validated_refuse_typed"
     lifecycle.disarm()
     trace = _tiny_trace()
     trace.distributed_scope = "forged_scope_value"
-    _tampered_loads_verbatim(
-        trace, tmp_path, "distributed_scope", lambda t: t.distributed_scope, "forged_scope_value"
+    refusal = _tampered_refuses(
+        trace,
+        tmp_path,
+        "distributed_scope",
+        field="Trace.distributed_scope",
     )
+    assert refusal.fields["code"] == "artifact_distributed_scope_invalid"
 
 
-def test_tamper_timing_provenance_deferred_to_bump(tmp_path) -> None:
-    assert FORGERY_SURFACE_LEDGER["Trace.grad_fn_timing_provenance"] == "DEFERRED_TO_BUMP"
+def test_tamper_timing_provenance_refuses_typed(tmp_path) -> None:
+    """A planted clock-source vocabulary forgery refuses at load."""
+
+    assert FORGERY_SURFACE_LEDGER["Trace.grad_fn_timing_provenance"] == "validated_refuse_typed"
     trace = _backward_trace()
     object.__setattr__(trace, "grad_fn_timing_provenance", "forged_clock_source")
-    _tampered_loads_verbatim(
-        trace, tmp_path, "timing", lambda t: t.grad_fn_timing_provenance, "forged_clock_source"
+    refusal = _tampered_refuses(
+        trace,
+        tmp_path,
+        "timing",
+        field="Trace.grad_fn_timing_provenance",
     )
+    assert refusal.fields["code"] == "artifact_grad_fn_timing_provenance_invalid"
 
 
-def test_tamper_checkpoint_witness_deferred_to_bump(tmp_path) -> None:
-    assert FORGERY_SURFACE_LEDGER["Trace.checkpoint_invocation_witness"] == "DEFERRED_TO_BUMP"
+def test_tamper_checkpoint_witness_refuses_typed(tmp_path) -> None:
+    """A planted checkpoint token-count type forgery refuses at load."""
+
+    assert FORGERY_SURFACE_LEDGER["Trace.checkpoint_invocation_witness"] == "validated_refuse_typed"
     trace = _checkpoint_trace()
     witness = dict(trace.checkpoint_invocation_witness)
     witness["token_count"] = "forty-two"  # type-forged: count is not even an int
     object.__setattr__(trace, "checkpoint_invocation_witness", witness)
-    _tampered_loads_verbatim(
+    refusal = _tampered_refuses(
         trace,
         tmp_path,
         "checkpoint",
-        lambda t: t.checkpoint_invocation_witness["token_count"],
-        "forty-two",
+        field="Trace.checkpoint_invocation_witness",
     )
+    assert refusal.fields["code"] == "artifact_checkpoint_witness_invalid"
 
 
-def test_tamper_intervention_audit_deferred_to_bump(tmp_path) -> None:
-    assert FORGERY_SURFACE_LEDGER["Trace.intervention_audit"] == "DEFERRED_TO_BUMP"
+def test_tamper_intervention_audit_refuses_typed(tmp_path) -> None:
+    """A planted audit/recipe digest mismatch refuses at load."""
+
+    assert FORGERY_SURFACE_LEDGER["Trace.intervention_audit"] == "validated_refuse_typed"
     fork = _selection_fork()
     audit = [dict(record) for record in fork.intervention_audit]
     audit[-1]["resolve_digest"] = "f" * 64
     object.__setattr__(fork, "intervention_audit", audit)
-    _tampered_loads_verbatim(
-        fork, tmp_path, "audit", lambda t: t.intervention_audit[-1]["resolve_digest"], "f" * 64
+    refusal = _tampered_refuses(
+        fork,
+        tmp_path,
+        "audit",
+        field="Trace.intervention_audit",
     )
+    assert refusal.fields["code"] == "artifact_intervention_audit_invalid"
 
 
-def test_tamper_kernel_telemetry_deferred_to_bump(tmp_path) -> None:
-    assert FORGERY_SURFACE_LEDGER["Trace.annotations._kernel_telemetry"] == "DEFERRED_TO_BUMP"
+def test_tamper_kernel_telemetry_refuses_typed(tmp_path) -> None:
+    """A parse-valid kernel relation with a forged primitive FK refuses."""
+
+    assert FORGERY_SURFACE_LEDGER["Trace.annotations._kernel_telemetry"] == "validated_refuse_typed"
     trace = _telemetry_trace()
     payload = trace.annotations["_kernel_telemetry"]
     tampered = dict(payload)
-    tampered["_relations"] = {"forged_marker": [999999]}
+    tampered["_relations"] = ((999999, 0),)
     trace.annotations["_kernel_telemetry"] = tampered
-    _tampered_loads_verbatim(
+    refusal = _tampered_refuses(
         trace,
         tmp_path,
         "telemetry",
-        lambda t: t.annotations["_kernel_telemetry"]["_relations"],
-        {"forged_marker": [999999]},
+        field="Trace.annotations._kernel_telemetry",
     )
+    assert refusal.fields["code"] == "artifact_kernel_telemetry_invalid"
 
 
 @pytest.mark.smoke

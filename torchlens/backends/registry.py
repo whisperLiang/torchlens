@@ -25,6 +25,9 @@ against this constant, never a hard-coded literal — the backend-literal gate
 in ``tests/test_backend_registry.py`` enforces it.
 """
 
+JAX_BACKEND_NAME: Final[BackendName] = "jax"
+"""Canonical registry name of the JAX preview backend."""
+
 TINYGRAD_BACKEND_NAME: Final[BackendName] = "tinygrad"
 """Canonical registry name of the tinygrad preview backend."""
 
