@@ -125,6 +125,12 @@ _INSTALL_STATE_AND_CACHES = frozenset(
         ("torchlens/_io/prerelease.py", "_REGISTRY"),
         # Wrapper-lifecycle slots rebound only through the module object
         # (visible since the cross-module rebind detector, hunt-b2-sol R54).
+        # Kernel-telemetry correlation installs by rebinding these two aten-call
+        # slots THROUGH THE MODULE OBJECT (kernel_telemetry.py:563-591) and
+        # restores the originals on exit -- the same wrapper-lifecycle pattern as
+        # the _state.py slots below, not a cache.
+        ("torchlens/backends/torch/_aten_capture.py", "_finish_aten_call"),
+        ("torchlens/backends/torch/_aten_capture.py", "_prepare_aten_call"),
         ("torchlens/_state.py", "_decorated_identity"),
         ("torchlens/_state.py", "_is_decorated"),
         ("torchlens/_state.py", "_wrap_epoch"),
