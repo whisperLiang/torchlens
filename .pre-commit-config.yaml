@@ -94,7 +94,8 @@ repos:
             tests/capture_oracle/goldens/.*|
             tests/godobject_oracle/goldens/.*|
             tests/snapshots/.*|
-            tests/perf_baselines/.*
+            tests/perf_baselines/.*|
+            tests/fixtures/tlspec_v7/.*
           )$
   - repo: https://github.com/astral-sh/ruff-pre-commit
     # PIN AUTHORITY: the `# vX.Y.Z` trailer MUST equal the `ruff==` pin in
