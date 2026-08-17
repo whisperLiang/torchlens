@@ -37,3 +37,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: d61fc573a06d9f1d1e6da5205ead21d2ce53b728 (dirty)
 recorded: 2026-08-17T00:57:41.410353+00:00
+---
+generator: tests/godobject_oracle legacy
+flag: TORCHLENS_UPDATE_LEGACY_ARTIFACT_ORACLE=1
+reason: L6 stage-3 fields edge_substitutions/edge_replacement_stamps (+ Trace intervention_audit) now appear at defaults on loaded legacy surfaces; snapshot follows the shipped surface
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: d3c93d016124ac43ea6082aa576cd61354c0dff7 (clean)
+recorded: 2026-08-17T00:58:35.897051+00:00
