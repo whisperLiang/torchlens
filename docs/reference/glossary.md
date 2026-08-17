@@ -730,9 +730,14 @@ deprecation shim owed*
   DERIVED — `Param.used_by_ops` + template-component identity/barcode
   matching, FAIL-CLOSED (`param_substitution_occurrence_underivable` when
   any consumption cannot be addressed: nested container positions,
-  released legacy captures, and multi-pass/recurrence-grouped consumers —
-  recurrently reused params such as tied weights are a named v1 engine
-  limitation). The substitution then drives the shipped edge-substitution
+  released legacy captures, a bare pass-ambiguous multi-pass consumer
+  spelling, or a consumer inventory omitting a pass). Recurrently reused
+  parameters (tied weights, one module called at N passes of a
+  recurrence-grouped layer) ARE substitutable: consumers are recorded and
+  staged pass-qualified (`label:pass`), the edit lands at EVERY
+  consumption (a parameter has one identity across passes), and the
+  pass-qualified replay engine recomputes each pass faithfully. The
+  substitution then drives the shipped edge-substitution
   engine: tier-(ii) `Op.edge_substitutions` entries marked
   `substitution_kind="param"`, edit-then-scatter masking over the param
   index space, one replay pass over all consumer origins (cone

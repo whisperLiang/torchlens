@@ -65,9 +65,12 @@ Key entry points:
   each consumer sees is substituted at its derived occurrence address via the
   tier-(ii) edge-substitution store (`substitution_kind="param"`, re-spliced
   on cone recomputation), the live `nn.Parameter` is never written, and
-  rerun/set_only refuse `param_substitution_engine_unsupported`; multi-pass
-  (recurrence-grouped) consumers, e.g. tied weights, refuse
-  `param_substitution_occurrence_underivable` (named v1 engine limitation).
+  rerun/set_only refuse `param_substitution_engine_unsupported`. Recurrently
+  reused params (tied weights, multi-pass consumers) substitute at EVERY
+  consumption via pass-qualified staging; what still refuses
+  `param_substitution_occurrence_underivable` (fail-closed): nested container
+  positions, released legacy captures, bare pass-ambiguous consumer
+  spellings, and consumer inventories omitting a pass.
 - Pass-qualified replay (JMT-ruled 2026-08-17; refusal spelling
   DOCUMENTED-UNSTABLE): the replay/push engine keys cone traversal, the
   overlay, hook targets, and commits by pass-qualified op labels
