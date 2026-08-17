@@ -10,8 +10,14 @@ key, a grouping key, or replay evidence.
 The adapter is CUDA-only. It brackets each redispatched ATen call with a unique profiler marker,
 then uses marker containment to identify CUDA runtime calls and Kineto runtime correlation IDs to
 follow asynchronous work onto the device. It does not inspect operator-name or kernel-name
-substrings. This supports one ATen call launching many kernels and a single fused launch related to
-several ATen rows without pretending either shape is one-to-one.
+substrings. The implementation is designed to represent one ATen call launching many kernels and a
+single fused launch related to several ATen rows without pretending either shape is one-to-one.
+
+Real-CUDA/CUPTI correlation is **UNVERIFIED on the environment used for this audit**: its real-device
+test is NOT-RUN here. The following cases are therefore also NOT-RUN: one ATen call to many kernels,
+many ATen calls to one fused launch, multiple streams, asynchronous launches, memory copies,
+profiler warmup, and profiler teardown when capture raises. The design and CPU/fake-profiler tests
+must not be read as empirical validation of those real-device cases.
 
 The public record facade is `KernelLaunch`. Its measured fields are `launch_name`, `device`,
 `stream`, `duration`, `runtime_correlation`, and `attribution_status`. The computed
@@ -25,9 +31,9 @@ If CUDA or CUPTI is unavailable, telemetry returns a single fact-free disclosure
 `attribution_status="unavailable"`. That row is not a kernel launch and is never counted as one.
 An empty tuple is reserved for a profiler session that ran and observed no related device event.
 
-`mode_paused_interior` remains an observation gap. If a parent Op has any such gap, its observed
-kernel set and every count derived from it are lower bounds. TorchLens does not invent a hidden ATen
-row, kernel, duration, stream, or correlation ID for the paused region.
+`mode_paused_interior` remains an observation gap. Wherever it is non-empty, the observed kernel set
+and every count derived from it remain lower bounds. TorchLens does not invent a hidden ATen row,
+kernel, duration, stream, or correlation ID for the paused region.
 
 ## Persistence and shed boundary
 
