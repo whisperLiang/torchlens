@@ -148,14 +148,20 @@ def test_apply_refusal_axes(log):
 
 
 def test_param_and_mixed_plan_refusals(log):
-    """PARAM edits refuse (D3 activation-path narrowing); mixed plans refuse."""
+    """PARAM edits ride parameter substitution on the replay engine (the JMT
+    2026-08-17 param-operand ruling supersedes the D3 typed-refusal default
+    there; tests/test_param_substitution.py pins the substitution behavior).
+    Off-replay engines and mixed plans still refuse typed."""
 
     from torchlens.intervention.errors import EngineDispatchError
 
     with pytest.raises(SelectionError) as excinfo:
-        log.fork().do(tl.params("c1.weight"), tl.zero_ablate())
-    assert excinfo.value.fields["code"] == "selection_apply_invalid"
-    assert excinfo.value.fields["reason"] == "not_maskable"
+        log.fork().do(
+            tl.params("c1.weight"),
+            tl.zero_ablate(),
+            intervention=tl.options.InterventionOptions(engine="set_only"),
+        )
+    assert excinfo.value.fields["code"] == "param_substitution_engine_unsupported"
 
     mixed = tl.units("input_1", [(0, 0, 0, 0)]) | tl.units("relu_1_2", [(0, 0, 0, 0)])
     with pytest.raises(EngineDispatchError):
@@ -189,10 +195,11 @@ def test_audit_record_contents(log):
     assert record["sites"][0]["selected"] == 1
 
 
-def test_mask_never_enters_keep_fields_and_recipe_drops(log):
+def test_mask_never_enters_keep_fields_and_recipe_policy(log):
     """Persistence honesty: derived specs carry masks only in the DROP factory;
-    the recipe rides the DROP-gated selection_recipe family (registrar-backed).
-    Args/kwargs/metadata stay tensor-free."""
+    the recipe rides the selection_recipe family (BLOB_RECURSIVE as of the
+    tlspec v8 coordinated bump — never smuggled through the KEEP args/kwargs
+    fields). Args/kwargs/metadata stay tensor-free."""
 
     selection = tl.units("relu_1_2", [(0, 0, 1, 1)])
     fork = log.fork()
@@ -206,7 +213,9 @@ def test_mask_never_enters_keep_fields_and_recipe_drops(log):
     assert derived.helper_name == "zero_ablate"  # helper identity preserved
     assert derived.selection_recipe is not None
     assert derived.selection_recipe["resolve_digest"]
-    assert HelperSpec.PORTABLE_STATE_SPEC["selection_recipe"].name == "DROP"
+    # the mask lives only in the runtime factory closure, which never persists
+    assert HelperSpec.PORTABLE_STATE_SPEC["factory"].name == "DROP"
+    assert HelperSpec.PORTABLE_STATE_SPEC["selection_recipe"].name == "BLOB_RECURSIVE"
 
     def _no_tensor_leaves(value):
         if isinstance(value, torch.Tensor):

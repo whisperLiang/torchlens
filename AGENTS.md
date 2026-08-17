@@ -59,7 +59,15 @@ Key entry points:
   `tl.random_selection`. Cross-run (stage 4a): `resolved.align_to(target)`
   re-binds ACT selections across runs on L1 site keys, same-policy captures
   only (`selection_alignment_invalid`, closed six-reason set); `do()` still
-  refuses foreign resolved selections typed.
+  refuses foreign resolved selections typed. Parameter substitution
+  (DOCUMENTED-UNSTABLE): `fork.do(tl.params(name, mask=None), edit)` applies
+  the edit "as if" the parameter were changed, replay engine only — the value
+  each consumer sees is substituted at its derived occurrence address via the
+  tier-(ii) edge-substitution store (`substitution_kind="param"`, re-spliced
+  on cone recomputation), the live `nn.Parameter` is never written, and
+  rerun/set_only refuse `param_substitution_engine_unsupported`; multi-pass
+  (recurrence-grouped) consumers, e.g. tied weights, refuse
+  `param_substitution_occurrence_underivable` (named v1 engine limitation).
 - Backward residuals (L9; DOCUMENTED-UNSTABLE): per-fire timing -- one clock
   (`perf_counter`), per-node keyed-LIFO pairing, stamps on the runtime
   `GradFnFired` event only; live-only `trace.grad_fn_fire_timings` (loaded

@@ -267,6 +267,10 @@ def _reexecute_child_with_substitution(
     args, kwargs = replay_module._reconstruct_args_from_template(
         template, child_op, trace, {}, strict=strict
     )
+    # Composition coherence: a child whose PARAMETER was previously
+    # substituted keeps its "as if" value under a later edge edit (the
+    # edge splice below overwrites its own occurrence last if they collide).
+    args, kwargs = replay_module._splice_param_substitutions([child_op], args, kwargs)
     if arg_kind == "positional":
         position = int(arg_path[0])
         args = args[:position] + (substituted,) + args[position + 1 :]

@@ -549,6 +549,7 @@ def _run_replay(
             strict=strict,
             differentiable_frontier=differentiable_frontier,
         )
+        args, kwargs = _splice_param_substitutions(replay_group, args, kwargs)
         output = _execute_replay_func_strict(representative, args, kwargs)
         if output is None and _is_inplace_none_return(representative):
             output = args[0]
@@ -930,6 +931,56 @@ def _apply_replay_hooks(
         )
         records.append(_replay_fire_record(entry, site, replaced=current is not original))
     return current, records
+
+
+def _splice_param_substitutions(
+    group: Sequence[Op],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Re-splice param-kind tier-(ii) substitutions into reconstructed args.
+
+    A parameter argument reconstructs from its template ``LiteralTensor`` as
+    the LIVE (unsubstituted) parameter, so cone recomputation of an op whose
+    parameter was substituted (``fork.do(tl.params(...), edit)``) must
+    re-apply the substituted value here — otherwise a push would silently
+    revert the "as if" edit at every recomputation. STRICTLY gated to
+    ``substitution_kind == "param"`` entries: edge-selection entries keep
+    their shipped no-re-splice semantics (parity-pinned).
+
+    Parameters
+    ----------
+    group:
+        Same-call output sites (any member may carry the store).
+    args:
+        Reconstructed positional arguments.
+    kwargs:
+        Reconstructed keyword arguments.
+
+    Returns
+    -------
+    tuple[tuple[Any, ...], dict[str, Any]]
+        Arguments with param-kind substituted values spliced in.
+    """
+
+    for member in group:
+        entries = getattr(member, "edge_substitutions", None) or {}
+        for store_key, payload in entries.items():
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("substitution_kind") != "param":
+                continue
+            value = payload.get("value")
+            if not isinstance(value, torch.Tensor):
+                continue
+            arg_kind, arg_path = store_key
+            if arg_kind == "positional":
+                position = int(arg_path[0])
+                args = args[:position] + (value,) + args[position + 1 :]
+            else:
+                kwargs = dict(kwargs)
+                kwargs[arg_path[0]] = value
+    return args, kwargs
 
 
 def _commit_replay_updates(
