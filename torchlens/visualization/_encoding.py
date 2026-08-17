@@ -52,7 +52,7 @@ from typing import TYPE_CHECKING, Any
 
 from .._errors import InvalidArgumentError
 
-if TYPE_CHECKING:  # pragma: no cover - typing only
+if TYPE_CHECKING:
     import graphviz
 
     from ..data_classes.trace import Trace
@@ -1583,6 +1583,8 @@ def channel_wrapped_node_spec_fn(
         return node_spec_fn
 
     def channel_then_user(layer_log: Any, spec: Any) -> Any:
+        """Apply the channel fill/size, then let the user callback override them."""
+
         if channel_fill is not None:
             spec = spec.replace(fillcolor=channel_fill)
         if channel_size is not None:

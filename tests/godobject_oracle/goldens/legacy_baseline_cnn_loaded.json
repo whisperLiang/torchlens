@@ -287,7 +287,10 @@
     4,
     4
    ],
+   "shape_summary": null,
    "siblings": [],
+   "site_key": "<raises InvalidArgumentError>",
+   "site_peers": "<raises InvalidArgumentError>",
    "source_trace": {
     "__ref__": "Trace",
     "label": null
@@ -532,7 +535,10 @@
     4,
     4
    ],
+   "shape_summary": null,
    "siblings": [],
+   "site_key": "<raises InvalidArgumentError>",
+   "site_peers": "<raises InvalidArgumentError>",
    "source_trace": {
     "__ref__": "Trace",
     "label": null
@@ -839,7 +845,10 @@
     1,
     3
    ],
+   "shape_summary": null,
    "siblings": [],
+   "site_key": "<raises InvalidArgumentError>",
+   "site_peers": "<raises InvalidArgumentError>",
    "source_trace": {
     "__ref__": "Trace",
     "label": null
@@ -1104,7 +1113,10 @@
     1,
     2
    ],
+   "shape_summary": null,
    "siblings": [],
+   "site_key": "<raises InvalidArgumentError>",
+   "site_peers": "<raises InvalidArgumentError>",
    "source_trace": {
     "__ref__": "Trace",
     "label": null
@@ -1351,7 +1363,10 @@
     1,
     3
    ],
+   "shape_summary": null,
    "siblings": [],
+   "site_key": "<raises InvalidArgumentError>",
+   "site_peers": "<raises InvalidArgumentError>",
    "source_trace": {
     "__ref__": "Trace",
     "label": null
@@ -1615,7 +1630,10 @@
     4,
     4
    ],
+   "shape_summary": null,
    "siblings": [],
+   "site_key": "<raises InvalidArgumentError>",
+   "site_peers": "<raises InvalidArgumentError>",
    "source_trace": {
     "__ref__": "Trace",
     "label": null
@@ -2830,6 +2848,8 @@
    "dropped_edge_tensor_args": [],
    "dtype": "torch.float32",
    "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+   "edge_replacement_stamps": {},
+   "edge_substitutions": {},
    "edge_uses": [
     "<torchlens.intervention.types.EdgeUseRecord>"
    ],
@@ -3131,6 +3151,7 @@
     4
    ],
    "siblings": [],
+   "site_key": null,
    "source_trace": {
     "__ref__": "Trace",
     "label": null
@@ -3239,6 +3260,8 @@
    "dropped_edge_tensor_args": [],
    "dtype": "torch.float32",
    "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+   "edge_replacement_stamps": {},
+   "edge_substitutions": {},
    "edge_uses": [],
    "equivalence_class": "input_1_1_4_4_torch.float32",
    "equivalent_ops": {
@@ -3461,6 +3484,7 @@
     4
    ],
    "siblings": [],
+   "site_key": null,
    "source_trace": {
     "__ref__": "Trace",
     "label": null
@@ -3603,6 +3627,8 @@
    "dropped_edge_tensor_args": [],
    "dtype": "torch.float32",
    "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+   "edge_replacement_stamps": {},
+   "edge_substitutions": {},
    "edge_uses": [
     "<torchlens.intervention.types.EdgeUseRecord>"
    ],
@@ -3862,6 +3888,7 @@
     3
    ],
    "siblings": [],
+   "site_key": null,
    "source_trace": {
     "__ref__": "Trace",
     "label": null
@@ -3982,6 +4009,8 @@
    "dropped_edge_tensor_args": [],
    "dtype": "torch.float32",
    "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+   "edge_replacement_stamps": {},
+   "edge_substitutions": {},
    "edge_uses": [
     "<torchlens.intervention.types.EdgeUseRecord>"
    ],
@@ -4235,6 +4264,7 @@
     2
    ],
    "siblings": [],
+   "site_key": null,
    "source_trace": {
     "__ref__": "Trace",
     "label": null
@@ -4339,6 +4369,8 @@
    "dropped_edge_tensor_args": [],
    "dtype": "torch.float32",
    "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+   "edge_replacement_stamps": {},
+   "edge_substitutions": {},
    "edge_uses": [],
    "equivalence_class": "output_1_1_3_torch.float32",
    "equivalent_ops": {
@@ -4572,6 +4604,7 @@
     3
    ],
    "siblings": [],
+   "site_key": null,
    "source_trace": {
     "__ref__": "Trace",
     "label": null
@@ -4690,6 +4723,8 @@
    "dropped_edge_tensor_args": [],
    "dtype": "torch.float32",
    "dtype_ref": "<torchlens.ir.refs.DtypeRef>",
+   "edge_replacement_stamps": {},
+   "edge_substitutions": {},
    "edge_uses": [
     "<torchlens.intervention.types.EdgeUseRecord>"
    ],
@@ -4922,6 +4957,7 @@
     4
    ],
    "siblings": [],
+   "site_key": null,
    "source_trace": {
     "__ref__": "Trace",
     "label": null
@@ -5546,6 +5582,7 @@
   "decoded_output": null,
   "derived_grads": "<torchlens.data_classes.derived_grad.DerivedGradAccessor>",
   "detach_saved_activations": false,
+  "edges": "<raises SelectionError>",
   "emit_nvtx": false,
   "escape_detector_backward_coverage": null,
   "escape_detector_callback_ns": null,
@@ -5603,6 +5640,17 @@
   "grad_transform": null,
   "grad_transform_repr": null,
   "graph_shape_hash": "c797ac839a48a1e41b2d6ce6daaaf9602b745e5179e6d3ae9bd52eae3f4c27bc",
+  "grouping": "structural",
+  "grouping_policy": {
+   "\"detector\"": "unknown",
+   "\"effective\"": false,
+   "\"folded_sites\"": "none",
+   "\"policy\"": "unknown",
+   "\"requested\"": "unknown",
+   "\"schema\"": "grouping_policy_v1",
+   "\"settlement_note\"": "grouping_stamp_legacy",
+   "\"site_join\"": "none"
+  },
   "halt_frontier": null,
   "halt_reason": null,
   "halted": false,
@@ -5633,6 +5681,7 @@
   "internal_source_layers": "<torchlens.data_classes.layer.LayerAccessor>",
   "internal_source_ops": [],
   "internally_terminated_bool_ops": [],
+  "intervention_audit": [],
   "intervention_ready": false,
   "is_appended": false,
   "is_branching": false,
@@ -6175,6 +6224,7 @@
   "sibling_events": [],
   "state": "TraceState.PRISTINE",
   "state_history": [],
+  "structure_only": false,
   "tlspec_version": 6,
   "total_activation_memory": "<measured>",
   "total_autograd_memory": "<measured>",

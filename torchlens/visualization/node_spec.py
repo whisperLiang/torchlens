@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from ..utils._multipass_access import get_multipass_attr
 
-if TYPE_CHECKING:  # pragma: no cover - typing only
+if TYPE_CHECKING:
     from ..data_classes.grad_fn import GradFn
     from ..data_classes.layer import Layer
     from ..data_classes.module import Module

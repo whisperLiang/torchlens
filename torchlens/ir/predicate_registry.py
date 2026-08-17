@@ -97,10 +97,8 @@ def _carries_capture_introspection(value: object) -> bool:
 
     if getattr(value, "selector", None) is not None:
         return True
-    try:
-        from ..intervention.selectors import BaseSelector
-    except ImportError:  # pragma: no cover - intervention always importable
-        return False
+    from ..intervention.selectors import BaseSelector
+
     return isinstance(value, BaseSelector)
 
 
@@ -218,6 +216,8 @@ def _make_registered_wrapper(
     if slot in _BOOL_ONLY_SLOTS:
 
         def wrapper(ctx: RecordContext) -> Any:
+            """Enforce the bool-only return domain of this slot on ``fn``."""
+
             result = fn(ctx)
             if not isinstance(result, bool):
                 from ..fastlog.exceptions import PredicateError
@@ -235,6 +235,8 @@ def _make_registered_wrapper(
     else:
 
         def wrapper(ctx: RecordContext) -> Any:
+            """Refuse RAW-CALLABLE-ONLY retroactive returns from a registered name."""
+
             result = fn(ctx)
             if isinstance(result, RetroactiveCaptureDecision):
                 from ..fastlog.exceptions import PredicateError

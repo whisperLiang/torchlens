@@ -74,9 +74,9 @@ def test_trace_field_set_subset_of_user_facing() -> None:
         # the top-precedence capture_verification_reason. Runtime-only and
         # FieldPolicy.DROP for the same reason as the transform-escape flag above.
         "_raw_dynamo_region_detected",
-        # Honesty/safety phase: warn-once flag for activations whose NaN/Inf check
-        # could not run under raise_on_nan (an unrunnable check is not a clean tensor).
-        "_warned_nonfinite_check_unavailable",
+        # Honesty/safety phase: the consolidated warn-once key set (nonfinite
+        # check unavailable under raise_on_nan; implicit backward pass).
+        "_warned_once",
         "_stop_directive",
         # r65-r81 buffer-rung/RNG-registry sprint: capture-scratch that
         # legitimately survives on a finished Trace (session-scoped

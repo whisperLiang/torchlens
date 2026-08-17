@@ -471,9 +471,8 @@ class TestSubclassCtorUnderWitness:
 
         owned = OwnedMode()
         foreign = ForeignMode()
-        with owned, foreign:
-            with pause_own_dispatch_modes() as exited:
-                assert exited == ()
+        with owned, foreign, pause_own_dispatch_modes() as exited:
+            assert exited == ()
 
     def test_owned_modes_restore_when_paused_call_raises(self) -> None:
         """The pause bracket restores owned modes before propagating an exception."""
@@ -484,10 +483,12 @@ class TestSubclassCtorUnderWitness:
 
         owned = _TorchLensDispatchMode()
         with owned:
-            with pytest.raises(RuntimeError, match="ctor failed"):
-                with pause_own_dispatch_modes() as exited:
-                    assert exited == (owned,)
-                    raise RuntimeError("ctor failed")
+            with (
+                pytest.raises(RuntimeError, match="ctor failed"),
+                pause_own_dispatch_modes() as exited,
+            ):
+                assert exited == (owned,)
+                raise RuntimeError("ctor failed")
             from torchlens.utils._torch_compat import get_current_dispatch_mode_stack
 
             stack = get_current_dispatch_mode_stack()

@@ -94,12 +94,30 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
                 "escape_diagnostics",
                 "facet_registry_snapshot",
                 "grad_transform",
+                # grouping / grouping_policy are the L1 wave-0 grouping
+                # surface: the request mirror and the grouping_policy_v1
+                # stamp are ordered display fields but stay session-time
+                # (FieldPolicy.DROP, pre-release-registered) until the
+                # coordinated tlspec v7 persistence bump; loads settle the
+                # canonical legacy degraded representation instead.
+                "grouping",
+                "grouping_policy",
+                # intervention_audit is the L6 selection do() audit trail
+                # (query repr + resolve digest + relations): an ordered
+                # display field, session-time (FieldPolicy.DROP,
+                # pre-release-registered) until the coordinated tlspec v7
+                # persistence bump.
+                "intervention_audit",
                 "last_run",
                 "layer_visualizers",
                 "module_filter",
                 "num_modules",
                 "parent_run",
                 "replay_frontier",
+                # structure_only is the L7a wave-0 hypothesis-capture flag:
+                # an ordered display field, session-time (FieldPolicy.DROP,
+                # pre-release-registered) until the wave-3 persistence bump.
+                "structure_only",
             }
         ),
     ),
@@ -114,6 +132,14 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
                 "activation_transform",
                 "arg_expressions",
                 "args_template",
+                # edge_substitutions / edge_replacement_stamps are the L6
+                # stage-3 tier-(ii) edge-substitution store and its stamps:
+                # ordered display fields, session-time (FieldPolicy.DROP,
+                # pre-release-registered) until the coordinated tlspec v7
+                # persistence bump (the v7 save boundary refuses typed while
+                # entries are present).
+                "edge_replacement_stamps",
+                "edge_substitutions",
                 "func",
                 "grad_fn",
                 "grad_fn_handle",
@@ -132,6 +158,12 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
                 "kwargs_template",
                 "num_inputs",
                 "raw_label",
+                # site_key is the L1 wave-0 per-op structural-position
+                # identity: an ordered display field, session-time
+                # (FieldPolicy.DROP, pre-release-registered) until the
+                # coordinated tlspec v7 persistence bump; loaded ops read
+                # None and site consumers refuse typed.
+                "site_key",
                 "source_trace",
             }
         ),

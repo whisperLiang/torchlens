@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 from ._accessor_base import SuperAccessor
 from ._base import Super, _TensorBearing
 
-if TYPE_CHECKING:  # pragma: no cover - typing-only
+if TYPE_CHECKING:
     from ...data_classes.aten_op import AtenOp
     from ...data_classes.layer import Layer
     from ...data_classes.op import Op

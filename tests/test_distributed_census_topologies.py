@@ -82,7 +82,7 @@ def single_rank_world():
         os.environ["MASTER_PORT"] = str(probe.getsockname()[1])
     try:
         dist.init_process_group(backend="gloo", rank=0, world_size=1)
-    except Exception as error:  # pragma: no cover - environment dependent
+    except (OSError, RuntimeError, ValueError) as error:  # pragma: no cover - environment dependent
         pytest.skip(f"gloo init failed: {error}")
     try:
         yield dist

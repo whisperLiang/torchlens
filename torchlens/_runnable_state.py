@@ -840,6 +840,33 @@ def _snapshot_refusal(reason: str, **payload: Any) -> Exception:
     )
 
 
+def _enumerate_declared_state_bindings(
+    named_modules: Any,
+) -> list[tuple[Any, str, str, str, torch.Tensor]]:
+    """Enumerate every registered parameter/buffer binding, refusing typed.
+
+    ``remove_duplicate=False`` keeps every registration site so alias
+    topology is preserved (one clone per live object identity downstream).
+    """
+
+    bindings: list[tuple[Any, str, str, str, torch.Tensor]] = []
+    try:
+        modules = list(named_modules(remove_duplicate=False))
+    except Exception as exc:
+        raise _snapshot_refusal(f"named_modules() enumeration failed ({exc!r})") from exc
+    for module_path, module in modules:
+        for registry_attr in ("_parameters", "_buffers"):
+            registry = getattr(module, registry_attr, None)
+            if not isinstance(registry, dict):
+                continue
+            for local_name, value in registry.items():
+                if not isinstance(value, torch.Tensor):
+                    continue
+                canonical = f"{module_path}.{local_name}" if module_path else local_name
+                bindings.append((module, registry_attr, local_name, canonical, value))
+    return bindings
+
+
 def snapshot_live_declared_state(model: object) -> LiveDeclaredStateSnapshot:
     """Snapshot a live model's declared state before a default run() executes.
 
@@ -866,21 +893,7 @@ def snapshot_live_declared_state(model: object) -> LiveDeclaredStateSnapshot:
             "unprovable refuses, never guesses)",
             alias_refusals=refusals,
         )
-    bindings: list[tuple[Any, str, str, str, torch.Tensor]] = []
-    try:
-        modules = list(named_modules(remove_duplicate=False))
-    except Exception as exc:
-        raise _snapshot_refusal(f"named_modules() enumeration failed ({exc!r})") from exc
-    for module_path, module in modules:
-        for registry_attr in ("_parameters", "_buffers"):
-            registry = getattr(module, registry_attr, None)
-            if not isinstance(registry, dict):
-                continue
-            for local_name, value in registry.items():
-                if not isinstance(value, torch.Tensor):
-                    continue
-                canonical = f"{module_path}.{local_name}" if module_path else local_name
-                bindings.append((module, registry_attr, local_name, canonical, value))
+    bindings = _enumerate_declared_state_bindings(named_modules)
     clones: dict[int, torch.Tensor] = {}
     with _state.pause_logging(), _guarded_defensive_materialize():
         for _module, _registry_attr, _local_name, canonical, value in bindings:

@@ -22,6 +22,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 import torchlens as tl
 
 #: Mutating list-method names that rewrite op-lane contents in place.
@@ -104,8 +106,15 @@ def _scan_source(source: str, relative: str) -> set[tuple[str, str, str]]:
     return found
 
 
+@pytest.mark.heavy
 def test_inplace_op_lane_writers_match_the_sanctioned_ledger() -> None:
-    """Package-wide scan: op-lane mutators == the reason-bearing ledger, exactly."""
+    """Package-wide scan: op-lane mutators == the reason-bearing ledger, exactly.
+
+    ``heavy`` by measured cost, not preference: the package-wide AST scan
+    crossed the 5s smoke/unmarked boundary as the feature-sprint lanes grew
+    the tree (5.3s standalone, 2026-08-17); the 5-20s partition rule places
+    it in the mid backstop.
+    """
 
     package_root = Path(tl.__file__).parent
     observed: set[tuple[str, str, str]] = set()

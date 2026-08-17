@@ -405,8 +405,35 @@ from .runnable import (  # noqa: E402
 )
 
 _resolve_run_until_plan = _rebind_function(_runnable_transaction._resolve_run_until_plan, globals())
+_validated_until_tokens = _rebind_function(_runnable_transaction._validated_until_tokens, globals())
+_resolve_until_site = _rebind_function(_runnable_transaction._resolve_until_site, globals())
+_until_stop_raw_index = _rebind_function(_runnable_transaction._until_stop_raw_index, globals())
+_until_execution_partition = _rebind_function(
+    _runnable_transaction._until_execution_partition, globals()
+)
+_until_dependency_closure = _rebind_function(
+    _runnable_transaction._until_dependency_closure, globals()
+)
 _run_truncation_record = _rebind_function(_runnable_transaction._run_truncation_record, globals())
 _loaded_until_cut = _rebind_function(_runnable_transaction._loaded_until_cut, globals())
+_LiveRunOptions = _runnable_transaction._LiveRunOptions
+_LiveFinalizeContext = _runnable_transaction._LiveFinalizeContext
+_require_live_source_model = _rebind_function(
+    _runnable_transaction._require_live_source_model, globals()
+)
+_attempt_live_forward = _rebind_function(_runnable_transaction._attempt_live_forward, globals())
+_split_live_inputs = _rebind_function(_runnable_transaction._split_live_inputs, globals())
+_install_live_until_latch = _rebind_function(
+    _runnable_transaction._install_live_until_latch, globals()
+)
+_live_nondeterministic_sources = _rebind_function(
+    _runnable_transaction._live_nondeterministic_sources, globals()
+)
+_live_readiness_report = _rebind_function(_runnable_transaction._live_readiness_report, globals())
+_finalize_truncated_live_run = _rebind_function(
+    _runnable_transaction._finalize_truncated_live_run, globals()
+)
+_finalize_full_live_run = _rebind_function(_runnable_transaction._finalize_full_live_run, globals())
 _live_runtime_input_leaves = _rebind_function(
     _runnable_transaction._live_runtime_input_leaves, globals()
 )

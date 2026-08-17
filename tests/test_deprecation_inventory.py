@@ -840,12 +840,22 @@ def test_census_matches_the_recorded_baseline() -> None:
     Rebased in fixwave-2 (R47-1) for +9 spellings, again not new shims: the
     nine write-only "future" option fields were DELETED (they were silent
     no-ops), and their keywords now warn through ``inert_option_fields``.
+
+    Rebased in the wave-0 governance sweep for +1 spelling:
+    ``flat_option_kwargs`` 81 -> 82 (``structure_only``). The L7a
+    structure-only capture flag joined ``_CAPTURE_FLAT_TO_GROUP``, so its
+    flat spelling warns and routes to ``CaptureOptions(structure_only=...)``
+    like every other capture flat kwarg. NOTE for the naming session: this
+    is a deprecated-from-birth alias on a brand-new option (the newer
+    session-time knobs ``save_budget``/``measure_python_peak_memory``/
+    ``distributed_witness`` deliberately got NO flat alias); whether it
+    stays is an S2/naming-slate call.
     """
 
     assert deprecated_spelling_census() == {
         "moved_top_level_names": 50,
         "paper_era_api_shims": 9,
-        "flat_option_kwargs": 81,
+        "flat_option_kwargs": 82,
         "renamed_public_callables": 21,
         "option_alias_property_reads": 3,
         "legacy_buffer_visibility_bools": 2,

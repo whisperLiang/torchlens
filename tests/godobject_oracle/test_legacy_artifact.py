@@ -94,6 +94,36 @@ def test_legacy_analysis_artifact_loads_byte_identically() -> None:
 
 
 @pytest.mark.smoke
+def test_legacy_artifact_site_key_refusal_teaches() -> None:
+    """Pre-site-key artifacts refuse ``site_key``/``site_peers`` TEACHINGLY.
+
+    The frozen v6 artifact predates the site_key_v1 grouping surface, so the
+    Layer accessors must refuse typed (``site_key_unavailable``) -- never
+    return ``None``, which would present the absence of a key as a fact about
+    the model -- and the message must teach at the point of failure: name the
+    tlspec v7 pre-release persistence boundary and the re-capture remedy.
+    """
+
+    from torchlens._errors import InvalidArgumentError
+
+    loaded = tl.load(str(_ANALYSIS_ARTIFACT))
+    layer = loaded[loaded.layer_labels[0]]
+    with pytest.raises(InvalidArgumentError) as site_exc:
+        _ = layer.site_key
+    assert site_exc.value.fields["code"] == "site_key_unavailable"
+    message = str(site_exc.value)
+    assert "site_key_v1" in message
+    assert "tlspec v7" in message
+    assert "re-capture" in message
+    with pytest.raises(InvalidArgumentError) as peers_exc:
+        _ = layer.site_peers
+    assert peers_exc.value.fields["code"] == "site_key_unavailable"
+    peers_message = str(peers_exc.value)
+    assert "tlspec v7" in peers_message
+    assert "re-capture" in peers_message
+
+
+@pytest.mark.smoke
 def test_legacy_runnable_artifact_runs_verified() -> None:
     """The frozen runnable artifact stages state and replays VERIFIED.
 

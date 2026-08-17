@@ -295,7 +295,13 @@ def _ensure_backward_pass_for_tensor_hook(trace: "Trace") -> int:
     trace._implicit_backward_pass_open = True
     if current_task_id is not None:
         _IMPLICIT_BACKWARD_TASK_IDS[trace] = current_task_id
-    if not getattr(trace, "_warned_implicit_backward_pass", False):
+        # Engine-drain close (L9 memo 1.2): opening inside a tensor hook is
+        # provably in-backward, so queue the drain callback for THIS graph
+        # task now. Opportunistic -- the sync-point backstop stays armed.
+        from .backward import _enqueue_implicit_pass_drain_callback
+
+        _enqueue_implicit_pass_drain_callback(trace, pass_index, current_task_id)
+    if "implicit_backward_pass" not in trace._warned_once:
         warnings.warn(
             "TorchLens observed gradients outside a managed backward trigger; recording an "
             "implicit backward pass. Use trace.log_backward(), trace.backward(), or a TorchLens "
@@ -303,7 +309,7 @@ def _ensure_backward_pass_for_tensor_hook(trace: "Trace") -> int:
             RuntimeWarning,
             stacklevel=3,
         )
-        trace._warned_implicit_backward_pass = True
+        trace._warned_once.add("implicit_backward_pass")
     events = _ensure_backward_event_stream(trace)
     events.append_backward(
         BackwardPassStart(

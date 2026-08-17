@@ -144,7 +144,7 @@ def _open_file_quietly(filepath: str, *, announce_headless: bool = False) -> boo
         return False  # no viewer available; silently skip
 
 
-if TYPE_CHECKING:  # pragma: no cover - typing-only
+if TYPE_CHECKING:
     pass
 
 

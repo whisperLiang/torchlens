@@ -355,8 +355,7 @@ def _execution_context(
 def _prepare_aten_call(
     state: Any,
     func: Any,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any] | None,
+    input_tree: tuple[tuple[Any, ...], dict[str, Any]],
     owner_func_call_id: int | None,
     *,
     mutates: bool,
@@ -369,10 +368,8 @@ def _prepare_aten_call(
         Active witness/ATen recorder state.
     func
         Dispatcher operator overload.
-    args
-        Positional dispatcher arguments.
-    kwargs
-        Keyword dispatcher arguments.
+    input_tree
+        The ``(args, kwargs)`` dispatcher input pair.
     owner_func_call_id
         Exact active wrapper call id when present.
     mutates
@@ -385,7 +382,6 @@ def _prepare_aten_call(
     """
 
     namespace, operator, overload, schema, fingerprint = _operator_parts(func)
-    input_tree = (args, kwargs or {})
     autocast = _autocast_context()
     active_grad_refs = _ACTIVE_BACKWARD_GRAD_FN_REFS.get()
     grad_ref = active_grad_refs[-1] if active_grad_refs else None

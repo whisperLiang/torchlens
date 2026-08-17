@@ -65,7 +65,7 @@ builtin-gated, so silent passthrough would be undefined behavior).
 
 ## The single coercion point
 
-```python
+```text
 coerce_predicate(value, *, slot: Literal["save", "halt", "until"])
 ```
 
@@ -107,7 +107,7 @@ with the bumped key, while an already-bound wrapper keeps its consistent
 
 ## Registration
 
-```python
+```text
 @register_predicate(name, *, replace=False)
 ```
 

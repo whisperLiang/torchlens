@@ -215,13 +215,22 @@ class ParamGradObserved:
 
 @dataclass(frozen=True, slots=True)
 class BackwardPassEnd:
-    """Core event marking completion of one autograd engine invocation."""
+    """Core event marking completion of one autograd engine invocation.
+
+    ``close_path`` is the implicit-pass close-path disclosure (L9 memo 1.2;
+    provisional spelling, DOCUMENTED-UNSTABLE pending naming-session/S2
+    routing): ``"engine_drain"`` when the queued engine final callback
+    journaled the close, ``"sync_point"`` for every backstop path, ``None``
+    for explicit (non-implicit) passes. Sidecar-event-only in wave 2 -- the
+    projected ``BackwardPass`` record field waits for the wave-3 bump.
+    """
 
     pass_index: int
     duration: float | None
     peak_memory: int | None
     status: BackwardStatus
     order_attribution_coverage: float | None
+    close_path: str | None = None
     seq: int = 0
 
 
@@ -281,13 +290,43 @@ class BackwardCoverageGap:
 
 @dataclass(frozen=True, slots=True)
 class GradFnFired:
-    """Torch enrichment event emitted from an autograd node hook."""
+    """Torch enrichment event emitted from an autograd node hook.
+
+    ``fire_started_monotonic`` / ``fire_finished_monotonic`` are the L9
+    per-fire timing pair (provisional spellings, DOCUMENTED-UNSTABLE): BOTH
+    stamps come from ``time.perf_counter()`` in the same process, paired at
+    capture time by the per-node keyed LIFO, and enter this ONE event
+    together -- projection never re-pairs them. An untimed fire (empty LIFO,
+    key mismatch, timing-registration failure) carries ``(None, None)``,
+    never a cross-fire or cross-clock pair. The wall-clock ``timestamp``
+    stays the event-ordering stamp and is NEVER a duration operand.
+    """
 
     object_id: int
     pass_index: int
     grad_input_refs: object | None
     grad_output_refs: object | None
     intervention_fire_ref: object | None
+    timestamp: float
+    fire_started_monotonic: float | None = None
+    fire_finished_monotonic: float | None = None
+    seq: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointInvocationObserved:
+    """Torch enrichment event minted for one classified checkpoint invocation.
+
+    L9 memo 2.3 (provisional spelling, DOCUMENTED-UNSTABLE): the token is a
+    per-trace monotonic ordinal minted ONLY in the patched
+    ``saved_tensors_hooks.__enter__`` for ``_checkpoint_hook`` instances on
+    the armed owner thread outside any engine invocation. Pack counts and
+    unpack window evidence accumulate in runtime token state, not on this
+    frozen event; the projected summary lands on the DROP-gated Trace
+    checkpoint-invocation witness field.
+    """
+
+    token: int
     timestamp: float
     seq: int = 0
 

@@ -84,14 +84,26 @@ _NEW_FILE_LINE_CAP = 2000
 #:   bundle/__init__.py 2450 | capture/trace.py 2200
 #:   data_classes/trace.py 3750 | options.py 2425 | user_funcs.py 3900
 #:   _runnable_state.py 2700 (L4 D18 mode-aware projector + snapshot-restore)
+#:   visualization/_render_edges.py 2350 (portable rolled-edge label placement)
 #: 2026-08-16 L6 merge settle (same debt record): three more ceilings
 #: re-stepped for reviewed L6 selection-algebra / edge-substitution mass
 #: (edge boundary verdict in validation/core, tier-(ii) edge stores on Op,
 #: the v7 save boundary in _io/bundle). PRE-SPRINT BASELINE at 75439a67:
 #:   validation/core.py 5300 | data_classes/op.py 5200
 #:   (_io/bundle.py already listed above at 4450; L6 re-steps 4500 -> 4550)
+#: 2026-08-17 gov-sweep settle: the L6 edge-boundary check family moved out
+#: of validation/core into validation/_edge_boundary.py; core re-keyed
+#: 5450 -> 5350 (measured 5325).
+#: 2026-08-17 L9 merge settle (same debt record): two ceilings re-stepped for
+#: reviewed L9 backward-residuals mass -- per-fire timing (keyed-LIFO prehook
+#: + pairing), checkpoint invocation tokens (classifier + witness + D1-D6),
+#: and the journal/scavenge/finalize implicit-close split all land in
+#: backends/torch/backward.py (3900 -> 4450); the two DROP-gated Trace fields
+#: + init/load-fill land in data_classes/trace.py (3850 -> 3900).
+#: PRE-SPRINT BASELINES unchanged (backward.py 3800, trace.py 3750 at
+#: 75439a67); the post-features debloat pass keeps both as targets.
 _GOD_FILE_CEILINGS: dict[str, int] = {
-    "torchlens/validation/core.py": 5450,
+    "torchlens/validation/core.py": 5350,
     "torchlens/data_classes/op.py": 5250,
     "torchlens/_io/runnable.py": 5000,
     "torchlens/utils/rng.py": 4950,
@@ -99,11 +111,16 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/backends/jax/backend.py": 4400,
     "torchlens/_io/bundle.py": 4550,
     "torchlens/_io/runnable_load.py": 3850,
-    "torchlens/user_funcs.py": 4200,
-    "torchlens/backends/torch/backward.py": 3900,
+    # 4200 -> 4050: the wave-0 governance sweep extracted the structure-only
+    # Layer-0 entry contract to capture/_structure_only_entry.py; re-keyed
+    # down to the next 50-line step above the post-split measurement.
+    "torchlens/user_funcs.py": 4050,
+    "torchlens/backends/torch/backward.py": 4450,
     # 3800 -> 3850: L1 adds the grouping knob mirror + grouping_policy stamp
     # settlement (~25 lines) on top of the re-stepped feature-sprint baseline.
-    "torchlens/data_classes/trace.py": 3850,
+    # 3850 -> 3900: L9 adds the two DROP-gated backward-residuals fields
+    # (timing provenance, checkpoint witness) + init/load-fill/registration.
+    "torchlens/data_classes/trace.py": 3900,
     "torchlens/utils/_torch_compat.py": 3450,
     "torchlens/backends/torch/wrappers.py": 3400,
     "torchlens/backends/tinygrad/backend.py": 3300,
@@ -122,7 +139,7 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/data_classes/layer.py": 2350,
     "torchlens/postprocess/loop_grouping_adapter.py": 2600,
     "torchlens/visualization/_render_leaf.py": 2400,
-    "torchlens/visualization/_render_edges.py": 2350,
+    "torchlens/visualization/_render_edges.py": 2450,
     # Raised 2400 -> 2425 at the L5 channel-core merge (color_by + tri-state
     # show_legend): options.py is the ONE serialized shared option surface
     # every feature lane's grouped options must land on, so reviewed

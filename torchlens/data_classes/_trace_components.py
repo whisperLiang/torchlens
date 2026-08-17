@@ -180,6 +180,10 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "recurrence_detection": "capture_config",
     "grouping": "capture_config",
     "grouping_policy": "capture_config",
+    # L9 backward residuals: timing clock provenance + checkpoint witness are
+    # capture-evidence disclosures, not graph structure.
+    "grad_fn_timing_provenance": "witness",
+    "checkpoint_invocation_witness": "witness",
     "verbose": "capture_config",
     "profile_enabled": "capture_config",
     "has_gradients": "totals",
@@ -311,7 +315,7 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "measure_python_peak_memory": "capture_config",
     "distributed_witness": "capture_config",
     "save_budget": "capture_config",
-    "_warned_nonfinite_check_unavailable": "session",
+    "_warned_once": "session",
     "_predicate_save_options": "session",
     "_predicate_history_size": "session",
     "_predicate_history": "session",
@@ -364,7 +368,6 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "_backward_projection_revision": "graph",
     "_backward_projection_fold_state": "graph",
     "_implicit_backward_pass_open": "graph",
-    "_warned_implicit_backward_pass": "session",
     "_tl_backward_triggers_disarmed": "session",
     "_tl_cleaned_up": "session",
     "_grad_fn_param_refs_by_object_id": "graph",

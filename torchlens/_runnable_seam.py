@@ -60,6 +60,7 @@ LEGACY_RUNNABLE_TRACE_FIELD_MAP = {
     "_runnable_input_metadata_reads": "input_metadata_reads",
     "_runnable_input_label_layouts": "input_label_layouts",
     "_runnable_module_training_modes": "module_training_modes",
+    "_runnable_state_compromised": "state_compromised",
 }
 """Legacy dict keys accepted only while restoring older plain pickles."""
 

@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
-from .errors._base import ConfigurationError
+from .errors._base import ConfigurationError, TorchLensError
 
 if TYPE_CHECKING:
     from .data_classes.trace import Trace
@@ -170,18 +170,21 @@ class _Mask:
         if self.form == "empty":
             return torch.zeros(self.shape, dtype=torch.bool)
         if self.form == "slices":
+            if self.slice_bounds is None:
+                raise RuntimeError("slices-form mask lost its slice_bounds")
             mask = torch.zeros(self.shape, dtype=torch.bool)
-            assert self.slice_bounds is not None
             mask[tuple(slice(*bounds) for bounds in self.slice_bounds)] = True
             return mask
-        assert self.dense is not None
+        if self.dense is None:
+            raise RuntimeError("dense-form mask lost its dense tensor")
         return self.dense.clone()
 
     def _dense_ro(self) -> torch.Tensor:
         """Return the dense form for internal composition (never handed out)."""
 
         if self.form == "dense":
-            assert self.dense is not None
+            if self.dense is None:
+                raise RuntimeError("dense-form mask lost its dense tensor")
             return self.dense
         return self.to_dense()
 
@@ -193,12 +196,14 @@ class _Mask:
         if self.form == "empty":
             return 0
         if self.form == "slices":
-            assert self.slice_bounds is not None
+            if self.slice_bounds is None:
+                raise RuntimeError("slices-form mask lost its slice_bounds")
             total = 1
             for start, stop, step in self.slice_bounds:
                 total *= max(0, (stop - start + step - 1) // step)
             return total
-        assert self.dense is not None
+        if self.dense is None:
+            raise RuntimeError("dense-form mask lost its dense tensor")
         return int(self.dense.sum().item())
 
     def canonical_bytes(self) -> bytes:
@@ -208,10 +213,14 @@ class _Mask:
 
 
 def _mask_whole(shape: tuple[int, ...]) -> _Mask:
+    """Build the whole-form mask (every element of ``shape`` selected)."""
+
     return _Mask(shape=shape, form="whole")
 
 
 def _mask_empty(shape: tuple[int, ...]) -> _Mask:
+    """Build the empty-form mask (no element of ``shape`` selected)."""
+
     return _Mask(shape=shape, form="empty")
 
 
@@ -244,6 +253,8 @@ def _mask_from_slices(shape: tuple[int, ...], slices: tuple[slice, ...]) -> _Mas
 
 
 def _mask_union(a: _Mask, b: _Mask) -> _Mask:
+    """Union two same-shape masks (whole/empty fast paths, else dense OR)."""
+
     if a.form == "whole" or b.form == "empty":
         return a if a.form == "whole" else (a if b.form == "empty" else b)
     if b.form == "whole" or a.form == "empty":
@@ -252,6 +263,8 @@ def _mask_union(a: _Mask, b: _Mask) -> _Mask:
 
 
 def _mask_intersect(a: _Mask, b: _Mask) -> _Mask:
+    """Intersect two same-shape masks (whole/empty fast paths, else dense AND)."""
+
     if a.form == "empty" or b.form == "whole":
         return a
     if b.form == "empty" or a.form == "whole":
@@ -260,6 +273,8 @@ def _mask_intersect(a: _Mask, b: _Mask) -> _Mask:
 
 
 def _mask_difference(a: _Mask, b: _Mask) -> _Mask:
+    """Subtract ``b`` from ``a`` (set difference on same-shape masks)."""
+
     if a.form == "empty" or b.form == "empty":
         return a
     if b.form == "whole":
@@ -268,6 +283,8 @@ def _mask_difference(a: _Mask, b: _Mask) -> _Mask:
 
 
 def _mask_complement(a: _Mask) -> _Mask:
+    """Complement a mask within its own index space."""
+
     if a.form == "whole":
         return _mask_empty(a.shape)
     if a.form == "empty":
@@ -276,6 +293,8 @@ def _mask_complement(a: _Mask) -> _Mask:
 
 
 def _mask_equal(a: _Mask, b: _Mask) -> bool:
+    """Compare two masks as element sets (form-independent equality)."""
+
     if a.shape != b.shape:
         return False
     if a.form == b.form == "whole" or a.form == b.form == "empty":
@@ -512,6 +531,8 @@ class ResolvedSelection:
 
 @dataclass(frozen=True)
 class _SelectorTerm:
+    """AST leaf lifting a ``BaseSelector`` predicate into a Selection."""
+
     selector: Any
 
     def __repr__(self) -> str:
@@ -520,6 +541,8 @@ class _SelectorTerm:
 
 @dataclass(frozen=True)
 class _BoxTerm:
+    """AST leaf lifting a ``ReceptiveFieldBox`` region into a Selection."""
+
     box: Any
 
     def __repr__(self) -> str:
@@ -528,6 +551,8 @@ class _BoxTerm:
 
 @dataclass(frozen=True)
 class _GradientTerm:
+    """AST leaf lifting a ``GradientReceptiveField`` region into a Selection."""
+
     gradient_rf: Any
 
     def __repr__(self) -> str:
@@ -536,6 +561,8 @@ class _GradientTerm:
 
 @dataclass(frozen=True)
 class _FacetTerm:
+    """AST leaf lifting a ``FacetSpec`` region into a Selection."""
+
     spec: Any
 
     def __repr__(self) -> str:
@@ -545,6 +572,8 @@ class _FacetTerm:
 
 @dataclass(frozen=True)
 class _ParamTerm:
+    """AST leaf for ``tl.params(name, mask=...)`` (PARAM-kind producer)."""
+
     name: str
     mask: torch.Tensor | None
 
@@ -555,6 +584,8 @@ class _ParamTerm:
 
 @dataclass(frozen=True)
 class _UnitTerm:
+    """AST leaf for ``tl.units(site, indices|mask)`` (explicit ACT elements)."""
+
     site: str
     indices: tuple[tuple[int, ...], ...] | None
     index_mask: torch.Tensor | None
@@ -562,12 +593,15 @@ class _UnitTerm:
     def __repr__(self) -> str:
         if self.index_mask is not None:
             return f"units({self.site!r}, mask=<bool tensor>)"
-        assert self.indices is not None
+        if self.indices is None:  # constructor guarantees one of the two forms
+            return f"units({self.site!r})"
         return f"units({self.site!r}, n={len(self.indices)})"
 
 
 @dataclass(frozen=True)
 class _WholeSiteTerm:
+    """AST leaf selecting every element of one site (Op/Layer lift)."""
+
     site_label: str
     pass_index: int | None
 
@@ -579,6 +613,8 @@ class _WholeSiteTerm:
 
 @dataclass(frozen=True)
 class _RandomTerm:
+    """AST leaf for ``tl.random_selection`` (seeded size-matched control)."""
+
     like: Any
     within: Any
     seed: int
@@ -589,6 +625,8 @@ class _RandomTerm:
 
 @dataclass(frozen=True)
 class _Combinator:
+    """AST interior node combining operand terms with one set operator."""
+
     op: str  # "or" | "and" | "sub" | "invert"
     operands: tuple[Any, ...]
 
@@ -728,7 +766,7 @@ class _SelectionOperand:
 
     __slots__ = ()
 
-    def __selection__(self) -> Any:  # pragma: no cover - implementers override
+    def __selection__(self) -> Any:
         """Lift this producer to a Selection."""
 
         raise NotImplementedError
@@ -815,29 +853,40 @@ def _compose_any(op: str, left: Any, right: Any) -> Any:
         return NotImplemented
 
     if isinstance(lifted_left, ResolvedSelection) or isinstance(lifted_right, ResolvedSelection):
-        if isinstance(lifted_left, ResolvedSelection) and isinstance(
-            lifted_right, ResolvedSelection
-        ):
-            if lifted_left._trace is not lifted_right._trace:
-                raise SelectionError(
-                    "cannot compose resolved selections bound to different traces. "
-                    "Re-resolve one side against the other's trace first.",
-                    code="selection_trace_mismatch",
-                )
-            resolved_left, resolved_right = lifted_left, lifted_right
-        elif isinstance(lifted_left, ResolvedSelection):
-            resolved_left = lifted_left
-            assert isinstance(lifted_right, Selection)
-            resolved_right = lifted_right.resolve(resolved_left._trace)
-        else:
-            assert isinstance(lifted_left, Selection)
-            assert isinstance(lifted_right, ResolvedSelection)
-            resolved_right = lifted_right
-            resolved_left = lifted_left.resolve(resolved_right._trace)
+        resolved_left, resolved_right = _align_resolved_operands(lifted_left, lifted_right)
         _check_kinds(op, resolved_left._kind, resolved_right._kind)
         return _compose_resolved(op, resolved_left, resolved_right)
 
-    assert isinstance(lifted_left, Selection) and isinstance(lifted_right, Selection)
+    if not isinstance(lifted_left, Selection) or not isinstance(lifted_right, Selection):
+        raise RuntimeError("query composition operands must both be Selection here")
+    return _compose_queries(op, lifted_left, lifted_right)
+
+
+def _align_resolved_operands(
+    lifted_left: Any, lifted_right: Any
+) -> tuple[ResolvedSelection, ResolvedSelection]:
+    """Return both operands resolved on one shared trace (mixed sides resolve now)."""
+
+    if isinstance(lifted_left, ResolvedSelection) and isinstance(lifted_right, ResolvedSelection):
+        if lifted_left._trace is not lifted_right._trace:
+            raise SelectionError(
+                "cannot compose resolved selections bound to different traces. "
+                "Re-resolve one side against the other's trace first.",
+                code="selection_trace_mismatch",
+            )
+        return lifted_left, lifted_right
+    if isinstance(lifted_left, ResolvedSelection):
+        if not isinstance(lifted_right, Selection):
+            raise RuntimeError("mixed composition lost its Selection operand")
+        return lifted_left, lifted_right.resolve(lifted_left._trace)
+    if not isinstance(lifted_left, Selection) or not isinstance(lifted_right, ResolvedSelection):
+        raise RuntimeError("mixed composition lost its Selection operand")
+    return lifted_left.resolve(lifted_right._trace), lifted_right
+
+
+def _compose_queries(op: str, lifted_left: Selection, lifted_right: Selection) -> Selection:
+    """Compose two query selections into one AST node (n-ary flatten for or)."""
+
     _check_kinds(op, lifted_left._kind, lifted_right._kind)
     _check_directions(lifted_left._direction, lifted_right._direction)
     if op == "or":
@@ -862,34 +911,61 @@ def _compose_resolved(
 
     left_by_key = {entry.site_key: entry for entry in left._entries}
     right_by_key = {entry.site_key: entry for entry in right._entries}
-    entries: list[SiteEntry] = []
     if op == "or":
-        for key, entry in left_by_key.items():
-            other = right_by_key.get(key)
-            if other is None:
-                entries.append(entry)
-            else:
-                entries.append(_entry_compose(entry, other, _mask_union, _join_relation))
-        for key, entry in right_by_key.items():
-            if key not in left_by_key:
-                entries.append(entry)
+        entries = _compose_entries_union(left_by_key, right_by_key)
     elif op == "and":
-        # Shared sites stay touched even when the intersection is element-empty.
-        for key, entry in left_by_key.items():
-            other = right_by_key.get(key)
-            if other is not None:
-                entries.append(_entry_compose(entry, other, _mask_intersect, _join_relation))
+        entries = _compose_entries_intersection(left_by_key, right_by_key)
     elif op == "sub":
-        # Subtraction never un-touches: fam(A - B) = fam(A).
-        for key, entry in left_by_key.items():
-            other = right_by_key.get(key)
-            if other is None:
-                entries.append(entry)
-            else:
-                entries.append(_entry_compose(entry, other, _mask_difference, _difference_relation))
-    else:  # pragma: no cover - closed operator set
+        entries = _compose_entries_difference(left_by_key, right_by_key)
+    else:
         raise ValueError(f"unknown operator {op!r}")
     return ResolvedSelection(left._trace, left._kind, entries)
+
+
+def _compose_entries_union(
+    left_by_key: dict[Any, SiteEntry], right_by_key: dict[Any, SiteEntry]
+) -> list[SiteEntry]:
+    """Union entries: every touched site survives; shared sites join masks."""
+
+    entries: list[SiteEntry] = []
+    for key, entry in left_by_key.items():
+        other = right_by_key.get(key)
+        if other is None:
+            entries.append(entry)
+        else:
+            entries.append(_entry_compose(entry, other, _mask_union, _join_relation))
+    for key, entry in right_by_key.items():
+        if key not in left_by_key:
+            entries.append(entry)
+    return entries
+
+
+def _compose_entries_intersection(
+    left_by_key: dict[Any, SiteEntry], right_by_key: dict[Any, SiteEntry]
+) -> list[SiteEntry]:
+    """Intersect entries; shared sites stay touched even when element-empty."""
+
+    entries: list[SiteEntry] = []
+    for key, entry in left_by_key.items():
+        other = right_by_key.get(key)
+        if other is not None:
+            entries.append(_entry_compose(entry, other, _mask_intersect, _join_relation))
+    return entries
+
+
+def _compose_entries_difference(
+    left_by_key: dict[Any, SiteEntry], right_by_key: dict[Any, SiteEntry]
+) -> list[SiteEntry]:
+    """Difference entries; subtraction never un-touches: fam(A - B) = fam(A)."""
+
+    entries: list[SiteEntry] = []
+    for key, entry in left_by_key.items():
+        other = right_by_key.get(key)
+        if other is None:
+            entries.append(entry)
+        else:
+            entries.append(_entry_compose(entry, other, _mask_difference, _difference_relation))
+    return entries
 
 
 def _entry_compose(
@@ -1004,32 +1080,23 @@ def _resolve_node(node: Any, trace: Any, kind: str) -> ResolvedSelection:
     """Resolve one AST node against a trace."""
 
     if isinstance(node, _Combinator):
-        if node.op == "invert":
-            return ~_resolve_node(node.operands[0], trace, kind)
-        resolved = [_resolve_node(operand, trace, kind) for operand in node.operands]
-        result = resolved[0]
-        for operand in resolved[1:]:
-            result = _compose_resolved(node.op, result, operand)
-        return result
-    if isinstance(node, _SelectorTerm):
-        return _resolve_selector_term(node, trace)
-    if isinstance(node, _BoxTerm):
-        return _resolve_box_term(node, trace)
-    if isinstance(node, _GradientTerm):
-        return _resolve_gradient_term(node, trace)
-    if isinstance(node, _FacetTerm):
-        return _resolve_facet_term(node, trace)
-    if isinstance(node, _ParamTerm):
-        return _resolve_param_term(node, trace)
-    if isinstance(node, _UnitTerm):
-        return _resolve_unit_term(node, trace)
-    if isinstance(node, _WholeSiteTerm):
-        return _resolve_whole_site_term(node, trace)
-    if isinstance(node, _RandomTerm):
-        return _resolve_random_term(node, trace)
-    if isinstance(node, _EdgeTerm):
-        return _resolve_edge_term(node, trace)
-    raise TypeError(f"unknown selection AST node {type(node).__name__}")  # pragma: no cover
+        return _resolve_combinator(node, trace, kind)
+    for term_type, resolver in _TERM_RESOLVERS:
+        if isinstance(node, term_type):
+            return resolver(node, trace)
+    raise TypeError(f"unknown selection AST node {type(node).__name__}")
+
+
+def _resolve_combinator(node: _Combinator, trace: Any, kind: str) -> ResolvedSelection:
+    """Resolve an operator node by folding its resolved operands."""
+
+    if node.op == "invert":
+        return ~_resolve_node(node.operands[0], trace, kind)
+    resolved = [_resolve_node(operand, trace, kind) for operand in node.operands]
+    result = resolved[0]
+    for operand in resolved[1:]:
+        result = _compose_resolved(node.op, result, operand)
+    return result
 
 
 def _resolve_selector_term(node: _SelectorTerm, trace: Any) -> ResolvedSelection:
@@ -1144,7 +1211,7 @@ def _resolve_facet_term(node: _FacetTerm, trace: Any) -> ResolvedSelection:
     except Exception as exc:
         try:
             home_out = getattr(op, "out", None)
-        except Exception:  # unsaved payload reads raise typed
+        except TorchLensError:  # unsaved payload reads raise typed
             home_out = None
         if home_out is None:
             raise _unresolvable(
@@ -1236,7 +1303,8 @@ def _resolve_unit_term(node: _UnitTerm, trace: Any) -> ResolvedSelection:
                 )
             mask = _mask_from_dense(shape, node.index_mask.bool())
         else:
-            assert node.indices is not None
+            if node.indices is None:
+                raise RuntimeError("units node has neither index_mask nor indices")
             dense = torch.zeros(shape, dtype=torch.bool)
             for coordinates in node.indices:
                 if len(coordinates) != len(shape) or any(
@@ -1329,7 +1397,8 @@ def _resolve_operand_for_random(operand: Any, trace: Any) -> ResolvedSelection:
                 code="selection_trace_mismatch",
             )
         return operand
-    assert isinstance(operand, Selection)
+    if not isinstance(operand, Selection):
+        raise RuntimeError("random_selection operand must lift to a Selection")
     return operand.resolve(trace)
 
 
@@ -1526,9 +1595,13 @@ def _masked_factory(inner_factory: Any, mask: _Mask, site_label: str) -> Any:
     """Wrap a helper hook factory with the engine-owned scatter step."""
 
     def factory() -> Any:
+        """Instantiate the inner hook and wrap it with the mask scatter."""
+
         inner = inner_factory()
 
         def _masked_hook(out: Any, *, hook: Any) -> Any:
+            """Run the inner edit, then scatter only masked elements into ``out``."""
+
             if not isinstance(out, torch.Tensor):
                 raise _apply_invalid(
                     "not_maskable",
@@ -1609,7 +1682,11 @@ def _derive_masked_edit(edit: Any, entry: SiteEntry, digest: str, site_label: st
             return edit
 
         def _plain_factory() -> Any:
+            """Adapt a bare hook callable to the masked-factory protocol."""
+
             def _adapter(out: Any, *, hook: Any) -> Any:
+                """Forward to the user's hook callable unchanged."""
+
                 return edit(out, hook=hook)
 
             return _adapter
@@ -1637,30 +1714,7 @@ def build_selection_do_plan(
             "do(selection, edit) requires an edit: pass an Edit/HelperSpec "
             "(e.g. tl.zero_ablate()), a hook callable, or a replacement tensor."
         )
-    lifted = _lift(selection_like)
-    assert lifted is not None
-    if isinstance(lifted, ResolvedSelection):
-        if lifted._trace is not trace:
-            raise SelectionError(
-                "the resolved selection is bound to a different trace; resolve "
-                "against this trace first.",
-                code="selection_trace_mismatch",
-            )
-        resolved = lifted
-    else:
-        resolved = lifted.resolve(trace)
-    if resolved.kind == "PARAM":
-        raise _apply_invalid(
-            "not_maskable",
-            "learned-parameter edits are outside the stage-2 activation path "
-            "(differentiability is narrowed to activations pending the D3 "
-            "ruling; the wave-2 default is a typed refusal).",
-        )
-    if resolved.kind == "EDGE":
-        raise _apply_invalid(
-            "not_maskable",
-            "edge selections address edge substitution (stage 3), not node edits.",
-        )
+    resolved = _resolve_do_target(trace, selection_like)
 
     from .intervention.types import HelperSpec
 
@@ -1713,6 +1767,37 @@ def build_selection_do_plan(
     if getattr(edit, "helper_name", None) == "patch_from" and source_identity:
         audit["patch_source"] = dict(source_identity)
     return resolved, plan, audit
+
+
+def _resolve_do_target(trace: Any, selection_like: Any) -> ResolvedSelection:
+    """Resolve the ``do()`` target on this trace, refusing PARAM/EDGE kinds."""
+
+    lifted = _lift(selection_like)
+    if lifted is None:
+        raise RuntimeError("build_selection_do_plan requires a selection-shaped input")
+    if isinstance(lifted, ResolvedSelection):
+        if lifted._trace is not trace:
+            raise SelectionError(
+                "the resolved selection is bound to a different trace; resolve "
+                "against this trace first.",
+                code="selection_trace_mismatch",
+            )
+        resolved = lifted
+    else:
+        resolved = lifted.resolve(trace)
+    if resolved.kind == "PARAM":
+        raise _apply_invalid(
+            "not_maskable",
+            "learned-parameter edits are outside the stage-2 activation path "
+            "(differentiability is narrowed to activations pending the D3 "
+            "ruling; the wave-2 default is a typed refusal).",
+        )
+    if resolved.kind == "EDGE":
+        raise _apply_invalid(
+            "not_maskable",
+            "edge selections address edge substitution (stage 3), not node edits.",
+        )
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -1823,3 +1908,17 @@ def _edge_family_complement(resolved: ResolvedSelection) -> ResolvedSelection:
         if edge_address_of(record) not in selected
     ]
     return ResolvedSelection(resolved._trace, "EDGE", entries)
+
+
+#: Ordered term-type dispatch for ``_resolve_node`` (combinators handled first).
+_TERM_RESOLVERS: tuple[tuple[type, Any], ...] = (
+    (_SelectorTerm, _resolve_selector_term),
+    (_BoxTerm, _resolve_box_term),
+    (_GradientTerm, _resolve_gradient_term),
+    (_FacetTerm, _resolve_facet_term),
+    (_ParamTerm, _resolve_param_term),
+    (_UnitTerm, _resolve_unit_term),
+    (_WholeSiteTerm, _resolve_whole_site_term),
+    (_RandomTerm, _resolve_random_term),
+    (_EdgeTerm, _resolve_edge_term),
+)

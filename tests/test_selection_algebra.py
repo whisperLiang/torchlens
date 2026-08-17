@@ -147,6 +147,16 @@ def test_selector_sub_desugars_to_and_not(log):
         tl.func("relu") - 5
 
 
+def test_selector_subtraction_non_selector_operand_refuses_typed():
+    """`selector - <non-selector>` refuses with the documented code."""
+
+    from torchlens._errors import ArgumentTypeError
+
+    with pytest.raises(ArgumentTypeError) as excinfo:
+        _ = tl.func("relu") - 3
+    assert excinfo.value.fields["code"] == "selector_subtraction_operand_invalid"
+
+
 def test_op_and_layer_lift(log):
     """Op lifts one pass; Layer lifts ALL passes (whole-output producers)."""
 
@@ -360,7 +370,7 @@ def test_totality_mixed_kind_cells_refuse(log, operator, resolved_state):
 def test_totality_invert_cells(log):
     """~ over every kind/emptiness cell (query and resolved)."""
 
-    for (kind, state), builder in _EMPTINESS_BUILDERS.items():
+    for (_kind, _state), builder in _EMPTINESS_BUILDERS.items():
         resolved = builder(log)
         inverted = ~resolved
         assert isinstance(inverted, ResolvedSelection)
@@ -763,3 +773,31 @@ def test_selection_error_is_catalogued():
     assert catalogued is SelectionError
     assert issubclass(SelectionError, ValueError)
     assert SelectionError.severity == "recoverable"
+
+
+def test_internal_closed_set_guards_raise(log):
+    """The interior closed-set guards are live raises, never dead lines.
+
+    Covers the unknown resolved-composition operator, the unknown AST node,
+    and the operand mixin's abstract ``__selection__`` — the census forbids
+    hiding these behind ``pragma: no cover``.
+    """
+
+    from torchlens.selection import (
+        _compose_resolved,
+        _resolve_node,
+        _SelectionOperand,
+    )
+
+    resolved = tl.units("relu_1_2", [(0, 0, 1, 1)]).resolve(log)
+    with pytest.raises(ValueError, match="unknown operator"):
+        _compose_resolved("xor", resolved, resolved)
+
+    with pytest.raises(TypeError, match="unknown selection AST node"):
+        _resolve_node(object(), log, "ACT")
+
+    class _Bare(_SelectionOperand):
+        __slots__ = ()
+
+    with pytest.raises(NotImplementedError):
+        _Bare().__selection__()

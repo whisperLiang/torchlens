@@ -180,7 +180,7 @@ from .types import (
     rebuild_container_from_spec,
 )
 
-if TYPE_CHECKING:  # pragma: no cover - typing-only mirror of the lazy names below
+if TYPE_CHECKING:  # typing-only mirror of the lazy names below
     from .bundle import Bundle
     from .rerun import rerun, run
 

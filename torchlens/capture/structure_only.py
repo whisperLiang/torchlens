@@ -594,21 +594,23 @@ def require_structure_only_capability(
             status=row.status_v1,
             flip_event=row.flip_event,
         )
-    if row.status_v1 == "supported_hypothesis":
-        if claim_status_for(trace) is StructureClaimStatus.REFUTED:
-            discharge = _DISCHARGE_REGISTRY.get(trace)
-            first = discharge.first_contradiction if discharge is not None else None
-            raise StructureOnlyCapabilityError(
-                f"TorchLens refuses {capability!r}: this structure-only "
-                "capture's hypotheses were REFUTED by a registered real-run "
-                f"discharge (first contradiction: {first}). A refuted "
-                "hypothesis is strictly worse than no capture. Remedy: "
-                "re-capture after fixing the model/meta divergence, or "
-                "consume the discharge record's contradiction table directly.",
-                code="structure_only_refuted_hypothesis",
-                capability=capability,
-                status=row.status_v1,
-            )
+    if (
+        row.status_v1 == "supported_hypothesis"
+        and claim_status_for(trace) is StructureClaimStatus.REFUTED
+    ):
+        discharge = _DISCHARGE_REGISTRY.get(trace)
+        first = discharge.first_contradiction if discharge is not None else None
+        raise StructureOnlyCapabilityError(
+            f"TorchLens refuses {capability!r}: this structure-only "
+            "capture's hypotheses were REFUTED by a registered real-run "
+            f"discharge (first contradiction: {first}). A refuted "
+            "hypothesis is strictly worse than no capture. Remedy: "
+            "re-capture after fixing the model/meta divergence, or "
+            "consume the discharge record's contradiction table directly.",
+            code="structure_only_refuted_hypothesis",
+            capability=capability,
+            status=row.status_v1,
+        )
     return row
 
 
@@ -727,7 +729,7 @@ def discharge_against(structure_trace: Any, real_trace: Any) -> StructureDischar
     claims: list[ClaimComparison] = []
     first_contradiction: str | None = None
     for index, (hyp_layer, real_layer) in enumerate(
-        zip(structure_trace.layer_list, real_trace.layer_list)
+        zip(structure_trace.layer_list, real_trace.layer_list, strict=False)
     ):
         site = (
             getattr(hyp_layer, "label", None)

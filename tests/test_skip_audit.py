@@ -1026,6 +1026,153 @@ def test_device_gated_skipif_scanner_is_red_capable(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 2c. tripwire-guard classification of unavailable-ok targets (skip-audit lane)
+# ---------------------------------------------------------------------------
+#
+# The ledger tiers classify DEPENDENCY AVAILABILITY; they say nothing about
+# what the guarded test protects. That is where the label-geometry incident
+# hid (2026-08-16): ``cairosvg`` sat truthfully in ``unavailable-ok`` while
+# the test it guards -- the 16-model rendered label-geometry gate -- silently
+# disarmed on every dev box, and 4 models drifted into hard violations behind
+# a green summary. Same shape as the core.hooksPath incident: a check that
+# looks armed and is not.
+#
+# So every ``unavailable-ok`` target must now be consciously classified:
+#
+# - ``TRIPWIRE_GUARD_TARGETS``: the dep's absence disarms a correctness or
+#   honesty GATE (rendered-output audits, byte/pixel honesty layers). On any
+#   box claiming the full ``[test]`` extra (the same sentinel claim the
+#   test-extra enforcement uses) these must RESOLVE -- a missing dep breaks
+#   the build instead of quietly disarming the check.
+# - ``OPTIONAL_INTEGRATION_TARGETS``: genuinely-optional integration coverage
+#   whose absence costs breadth, never gate integrity; one-line reason each.
+#
+# ``optional-preview`` targets are out of the classification's domain: that
+# tier is by construction backend/bridge extras with their own preview envs
+# (and the weekly workflow's executed-floor gate arms the bridge families).
+
+#: unavailable-ok target -> the tripwire gate its absence silently disarms.
+TRIPWIRE_GUARD_TARGETS: dict[str, str] = {
+    "cairosvg": (
+        "tests/test_label_geometry.py (16-model rendered label-geometry gate) and "
+        "tests/test_bundle_diff_renderer.py's pixel-exoneration layer (its byte-drift "
+        "check degraded to a SKIP once before -- b10 R78-4)"
+    ),
+    "fitz": (
+        "tests/test_render_bugs.py::test_large_composed_pdf_contains_visible_graph_region "
+        "(composed-PDF visible-graph-region honesty gate)"
+    ),
+    "matplotlib": (
+        "whole-file guards on tests/test_viz_display_behaviors.py and tests/test_reprs.py "
+        "(viz display/repr behavior checks disarm as entire files)"
+    ),
+    "matplotlib.pyplot": (
+        "per-test guards in tests/test_node_plots.py (tensor-display rendering checks)"
+    ),
+}
+
+#: unavailable-ok target -> why its absence is breadth loss, not gate loss.
+OPTIONAL_INTEGRATION_TARGETS: dict[str, str] = {
+    "cornet": "research-model real-world coverage; GitHub-only distribution",
+    "dacite": "model-explorer export-bridge demo dependency",
+    "dagua": "unreleased in-development layout engine",
+    "e3nn.o3": "research-model real-world coverage, deliberately undeclared",
+    "git": "release-environment-only (hash-locked release-defenses job installs it)",
+    "model_explorer": "export-bridge integration target with no declared extra",
+    "pennylane": "quantum-ML research-model coverage, deliberately undeclared",
+    "semantic_release": "release-environment-only (release-defenses job)",
+    "tensorboard": "export-bridge integration target with no declared extra",
+    "tomli": "py<3.11 tomllib backport, only conditionally needed",
+    "transformer_lens": "bridge integration without a declared extra",
+    "xarray": "export-bridge integration target with no declared extra",
+    "torch._dynamo.trace_rules": "torch build/version capability probe",
+    "torch._subclasses.fake_tensor": "torch build/version capability probe",
+    "torch.ao.quantization": "torch build/version capability probe",
+    "torch.distributed": "torch build capability probe",
+    "torch.distributed.tensor": "torch build/version capability probe",
+    "torch.distributed.tensor.parallel": "torch build/version capability probe",
+    "torch.nn.attention.bias": "torch version capability probe",
+}
+
+
+def _unresolved_tripwire_targets(targets: dict[str, str]) -> list[str]:
+    """Tripwire targets whose top-level module does not resolve right now."""
+
+    return sorted(
+        target for target in targets if importlib.util.find_spec(target.split(".", 1)[0]) is None
+    )
+
+
+@pytest.mark.smoke
+def test_unavailable_ok_targets_are_all_classified() -> None:
+    """Every unavailable-ok target is consciously tripwire XOR optional.
+
+    A new ``unavailable-ok`` ledger row must land with a classification, so
+    "the dep is legitimately absent" can never again silently answer the
+    different question "is the guarded test a gate?".
+    """
+
+    unavailable_ok = {
+        target for target, (tier, _note) in IMPORTORSKIP_LEDGER.items() if tier == UNAVAILABLE_OK
+    }
+    tripwire = set(TRIPWIRE_GUARD_TARGETS)
+    optional = set(OPTIONAL_INTEGRATION_TARGETS)
+    overlap = tripwire & optional
+    unclassified = unavailable_ok - tripwire - optional
+    stale = (tripwire | optional) - unavailable_ok
+    assert not overlap, f"targets classified both ways: {sorted(overlap)}"
+    assert not unclassified, (
+        "unavailable-ok importorskip targets must be consciously classified as "
+        "TRIPWIRE_GUARD_TARGETS (absence disarms a correctness/honesty gate) or "
+        "OPTIONAL_INTEGRATION_TARGETS (breadth-only) in tests/test_skip_audit.py:\n  "
+        + "\n  ".join(sorted(unclassified))
+    )
+    assert not stale, (
+        "classified targets no longer ledgered unavailable-ok (move or delete "
+        "the rows):\n  " + "\n  ".join(sorted(stale))
+    )
+    for target, reason in (*TRIPWIRE_GUARD_TARGETS.items(), *OPTIONAL_INTEGRATION_TARGETS.items()):
+        assert reason.strip(), f"{target}: empty classification reason"
+
+
+@pytest.mark.smoke
+def test_tripwire_guard_deps_resolve_in_full_env() -> None:
+    """A full-[test]-extra box may not silently disarm a tripwire gate.
+
+    The claim is the same sentinel the test-extra enforcement uses: a partial
+    install legitimately skips, but a provisioned dev/CI box with a tripwire
+    dep absent means a correctness gate is skipping while every summary reads
+    green -- that must be LOUD. Remedy: install the named dep (additive), or
+    consciously reclassify the target with its gate's owner.
+    """
+
+    if importlib.util.find_spec(FULL_TEST_EXTRA_SENTINEL) is None:
+        pytest.skip(
+            f"environment does not claim the full [test] extra "
+            f"(sentinel {FULL_TEST_EXTRA_SENTINEL!r} is absent)"
+        )
+    missing = _unresolved_tripwire_targets(TRIPWIRE_GUARD_TARGETS)
+    assert not missing, (
+        "TRIPWIRE GATES ARE SILENTLY SKIPPING on this full-[test]-extra "
+        "environment -- each absent dep below disarms a correctness/honesty "
+        "gate that then reads green in every summary. Install the dep or "
+        "consciously reclassify it in tests/test_skip_audit.py:\n"
+        + "\n".join(f"  {target}: disarms {TRIPWIRE_GUARD_TARGETS[target]}" for target in missing)
+    )
+
+
+@pytest.mark.smoke
+def test_tripwire_resolution_check_is_red_capable() -> None:
+    """A planted unresolvable tripwire target is reported missing."""
+
+    planted = {
+        "torchlens_planted_missing_dep_xyz": "planted gate (must be reported)",
+        "pytest": "resolvable decoy (must NOT be reported)",
+    }
+    assert _unresolved_tripwire_targets(planted) == ["torchlens_planted_missing_dep_xyz"]
+
+
+# ---------------------------------------------------------------------------
 # 3. requires_assertions / python -O leg self-verification
 # ---------------------------------------------------------------------------
 
