@@ -33,6 +33,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from ..backends.registry import TORCH_BACKEND_NAME
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..data_classes.trace import Trace
 
@@ -195,7 +197,7 @@ def compute_suppressed_arg_keys(trace: Trace, universe: Any) -> dict[int, frozen
     live on the trace).
     """
 
-    if str(getattr(trace, "backend", "")) != "torch":
+    if str(getattr(trace, "backend", "")) != TORCH_BACKEND_NAME:
         # Non-torch capture backends are never candidates (the axis
         # semantics in the table are the PyTorch module contract).
         return {}
