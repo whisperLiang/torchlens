@@ -37,7 +37,7 @@ from ..intervention.resolver import resolve_sites
 from ..intervention.types import Relationship
 from ._relations import MemberRelationRow, MemberRelationTable
 
-if TYPE_CHECKING:  # pragma: no cover - typing-only
+if TYPE_CHECKING:
     from torch import nn
 
     from ..capture._episode_ledger import EpisodeFoldResult, EpisodeLedger

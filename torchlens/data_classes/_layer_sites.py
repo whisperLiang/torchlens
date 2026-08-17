@@ -40,8 +40,12 @@ SHAPE_SUMMARY_CHARACTER_CLASS = frozenset("0123456789x->-")
 
 
 def _pass_ordered_ops(layer: Layer) -> list[Any]:
-    # ``Layer.ops`` is keyed by 1-based pass index (positional ints are a
-    # separate 0-based access path); sort items for pass order.
+    """Return the layer's ops in pass order.
+
+    ``Layer.ops`` is keyed by 1-based pass index (positional ints are a
+    separate 0-based access path); sorting the items yields pass order.
+    """
+
     return [op for _, op in sorted(layer.ops.items())]
 
 
@@ -60,10 +64,16 @@ def layer_site_key(layer: Layer) -> str:
     keys = {op.site_key for op in _pass_ordered_ops(layer)}
     if keys == {None}:
         raise InvalidArgumentError(
-            f"Layer '{layer.layer_label}' carries no site keys: this trace "
-            "was captured/saved before site_key_v1 existed.",
+            f"Layer '{layer.layer_label}' carries no site keys: this artifact "
+            "predates the site_key_v1 grouping surface. Site keys are minted "
+            "at capture time and their persisted row is pre-release-gated "
+            "under tlspec v7, so loaded artifacts (any tlspec v6 artifact, "
+            "and v7 artifacts written before the coordinated persistence "
+            "bump) read keyless.",
             code="site_key_unavailable",
-            remedy="re-capture with a current TorchLens to mint site keys",
+            remedy=(
+                "re-capture the model with a current TorchLens and read site_key on the live trace"
+            ),
             layer_label=layer.layer_label,
         )
     keys.discard(None)
@@ -99,9 +109,16 @@ def layer_site_peers(layer: Layer) -> tuple[Layer, ...]:
     if not own_keys or trace is None:
         raise InvalidArgumentError(
             f"Layer '{layer.layer_label}' has no valid site key to index "
-            "peers by (legacy artifact or detached layer).",
+            "peers by: either the layer is detached from its trace, or this "
+            "artifact predates the site_key_v1 grouping surface (site keys "
+            "are minted at capture time; their persisted row is "
+            "pre-release-gated under tlspec v7, so loaded artifacts read "
+            "keyless).",
             code="site_key_unavailable",
-            remedy="re-capture with a current TorchLens to mint site keys",
+            remedy=(
+                "re-capture the model with a current TorchLens and read "
+                "site_peers on the live trace"
+            ),
             layer_label=layer.layer_label,
         )
     peers: list[Layer] = []
@@ -146,8 +163,9 @@ def layer_shape_summary(layer: Layer) -> str | None:
         ]
         if len(varying_axes) == 1:
             axis_values = [shape[varying_axes[0]] for shape in shapes]
-            ascending = all(a <= b for a, b in zip(axis_values, axis_values[1:]))
-            descending = all(a >= b for a, b in zip(axis_values, axis_values[1:]))
+            pairs = list(zip(axis_values, axis_values[1:], strict=False))
+            ascending = all(a <= b for a, b in pairs)
+            descending = all(a >= b for a, b in pairs)
             if ascending or descending:
                 return f"{axis_values[0]}->{axis_values[-1]}"
             return f"{min(axis_values)}-{max(axis_values)}"

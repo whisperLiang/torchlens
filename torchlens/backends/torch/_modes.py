@@ -68,9 +68,11 @@ def pause_own_dispatch_modes() -> Iterator[tuple[_TorchLensDispatchMode, ...]]:
         _reenter_own_dispatch_modes(exited)
         stack_after = get_current_dispatch_mode_stack()
         if stack_before is not None and stack_after is not None:
-            assert len(stack_after) == len(stack_before), (
-                "TorchLens dispatch-mode pause changed the active stack depth"
-            )
-            assert all(
-                after is before for before, after in zip(stack_before, stack_after, strict=True)
-            ), "TorchLens dispatch-mode pause changed active stack identity or order"
+            if len(stack_after) != len(stack_before):
+                raise RuntimeError("TorchLens dispatch-mode pause changed the active stack depth")
+            if any(
+                after is not before for before, after in zip(stack_before, stack_after, strict=True)
+            ):
+                raise RuntimeError(
+                    "TorchLens dispatch-mode pause changed active stack identity or order"
+                )

@@ -48,10 +48,8 @@ class _FlatBranch(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.flag:
-            y = torch.tanh(x)
-        else:
-            y = torch.tanh(x)
-        return y
+            return torch.tanh(x)
+        return torch.tanh(x)
 
 
 class _NestedInner(nn.Module):
@@ -65,10 +63,8 @@ class _NestedInner(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.flag:
-            y = torch.tanh(x)
-        else:
-            y = torch.tanh(x)
-        return y
+            return torch.tanh(x)
+        return torch.tanh(x)
 
 
 class _NestedOuter(nn.Module):
@@ -201,7 +197,7 @@ def test_permuted_cardinality_weak_passes_strong_refuses() -> None:
 
 
 @pytest.mark.smoke
-def test_same_line_reorder_residual_r4_stays_disclosed() -> None:
+def test_same_line_reorder_residual_stays_disclosed() -> None:
     left = tl.trace(_SameLineLoop(), torch.randn(2, 4))
     right = tl.trace(_SameLineLoop(), torch.randn(2, 4))
     rows = join_site_profiles(site_profile(left), site_profile(right))

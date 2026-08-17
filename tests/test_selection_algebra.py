@@ -360,7 +360,7 @@ def test_totality_mixed_kind_cells_refuse(log, operator, resolved_state):
 def test_totality_invert_cells(log):
     """~ over every kind/emptiness cell (query and resolved)."""
 
-    for (kind, state), builder in _EMPTINESS_BUILDERS.items():
+    for (_kind, _state), builder in _EMPTINESS_BUILDERS.items():
         resolved = builder(log)
         inverted = ~resolved
         assert isinstance(inverted, ResolvedSelection)

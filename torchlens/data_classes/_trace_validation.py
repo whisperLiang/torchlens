@@ -797,7 +797,7 @@ class TraceValidationMixin(_TraceMixinBase):
             from ..capture.structure_only import require_structure_only_capability
 
             require_structure_only_capability(self, "live_replay")
-            from .._runnable_execution import run_live_trace
+            from .._runnable_execution import _LiveRunOptions, run_live_trace
 
             _refuse_state_compromised_live_run(self)
             source_ref = getattr(self, "_source_model_ref", None)
@@ -816,8 +816,7 @@ class TraceValidationMixin(_TraceMixinBase):
                     run_inputs,
                     seed=seed,
                     on_divergence=on_divergence,
-                    carry_state=carry_state,
-                    until=until,
+                    options=_LiveRunOptions(carry_state=carry_state, until=until),
                 ),
                 run_save_labels,
             )

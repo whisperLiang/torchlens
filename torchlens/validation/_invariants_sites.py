@@ -34,14 +34,20 @@ def _check_site_key_invariants(ml: Trace) -> None:
         On the first violated site invariant.
     """
 
-    from .invariants import MetadataInvariantError
-
     name = "site_key_invariants"
     ops = list(ml.layer_list)
     if not any(getattr(op, "site_key", None) is not None for op in ops):
         return  # legacy artifact: out of the invariant's declared domain
+    _check_site_key_totality(ops, name)
+    _check_site_key_uniqueness(ops, name)
+    _check_layer_site_coherence(ml, name)
 
-    # I-S1: every retained op carries a non-empty, prefixed, well-formed key.
+
+def _check_site_key_totality(ops: list, name: str) -> None:
+    """I-S1: every retained op carries a non-empty, prefixed, well-formed key."""
+
+    from .invariants import MetadataInvariantError
+
     for op in ops:
         key = getattr(op, "site_key", None)
         if not isinstance(key, str) or not key.startswith(SITE_KEY_PREFIX + "|"):
@@ -67,7 +73,12 @@ def _check_site_key_invariants(ml: Trace) -> None:
                     f"{op.label}.site_key ({key!r})",
                 )
 
-    # I-S2: (site_key, pass-qualified innermost call instance) unique.
+
+def _check_site_key_uniqueness(ops: list, name: str) -> None:
+    """I-S2: (site_key, pass-qualified innermost call instance) unique."""
+
+    from .invariants import MetadataInvariantError
+
     seen: dict[tuple[str, str], str] = {}
     for op in ops:
         stack = tuple(getattr(op, "module_call_stack", ()) or ())
@@ -81,10 +92,16 @@ def _check_site_key_invariants(ml: Trace) -> None:
             )
         seen[identity] = op.label
 
-    # I-S3': Layer.site_key coherence -- the accessor returns a key iff the
-    # layer's ops share exactly one; a silent single-key read on a
-    # site-spanning layer is the failure this tripwire exists to catch.
+
+def _check_layer_site_coherence(ml: Trace, name: str) -> None:
+    """I-S3': the accessor returns a key iff the layer's ops share exactly one.
+
+    A silent single-key read on a site-spanning layer is the failure this
+    tripwire exists to catch.
+    """
+
     from .._errors import InvalidArgumentError
+    from .invariants import MetadataInvariantError
 
     for layer_label in getattr(ml, "layer_labels", ()) or ():
         layer = ml.layer_logs.get(layer_label)

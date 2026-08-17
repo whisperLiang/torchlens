@@ -60,7 +60,7 @@ def escape_site_component(component: str) -> str:
     out: list[str] = []
     for ch in component:
         if ch in _ESCAPE_CHARS or ord(ch) < 0x20:
-            out.append("".join("%%%02X" % b for b in ch.encode("utf-8")))
+            out.append("".join(f"%{b:02X}" for b in ch.encode("utf-8")))
         else:
             out.append(ch)
     return "".join(out)

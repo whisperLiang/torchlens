@@ -748,9 +748,12 @@ def run_census_criterion_1(
     logger = ReferenceDispatchLogger()
     if interposition or suppress_interposition:
         interposition_channel = "suppressed" if suppress_interposition else "dispatcher"
-        with dispatcher_interposition_counters(suppress=suppress_interposition) as counters:
-            with torch.no_grad(), logger:
-                bare_out = bare_model(bare_input)
+        with (
+            dispatcher_interposition_counters(suppress=suppress_interposition) as counters,
+            torch.no_grad(),
+            logger,
+        ):
+            bare_out = bare_model(bare_input)
         completion_events = dict(counters)
     else:
         with torch.no_grad(), logger:

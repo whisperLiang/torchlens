@@ -90,8 +90,11 @@ _NEW_FILE_LINE_CAP = 2000
 #: the v7 save boundary in _io/bundle). PRE-SPRINT BASELINE at 75439a67:
 #:   validation/core.py 5300 | data_classes/op.py 5200
 #:   (_io/bundle.py already listed above at 4450; L6 re-steps 4500 -> 4550)
+#: 2026-08-17 gov-sweep settle: the L6 edge-boundary check family moved out
+#: of validation/core into validation/_edge_boundary.py; core re-keyed
+#: 5450 -> 5350 (measured 5325).
 _GOD_FILE_CEILINGS: dict[str, int] = {
-    "torchlens/validation/core.py": 5450,
+    "torchlens/validation/core.py": 5350,
     "torchlens/data_classes/op.py": 5250,
     "torchlens/_io/runnable.py": 5000,
     "torchlens/utils/rng.py": 4950,
@@ -99,7 +102,10 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/backends/jax/backend.py": 4400,
     "torchlens/_io/bundle.py": 4550,
     "torchlens/_io/runnable_load.py": 3850,
-    "torchlens/user_funcs.py": 4200,
+    # 4200 -> 4050: the wave-0 governance sweep extracted the structure-only
+    # Layer-0 entry contract to capture/_structure_only_entry.py; re-keyed
+    # down to the next 50-line step above the post-split measurement.
+    "torchlens/user_funcs.py": 4050,
     "torchlens/backends/torch/backward.py": 3900,
     # 3800 -> 3850: L1 adds the grouping knob mirror + grouping_policy stamp
     # settlement (~25 lines) on top of the re-stepped feature-sprint baseline.

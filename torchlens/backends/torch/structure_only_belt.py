@@ -255,6 +255,8 @@ def _make_escalated_method(original: Any, state: _StructureOnlyBeltState, name: 
 
     @functools.wraps(original)
     def wrapper(self: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
+        """Refuse on hypothesis tensors, then defer to the original method."""
+
         _maybe_refuse_escape(state, name, self)
         return original(self, *args, **kwargs)
 
@@ -266,6 +268,8 @@ def _make_escalated_module_func(original: Any, state: _StructureOnlyBeltState, n
 
     @functools.wraps(original)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        """Refuse on hypothesis tensor operands, then defer to the original."""
+
         for operand in args:
             if isinstance(operand, torch.Tensor):
                 _maybe_refuse_escape(state, f"torch.{name}", operand)
@@ -278,10 +282,62 @@ def _make_escalated_property(descriptor: Any, state: _StructureOnlyBeltState, na
     """Wrap one getset-descriptor property with the escalated belt."""
 
     def getter(self: torch.Tensor) -> Any:
+        """Refuse on hypothesis tensors, then read the original descriptor."""
+
         _maybe_refuse_escape(state, name, self)
         return descriptor.__get__(self, type(self))
 
     return property(getter)
+
+
+def _install_method_belt(
+    state: _StructureOnlyBeltState, method_restores: dict[str, tuple[bool, Any]]
+) -> None:
+    """Wrap the Tensor method escape surface, recording shadow-aware restores."""
+
+    for name in sorted(_TENSOR_METHOD_SURFACE):
+        original = getattr(torch.Tensor, name, None)
+        if original is None or not callable(original):
+            continue
+        shadowed = name in torch.Tensor.__dict__
+        try:
+            setattr(torch.Tensor, name, _make_escalated_method(original, state, name))
+        except (TypeError, AttributeError):
+            continue
+        method_restores[name] = (shadowed, original)
+
+
+def _install_module_func_belt(
+    state: _StructureOnlyBeltState, module_restores: list[tuple[Any, str, Any]]
+) -> None:
+    """Wrap the ``torch.*`` module predicate escape surface."""
+
+    for name in sorted(HOST_VALUE_ESCAPE_MODULE_FUNCS):
+        original = getattr(torch, name, None)
+        if original is None or not callable(original):
+            continue
+        try:
+            setattr(torch, name, _make_escalated_module_func(original, state, name))
+        except (TypeError, AttributeError):
+            continue
+        module_restores.append((torch, name, original))
+
+
+def _install_property_belt(
+    state: _StructureOnlyBeltState, property_restores: dict[str, tuple[bool, Any]]
+) -> None:
+    """Wrap the invisible getset-descriptor escape surface."""
+
+    for name in sorted(INVISIBLE_HOST_ESCAPE_PROPERTIES):
+        descriptor = inspect.getattr_static(torch.Tensor, name, None)
+        if descriptor is None or not hasattr(descriptor, "__get__"):
+            continue
+        shadowed = name in torch.Tensor.__dict__
+        try:
+            setattr(torch.Tensor, name, _make_escalated_property(descriptor, state, name))
+        except (TypeError, AttributeError):
+            continue
+        property_restores[name] = (shadowed, descriptor)
 
 
 @contextmanager
@@ -304,6 +360,8 @@ def structure_only_escape_belt(trace: Any) -> Iterator[None]:
     property_restores: dict[str, tuple[bool, Any]] = {}
 
     def _restore() -> None:
+        """Unwind every belt patch, shadow-aware (delete unshadowed names)."""
+
         for name, (shadowed, original) in method_restores.items():
             if shadowed:
                 setattr(torch.Tensor, name, original)
@@ -318,35 +376,9 @@ def structure_only_escape_belt(trace: Any) -> Iterator[None]:
                 delattr(torch.Tensor, name)
 
     try:
-        for name in sorted(_TENSOR_METHOD_SURFACE):
-            original = getattr(torch.Tensor, name, None)
-            if original is None or not callable(original):
-                continue
-            shadowed = name in torch.Tensor.__dict__
-            try:
-                setattr(torch.Tensor, name, _make_escalated_method(original, state, name))
-            except (TypeError, AttributeError):
-                continue
-            method_restores[name] = (shadowed, original)
-        for name in sorted(HOST_VALUE_ESCAPE_MODULE_FUNCS):
-            original = getattr(torch, name, None)
-            if original is None or not callable(original):
-                continue
-            try:
-                setattr(torch, name, _make_escalated_module_func(original, state, name))
-            except (TypeError, AttributeError):
-                continue
-            module_restores.append((torch, name, original))
-        for name in sorted(INVISIBLE_HOST_ESCAPE_PROPERTIES):
-            descriptor = inspect.getattr_static(torch.Tensor, name, None)
-            if descriptor is None or not hasattr(descriptor, "__get__"):
-                continue
-            shadowed = name in torch.Tensor.__dict__
-            try:
-                setattr(torch.Tensor, name, _make_escalated_property(descriptor, state, name))
-            except (TypeError, AttributeError):
-                continue
-            property_restores[name] = (shadowed, descriptor)
+        _install_method_belt(state, method_restores)
+        _install_module_func_belt(state, module_restores)
+        _install_property_belt(state, property_restores)
     except BaseException:
         _restore()
         raise
@@ -374,6 +406,8 @@ def _innermost_traceback_frame(exc: BaseException) -> types.TracebackType | None
 
 
 def _frame_location(tb: types.TracebackType) -> tuple[Path, int]:
+    """Return the resolved (file, line) of one traceback frame."""
+
     return Path(tb.tb_frame.f_code.co_filename).resolve(), tb.tb_lineno
 
 
