@@ -585,6 +585,34 @@ print(tl.compat.report(model, x).to_markdown())
   Replay/push engine ONLY: rerun/set_only refuse
   `param_substitution_engine_unsupported`. The audit record (kind `PARAM`)
   discloses "substituted at consumption ... live parameters unchanged".
+- PASS-QUALIFIED REPLAY (JMT-ruled 2026-08-17; refusal spelling
+  DOCUMENTED-UNSTABLE): the replay/push engine operates on pass-qualified
+  op labels (`Op.label`, the `label:pass` spelling — single-pass ops carry
+  `:1`). Cone traversal, the replay overlay, hook targets, origin sets, and
+  pending commits are all keyed per pass, so `fork.do(...)` on multi-pass
+  (recurrence-grouped) layers edits exactly the addressed pass, recomputes
+  every downstream pass, and commits every pass's record (previously bare
+  layer_label keys silently truncated the cone, fell back to the LAST
+  pass's captured out, fired one pass's hook at every pass, and committed
+  only the last pass — wrong values, nothing raised). The parent-edge
+  divergence check compares in replay-key space (no more spurious
+  `ControlFlowDivergenceWarning` on multi-pass replays; `strict=True`
+  multi-pass replay works). BOUNDARY: a bare layer label naming a
+  multi-pass layer refuses typed — `multipass_bare_label_ambiguous`
+  (`SiteAmbiguityError`) on string/`tl.label` addressing
+  (do/attach_hooks/push_from/resolve_sites), `selection_unresolvable` /
+  `multipass_bare_label` on `tl.units` — with a teaching message naming
+  every pass-qualified spelling; bare labels on single-pass layers stay
+  accepted, predicate selectors keep fan-out, and the explicit Layer
+  selection (`log[label].__selection__()`) is the all-passes spelling.
+  Post-hoc `contains`/string addressing accepts pass-qualified needles
+  (a needle containing `:` also matches `Op.label`), and the hook-context
+  `layer_log` snapshot carries `label` + `pass_index`. Replay disclosures
+  (`last_run` origins/cone, `replay_frontier` keys) spell multi-pass ops
+  pass-qualified and keep bare labels for single-pass layers. The
+  param-substitution multi-pass refusal
+  (`param_substitution_occurrence_underivable`) is deliberately unchanged —
+  narrowing it is a follow-on lane.
 - BACKWARD RESIDUALS (L9; every spelling DOCUMENTED-UNSTABLE pending
   naming-session/E-L9-4 routing): PER-FIRE TIMING -- every hooked grad_fn
   gets a timing prehook; ONE clock (`perf_counter`) paired at capture by a

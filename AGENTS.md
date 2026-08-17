@@ -68,6 +68,18 @@ Key entry points:
   rerun/set_only refuse `param_substitution_engine_unsupported`; multi-pass
   (recurrence-grouped) consumers, e.g. tied weights, refuse
   `param_substitution_occurrence_underivable` (named v1 engine limitation).
+- Pass-qualified replay (JMT-ruled 2026-08-17; refusal spelling
+  DOCUMENTED-UNSTABLE): the replay/push engine keys cone traversal, the
+  overlay, hook targets, and commits by pass-qualified op labels
+  (`Op.label`, `label:pass`), so multi-pass edits touch exactly the
+  addressed pass, recompute downstream passes, and commit every pass's
+  record; strict multi-pass replay works and the spurious multi-pass
+  `ControlFlowDivergenceWarning` is gone. A bare layer label naming a
+  multi-pass layer refuses typed with a teaching message naming every
+  pass-qualified spelling (`multipass_bare_label_ambiguous` on
+  string/`tl.label` addressing; `selection_unresolvable` /
+  `multipass_bare_label` on `tl.units`); single-pass bare labels stay
+  accepted and `log[label].__selection__()` is the all-passes spelling.
 - Backward residuals (L9; DOCUMENTED-UNSTABLE): per-fire timing -- one clock
   (`perf_counter`), per-node keyed-LIFO pairing, stamps on the runtime
   `GradFnFired` event only; live-only `trace.grad_fn_fire_timings` (loaded

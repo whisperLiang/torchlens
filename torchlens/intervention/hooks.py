@@ -46,6 +46,11 @@ _DEFAULT_HEAD_FACET_NAMES = ("q", "k", "v")
 
 _LAYER_LOG_CONTEXT_FIELDS = (
     "layer_label",
+    # Pass-qualified spelling + pass ordinal: on a multi-pass
+    # (recurrence-grouped) layer the bare layer_label alone cannot tell a
+    # hook WHICH pass it is firing at.
+    "label",
+    "pass_index",
     "layer_type",
     "shape",
     "dtype",

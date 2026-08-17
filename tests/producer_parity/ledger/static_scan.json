@@ -3729,6 +3729,14 @@
  },
  {
   "ambiguous": false,
+  "field": "pass_index",
+  "file": "torchlens/intervention/resolver.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": false,
   "field": "raw_index",
   "file": "torchlens/intervention/resolver.py",
   "has_default": true,
@@ -5772,7 +5780,7 @@
   "field": "pass_index",
   "file": "torchlens/selection.py",
   "has_default": true,
-  "sites": 6,
+  "sites": 7,
   "via_getattr": true
  },
  {

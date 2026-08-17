@@ -770,7 +770,8 @@ class Selection:
             ``code="selection_unresolvable"`` with a closed ``reason`` field
             (``site_not_in_trace`` / ``value_not_saved`` / ``non_tensor_site``
             / ``no_index_space`` / ``mask_shape_mismatch`` /
-            ``facet_write_mask_unavailable`` / ``population_too_small``).
+            ``facet_write_mask_unavailable`` / ``population_too_small`` /
+            ``multipass_bare_label``).
         """
 
         return _resolve_node(self._node, trace, self._kind)
@@ -1319,6 +1320,19 @@ def _resolve_unit_term(node: _UnitTerm, trace: Any) -> ResolvedSelection:
             f"site {node.site!r} is not a site of this trace.",
             site=node.site,
         )
+    if len(matches) > 1 and len({getattr(op, "layer_label", None) for op in matches}) == 1:
+        # A layer-wide spelling of a multi-pass layer names N distinct ops;
+        # units() addresses ONE op's index space, so never guess a pass.
+        from .intervention.resolver import multipass_bare_label_message
+
+        layer_label = getattr(matches[0], "layer_label", None) or node.site
+        pass_indices = sorted(int(getattr(op, "pass_index", 1) or 1) for op in matches)
+        raise _unresolvable(
+            "multipass_bare_label",
+            multipass_bare_label_message(layer_label, pass_indices),
+            site=node.site,
+            pass_indices=tuple(pass_indices),
+        )
     entries = []
     for op in matches:
         shape = _site_shape(op)
@@ -1445,8 +1459,10 @@ def units(
     Parameters
     ----------
     site:
-        Site spelling: a layer label (all passes), a pass-qualified op label,
-        or an input io role.
+        Site spelling: a pass-qualified op label (``'relu_1_2:1'``), a bare
+        layer label (single-pass layers only — a bare label naming a
+        multi-pass layer refuses ``selection_unresolvable`` /
+        ``multipass_bare_label``), or an input io role.
     indices:
         Either a bool mask over the site's output index space, or an iterable
         of integer coordinate tuples (ints accepted for 1-d sites).
