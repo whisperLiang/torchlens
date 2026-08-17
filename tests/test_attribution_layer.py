@@ -201,7 +201,12 @@ def test_grad_cam_upsamples_to_input_spatial_size_and_is_finite() -> None:
 
     assert result.method == "grad_cam"
     assert result.values.shape == (1, 1, 5, 5)
-    assert result.extra == {"layer": "features.0", "relu": True}
+    assert result.extra["layer"] == "features.0"
+    assert result.extra["relu"] is True
+    assert result.extra["native_map_resolution"] == (5, 5)
+    assert result.extra["rendered_map_resolution"] == (5, 5)
+    assert result.extra["upsampling"] == "bilinear_display_only"
+    assert result.extra["overlay"].info["torchlens_disclosure"].startswith("CAM native map")
     assert torch.isfinite(result.values).all()
     assert (result.values >= 0).all()
 
@@ -222,7 +227,25 @@ def test_grad_cam_callable_target_form() -> None:
 
     assert result.values.shape == (2, 1, 6, 6)
     assert torch.isfinite(result.values).all()
-    assert result.extra == {"layer": "features.0", "relu": False}
+    assert result.extra["layer"] == "features.0"
+    assert result.extra["relu"] is False
+
+
+def test_grad_cam_overlay_discloses_native_resolution_before_upsampling() -> None:
+    """A coarse CAM overlay visibly distinguishes measured and display grids."""
+
+    model = TinyCnn()
+    inputs = torch.linspace(-1.0, 1.0, steps=25).reshape(1, 1, 5, 5)
+
+    result = attribution.grad_cam(model, inputs, target=0, layer="features.2")
+
+    assert result.extra["native_map_resolution"] == (2, 2)
+    assert result.extra["rendered_map_resolution"] == (5, 5)
+    overlay = result.extra["overlay"]
+    assert overlay.width >= 5
+    assert overlay.height > 5
+    assert "2x2" in overlay.info["torchlens_disclosure"]
+    assert "interpolated" in overlay.info["torchlens_disclosure"]
 
 
 def test_grad_cam_rejects_non_conv_style_layer() -> None:

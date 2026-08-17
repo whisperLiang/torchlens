@@ -9,15 +9,16 @@ captured Trace.
 
 | File | Purpose |
 |------|---------|
-| `__init__.py` | Public re-exports only; the 10-name `__all__` below |
-| `_core.py` | `AttributionError`, `AttributionResult`, input normalization / leaf minting / baseline validation machinery, and the input-level methods (`saliency`, `input_x_grad`, `integrated_gradients`, `smoothgrad`) |
+| `__init__.py` | Public re-exports only; the 11-name `__all__` below |
+| `_core.py` | `AttributionError`, `AttributionResult`, input normalization / leaf minting / baseline validation machinery, and the input-level methods (`saliency`, `input_x_grad`, `integrated_gradients`, `smoothgrad`); IG always reports its completeness residual |
 | `_layer.py` | Layer-level methods: `layer_attribution`, `layer_integrated_gradients`, `layer_conductance`, `grad_cam` |
+| `_occlusion.py` | Selection-addressed scored occlusion through `Trace.fork().do(...)`, with explicit zeros/mean/blur baselines |
 
-## Public surface (`__all__`, 10 names)
+## Public surface (`__all__`, 11 names)
 
 `AttributionError`, `AttributionResult`, `saliency`, `input_x_grad`,
 `integrated_gradients`, `smoothgrad`, `layer_attribution`,
-`layer_integrated_gradients`, `layer_conductance`, `grad_cam`.
+`layer_integrated_gradients`, `layer_conductance`, `grad_cam`, `occlusion`.
 
 ## Gotchas
 
@@ -31,6 +32,8 @@ captured Trace.
   validation path.
 - The model's `training` flag is saved/restored by `_temporarily_eval` —
   do not add code paths that return without restoring it.
+- Stage-4b names and metadata are DOCUMENTED-UNSTABLE and lockstep-indexed in
+  `docs/reference/glossary.md`.
 
 ## Tests
 

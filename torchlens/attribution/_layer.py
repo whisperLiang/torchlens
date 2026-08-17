@@ -7,6 +7,7 @@ from typing import Any, Literal, TypeAlias
 
 import torch
 import torch.nn.functional as F
+from PIL import Image
 from torch import Tensor
 from torch.nn import Module
 from torch.utils.hooks import RemovableHandle
@@ -15,7 +16,7 @@ from torchlens.attribution._core import (
     AttributionError,
     AttributionResult,
     InputKwargs,
-    TargetSpec,
+    _AttributionTarget,
     _call_model,
     _interned_path_leaves,
     _make_input_leaves,
@@ -27,6 +28,8 @@ from torchlens.attribution._core import (
     _validate_baselines,
     _validate_positive_int,
 )
+from torchlens.receptive_field._viz import _blend_heatmap
+from torchlens.viz.node_plots import render_heatmap
 
 LayerAttributionMethod: TypeAlias = Literal["activation_x_grad", "grad"]
 
@@ -330,7 +333,7 @@ def _resolve_named_layer(model: Module, layer: str) -> Module:
 def _capture_layer_activation(
     model: Module,
     inputs: _PreparedInputs,
-    target: TargetSpec,
+    target: _AttributionTarget,
     layer: str,
 ) -> tuple[tuple[Tensor, ...], tuple[Tensor, ...], tuple[Tensor, ...]]:
     """Capture every distinct layer firing and its target gradient.
@@ -402,7 +405,7 @@ def _capture_layer_activation(
 def _capture_layer_activation_for_leaves(
     model: Module,
     inputs: _PreparedInputs,
-    target: TargetSpec,
+    target: _AttributionTarget,
     layer: str,
     input_leaves: tuple[Tensor, ...],
     *,
@@ -473,7 +476,7 @@ def _capture_layer_activation_for_leaves(
 def _layer_path_basics(
     model: Module,
     inputs: _PreparedInputs,
-    target: TargetSpec,
+    target: _AttributionTarget,
     layer: str,
     baseline_tensors: tuple[Tensor, ...],
     n_steps: int,
@@ -626,14 +629,90 @@ def _validate_conv_activation(activation: Tensor, layer: str) -> None:
         )
 
 
+def _cam_base_image(spatial_reference: Tensor, image: Image.Image | None) -> Image.Image:
+    """Return an RGB base image for a CAM overlay.
+
+    Parameters
+    ----------
+    spatial_reference
+        Input tensor whose spatial grid was dependency-proven to feed the layer.
+    image
+        Optional user-provided source image.
+
+    Returns
+    -------
+    PIL.Image.Image
+        RGB image at the input tensor's spatial resolution.
+    """
+
+    height, width = (int(value) for value in spatial_reference.shape[-2:])
+    if image is not None:
+        return image.convert("RGB").resize((width, height))
+    data = spatial_reference.detach().float().cpu()[0]
+    if data.ndim == 3 and data.shape[0] in {1, 3, 4}:
+        channels = data[:3]
+        if channels.shape[0] == 1:
+            channels = channels.expand(3, -1, -1)
+        low = channels.amin()
+        high = channels.amax()
+        normalized = torch.zeros_like(channels) if high == low else (channels - low) / (high - low)
+        array = (normalized.permute(1, 2, 0).clamp(0, 1) * 255).to(torch.uint8).numpy()
+        return Image.fromarray(array, mode="RGB")
+    reduced = data.abs().mean(dim=0) if data.ndim == 3 else data.abs()
+    return render_heatmap(reduced.numpy(), width=width, height=height, cmap="gray")
+
+
+def _cam_overlay(
+    native_cam: Tensor,
+    spatial_reference: Tensor,
+    *,
+    image: Image.Image | None,
+    alpha: float,
+    cmap: str,
+) -> Image.Image:
+    """Render CAM values through the receptive-field heatmap overlay path.
+
+    Parameters
+    ----------
+    native_cam
+        Channel-reduced map at the measured feature-map resolution.
+    spatial_reference
+        Dependency-proven input tensor defining the rendered grid.
+    image
+        Optional source image override.
+    alpha
+        Heatmap opacity.
+    cmap
+        Heatmap colormap.
+
+    Returns
+    -------
+    PIL.Image.Image
+        Overlay with a visible native-resolution disclosure footer.
+    """
+
+    if not 0.0 <= alpha <= 1.0:
+        raise AttributionError("alpha must be between 0 and 1")
+    base = _cam_base_image(spatial_reference, image)
+    data = native_cam.detach().float().cpu().mean(dim=(0, 1))
+    heatmap = render_heatmap(data.numpy(), width=base.width, height=base.height, cmap=cmap)
+    native_height, native_width = (int(value) for value in native_cam.shape[-2:])
+    disclosure = f"CAM native map: {native_height}x{native_width}; display interpolated"
+    return _blend_heatmap(base, heatmap, alpha=alpha, disclosure=disclosure)
+
+
 def grad_cam(
     model: Module,
     inputs: Any,
     input_kwargs: InputKwargs = None,
     *,
-    target: TargetSpec,
+    target: _AttributionTarget,
     layer: str,
     relu: bool = True,
+    overlay: bool = True,
+    image: Image.Image | None = None,
+    alpha: float = 0.6,
+    cmap: str = "magma",
 ) -> AttributionResult:
     """Compute Grad-CAM for a named convolution-style layer.
 
@@ -656,12 +735,23 @@ def grad_cam(
         than silently attributing one arbitrary call.
     relu
         Whether to apply ReLU to the channel-reduced CAM.
+    overlay
+        Whether to render the CAM over the dependency-proven spatial input.
+    image
+        Optional source image override for the rendered overlay.
+    alpha
+        Heatmap opacity in ``[0, 1]``.
+    cmap
+        Heatmap colormap.
 
     Returns
     -------
     AttributionResult
         Grad-CAM values upsampled to the spatial size of the input that feeds
-        the target layer, with shape ``N, 1, Hin, Win``.
+        the target layer, with shape ``N, 1, Hin, Win``. Metadata reports the
+        measured native map resolution separately from the interpolated display
+        resolution. When requested, ``extra["overlay"]`` is a PIL image whose
+        visible footer discloses that native resolution.
 
     Raises
     ------
@@ -682,10 +772,12 @@ def grad_cam(
     activation, gradient = activations[0], gradients[0]
     _validate_conv_activation(activation, layer)
     spatial_reference = _spatial_reference_tensor(prepared_inputs, feeding_leaves, layer)
-    alpha = gradient.mean(dim=(2, 3), keepdim=True)
-    cam = (alpha * activation).sum(dim=1, keepdim=True)
+    channel_weights = gradient.mean(dim=(2, 3), keepdim=True)
+    cam = (channel_weights * activation).sum(dim=1, keepdim=True)
     if relu:
         cam = torch.relu(cam)
+    native_resolution = tuple(int(value) for value in cam.shape[-2:])
+    rendered_resolution = tuple(int(value) for value in spatial_reference.shape[-2:])
     upsampled_cam = F.interpolate(
         cam,
         size=spatial_reference.shape[-2:],
@@ -696,7 +788,24 @@ def grad_cam(
         method="grad_cam",
         values=upsampled_cam.detach(),
         target_repr=_target_repr(target),
-        extra={"layer": layer, "relu": relu},
+        extra={
+            "layer": layer,
+            "relu": relu,
+            "native_map_resolution": native_resolution,
+            "rendered_map_resolution": rendered_resolution,
+            "upsampling": "bilinear_display_only",
+            "overlay": (
+                _cam_overlay(
+                    cam,
+                    spatial_reference,
+                    image=image,
+                    alpha=alpha,
+                    cmap=cmap,
+                )
+                if overlay
+                else None
+            ),
+        },
     )
 
 
@@ -705,7 +814,7 @@ def layer_integrated_gradients(
     inputs: Any,
     input_kwargs: InputKwargs = None,
     *,
-    target: TargetSpec,
+    target: _AttributionTarget,
     layer: str,
     baseline: Any | None = None,
     n_steps: int = 50,
@@ -779,7 +888,7 @@ def layer_conductance(
     inputs: Any,
     input_kwargs: InputKwargs = None,
     *,
-    target: TargetSpec,
+    target: _AttributionTarget,
     layer: str,
     baseline: Any | None = None,
     n_steps: int = 50,
@@ -865,7 +974,7 @@ def layer_attribution(
     inputs: Any,
     input_kwargs: InputKwargs = None,
     *,
-    target: TargetSpec,
+    target: _AttributionTarget,
     layer: str,
     method: LayerAttributionMethod = "activation_x_grad",
 ) -> AttributionResult:
