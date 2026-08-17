@@ -536,6 +536,12 @@ def _enqueue_implicit_pass_drain_callback(
     trace_ref = weakref.ref(trace)
 
     def _drain_callback() -> None:
+        """Close the implicit backward pass once the autograd engine drains.
+
+        Registered as a final callback; torch runs these with the graph task
+        still live, so the close is deferred off the engine thread. No-ops when
+        the trace is gone or the pass is already closed.
+        """
         live_trace = trace_ref()
         if live_trace is None:
             return
@@ -3751,6 +3757,12 @@ def _token_bearing_pack_hook(
     trace_ref = weakref.ref(trace)
 
     def pack_hook(value: Any) -> Any:
+        """Count one checkpoint pack for this token, then pass the value through.
+
+        Held via a weakref so an abandoned trace cannot keep the hook alive; a
+        dead referent degrades to pass-through rather than raising inside torch's
+        saved-tensor machinery.
+        """
         live_trace = trace_ref()
         if live_trace is not None:
             state = _CHECKPOINT_TOKEN_STATE.get(live_trace)
@@ -3780,6 +3792,10 @@ def _token_bearing_unpack_hook(
     trace_ref = weakref.ref(trace)
 
     def unpack_hook(value: Any) -> Any:
+        """Count one checkpoint unpack (recomputation) for this token.
+
+        Mirrors :func:`pack_hook`: weakref-held, pass-through on a dead trace.
+        """
         live_trace = trace_ref()
         if live_trace is not None:
             state = _CHECKPOINT_TOKEN_STATE.get(live_trace)

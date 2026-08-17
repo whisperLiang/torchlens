@@ -1181,6 +1181,7 @@ def _size_coerce(state: EncodingState) -> Any:
     assert spec is not None
 
     def coerce(node: Any, value: Any) -> float | None:
+        """Coerce one node's ``size_by`` value to a float, or None if unusable."""
         return _coerce_scalar(
             state,
             node,
