@@ -161,7 +161,10 @@ cover: classifier unavailable, patch unavailable, exotic subclass, the unmatched
 the reentrant node sentinel (`CheckpointFunctionBackward` in the discovery stream — reentrant
 checkpointing is definitionally token-free), and unwitnessed checkpoint enters (paused logging,
 non-owner thread, inside an engine invocation). Any flag withdraws the affirmative
-"no checkpoint invocation observed" verdict. The typed checkpoint-ambiguity refusal is an S2
+"no checkpoint invocation observed" verdict. The private `_checkpoint_hook` class resolves
+through the compat chokepoint behind the named `HAS_CHECKPOINT_HOOK_CLASS` capability flag
+(visible in `tl.utils.doctor()` / `tl.compat.report()`); a torch without it degrades
+fail-closed — the classifier mints NO tokens, never a false one. The typed checkpoint-ambiguity refusal is an S2
 amendment (R-L9-1) and lands with the identity-read accessors once the amendment is ratified.
 
 ## Validation
@@ -238,4 +241,7 @@ inside an engine invocation; a deferred finalize runs at the next qualifying syn
 non-engine read, and a read from inside an engine invocation journals without materializing.
 The `BackwardPassEnd` sidecar event discloses which close path fired (`engine_drain` /
 `sync_point`, DOCUMENTED-UNSTABLE values, runtime-only in wave 2; the projected `BackwardPass`
-field waits for the coordinated bump).
+field waits for the coordinated bump). The engine's final-callback handle resolves through the
+compat chokepoint behind the named `HAS_AUTOGRAD_ENGINE_QUEUE_CALLBACK` capability flag
+(visible in `tl.utils.doctor()` / `tl.compat.report()`); without it every implicit close takes
+the sync-point backstop.
