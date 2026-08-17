@@ -416,6 +416,9 @@ _WEAK_SUBJECT_TABLES = frozenset(
         # Per-accessor param ordinal index, keyed weakly by the owning
         # accessor; entries die with it (mirror of _ORDINAL_POSITIONS_CACHE).
         ("torchlens/data_classes/param.py", "_ORDINAL_INDEX_CACHE"),
+        # Live telemetry relations are keyed by AtenOp facades and disappear
+        # with those rows; they never retain a Trace or profiler session.
+        ("torchlens/kernel_telemetry.py", "_ATEN_KERNELS"),
         ("torchlens/partial/__init__.py", "_FAILED_CAPTURE_RESULTS"),
         ("torchlens/visualization/auto_collapse.py", "_ANALYSIS_CACHE"),
         ("torchlens/visualization/auto_collapse.py", "_OP_ADJACENCY_INDEX_CACHE"),
@@ -1126,6 +1129,7 @@ _WEAKLY_HELD = frozenset(
         ("torchlens/data_classes/_nonfinite.py", "_MEMOS"),
         ("torchlens/data_classes/grad_fn_call.py", "_ORDINAL_POSITIONS_CACHE"),
         ("torchlens/data_classes/param.py", "_ORDINAL_INDEX_CACHE"),
+        ("torchlens/kernel_telemetry.py", "_ATEN_KERNELS"),
         ("torchlens/partial/__init__.py", "_FAILED_CAPTURE_RESULTS"),
         ("torchlens/visualization/auto_collapse.py", "_ANALYSIS_CACHE"),
         ("torchlens/visualization/auto_collapse.py", "_OP_ADJACENCY_INDEX_CACHE"),

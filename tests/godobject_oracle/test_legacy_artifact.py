@@ -18,6 +18,7 @@ import torch
 from surface_oracle._snapshot import canonical_dump, snapshot_trace_surface
 
 import torchlens as tl
+from torchlens import kernel_telemetry as _kernel_telemetry
 
 from .test_aliases import _SEED
 
@@ -32,6 +33,8 @@ _LOADED_SURFACE_GOLDEN = _GOLDEN_DIR / "legacy_baseline_cnn_loaded.json"
 @pytest.mark.smoke
 def test_legacy_analysis_artifact_loads_byte_identically() -> None:
     """The frozen analysis artifact loads with an identical public surface."""
+
+    assert _kernel_telemetry.KernelLaunch.__name__ == "KernelLaunch"
 
     from _oracle_env import (
         flag_armed,
