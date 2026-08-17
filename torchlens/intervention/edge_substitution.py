@@ -105,7 +105,8 @@ def _edit_hook(edit: Any, site_label: str) -> tuple[Any, HelperSpec | None, str]
     from .predicates import replace_with
 
     spec = replace_with(edit)
-    assert spec.factory is not None
+    if spec.factory is None:
+        raise RuntimeError("replace_with spec lost its factory")
     return spec.factory(), spec, spec.helper_name
 
 

@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
-from .errors._base import ConfigurationError
+from .errors._base import ConfigurationError, TorchLensError
 
 if TYPE_CHECKING:
     from .data_classes.trace import Trace
@@ -170,18 +170,21 @@ class _Mask:
         if self.form == "empty":
             return torch.zeros(self.shape, dtype=torch.bool)
         if self.form == "slices":
+            if self.slice_bounds is None:
+                raise RuntimeError("slices-form mask lost its slice_bounds")
             mask = torch.zeros(self.shape, dtype=torch.bool)
-            assert self.slice_bounds is not None
             mask[tuple(slice(*bounds) for bounds in self.slice_bounds)] = True
             return mask
-        assert self.dense is not None
+        if self.dense is None:
+            raise RuntimeError("dense-form mask lost its dense tensor")
         return self.dense.clone()
 
     def _dense_ro(self) -> torch.Tensor:
         """Return the dense form for internal composition (never handed out)."""
 
         if self.form == "dense":
-            assert self.dense is not None
+            if self.dense is None:
+                raise RuntimeError("dense-form mask lost its dense tensor")
             return self.dense
         return self.to_dense()
 
@@ -193,12 +196,14 @@ class _Mask:
         if self.form == "empty":
             return 0
         if self.form == "slices":
-            assert self.slice_bounds is not None
+            if self.slice_bounds is None:
+                raise RuntimeError("slices-form mask lost its slice_bounds")
             total = 1
             for start, stop, step in self.slice_bounds:
                 total *= max(0, (stop - start + step - 1) // step)
             return total
-        assert self.dense is not None
+        if self.dense is None:
+            raise RuntimeError("dense-form mask lost its dense tensor")
         return int(self.dense.sum().item())
 
     def canonical_bytes(self) -> bytes:
@@ -562,7 +567,8 @@ class _UnitTerm:
     def __repr__(self) -> str:
         if self.index_mask is not None:
             return f"units({self.site!r}, mask=<bool tensor>)"
-        assert self.indices is not None
+        if self.indices is None:  # constructor guarantees one of the two forms
+            return f"units({self.site!r})"
         return f"units({self.site!r}, n={len(self.indices)})"
 
 
@@ -827,17 +833,21 @@ def _compose_any(op: str, left: Any, right: Any) -> Any:
             resolved_left, resolved_right = lifted_left, lifted_right
         elif isinstance(lifted_left, ResolvedSelection):
             resolved_left = lifted_left
-            assert isinstance(lifted_right, Selection)
+            if not isinstance(lifted_right, Selection):
+                raise RuntimeError("mixed composition lost its Selection operand")
             resolved_right = lifted_right.resolve(resolved_left._trace)
         else:
-            assert isinstance(lifted_left, Selection)
-            assert isinstance(lifted_right, ResolvedSelection)
+            if not isinstance(lifted_left, Selection) or not isinstance(
+                lifted_right, ResolvedSelection
+            ):
+                raise RuntimeError("mixed composition lost its Selection operand")
             resolved_right = lifted_right
             resolved_left = lifted_left.resolve(resolved_right._trace)
         _check_kinds(op, resolved_left._kind, resolved_right._kind)
         return _compose_resolved(op, resolved_left, resolved_right)
 
-    assert isinstance(lifted_left, Selection) and isinstance(lifted_right, Selection)
+    if not isinstance(lifted_left, Selection) or not isinstance(lifted_right, Selection):
+        raise RuntimeError("query composition operands must both be Selection here")
     _check_kinds(op, lifted_left._kind, lifted_right._kind)
     _check_directions(lifted_left._direction, lifted_right._direction)
     if op == "or":
@@ -1144,7 +1154,7 @@ def _resolve_facet_term(node: _FacetTerm, trace: Any) -> ResolvedSelection:
     except Exception as exc:
         try:
             home_out = getattr(op, "out", None)
-        except Exception:  # unsaved payload reads raise typed
+        except TorchLensError:  # unsaved payload reads raise typed
             home_out = None
         if home_out is None:
             raise _unresolvable(
@@ -1236,7 +1246,8 @@ def _resolve_unit_term(node: _UnitTerm, trace: Any) -> ResolvedSelection:
                 )
             mask = _mask_from_dense(shape, node.index_mask.bool())
         else:
-            assert node.indices is not None
+            if node.indices is None:
+                raise RuntimeError("units node has neither index_mask nor indices")
             dense = torch.zeros(shape, dtype=torch.bool)
             for coordinates in node.indices:
                 if len(coordinates) != len(shape) or any(
@@ -1329,7 +1340,8 @@ def _resolve_operand_for_random(operand: Any, trace: Any) -> ResolvedSelection:
                 code="selection_trace_mismatch",
             )
         return operand
-    assert isinstance(operand, Selection)
+    if not isinstance(operand, Selection):
+        raise RuntimeError("random_selection operand must lift to a Selection")
     return operand.resolve(trace)
 
 
@@ -1638,7 +1650,8 @@ def build_selection_do_plan(
             "(e.g. tl.zero_ablate()), a hook callable, or a replacement tensor."
         )
     lifted = _lift(selection_like)
-    assert lifted is not None
+    if lifted is None:
+        raise RuntimeError("build_selection_do_plan requires a selection-shaped input")
     if isinstance(lifted, ResolvedSelection):
         if lifted._trace is not trace:
             raise SelectionError(
