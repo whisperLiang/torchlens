@@ -283,16 +283,13 @@ def test_ruff_pin_is_identical_across_declaration_sites() -> None:
 
 
 def test_third_party_actions_are_sha_pinned() -> None:
-    """Every third-party Action ref is SHA-pinned, with one documented exception.
+    """Every third-party Action ref is SHA-pinned.
 
     A mutable tag like ``@v4`` means whoever controls that tag controls what runs
-    in CI, including in the job that publishes to PyPI. The one allowed exception
-    is PyPA's publishing action, whose own guidance is to track ``release/v1``;
-    the rationale is recorded inline at the call site in release.yml.
+    in CI, including in the job that publishes to PyPI.
     """
 
     workflow_dir = Path(__file__).resolve().parent.parent / ".github" / "workflows"
-    allowed_unpinned = {"pypa/gh-action-pypi-publish@release/v1"}
 
     unpinned: list[str] = []
     pinned_count = 0
@@ -303,13 +300,11 @@ def test_third_party_actions_are_sha_pinned() -> None:
             if re.search(r"@[0-9a-f]{40}$", ref):
                 pinned_count += 1
                 continue
-            if ref in allowed_unpinned:
-                continue
             unpinned.append(f"{workflow.name}: {ref}")
 
     assert not unpinned, (
         "third-party Action refs must be pinned to a full 40-char commit SHA "
-        f"(add a documented exception only with a reason): {unpinned}"
+        f"with no exceptions: {unpinned}"
     )
     assert pinned_count > 0, "expected to find SHA-pinned action refs"
 
