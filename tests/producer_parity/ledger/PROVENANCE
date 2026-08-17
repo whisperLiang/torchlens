@@ -233,3 +233,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 272cc1fd024662c38fd39f153daad12bde3c702f (dirty)
 recorded: 2026-08-17T07:22:50.355534+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: param-operand lane adds intervention/param_substitution.py, a reviewed new consumer of Op.func_call_id and Trace.params (parameter substitution derives occurrence addresses from Param.used_by_ops + templates); no producer moved
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 7312c00a0f800d837d8d7b16719c6c9c0c730fe4 (dirty)
+recorded: 2026-08-17T15:35:23.556217+00:00

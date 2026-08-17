@@ -216,7 +216,6 @@ def _param_occurrences_for_op(
 
 
 def _substituted_value(
-    trace: Trace,
     entry: SiteEntry,
     edit: Any,
     resolve_digest: str,
@@ -249,6 +248,16 @@ def _substituted_value(
     substituted = hook_callable(consumed, hook=context)
     substituted = _validate_edited(substituted, consumed, site_label)
     return substituted, helper_spec, helper_name
+
+
+@dataclasses.dataclass
+class _Staging:
+    """Mutable staging context threaded through one apply transaction."""
+
+    applied_params: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    committed: list[tuple[Any, tuple[Any, ...]]] = dataclasses.field(default_factory=list)
+    pending_records: dict[str, list[FireRecord]] = dataclasses.field(default_factory=dict)
+    origin_ops: dict[int, Any] = dataclasses.field(default_factory=dict)
 
 
 def apply_param_substitution_do(
@@ -284,9 +293,7 @@ def apply_param_substitution_do(
 
     import importlib
 
-    edge_module = importlib.import_module("torchlens.intervention.edge_substitution")
     replay_module = importlib.import_module("torchlens.intervention.replay")
-
     replay_module._preflight_log(trace)
 
     if not isinstance(edit, HelperSpec) and not callable(edit):
@@ -294,146 +301,198 @@ def apply_param_substitution_do(
 
         edit = replace_with(edit)
 
-    applied_params: list[dict[str, Any]] = []
-    committed: list[tuple[Any, tuple[Any, ...]]] = []
-    pending_records: dict[str, list[FireRecord]] = {}
-    origin_ops: dict[int, Any] = {}
+    staging = _Staging()
     try:
         for entry in resolved:
             if entry.selected_count == 0:
                 continue
-            param = _param_for_entry(trace, entry)
-            param_address = entry.site_key[0]
-            live_param, barcode = _live_param_identity(param)
-            if live_param is None and barcode is None:
-                raise _underivable(
-                    f"parameter {param_address!r} has neither a live reference "
-                    "nor a barcode on this trace (released or legacy capture); "
-                    "its consumptions cannot be identified.",
-                    param_address=param_address,
-                )
-
-            consumers = list(getattr(param, "used_by_ops", ()) or ())
-            if not consumers:
-                raise _underivable(
-                    f"parameter {param_address!r} records no consuming ops on this trace.",
-                    param_address=param_address,
-                )
-            occurrences_by_op: list[
-                tuple[Any, str, list[tuple[str, tuple[Any, ...], torch.Tensor]]]
-            ] = []
-            for consumer_label in consumers:
-                layer = trace.layer_dict_all_keys.get(consumer_label)
-                if layer is None or not getattr(layer, "ops", None):
-                    raise _underivable(
-                        f"consumer {consumer_label!r} of parameter "
-                        f"{param_address!r} is not present on this trace.",
-                        param_address=param_address,
-                        site=consumer_label,
-                    )
-                child_op = layer.ops[0]
-                if int(getattr(child_op, "num_passes", 1) or 1) > 1:
-                    raise _underivable(
-                        f"consumer {consumer_label!r} of parameter "
-                        f"{param_address!r} belongs to a multi-pass "
-                        "(recurrence-grouped) layer; the replay cone keys "
-                        "sites by layer label, so multi-pass origins cannot "
-                        "propagate faithfully — a named v1 engine limitation "
-                        "(recurrently reused parameters, e.g. tied weights at "
-                        "structurally corresponding sites, are not yet "
-                        "substitutable).",
-                        param_address=param_address,
-                        site=consumer_label,
-                    )
-                template = replay_module._template_for_site(child_op)
-                occurrences_by_op.append(
-                    (
-                        child_op,
-                        consumer_label,
-                        _param_occurrences_for_op(
-                            child_op, template, live_param, barcode, param_address
-                        ),
-                    )
-                )
-
-            matched_values = [
-                value for _, _, occurrences in occurrences_by_op for _, _, value in occurrences
-            ]
-            first_value = matched_values[0]
-            if any(value is not first_value for value in matched_values[1:]):
-                raise _underivable(
-                    f"parameter {param_address!r} matched DISTINCT tensor "
-                    "objects across its consumers; the current value is "
-                    "ambiguous.",
-                    param_address=param_address,
-                )
-            with torch.no_grad():
-                consumed = first_value.detach().clone()
-            substituted, helper_spec, helper_name = _substituted_value(
-                trace, entry, edit, resolved.resolve_digest, consumed, param_address
-            )
-
-            param_occurrences: list[dict[str, Any]] = []
-            for child_op, consumer_label, occurrences in occurrences_by_op:
-                for arg_kind, arg_path, _matched in occurrences:
-                    store_key = (arg_kind, tuple(arg_path))
-                    value_digest = edge_module._record_edge_substitution(
-                        child_op,
-                        store_key,
-                        substituted,
-                        meta={
-                            "parent_label": param_address,
-                            "resolve_digest": resolved.resolve_digest,
-                            "helper_name": helper_name,
-                        },
-                    )
-                    _stamp_param_kind(child_op, store_key, param_address)
-                    committed.append((child_op, store_key))
-                    address = (child_op.func_call_id, arg_kind, tuple(arg_path))
-                    pending_records.setdefault(child_op.layer_label, []).append(
-                        _param_fire_record(
-                            child_op,
-                            helper_spec,
-                            helper_name,
-                            address,
-                            param_address,
-                            resolved.resolve_digest,
-                        )
-                    )
-                    param_occurrences.append(
-                        {
-                            "edge_address": repr(address),
-                            "consumer": consumer_label,
-                            "value_digest": value_digest,
-                        }
-                    )
-                origin_ops[id(child_op)] = child_op
-            applied_params.append(
-                {
-                    "param_address": param_address,
-                    "consumers": consumers,
-                    "occurrences": param_occurrences,
-                }
-            )
-        if origin_ops:
-            replay_module._run_replay(
-                trace,
-                list(origin_ops.values()),
-                hook_entries=[],
-                strict=strict,
-                preserve_origins=False,
-            )
-            for label, records in pending_records.items():
-                trace.layer_dict_all_keys[label].ops[0].interventions.extend(records)
+            _stage_param_entry(trace, entry, edit, resolved.resolve_digest, staging)
+        _propagate_staged(trace, staging, strict=strict)
     except Exception:
-        _rollback_param_substitutions(committed)
+        _rollback_param_substitutions(staging.committed)
         raise
     return {
-        "params": applied_params,
+        "params": staging.applied_params,
         "disclosure": (
             "parameter values substituted at consumption for replay; live parameters unchanged"
         ),
     }
+
+
+def _stage_param_entry(
+    trace: Trace,
+    entry: SiteEntry,
+    edit: Any,
+    resolve_digest: str,
+    staging: _Staging,
+) -> None:
+    """Derive one entry's occurrences, compute its value, stage the stores."""
+
+    param_address = entry.site_key[0]
+    occurrences_by_op = _derive_entry_occurrences(trace, entry)
+    matched_values = [
+        value for _, _, occurrences in occurrences_by_op for _, _, value in occurrences
+    ]
+    first_value = matched_values[0]
+    if any(value is not first_value for value in matched_values[1:]):
+        raise _underivable(
+            f"parameter {param_address!r} matched DISTINCT tensor objects "
+            "across its consumers; the current value is ambiguous.",
+            param_address=param_address,
+        )
+    with torch.no_grad():
+        consumed = first_value.detach().clone()
+    substituted, helper_spec, helper_name = _substituted_value(
+        entry, edit, resolve_digest, consumed, param_address
+    )
+    param_occurrences: list[dict[str, Any]] = []
+    for child_op, consumer_label, occurrences in occurrences_by_op:
+        for arg_kind, arg_path, _matched in occurrences:
+            record = _stage_occurrence(
+                child_op,
+                (arg_kind, tuple(arg_path)),
+                substituted,
+                meta={
+                    "param_address": param_address,
+                    "resolve_digest": resolve_digest,
+                    "helper_name": helper_name,
+                    "helper_spec": helper_spec,
+                },
+            )
+            staging.committed.append((child_op, (arg_kind, tuple(arg_path))))
+            staging.pending_records.setdefault(child_op.layer_label, []).append(
+                record["fire_record"]
+            )
+            param_occurrences.append(
+                {
+                    "edge_address": record["edge_address"],
+                    "consumer": consumer_label,
+                    "value_digest": record["value_digest"],
+                }
+            )
+        staging.origin_ops[id(child_op)] = child_op
+    staging.applied_params.append(
+        {
+            "param_address": param_address,
+            "consumers": [label for _, label, _ in occurrences_by_op],
+            "occurrences": param_occurrences,
+        }
+    )
+
+
+def _derive_entry_occurrences(
+    trace: Trace, entry: SiteEntry
+) -> list[tuple[Any, str, list[tuple[str, tuple[Any, ...], torch.Tensor]]]]:
+    """Resolve one PARAM entry to ``(op, consumer_label, occurrences)`` rows."""
+
+    import importlib
+
+    replay_module = importlib.import_module("torchlens.intervention.replay")
+    param = _param_for_entry(trace, entry)
+    param_address = entry.site_key[0]
+    live_param, barcode = _live_param_identity(param)
+    if live_param is None and barcode is None:
+        raise _underivable(
+            f"parameter {param_address!r} has neither a live reference nor a "
+            "barcode on this trace (released or legacy capture); its "
+            "consumptions cannot be identified.",
+            param_address=param_address,
+        )
+    consumers = list(getattr(param, "used_by_ops", ()) or ())
+    if not consumers:
+        raise _underivable(
+            f"parameter {param_address!r} records no consuming ops on this trace.",
+            param_address=param_address,
+        )
+    rows: list[tuple[Any, str, list[tuple[str, tuple[Any, ...], torch.Tensor]]]] = []
+    for consumer_label in consumers:
+        layer = trace.layer_dict_all_keys.get(consumer_label)
+        if layer is None or not getattr(layer, "ops", None):
+            raise _underivable(
+                f"consumer {consumer_label!r} of parameter {param_address!r} "
+                "is not present on this trace.",
+                param_address=param_address,
+                site=consumer_label,
+            )
+        child_op = layer.ops[0]
+        if int(getattr(child_op, "num_passes", 1) or 1) > 1:
+            raise _underivable(
+                f"consumer {consumer_label!r} of parameter {param_address!r} "
+                "belongs to a multi-pass (recurrence-grouped) layer; the "
+                "replay cone keys sites by layer label, so multi-pass origins "
+                "cannot propagate faithfully — a named v1 engine limitation "
+                "(recurrently reused parameters, e.g. tied weights at "
+                "structurally corresponding sites, are not yet substitutable).",
+                param_address=param_address,
+                site=consumer_label,
+            )
+        template = replay_module._template_for_site(child_op)
+        rows.append(
+            (
+                child_op,
+                consumer_label,
+                _param_occurrences_for_op(child_op, template, live_param, barcode, param_address),
+            )
+        )
+    return rows
+
+
+def _stage_occurrence(
+    child_op: Any,
+    store_key: tuple[Any, ...],
+    substituted: torch.Tensor,
+    *,
+    meta: dict[str, Any],
+) -> dict[str, Any]:
+    """Stage one occurrence's tier-(ii) entry, stamp, and FireRecord."""
+
+    import importlib
+
+    edge_module = importlib.import_module("torchlens.intervention.edge_substitution")
+    param_address = meta["param_address"]
+    value_digest = edge_module._record_edge_substitution(
+        child_op,
+        store_key,
+        substituted,
+        meta={
+            "parent_label": param_address,
+            "resolve_digest": meta["resolve_digest"],
+            "helper_name": meta["helper_name"],
+        },
+    )
+    _stamp_param_kind(child_op, store_key, param_address)
+    address = (child_op.func_call_id,) + tuple(store_key)
+    fire_record = _param_fire_record(
+        child_op,
+        meta["helper_spec"],
+        meta["helper_name"],
+        address,
+        meta={"param_address": param_address, "resolve_digest": meta["resolve_digest"]},
+    )
+    return {
+        "edge_address": repr(address),
+        "value_digest": value_digest,
+        "fire_record": fire_record,
+    }
+
+
+def _propagate_staged(trace: Trace, staging: _Staging, *, strict: bool) -> None:
+    """Run the ONE replay pass over all consumer origins, then attach records."""
+
+    if not staging.origin_ops:
+        return
+    import importlib
+
+    replay_module = importlib.import_module("torchlens.intervention.replay")
+    replay_module._run_replay(
+        trace,
+        list(staging.origin_ops.values()),
+        hook_entries=[],
+        strict=strict,
+        preserve_origins=False,
+    )
+    for label, records in staging.pending_records.items():
+        trace.layer_dict_all_keys[label].ops[0].interventions.extend(records)
 
 
 def _stamp_param_kind(child_op: Any, store_key: tuple[Any, ...], param_address: str) -> None:
@@ -458,8 +517,7 @@ def _param_fire_record(
     helper_spec: HelperSpec | None,
     helper_name: str,
     address: tuple[Any, ...],
-    param_address: str,
-    resolve_digest: str,
+    meta: dict[str, Any],
 ) -> FireRecord:
     """Mint the per-occurrence FireRecord (discloses substitution, not change)."""
 
@@ -473,9 +531,9 @@ def _param_fire_record(
             dataclasses.replace(
                 helper_spec,
                 selection_recipe={
-                    "resolve_digest": resolve_digest,
+                    "resolve_digest": meta["resolve_digest"],
                     "edge_address": repr(tuple(address)),
-                    "param_address": param_address,
+                    "param_address": meta["param_address"],
                     "note": (
                         "parameter substituted at consumption for replay; live parameter unchanged"
                     ),
