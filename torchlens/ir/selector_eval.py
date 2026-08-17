@@ -919,10 +919,16 @@ def _evaluate_subject(selector: BaseSelector, subject: Any, lifecycle: str) -> b
         if lifecycle == "live" and bool(getattr(subject, "_tl_module_boundary", False)):
             return False
         needle = str(value).lower()
-        return any(
-            needle in label.lower()
-            for label in _string_labels(subject, lifecycle, _SUBSTRING_LABEL_ATTRS)
-        )
+        labels = _string_labels(subject, lifecycle, _SUBSTRING_LABEL_ATTRS)
+        if lifecycle == "site" and ":" in needle:
+            # Bare final labels never contain ':', so a pass-qualified needle
+            # (the remedy the multipass_bare_label refusal teaches) can only
+            # address the pass-qualified op spelling; without it, string
+            # addressing of one pass of a multi-pass layer matches 0 sites.
+            pass_label = getattr(subject, "label", None)
+            if isinstance(pass_label, str) and pass_label not in labels:
+                labels = (*labels, pass_label)
+        return any(needle in label.lower() for label in labels)
     if kind == "regex":
         _maybe_guard_label(kind, str(value), subject, lifecycle)
         pattern = str(value)
