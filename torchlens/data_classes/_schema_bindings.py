@@ -126,6 +126,7 @@ STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {
         "save_rng_states": StorageBinding(StorageKind.SCALAR),
         "recurrence_detection": StorageBinding(StorageKind.SCALAR),
         "grouping": StorageBinding(StorageKind.RUNTIME),
+        "distributed_scope": StorageBinding(StorageKind.RUNTIME, annotation='str | None'),
         "grouping_policy": StorageBinding(StorageKind.RUNTIME),
         "verbose": StorageBinding(StorageKind.SCALAR),
         "profile_enabled": StorageBinding(StorageKind.SCALAR, annotation="<class 'bool'>"),

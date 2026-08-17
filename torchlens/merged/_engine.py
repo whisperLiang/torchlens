@@ -197,6 +197,23 @@ def _guard_scope(evidence: Mapping[int, RankEvidence]) -> None:
     """Refuse out-of-C1-scope boundaries typed (p2p/pipeline: C3; DTensor: C2)."""
 
     for rank in sorted(evidence):
+        if evidence[rank].shard_local:
+            # L8 3.2c(2), the SECOND scope key (marker-keyed; refusal-widening
+            # beside the geometry key below, which STAYS): a member whose
+            # trace carries the shard-local capture marker refuses regardless
+            # of boundary geometry. Runs inside derive_merge, so directly
+            # constructed RankEvidence refuses too (the membership-authority
+            # precedent). Narrowing this refusal is D-L8-MRG, never this code.
+            raise MergeInputError(
+                f"Rank {rank} is a shard-local capture (distributed_scope == "
+                "'rank_local_shard'). Sharded-topology merging stays refused "
+                "pending its own authorizing ruling plus the merged-side "
+                "tiling-proof deliverable; the geometry-independent marker "
+                "key refuses it at merge scope.",
+                code=MergedErrorCode.MERGE_SCOPE_UNSUPPORTED,
+                rank=rank,
+                reason="shard_local_member_unsupported",
+            )
         for index, entry in enumerate(evidence[rank].boundaries):
             kind = entry["kind"]
             channel = entry["correlation"]["channel"]

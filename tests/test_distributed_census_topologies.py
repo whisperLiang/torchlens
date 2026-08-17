@@ -855,17 +855,19 @@ class TestGroupCRefusalParity:
         )
         assert result.green, result.failures
 
-    def test_c5r_shard_local_merge_inputs_unconstructible_today(self):
-        """C5r pre-relaxation: the distributed_scope marker is NOT shipped, so
-        a shard-local merge member cannot exist -- red-by-construction. From
-        the first C2 capture relaxation onward this row asserts the typed
-        merge_scope_unsupported refusal on both derive_merge entry paths."""
+    def test_c5r_shard_local_marker_substrate_and_merge_refusal(self):
+        """C5r post-substrate: the distributed_scope marker SHIPPED (dark --
+        no capture can set it until the D-L8-CAP relaxation; every sharded
+        topology still refuses at entry per the Group B/C rows above), and
+        the marker-keyed merge-scope refusal is asserted on BOTH derive_merge
+        entry paths in tests/test_distributed_shard_local_marker.py."""
 
         from torchlens.constants import MODEL_LOG_FIELD_ORDER
 
-        assert "distributed_scope" not in MODEL_LOG_FIELD_ORDER
+        assert "distributed_scope" in MODEL_LOG_FIELD_ORDER
         log = tl.trace(_dense_model(), _dense_input())
-        assert not hasattr(log, "distributed_scope")
+        # A plain capture NEVER carries the marker (over-labeling guard).
+        assert log.distributed_scope is None
 
 
 # ===========================================================================

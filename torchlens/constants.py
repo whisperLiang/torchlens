@@ -179,6 +179,7 @@ MODEL_LOG_FIELD_ORDER = [
     # Grouping knob mirror + grouping-policy stamp (L1 wave 0; both
     # FieldPolicy.DROP under tlspec v7, prerelease-registered)
     "grouping",
+    "distributed_scope",
     "grouping_policy",
     "verbose",
     "profile_enabled",

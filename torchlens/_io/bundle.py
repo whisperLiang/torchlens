@@ -286,6 +286,49 @@ def _refuse_edge_intervened_save(trace: Any) -> None:
     )
 
 
+def _refuse_shard_local_erasure(trace: Any) -> None:
+    """PERMANENT erasure-prevention invariant for the shard-local disclosure.
+
+    L8/F6 (census plan 3.2b): an ordinary bundle write must NEVER complete if
+    it would silently drop the shard-local disclosure -- a saved shard-local
+    trace reloading as a plain dense-looking trace is the marker-free-artifact
+    class this invariant keeps EMPTY BY CONSTRUCTION. Refuses typed IFF the
+    trace carries ``distributed_scope == "rank_local_shard"`` AND the marker
+    is not persisted by the active schema (still ``FieldPolicy.DROP`` with the
+    S3 pre-release switch inactive). The wave-3 coordinated bump changes the
+    ENVIRONMENT, not this predicate: once the policy persists, the second
+    conjunct goes false by construction and ordinary saves proceed; the code,
+    predicate, and forced-DROP tamper red all REMAIN so any schema regression
+    that would re-drop the disclosure re-fires the invariant. Never deleted,
+    never a narrowing, no D-ruling owed.
+    """
+
+    if getattr(trace, "distributed_scope", None) != "rank_local_shard":
+        return
+    from ..data_classes.trace import Trace as _Trace
+    from . import FieldPolicy
+    from .prerelease import prerelease_fields_active
+
+    policy_entry = _Trace.FIELD_POLICY.get("distributed_scope")
+    portable_policy = getattr(policy_entry, "portable_policy", policy_entry)
+    if portable_policy is not None and portable_policy is not FieldPolicy.DROP:
+        return
+    if prerelease_fields_active():
+        return
+    from .._errors import InvalidArgumentError
+
+    raise InvalidArgumentError(
+        "this trace is a shard-local capture (distributed_scope == "
+        "'rank_local_shard'), and the active schema does not persist the "
+        "shard-local disclosure: an ordinary save would reload as a plain "
+        "trace with silently mis-stated parameter geometry. Shard-local "
+        "traces are session-only until the coordinated schema bump persists "
+        "the marker and its dual-geometry evidence.",
+        code="shard_local_persistence_unsupported",
+        remedy="analyze in-session; persistence lands with the coordinated schema bump",
+    )
+
+
 def save(
     trace: Trace,
     path: str | Path,
@@ -454,6 +497,10 @@ def save(
     # (4) this L6 edge boundary. Reviewers of record for this hunk: L4 + S3
     # registrar + L7 (chokepoint co-owner).
     _refuse_edge_intervened_save(trace)
+    # (5) L8 shard-local erasure prevention: appended AFTER the pinned
+    # four-refusal order above (owners disjoint; nothing reordered). Same
+    # two-conjunct key shape as the L6 edge boundary.
+    _refuse_shard_local_erasure(trace)
     # A PartialTrace is a failed-capture inspection wrapper, never a savable
     # product (its FIELD_POLICY declares both fields session-time DROP). Every
     # SHIPPED wrapper settles FAILED and refuses through the gate above; this

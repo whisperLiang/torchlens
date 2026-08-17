@@ -91,6 +91,15 @@ class RankEvidence:
     source:
         Where the evidence came from (diagnostic): ``"live"``, ``"loaded"``,
         or the bundle path string.
+    shard_local:
+        Whether the member trace carries the shard-local capture marker
+        (``distributed_scope == "rank_local_shard"``; L8 census plan 3.2c(2)).
+        REQUIRED with no default -- every constructor, direct construction
+        included, must consciously supply it, so the ``_guard_scope`` marker
+        key can never be silently omitted. Populated here in
+        :func:`extract_rank_evidence`, the single common ancestor of all
+        ``derive_merge`` entry paths (public input resolution, save-time
+        reverify, load rederivation).
     """
 
     rank: int
@@ -98,6 +107,7 @@ class RankEvidence:
     ledger: GroupLifecycleLedger
     install_epoch: str
     source: str
+    shard_local: bool
 
 
 def _refuse(detail: str, **payload: Any) -> MergeInputError:
@@ -643,6 +653,14 @@ def extract_rank_evidence(trace: Any, source: str) -> RankEvidence:
         ledger=ledger,
         install_epoch=str(install_epoch),
         source=source,
+        # The marker key of _guard_scope (L8 3.2c(2)): the geometry key alone
+        # does not fire on TP/FSDP2 boundaries (funcol/c10d traffic on
+        # to_local()-ed plain tensors carries no role geometry), so the
+        # trace-level marker travels on the evidence itself. Hostile inputs:
+        # anything other than the exact marker string reads False -- absence
+        # of the marker never blocks, presence of ANY other value never
+        # blocks; only the one documented value engages the scope guard.
+        shard_local=(getattr(trace, "distributed_scope", None) == "rank_local_shard"),
     )
 
 
