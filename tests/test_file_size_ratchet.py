@@ -166,7 +166,15 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     # noticed, reason stated), not silent god-file regrowth.
     "torchlens/options.py": 2550,
     "torchlens/intervention/save.py": 2350,
-    "torchlens/_io/scrub.py": 2400,
+    # Raised 2400 -> 2425 at the facet-cache persistence fix (2026-08-17): the
+    # +22 lines are the TEACHING half of the completeness refusal -- for an
+    # undeclared `_<name>_cache` cell backed by a public property it now names
+    # the accessor that populated it and states the DROP remedy, instead of
+    # naming an internal field the user never touched. The refusal itself was
+    # not weakened; only its message got smarter. Reviewed raise with a stated
+    # reason (the ratchet working as intended), NOT silent god-file regrowth --
+    # and scrub.py remains on the debloat-pass list as a genuine god file.
+    "torchlens/_io/scrub.py": 2425,
     "torchlens/debug/_infer_input_shape.py": 2250,
     "torchlens/postprocess/ast_branches.py": 2250,
     "torchlens/visualization/_summary_internal/_builder.py": 2200,
