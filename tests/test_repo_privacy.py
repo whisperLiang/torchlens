@@ -32,6 +32,8 @@ PRIVATE_PATH_PATTERN = re.compile(
     r"|^\.project-context/(?!(architecture|state_of_torchlens)\.md$)"
     r"|^(FORKS|PROGRESS)\.md$"
     r"|^[^/]*_RESULTS\.md$"
+    r"|^[^/]*_(REPORT|AUDIT|SUMMARY|LEDGER|BATON|FINDINGS|NOTES|STATE|PLAN)(_[^/]*)?\.md$"
+    r"|^(HUNT|SPRINT|ROUND)_[^/]*\.md$"
 )
 
 

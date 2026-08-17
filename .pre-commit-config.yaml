@@ -136,13 +136,14 @@ repos:
         entry: >-
           BLOCKED: internal planning/notes must NOT be committed to this PUBLIC repo.
           .research/, .project-context/ (except architecture.md and state_of_torchlens.md),
-          and repo-root sprint ledgers (FORKS.md, PROGRESS.md, *_RESULTS.md)
+          and repo-root sprint ledgers / agent reports (FORKS.md, PROGRESS.md, *_RESULTS.md,
+          *_REPORT/_AUDIT/_SUMMARY/_LEDGER/_BATON/_FINDINGS/_NOTES/_STATE/_PLAN.md, HUNT_*/SPRINT_*/ROUND_*.md)
           are gitignored on purpose. Do not `git add -f` them. To untrack, use `git rm --cached`.
         language: fail
         # commit stage only: catches `git add` of a private path. At pre-push the same matcher
         # would fire on DELETIONS of these paths (e.g. the commit that untracks them), so scope here.
         stages: [pre-commit]
-        files: '^\.research/|^\.project-context/(?!(architecture|state_of_torchlens)\.md$)|^(FORKS|PROGRESS)\.md$|^[^/]*_RESULTS\.md$'
+        files: '^\.research/|^\.project-context/(?!(architecture|state_of_torchlens)\.md$)|^(FORKS|PROGRESS)\.md$|^[^/]*_RESULTS\.md$|^[^/]*_(REPORT|AUDIT|SUMMARY|LEDGER|BATON|FINDINGS|NOTES|STATE|PLAN)(_[^/]*)?\.md$|^(HUNT|SPRINT|ROUND)_[^/]*\.md$'
       # r7 R82 (opus b10 MED): the path hook above cannot see private paths
       # appearing as file CONTENT -- .gitattributes shipped five internal
       # .research/ filenames as dead LFS rules in this PUBLIC repo. Git config
