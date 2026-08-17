@@ -427,6 +427,18 @@ def test_torch_capability_snapshot_contract() -> None:
         # retaining their lazy-probe lifecycle.
         "HAS_FUNCOL_GROUP_RESOLUTION": tc.HAS_FUNCOL_GROUP_RESOLUTION,
         "HAS_FUNCOL_WAIT_INTERPOSITION": tc.HAS_FUNCOL_WAIT_INTERPOSITION,
+        # fix/private-probe-routing: the remaining L8/C2 funcol private touches
+        # (module object for the arm-time wraps, ACT class for inner-tensor
+        # unwrapping) resolve through compat. Distributed availability is
+        # build-dependent, so mirror the live post-snapshot capability.
+        "HAS_FUNCOL_MODULE": tc.HAS_FUNCOL_MODULE,
+        "HAS_ASYNC_COLLECTIVE_TENSOR": tc.HAS_ASYNC_COLLECTIVE_TENSOR,
+        # L9 backward-residual private touches, compat-routed. The autograd
+        # engine callback handle exists across the whole supported range --
+        # hardcoded True as a tripwire; the non-reentrant _checkpoint_hook
+        # class is version-dependent, so mirror the live capability.
+        "HAS_CHECKPOINT_HOOK_CLASS": tc.HAS_CHECKPOINT_HOOK_CLASS,
+        "HAS_AUTOGRAD_ENGINE_QUEUE_CALLBACK": True,
         "HAS_TRACING_TENSOR_TYPES": tc.HAS_TRACING_TENSOR_TYPES,
         # Compile rung-2 probes: set_stance (torch >= 2.6) lets capture run
         # compiled callables through their original eager Python, and Dynamo's
