@@ -348,6 +348,43 @@ def _assigned_module_names(statement: ast.stmt) -> set[str]:
 
 
 @functools.lru_cache(maxsize=1)
+def _parsed_package_trees(package_root: Path) -> tuple[tuple[str, str, ast.Module], ...]:
+    """Parse every ``torchlens`` package file ONCE per session.
+
+    Same motivation as :func:`_parsed_test_trees` one tier down: the static
+    censuses below each used to ``rglob`` and re-parse the whole package
+    (~520 modules) independently, so the second one to run paid the full cost
+    again. That made ``test_capability_dependent_caches_are_cleared`` measure
+    6.57 s on a QUIET box against the 5 s smoke boundary -- 94% of its budget
+    with nothing else running, i.e. a session-failing tripwire under any
+    parallel load. Sharing one cached parse fixes the cost at its source
+    instead of re-tiering an honest test or widening a budget.
+
+    Parameters
+    ----------
+    package_root:
+        Root of the ``torchlens`` package.
+
+    Returns
+    -------
+    tuple[tuple[str, str, ast.Module], ...]
+        ``(module_name, source, tree)`` per package file. ``source`` is carried
+        because :func:`_lru_cached_functions` needs it for
+        ``ast.get_source_segment``.
+    """
+
+    parsed: list[tuple[str, str, ast.Module]] = []
+    for path in sorted(package_root.rglob("*.py")):
+        module_parts = path.relative_to(package_root.parent).with_suffix("").parts
+        if module_parts[-1] == "__init__":
+            module_parts = module_parts[:-1]
+        module_name = ".".join(module_parts)
+        source = path.read_text(encoding="utf-8")
+        parsed.append((module_name, source, ast.parse(source, filename=str(path))))
+    return tuple(parsed)
+
+
+@functools.lru_cache(maxsize=1)
 def _warn_once_declarations(package_root: Path) -> set[tuple[str, str]]:
     """Collect warn-once module-global declarations from TorchLens sources.
 
@@ -363,12 +400,7 @@ def _warn_once_declarations(package_root: Path) -> set[tuple[str, str]]:
     """
 
     declarations: set[tuple[str, str]] = set()
-    for path in package_root.rglob("*.py"):
-        module_parts = path.relative_to(package_root.parent).with_suffix("").parts
-        if module_parts[-1] == "__init__":
-            module_parts = module_parts[:-1]
-        module_name = ".".join(module_parts)
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for module_name, _source, tree in _parsed_package_trees(package_root):
         for statement in tree.body:
             for name in _assigned_module_names(statement):
                 normalized = name.lower()
@@ -1092,13 +1124,7 @@ def _lru_cached_functions(package_root: Path) -> dict[tuple[str, str], str]:
     """
 
     cached: dict[tuple[str, str], str] = {}
-    for path in package_root.rglob("*.py"):
-        module_parts = path.relative_to(package_root.parent).with_suffix("").parts
-        if module_parts[-1] == "__init__":
-            module_parts = module_parts[:-1]
-        module_name = ".".join(module_parts)
-        source = path.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=str(path))
+    for module_name, source, tree in _parsed_package_trees(package_root):
         for statement in tree.body:
             if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
