@@ -137,3 +137,19 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 40eeda843fca6d2788f30a61eaed80491ac16342 (clean)
 recorded: 2026-08-17T00:27:24.113626+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: label-geometry portability fix merged with main: factored rolled-edge predicates plus the governance-sweep decompositions
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: d0742d28cd5ac371e4c869ac142adde44bf3f172 (dirty)
+recorded: 2026-08-17T00:54:55.207196+00:00
+---
+generator: producer_parity/test_ledger.py (static half)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: label-geometry portability fix merged with main: factored rolled-edge predicates plus the governance-sweep decompositions
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: d0742d28cd5ac371e4c869ac142adde44bf3f172 (dirty)
+recorded: 2026-08-17T00:55:06.483869+00:00

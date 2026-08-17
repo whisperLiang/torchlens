@@ -84,6 +84,7 @@ _NEW_FILE_LINE_CAP = 2000
 #:   bundle/__init__.py 2450 | capture/trace.py 2200
 #:   data_classes/trace.py 3750 | options.py 2425 | user_funcs.py 3900
 #:   _runnable_state.py 2700 (L4 D18 mode-aware projector + snapshot-restore)
+#:   visualization/_render_edges.py 2350 (portable rolled-edge label placement)
 #: 2026-08-16 L6 merge settle (same debt record): three more ceilings
 #: re-stepped for reviewed L6 selection-algebra / edge-substitution mass
 #: (edge boundary verdict in validation/core, tier-(ii) edge stores on Op,
@@ -128,7 +129,7 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/data_classes/layer.py": 2350,
     "torchlens/postprocess/loop_grouping_adapter.py": 2600,
     "torchlens/visualization/_render_leaf.py": 2400,
-    "torchlens/visualization/_render_edges.py": 2350,
+    "torchlens/visualization/_render_edges.py": 2450,
     # Raised 2400 -> 2425 at the L5 channel-core merge (color_by + tri-state
     # show_legend): options.py is the ONE serialized shared option surface
     # every feature lane's grouped options must land on, so reviewed

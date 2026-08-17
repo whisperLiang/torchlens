@@ -6732,7 +6732,7 @@
   "field": "step_index",
   "file": "torchlens/visualization/_render_edges.py",
   "has_default": false,
-  "sites": 4,
+  "sites": 8,
   "via_getattr": false
  },
  {
