@@ -10,7 +10,9 @@ interposition lifetime, and disarm restoration.
 
 from __future__ import annotations
 
+import gc
 import warnings
+import weakref
 
 import pytest
 import torch
@@ -360,3 +362,89 @@ class TestFuncolPersistence:
         with pytest.raises(MergeInputError) as excinfo:
             extract_rank_evidence(loaded, str(path))
         assert excinfo.value.fields["reason"] == "functional_collective_boundary_unsupported"
+
+
+@pytest.mark.heavy
+class TestFuncolSessionLeak:
+    """The armed-capture Trace leak, closed (fix/funcol-session-leak).
+
+    The dispatcher can retain the ``wait_tensor`` kernel past
+    ``Library._destroy()``; the kernel used to close over the session
+    strongly, so ``session.trace`` pinned every armed process's LATEST Trace
+    -- retained activations included -- for the life of the process, with
+    zero gc-visible referrers. The kernel now holds the session by weakref;
+    these tests pin collectability, the intact live path, and the honest
+    dead-ref (leaked-kernel) behavior.
+    """
+
+    def test_later_trace_collectable_in_armed_process(self, gloo_world):
+        """After arming, an ordinary Trace must die when the user drops it.
+
+        RED on the unfixed sources: the ref stays live (the capture's own
+        destroyed-but-retained kernel pinned the session, hence the Trace).
+        """
+
+        import torchlens
+
+        lifecycle.arm()
+        # One armed funcol capture first: the historical repro shape.
+        tl.trace(WaitedFuncol(), torch.ones(3))
+
+        class Tiny(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lin = nn.Linear(4, 4)
+
+            def forward(self, x):
+                return torch.relu(self.lin(x))
+
+        log = tl.trace(Tiny(), torch.ones(2, 4), save=torchlens.func("relu"))
+        ref = weakref.ref(log)
+        del log
+        gc.collect()
+        gc.collect()
+        assert ref() is None
+
+    def test_weakref_kernel_still_observes_live_completions(self, gloo_world):
+        """The leak fix must not disable plane-W: live captures stay observed.
+
+        A quietly inert interposition would trade the leak for a capture
+        quality gap (every funcol boundary stuck ``unobserved``), which is
+        worse than the leak.
+        """
+
+        lifecycle.arm()
+        log = tl.trace(WaitedFuncol(), torch.ones(3))
+        payload = _funcol_boundaries(log)[0]
+        assert payload["events"]["completion_interposition"] == "installed"
+        assert payload["events"]["completion_binding"] == "observed_wait"
+        assert payload["events"]["destination_completions"] == [True]
+
+    def test_dead_session_kernel_executes_real_wait_and_skips_bookkeeping(self):
+        """Pinned dead-ref behavior: redispatch the REAL wait, record nothing.
+
+        A leaked kernel outliving its capture must never swallow or refuse a
+        user's collective completion; the owning capture already settled
+        fail-closed (``completion_binding="unobserved"``), so skipping the
+        dead session's bookkeeping is the honest degradation.
+        """
+
+        from torchlens.backends.torch.funcol import (
+            _FuncolCaptureSession,
+            _make_observed_wait_tensor,
+        )
+        from torchlens.utils._torch_compat import get_funcol_wait_redispatch
+
+        redispatch = get_funcol_wait_redispatch()
+        if redispatch is None:
+            pytest.skip("funcol wait interposition capability absent on this build")
+        wait_op, exclude_cpu_guard = redispatch
+        session = _FuncolCaptureSession(trace=object())
+        session_ref = weakref.ref(session)
+        del session
+        gc.collect()
+        assert session_ref() is None
+        kernel = _make_observed_wait_tensor(session_ref, wait_op, exclude_cpu_guard)
+        tensor = torch.ones(3)
+        result = kernel(tensor)
+        assert torch.equal(result, tensor)
