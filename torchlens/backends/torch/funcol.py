@@ -57,6 +57,7 @@ import copy
 import inspect
 import threading
 import time
+import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -331,6 +332,60 @@ class _PendingFuncolCompletion:
                 self.payload["witness"]["not_present_reason"] = None
 
 
+def _make_observed_wait_tensor(
+    session_ref: weakref.ref[_FuncolCaptureSession],
+    wait_op: Any,
+    exclude_cpu_guard: Callable[[], Any],
+) -> Callable[[torch.Tensor], torch.Tensor]:
+    """Build the dispatcher-level ``wait_tensor`` kernel for one session.
+
+    The kernel holds its session through ``weakref`` ONLY. On current torch
+    builds the C++ dispatcher retains the python kernel past
+    ``torch.library.Library._destroy()`` with zero gc-visible referrers, so a
+    strong reference would pin the session -- and through ``session.trace``
+    the whole latest armed capture's Trace, retained activations included --
+    for the life of the process. During the capture window the session is
+    strongly held elsewhere (``_ACTIVE_FUNCOL_SESSION`` plus the
+    ``distributed_recording_session`` frame), so the ref can never go dead
+    while its own capture is live.
+
+    Dead-ref behavior (the leaked-kernel path): the REAL wait is still
+    executed via redispatch -- a leaked bookkeeping hook must never swallow
+    or refuse the user's collective completion -- and only the dead session's
+    completion bookkeeping is skipped. That is honest by construction: the
+    owning capture already settled fail-closed
+    (``completion_binding="unobserved"`` + typed disclosures), and a later
+    armed capture's own install replaces this kernel, so no live capture's
+    observation quality ever depends on a dead kernel.
+
+    Parameters
+    ----------
+    session_ref:
+        Weak reference to the owning :class:`_FuncolCaptureSession`.
+    wait_op:
+        The resolved ``wait_tensor`` op handle to redispatch through.
+    exclude_cpu_guard:
+        Zero-arg factory for the below-CPU-key redispatch guard.
+
+    Returns
+    -------
+    Callable[[torch.Tensor], torch.Tensor]
+        The kernel to register at the CPU dispatch key.
+    """
+
+    def observed_wait_tensor(tensor: torch.Tensor) -> torch.Tensor:
+        """Redispatch ``wait_tensor`` below this key, then bind completion."""
+
+        with exclude_cpu_guard():
+            result = wait_op(tensor)
+        session = session_ref()
+        if session is not None:
+            session.record_completion(tensor)
+        return result
+
+    return observed_wait_tensor
+
+
 class _FuncolCaptureSession:
     """Capture-scoped plane-W state: pending completions + wait interposition.
 
@@ -379,16 +434,11 @@ class _FuncolCaptureSession:
         wait_op, exclude_cpu_guard = redispatch
         try:
             library = torch.library.Library("_c10d_functional", "IMPL")  # noqa: TOR901
-
-            def observed_wait_tensor(tensor: torch.Tensor) -> torch.Tensor:
-                """Redispatch ``wait_tensor`` below this key, then bind completion."""
-
-                with exclude_cpu_guard():
-                    result = wait_op(tensor)
-                self.record_completion(tensor)
-                return result
-
-            library.impl("wait_tensor", observed_wait_tensor, "CPU")
+            # weakref, never self: the dispatcher can retain this kernel past
+            # _destroy(), and a strong session hold would pin session.trace
+            # (the latest Trace + activations) for the life of the process.
+            kernel = _make_observed_wait_tensor(weakref.ref(self), wait_op, exclude_cpu_guard)
+            library.impl("wait_tensor", kernel, "CPU")
         except Exception as exc:
             self.interposition_status = f"unavailable: {type(exc).__name__}: {exc}"
             return
