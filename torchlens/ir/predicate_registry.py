@@ -97,10 +97,8 @@ def _carries_capture_introspection(value: object) -> bool:
 
     if getattr(value, "selector", None) is not None:
         return True
-    try:
-        from ..intervention.selectors import BaseSelector
-    except ImportError:  # pragma: no cover - intervention always importable
-        return False
+    from ..intervention.selectors import BaseSelector
+
     return isinstance(value, BaseSelector)
 
 

@@ -766,7 +766,7 @@ class _SelectionOperand:
 
     __slots__ = ()
 
-    def __selection__(self) -> Any:  # pragma: no cover - implementers override
+    def __selection__(self) -> Any:
         """Lift this producer to a Selection."""
 
         raise NotImplementedError
@@ -917,7 +917,7 @@ def _compose_resolved(
         entries = _compose_entries_intersection(left_by_key, right_by_key)
     elif op == "sub":
         entries = _compose_entries_difference(left_by_key, right_by_key)
-    else:  # pragma: no cover - closed operator set
+    else:
         raise ValueError(f"unknown operator {op!r}")
     return ResolvedSelection(left._trace, left._kind, entries)
 
@@ -1084,7 +1084,7 @@ def _resolve_node(node: Any, trace: Any, kind: str) -> ResolvedSelection:
     for term_type, resolver in _TERM_RESOLVERS:
         if isinstance(node, term_type):
             return resolver(node, trace)
-    raise TypeError(f"unknown selection AST node {type(node).__name__}")  # pragma: no cover
+    raise TypeError(f"unknown selection AST node {type(node).__name__}")
 
 
 def _resolve_combinator(node: _Combinator, trace: Any, kind: str) -> ResolvedSelection:

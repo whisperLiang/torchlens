@@ -763,3 +763,31 @@ def test_selection_error_is_catalogued():
     assert catalogued is SelectionError
     assert issubclass(SelectionError, ValueError)
     assert SelectionError.severity == "recoverable"
+
+
+def test_internal_closed_set_guards_raise(log):
+    """The interior closed-set guards are live raises, never dead lines.
+
+    Covers the unknown resolved-composition operator, the unknown AST node,
+    and the operand mixin's abstract ``__selection__`` — the census forbids
+    hiding these behind ``pragma: no cover``.
+    """
+
+    from torchlens.selection import (
+        _compose_resolved,
+        _resolve_node,
+        _SelectionOperand,
+    )
+
+    resolved = tl.units("relu_1_2", [(0, 0, 1, 1)]).resolve(log)
+    with pytest.raises(ValueError, match="unknown operator"):
+        _compose_resolved("xor", resolved, resolved)
+
+    with pytest.raises(TypeError, match="unknown selection AST node"):
+        _resolve_node(object(), log, "ACT")
+
+    class _Bare(_SelectionOperand):
+        __slots__ = ()
+
+    with pytest.raises(NotImplementedError):
+        _Bare().__selection__()
