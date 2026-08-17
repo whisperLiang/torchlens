@@ -174,7 +174,14 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     # not weakened; only its message got smarter. Reviewed raise with a stated
     # reason (the ratchet working as intended), NOT silent god-file regrowth --
     # and scrub.py remains on the debloat-pass list as a genuine god file.
-    "torchlens/_io/scrub.py": 2425,
+    # Raised 2425 -> 2445 at the draw()-poisons-save fix (2026-08-17): the
+    # +20 lines enroll `_last_encoding_state` in the Trace runtime-only set
+    # and extend the same teaching refusal to LEDGERED-but-undeclared Trace
+    # transients (it now quotes the TRACE_EXTERNAL_WRITE_EXEMPTIONS row and
+    # states that a ledger row is documentation, not a scrub policy). Same
+    # reviewed-raise class as the row above; scrub.py stays on the
+    # debloat-pass list.
+    "torchlens/_io/scrub.py": 2445,
     "torchlens/debug/_infer_input_shape.py": 2250,
     "torchlens/postprocess/ast_branches.py": 2250,
     "torchlens/visualization/_summary_internal/_builder.py": 2200,

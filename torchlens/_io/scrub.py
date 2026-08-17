@@ -1086,6 +1086,26 @@ def _scrub_value(
                         f"{type(value).__name__}.PORTABLE_STATE_SPEC so a "
                         f"read-only access cannot poison a later save."
                     )
+            # Same lesson for LEDGERED-but-undeclared Trace transients (the
+            # draw() `_last_encoding_state` incident: ledgered as
+            # "scrub-declared runtime-only" while no declaration existed) --
+            # quote the ledger row so the message names the writer.
+            if owner_is_trace and not accessor_hint:
+                from ..data_classes._trace_components import (
+                    TRACE_EXTERNAL_WRITE_EXEMPTIONS,
+                )
+
+                ledger_reason = TRACE_EXTERNAL_WRITE_EXEMPTIONS.get(field_name)
+                if ledger_reason is not None:
+                    accessor_hint = (
+                        f" This field is ledgered in "
+                        f"TRACE_EXTERNAL_WRITE_EXEMPTIONS as: {ledger_reason!r}."
+                        f" The ledger documents the write; it is not a scrub "
+                        f"policy. Enroll the runtime-only transient in the "
+                        f"scrub's runtime-only set (or give it a "
+                        f"FieldPolicy.DROP row) so populating it cannot "
+                        f"poison a later save."
+                    )
             raise TorchLensIOError(
                 f"{type(value).__name__}.{field_name} is missing from "
                 f"PORTABLE_STATE_SPEC. Every live state field needs an "
@@ -1697,6 +1717,9 @@ def _is_runtime_only_trace_field(field_name: str) -> bool:
         "_had_unattributed_tensor_args",
         "_module_entry_adoptions",
         "_last_sibling_ordering_decision",
+        # Sibling render diagnostic (same _render_dot write site as the row
+        # above); left unenrolled, ONE draw() poisoned every later tl.save.
+        "_last_encoding_state",
         "_pending_container_collapse_nodes",
         "_defer_streaming_bundle_finalization",
         "_capture_producer_policy",

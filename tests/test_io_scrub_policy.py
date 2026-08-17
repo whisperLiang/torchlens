@@ -319,6 +319,419 @@ def test_intervention_ready_accessor_sweep_still_saves(tmp_path: Path) -> None:
     tl.save(log, str(tmp_path / "after_armed_sweep.tlspec"))
 
 
+# --- Public METHOD sweep (v2 of the accessor tripwire) ----------------------
+#
+# The attribute sweep above closed the lazily-caching PROPERTY class, but
+# ``draw()`` is a METHOD -- it populated ``Trace._last_encoding_state`` with no
+# scrub policy, so "visualize then save" failed while the attribute sweep
+# stayed green. The method sweep closes the sibling class: call every
+# read-only presentation/analysis method a user would plausibly run before
+# saving, then assert the trace still saves.
+#
+# TOTALITY: every public method on every record class must appear in exactly
+# one of the two tables below (sweep or exclusion). A new public method fails
+# ``test_public_method_sweep_tables_are_total`` until it is classified -- an
+# untested method silently omitted is exactly how the draw() gap recurred.
+
+#: Public Trace methods deliberately NOT swept, each with the reason. A
+#: reason must name why the call is unsafe or out of scope for a read-only
+#: pre-save sweep; "we forgot" is not representable in this table.
+_TRACE_METHOD_EXCLUSIONS: dict[str, str] = {
+    "annotate": "user annotation writer (mutates trace annotations by contract)",
+    "with_annotations": "user annotation writer (mutating fluent spelling)",
+    "add_node_overlay": "mutates the overlay table consumed by draw",
+    "attach_hooks": "mutates the live model's hook registry",
+    "clear_hooks": "mutates the live model's hook registry",
+    "detach_hooks": "mutates the live model's hook registry",
+    "disarm_triggers": "mutates armed trigger state",
+    "backward": "autograd execution; writes gradient state",
+    "log_backward": "autograd execution; writes gradient state",
+    "recording_backward": "autograd execution; writes gradient state",
+    "cleanup": "destructive teardown of the trace",
+    "release_param_refs": "destructive; nulls live parameter refs",
+    "do": "intervention editor (mutates fork state)",
+    "set": "intervention editor (mutates fork state)",
+    "remove": "removal scrub (mutates the graph)",
+    "push": "replay/push engine; execution, not presentation",
+    "push_from": "replay/push engine; execution, not presentation",
+    "replay": "replay engine; execution, not presentation",
+    "replay_from": "replay engine; execution, not presentation",
+    "rerun": "rerun engine; execution, not presentation",
+    "save_new_outs": "fast re-capture engine; execution, not presentation",
+    "replace_state_from": "state mutator (cross-trace state transplant)",
+    "append_state_from": "state mutator (cross-trace state transplant)",
+    "run": "sparse/live execution engine",
+    "preview_fastlog": "fastlog execution",
+    "fork": "constructs a new trace; the sweep audits reads on the original",
+    "load_state_dict": "stages state onto the trace",
+    "save": "the save boundary itself is the sweep's assertion, not a subject",
+    "save_intervention": "save boundary (intervention spec artifact)",
+    "validate_forward_pass": "full replay validation; execution-tier compute",
+    "validate_saved_outs": "full replay validation; execution-tier compute",
+    "discharge_against": "requires a second real capture as input",
+    "render_dagua_graph": "optional external dagua renderer dependency",
+    "to_dagua_graph": "optional external dagua renderer dependency",
+}
+
+_OP_METHOD_EXCLUSIONS: dict[str, str] = {
+    "attach_hooks": "mutates the live model's hook registry",
+    "do": "intervention editor (mutates fork state)",
+    "set": "intervention editor (mutates fork state)",
+    "log_tensor_grad": "capture-internal gradient writer",
+    "save_activation": "capture-internal payload writer",
+}
+
+_LAYER_METHOD_EXCLUSIONS: dict[str, str] = {
+    "attach_hooks": "mutates the live model's hook registry",
+    "do": "intervention editor (mutates fork state)",
+    "set": "intervention editor (mutates fork state)",
+}
+
+_PARAM_METHOD_EXCLUSIONS: dict[str, str] = {
+    "release_param_ref": "destructive; nulls the live param ref",
+}
+
+_MODULE_METHOD_EXCLUSIONS: dict[str, str] = {}
+_MODULE_CALL_METHOD_EXCLUSIONS: dict[str, str] = {}
+_BUFFER_METHOD_EXCLUSIONS: dict[str, str] = {}
+
+
+def _trace_method_sweep(tmp_path: Path, sink: Any) -> dict[str, Any]:
+    """Return caller-per-method for every swept public ``Trace`` method."""
+
+    out = tmp_path / "method_sweep"
+    out.mkdir(exist_ok=True)
+    return {
+        "summary": lambda t: t.summary(),
+        "profile": lambda t: t.profile(),
+        "to_pandas": lambda t: t.to_pandas(),
+        # Plain draw AND an encoding-channel draw: the channel path is the
+        # one that populated `_last_encoding_state` (fail-before case).
+        "draw": lambda t: (
+            t.draw(vis_outpath=str(out / "graph")),
+            t.draw(vis_outpath=str(out / "graph_encoded"), color_by="time"),
+        ),
+        "collapse_plan": lambda t: t.collapse_plan(),
+        "collapse_schedule": lambda t: t.collapse_schedule(),
+        "collapse_order": lambda t: t.collapse_order(),
+        "receptive_fields": lambda t: t.receptive_fields(),
+        "projective_fields": lambda t: t.projective_fields(),
+        "show_call_tree": lambda t: t.show_call_tree(file=sink),
+        "walk_calls": lambda t: list(t.walk_calls()),
+        "find_layers": lambda t: t.find_layers("relu"),
+        "audit": lambda t: t.audit(),
+        "check_metadata_invariants": lambda t: t.check_metadata_invariants(),
+        "find_nan": lambda t: t.find_nan(),
+        "first_nonfinite": lambda t: t.first_nonfinite(),
+        "last_run_records": lambda t: t.last_run_records(),
+        "decode_output": lambda t: t.decode_output(),
+        "output_table": lambda t: t.output_table(),
+        "reconstruct_output": lambda t: t.reconstruct_output(),
+        "reconstruct_container": lambda t: t.reconstruct_container(),
+        "visualization_field_audit": lambda t: t.visualization_field_audit(),
+        "attention_blocks": lambda t: list(t.attention_blocks()),
+        "modules_with_facet": lambda t: list(t.modules_with_facet("query")),
+        "activations_by_pass": lambda t: t.activations_by_pass(1),
+        "activations_by_address": lambda t: t.activations_by_address("linear"),
+        "activation_by_raw_label": lambda t: t.activation_by_raw_label(t.layer_list[0].raw_label),
+        "find_sites": lambda t: t.find_sites("relu"),
+        "resolve_sites": lambda t: t.resolve_sites("relu"),
+        "stack": lambda t: t.stack(tl.func("relu")),
+        "show": lambda t: t.show(method="graph", vis_outpath=str(out / "shown")),
+        "draw_backward": lambda t: t.draw_backward(vis_outpath=str(out / "bwd")),
+        "draw_combined": lambda t: t.draw_combined(vis_outpath=str(out / "cmb")),
+        "animate_ops": lambda t: t.animate_ops(t.layer_list[0].layer_label),
+    }
+
+
+def _op_method_sweep(tmp_path: Path, sink: Any) -> dict[str, Any]:
+    """Return caller-per-method for every swept public ``Op`` method."""
+
+    return {
+        "copy": lambda o: o.copy(),
+        "get_children": lambda o: o.get_children(),
+        "get_parents": lambda o: o.get_parents(),
+        "grad_for": lambda o: o.grad_for(bwd=0),
+        "materialize_grad": lambda o: o.materialize_grad(),
+        "materialize_out": lambda o: o.materialize_out(),
+        "show": lambda o: o.show(),
+        "to_pandas": lambda o: o.to_pandas(),
+    }
+
+
+def _layer_method_sweep(tmp_path: Path, sink: Any) -> dict[str, Any]:
+    """Return caller-per-method for every swept public ``Layer`` method."""
+
+    return {
+        "get_children": lambda x: x.get_children(),
+        "get_parents": lambda x: x.get_parents(),
+        "show": lambda x: x.show(),
+        "to_pandas": lambda x: x.to_pandas(),
+    }
+
+
+def _module_method_sweep(tmp_path: Path, sink: Any) -> dict[str, Any]:
+    """Return caller-per-method for every swept public ``Module`` method."""
+
+    out = tmp_path / "method_sweep"
+    out.mkdir(exist_ok=True)
+    return {
+        "draw": lambda m: m.draw(vis_outpath=str(out / f"module_{id(m)}")),
+        "show_call_tree": lambda m: m.show_call_tree(file=sink),
+        "to_pandas": lambda m: m.to_pandas(),
+        "walk_descendants": lambda m: list(m.walk_descendants()),
+    }
+
+
+def _module_call_method_sweep(tmp_path: Path, sink: Any) -> dict[str, Any]:
+    """Return caller-per-method for every swept public ``ModuleCall`` method."""
+
+    return {
+        "show_call_tree": lambda m: m.show_call_tree(file=sink),
+        "to_pandas": lambda m: m.to_pandas(),
+        "walk_descendants": lambda m: list(m.walk_descendants()),
+    }
+
+
+def _param_method_sweep(tmp_path: Path, sink: Any) -> dict[str, Any]:
+    """Return caller-per-method for every swept public ``Param`` method."""
+
+    return {"to_pandas": lambda p: p.to_pandas()}
+
+
+def _buffer_method_sweep(tmp_path: Path, sink: Any) -> dict[str, Any]:
+    """Return caller-per-method for every swept public ``Buffer`` method."""
+
+    return {
+        "to_pandas": lambda b: b.to_pandas(),
+        "value_after": lambda b: b.value_after(1),
+        "value_at": lambda b: b.value_at(1),
+    }
+
+
+#: (class, sweep factory, exclusion table, instance picker) per record class.
+_METHOD_SWEEP_PLAN: list[tuple[type, Any, dict[str, str], Any]] = [
+    (Trace, _trace_method_sweep, _TRACE_METHOD_EXCLUSIONS, lambda log: [log]),
+    (
+        Op,
+        _op_method_sweep,
+        _OP_METHOD_EXCLUSIONS,
+        lambda log: [layer for layer in log.layer_list if type(layer) is Op],
+    ),
+    (
+        Layer,
+        _layer_method_sweep,
+        _LAYER_METHOD_EXCLUSIONS,
+        lambda log: list(log.layer_logs.values()),
+    ),
+    (Module, _module_method_sweep, _MODULE_METHOD_EXCLUSIONS, lambda log: list(log.modules)),
+    (
+        ModuleCall,
+        _module_call_method_sweep,
+        _MODULE_CALL_METHOD_EXCLUSIONS,
+        lambda log: list(log.modules._pass_dict.values()),
+    ),
+    (Param, _param_method_sweep, _PARAM_METHOD_EXCLUSIONS, lambda log: list(log.param_logs)),
+    (Buffer, _buffer_method_sweep, _BUFFER_METHOD_EXCLUSIONS, lambda log: list(log.buffers)),
+]
+
+#: Methods that must run WITHOUT raising on the canonical tiny capture. The
+#: long tail is best-effort (a typed refusal on a plain tiny trace -- e.g.
+#: draw_backward without a backward pass -- is fine, and a raising method may
+#: still have populated state before raising, which is exactly what the sweep
+#: exists to catch). This floor keeps the sweep from silently degrading into
+#: all-TypeErrors if a signature changes.
+_METHOD_SWEEP_MUST_SUCCEED: dict[str, frozenset[str]] = {
+    "Trace": frozenset(
+        {
+            "summary",
+            "profile",
+            "to_pandas",
+            "draw",
+            "collapse_plan",
+            "collapse_schedule",
+            "collapse_order",
+            "receptive_fields",
+            "projective_fields",
+            "show_call_tree",
+            "walk_calls",
+            "find_layers",
+            "audit",
+            "check_metadata_invariants",
+        }
+    ),
+    "Op": frozenset({"get_children", "get_parents", "to_pandas", "show"}),
+    "Layer": frozenset({"get_children", "get_parents", "to_pandas", "show"}),
+    "Module": frozenset({"show_call_tree", "to_pandas", "walk_descendants"}),
+    "ModuleCall": frozenset({"show_call_tree", "to_pandas", "walk_descendants"}),
+    "Param": frozenset({"to_pandas"}),
+    "Buffer": frozenset({"to_pandas"}),
+}
+
+
+def _public_methods(cls: type) -> set[str]:
+    """Return the public instance-method names on ``cls``.
+
+    Properties and ``functools.cached_property`` descriptors belong to the
+    attribute sweep above; classmethod/staticmethod constructors are not
+    instance reads and stay out of both sweeps.
+    """
+
+    names: set[str] = set()
+    for name in dir(cls):
+        if name.startswith("_"):
+            continue
+        static = inspect.getattr_static(cls, name, None)
+        if isinstance(static, (property, functools.cached_property, classmethod, staticmethod)):
+            continue
+        if callable(static):
+            names.add(name)
+    return names
+
+
+@pytest.mark.smoke
+def test_public_method_sweep_tables_are_total(tmp_path: Path) -> None:
+    """Every public method is either swept or excluded with a reason -- exactly.
+
+    Both directions are exact: a new public method must be classified before
+    it ships, and a retired method's row must be deleted. An untested method
+    silently omitted is how the draw() poison recurred after the attribute
+    sweep landed.
+    """
+
+    problems: dict[str, dict[str, list[str]]] = {}
+    for cls, sweep_factory, exclusions, _picker in _METHOD_SWEEP_PLAN:
+        swept = set(sweep_factory(tmp_path, None))
+        public = _public_methods(cls)
+        unclassified = sorted(public - swept - set(exclusions))
+        stale = sorted((swept | set(exclusions)) - public)
+        overlap = sorted(swept & set(exclusions))
+        entry: dict[str, list[str]] = {}
+        if unclassified:
+            entry["unclassified"] = unclassified
+        if stale:
+            entry["stale"] = stale
+        if overlap:
+            entry["both_swept_and_excluded"] = overlap
+        if entry:
+            problems[cls.__name__] = entry
+    assert problems == {}, (
+        "public-method sweep tables are not total; classify each method as "
+        f"swept or excluded-with-reason: {problems}"
+    )
+
+
+@pytest.mark.smoke
+def test_public_method_reads_never_poison_save(tmp_path: Path) -> None:
+    """Read-only presentation/analysis methods must leave the trace saveable.
+
+    Fail-before: ``Trace.draw()`` stored its encoding diagnostic on
+    ``_last_encoding_state`` with no scrub policy, so the flagship
+    visualize-then-save workflow refused with an error naming an internal
+    field the user never touched. The attribute sweep above could not see it:
+    ``draw()`` is a method, not a property.
+    """
+
+    import io
+
+    live_log = _build_live_log()
+    sink = io.StringIO()
+    raised_must_succeed: dict[str, str] = {}
+
+    for cls, sweep_factory, _exclusions, picker in _METHOD_SWEEP_PLAN:
+        callers = sweep_factory(tmp_path, sink)
+        must_succeed = _METHOD_SWEEP_MUST_SUCCEED[cls.__name__]
+        for record in picker(live_log):
+            for name, caller in callers.items():
+                try:
+                    caller(record)
+                except Exception as exc:  # noqa: BLE001 - refusals are not the subject
+                    if name in must_succeed:
+                        raised_must_succeed[f"{cls.__name__}.{name}"] = repr(exc)
+
+    assert raised_must_succeed == {}, (
+        "headline presentation methods raised on the canonical tiny capture "
+        f"(sweep coverage is degrading): {raised_must_succeed}"
+    )
+
+    from torchlens._io.scrub import _is_runtime_only_trace_field
+
+    undeclared_by_class: dict[str, list[str]] = {}
+    for record in _all_record_instances(live_log):
+        spec = getattr(type(record), "PORTABLE_STATE_SPEC", None)
+        if spec is None:
+            continue
+        undeclared = sorted(
+            field_name
+            for field_name, _ in state_items(record)
+            if field_name not in spec
+            and not (isinstance(record, Trace) and _is_runtime_only_trace_field(field_name))
+            and not isinstance(
+                inspect.getattr_static(type(record), field_name, None),
+                functools.cached_property,
+            )
+        )
+        if undeclared:
+            undeclared_by_class.setdefault(type(record).__name__, undeclared)
+    assert undeclared_by_class == {}, (
+        "public method calls populated live state with no scrub policy; "
+        f"declare each field (usually FieldPolicy.DROP): {undeclared_by_class}"
+    )
+
+    tl.save(live_log, str(tmp_path / "after_method_sweep.tlspec"))
+    pickle.dumps(live_log)
+
+
+@pytest.mark.smoke
+def test_draw_then_save_and_pickle_regression(tmp_path: Path) -> None:
+    """Focused fail-before pin: draw() must not poison tl.save or pickle.
+
+    ``draw()`` stored the encoding diagnostic on ``_last_encoding_state``
+    (ledgered as "scrub-declared runtime-only" but enrolled nowhere the scrub
+    consults), so one draw made every later ``tl.save`` refuse. The callable
+    variant pins the pickle side: a ``color_by=`` lambda rode the diagnostic
+    into ``__dict__``, so ``pickle.dumps`` crashed on the raw user callable
+    while ``tl.save`` succeeded on the same trace (the R10-7 class).
+    """
+
+    log = trace_fn(_TinyIOModel(), torch.randn(2, 4))
+    log.draw(vis_outpath=str(tmp_path / "graph"), color_by=lambda node: 1.0)
+    tl.save(log, str(tmp_path / "after_draw.tlspec"))
+    pickle.dumps(log)
+
+
+@pytest.mark.smoke
+def test_ledgered_undeclared_trace_field_refusal_teaches(tmp_path: Path) -> None:
+    """The completeness refusal quotes the external-write ledger row.
+
+    ``_last_encoding_state`` was ledgered in TRACE_EXTERNAL_WRITE_EXEMPTIONS
+    as "scrub-declared runtime-only" while no scrub declaration existed -- the
+    ledger documents the write, it is not a policy. When a ledgered field with
+    no declaration reaches the save boundary, the refusal must name the writer
+    (via the ledger reason) and state the remedy, not just an internal field
+    name the user never touched.
+    """
+
+    from torchlens._io import TorchLensIOError
+    from torchlens._io.scrub import _is_runtime_only_trace_field
+    from torchlens.data_classes._trace_components import TRACE_EXTERNAL_WRITE_EXEMPTIONS
+
+    field_name = next(
+        name
+        for name in TRACE_EXTERNAL_WRITE_EXEMPTIONS
+        if name not in Trace.PORTABLE_STATE_SPEC and not _is_runtime_only_trace_field(name)
+    )
+    log = trace_fn(_TinyIOModel(), torch.randn(2, 4))
+    setattr(log, field_name, "still-live-at-save-time")
+    with pytest.raises(TorchLensIOError) as excinfo:
+        tl.save(log, str(tmp_path / "refused.tlspec"))
+    message = str(excinfo.value)
+    assert field_name in message
+    assert "TRACE_EXTERNAL_WRITE_EXEMPTIONS" in message
+    assert TRACE_EXTERNAL_WRITE_EXEMPTIONS[field_name] in message
+    assert "not a scrub policy" in message
+
+
 @pytest.mark.smoke
 @pytest.mark.parametrize("raw_policy", [True, "small"], ids=["true", "small"])
 def test_r69_sparse_runnable_save_always_drops_raw_fields(tmp_path: Path, raw_policy) -> None:
