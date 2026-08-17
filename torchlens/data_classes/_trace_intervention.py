@@ -969,7 +969,7 @@ class TraceInterventionMixin(_TraceMixinBase):
         """
 
         from ..intervention.hooks import make_hook_context
-        from ..intervention.replay import _commit_replay_updates
+        from ..intervention.replay import _commit_replay_updates, _replay_site_key
         from ..intervention.types import FireRecord, HelperSpec
         from ..selection import _apply_invalid
 
@@ -1016,8 +1016,8 @@ class TraceInterventionMixin(_TraceMixinBase):
                     f"({type(applied).__name__}).",
                     site=op.label,
                 )
-            pending_updates[op.layer_label] = applied
-            pending_records[op.layer_label] = [
+            pending_updates[_replay_site_key(op)] = applied
+            pending_records[_replay_site_key(op)] = [
                 FireRecord(
                     target_label=op.layer_label,
                     call_label=op.label,

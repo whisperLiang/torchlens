@@ -292,12 +292,12 @@ def _run_differentiable_replay(
         "fork",
         source_id=id(log),
         name=replay_log.trace_label,
-        source_cone_labels=tuple(site.layer_label for site in source_cone),
+        source_cone_labels=tuple(_disclosure_label(site) for site in source_cone),
     )
     _reset_backward_projection(replay_log)
     _run_replay(
         replay_log,
-        [replay_log[origin.layer_label] for origin in origins],
+        [replay_log.layer_dict_all_keys[_replay_site_key(origin)] for origin in origins],
         hook_entries=hook_entries,
         strict=strict,
         preserve_origins=preserve_origins,
@@ -424,6 +424,58 @@ def _clear_param_gradient_projection(param_log: Any) -> None:
     param_log._grad_memory = Bytes(0)
 
 
+def _replay_site_key(site: Op) -> str:
+    """Return the pass-qualified replay key for one op record.
+
+    ``Op.label`` is the pass-qualified ``layer_label:pass`` spelling on every
+    finished-trace op (single-pass ops carry ``:1``), and every such spelling
+    is a ``layer_dict_all_keys`` lookup key, so replay state keyed by it can
+    never collide across passes of a recurrence-grouped layer. Bare
+    ``layer_label`` keys map to the LAST pass only — keying replay state by
+    them is exactly the pass-blind corruption this key exists to prevent.
+    """
+
+    label = getattr(site, "label", None)
+    if isinstance(label, str) and label:
+        return label
+    return site.layer_label
+
+
+def _disclosure_label(site: Op) -> str:
+    """Return the user-facing label for replay disclosures and frontier keys.
+
+    Bare layer labels are unambiguous only when the layer is single-pass;
+    multi-pass ops disclose their pass-qualified spelling.
+    """
+
+    if int(getattr(site, "num_passes", 1) or 1) > 1:
+        return _replay_site_key(site)
+    return site.layer_label
+
+
+def _label_key_map(trace: Trace) -> dict[str, tuple[str, ...]]:
+    """Map every string label spelling to the replay keys it may denote.
+
+    A spelling denoting exactly one op (pass-qualified labels, single-pass
+    bare labels, historical position labels) maps to that op's replay key; a
+    layer-wide spelling of a multi-pass layer (its bare ``layer_label``, its
+    short label) maps to EVERY pass's key and is therefore pass-ambiguous.
+    """
+
+    mapping: dict[str, list[str]] = {}
+    for op in trace.layer_list:
+        key = _replay_site_key(op)
+        spellings = {key, op.layer_label}
+        for spelling in getattr(op, "lookup_keys", ()) or ():
+            if isinstance(spelling, str):
+                spellings.add(spelling)
+        for spelling in spellings:
+            keys = mapping.setdefault(spelling, [])
+            if key not in keys:
+                keys.append(key)
+    return {spelling: tuple(keys) for spelling, keys in mapping.items()}
+
+
 def cone_of_effect(trace: Trace, origins: Iterable[Op]) -> list[Op]:
     """Return downstream cone in topological order.
 
@@ -438,42 +490,48 @@ def cone_of_effect(trace: Trace, origins: Iterable[Op]) -> list[Op]:
     -------
     list[Op]
         Origin and downstream sites in execution order, with call-group
-        siblings included.
+        siblings included. Traversal is keyed by pass-qualified op labels, so
+        edges crossing recurrence-grouped (multi-pass) layers are followed
+        per-pass rather than silently dropped.
     """
 
-    label_to_layer = {layer.layer_label: layer for layer in trace.layer_list}
+    all_keys = trace.layer_dict_all_keys
+    label_keys = _label_key_map(trace)
     call_groups = _func_call_groups(trace)
     visited: set[str] = set()
     frontier: deque[str] = deque()
     for origin in origins:
-        if origin.layer_label in label_to_layer:
-            frontier.append(origin.layer_label)
+        key = _replay_site_key(origin)
+        if key in all_keys:
+            frontier.append(key)
+
+    def _enqueue_children(site: Op) -> None:
+        for child_label in _child_labels(site):
+            # A pass-ambiguous child spelling (not produced by finished-trace
+            # relations, but guarded against) expands to every pass: a
+            # conservative superset is safe for cone traversal, guessing one
+            # pass is not.
+            for child_key in label_keys.get(child_label, ()):
+                if child_key not in visited:
+                    frontier.append(child_key)
 
     while frontier:
-        label = frontier.popleft()
-        if label in visited:
+        key = frontier.popleft()
+        if key in visited:
             continue
-        visited.add(label)
-        layer = label_to_layer.get(label)
+        visited.add(key)
+        layer = all_keys.get(key)
         if layer is None:
             continue
 
         group = call_groups.get(layer.func_call_id, ()) if layer.func_call_id is not None else ()
         for sibling in group:
-            if sibling.layer_label not in visited:
-                visited.add(sibling.layer_label)
-            for child_label in _child_labels(sibling):
-                if child_label not in visited:
-                    frontier.append(child_label)
+            visited.add(_replay_site_key(sibling))
+            _enqueue_children(sibling)
 
-        for child_label in _child_labels(layer):
-            if child_label not in visited:
-                frontier.append(child_label)
-        for child_label in getattr(layer, "out_versions_by_child", {}) or {}:
-            if child_label not in visited:
-                frontier.append(child_label)
+        _enqueue_children(layer)
 
-    return [layer for layer in trace.layer_list if layer.layer_label in visited]
+    return [layer for layer in trace.layer_list if _replay_site_key(layer) in visited]
 
 
 def _run_replay(
@@ -512,11 +570,12 @@ def _run_replay(
 
     started_at = time.monotonic()
     cone = cone_of_effect(log, origins)
-    origin_labels = {origin.layer_label for origin in origins}
+    origin_keys = {_replay_site_key(origin) for origin in origins}
+    label_keys = _label_key_map(log)
     overlay: dict[str, torch.Tensor] = {}
     for origin in origins:
         if isinstance(origin.out, torch.Tensor):
-            overlay[origin.layer_label] = origin.out
+            overlay[_replay_site_key(origin)] = origin.out
 
     hook_targets = _hook_targets_by_label(log, hook_entries, strict=strict)
     executed_call_ids: set[int] = set()
@@ -526,15 +585,16 @@ def _run_replay(
     pending_records: dict[str, list[FireRecord]] = {}
 
     for site in progress_bar(cone, total=len(cone), desc="torchlens.replay"):
-        if preserve_origins and site.layer_label in origin_labels:
-            pending_updates[site.layer_label] = overlay[site.layer_label]
+        site_key = _replay_site_key(site)
+        if preserve_origins and site_key in origin_keys:
+            pending_updates[site_key] = overlay[site_key]
             continue
         if site.func_call_id is not None and site.func_call_id in executed_call_ids:
             continue
         group = _group_for_site(site, call_groups, cone)
         if site.func_call_id is not None:
             executed_call_ids.add(site.func_call_id)
-        if all(preserve_origins and member.layer_label in origin_labels for member in group):
+        if all(preserve_origins and _replay_site_key(member) in origin_keys for member in group):
             continue
         _preflight_group(group)
         replay_group = [member for member in group if not getattr(member, "is_buffer", False)]
@@ -548,27 +608,29 @@ def _run_replay(
             overlay,
             strict=strict,
             differentiable_frontier=differentiable_frontier,
+            label_keys=label_keys,
         )
         args, kwargs = _splice_param_substitutions(replay_group, args, kwargs)
         output = _execute_replay_func_strict(representative, args, kwargs)
         if output is None and _is_inplace_none_return(representative):
             output = args[0]
         for member in replay_group:
-            if preserve_origins and member.layer_label in origin_labels:
+            member_key = _replay_site_key(member)
+            if preserve_origins and member_key in origin_keys:
                 continue
             tensor = _slice_output_by_path(output, tuple(member.container_path or ()))
             tensor, records = _apply_replay_hooks(
                 tensor,
                 site=member,
-                hook_entries=hook_targets.get(member.layer_label, ()),
+                hook_entries=hook_targets.get(member_key, ()),
                 run_ctx=_ensure_replay_run_ctx(log),
             )
-            if differentiable_frontier is not None and member.layer_label in hook_targets:
-                tensor = _frontier_leaf(differentiable_frontier, member.layer_label, tensor)
-            overlay[member.layer_label] = tensor
-            pending_updates[member.layer_label] = tensor
+            if differentiable_frontier is not None and member_key in hook_targets:
+                tensor = _frontier_leaf(differentiable_frontier, _disclosure_label(member), tensor)
+            overlay[member_key] = tensor
+            pending_updates[member_key] = tensor
             if records:
-                pending_records.setdefault(member.layer_label, []).extend(records)
+                pending_records.setdefault(member_key, []).extend(records)
             if differentiable_frontier is not None:
                 _install_replay_tensor_hook(log, member, tensor)
             _check_edge_expectations(member, strict=strict)
@@ -581,19 +643,19 @@ def _run_replay(
         "engine": "replay",
         "timestamp": started_at,
         "started_at": started_at,
-        "origins": tuple(origin.layer_label for origin in origins),
+        "origins": tuple(_disclosure_label(origin) for origin in origins),
         "hooks": tuple(_hook_name(entry) for entry in hook_entries),
         "strict": strict,
         "errors_non_fatal": errors_non_fatal,
-        "cone": tuple(site.layer_label for site in cone),
+        "cone": tuple(_disclosure_label(site) for site in cone),
     }
     log._record_operation(
         "replay",
         engine="replay",
-        origins=tuple(origin.layer_label for origin in origins),
+        origins=tuple(_disclosure_label(origin) for origin in origins),
         hooks=tuple(_hook_name(entry) for entry in hook_entries),
         strict=strict,
-        cone=tuple(site.layer_label for site in cone),
+        cone=tuple(_disclosure_label(site) for site in cone),
         errors_non_fatal=errors_non_fatal,
     )
     log._has_direct_writes = False
@@ -632,6 +694,7 @@ def _reconstruct_args_from_template(
     *,
     strict: bool = False,
     differentiable_frontier: dict[str, torch.Tensor] | None = None,
+    label_keys: dict[str, tuple[str, ...]] | None = None,
 ) -> tuple[tuple[Any, ...], dict[str, Any]]:
     """Reconstruct call arguments from a captured forward template.
 
@@ -644,11 +707,14 @@ def _reconstruct_args_from_template(
     trace:
         Owning model log.
     overlay:
-        Current replay outs keyed by site label.
+        Current replay outs keyed by pass-qualified replay key.
     strict:
         Whether divergence warnings should raise.
     differentiable_frontier:
         Optional replay-frontier leaf cache.
+    label_keys:
+        Optional precomputed :func:`_label_key_map` result; built on demand
+        when omitted.
 
     Returns
     -------
@@ -656,6 +722,8 @@ def _reconstruct_args_from_template(
         Reconstructed positional and keyword arguments.
     """
 
+    if label_keys is None:
+        label_keys = _label_key_map(trace)
     args = tuple(
         _resolve_arg_component(
             component,
@@ -664,6 +732,7 @@ def _reconstruct_args_from_template(
             overlay,
             strict=strict,
             differentiable_frontier=differentiable_frontier,
+            label_keys=label_keys,
         )
         for component in template.args
     )
@@ -675,6 +744,7 @@ def _reconstruct_args_from_template(
             overlay,
             strict=strict,
             differentiable_frontier=differentiable_frontier,
+            label_keys=label_keys,
         )
         for key, component in template.kwargs
     }
@@ -715,6 +785,7 @@ def _resolve_arg_component(
     *,
     strict: bool,
     differentiable_frontier: dict[str, torch.Tensor] | None = None,
+    label_keys: dict[str, tuple[str, ...]] | None = None,
 ) -> Any:
     """Resolve one captured argument component.
 
@@ -727,11 +798,15 @@ def _resolve_arg_component(
     trace:
         Owning model log.
     overlay:
-        Replay overlay of already-computed outs.
+        Replay overlay of already-computed outs, keyed by pass-qualified
+        replay key.
     strict:
         Whether divergence warnings should raise.
     differentiable_frontier:
         Optional replay-frontier leaf cache.
+    label_keys:
+        Optional precomputed :func:`_label_key_map` result; built on demand
+        when omitted.
 
     Returns
     -------
@@ -739,29 +814,54 @@ def _resolve_arg_component(
         Concrete argument value.
     """
 
+    if label_keys is None:
+        label_keys = _label_key_map(trace)
     if isinstance(component, ParentRef):
         parent_label = _final_label_for_ref(trace, component.parent_label)
         if parent_label not in trace.layer_dict_all_keys:
             raise ReplayPreconditionError(
                 f"{pass_log.layer_label} references missing parent {component.parent_label!r}"
             )
-        parent = trace[parent_label]
-        _warn_if_unexpected_parent(pass_log, parent.layer_label, strict=strict)
-        if parent.layer_label in overlay:
-            return overlay[parent.layer_label]
-        if pass_log.layer_label in (getattr(parent, "out_versions_by_child", {}) or {}):
-            version = parent.out_versions_by_child[pass_log.layer_label]
+        parent_keys = label_keys.get(parent_label, ())
+        if len(parent_keys) > 1:
+            # A layer-wide spelling of a multi-pass layer names N distinct
+            # ops; resolving through the bare lookup would silently read the
+            # LAST pass's out. Never guess a pass.
+            raise ReplayPreconditionError(
+                f"replay template for {_disclosure_label(pass_log)!r} references parent "
+                f"{component.parent_label!r}, which is ambiguous across the "
+                f"{len(parent_keys)} passes of that layer "
+                f"({', '.join(repr(key) for key in parent_keys)}); refusing to guess a pass."
+            )
+        parent = trace.layer_dict_all_keys[parent_keys[0] if parent_keys else parent_label]
+        parent_key = _replay_site_key(parent)
+        _warn_if_unexpected_parent(pass_log, parent, label_keys, strict=strict)
+        if parent_key in overlay:
+            return overlay[parent_key]
+        versions = getattr(parent, "out_versions_by_child", {}) or {}
+        child_spelling = next(
+            (
+                spelling
+                for spelling in (_replay_site_key(pass_log), pass_log.layer_label)
+                if spelling in versions
+            ),
+            None,
+        )
+        if child_spelling is not None:
+            version = versions[child_spelling]
             if isinstance(version, torch.Tensor):
                 if differentiable_frontier is not None:
                     return _frontier_leaf(
                         differentiable_frontier,
-                        f"{parent.layer_label}->{pass_log.layer_label}",
+                        f"{_disclosure_label(parent)}->{_disclosure_label(pass_log)}",
                         version,
                     )
                 return version
         if isinstance(parent.out, torch.Tensor):
             if differentiable_frontier is not None:
-                return _frontier_leaf(differentiable_frontier, parent.layer_label, parent.out)
+                return _frontier_leaf(
+                    differentiable_frontier, _disclosure_label(parent), parent.out
+                )
             return parent.out
         raise ReplayPreconditionError(
             f"parent {parent.layer_label!r} for {pass_log.layer_label!r} has no out"
@@ -785,6 +885,7 @@ def _resolve_arg_component(
                     overlay,
                     strict=strict,
                     differentiable_frontier=differentiable_frontier,
+                    label_keys=label_keys,
                 )
                 for key, value in component
             }
@@ -796,6 +897,7 @@ def _resolve_arg_component(
                 overlay,
                 strict=strict,
                 differentiable_frontier=differentiable_frontier,
+                label_keys=label_keys,
             )
             for value in component
         )
@@ -1200,13 +1302,13 @@ def _origin_sites_for_hooks(
         Unique hook target sites in execution order.
     """
 
-    target_labels: set[str] = set()
+    target_keys: set[str] = set()
     for entry in hook_entries:
         for site in log.resolve_sites(
             entry.site_target, strict=strict, max_fanout=len(log.layer_list)
         ):
-            target_labels.add(site.layer_label)
-    return [site for site in log.layer_list if site.layer_label in target_labels]
+            target_keys.add(_replay_site_key(site))
+    return [site for site in log.layer_list if _replay_site_key(site) in target_keys]
 
 
 def _hook_targets_by_label(
@@ -1229,7 +1331,8 @@ def _hook_targets_by_label(
     Returns
     -------
     dict[str, tuple[NormalizedHookEntry, ...]]
-        Matching hooks per site in FIFO order.
+        Matching hooks per site in FIFO order, keyed by pass-qualified
+        replay key so a hook addressed to one pass never fires at another.
     """
 
     targets: dict[str, list[NormalizedHookEntry]] = {}
@@ -1237,7 +1340,7 @@ def _hook_targets_by_label(
         for site in log.resolve_sites(
             entry.site_target, strict=strict, max_fanout=len(log.layer_list)
         ):
-            targets.setdefault(site.layer_label, []).append(entry)
+            targets.setdefault(_replay_site_key(site), []).append(entry)
     return {label: tuple(entries) for label, entries in targets.items()}
 
 
@@ -1313,11 +1416,11 @@ def _group_for_site(
 
     if site.func_call_id is None:
         return (site,)
-    cone_labels = {member.layer_label for member in cone}
+    cone_keys = {_replay_site_key(member) for member in cone}
     return tuple(
         member
         for member in call_groups.get(site.func_call_id, (site,))
-        if member.layer_label in cone_labels
+        if _replay_site_key(member) in cone_keys
     )
 
 
@@ -1415,27 +1518,43 @@ def _final_label_for_ref(log: Trace, label: str) -> str:
 
 def _warn_if_unexpected_parent(
     pass_log: Op,
-    parent_label: str,
+    parent: Op,
+    label_keys: dict[str, tuple[str, ...]],
     *,
     strict: bool,
 ) -> None:
     """Warn or raise when template parent refs disagree with graph parents.
 
+    Both sides compare in pass-qualified replay-key space: saved parent
+    edges spell multi-pass endpoints ``label:pass`` while a template ref may
+    resolve through any lookup spelling, so comparing raw spellings fired a
+    spurious divergence on every multi-pass replay.
+
     Parameters
     ----------
     pass_log:
         Child site being replayed.
-    parent_label:
-        Parent label found in the template.
+    parent:
+        Resolved parent op found in the template.
+    label_keys:
+        Precomputed :func:`_label_key_map` result.
     strict:
         Whether to raise instead of warn.
     """
 
-    if parent_label in set(getattr(pass_log, "parents", ()) or ()):
+    parent_key = _replay_site_key(parent)
+    saved_keys: set[str] = set()
+    for saved_label in getattr(pass_log, "parents", ()) or ():
+        keys = label_keys.get(saved_label)
+        if keys:
+            saved_keys.update(keys)
+        else:
+            saved_keys.add(saved_label)
+    if parent_key in saved_keys:
         return
     message = (
-        f"replay template for {pass_log.layer_label!r} references {parent_label!r}, "
-        "which is not in the saved parent edge set"
+        f"replay template for {_disclosure_label(pass_log)!r} references "
+        f"{_disclosure_label(parent)!r}, which is not in the saved parent edge set"
     )
     if strict:
         raise ControlFlowDivergenceError(message)
