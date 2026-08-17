@@ -88,6 +88,51 @@ def test_bridge_module_is_imported_nowhere_in_the_package() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Teaching refusals: the L7b rows name the boundary and the way forward
+# ---------------------------------------------------------------------------
+
+
+@smoke
+def test_l7b_row_refusals_teach_the_boundary_and_the_remedy() -> None:
+    """House rule: the L7b refusals name the flip boundary (declared
+    late-bind posture) and what to do INSTEAD, not just the code."""
+
+    log = tl.trace(
+        _NonPersistentBufferModel(),
+        torch.randn(2, 3),
+        capture=CaptureOptions(structure_only=True),
+    )
+    with pytest.raises(StructureOnlyCapabilityError) as runnable_exc:
+        require_structure_only_capability(log, "save_runnable")
+    message = str(runnable_exc.value)
+    assert "late-bind" in message
+    assert "intervention_ready=True" in message
+    assert runnable_exc.value.fields["flip_event"] == "L7b amendment lands"
+    with pytest.raises(StructureOnlyCapabilityError) as replay_exc:
+        log.run(inputs=torch.randn(2, 3))
+    assert "discharge_against" in str(replay_exc.value)
+
+
+@smoke
+def test_entry_conflict_teaches_the_runnable_ready_flip_event() -> None:
+    """The structure_only + intervention_ready entry conflict names its
+    capability row and the L7b amendment as the flip event."""
+
+    from torchlens._errors import StructureOnlyOptionConflictError
+
+    with pytest.raises(StructureOnlyOptionConflictError) as excinfo:
+        tl.trace(
+            _NonPersistentBufferModel(),
+            torch.randn(2, 3),
+            capture=CaptureOptions(structure_only=True, intervention_ready=True),
+        )
+    message = str(excinfo.value)
+    assert "runnable_ready_composition" in message
+    assert "late-bind" in message
+    assert excinfo.value.fields["code"] == "structure_only_option_conflict"
+
+
+# ---------------------------------------------------------------------------
 # Bind-time digests: real byte digests, mandatory, never skipped
 # ---------------------------------------------------------------------------
 

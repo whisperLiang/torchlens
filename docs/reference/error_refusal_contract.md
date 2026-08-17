@@ -268,8 +268,8 @@ add names to the top-level `torchlens` namespace:
 | `structure_only_episode_unsupported` | Episode capture does not compose with structure-only (v1; S2-amendment candidate) | Run the episode capture without `structure_only` |
 | `structure_only_option_conflict` | `structure_only=True` combined with an option that needs tensor values (`raise_on_nan`, `intervention_ready`, a not-provably-value-free `halt=`) | Drop the conflicting option or run a real capture |
 | `structure_only_refuted_hypothesis` | A registered real-run discharge REFUTED this structure-only trace's hypotheses; hypothesis consumers refuse | Re-capture after fixing the divergence, or consume the discharge record directly |
-| `structure_only_replay_unsupported` | Replay/run requires tensor values a structure-only trace never records | Run a real capture for replay surfaces |
-| `structure_only_runnable_unsupported` | Runnable save is refused on a structure-only trace (v1; L7b late-bind may amend) | Run a real capture with `intervention_ready=True` for runnable artifacts |
+| `structure_only_replay_unsupported` | Replay/run requires tensor values a structure-only trace never records (v1 floor; the declared late-bind posture is the row's named flip event) | Run the real model, or corroborate via `Trace.discharge_against(real_trace)` |
+| `structure_only_runnable_unsupported` | Runnable save is refused on a structure-only trace (v1 floor; declared late-bind slots arrive with the L7b S2 StateSource amendment) | Run a real capture with `intervention_ready=True` for runnable artifacts |
 | `structure_only_save_unsupported` | Persisting a structure-only trace is refused until the coordinated tlspec bump lands the marker and load rows | Keep the trace in-session, or run a real capture to save |
 | `structure_only_type_invalid` | Capture option `structure_only` is not a bool | Pass `structure_only=True` or `structure_only=False` |
 | `structure_only_validation_unsupported` | Validation entry has nothing to compare against on a structure-only trace; discharge is the verification story | Use `Trace.discharge_against(real_trace)` instead |

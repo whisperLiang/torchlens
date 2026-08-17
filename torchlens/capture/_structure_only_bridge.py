@@ -131,6 +131,7 @@ def compute_bound_state_digests(values: Mapping[str, Any]) -> dict[str, str]:
 
     from .. import hash as tl_hash
     from ..errors.runnable import StateBindingError
+    from ..runnable import RunnableErrorCode
 
     digests: dict[str, str] = {}
     for name, value in values.items():
@@ -142,7 +143,7 @@ def compute_bound_state_digests(values: Mapping[str, Any]) -> dict[str, str]:
                 "late-bound run is attestable only against real bound bytes; "
                 "digesting geometry here would let a valueless slot "
                 "masquerade as bound state (G2 domain discipline).",
-                code="state_metadata_mismatch",
+                code=RunnableErrorCode.STATE_METADATA_MISMATCH.value,
                 remedy=(
                     "bind a real-substrate tensor for this slot (materialize "
                     "the value before binding); geometry-only digests belong "
@@ -159,7 +160,7 @@ def compute_bound_state_digests(values: Mapping[str, Any]) -> dict[str, str]:
                 "— a late-bound run without them could never be attested "
                 "against what was bound, so the bind refuses rather than "
                 "silently skipping the digest.",
-                code="state_metadata_mismatch",
+                code=RunnableErrorCode.STATE_METADATA_MISMATCH.value,
                 remedy=(
                     "bind a dense, byte-readable tensor for this slot; if the "
                     "value is correct, the chained cause names what made its "
