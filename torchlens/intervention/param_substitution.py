@@ -18,7 +18,14 @@ classify as ``LiteralTensor`` template components carrying a param barcode),
 so this module DERIVES the occurrence addresses for a PARAM selection —
 ``Param.used_by_ops`` reverse map + template-component identity/barcode
 match, FAIL-CLOSED (a consumption the engine cannot address refuses typed,
-never a silent partial "as if") — and drives the same engine:
+never a silent partial "as if") — and drives the same engine. Recurrently
+reused parameters (tied weights, a module called at several passes of a
+recurrence-grouped layer) are substitutable: consumers are recorded and
+staged PASS-QUALIFIED (``label:pass``), the edit lands at EVERY consumption
+(a parameter has one identity across passes), and the pass-qualified replay
+engine recomputes each pass faithfully. A bare multi-pass consumer
+spelling or a consumer inventory missing a pass still refuses (they would
+silently cover a subset of consumptions):
 
 * tier-(ii) store: substituted values land in ``Op.edge_substitutions`` /
   ``Op.edge_replacement_stamps`` at the derived occurrence address, marked
@@ -360,9 +367,11 @@ def _stage_param_entry(
                 },
             )
             staging.committed.append((child_op, (arg_kind, tuple(arg_path))))
-            staging.pending_records.setdefault(child_op.layer_label, []).append(
-                record["fire_record"]
-            )
+            # Pass-qualified key: the bare layer_label of a multi-pass layer
+            # resolves to its LAST pass, which would land every pass's
+            # FireRecord on one op.
+            record_key = getattr(child_op, "label", None) or child_op.layer_label
+            staging.pending_records.setdefault(record_key, []).append(record["fire_record"])
             param_occurrences.append(
                 {
                     "edge_address": record["edge_address"],
@@ -405,6 +414,7 @@ def _derive_entry_occurrences(
             param_address=param_address,
         )
     rows: list[tuple[Any, str, list[tuple[str, tuple[Any, ...], torch.Tensor]]]] = []
+    staged_op_ids: set[int] = set()
     for consumer_label in consumers:
         layer = trace.layer_dict_all_keys.get(consumer_label)
         if layer is None or not getattr(layer, "ops", None):
@@ -415,17 +425,25 @@ def _derive_entry_occurrences(
                 site=consumer_label,
             )
         child_op = layer.ops[0]
-        if int(getattr(child_op, "num_passes", 1) or 1) > 1:
+        if (
+            int(getattr(child_op, "num_passes", 1) or 1) > 1
+            and consumer_label == child_op.layer_label
+        ):
+            # A bare layer label of a multi-pass layer resolves to its LAST
+            # pass only; staging from it would silently substitute a subset
+            # of the parameter's consumptions.
             raise _underivable(
-                f"consumer {consumer_label!r} of parameter {param_address!r} "
-                "belongs to a multi-pass (recurrence-grouped) layer; the "
-                "replay cone keys sites by layer label, so multi-pass origins "
-                "cannot propagate faithfully — a named v1 engine limitation "
-                "(recurrently reused parameters, e.g. tied weights at "
-                "structurally corresponding sites, are not yet substitutable).",
+                f"consumer spelling {consumer_label!r} of parameter "
+                f"{param_address!r} is the bare label of a multi-pass "
+                "(recurrence-grouped) layer, which addresses only its last "
+                "pass; every consuming pass must be recorded pass-qualified "
+                "(``label:pass``) to be substitutable.",
                 param_address=param_address,
                 site=consumer_label,
             )
+        if id(child_op) in staged_op_ids:
+            continue
+        staged_op_ids.add(id(child_op))
         template = replay_module._template_for_site(child_op)
         rows.append(
             (
@@ -434,7 +452,42 @@ def _derive_entry_occurrences(
                 _param_occurrences_for_op(child_op, template, live_param, barcode, param_address),
             )
         )
+    _check_multipass_coverage(rows, param_address)
     return rows
+
+
+def _check_multipass_coverage(
+    rows: list[tuple[Any, str, list[tuple[str, tuple[Any, ...], torch.Tensor]]]],
+    param_address: str,
+) -> None:
+    """Refuse unless every pass of each multi-pass consumer layer is addressed.
+
+    Recurrence grouping guarantees that all passes of a multi-pass layer are
+    equivalent ops consuming the same parameters, so a consumer inventory
+    that names only SOME passes of a layer is incoherent metadata — staging
+    the named subset would be a silent partial "as if" (fail-closed).
+    """
+
+    covered: dict[str, set[int]] = {}
+    total_passes: dict[str, int] = {}
+    for child_op, _, _ in rows:
+        num_passes = int(getattr(child_op, "num_passes", 1) or 1)
+        if num_passes > 1:
+            covered.setdefault(child_op.layer_label, set()).add(
+                int(getattr(child_op, "pass_index", 0) or 0)
+            )
+            total_passes[child_op.layer_label] = num_passes
+    for bare_label, seen in covered.items():
+        missing = set(range(1, total_passes[bare_label] + 1)) - seen
+        if missing:
+            raise _underivable(
+                f"parameter {param_address!r} is consumed by multi-pass layer "
+                f"{bare_label!r}, but its recorded consumers omit "
+                f"pass(es) {sorted(missing)}; substituting only the addressed "
+                "passes would be a silent partial 'as if'.",
+                param_address=param_address,
+                site=bare_label,
+            )
 
 
 def _stage_occurrence(
