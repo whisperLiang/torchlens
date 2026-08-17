@@ -213,10 +213,14 @@ class _Mask:
 
 
 def _mask_whole(shape: tuple[int, ...]) -> _Mask:
+    """Build the whole-form mask (every element of ``shape`` selected)."""
+
     return _Mask(shape=shape, form="whole")
 
 
 def _mask_empty(shape: tuple[int, ...]) -> _Mask:
+    """Build the empty-form mask (no element of ``shape`` selected)."""
+
     return _Mask(shape=shape, form="empty")
 
 
@@ -249,6 +253,8 @@ def _mask_from_slices(shape: tuple[int, ...], slices: tuple[slice, ...]) -> _Mas
 
 
 def _mask_union(a: _Mask, b: _Mask) -> _Mask:
+    """Union two same-shape masks (whole/empty fast paths, else dense OR)."""
+
     if a.form == "whole" or b.form == "empty":
         return a if a.form == "whole" else (a if b.form == "empty" else b)
     if b.form == "whole" or a.form == "empty":
@@ -257,6 +263,8 @@ def _mask_union(a: _Mask, b: _Mask) -> _Mask:
 
 
 def _mask_intersect(a: _Mask, b: _Mask) -> _Mask:
+    """Intersect two same-shape masks (whole/empty fast paths, else dense AND)."""
+
     if a.form == "empty" or b.form == "whole":
         return a
     if b.form == "empty" or a.form == "whole":
@@ -265,6 +273,8 @@ def _mask_intersect(a: _Mask, b: _Mask) -> _Mask:
 
 
 def _mask_difference(a: _Mask, b: _Mask) -> _Mask:
+    """Subtract ``b`` from ``a`` (set difference on same-shape masks)."""
+
     if a.form == "empty" or b.form == "empty":
         return a
     if b.form == "whole":
@@ -273,6 +283,8 @@ def _mask_difference(a: _Mask, b: _Mask) -> _Mask:
 
 
 def _mask_complement(a: _Mask) -> _Mask:
+    """Complement a mask within its own index space."""
+
     if a.form == "whole":
         return _mask_empty(a.shape)
     if a.form == "empty":
@@ -281,6 +293,8 @@ def _mask_complement(a: _Mask) -> _Mask:
 
 
 def _mask_equal(a: _Mask, b: _Mask) -> bool:
+    """Compare two masks as element sets (form-independent equality)."""
+
     if a.shape != b.shape:
         return False
     if a.form == b.form == "whole" or a.form == b.form == "empty":
@@ -517,6 +531,8 @@ class ResolvedSelection:
 
 @dataclass(frozen=True)
 class _SelectorTerm:
+    """AST leaf lifting a ``BaseSelector`` predicate into a Selection."""
+
     selector: Any
 
     def __repr__(self) -> str:
@@ -525,6 +541,8 @@ class _SelectorTerm:
 
 @dataclass(frozen=True)
 class _BoxTerm:
+    """AST leaf lifting a ``ReceptiveFieldBox`` region into a Selection."""
+
     box: Any
 
     def __repr__(self) -> str:
@@ -533,6 +551,8 @@ class _BoxTerm:
 
 @dataclass(frozen=True)
 class _GradientTerm:
+    """AST leaf lifting a ``GradientReceptiveField`` region into a Selection."""
+
     gradient_rf: Any
 
     def __repr__(self) -> str:
@@ -541,6 +561,8 @@ class _GradientTerm:
 
 @dataclass(frozen=True)
 class _FacetTerm:
+    """AST leaf lifting a ``FacetSpec`` region into a Selection."""
+
     spec: Any
 
     def __repr__(self) -> str:
@@ -550,6 +572,8 @@ class _FacetTerm:
 
 @dataclass(frozen=True)
 class _ParamTerm:
+    """AST leaf for ``tl.params(name, mask=...)`` (PARAM-kind producer)."""
+
     name: str
     mask: torch.Tensor | None
 
@@ -560,6 +584,8 @@ class _ParamTerm:
 
 @dataclass(frozen=True)
 class _UnitTerm:
+    """AST leaf for ``tl.units(site, indices|mask)`` (explicit ACT elements)."""
+
     site: str
     indices: tuple[tuple[int, ...], ...] | None
     index_mask: torch.Tensor | None
@@ -574,6 +600,8 @@ class _UnitTerm:
 
 @dataclass(frozen=True)
 class _WholeSiteTerm:
+    """AST leaf selecting every element of one site (Op/Layer lift)."""
+
     site_label: str
     pass_index: int | None
 
@@ -585,6 +613,8 @@ class _WholeSiteTerm:
 
 @dataclass(frozen=True)
 class _RandomTerm:
+    """AST leaf for ``tl.random_selection`` (seeded size-matched control)."""
+
     like: Any
     within: Any
     seed: int
@@ -595,6 +625,8 @@ class _RandomTerm:
 
 @dataclass(frozen=True)
 class _Combinator:
+    """AST interior node combining operand terms with one set operator."""
+
     op: str  # "or" | "and" | "sub" | "invert"
     operands: tuple[Any, ...]
 
@@ -1563,9 +1595,13 @@ def _masked_factory(inner_factory: Any, mask: _Mask, site_label: str) -> Any:
     """Wrap a helper hook factory with the engine-owned scatter step."""
 
     def factory() -> Any:
+        """Instantiate the inner hook and wrap it with the mask scatter."""
+
         inner = inner_factory()
 
         def _masked_hook(out: Any, *, hook: Any) -> Any:
+            """Run the inner edit, then scatter only masked elements into ``out``."""
+
             if not isinstance(out, torch.Tensor):
                 raise _apply_invalid(
                     "not_maskable",
@@ -1646,7 +1682,11 @@ def _derive_masked_edit(edit: Any, entry: SiteEntry, digest: str, site_label: st
             return edit
 
         def _plain_factory() -> Any:
+            """Adapt a bare hook callable to the masked-factory protocol."""
+
             def _adapter(out: Any, *, hook: Any) -> Any:
+                """Forward to the user's hook callable unchanged."""
+
                 return edit(out, hook=hook)
 
             return _adapter
