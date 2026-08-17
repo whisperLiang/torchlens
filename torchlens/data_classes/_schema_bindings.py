@@ -731,6 +731,7 @@ STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {
         "custom_methods": StorageBinding(StorageKind.SCALAR, annotation='list[str]'),
         "_buffer_accessor": StorageBinding(StorageKind.RUNTIME),
         "_source_trace_ref": StorageBinding(StorageKind.SCALAR),
+        "_facets_cache": StorageBinding(StorageKind.RUNTIME),
     },
     "module_call": {
         "address": StorageBinding(StorageKind.SCALAR, annotation="<class 'str'>"),
@@ -791,6 +792,7 @@ STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {
         "_forward_kwargs_template": StorageBinding(StorageKind.RUNTIME),
         "_source_trace_strong": StorageBinding(StorageKind.RUNTIME),
         "_source_trace_ref": StorageBinding(StorageKind.SCALAR),
+        "_facets_cache": StorageBinding(StorageKind.RUNTIME),
     },
     "param": {
         "address": StorageBinding(StorageKind.SCALAR),
