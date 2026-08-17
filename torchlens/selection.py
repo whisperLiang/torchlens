@@ -76,8 +76,8 @@ class SelectionError(ConfigurationError, ValueError):
 
     Branch on ``exc.fields["code"]`` (``selection_trace_mismatch`` /
     ``selection_bool_ambiguous`` / ``selection_kind_incompatible`` /
-    ``selection_unresolvable`` / ``selection_apply_invalid``), never on
-    message text.
+    ``selection_unresolvable`` / ``selection_apply_invalid`` /
+    ``selection_alignment_invalid``), never on message text.
     """
 
 
@@ -425,6 +425,32 @@ class ResolvedSelection:
         """Return the freeze-time digest of the canonical (family, masks) pair."""
 
         return self._digest
+
+    def align_to(self, target: Trace) -> ResolvedSelection:
+        """Re-bind this resolved selection onto another trace (cross-run).
+
+        The stage-4a cross-run door: alignment keys on the L1 structural
+        site keys each entry records (position proof) AND the same-policy
+        ``(layer_label, pass_index)`` address, under the L1 cross-stamp rule
+        (same-policy captures only — healthy, agreeing grouping stamps on
+        both sides; anything else refuses typed). Masks travel unchanged
+        onto an identical index space; per-entry provenance discloses the
+        cross-run origin. ``do()`` still refuses foreign resolved selections
+        (``selection_trace_mismatch``) — this explicit spelling is the only
+        rebind. DOCUMENTED-UNSTABLE pending naming-session ratification.
+
+        Raises
+        ------
+        SelectionError
+            ``selection_alignment_invalid`` with a closed reason set
+            (``kind_unsupported`` / ``grouping_stamp_degraded`` /
+            ``grouping_stamp_mismatch`` / ``site_key_unavailable`` /
+            ``site_not_in_target`` / ``index_space_mismatch``).
+        """
+
+        from ._selection_align import align_resolved_selection
+
+        return align_resolved_selection(self, target)
 
     def __bool__(self) -> bool:
         """Return whether ANY element is selected (element level)."""
@@ -1050,7 +1076,10 @@ def _act_entry(op: Any, mask: _Mask, relation: str, source: str) -> SiteEntry:
         site_key=(layer_label, pass_index),
         provenance=SelectionProvenance(relation=relation, source=source),
         _mask=mask,
-        structural_site_key=getattr(op, "structural_site_key", None),
+        # The L1 structural-position identity lives on Op as ``site_key``
+        # (site_key_v1 strings); SiteEntry's field keeps the qualified name
+        # because SiteEntry.site_key is already the (label, pass) address.
+        structural_site_key=getattr(op, "site_key", None),
     )
 
 
@@ -1779,7 +1808,9 @@ def _resolve_do_target(trace: Any, selection_like: Any) -> ResolvedSelection:
         if lifted._trace is not trace:
             raise SelectionError(
                 "the resolved selection is bound to a different trace; resolve "
-                "against this trace first.",
+                "against this trace first, or bridge explicitly with "
+                "resolved.align_to(trace) (cross-run alignment on L1 site "
+                "keys, same-policy captures only).",
                 code="selection_trace_mismatch",
             )
         resolved = lifted
