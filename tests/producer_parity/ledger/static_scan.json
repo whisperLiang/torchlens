@@ -6600,6 +6600,30 @@
   "via_getattr": true
  },
  {
+  "ambiguous": true,
+  "field": "kind",
+  "file": "torchlens/visualization/_arg_suppression.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": false,
+  "field": "layer_type",
+  "file": "torchlens/visualization/_arg_suppression.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": true,
+  "field": "parents",
+  "file": "torchlens/visualization/_arg_suppression.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
   "ambiguous": false,
   "field": "layer_type",
   "file": "torchlens/visualization/_condensed_flow.py",
@@ -6910,6 +6934,30 @@
   "has_default": false,
   "sites": 2,
   "via_getattr": false
+ },
+ {
+  "ambiguous": true,
+  "field": "kind",
+  "file": "torchlens/visualization/_stacking.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": false,
+  "field": "pass_index",
+  "file": "torchlens/visualization/_stacking.py",
+  "has_default": true,
+  "sites": 2,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": false,
+  "field": "raw_index",
+  "file": "torchlens/visualization/_stacking.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
  },
  {
   "ambiguous": true,

@@ -694,6 +694,14 @@ AXES: dict[str, str] = {
     "artifact:apparent_cycle": "interleaved repeat-fold apparent-cycle artifact (known)",
     "diag:collapse_plan": "Trace.collapse_plan() diagnostic",
     "diag:collapse_schedule": "Trace.collapse_schedule() diagnostic",
+    "labels:checked_suppression": (
+        "default-on checked suppression of constructor args proven equal to captured shape dims"
+    ),
+    "labels:show_redundant_args": "show_redundant_args=True opt-out (every captured arg)",
+    "channel:color_by": "color_by= fill encoding (field / scalar builtin / callable)",
+    "channel:size_by": "size_by= box-minimum encoding ('dims' / field / callable)",
+    "channel:size_scale": "scale='sqrt' (default) vs 'linear' size transform",
+    "channel:stack_by": "stack_by= rank columns (licensed auto + explicit annotation)",
 }
 
 # Axes that are deliberately NOT given a page, with the honest reason.
@@ -1718,7 +1726,7 @@ SECTIONS: list[Section] = [
                 title="node_label_fields: choosing the label rows",
                 caption=(
                     "node_label_fields replaces the default label rows with an explicit list. Supported "
-                    "fields: label/name, type/op, shape, memory/bytes, module, params, pass, flops, time.\n"
+                    "fields: label/name, type/op, shape, shape_summary (rolled across-pass summary, when set), memory/bytes, module, params, pass, flops, time.\n"
                     "CHECK: rows appear in the requested order and nothing else."
                 ),
                 panels=[
@@ -1734,6 +1742,31 @@ SECTIONS: list[Section] = [
                     ),
                 ],
                 covers=["node_label_fields"],
+            ),
+            Page(
+                label="f5b_checked_suppression",
+                title="Checked suppression: redundant constructor args (default-on)",
+                caption=(
+                    "Node labels omit a module constructor arg exactly when the CHECK licenses it: the "
+                    "arg value provably equals the captured shape dimension it duplicates on THIS trace "
+                    "(closed torch-family table; kernel_size/stride/padding/groups are never candidates). "
+                    "A mismatch or unavailable shape keeps the arg VISIBLE -- the rule reveals, never "
+                    "hides. show_redundant_args=True restores every captured arg.\n"
+                    "CHECK: left panel omits in_channels/out_channels/in_features/out_features; right "
+                    "panel shows them; kernel/stride/padding rows are identical in both."
+                ),
+                panels=[
+                    Panel(
+                        "default draw() -- proven-redundant args suppressed",
+                        "small_conv",
+                    ),
+                    Panel(
+                        "show_redundant_args=True -- every captured arg",
+                        "small_conv",
+                        kwargs={"show_redundant_args": True},
+                    ),
+                ],
+                covers=["labels:checked_suppression", "labels:show_redundant_args"],
             ),
             Page(
                 label="f6_code_panel",
@@ -2276,6 +2309,89 @@ SECTIONS: list[Section] = [
                     )
                 ],
                 covers=["surface:bundle_diff"],
+            ),
+        ],
+    ),
+    # =====================================================================
+    Section(
+        "M",
+        "Encoding Channels (L5, documented-unstable spellings)",
+        "Declarative value -> visual channel mappings on draw(): color_by "
+        "(fill), size_by + scale (box minimums), stack_by (rank columns). "
+        "All strictly opt-in, dot-layout-only, legend/caption-disclosed.",
+        [
+            Page(
+                label="m1_color_by",
+                title="color_by: sequential fill from a value source",
+                caption=(
+                    "color_by fills eligible op nodes from a colorblind-safe sequential ramp, "
+                    "normalized linear min-max over visible nodes. Sources: a record field, a scalar "
+                    "builtin (time/flops/bytes/magnitude/grad_norm), or a callable. The AUTO legend "
+                    "(show_legend=None) discloses the source, the transform, and min/mid/max swatches.\n"
+                    "CHECK: fills vary across nodes; the encoding legend block is present and names the "
+                    "source; unencoded nodes (missing values) keep their role fill."
+                ),
+                panels=[
+                    Panel(
+                        "color_by='time' -- per-op forward duration",
+                        "small_conv",
+                        kwargs={"color_by": "time"},
+                    ),
+                    Panel(
+                        "color_by='bytes' -- activation memory",
+                        "small_conv",
+                        kwargs={"color_by": "bytes"},
+                    ),
+                ],
+                covers=["channel:color_by"],
+            ),
+            Page(
+                label="m2_size_by",
+                title="size_by + scale: box minimums from a value source (D4 default mapping)",
+                caption=(
+                    "size_by sizes nodes by a scalar field, a callable, or the closed 'dims' shape "
+                    "token (numel of the non-batch output shape -- the conservative D4 default "
+                    "mapping, sqrt scale default). Emitted sizes are MINIMUMS under fixedsize=false: "
+                    "labels never truncate, fonts never scale, and encoded area is clamped to 4x the "
+                    "default node area. On text-heavy nodes the label's natural size dominates -- the "
+                    "motif reads on compact nodes (ellipses, small labels).\n"
+                    "CHECK: the legend states 'size ~ sqrt(dims)' (left) / 'linear(dims)' (right); "
+                    "larger-activation nodes are never SMALLER than smaller-activation ones."
+                ),
+                panels=[
+                    Panel(
+                        "size_by='dims' (scale='sqrt' default)",
+                        "small_conv",
+                        kwargs={"size_by": "dims"},
+                    ),
+                    Panel(
+                        "size_by='dims', scale='linear' (literal area motif)",
+                        "small_conv",
+                        kwargs={"size_by": "dims", "scale": "linear"},
+                    ),
+                ],
+                covers=["channel:size_by", "channel:size_scale"],
+            ),
+            Page(
+                label="m3_stack_by",
+                title="stack_by: rank columns from an annotation (the classic timestep diagram)",
+                caption=(
+                    "stack_by=True derives pass_index on multi-pass ops under the LOCKSTEP LICENSE "
+                    "(globally monotone execution windows -- non-monotone traces refuse "
+                    "stack_by_auto_underivable and an explicit field/callable bypasses). Nodes sharing "
+                    "an annotation value pin to one rank; with direction='leftright' the ranks read as "
+                    "timestep columns. The graph caption and legend disclose the annotation used.\n"
+                    "CHECK: each recurrent pass forms one column; the stem/head ops hang free (not "
+                    "pinned to column 1); the caption line 'stacked by: pass_index (auto)' is present."
+                ),
+                panels=[
+                    Panel(
+                        "stack_by=True, direction='leftright' -- RNN cell over 4 steps",
+                        "rnn_cell_seq",
+                        kwargs={"stack_by": True, "direction": "leftright"},
+                    ),
+                ],
+                covers=["channel:stack_by"],
             ),
         ],
     ),

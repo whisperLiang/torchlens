@@ -5,7 +5,20 @@ name, scalar node-overlay builtin, or callable ``node -> value``) compiled
 down to the existing NodeSpec chain as a fillcolor transform in the C3
 precedence slot (after the node-style preset and intervention styling, before
 the user ``node_spec_fn``), plus an auto-legend that disclosures the
-transform. Size (``size_by``) and rank (``stack_by``) channels are wave-1.
+transform.
+
+Wave 1 adds the SIZE channel (``size_by`` + ``scale=``): a scalar field,
+callable, or the closed ``"dims"`` shape token mapped to node width/height
+minimums (Graphviz ``fixedsize=false`` -- a label can never be truncated by
+an encoding, and the max clamp bounds encoded area at
+:data:`SIZE_BY_MAX_AREA_MULT` times the default node area). The shipped
+multi-dim -> geometry mapping is the D4 DEFAULT (memo 3.2 C2, AREA-ONLY:
+one scalar = numel of the non-batch shape, box area ~ value, default aspect
+preserved) with the default ``scale="sqrt"`` -- D4 was UNRULED at this
+merge, so the METAPLAN default applies and is marked as default-applied.
+Size REFUSES where color degrades on rolled multi-pass nodes
+(``size_by_rolled_varying``): an unencoded box is visually indistinguishable
+from an encoded small box, so size has no honest "n/a" rendering.
 
 Resolution is TWO-PHASE (design memo 2.3):
 
@@ -194,6 +207,14 @@ _NON_NUMERIC_FIELDS = frozenset(
         # Identity / naming strings.
         "layer_label",
         "layer_label_short",
+        # L1 grouping surface (site keys + across-pass shape summary): a
+        # percent-escaped position key, a live peer view, and a plain-data
+        # summary STRING ("2->4") — none is an encodable magnitude. The
+        # completeness pin went red the moment L1's merge added these; this
+        # row is the classification it demanded.
+        "site_key",
+        "site_peers",
+        "shape_summary",
         "layer_type",
         "label",
         "label_short",
@@ -372,6 +393,32 @@ NOTE_CALLABLE = "value from user callable"
 LIGHT_RAMP = ("#FFFFFF", "#0072B2")
 DARK_RAMP = ("#1F2937", "#56B4E9")
 
+# ---------------------------------------------------------------------------
+# SIZE channel constants (wave 1; D4 DEFAULT-APPLIED -- memo 3.1/3.2 C2).
+# ---------------------------------------------------------------------------
+
+#: Closed ``scale=`` vocabulary (slate 3.2). Log is REJECTED by design: it
+#: flattens 512-vs-4096 and defeats the size motif.
+SIZE_SCALE_VOCABULARY = ("sqrt", "linear")
+
+#: Max clamp in value space: encoded node area never exceeds this multiple of
+#: the default node area. PROVISIONAL value per the design memo (4.0), to be
+#: tuned once at the D4 rendered-candidates session; the min clamp is free
+#: (fixedsize=false -- the box only ever GROWS from the label's natural size).
+SIZE_BY_MAX_AREA_MULT = 4.0
+
+#: Graphviz's own default node geometry in inches (dot default width=0.75,
+#: height=0.5). Emitted sizes are MINIMUMS scaled from this baseline with the
+#: default aspect ratio preserved (D4 default mapping C2: area-only,
+#: conservative -- no per-rank axis rules that could mislead about which axis
+#: is which).
+DEFAULT_NODE_WIDTH_IN = 0.75
+DEFAULT_NODE_HEIGHT_IN = 0.5
+
+#: The one shape-valued builtin source token, legal for ``size_by`` only
+#: (memo 2.2): user callables must return scalars.
+SIZE_DIMS_TOKEN = "dims"
+
 
 def _hex_to_rgb(color: str) -> tuple[int, int, int]:
     """Parse ``#RRGGBB`` into an RGB tuple."""
@@ -439,9 +486,13 @@ class EncodingState:
 
     Created at request resolution, populated exactly once by the Phase-A
     prepass in ``build_render_ir``, and read by Phase B and the legend.
+    One state object carries every active channel for the draw: ``spec`` is
+    the color channel (``None`` when only size is active) and ``size_spec``
+    /``size_scale`` the size channel; the two compose freely (different
+    Graphviz attrs, memo 2.4).
     """
 
-    spec: EncodingChannelSpec
+    spec: EncodingChannelSpec | None = None
     dark_theme: bool = False
     populated: bool = False
     colors: dict[str, str] = field(default_factory=dict)
@@ -450,17 +501,61 @@ class EncodingState:
     notes: list[str] = field(default_factory=list)
     aggregation_lines: list[str] = field(default_factory=list)
     eligible_count: int = 0
+    # SIZE channel (wave 1). ``sizes`` maps node key -> (width_in, height_in)
+    # emitted as Graphviz minimums under fixedsize=false.
+    size_spec: EncodingChannelSpec | None = None
+    size_scale: str = "sqrt"
+    sizes: dict[str, tuple[float, float]] = field(default_factory=dict)
+    size_values: dict[str, float] = field(default_factory=dict)
+    size_domain: tuple[float, float] | None = None
+    size_notes: list[str] = field(default_factory=list)
+    size_aggregation_lines: list[str] = field(default_factory=list)
+    # STACK (rank) channel (wave 1). ``stack_groups`` holds
+    # (rank_key_repr, member node names) rows resolved at the prepass and
+    # emitted as rank=same subgraphs under newrank=true.
+    stack_spec: EncodingChannelSpec | None = None
+    stack_groups: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    stack_notes: list[str] = field(default_factory=list)
 
     def note(self, text: str) -> None:
-        """Record a legend note once."""
+        """Record a color-channel legend note once."""
 
         if text not in self.notes:
             self.notes.append(text)
+
+    def size_note(self, text: str) -> None:
+        """Record a size-channel legend note once."""
+
+        if text not in self.size_notes:
+            self.size_notes.append(text)
+
+    def stack_note(self, text: str) -> None:
+        """Record a stack-channel legend note once."""
+
+        if text not in self.stack_notes:
+            self.stack_notes.append(text)
 
     def fillcolor_for(self, node: Any) -> str | None:
         """Phase B: return the precomputed fill for ``node`` (None = unencoded)."""
 
         return self.colors.get(_node_key(node))
+
+    def size_for(self, node: Any) -> tuple[float, float] | None:
+        """Phase B: return the precomputed (width, height) for ``node``."""
+
+        return self.sizes.get(_node_key(node))
+
+    def active_channels(self) -> tuple[str, ...]:
+        """Return the active channel kwarg names for fence/refusal messages."""
+
+        channels: list[str] = []
+        if self.spec is not None:
+            channels.append("color_by")
+        if self.size_spec is not None:
+            channels.append("size_by")
+        if self.stack_spec is not None:
+            channels.append("stack_by")
+        return tuple(channels)
 
     @property
     def ramp(self) -> tuple[str, str]:
@@ -545,6 +640,118 @@ def resolve_color_by(color_by: Any) -> EncodingChannelSpec | None:
     )
 
 
+def resolve_size_by(size_by: Any) -> EncodingChannelSpec | None:
+    """Validate ``size_by`` at option validation, before any render work.
+
+    Parameters
+    ----------
+    size_by:
+        ``None``, a field-name string, the closed ``"dims"`` shape token, or
+        a callable ``node -> scalar``.
+
+    Returns
+    -------
+    EncodingChannelSpec | None
+        Resolved channel spec, or ``None`` when the channel is inactive.
+
+    Raises
+    ------
+    InvalidArgumentError
+        ``encoding_source_invalid`` for an unknown field name or a
+        non-string non-callable source.
+    """
+
+    if size_by is None:
+        return None
+    if callable(size_by) and not isinstance(size_by, str):
+        name = getattr(size_by, "__name__", type(size_by).__name__)
+        return EncodingChannelSpec(
+            channel="size",
+            source_kind="callable",
+            source=size_by,
+            display_name=f"callable {name}",
+        )
+    if isinstance(size_by, str):
+        normalized = size_by.strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized == SIZE_DIMS_TOKEN:
+            return EncodingChannelSpec(
+                channel="size",
+                source_kind="dims",
+                source=SIZE_DIMS_TOKEN,
+                display_name=SIZE_DIMS_TOKEN,
+            )
+        from ..constants import LAYER_PASS_LOG_FIELD_ORDER
+
+        if size_by in LAYER_SOURCE_ROWS or size_by in LAYER_PASS_LOG_FIELD_ORDER:
+            return EncodingChannelSpec(
+                channel="size",
+                source_kind="field",
+                source=size_by,
+                display_name=size_by,
+            )
+        raise _encoding_error(
+            f"size_by source {size_by!r} is not a known record field, the "
+            '"dims" builtin, or a callable',
+            code="encoding_source_invalid",
+            remedy=(
+                'pass a Layer/Op field name, "dims" for shape-driven sizing, '
+                "or a callable node -> scalar"
+            ),
+            argument="size_by",
+        )
+    raise _encoding_error(
+        f'size_by must be a field-name string, "dims", or callable; '
+        f"received {type(size_by).__name__}",
+        code="encoding_source_invalid",
+        remedy='pass a string source name, "dims", or a callable node -> scalar',
+        argument="size_by",
+    )
+
+
+def resolve_size_scale(scale: Any, *, size_by_active: bool) -> str:
+    """Validate ``scale=`` at option validation (closed vocabulary).
+
+    Parameters
+    ----------
+    scale:
+        ``None`` (default -> ``"sqrt"``), ``"sqrt"``, or ``"linear"``.
+    size_by_active:
+        Whether a ``size_by`` source was supplied.
+
+    Returns
+    -------
+    str
+        The effective scale.
+
+    Raises
+    ------
+    InvalidArgumentError
+        ``scale_requires_size_by`` when ``scale`` is supplied without
+        ``size_by``; ``encoding_scale_invalid`` for an unknown scale token.
+    """
+
+    if scale is None:
+        return "sqrt"
+    if not size_by_active:
+        raise _encoding_error(
+            "scale= was supplied without size_by; the scale transform applies "
+            "to the size channel only",
+            code="scale_requires_size_by",
+            remedy="pass size_by= alongside scale=, or drop scale=",
+            argument="scale",
+        )
+    if scale not in SIZE_SCALE_VOCABULARY:
+        raise _encoding_error(
+            f"scale must be one of {SIZE_SCALE_VOCABULARY}; received {scale!r} "
+            "(log is rejected by design: it flattens 512-vs-4096 and defeats "
+            "the size motif)",
+            code="encoding_scale_invalid",
+            remedy="pass scale='sqrt' (default) or scale='linear'",
+            argument="scale",
+        )
+    return str(scale)
+
+
 def _node_key(node: Any) -> str:
     """Stable per-draw key for a rendered record.
 
@@ -600,48 +807,87 @@ def is_record_derived_image_node(trace: Trace, node: Any) -> bool:
     return bool(getattr(node, "is_input", False)) and getattr(trace, "raw_input", None) is not None
 
 
-def _coerce_scalar(state: EncodingState, node: Any, value: Any) -> float | None:
-    """Apply the closed value/type rules (memo 2.2) to one resolved value."""
+def _coerce_scalar(
+    state: EncodingState,
+    node: Any,
+    value: Any,
+    *,
+    argument: str = "color_by",
+    display_name: str | None = None,
+    note: Any = None,
+) -> float | None:
+    """Apply the closed value/type rules (memo 2.2) to one resolved value.
 
+    ``argument``/``display_name``/``note`` select the owning channel so both
+    color and size share ONE closed failure table.
+    """
+
+    record_note = note if note is not None else state.note
+    if display_name is None:
+        display_name = state.spec.display_name if state.spec is not None else argument
     if value is None:
-        state.note(NOTE_NA_UNENCODED)
+        record_note(NOTE_NA_UNENCODED)
         return None
     if isinstance(value, bool):
         raise _encoding_error(
-            f"color_by source {state.spec.display_name!r} produced a bool on node "
+            f"{argument} source {display_name!r} produced a bool on node "
             f"{_node_key(node)!r}; a truth value is not an encodable magnitude",
             code="encoding_value_invalid",
             remedy="encode a numeric field, or map the bool to a number in a callable",
-            argument="color_by",
+            argument=argument,
         )
     if isinstance(value, (int, float)):
         as_float = float(value)
         if not math.isfinite(as_float):
-            state.note(NOTE_NA_UNENCODED)
+            record_note(NOTE_NA_UNENCODED)
             return None
         return as_float
+    if argument == "size_by" and _is_shape_valued(value):
+        raise _encoding_error(
+            f"size_by source {display_name!r} produced a shape "
+            f'({type(value).__name__}) on node {_node_key(node)!r}; "dims" is '
+            "the only shape-valued size source",
+            code="encoding_value_invalid",
+            remedy='pass size_by="dims" for shape-driven sizing, or return a scalar',
+            argument=argument,
+        )
     numel = getattr(value, "numel", None)
     item = getattr(value, "item", None)
     if callable(numel) and callable(item):
         if numel() == 1:
             # Documented: float(x.item()) forces a device sync the user
             # opted into by passing a tensor-returning source.
-            return _coerce_scalar(state, node, item())
+            return _coerce_scalar(
+                state,
+                node,
+                item(),
+                argument=argument,
+                display_name=display_name,
+                note=record_note,
+            )
         raise _encoding_error(
-            f"color_by source {state.spec.display_name!r} produced a non-scalar "
+            f"{argument} source {display_name!r} produced a non-scalar "
             f"tensor on node {_node_key(node)!r}",
             code="encoding_value_invalid",
             remedy="reduce the tensor to one element (e.g. .mean()) in the callable",
-            argument="color_by",
+            argument=argument,
         )
     raise _encoding_error(
-        f"color_by source {state.spec.display_name!r} produced "
-        f"{type(value).__name__!r} on node {_node_key(node)!r}; the color channel "
-        "accepts python ints/floats and 1-element tensors",
+        f"{argument} source {display_name!r} produced "
+        f"{type(value).__name__!r} on node {_node_key(node)!r}; encoding channels "
+        "accept python ints/floats and 1-element tensors",
         code="encoding_value_invalid",
         remedy="pick a numeric source or convert the value in a callable",
-        argument="color_by",
+        argument=argument,
     )
+
+
+def _is_shape_valued(value: Any) -> bool:
+    """Return whether ``value`` is a shape (tuple/list/torch.Size of ints)."""
+
+    if not isinstance(value, (tuple, list)):
+        return False
+    return all(isinstance(entry, int) and not isinstance(entry, bool) for entry in value)
 
 
 def _varying_marker(node: Any) -> dict[str, Any]:
@@ -777,9 +1023,10 @@ def _resolve_field_on_rolled(state: EncodingState, node: Any, field_name: str) -
 
 
 def _resolve_source_value(state: EncodingState, trace: Trace, node: Any) -> float | None:
-    """Resolve one node's raw channel value (Phase A, exactly once per node)."""
+    """Resolve one node's raw color value (Phase A, exactly once per node)."""
 
     spec = state.spec
+    assert spec is not None
     if spec.source_kind == "callable":
         try:
             value = spec.source(node)
@@ -822,6 +1069,265 @@ def _resolve_source_value(state: EncodingState, trace: Trace, node: Any) -> floa
     return _coerce_scalar(state, node, value)
 
 
+# ---------------------------------------------------------------------------
+# SIZE channel resolution (wave 1). THE D4 DETECTOR (memo 3.1): the refusal
+# predicate is LAYER-RECORD truth -- a rolled multi-pass Layer refuses
+# size_by when the size source cannot be certified single-valued on it
+# (marker-varying reconciled fields, mirrored/unreconciled per-call
+# projections). Verdicts key on the source's DECLARED 2.3b row, never on
+# string-prefix accident. Callables bypass the table (the user asserts their
+# own aggregate semantics; disclosed in the legend).
+# ---------------------------------------------------------------------------
+
+
+def _size_rolled_refusal(node: Any, field_name: str, why: str) -> InvalidArgumentError:
+    """Build the typed rolled-varying size refusal (widened semantics)."""
+
+    detail = ""
+    shape_summary = getattr(node, "shape_summary", None)
+    if isinstance(shape_summary, str) and shape_summary:
+        detail = f" (shapes across passes: {shape_summary})"
+    return _encoding_error(
+        f"size_by source {field_name!r} cannot be certified single-valued on "
+        f"rolled multi-pass node {_node_key(node)!r}: {why}{detail}",
+        code="size_by_rolled_varying",
+        remedy=(
+            "unroll the graph (vis_mode='unrolled') to size each pass by its "
+            "own value, choose a cross-pass total (total_*), or pass a "
+            "callable asserting your own aggregate semantics"
+        ),
+        argument="size_by",
+    )
+
+
+def _resolve_size_field_on_rolled(state: EncodingState, node: Any, field_name: str) -> float | None:
+    """Resolve a FIELD size source on a rolled multi-pass Layer.
+
+    Size REFUSES where color degrades: every verdict below that unencodes for
+    color is a typed ``size_by_rolled_varying`` refusal here (memo 3.1).
+    """
+
+    spec = state.size_spec
+    assert spec is not None
+    row = LAYER_SOURCE_ROWS.get(field_name)
+    if row is None:
+        raise _encoding_error(
+            f"size_by source {field_name!r} has no declared rolled-aggregate "
+            f"semantics row and cannot resolve on rolled multi-pass node "
+            f"{_node_key(node)!r}",
+            code="encoding_source_invalid",
+            remedy=(
+                "unroll the graph (vis_mode='unrolled'), use a callable that "
+                "asserts its own aggregate semantics, or classify the field in "
+                "the rolled-aggregate allowlist"
+            ),
+            argument="size_by",
+        )
+    coerce = _size_coerce(state)
+    marker = _varying_marker(node)
+    if row == ROW_RECONCILED:
+        if field_name in marker:
+            raise _size_rolled_refusal(
+                node, field_name, "the stored aggregate is a per-pass maximum (upper bound)"
+            )
+        return coerce(node, getattr(node, field_name, None))
+    if row == ROW_SUMMED:
+        value = coerce(node, getattr(node, field_name, None))
+        if value is not None:
+            wording = _AGGREGATE_LEGEND_WORDING.get(field_name, "total across passes")
+            line = f"{field_name}: {wording} on rolled nodes"
+            if line not in state.size_aggregation_lines:
+                state.size_aggregation_lines.append(line)
+        return value
+    if row == ROW_MIRRORED_PER_CALL:
+        raise _size_rolled_refusal(
+            node, field_name, "the stored value is an unreconciled first-pass projection"
+        )
+    if row == ROW_DERIVED:
+        for input_name in _DERIVED_COMPOSITE_INPUTS[field_name]:
+            if LAYER_SOURCE_ROWS.get(input_name) == ROW_MIRRORED_PER_CALL:
+                raise _size_rolled_refusal(
+                    node,
+                    field_name,
+                    f"input {input_name!r} is an unreconciled first-pass projection",
+                )
+            if input_name in marker:
+                raise _size_rolled_refusal(node, field_name, f"input {input_name!r} varies")
+        return coerce(node, getattr(node, field_name, None))
+    if row == ROW_STRUCTURAL:
+        op_field = _mirror_backed_op_field(field_name)
+        if op_field is not None:
+            per_pass = [getattr(node.ops.get(index), op_field, None) for index in sorted(node.ops)]
+            if len({repr(value) for value in per_pass}) > 1:
+                raise _size_rolled_refusal(
+                    node, field_name, "per-pass values disagree (defensive check)"
+                )
+        return coerce(node, getattr(node, field_name, None))
+    if row == ROW_PER_PASS:
+        raise _size_rolled_refusal(
+            node, field_name, "the field is per-pass with no aggregate meaning"
+        )
+    # ROW_SHAPE / ROW_NON_NUMERIC: read and let the wrong-type rule speak
+    # (a shape field names its own remedy: size_by="dims").
+    from ..utils._multipass_access import get_multipass_attr
+
+    return coerce(node, get_multipass_attr(node, field_name, None, multipass=None))
+
+
+def _size_coerce(state: EncodingState) -> Any:
+    """Return a size-channel scalar coercion closure."""
+
+    spec = state.size_spec
+    assert spec is not None
+
+    def coerce(node: Any, value: Any) -> float | None:
+        """Coerce one node's ``size_by`` value to a float, or None if unusable."""
+        return _coerce_scalar(
+            state,
+            node,
+            value,
+            argument="size_by",
+            display_name=spec.display_name,
+            note=state.size_note,
+        )
+
+    return coerce
+
+
+def _resolve_node_shape(state: EncodingState, node: Any) -> tuple[int, ...] | None:
+    """Resolve the ``"dims"`` shape for one node (typed shape path, memo 2.2).
+
+    ORDERING PIN: on a rolled multi-pass node the 3.1 refusal fires BEFORE
+    resolution, so the string-bearing honest aggregates minted for varying
+    rolled layers ("3..4" range tokens, ``("varies",)``) are unreachable by
+    construction; a non-int entry reaching resolution anyway is a defensive
+    ``encoding_value_invalid``.
+    """
+
+    if _is_rolled_multipass(node):
+        if "shape" in _varying_marker(node):
+            raise _size_rolled_refusal(node, "shape", "the output shape varies across passes")
+        shape = getattr(node, "shape", None)
+    else:
+        from ..utils._multipass_access import get_multipass_attr
+
+        shape = get_multipass_attr(node, "shape", None, multipass=None)
+    if shape is None:
+        state.size_note(NOTE_NA_UNENCODED)
+        return None
+    entries = tuple(shape)
+    for entry in entries:
+        if isinstance(entry, bool) or not isinstance(entry, int):
+            raise _encoding_error(
+                f'size_by="dims" resolved a non-integer shape entry {entry!r} on '
+                f"node {_node_key(node)!r}",
+                code="encoding_value_invalid",
+                remedy="unroll the graph for per-pass shapes",
+                argument="size_by",
+            )
+    return entries
+
+
+def _non_batch_numel(shape: tuple[int, ...]) -> float:
+    """D4 default mapping C2: numel of the non-batch shape (batch = dim 0).
+
+    Rank <= 1 resolves to 1 (default box) -- conservative: a rank-1 dim may
+    or may not be a batch axis, and C2 never misleads about which axis is
+    which.
+    """
+
+    if len(shape) <= 1:
+        return 1.0
+    numel = 1.0
+    for dim in shape[1:]:
+        numel *= max(1, dim)
+    return numel
+
+
+def _resolve_size_source_value(state: EncodingState, trace: Trace, node: Any) -> float | None:
+    """Resolve one node's raw size value (Phase A, exactly once per node)."""
+
+    spec = state.size_spec
+    assert spec is not None
+    if spec.source_kind == "callable":
+        try:
+            value = spec.source(node)
+        except Exception as error:
+            raise _encoding_error(
+                f"size_by callable {spec.display_name!r} raised on node "
+                f"{_node_key(node)!r}: {error}",
+                code="encoding_callable_error",
+                remedy=(
+                    "fix the callable; per-pass reads off rolled aggregates trip "
+                    "the multipass tripwire -- read Layer.ops for per-pass truth"
+                ),
+                argument="size_by",
+            ) from error
+        state.size_note(NOTE_CALLABLE)
+        return _size_coerce(state)(node, value)
+
+    if spec.source_kind == "dims":
+        shape = _resolve_node_shape(state, node)
+        if shape is None:
+            return None
+        return _non_batch_numel(shape)
+
+    field_name = spec.source
+    if _is_rolled_multipass(node):
+        return _resolve_size_field_on_rolled(state, node, field_name)
+    from ..utils._multipass_access import get_multipass_attr
+
+    value = get_multipass_attr(node, field_name, None, multipass=None)
+    if value is None:
+        state.size_note(NOTE_NA_UNENCODED)
+        return None
+    return _size_coerce(state)(node, value)
+
+
+def _compute_size_geometry(state: EncodingState) -> None:
+    """Map collected size values to (width, height) minimums (D4 default C2).
+
+    ``scale="sqrt"`` (default) compresses the dynamic range; ``"linear"``
+    keeps area ~ value for the literal motif. Normalization is min-max over
+    the transformed finite values of visible nodes; the encoded area spans
+    [1x .. SIZE_BY_MAX_AREA_MULT x] the default node area with the default
+    aspect ratio preserved. Fonts NEVER scale.
+    """
+
+    if not state.size_values:
+        state.size_note(NOTE_NA_UNENCODED)
+        return
+    if state.size_scale == "sqrt":
+        for key, value in state.size_values.items():
+            if value < 0:
+                raise _encoding_error(
+                    f"size_by produced a negative value ({value}) on node {key!r}; "
+                    "scale='sqrt' requires non-negative magnitudes",
+                    code="encoding_value_invalid",
+                    remedy="use scale='linear' or map values to magnitudes in a callable",
+                    argument="size_by",
+                )
+        transformed = {key: math.sqrt(value) for key, value in state.size_values.items()}
+    else:
+        transformed = dict(state.size_values)
+    low = min(transformed.values())
+    high = max(transformed.values())
+    state.size_domain = (min(state.size_values.values()), max(state.size_values.values()))
+    default_area = DEFAULT_NODE_WIDTH_IN * DEFAULT_NODE_HEIGHT_IN
+    aspect = DEFAULT_NODE_WIDTH_IN / DEFAULT_NODE_HEIGHT_IN
+    if low == high:
+        state.size_note(NOTE_CONSTANT)
+        fractions = dict.fromkeys(transformed, 0.5)
+    else:
+        span = high - low
+        fractions = {key: (value - low) / span for key, value in transformed.items()}
+    for key, fraction in fractions.items():
+        area = default_area * (1.0 + fraction * (SIZE_BY_MAX_AREA_MULT - 1.0))
+        width = math.sqrt(area * aspect)
+        height = math.sqrt(area / aspect)
+        state.sizes[key] = (round(width, 3), round(height, 3))
+
+
 def populate_encoding_state(state: EncodingState, trace: Trace, universe: Any) -> None:
     """PHASE A: collect values over the visible-node universe and normalize.
 
@@ -843,11 +1349,25 @@ def populate_encoding_state(state: EncodingState, trace: Trace, universe: Any) -
         if is_record_derived_image_node(trace, node):
             continue
         state.eligible_count += 1
-        value = _resolve_source_value(state, trace, node)
-        if value is None:
-            continue
-        raw_values[_node_key(node)] = value
+        if state.spec is not None:
+            value = _resolve_source_value(state, trace, node)
+            if value is not None:
+                raw_values[_node_key(node)] = value
+        if state.size_spec is not None:
+            size_value = _resolve_size_source_value(state, trace, node)
+            if size_value is not None:
+                state.size_values[_node_key(node)] = size_value
 
+    if state.size_spec is not None:
+        _compute_size_geometry(state)
+
+    if state.stack_spec is not None:
+        from ._stacking import compute_stack_groups
+
+        compute_stack_groups(state, trace, universe)
+
+    if state.spec is None:
+        return
     if not raw_values:
         state.note(NOTE_NA_UNENCODED)
         return
@@ -870,7 +1390,7 @@ def populate_encoding_state(state: EncodingState, trace: Trace, universe: Any) -
 def _format_domain_value(state: EncodingState, value: float) -> str:
     """Format a domain endpoint for the legend (builtin-aware)."""
 
-    if state.spec.source_kind == "builtin":
+    if state.spec is not None and state.spec.source_kind == "builtin":
         from .overlays import format_overlay_value
 
         formatted = format_overlay_value(state.spec.source, value)
@@ -905,31 +1425,66 @@ def add_channel_legend_to_graphviz(
         )
         start, end = state.ramp
         rows: list[NodeSpec] = []
-        title_lines = [f"color_by: {state.spec.display_name}", "linear min-max"]
-        for line in state.aggregation_lines:
-            title_lines.append(line)
-        for note in state.notes:
-            title_lines.append(note)
-        rows.append(NodeSpec(lines=title_lines, shape="box", style="filled,rounded"))
-        if state.domain is not None:
-            low, high = state.domain
-            mid = (low + high) / 2.0
-            for tag, fraction, value in (
-                ("min", 0.0, low),
-                ("mid", 0.5, mid),
-                ("max", 1.0, high),
-            ):
-                rows.append(
-                    NodeSpec(
-                        lines=[f"{tag}: {_format_domain_value(state, value)}"],
-                        shape="box",
-                        fillcolor=interpolate_hex(start, end, fraction),
+        if state.spec is not None:
+            title_lines = [f"color_by: {state.spec.display_name}", "linear min-max"]
+            for line in state.aggregation_lines:
+                title_lines.append(line)
+            for note in state.notes:
+                title_lines.append(note)
+            rows.append(NodeSpec(lines=title_lines, shape="box", style="filled,rounded"))
+            if state.domain is not None:
+                low, high = state.domain
+                mid = (low + high) / 2.0
+                for tag, fraction, value in (
+                    ("min", 0.0, low),
+                    ("mid", 0.5, mid),
+                    ("max", 1.0, high),
+                ):
+                    rows.append(
+                        NodeSpec(
+                            lines=[f"{tag}: {_format_domain_value(state, value)}"],
+                            shape="box",
+                            fillcolor=interpolate_hex(start, end, fraction),
+                        )
                     )
+        if state.size_spec is not None:
+            # Disclosure contract: every legend drawn states the size scale
+            # transform and clamps (D4 wording: "size ~ sqrt(dims), clamped").
+            size_lines = [
+                f"size_by: {state.size_spec.display_name}",
+                f"size ~ {state.size_scale}({state.size_spec.display_name}), min-max, clamped",
+            ]
+            for line in state.size_aggregation_lines:
+                size_lines.append(line)
+            for note in state.size_notes:
+                size_lines.append(note)
+            if state.size_domain is not None:
+                low, high = state.size_domain
+                size_lines.append(
+                    f"min {_format_size_domain_value(low)} .. max {_format_size_domain_value(high)}"
                 )
+            rows.append(NodeSpec(lines=size_lines, shape="box", style="filled,rounded"))
+        if state.stack_spec is not None:
+            # Rank rule (memo 2.3): the legend names the annotation used.
+            stack_lines = [
+                f"stack_by: {state.stack_spec.display_name}",
+                "same rank = same annotation value",
+            ]
+            for note in state.stack_notes:
+                stack_lines.append(note)
+            rows.append(NodeSpec(lines=stack_lines, shape="box", style="filled,rounded"))
         for index, spec in enumerate(rows):
             node_args = _node_spec_to_graphviz_args(apply_theme_to_spec(spec, theme))
             node_args["name"] = f"tl_encoding_legend_{index}"
             legend.node(**node_args)
+
+
+def _format_size_domain_value(value: float) -> str:
+    """Format a size-domain endpoint for the legend."""
+
+    if value == int(value) and abs(value) < 1e15:
+        return str(int(value))
+    return f"{value:.4g}"
 
 
 #: Notice emitted when an active channel forces the dot engine where AUTO
@@ -944,18 +1499,37 @@ ENCODING_FORCES_DOT_NOTICE = (
 )
 
 
-def attach_encoding_state(request: Any, channel_spec: EncodingChannelSpec, theme: Any) -> Any:
+def attach_encoding_state(
+    request: Any,
+    theme: Any,
+    *,
+    color_spec: EncodingChannelSpec | None = None,
+    size_spec: EncodingChannelSpec | None = None,
+    size_scale: str = "sqrt",
+    stack_spec: EncodingChannelSpec | None = None,
+) -> Any:
     """Return ``request`` with a fresh per-draw :class:`EncodingState` attached."""
 
     from dataclasses import replace
 
     return replace(
         request,
-        encoding=EncodingState(spec=channel_spec, dark_theme=theme.name == "dark"),
+        encoding=EncodingState(
+            spec=color_spec,
+            dark_theme=theme.name == "dark",
+            size_spec=size_spec,
+            size_scale=size_scale,
+            stack_spec=stack_spec,
+        ),
     )
 
 
-def resolve_encoding_engine(requested_engine: str, resolved_engine: str, layout_cost: int) -> str:
+def resolve_encoding_engine(
+    requested_engine: str,
+    resolved_engine: str,
+    layout_cost: int,
+    channels: tuple[str, ...] = ("color_by",),
+) -> str:
     """Apply the engine-resolution fence for an ACTIVE channel (memo 2.1).
 
     v1 encoding channels are dot-layout-only. EXPLICIT ``layout="rank"``
@@ -964,12 +1538,13 @@ def resolve_encoding_engine(requested_engine: str, resolved_engine: str, layout_
     a notice when the force overrides what AUTO would have chosen by cost.
     """
 
+    channel_names = ", ".join(channels) if channels else "color_by"
     if requested_engine == "rank":
         raise _encoding_error(
-            "encoding channels (color_by) require the Graphviz dot layout; "
-            "explicit layout='rank' cannot render them",
+            f"encoding channels ({channel_names}) require the Graphviz dot "
+            "layout; explicit layout='rank' cannot render them",
             code="encoding_requires_dot_layout",
-            remedy="pass layout='dot' or layout='auto', or drop color_by",
+            remedy=f"pass layout='dot' or layout='auto', or drop {channel_names}",
             argument="layout",
         )
     if resolved_engine == "rank":
@@ -980,7 +1555,7 @@ def resolve_encoding_engine(requested_engine: str, resolved_engine: str, layout_
 
         warnings.warn(
             ENCODING_FORCES_DOT_NOTICE.format(
-                channel="color_by",
+                channel=channel_names,
                 cost=layout_cost,
                 threshold=_rank_layout.RANK_LAYOUT_COST_THRESHOLD,
             ),
@@ -994,23 +1569,30 @@ def channel_wrapped_node_spec_fn(
     node: Any,
     node_spec_fn: Any,
 ) -> Any:
-    """Wrap ``node_spec_fn`` with the channel's per-node fill transform.
+    """Wrap ``node_spec_fn`` with the channels' per-node spec transforms.
 
-    PHASE B application site: the precomputed fill applies in the C3 slot
-    (after the node-style preset, before the user callback, which still sees
-    and may override it). Keyed on the rendered node itself: unrolled
-    per-pass Op nodes encode their OWN pass value even though the user
-    callback receives the aggregate Layer.
+    PHASE B application site: the precomputed fill and size minimums apply
+    in the C3 slot (after the node-style preset, before the user callback,
+    which still sees and may override them). Keyed on the rendered node
+    itself: unrolled per-pass Op nodes encode their OWN pass value even
+    though the user callback receives the aggregate Layer.
     """
 
     channel_fill = encoding.fillcolor_for(node)
-    if channel_fill is None:
+    channel_size = encoding.size_for(node)
+    if channel_fill is None and channel_size is None:
         return node_spec_fn
 
     def channel_then_user(layer_log: Any, spec: Any) -> Any:
-        """Apply the channel fill, then let the user callback override it."""
+        """Apply the channel fill/size, then let the user callback override them."""
 
-        spec = spec.replace(fillcolor=channel_fill)
+        if channel_fill is not None:
+            spec = spec.replace(fillcolor=channel_fill)
+        if channel_size is not None:
+            # Minimums only: fixedsize=false means the box can only GROW
+            # from the label's natural size (a label can never be truncated
+            # by an encoding; fonts never scale).
+            spec = spec.replace(width=channel_size[0], height=channel_size[1], fixedsize="false")
         if node_spec_fn is None:
             return spec
         result = node_spec_fn(layer_log, spec)
@@ -1019,17 +1601,18 @@ def channel_wrapped_node_spec_fn(
     return channel_then_user
 
 
-def raise_encoding_dagua_refusal() -> None:
+def raise_encoding_dagua_refusal(channels: tuple[str, ...] = ("color_by",)) -> None:
     """Refuse an active channel on the dagua renderer (never a silent drop).
 
     An active channel silently dropped by the alternate label path would be
     a dishonest no-op; channels are Graphviz-dot-only in v1.
     """
 
+    channel_names = ", ".join(channels) if channels else "color_by"
     raise _encoding_error(
-        "encoding channels (color_by) are not supported by the dagua renderer",
+        f"encoding channels ({channel_names}) are not supported by the dagua renderer",
         code="encoding_requires_dot_layout",
-        remedy="use the graphviz renderer, or drop color_by",
+        remedy=f"use the graphviz renderer, or drop {channel_names}",
         argument="vis_renderer",
     )
 

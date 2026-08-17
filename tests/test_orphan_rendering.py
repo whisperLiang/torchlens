@@ -119,3 +119,31 @@ def test_orphans_do_not_mask_num_ops_self_consistency_failure(show_orphans: bool
 
     with pytest.raises(MetadataInvariantError, match="trace_self_consistency"):
         check_metadata_invariants(trace)
+
+
+def test_sf63_orphan_label_display_never_leaks_the_placeholder() -> None:
+    """SF-63 render-verification row (L5 wave 1; memo sec 7 split).
+
+    TODAY'S CONTRACT (pre-fix): postprocess step 3 copies ``op.label`` into
+    ``orphan_records`` BEFORE the step-8 label writer runs, so every
+    persisted orphan record carries the ``None`` placeholder in its public
+    ``label`` field. The RENDER path resolves real labels from the orphan
+    accessor through the S5 choke point, and the placeholder must never
+    surface in DOT output. Both facts are pinned here so the wave-3 flip
+    (L1's data half writes ``_label_raw``; blocked on the S3 value-gate
+    escalation) has a ready-made render acceptance row: after the flip the
+    record-side assertion inverts while the display-side assertions below
+    hold unchanged.
+    """
+
+    trace = _orphan_trace()
+    # Pre-fix record truth: the persisted field still ships the placeholder.
+    assert all(record.get("label") is None for record in trace.orphan_records)
+    # Display truth: real labels render inside the island cluster...
+    dot = trace.draw(show_orphans=True, vis_save_only=True, return_graph=True)
+    source = dot.source if hasattr(dot, "source") else str(dot)
+    for orphan_label in ("randn_1_1", "mul_1_2"):
+        assert orphan_label in source
+    # ...and the placeholder never leaks into a rendered label row.
+    assert ">None<" not in source
+    assert "<B>None</B>" not in source

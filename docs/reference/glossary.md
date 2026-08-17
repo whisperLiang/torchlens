@@ -218,6 +218,46 @@ alignment is evidence, not semantic equivalence.
   (`encoding_source_invalid`). Wrong-typed values refuse (`encoding_value_invalid`); a raising
   callable refuses with the original exception chained (`encoding_callable_error`).
 
+**size_by** *(unstable — no deprecation shim owed; keyword-only)*
+: `draw(size_by=...)` sizes eligible operation nodes from a scalar field, the closed `"dims"`
+  shape token (numel of the non-batch output shape — the D4 default mapping, applied because D4
+  is unruled), or a callable `node -> scalar`. Emitted sizes are width/height MINIMUMS under
+  `fixedsize=false`: a label can never be truncated by an encoding and fonts never scale; the
+  encoded area is clamped to 4x the default node area. Strictly opt-in — plain `draw()` keeps
+  uniform boxes. On rolled multi-pass layers size REFUSES where color degrades
+  (`size_by_rolled_varying`): a size source that cannot be certified single-valued
+  (marker-varying, first-pass projection, varying shape under `"dims"`) has no honest "n/a"
+  rendering. Exact cross-pass totals (`total_*`) encode with a mandatory aggregation legend line;
+  callables bypass the rolled table with a legend disclosure.
+
+**scale (size channel)** *(unstable — no deprecation shim owed; keyword-only)*
+: The size-channel scale transform: `"sqrt"` (default; compresses dynamic range) or `"linear"`
+  (the literal area motif). Log is rejected by design (flattens 512-vs-4096). Supplied without
+  `size_by` it refuses (`scale_requires_size_by`); an unknown token refuses
+  (`encoding_scale_invalid`). Every legend drawn states the active scale.
+
+**stack_by** *(unstable — no deprecation shim owed; keyword-only)*
+: `draw(stack_by=...)` pins nodes sharing an annotation value to one Graphviz rank (the classic
+  unrolled-RNN timestep diagram; strictly opt-in). `True`/`"auto"` derives the annotation
+  (`pass_index` on multi-pass ops only) under the LOCKSTEP LICENSE: granted iff the pass_index
+  sequence over all multi-pass ops in raw execution order is globally non-decreasing — then
+  "same column = same execution window" is exactly what the figure claims. Non-monotone traces
+  refuse (`stack_by_auto_underivable`); an explicit field/callable bypasses the license with the
+  caption disclosing what was used; rolled graphs refuse (`stack_by_requires_unrolled`).
+  Rank groups ride `RenderIR.stack_rank_groups` and emit as `rank=same` subgraphs under
+  `newrank=true`; the sibling-ordering post-pass no-ops while stacking is active.
+
+**show_redundant_args** *(unstable — no deprecation shim owed; keyword-only)*
+: Checked suppression of redundant constructor-arg label rows is DEFAULT-ON: `draw()` omits a
+  module constructor arg exactly when the check licenses it — the arg value provably equals the
+  captured shape dimension it claims to duplicate on THIS trace (a closed torch nn module-family
+  candidate table; kernel_size/stride/padding/groups/num_embeddings/num_heads are never
+  candidates). A mismatch or unavailable shape keeps the arg VISIBLE — the rule can only reveal
+  more, never hide a discrepancy. Rolled varying aggregates keep args visible while their
+  unrolled per-pass nodes suppress (deliberate divergence); detached records render all args.
+  `draw(show_redundant_args=True)` shows every captured arg. Reference:
+  `docs/reference/encoding.md`.
+
 **show_legend tri-state**
 : `show_legend` accepts `None` (default, AUTO: no legend unless an encoding channel is active,
   then a channel-only disclosure legend), `True` (full theme legend, plus channel rows when
@@ -628,6 +668,26 @@ shim owed*
 : The v1 encoding-channel value source on `Trace.draw` (L5 channel core). See
   the "color_by" entry above for semantics.
 
+**size_by / scale (draw kwargs)** — *unstable — no deprecation shim owed; keyword-only*
+: The wave-1 size encoding channel on `Trace.draw` (D4 default-applied: sqrt +
+  conservative area-only mapping + typed refusal on rolled varying sources).
+  See the "size_by" and "scale (size channel)" entries above for semantics.
+
+**stack_by (draw kwarg)** — *unstable — no deprecation shim owed; keyword-only*
+: The wave-1 rank encoding channel on `Trace.draw` (stacking split (a):
+  explicit + licensed auto on plain traces). The `True`/`"auto"` request form
+  is itself an unstable spelling. See the "stack_by" entry above.
+
+**show_redundant_args (draw kwarg)** — *unstable — no deprecation shim owed; keyword-only*
+: Opt-out for the default-on checked suppression of redundant constructor-arg
+  label rows (slate 8.7). See the "show_redundant_args" entry above.
+
+**"shape_summary" node_label_fields token** — *unstable — no deprecation shim owed*
+: Selector token rendering `Layer.shape_summary` (the L1 across-pass shape
+  summary) as a label row; skipped when the field is unset. The default label
+  renders the summary automatically on rolled varying multi-pass nodes,
+  directly after the title row.
+
 **show_legend=None AUTO value** — *unstable — no deprecation shim owed*
 : The tri-state AUTO value on the stable `show_legend` kwarg: no legend unless
   an encoding channel is active, then a channel-only disclosure legend.
@@ -635,7 +695,9 @@ shim owed*
 
 **Encoding refusal codes** — *unstable — no deprecation shim owed*
 : `encoding_source_invalid`, `encoding_value_invalid`,
-  `encoding_callable_error`, `encoding_requires_dot_layout`.
+  `encoding_callable_error`, `encoding_requires_dot_layout`,
+  `size_by_rolled_varying`, `scale_requires_size_by`, `encoding_scale_invalid`,
+  `stack_by_auto_underivable`, `stack_by_requires_unrolled`.
 
 **trace.grad_fn_fire_timings** — *unstable — no deprecation shim owed*
 : Live-trace-only per-fire backward timing spans, keyed like

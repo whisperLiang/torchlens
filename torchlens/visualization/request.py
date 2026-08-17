@@ -106,12 +106,20 @@ class ResolvedRenderRequest:
     # even with channels active (a deliberate act).
     show_legend: bool | None = None
     # Encoding channel core (L5, DOCUMENTED-UNSTABLE until ratified):
-    # ``color_by`` is the raw user source; ``encoding`` carries the resolved
-    # per-draw EncodingState. Presentation-only: NEITHER joins __hash__ (the
+    # ``color_by``/``size_by``/``scale`` are the raw user sources;
+    # ``encoding`` carries the resolved per-draw EncodingState (all active
+    # channels). Presentation-only: NONE joins __hash__ (the
     # collapse-planning subset is unchanged -- channels must never affect the
     # collapse plan).
     color_by: Any = None
+    size_by: Any = None
+    scale: Any = None
+    stack_by: Any = None
     encoding: Any = None
+    # Checked suppression (L5 M4, DOCUMENTED-UNSTABLE spelling): True shows
+    # every constructor arg; False (default) suppresses args the equality
+    # check proves redundant against this trace's captured shapes.
+    show_redundant_args: bool = False
     font_size: int | None = None
     dpi: int | None = None
     for_paper: bool = False

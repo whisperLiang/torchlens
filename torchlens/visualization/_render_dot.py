@@ -11,6 +11,7 @@ from .._errors import CaptureContextError, InvalidArgumentError, PayloadUnavaila
 from ..errors._base import TorchLensWarning
 from ..utils.display import atomic_write_text, user_stacklevel
 from . import _render_utils
+from ._draw_validation import _validate_draw_flag_options, _validate_draw_options
 from ._render_common import *
 from ._render_edges import *
 from ._render_flow import *
@@ -191,118 +192,6 @@ def _raise_graphviz_failure(
     ) from error
 
 
-def _validate_draw_options(
-    node_mode: VisNodeModeLiteral,
-    intervention_mode: VisInterventionModeLiteral,
-    collapse: CollapseLiteral,
-    fold_repeats: FoldRepeatsLiteral,
-) -> None:
-    """Validate the closed-vocabulary forward-render options.
-
-    Raises
-    ------
-    ValueError
-        If any option falls outside its supported vocabulary.
-    """
-
-    if node_mode not in MODE_REGISTRY:
-        raise InvalidArgumentError(
-            "Visualization node_style/node_mode must be one of 'default', "
-            f"'profiling', 'vision', or 'attention'; received {node_mode!r}",
-            code="visualization_node_style_invalid",
-            remedy="pass node_style='default', 'profiling', 'vision', or 'attention'",
-            argument="node_style",
-        )
-    if node_mode in DOMAIN_NODE_MODES:
-        # The advice used to name examples/recipes/<style>.py and a
-        # torchlens.<style> plugin. NEITHER exists (grind b4, R48-b);
-        # torchlens.experimental.node_styles is the destination that actually
-        # resolves today -- same treatment as the options.py sibling.
-        from .._deprecations import TorchLensDeprecationWarning
-
-        warnings.warn(
-            f"node_style={node_mode!r} is moving out of core; use "
-            f"torchlens.experimental.node_styles.{node_mode}_node_mode "
-            f"(exported today) via node_spec_fn instead",
-            TorchLensDeprecationWarning,
-            stacklevel=user_stacklevel(),
-        )
-    if intervention_mode not in {"node_mark", "as_node"}:
-        raise InvalidArgumentError(
-            "vis_intervention_mode must be either 'node_mark' or 'as_node'; "
-            f"received {intervention_mode!r}",
-            code="visualization_intervention_mode_invalid",
-            remedy="pass vis_intervention_mode='node_mark' or 'as_node'",
-            argument="vis_intervention_mode",
-        )
-    if isinstance(collapse, float):
-        if not 0.0 <= collapse <= 1.0:
-            raise InvalidArgumentError(
-                f"collapse float level must be in [0.0, 1.0]; received {collapse!r}",
-                code="collapse_level_invalid",
-                remedy="pass a collapse level between 0.0 and 1.0",
-                argument="collapse",
-            )
-    elif collapse not in {"none", "auto", "max"}:
-        raise InvalidArgumentError(
-            "collapse must be 'none', 'auto', 'max', or a float in [0.0, 1.0]; "
-            f"received {collapse!r}",
-            code="collapse_mode_invalid",
-            remedy="pass collapse='none', 'auto', 'max', or an in-range float",
-            argument="collapse",
-        )
-    if fold_repeats not in {None, True, False}:
-        raise InvalidArgumentError(
-            f"fold_repeats must be None, True, or False; received {fold_repeats!r}",
-            code="fold_repeats_invalid",
-            remedy="pass fold_repeats=None, True, or False",
-            argument="fold_repeats",
-        )
-
-
-# The non-``False`` ``show_containers`` vocabulary (``Trace.draw`` literal).
-_SHOW_CONTAINERS_MODES = ("labels", "cluster", "collapsed", "auto", "nodes")
-
-
-def _validate_draw_flag_options(
-    show_containers: ShowContainersLiteral,
-    **bool_options: object,
-) -> None:
-    """Validate the bool-typed public draw kwargs and ``show_containers``.
-
-    R64-F3: strings such as ``order_siblings='yes'`` were accepted silently,
-    and ``'no'``/``'false'`` truthily meant ON. Only real bools are accepted;
-    ``show_containers`` additionally allows its closed string vocabulary.
-
-    Raises
-    ------
-    ValueError
-        If any flag is not a real bool, or ``show_containers`` falls outside
-        its supported vocabulary.
-    """
-
-    for name, value in bool_options.items():
-        if name == "show_legend" and value is None:
-            # Tri-state: None = AUTO (L5 channel core) is a legal value on
-            # this one flag; True/False keep their historical meanings.
-            continue
-        if not isinstance(value, bool):
-            raise InvalidArgumentError(
-                f"{name} must be a bool (True or False); received {value!r}",
-                code="visualization_bool_option_invalid",
-                remedy=f"pass {name}=True or {name}=False",
-                argument=name,
-            )
-    if not (show_containers is False or show_containers in _SHOW_CONTAINERS_MODES):
-        modes = ", ".join(repr(mode) for mode in _SHOW_CONTAINERS_MODES)
-        raise InvalidArgumentError(
-            f"show_containers must be False or one of {modes}; received {show_containers!r}",
-            code="visualization_show_containers_invalid",
-            remedy=f"pass show_containers=False or one of {modes}",
-            argument="show_containers",
-        )
-
-
 def _resolve_draw_request(
     trace: "Trace",
     request: ResolvedRenderRequest,
@@ -444,6 +333,13 @@ def _build_graphviz_shell(
     )
     if getattr(trace, "_has_direct_writes", False):
         caption_body += "Direct writes detected - recipe propagation will overlay<br align='left'/>"
+    encoding_state = getattr(request, "encoding", None)
+    if encoding_state is not None and getattr(encoding_state, "stack_spec", None) is not None:
+        # Stacking disclosure is part of the contract (memo 4.1): the
+        # rendered output captions which annotation produced the columns.
+        caption_body += (
+            f"stacked by: {html_escape(encoding_state.stack_spec.display_name)}<br align='left'/>"
+        )
     graph_caption = f"<<FONT COLOR='{theme.default_font}'>{caption_body}</FONT>>"
 
     dot = graphviz.Digraph(
@@ -541,7 +437,9 @@ def _resolve_forward_context(
         # forces dot (show_containers precedent), noticed on cost override.
         from ._encoding import resolve_encoding_engine
 
-        engine = resolve_encoding_engine(request.engine, engine, layout_cost)
+        engine = resolve_encoding_engine(
+            request.engine, engine, layout_cost, request.encoding.active_channels()
+        )
     # Session diagnostic (never persisted; scrub-declared like the sibling
     # decision): the last draw's encoding state, for tests and debugging.
     trace._last_encoding_state = request.encoding
@@ -617,6 +515,15 @@ def _populate_forward_ir(trace: "Trace", context: _ForwardRenderContext) -> _For
         container_max_inline=request.container_max_inline,
         pending_nodes=pending_container_collapse_nodes,
     )
+    # Checked suppression (L5 M4, DEFAULT-ON): the trace-bearing prepass
+    # proves which constructor-arg rows duplicate captured shapes on THIS
+    # trace; unprovable or mismatching args stay visible (self-honest).
+    # Computed ONCE and shared by the IR decision pass and node emission.
+    suppressed_args: dict[int, frozenset[str]] = {}
+    if not request.show_redundant_args:
+        from ._arg_suppression import compute_suppressed_arg_keys
+
+        suppressed_args = compute_suppressed_arg_keys(trace, context.node_universe)
     forward_render_ir = build_render_ir(
         trace,
         collapse_fn=request.collapse_fn,
@@ -625,6 +532,7 @@ def _populate_forward_ir(trace: "Trace", context: _ForwardRenderContext) -> _For
         universe=context.node_universe,
         segments=context.segments,
         segment_lookup=context.segment_lookup,
+        suppressed_args=suppressed_args,
     )
     antiparallel_projected_edges = projected_antiparallel_endpoint_pairs(forward_render_ir)
     decisions_by_name = {node.name: node for node in forward_render_ir.nodes}
@@ -672,6 +580,7 @@ def _populate_forward_ir(trace: "Trace", context: _ForwardRenderContext) -> _For
                 rolled_maps,
                 deduped_edge_registry,
                 encoding=request.encoding,
+                suppressed_args=suppressed_args,
             )
     for node_args in pending_container_collapse_nodes:
         forward_ir_builder.node(**node_args)
@@ -736,7 +645,14 @@ def _finalize_forward_ir(
 
     request = context.request
     sibling_order_chains: tuple[SiblingOrderChain, ...] = ()
-    if _should_order_siblings(
+    # Stacking fence (L5 M3, conservative no-op): stack_by pins ranks, and
+    # two independent constraint systems fighting over dot's layout is how
+    # oscillation starts (visualization/CLAUDE.md no-op pattern). Stacking
+    # is strictly opt-in, so this never fires on plain draw().
+    stack_channel_active = (
+        request.encoding is not None and getattr(request.encoding, "stack_spec", None) is not None
+    )
+    if not stack_channel_active and _should_order_siblings(
         order_siblings=request.order_siblings,
         engine=context.engine,
         vis_mode=request.vis_mode,
@@ -859,6 +775,16 @@ def _emit_and_finish_forward(
 
     dot = context.dot
     GraphvizRenderer().emit(forward_render_ir, dot)
+    if forward_render_ir.stack_rank_groups:
+        # Stacking channel (L5 M3): rank=same groups span module clusters,
+        # so newrank=true opts dot into global rank constraints (without it
+        # cross-cluster rank=same is silently ignored -- a dishonest no-op).
+        dot.graph_attr.update({"newrank": "true"})
+        for rank_group in forward_render_ir.stack_rank_groups:
+            with dot.subgraph() as rank_subgraph:
+                rank_subgraph.attr(rank="same")
+                for member in rank_group.members:
+                    rank_subgraph.node(member)
     for overlay_edge in work.container_overlay_edges:
         dot.edge(
             tail_name=overlay_edge.tail_name,
@@ -1049,6 +975,10 @@ def draw(
     show_orphans: bool = False,
     *,
     color_by: "str | Callable[[Any], Any] | None" = None,
+    size_by: "str | Callable[[Any], Any] | None" = None,
+    scale: "str | None" = None,
+    stack_by: "str | bool | Callable[[Any], Any] | None" = None,
+    show_redundant_args: bool = False,
 ) -> Any:
     """Render the computational graph through the resolved forward IR pipeline.
 
@@ -1074,11 +1004,17 @@ def draw(
         show_input_transform_summary=show_input_transform_summary,
         show_orphans=show_orphans,
     )
-    from ._encoding import resolve_color_by
+    from ._encoding import resolve_color_by, resolve_size_by, resolve_size_scale
 
-    # Option validation for the encoding channel: an unknown source refuses
-    # HERE, before any render work (encoding_source_invalid).
+    # Option validation for the encoding channels: an unknown source refuses
+    # HERE, before any render work (encoding_source_invalid), and scale=
+    # without size_by refuses scale_requires_size_by.
     encoding_channel_spec = resolve_color_by(color_by)
+    size_channel_spec = resolve_size_by(size_by)
+    size_scale = resolve_size_scale(scale, size_by_active=size_channel_spec is not None)
+    from ._stacking import resolve_stack_by
+
+    stack_channel_spec = resolve_stack_by(stack_by, vis_mode)
     request = ResolvedRenderRequest(
         vis_mode=vis_mode,
         show_buffer_layers=cast(BufferVisibilityLiteral, show_buffer_layers),
@@ -1115,18 +1051,33 @@ def draw(
         show_orphans=show_orphans,
         direction=direction,
         color_by=color_by,
+        size_by=size_by,
+        scale=scale,
+        stack_by=stack_by,
+        show_redundant_args=show_redundant_args,
     )
     request, theme, site_labels = _resolve_draw_request(self, request)
-    if encoding_channel_spec is not None:
+    if (
+        encoding_channel_spec is not None
+        or size_channel_spec is not None
+        or stack_channel_spec is not None
+    ):
         from ._encoding import attach_encoding_state
 
-        request = attach_encoding_state(request, encoding_channel_spec, theme)
+        request = attach_encoding_state(
+            request,
+            theme,
+            color_spec=encoding_channel_spec,
+            size_spec=size_channel_spec,
+            size_scale=size_scale,
+            stack_spec=stack_channel_spec,
+        )
     show_buffer_layers = request.show_buffer_layers
 
     if vis_renderer == "dagua" and request.encoding is not None:
         from ._encoding import raise_encoding_dagua_refusal
 
-        raise_encoding_dagua_refusal()
+        raise_encoding_dagua_refusal(request.encoding.active_channels())
     if vis_renderer == "dagua":
         opted_in_module = sys.modules.get("torchlens.experimental.dagua")
         if not getattr(opted_in_module, "__torchlens_dagua_opted_in__", False):

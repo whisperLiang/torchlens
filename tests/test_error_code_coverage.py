@@ -130,7 +130,6 @@ UNPROVOKED_BASELINE: frozenset[str] = frozenset(
         "model_type_unsupported",
         "module_call_ambiguous",
         "module_focus_empty",
-        "node_label_field_invalid",
         "op_lookup_pass_out_of_range",
         "op_lookup_pass_required",
         "option_group_type_invalid",

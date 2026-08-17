@@ -53,3 +53,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: aac26242e9bdd4fcc494426aa26808a27bff974e (dirty)
 recorded: 2026-08-17T01:06:48.324019+00:00
+---
+generator: tests/godobject_oracle legacy
+flag: TORCHLENS_UPDATE_LEGACY_ARTIFACT_ORACLE=1
+reason: L9 backward merge: Trace gained the grad_fn_fire_timings accessor and grad_fn_site_summary rollup; legacy loaded surface legitimately grows exactly these two accessors (refresh missed by the L9 lane, red pre-exists on main fcc0f20c)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 7a2341a69d8ae0df5705a4090b619043d9ac135e (clean)
+recorded: 2026-08-17T01:37:59.221492+00:00

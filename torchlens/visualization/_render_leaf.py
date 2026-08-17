@@ -1593,7 +1593,16 @@ def _node_spec_to_graphviz_args(spec: NodeSpec) -> dict[str, str]:
         "tooltip": spec.tooltip,
         # r-b6 R19-6: relative to the visualizer root (graph-level imagepath).
         "image": relativize_visualizer_image(spec.image) if spec.image else spec.image,
+        "fixedsize": spec.fixedsize,
     }
+    # 2.4(ii) funnel rule (L5): DROP NodeSpec width/height when an image is
+    # set -- an image node's size is pixel-derived, and a channel-set width
+    # under fixedsize=false would otherwise become a live MINIMUM the image
+    # is scaled into. ``extra_attrs`` (merged last, below) stays the
+    # power-valve override for a user who genuinely wants a sized image node.
+    if spec.image is None:
+        optional_attrs["width"] = spec.width
+        optional_attrs["height"] = spec.height
     for attr_name, attr_value in optional_attrs.items():
         if attr_value is not None:
             node_args[attr_name] = str(attr_value)

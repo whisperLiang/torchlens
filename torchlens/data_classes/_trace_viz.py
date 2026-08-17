@@ -139,6 +139,10 @@ class TraceVisualizationMixin(_TraceMixinBase):
         show_orphans: bool = False,  # Invariants support flipping this; owner visual review pending.
         *,
         color_by: str | Callable[[Any], Any] | None = None,
+        size_by: str | Callable[[Any], Any] | None = None,
+        scale: str | None = None,
+        stack_by: str | bool | Callable[[Any], Any] | None = None,
+        show_redundant_args: bool = False,
     ) -> Any:
         """Render the computational graph for this model log.
 
@@ -195,6 +199,48 @@ class TraceVisualizationMixin(_TraceMixinBase):
             sources resolve through the rolled-aggregate allowlist —
             per-pass-varying and first-pass-only sources stay unencoded with
             a legend note rather than painting an unprovable uniform value.
+        size_by:
+            UNSTABLE (keyword-only; no deprecation shim owed). Size encoding
+            channel source: a Layer/Op field name, the closed ``"dims"``
+            shape token (numel of the non-batch output shape — the D4
+            default mapping, applied as default because D4 is unruled), or
+            a callable ``node -> scalar``. Encoded nodes get width/height
+            MINIMUMS (``fixedsize=false``: labels are never truncated,
+            fonts never scale) with encoded area clamped to 4x the default
+            node area. STRICTLY OPT-IN: plain ``draw()`` keeps uniform
+            boxes. On a rolled multi-pass layer a size source that cannot
+            be certified single-valued refuses typed
+            (``size_by_rolled_varying``): size has no honest "n/a"
+            rendering, so it refuses where color degrades. Callables bypass
+            the rolled table (disclosed in the legend).
+        scale:
+            UNSTABLE (keyword-only). Size-channel scale transform:
+            ``"sqrt"`` (default) or ``"linear"`` (the literal area motif).
+            Supplied without ``size_by`` it refuses
+            (``scale_requires_size_by``). Every legend drawn states the
+            active scale.
+        stack_by:
+            UNSTABLE (keyword-only). Rank encoding channel: nodes sharing an
+            annotation value pin to one Graphviz rank (column/row), the
+            classic unrolled-RNN timestep diagram. STRICTLY OPT-IN.
+            ``True``/``"auto"`` derives the annotation (``pass_index`` on
+            multi-pass ops only) under the lockstep license — the
+            multi-pass execution order must be globally monotone, else it
+            refuses (``stack_by_auto_underivable``); an explicit field name
+            or callable bypasses the license (the caption disclosed what
+            was used). Rolled graphs refuse (``stack_by_requires_unrolled``).
+            While stacking is active the sibling-ordering post-pass no-ops
+            (two rank-constraint systems would fight), and collapsed boxes/
+            fold reps stay un-annotated.
+        show_redundant_args:
+            UNSTABLE (keyword-only). Checked suppression of redundant
+            constructor-arg label rows is DEFAULT-ON: an arg such as
+            ``in_features=4`` is omitted exactly when its value provably
+            equals the captured shape dimension it duplicates on THIS
+            trace (a closed torch-module candidate table; the check is
+            data equality on records). A mismatch or unavailable shape
+            keeps the arg VISIBLE — the rule can only reveal more, never
+            hide a discrepancy. Pass ``True`` to show every captured arg.
 
         Returns
         -------
@@ -277,6 +323,10 @@ class TraceVisualizationMixin(_TraceMixinBase):
             show_input_transform_summary=show_input_transform_summary,
             show_orphans=show_orphans,
             color_by=color_by,
+            size_by=size_by,
+            scale=scale,
+            stack_by=stack_by,
+            show_redundant_args=show_redundant_args,
         )
 
     def add_node_overlay(

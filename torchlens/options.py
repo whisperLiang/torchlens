@@ -151,6 +151,10 @@ _VISUALIZATION_FIELDS: Final[tuple[str, ...]] = (
     "node_label_fields",
     "show_legend",
     "color_by",
+    "size_by",
+    "scale",
+    "stack_by",
+    "show_redundant_args",
     "font_size",
     "dpi",
     "for_paper",
@@ -1533,6 +1537,18 @@ class VisualizationOptions:
         encoding channel is active); see ``Trace.draw``.
     color_by:
         UNSTABLE encoding-channel value source; see ``Trace.draw``.
+    size_by:
+        UNSTABLE size-channel value source (field, ``"dims"``, or callable);
+        see ``Trace.draw``.
+    scale:
+        UNSTABLE size-channel scale transform (``"sqrt"``/``"linear"``);
+        see ``Trace.draw``.
+    stack_by:
+        UNSTABLE rank-channel annotation source (``True``/``"auto"``,
+        field, or callable); see ``Trace.draw``.
+    show_redundant_args:
+        UNSTABLE: show constructor args the checked-suppression equality
+        check proved redundant (default ``False``); see ``Trace.draw``.
     font_size:
         Optional Graphviz font size.
     dpi:
@@ -1579,6 +1595,10 @@ class VisualizationOptions:
     node_label_fields: list[str] | None = None
     show_legend: bool | None = None
     color_by: str | Callable[[Any], Any] | None = None
+    size_by: str | Callable[[Any], Any] | None = None
+    scale: str | None = None
+    stack_by: str | bool | Callable[[Any], Any] | None = None
+    show_redundant_args: bool = False
     font_size: int | None = None
     dpi: int | None = None
     for_paper: bool = False
@@ -1617,6 +1637,10 @@ class VisualizationOptions:
         node_label_fields: list[str] | None | MissingType = MISSING,
         show_legend: bool | None | MissingType = MISSING,
         color_by: str | Callable[[Any], Any] | None | MissingType = MISSING,
+        size_by: str | Callable[[Any], Any] | None | MissingType = MISSING,
+        scale: str | None | MissingType = MISSING,
+        stack_by: str | bool | Callable[[Any], Any] | None | MissingType = MISSING,
+        show_redundant_args: bool | MissingType = MISSING,
         font_size: int | None | MissingType = MISSING,
         dpi: int | None | MissingType = MISSING,
         for_paper: bool | MissingType = MISSING,
@@ -1716,6 +1740,12 @@ class VisualizationOptions:
                 "show_legend", show_legend, None, specified_fields
             ),
             "color_by": _resolve_option_value("color_by", color_by, None, specified_fields),
+            "size_by": _resolve_option_value("size_by", size_by, None, specified_fields),
+            "scale": _resolve_option_value("scale", scale, None, specified_fields),
+            "stack_by": _resolve_option_value("stack_by", stack_by, None, specified_fields),
+            "show_redundant_args": _resolve_option_value(
+                "show_redundant_args", show_redundant_args, False, specified_fields
+            ),
             "font_size": _resolve_option_value("font_size", font_size, None, specified_fields),
             "dpi": _resolve_option_value("dpi", dpi, None, specified_fields),
             "for_paper": _resolve_option_value("for_paper", for_paper, False, specified_fields),
@@ -2384,6 +2414,10 @@ def visualization_to_render_kwargs(visualization: VisualizationOptions) -> dict[
         "node_label_fields": visualization.node_label_fields,
         "show_legend": visualization.show_legend,
         "color_by": visualization.color_by,
+        "size_by": visualization.size_by,
+        "scale": visualization.scale,
+        "stack_by": visualization.stack_by,
+        "show_redundant_args": visualization.show_redundant_args,
         "font_size": visualization.font_size,
         "dpi": visualization.dpi,
         "for_paper": visualization.for_paper,

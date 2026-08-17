@@ -284,6 +284,46 @@ print(tl.compat.report(model, x).to_markdown())
   with channels active. Typed refusals: `encoding_source_invalid`, `encoding_value_invalid`
   (bools and non-scalar tensors refuse — a bool is not a magnitude), `encoding_callable_error`
   (chains the user exception), `encoding_requires_dot_layout`.
+- `Trace.draw(size_by=..., scale="sqrt"|"linear")` (UNSTABLE spellings, keyword-only) is the
+  wave-1 SIZE channel, shipped with the D4 DEFAULT APPLIED (D4 unruled at merge: sqrt scale +
+  conservative area-only mapping + typed refusal on rolled varying sources). Sources: a scalar
+  record field, the closed `"dims"` shape token (numel of the NON-BATCH output shape; the only
+  shape-valued source — callables must return scalars), or a callable. Emitted sizes are
+  width/height MINIMUMS under `fixedsize=false` (labels never truncate, fonts never scale),
+  encoded area clamped to `SIZE_BY_MAX_AREA_MULT` (4.0) x the default node area; strictly
+  opt-in (plain `draw()` keeps uniform boxes). On rolled multi-pass nodes size REFUSES where
+  color degrades: `size_by_rolled_varying` fires for any source that cannot be certified
+  single-valued (marker-varying reconciled fields, mirrored/per-pass projections, varying
+  shape under `"dims"` — the refusal fires BEFORE dims resolution, so the honest-aggregate
+  range strings are unreachable). Summed-family sources (`total_*`) encode with a mandatory
+  aggregation legend line. The spec funnel DROPS NodeSpec width/height when `spec.image` is
+  set (an image node's size is pixel-derived); `extra_attrs` stays the power-valve override
+  and wins on key conflicts by merge order. `scale=` without `size_by` refuses
+  `scale_requires_size_by`; unknown scale tokens refuse `encoding_scale_invalid`.
+- `Trace.draw(stack_by=...)` (UNSTABLE spelling, keyword-only) is the wave-1 RANK channel
+  (stacking split (a)): nodes sharing an annotation value pin to one Graphviz rank — the
+  classic unrolled-RNN timestep diagram; STRICTLY OPT-IN. `True`/`"auto"` derives
+  `pass_index` on multi-pass ops only, granted ONLY under the LOCKSTEP LICENSE (the
+  pass_index sequence over all multi-pass ops in raw order must be globally non-decreasing;
+  then "same column = same execution window" — a layer absent from window k has no node in
+  that column, disclosed in the caption). Non-monotone traces (chained loops,
+  late-resumption skips, non-monotone nested tallies) refuse `stack_by_auto_underivable`;
+  explicit field/callable sources BYPASS the license (caption discloses the source); rolled
+  graphs refuse `stack_by_requires_unrolled`. Rank groups resolve at the prepass, travel as
+  `RenderIR.stack_rank_groups`, and emit as top-level `rank=same` subgraphs under
+  `newrank=true` (cross-cluster constraints are silently ignored without it). While stacking
+  is active the sibling-ordering post-pass NO-OPS (two rank-constraint systems would fight);
+  collapsed boxes and fold reps stay un-annotated in v1; v1 has exactly ONE cohort.
+- CHECKED SUPPRESSION (UNSTABLE spelling `show_redundant_args`, DEFAULT-ON): `draw()` node
+  labels omit a module constructor arg exactly when the equality check licenses it — the arg
+  value provably equals the captured shape dimension it duplicates on THIS trace (closed torch
+  module-family table in `torchlens/visualization/_arg_suppression.py`; the check runs at the
+  trace-bearing prepass and is data equality on records, never a render-back loop).
+  kernel_size/stride/padding/dilation/groups/num_embeddings/num_heads are NEVER candidates; a
+  mismatch or unavailable shape keeps the arg VISIBLE (self-honest — the mismatch case is the
+  interesting one); rolled varying aggregates keep args visible while unrolled per-pass nodes
+  suppress (deliberate divergence, pinned both modes); detached records render all args.
+  `show_redundant_args=True` shows everything. Doc: `docs/reference/encoding.md`.
 - `Trace.draw(collapse="none"|"auto"|"max"|t, fold_repeats=None|True|False)` controls v2 smart
   collapse for rolled and unrolled graphs, where float `t` in `[0.0, 1.0]` follows the public
   monotone schedule (`0.0 == "none"`, `1.0 == "max"`). `auto` is the first schedule point whose

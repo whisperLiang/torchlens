@@ -61,6 +61,17 @@ class NodeSpec:
         Optional node tooltip.
     image:
         Optional image path to embed in the node.
+    width:
+        Optional node width minimum in inches (size encoding channel). With
+        ``fixedsize="false"`` the box can only GROW from the label's natural
+        size, so a label can never be truncated by an encoding. Dropped by
+        the spec funnel when ``image`` is set: an image node's size is
+        pixel-derived, and a width minimum would become a live scaling
+        floor (``extra_attrs`` remains the power-valve override).
+    height:
+        Optional node height minimum in inches (see ``width``).
+    fixedsize:
+        Optional Graphviz ``fixedsize`` value emitted with the size fields.
     extra_attrs:
         Additional Graphviz node attributes.
     """
@@ -74,6 +85,9 @@ class NodeSpec:
     penwidth: float | None = None
     tooltip: str | None = None
     image: str | None = None
+    width: float | None = None
+    height: float | None = None
+    fixedsize: str | None = None
     extra_attrs: dict[str, str] = field(default_factory=dict)
 
     def replace(self, **kwargs: Any) -> NodeSpec:
@@ -91,6 +105,41 @@ class NodeSpec:
         """
 
         return dataclass_replace(self, **kwargs)
+
+
+def _annotation_image_path_for_node(trace: Trace, node: Any) -> str | None:
+    """Return a user annotation image path for a rendered node.
+
+    One of the three record-derived image mechanisms in the closed 2.4(i)
+    image-origin predicate (``_encoding.is_record_derived_image_node``).
+    Moved here from ``_render_nodes`` (S5 territory; ratchet offload).
+
+    Returns
+    -------
+    str | None
+        Image path stored in ``annotations["user"]["image"]``, if present.
+    """
+
+    from ._render_nodes import BoundaryNode, _layer_log_for_node
+
+    if isinstance(node, BoundaryNode):
+        return None
+    candidates: list[Any] = [node]
+    try:
+        candidates.append(_layer_log_for_node(trace, node))
+    except ValueError:
+        pass
+    for candidate in candidates:
+        annotations = getattr(candidate, "annotations", None)
+        if not isinstance(annotations, dict):
+            continue
+        user_annotations = annotations.get("user")
+        if not isinstance(user_annotations, dict):
+            continue
+        image = user_annotations.get("image")
+        if isinstance(image, str) and image:
+            return image
+    return None
 
 
 # S5 contract (C4): the three node-callback aliases have ONE declaration home
