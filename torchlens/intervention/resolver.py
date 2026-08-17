@@ -888,6 +888,71 @@ class SiteTable:
         return pd.DataFrame(rows)
 
 
+def multipass_bare_label_message(layer_label: str, pass_indices: Sequence[int]) -> str:
+    """Return the teaching refusal message for a bare multi-pass layer label.
+
+    Parameters
+    ----------
+    layer_label:
+        Bare layer label the caller supplied.
+    pass_indices:
+        Pass indices recorded for the layer, in execution order.
+
+    Returns
+    -------
+    str
+        Message naming the layer, its pass count, and every pass-qualified
+        spelling the caller can address instead.
+    """
+
+    spellings = ", ".join(f"'{layer_label}:{index}'" for index in pass_indices)
+    return (
+        f"bare label {layer_label!r} is ambiguous on this trace: layer "
+        f"{layer_label!r} ran {len(pass_indices)} passes, and each pass is a "
+        "distinct op with its own activation. Bare layer labels address only "
+        "single-pass layers. Remedy: address one pass with a pass-qualified "
+        f"label ({spellings}), or select every pass explicitly with the Layer "
+        f"selection (log[{layer_label!r}].__selection__())."
+    )
+
+
+def _refuse_bare_multipass_label(selector: BaseSelector, matched: Sequence[Site]) -> None:
+    """Refuse an exact-label query that spans several passes of one layer.
+
+    A label selector addresses ONE op; when its spelling is layer-wide on a
+    multi-pass (recurrence-grouped) layer it matches every pass, and any
+    single-op consumer would have to guess a pass — the exact silent
+    wrong-pass corruption the replay engine refuses. Predicate selectors
+    (``tl.func``, module selectors, ...) keep their fan-out semantics.
+
+    Raises
+    ------
+    SiteAmbiguityError
+        With ``fields["code"] == "multipass_bare_label_ambiguous"``.
+    """
+
+    selector_kind = getattr(selector, "selector_kind", None)
+    if len(matched) <= 1 or selector_kind not in ("label", "contains"):
+        return
+    layer_labels = {getattr(site, "layer_label", None) for site in matched}
+    if len(layer_labels) != 1:
+        return
+    layer_label = next(iter(layer_labels))
+    if not isinstance(layer_label, str):
+        return
+    if selector_kind == "contains" and getattr(selector, "selector_value", None) != layer_label:
+        # A genuine substring pattern keeps its documented fan-out semantics;
+        # only the exact bare layer label is the pass-ambiguous address.
+        return
+    pass_indices = sorted(int(getattr(site, "pass_index", 1) or 1) for site in matched)
+    raise SiteAmbiguityError(
+        multipass_bare_label_message(layer_label, pass_indices),
+        code="multipass_bare_label_ambiguous",
+        layer_label=layer_label,
+        pass_indices=tuple(pass_indices),
+    )
+
+
 def resolve_sites(
     log: Trace,
     query: SelectorInput,
@@ -939,6 +1004,7 @@ def resolve_sites(
         raise SiteResolutionError(
             f"selector {query!r} matched 0 sites. Use log.find_sites(...) to discover labels."
         )
+    _refuse_bare_multipass_label(selector, matched)
     if len(matched) > max_fanout:
         raise SiteAmbiguityError(
             f"site {query!r} matched {len(matched)} sites, exceeding max_fanout={max_fanout}. "
