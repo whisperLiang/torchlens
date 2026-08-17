@@ -61,3 +61,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 7a2341a69d8ae0df5705a4090b619043d9ac135e (clean)
 recorded: 2026-08-17T01:37:59.221492+00:00
+---
+generator: tests/test_state_keyset_contract.py
+flag: TORCHLENS_UPDATE_STATE_KEYSET_ORACLE=1
+reason: L9 adds DROP-gated checkpoint invocation witness and grad-fn timing provenance Trace state; regenerate all live, pickle, fork, and recurrent keysets.
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 50d127a711e96dd5ec6e3c5125ce37646dc9afa4 (clean)
+recorded: 2026-08-17T02:32:04.404587+00:00
