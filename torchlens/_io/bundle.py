@@ -4099,8 +4099,16 @@ def _contains_nested_blob_refs(
         return False
     seen.add(obj_id)
 
+    from .prerelease import effective_policy
+
     for field_name, field_value in state_items(value):
         policy = spec.get(field_name)
+        if policy is not None:
+            # Registered pre-release fields are guarded under their
+            # switched-on persisting policy: a declared-DROP field that
+            # persisted BLOB_RECURSIVE under the switch can still carry
+            # nested lazy BlobRefs into a resave.
+            policy = effective_policy(type(value), field_name, policy)
         if policy == FieldPolicy.BLOB_RECURSIVE and _container_contains_blob_ref(
             field_value, allowed_blob_ids
         ):
