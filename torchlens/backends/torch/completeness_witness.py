@@ -1236,6 +1236,46 @@ class _CompletenessDispatchMode(_TorchLensDispatchMode):
         super().__init__()
         self.state = state
 
+    def _record_plane_p(self, func: Any) -> None:
+        """Append one plane-P dispatch record (merge-ranks C2; never raises).
+
+        Records EVERY dispatched op on the owner thread -- any namespace,
+        paused (TorchLens-internal) windows included -- as physical evidence
+        for the capture-fidelity census: ``(qualified_op,
+        owner_func_call_id, paused, discharged_inside_boundary,
+        has_module_context)``. The discharge flag implements v5's
+        no-double-tick nesting rule below the python layer: a dispatch inside
+        an open public collective boundary is that boundary's physical
+        evidence, never its own. Module context is resolved lazily and only
+        for records with no wrapper owner (the K4 linkage fallback).
+
+        Parameters
+        ----------
+        func:
+            Dispatcher operator overload being observed.
+        """
+
+        try:
+            paused = not _state._logging_enabled
+            from .collectives import _inside_boundary
+
+            discharged = _inside_boundary()
+            owner = _active_token()
+            owner_id = None if owner is None else owner.func_call_id
+            has_module_context = False
+            if owner_id is None and not paused and not discharged:
+                from ._aten_capture import _module_call_stack
+
+                has_module_context = bool(_module_call_stack(self.state.trace))
+            self.state.plane_p_events.append(
+                (_operator_name(func), owner_id, paused, discharged, has_module_context)
+            )
+        except Exception:
+            # Observation must never perturb or fail the capture; a dropped
+            # plane-P record surfaces as a census accounting miss, never as a
+            # capture failure.
+            pass
+
     def __torch_dispatch__(
         self,
         func: Any,
@@ -1269,6 +1309,12 @@ class _CompletenessDispatchMode(_TorchLensDispatchMode):
         aten_pending: Any = None
         pre_dispatch_receiver_numel: int | None = None
         try:
+            if (
+                self.state.plane_p
+                and threading.get_ident() == self.state.owner_thread_id
+                and _state._active_trace is self.state.trace
+            ):
+                self._record_plane_p(func)
             phase_visible = _state._logging_enabled or (
                 self.state.record_aten and self.state.capture_phase == "backward"
             )
@@ -2012,6 +2058,8 @@ _finalize_input_semantics_without_census = _rebind_function(
 )
 _init_witness_fields = _rebind_function(_completeness_finalize._init_witness_fields, globals())
 _build_witness_state = _rebind_function(_completeness_finalize._build_witness_state, globals())
+_plane_p_requested = _rebind_function(_completeness_finalize._plane_p_requested, globals())
+_finalize_plane_p = _rebind_function(_completeness_finalize._finalize_plane_p, globals())
 capture_completeness_witness = _rebind_contextmanager(
     _completeness_finalize.capture_completeness_witness, globals()
 )

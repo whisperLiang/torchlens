@@ -370,6 +370,16 @@ def _tensor_has_known_provenance(trace: "Trace", value: torch.Tensor) -> bool:
 
     if isinstance(value, torch.nn.Parameter) and _session_validated_parameter(trace, value):
         return True
+    from ._tl import _async_collective_elem
+
+    act_inner = _async_collective_elem(value)
+    if act_inner is not None:
+        # AsyncCollectiveTensor is a transparent async view of its inner
+        # ``.elem`` (merge-ranks C2 recording): the funcol boundary labeled the
+        # inner tensor, and user code passes the wrapper onward. Provenance is
+        # the inner tensor's -- same delegation as the get_tensor_label
+        # chokepoint, same no-wait ``.elem`` attribute read.
+        return _tensor_has_known_provenance(trace, act_inner)
     meta = get_tensor_meta(value)
     if meta is None:
         return False

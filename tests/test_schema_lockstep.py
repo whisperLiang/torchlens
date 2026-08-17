@@ -244,6 +244,7 @@ PRIVATE_ORDERED_DROP_FIELDS: dict[str, dict[str, str]] = {
     "Trace": {
         "_runnable": "sparse-runnable state container; rebuilt at load, never portable itself",
         "_fast_run_session": "session-time guarded-static-loop handle (tl.Trace.run(fast=True))",
+        "_distributed_plane_p": "session-time plane-P dispatch journal for armed captures (merge-ranks C2 census evidence)",
         "_transform": "capture-time input transform callable; opaque, session-only",
         "_output_transform": "capture-time output transform callable; opaque, session-only",
         "_visualizer_dir": "per-session visualizer scratch directory path",

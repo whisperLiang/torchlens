@@ -97,6 +97,7 @@ def _boundary(
 
 def _evidence(rank: int, entry: dict) -> RankEvidence:
     return RankEvidence(
+        shard_local=False,
         rank=rank,
         boundaries=(entry,),
         ledger=_seeded_ledger(),

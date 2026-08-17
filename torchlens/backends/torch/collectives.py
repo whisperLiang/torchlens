@@ -38,7 +38,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial, wraps
-from typing import Any
+from typing import Any, Protocol
 
 import torch
 
@@ -65,6 +65,24 @@ BOUNDARY_SCHEMA = "collective_boundary_v1"
 # Backends whose runtime honors p2p tags; on these the tag is part of the
 # channel. On tag-ignoring backends (NCCL) the tag demotes to a check field.
 _TAG_HONORING_BACKENDS = frozenset({"gloo", "mpi"})
+
+
+class BoundarySiteLike(Protocol):
+    """Structural site contract shared by the c10d and funcol boundary tables.
+
+    ``func_name`` drives the emitted node's TorchLens label type;
+    ``tensorless`` marks journal-only boundaries that emit no op node.
+    """
+
+    @property
+    def func_name(self) -> str:
+        """Sanitized TorchLens label type for the emitted boundary node."""
+        ...
+
+    @property
+    def tensorless(self) -> bool:
+        """Whether the boundary journals without emitting an op node."""
+        ...
 
 
 class WildcardRecvUnsupportedError(CompatibilityError, RuntimeError):
@@ -487,7 +505,7 @@ def _journal_boundary(trace: Any, payload: dict[str, Any], op_labels: list[str])
 
 def _emit_boundary_op(
     trace: Any,
-    site: CollectiveSite,
+    site: BoundarySiteLike,
     original: Callable[..., Any],
     args: tuple[Any, ...],
     kwargs: dict[str, Any],

@@ -91,6 +91,15 @@ class RankEvidence:
     source:
         Where the evidence came from (diagnostic): ``"live"``, ``"loaded"``,
         or the bundle path string.
+    shard_local:
+        Whether the member trace carries the shard-local capture marker
+        (``distributed_scope == "rank_local_shard"``; L8 census plan 3.2c(2)).
+        REQUIRED with no default -- every constructor, direct construction
+        included, must consciously supply it, so the ``_guard_scope`` marker
+        key can never be silently omitted. Populated here in
+        :func:`extract_rank_evidence`, the single common ancestor of all
+        ``derive_merge`` entry paths (public input resolution, save-time
+        reverify, load rederivation).
     """
 
     rank: int
@@ -98,6 +107,7 @@ class RankEvidence:
     ledger: GroupLifecycleLedger
     install_epoch: str
     source: str
+    shard_local: bool
 
 
 def _refuse(detail: str, **payload: Any) -> MergeInputError:
@@ -510,6 +520,25 @@ def extract_rank_evidence(trace: Any, source: str) -> RankEvidence:
     for index, entry in enumerate(boundaries):
         if not isinstance(entry, dict):
             raise _refuse(f"boundary {index} of {source} is not a mapping", source=source)
+        if entry.get("schema") == "functional_collective_boundary_v0":
+            # Merge-ranks C2 recording (fail-closed): funcol boundaries carry
+            # the documented-unstable v0 payload, which the frozen C1
+            # derivation cannot join. Refusing the CORE typed is strictly
+            # honest -- the shipped alternative was merging with the funcol
+            # traffic invisibly absent. The merged-side funcol join is C2
+            # merged-side work behind its own ruling (L8 plan 3.2c).
+            raise MergeInputError(
+                f"Merge input {source} records a functional-collective "
+                f"(funcol) boundary (index {index}, kind "
+                f"{entry.get('kind')!r}). C1 joins the frozen "
+                "collective_boundary_v1 payload only; funcol boundary joining "
+                "is rung-C2 merged-side scope and stays refused until its "
+                "capture-fidelity census and authorizing ruling land.",
+                code=MergedErrorCode.MERGE_SCOPE_UNSUPPORTED,
+                reason="functional_collective_boundary_unsupported",
+                source=source,
+                boundary_index=index,
+            )
         _validate_boundary(entry, index, source)
         # my_group_rank None-ness is UNIFORM per group within one rank core:
         # the writer mints None only when ``dist.get_group_rank`` raises -- a
@@ -624,6 +653,14 @@ def extract_rank_evidence(trace: Any, source: str) -> RankEvidence:
         ledger=ledger,
         install_epoch=str(install_epoch),
         source=source,
+        # The marker key of _guard_scope (L8 3.2c(2)): the geometry key alone
+        # does not fire on TP/FSDP2 boundaries (funcol/c10d traffic on
+        # to_local()-ed plain tensors carries no role geometry), so the
+        # trace-level marker travels on the evidence itself. Hostile inputs:
+        # anything other than the exact marker string reads False -- absence
+        # of the marker never blocks, presence of ANY other value never
+        # blocks; only the one documented value engages the scope guard.
+        shard_local=(getattr(trace, "distributed_scope", None) == "rank_local_shard"),
     )
 
 

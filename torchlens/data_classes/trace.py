@@ -172,6 +172,7 @@ else:
 _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
     "grouping": "structural",
     "grouping_policy": None,
+    "distributed_scope": None,
     "trace_label": None,
     "model_label": None,
     "backend": "torch",
@@ -180,6 +181,7 @@ _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
     "derived_grads": DerivedGradAccessor(),
     "_runnable": None,
     "_fast_run_session": None,
+    "_distributed_plane_p": None,
     "_buffer_persistence": {},
     "intervention_ready": False,
     "save_arg_templates": False,
@@ -1155,6 +1157,8 @@ class Trace(
     _module_capture_ws: ModuleCaptureWorkspace
     _wrapper_runtime_ws: WrapperRuntimeWorkspace
     _fast_run_session: Any | None
+    _distributed_plane_p: Any | None
+    distributed_scope: str | None
     _primitive_op_profile: Any | None
     backward_root_grad_fn_object_ids: list[int]
     backward_pass_logs: dict[int, BackwardPass]
@@ -1238,6 +1242,7 @@ class Trace(
         "intervention_audit": FieldPolicy.DROP,
         "_runnable": FieldPolicy.DROP,
         "_fast_run_session": FieldPolicy.DROP,
+        "_distributed_plane_p": FieldPolicy.DROP,
         "escape_detector_mode": FieldPolicy.DROP,
         "escape_detector_verified": FieldPolicy.DROP,
         "escape_diagnostics": FieldPolicy.DROP,
@@ -1368,6 +1373,12 @@ class Trace(
         # (S3 discipline); flips to persisting at the coordinated bump.
         "grouping": FieldPolicy.DROP,
         "grouping_policy": FieldPolicy.DROP,
+        # L8/F6 shard-local capture marker (merge-ranks C2 substrate): declared
+        # DROP under tlspec v7 and registered with the S3 pre-release registrar
+        # below; the wave-3 coordinated bump flips it to persisting WITH the
+        # marker-coherence load-validation rows. Value vocabulary
+        # ("rank_local_shard") is DOCUMENTED-UNSTABLE pending its S2 amendment.
+        "distributed_scope": FieldPolicy.DROP,
         # L9 backward-residuals surface: DROP under tlspec v7, prerelease-
         # registered (S3 discipline); both flip to persisting at the
         # coordinated bump. Value vocabularies provisional (E-L9-4 routing).
@@ -1765,6 +1776,10 @@ class Trace(
         self.intervention_audit: list[dict[str, Any]] = []
         self._runnable = RunnableTraceState()
         self._fast_run_session: Any | None = None
+        # Merge-ranks C2 plane-P: session-time physical dispatch observation
+        # journal for armed captures (census criteria 2-4 evidence). DROP
+        # under its private name; never survives save/load. DOCUMENTED-UNSTABLE.
+        self._distributed_plane_p: Any | None = None
         self.halted = False
         self.halt_reason: str | None = None
         self.halt_frontier: str | None = None
@@ -1859,6 +1874,11 @@ class Trace(
         # written by each producer once step-7 grouping settles.
         self.grouping = "structural"
         self.grouping_policy: dict[str, Any] | None = None
+        # L8/F6: set to "rank_local_shard" by C2 capture when any param/input
+        # carries a non-Replicate DTensor placement (the sharded predicate in
+        # torchlens.distributed._dtensor). Unreachable until the D-L8-CAP
+        # capture relaxation: every sharded capture still refuses at entry.
+        self.distributed_scope: str | None = None
         # L9 backward residuals: per-fire timing clock provenance
         # ("unmeasured" until a timing prehook arms) and the checkpoint-
         # invocation witness summary (None until torch capture builds it).
@@ -2904,6 +2924,9 @@ class Trace(
         # "cannot pickle 'weakref.ReferenceType'". Session-time (FieldPolicy
         # DROP under its private name); a restored trace re-runs verified.
         state.pop("_fast_run_session", None)
+        # Session-time plane-P dispatch journal (merge-ranks C2): tuples of
+        # per-dispatch facts, meaningless outside the capture session.
+        state.pop("_distributed_plane_p", None)
         # R10-7: the REPR is scrubbed below, but the RAW user callables stayed
         # in state, so a lambda transform= made pickle.dumps crash while
         # tl.save succeeded on the same trace. Serialize to the loaded-artifact
@@ -3850,6 +3873,14 @@ register_prerelease_field(Trace, "intervention_audit", persisted_policy=FieldPol
 # wave-3 coordinated bump.
 register_prerelease_field(Trace, "grouping")
 register_prerelease_field(Trace, "grouping_policy")
+
+# L8/F6 shard-local marker (merge-ranks C2 substrate): declared FieldPolicy.DROP
+# above, registered so the portability exit gates can round-trip it under the
+# test-only switch; flipped to persisting at the wave-3 coordinated bump
+# TOGETHER with the marker-coherence load-validation rows (census plan 3.2b/3.3
+# -- the ordinary-save erasure-prevention invariant in _io/bundle.py keys on
+# exactly this policy state).
+register_prerelease_field(Trace, "distributed_scope")
 
 # L9 backward-residuals surface: the per-fire timing clock-provenance marker
 # and the checkpoint-invocation witness, declared FieldPolicy.DROP above and

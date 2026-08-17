@@ -81,6 +81,7 @@ MODEL_LOG_FIELD_ORDER = [
     "intervention_audit",
     "_runnable",
     "_fast_run_session",
+    "_distributed_plane_p",
     "escape_detector_mode",
     "escape_detector_verified",
     "escape_diagnostics",
@@ -178,6 +179,7 @@ MODEL_LOG_FIELD_ORDER = [
     # Grouping knob mirror + grouping-policy stamp (L1 wave 0; both
     # FieldPolicy.DROP under tlspec v7, prerelease-registered)
     "grouping",
+    "distributed_scope",
     "grouping_policy",
     "verbose",
     "profile_enabled",

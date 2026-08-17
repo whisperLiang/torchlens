@@ -404,7 +404,13 @@ class TorchBackend:
                 # on the default path (zero-diff). The plain scalar-escape
                 # warning belt hands off to it in-mode (its module notes why).
                 with structure_only_escape_belt(trace), capture_scalar_escape_warning(trace):
-                    with _state.active_logging(trace):
+                    # Plane-W completion authority (merge-ranks C2): a no-op
+                    # for unarmed captures; for armed captures it installs the
+                    # capture-scoped funcol wait interposition and settles
+                    # every funcol boundary's completion evidence on exit.
+                    from .funcol import distributed_recording_session
+
+                    with distributed_recording_session(trace), _state.active_logging(trace):
                         # R54 wrapped-epoch check: model prep wrapped torch
                         # BEFORE admission, so a concurrent unwrap_torch()
                         # completing in between (it now holds the admission

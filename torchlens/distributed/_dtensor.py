@@ -115,3 +115,64 @@ def dtensor_dual_geometry(value: Any) -> dict[str, Any] | None:
         "logical_numel": logical_numel,
         "local_numel": local_numel,
     }
+
+
+#: The one distributed-scope marker value (DOCUMENTED-UNSTABLE pending its S2
+#: amendment; census plan 3.1). A fully replicated DTensor is NOT shard-local.
+RANK_LOCAL_SHARD = "rank_local_shard"
+
+
+def shard_local_placements(placements: Any) -> bool:
+    """Return whether a placements sequence marks a value shard-local.
+
+    THE ONE sharded predicate (census plan 3.3(c)): a PURE function over the
+    placements limb, evaluable identically on live torch placement objects at
+    capture time and on persisted ``repr`` strings at load time, so the
+    marker setter and the future load-coherence validator can never drift.
+    Any non-Replicate placement anywhere marks shard-local; all-Replicate
+    (or empty/absent) does not -- a fully replicated DTensor's local values
+    equal its logical values, so presenting it as shard-local would
+    over-label (census red N5).
+
+    Parameters
+    ----------
+    placements:
+        A sequence of live DTensor placement objects OR their persisted
+        ``repr`` strings; ``None``/empty is not shard-local.
+
+    Returns
+    -------
+    bool
+        ``True`` when any placement is non-Replicate.
+    """
+
+    if not placements:
+        return False
+    for placement in placements:
+        if isinstance(placement, str):
+            if not placement.startswith("Replicate"):
+                return True
+        elif type(placement).__name__ != "Replicate":
+            return True
+    return False
+
+
+def value_marks_shard_local(value: Any) -> bool:
+    """Return whether a live tensor value would set the shard-local marker.
+
+    Classification is by the sharded predicate over the value's OWN declared
+    placements, never by dual-geometry record presence (census plan 3.2(4b):
+    a placements-bearing value with no reachable mesh still classifies).
+
+    Parameters
+    ----------
+    value:
+        Candidate tensor-like object (DTensor or anything else).
+
+    Returns
+    -------
+    bool
+        ``True`` when the value carries a non-Replicate DTensor placement.
+    """
+
+    return shard_local_placements(getattr(value, "placements", None))

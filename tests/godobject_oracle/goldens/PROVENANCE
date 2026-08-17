@@ -77,3 +77,19 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 8b02878b4d12b678c032967fd9a390d0a77536b7 (dirty)
 recorded: 2026-08-17T02:44:44.522418+00:00
+---
+generator: tests/test_state_keyset_contract.py
+flag: TORCHLENS_UPDATE_STATE_KEYSET_ORACLE=1
+reason: L8 C2 recording: two new session-time Trace fields DECLARED TRUTH -- _distributed_plane_p (plane-P dispatch journal, private ordered DROP) and distributed_scope (shard-local marker, S3-prerelease-registered DROP); both never persist under tlspec v7
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: d79305f6d0f957518f2166b786f266c8420ae4bb (dirty)
+recorded: 2026-08-17T05:19:06.988818+00:00
+---
+generator: tests/godobject_oracle legacy
+flag: TORCHLENS_UPDATE_LEGACY_ARTIFACT_ORACLE=1
+reason: L8 C2 recording: legacy loads now default-fill the two new session-time DROP Trace fields (_distributed_plane_p, distributed_scope) as null -- DECLARED TRUTH, no legacy byte changed
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: d79305f6d0f957518f2166b786f266c8420ae4bb (dirty)
+recorded: 2026-08-17T05:22:23.739472+00:00

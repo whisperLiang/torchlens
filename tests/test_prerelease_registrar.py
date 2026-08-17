@@ -101,11 +101,13 @@ _STANDING_REGISTRATIONS: dict[str, tuple[str, ...]] = {
     ),
     "OpRef": ("func_call_id", "op_label", "op_row_index"),
     # L1 wave 0: the grouping knob mirror + grouping-policy stamp; L3:
-    # _primitive_op_profile; L7a: structure_only; L9: timing clock
-    # provenance + checkpoint-invocation witness (memo 1.3 / 2.3).
+    # _primitive_op_profile; L7a: structure_only; L8/F6: the shard-local
+    # capture marker (census plan 3.1/3.2b); L9: timing clock provenance +
+    # checkpoint-invocation witness (memo 1.3 / 2.3).
     "Trace": (
         "_primitive_op_profile",
         "checkpoint_invocation_witness",
+        "distributed_scope",
         "grad_fn_timing_provenance",
         "grouping",
         "grouping_policy",

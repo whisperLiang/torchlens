@@ -56,9 +56,18 @@ class TestCensusSkeleton:
         assert not result.green
         assert any("not bit-identical" in failure for failure in result.failures)
 
-    def test_criteria_2_through_4_are_honestly_unimplemented(self):
+    def test_criteria_2_through_4_refuse_without_plane_p(self):
+        """Wave-1 form of the skeleton honesty pin: the criteria BODIES exist
+        now (C2 recording lane), but an UNARMED capture carries no plane-P
+        journal, so requesting them still raises -- a green can never be
+        vacuous about which criteria actually ran."""
+
+        import torchlens as tl
+
+        lifecycle.disarm()
+        log = tl.trace(nn.Linear(4, 4), torch.randn(2, 4))
         with pytest.raises(NotImplementedError, match="C2"):
-            run_census_criterion_2()
+            run_census_criterion_2([], log)
 
 
 def _p2p_worker(rank: int, world_size: int, init_file: str, out_dir: str) -> None:

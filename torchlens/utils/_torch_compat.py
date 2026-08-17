@@ -77,6 +77,8 @@ __all__ = [
     "HAS_DYNAMO_COMPILE_COUNTERS",
     "HAS_DYNAMO_IS_COMPILING",
     "HAS_FAKE_TENSOR_MODE",
+    "HAS_FUNCOL_GROUP_RESOLUTION",
+    "HAS_FUNCOL_WAIT_INTERPOSITION",
     "HAS_JIT_SCHEMA_ENUMERATION",
     "HAS_TENSORBASE_CLASS",
     "HAS_VARIABLE_FUNCTIONS_CLASS",
@@ -1335,6 +1337,11 @@ _FAKE_TENSOR_MODE_PROBED: bool = False
 HAS_DTENSOR_SHARD_GEOMETRY: bool = False
 _DTENSOR_SHARD_GEOMETRY_FN: Callable[..., Any] | None = None
 _DTENSOR_SHARD_GEOMETRY_PROBED: bool = False
+HAS_FUNCOL_GROUP_RESOLUTION: bool = False
+_FUNCOL_GROUP_RESOLVERS: tuple[Callable[..., Any], Callable[..., Any]] | None = None
+_FUNCOL_GROUP_RESOLUTION_PROBED: bool = False
+HAS_FUNCOL_WAIT_INTERPOSITION: bool = False
+_FUNCOL_WAIT_INTERPOSITION_PROBED: bool = False
 
 _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_VARIABLE_FUNCTIONS",
@@ -1370,6 +1377,8 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_VARIABLE_FUNCTIONS_CLASS",
     "HAS_FAKE_TENSOR_MODE",
     "HAS_DTENSOR_SHARD_GEOMETRY",
+    "HAS_FUNCOL_GROUP_RESOLUTION",
+    "HAS_FUNCOL_WAIT_INTERPOSITION",
     "HAS_DYNAMO_IS_COMPILING",
     "HAS_SET_STANCE",
     "HAS_DYNAMO_COMPILE_COUNTERS",
@@ -1410,6 +1419,11 @@ _LAZY_PROBE_FAMILIES: dict[str, tuple[str, ...]] = {
         "_DISPATCH_MODE_STACK_FN",
     ),
     "_DTENSOR_PROBED": ("HAS_DTENSOR", "_DTENSOR_TYPE"),
+    "_FUNCOL_GROUP_RESOLUTION_PROBED": (
+        "HAS_FUNCOL_GROUP_RESOLUTION",
+        "_FUNCOL_GROUP_RESOLVERS",
+    ),
+    "_FUNCOL_WAIT_INTERPOSITION_PROBED": ("HAS_FUNCOL_WAIT_INTERPOSITION",),
     "_DTENSOR_SHARD_GEOMETRY_PROBED": (
         "HAS_DTENSOR_SHARD_GEOMETRY",
         "_DTENSOR_SHARD_GEOMETRY_FN",
@@ -2117,6 +2131,83 @@ def get_dtensor_shard_geometry_fn() -> Callable[..., Any] | None:
             "refused-DTensor findings omit shard offsets (geometry helper unavailable)",
         )
     return _DTENSOR_SHARD_GEOMETRY_FN
+
+
+def get_funcol_group_resolvers() -> tuple[Callable[..., Any], Callable[..., Any]] | None:
+    """Return funcol's group resolver plus the c10d name resolver, or ``None``.
+
+    Backs the functional-collective boundary wraps (merge-ranks C2 recording):
+    ``torch.distributed._functional_collectives._resolve_group`` maps every
+    public funcol group spelling (ProcessGroup / group-name string / DeviceMesh /
+    ``(mesh, dim)`` / rank lists) to a ProcessGroup or group name, and
+    ``torch.distributed.distributed_c10d._resolve_process_group`` maps a group
+    name to its live ProcessGroup. Both are torch-private surfaces, so their
+    absence flips the named ``HAS_FUNCOL_GROUP_RESOLUTION`` flag (visible in
+    ``doctor()`` / ``compat.report()``) instead of failing mid-capture; the
+    boundary wrap then refuses captured funcol calls typed rather than letting
+    an uncorrelatable collective execute silently.
+    """
+
+    global HAS_FUNCOL_GROUP_RESOLUTION, _FUNCOL_GROUP_RESOLVERS
+    global _FUNCOL_GROUP_RESOLUTION_PROBED
+
+    if not _FUNCOL_GROUP_RESOLUTION_PROBED:
+        resolve_group = _import_module_attr_or_none(
+            "torch.distributed._functional_collectives", "_resolve_group"
+        )
+        resolve_name = _import_module_attr_or_none(
+            "torch.distributed.distributed_c10d", "_resolve_process_group"
+        )
+        if callable(resolve_group) and callable(resolve_name):
+            _FUNCOL_GROUP_RESOLVERS = (resolve_group, resolve_name)
+        else:
+            _FUNCOL_GROUP_RESOLVERS = None
+        HAS_FUNCOL_GROUP_RESOLUTION = _FUNCOL_GROUP_RESOLVERS is not None
+        _FUNCOL_GROUP_RESOLUTION_PROBED = True
+    if _FUNCOL_GROUP_RESOLVERS is None:
+        mark_torch_capability_missing(
+            "HAS_FUNCOL_GROUP_RESOLUTION",
+            "captured functional-collective (funcol) calls refuse typed instead "
+            "of recording correlated boundary nodes (group resolvers unavailable)",
+        )
+    return _FUNCOL_GROUP_RESOLVERS
+
+
+def probe_funcol_wait_interposition() -> bool:
+    """Probe the dispatcher surfaces the plane-W wait interposition needs.
+
+    The mode-independent completion authority registers a scoped
+    ``torch.library.Library("_c10d_functional", "IMPL")`` wrapper for
+    ``wait_tensor`` at the CPU key and redispatches below itself through
+    ``torch._C._ExcludeDispatchKeyGuard`` (design-merge-ranks-c v5, 1.4c; probe
+    P3a). All four surfaces are feature-detected here; absence flips the named
+    ``HAS_FUNCOL_WAIT_INTERPOSITION`` flag and funcol completions then stay
+    honestly ``unobserved`` (fail-closed disclosure, never a crash).
+    """
+
+    global HAS_FUNCOL_WAIT_INTERPOSITION, _FUNCOL_WAIT_INTERPOSITION_PROBED
+
+    if not _FUNCOL_WAIT_INTERPOSITION_PROBED:
+        library_cls = getattr(getattr(torch, "library", None), "Library", None)
+        internals = getattr(torch, "_C", None)
+        HAS_FUNCOL_WAIT_INTERPOSITION = (
+            library_cls is not None
+            and getattr(internals, "_ExcludeDispatchKeyGuard", None) is not None
+            and getattr(internals, "DispatchKeySet", None) is not None
+            and getattr(getattr(internals, "DispatchKey", None), "CPU", None) is not None
+            and _import_module_attr_or_none(
+                "torch.distributed._functional_collectives", "wait_tensor"
+            )
+            is not None
+        )
+        _FUNCOL_WAIT_INTERPOSITION_PROBED = True
+    if not HAS_FUNCOL_WAIT_INTERPOSITION:
+        mark_torch_capability_missing(
+            "HAS_FUNCOL_WAIT_INTERPOSITION",
+            "functional-collective completions stay completion_binding='unobserved' "
+            "(dispatcher wait interposition unavailable on this torch build)",
+        )
+    return HAS_FUNCOL_WAIT_INTERPOSITION
 
 
 def get_torch_function_mode_stack_length() -> int | None:

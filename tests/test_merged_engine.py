@@ -149,6 +149,7 @@ def boundary(
 
 def evidence(rank: int, boundaries: list[dict], ledger=None, epoch: str = "seeded") -> RankEvidence:
     return RankEvidence(
+        shard_local=False,
         rank=rank,
         boundaries=tuple(boundaries),
         ledger=ledger if ledger is not None else seeded_ledger(),
