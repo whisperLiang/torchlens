@@ -3975,11 +3975,8 @@ def _scoped_saved_tensors_hook(hook: Callable[[Any], Any]) -> Callable[[Any], An
     def scoped_hook(value: Any) -> Any:
         """Run the user hook with capture logging paused on the owner thread."""
         active_trace, logging_enabled = _state.active_capture()
-        if (
-            logging_enabled
-            and active_trace is not None
-            and _state._active_owner_thread_id == threading.get_ident()
-        ):
+        on_owner_thread = _state._active_owner_thread_id == threading.get_ident()
+        if logging_enabled and active_trace is not None and on_owner_thread:
             with pause_logging():
                 return hook(value)
         return hook(value)
