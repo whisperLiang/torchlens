@@ -1,3 +1,4 @@
+import gc
 import os
 import random
 import sys
@@ -486,6 +487,33 @@ def _is_full_usage_stats_run(config: pytest.Config) -> bool:
         return False
     requested_paths = [Path(str(arg).split("::", maxsplit=1)[0]).resolve() for arg in config.args]
     return requested_paths == [Path(TESTS_DIR).resolve()]
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """Freeze the import-time heap so per-test gc cost is O(session-created objects).
+
+    Collection imports every selected test module up front, so a full session
+    starts with millions of live tracked objects (measured 2026-08-18: 5.17M at
+    test #1 of a 1,000-test smoke slice vs 445k isolated). Every full-heap gc
+    pass -- the explicit ``gc.collect()`` calls in weakref/leak tests AND
+    CPython's automatic threshold gen-2 collections -- scans that heap at
+    O(live objects), charging 4-9s of pure CPU to whichever test happens to be
+    running (69.9s of gen-2 gc in a 210s slice; the duration tripwire's
+    rotating "flakes" were exactly these). Freezing after one settling collect
+    moves the permanent import-time heap into gc's frozen generation, which
+    collections never scan, making per-test gc cost proportional to what the
+    session has created since -- ~200k objects per 1,000 tests, milliseconds.
+
+    Isolation is unchanged: freezing happens BEFORE the first test, so every
+    test-created object stays in the scanned generations and remains fully
+    collectable; frozen objects are import-time state that was never eligible
+    for collection while the session lives. Modules imported lazily mid-session
+    land post-freeze and are simply scanned as normal.
+    """
+
+    del session
+    gc.collect()
+    gc.freeze()
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
