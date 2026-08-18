@@ -1526,7 +1526,10 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         # streaming re-run executes this same body OUTSIDE the pipeline
         # and its windows — the fact already carried by the
         # ('18','grad_ref') phantom-write exemption); the reads
-        # observe-placeholder-and-fall-through.
+        # observe-placeholder-and-fall-through. The L6 tier-(ii) pair
+        # (persisted since the v8 bump; written only by session-time
+        # fork.do() on a FINISHED trace, so the scrub always observes the
+        # step-0 empty-dict seed) is reviewed in PROBES_GOLDEN.
         placeholder_probes=frozenset(
             (
                 "_facets_cache",
@@ -1535,6 +1538,8 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "_pending_transformed_grad_blob_id",
                 "_projective_field_cache",
                 "_receptive_field_cache",
+                "edge_replacement_stamps",
+                "edge_substitutions",
                 "grad",
                 "grad_dtype",
                 "grad_fn",

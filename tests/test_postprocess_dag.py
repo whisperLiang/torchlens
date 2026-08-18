@@ -188,6 +188,15 @@ PROBES_GOLDEN = {
     # the step-0 constant seed — grads are written post-backward, outside
     # the pipeline) are reviewed observe-and-fall-through probes.
     "16": frozenset(("_grad_records",)),
+    # Step 18 L6 tier-(ii) rows (tlspec v8 coordinated bump): the bump
+    # retired the S3 pre-release registrations and made edge_substitutions
+    # (BLOB_RECURSIVE) / edge_replacement_stamps (KEEP) permanent persisted
+    # schema rows, so the whole-row portable scrub now sweeps them. Same
+    # reviewed shape as the grad channel: in-pipeline both always hold the
+    # step-0 empty-dict seed (tier-(ii) entries are written only by
+    # session-time fork.do() on a FINISHED trace, outside the pipeline),
+    # no postprocess step writes either column, and the derived order is
+    # unchanged.
     "18": frozenset(
         (
             "_facets_cache",
@@ -196,6 +205,8 @@ PROBES_GOLDEN = {
             "_pending_transformed_grad_blob_id",
             "_projective_field_cache",
             "_receptive_field_cache",
+            "edge_replacement_stamps",
+            "edge_substitutions",
             "grad",
             "grad_dtype",
             "grad_fn",
