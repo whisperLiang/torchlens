@@ -1526,7 +1526,19 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         # streaming re-run executes this same body OUTSIDE the pipeline
         # and its windows — the fact already carried by the
         # ('18','grad_ref') phantom-write exemption); the reads
-        # observe-placeholder-and-fall-through.
+        # observe-placeholder-and-fall-through. The L6 tier-(ii) pair
+        # (reviewed at the tlspec v8 coordinated bump, which retired the
+        # S3 pre-release registrations and made both columns permanent
+        # persisted schema rows — edge_substitutions BLOB_RECURSIVE,
+        # edge_replacement_stamps KEEP) is the intervention-phase channel
+        # of the same shape: in-pipeline both always hold the step-0
+        # empty-dict seed (tier-(ii) entries are written only by
+        # session-time fork.do() on a FINISHED trace, outside the
+        # pipeline and its windows), so the scrub observes the
+        # placeholder and serializes the honest empty store. NO
+        # postprocess step writes either column, so the probes generate
+        # zero WAR edges and the derived order is unchanged (verified
+        # against LEGACY_STEP_RANK and the PINNED_ORDER_PAIRS corpus).
         placeholder_probes=frozenset(
             (
                 "_facets_cache",
@@ -1535,6 +1547,8 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "_pending_transformed_grad_blob_id",
                 "_projective_field_cache",
                 "_receptive_field_cache",
+                "edge_replacement_stamps",
+                "edge_substitutions",
                 "grad",
                 "grad_dtype",
                 "grad_fn",
