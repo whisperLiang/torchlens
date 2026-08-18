@@ -333,7 +333,7 @@ def _attestation_state_matches(
 def _raise_numeric_attestation_failure(fork: Any, check: ContractCheck) -> None:
     """Rollback and raise the mandatory saved-activation mismatch tripwire."""
 
-    _state._unregister_log(fork)
+    _state.unregister_log(fork)
     diagnostic = check.diagnostic
     raise NumericAttestationError(
         diagnostic.message if diagnostic is not None else "Numeric attestation failed.",
@@ -394,7 +394,7 @@ def _raise_failed_contract_as_divergence(
     """
 
     if fork is not None:
-        _state._unregister_log(fork)
+        _state.unregister_log(fork)
     diagnostic = failed.diagnostic
     error = PathDivergenceError(
         diagnostic.message if diagnostic is not None else "Sparse run path diverged.",
@@ -445,7 +445,7 @@ def _raise_monotonic_divergence(
     if status is not PathFaithfulness.DIVERGED or policy is DivergencePolicy.RETURN_DIVERGED:
         return
     if unregister_fork:
-        _state._unregister_log(fork)
+        _state.unregister_log(fork)
     raise PathDivergenceError(
         "Sparse run Trace retains a prior path divergence and cannot become faithful.",
         code=(

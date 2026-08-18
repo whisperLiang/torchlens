@@ -2027,7 +2027,7 @@ class Trace(
         self.num_backward_passes: int = 0
         self.backward_peak_memory: Bytes = Bytes(0)
         self.backward_memory_backend: str = "unknown"
-        _state._register_log(self)
+        _state.register_log(self)
 
     # ********************************************
     # ************ Built-in Methods **************
@@ -3338,7 +3338,7 @@ class Trace(
             from ..capture._episode_ledger import validate_loaded_episode_annotations
 
             validate_loaded_episode_annotations(self)
-        _state._register_log(self)
+        _state.register_log(self)
 
     def replace_state_from(self, new_log: "Trace") -> None:
         """Atomically replace this log's run-state from another ``Trace``.

@@ -3611,7 +3611,7 @@ def _capture_autograd_engine_call(
     # share the root tensors: a fork's ``log_backward`` would otherwise
     # silently append a pass to its parent's projection (and vice versa).
     # Unrelated root-owning traces keep the historical multi-trace capture.
-    directing_trace = _state._active_trace
+    directing_trace, _ = _state.active_capture()
     if directing_trace is not None and not getattr(
         directing_trace, "_tl_active_backward_bracket", False
     ):
@@ -3843,7 +3843,7 @@ def _observe_saved_tensors_hooks_enter(context: Any) -> None:
     silent: every checkpoint enter therefore either mints or flags.
     """
 
-    trace = _state._active_trace
+    trace, logging_enabled = _state.active_capture()
     if trace is None:
         return
     checkpoint_cls = _resolve_checkpoint_hook_cls()
@@ -3853,7 +3853,7 @@ def _observe_saved_tensors_hooks_enter(context: Any) -> None:
     if not isinstance(context, checkpoint_cls):
         return
     armed_on_owner_thread = (
-        _state._logging_enabled and _state._active_owner_thread_id == threading.get_ident()
+        logging_enabled and _state._active_owner_thread_id == threading.get_ident()
     )
     if not armed_on_owner_thread or _current_backward_graph_task_id() is not None:
         _flag_checkpoint_degrade(trace, _CHECKPOINT_FLAG_UNWITNESSED_ENTER)
@@ -3974,9 +3974,10 @@ def _scoped_saved_tensors_hook(hook: Callable[[Any], Any]) -> Callable[[Any], An
 
     def scoped_hook(value: Any) -> Any:
         """Run the user hook with capture logging paused on the owner thread."""
+        active_trace, logging_enabled = _state.active_capture()
         if (
-            _state._logging_enabled
-            and _state._active_trace is not None
+            logging_enabled
+            and active_trace is not None
             and _state._active_owner_thread_id == threading.get_ident()
         ):
             with pause_logging():
@@ -4036,7 +4037,7 @@ def _install_saved_tensors_hooks_scope() -> None:
             # the historical unscoped behavior rather than breaking entry --
             # and flags D3 so the checkpoint witness never claims coverage a
             # degraded patch cannot provide.
-            active_trace = _state._active_trace
+            active_trace, _ = _state.active_capture()
             if active_trace is not None:
                 _flag_checkpoint_degrade(active_trace, _CHECKPOINT_FLAG_EXOTIC_SUBCLASS)
         else:

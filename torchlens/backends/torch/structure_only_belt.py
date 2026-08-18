@@ -141,9 +141,10 @@ def _first_non_torchlens_caller() -> tuple[str, int, bool] | None:
 def _belt_should_consider(state: _StructureOnlyBeltState) -> bool:
     """Cheap hot-path guard shared by every patched site."""
 
+    active_trace, logging_enabled = _state.active_capture()
     return (
-        _state._logging_enabled
-        and _state._active_trace is state.trace
+        logging_enabled
+        and active_trace is state.trace
         and threading.get_ident() == state.owner_thread_id
         and not _internal_read_active()
     )

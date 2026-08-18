@@ -49,7 +49,19 @@ _PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "torchlens"
 # `_decorated_to_orig` poisoned-ledger integrity refusal plus the
 # detector/witness mode re-arm reads -- wrap-state surgery that must NOT
 # route through the accessor it is auditing).
-_ACCESS_SITE_BASELINE = 300
+# 300 -> 288 (2026-08-18 featmega settle): the L8/L9/L7a/runnable lanes had
+# grown the count to 311; reconciled by CONVERTING, not raising. The weak
+# log-registry transitions were renamed to the public state-owned spellings
+# `_state.register_log`/`_state.unregister_log` (-12 sites), and the paired
+# `_logging_enabled`/`_active_trace` reads in funcol.py, backward.py (L9
+# checkpoint/saved-tensors observers), and structure_only_belt.py now use
+# the sanctioned `active_capture()` snapshot (-11). Four new sites stay raw
+# in already-sanctioned classes: the `_active_owner_thread_id` gates in
+# funcol.py and backward.py (r43 class -- the owner-thread ident has no
+# accessor by design), and one `_logging_enabled` + `_active_trace` pair in
+# completeness_witness.py's `__torch_dispatch__` (per-aten-op hot path;
+# the module policy keeps single-field raw loads on hot wrapper paths).
+_ACCESS_SITE_BASELINE = 288
 
 
 def _state_access_sites() -> list[tuple[str, int]]:

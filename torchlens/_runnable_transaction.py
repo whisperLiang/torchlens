@@ -341,7 +341,7 @@ def _execute_loaded_sparse_transaction(
         # set excluded it -- the descriptor's capture device summary missed a
         # CUDA consumer, so run-local RNG isolation cannot be guaranteed. This
         # is an internal summary bug, never silently ignored.
-        _state._unregister_log(fork)
+        _state.unregister_log(fork)
         raise RuntimeError(
             "Internal invariant violation: CUDA became initialized during a "
             "seeded sparse run whose descriptor named no CUDA device; the "
@@ -887,7 +887,7 @@ def _finalize_truncated_live_run(
         )
     for log in _state.list_logs():
         if id(log) not in ctx.prior_log_ids and log is not fork:
-            _state._unregister_log(log)
+            _state.unregister_log(log)
     # RunResult.output is None under live truncation ([PROV]): there IS
     # no full-forward return value; callers read executed-prefix values
     # off the result trace. The live output-reconstruction contract
@@ -1048,10 +1048,10 @@ def run_live_trace(
             return _finalize_truncated_live_run(fork, until_plan, finalize_ctx)
         return _finalize_full_live_run(fork, finalize_ctx)
     except BaseException:
-        _state._unregister_log(fork)
+        _state.unregister_log(fork)
         for log in _state.list_logs():
             if id(log) not in prior_log_ids:
-                _state._unregister_log(log)
+                _state.unregister_log(log)
         raise
     finally:
         # L4 5.2: RESTORE runs in finally on EVERY path (success, divergence,
@@ -1081,7 +1081,7 @@ def _restore_declared_state_or_mark(trace: Any, fork: Any, snapshot: Any) -> Non
         restore_live_declared_state(snapshot)
     except LiveStateRestoreFailure as exc:
         mark_trace_path_status(fork, PathFaithfulness.UNVERIFIABLE, None)
-        _state._unregister_log(fork)
+        _state.unregister_log(fork)
         runnable_state = getattr(trace, "_runnable", None)
         if runnable_state is not None:
             runnable_state.state_compromised = {

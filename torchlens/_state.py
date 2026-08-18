@@ -221,8 +221,12 @@ _HF_CLASS_SUFFIXES: tuple[str, ...] = (
 """Common HuggingFace class suffixes stripped from generated log names."""
 
 
-def _register_log(log: "Trace") -> None:
+def register_log(log: "Trace") -> None:
     """Register a model log in the process-wide weak registry.
+
+    The state-owned registry transition (R45 raw-access ratchet): callers
+    spell it ``_state.register_log(...)`` rather than reaching into
+    ``_log_registry`` directly.
 
     Parameters
     ----------
@@ -238,8 +242,10 @@ def _register_log(log: "Trace") -> None:
     _log_registry.add(log)
 
 
-def _unregister_log(log: "Trace") -> None:
+def unregister_log(log: "Trace") -> None:
     """Remove an unexposed transactional Trace from the live registry.
+
+    The state-owned registry transition paired with ``register_log``.
 
     Parameters
     ----------

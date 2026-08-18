@@ -162,7 +162,7 @@ def run_loaded_sparse_trace(
             until_plan=until_plan,
         )
     except BaseException:
-        _state._unregister_log(fork)
+        _state.unregister_log(fork)
         raise
 
 
