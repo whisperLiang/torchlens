@@ -719,5 +719,5 @@ def build_fork(parent: Trace, *, name: str | None) -> Trace:
             if gc_was_enabled:
                 gc.enable()
     fork._rebind_fork_owner_refs()
-    _state._register_log(fork)
+    _state.register_log(fork)
     return fork
