@@ -150,6 +150,13 @@ repos:
       # rule lines name their subject path first, so a leading private path on
       # any line of a staged git config file is a leak of the artifact name.
       # CI layer: tests/test_repo_privacy.py::test_git_config_files_reference_no_private_paths.
+      - id: no-internal-notes-pre-push
+        name: Internal notes must not reach remote main
+        entry: scripts/check_no_internal_notes_pushed.py
+        language: python
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
       - id: no-internal-note-refs-in-git-config
         name: Git config files must not reference private paths
         language: pygrep
