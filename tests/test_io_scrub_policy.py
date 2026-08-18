@@ -261,7 +261,11 @@ def _sweep_public_accessors(record: Any) -> None:
             continue
         try:
             getattr(record, name)
-        except Exception:  # noqa: BLE001 - unreadable accessors are not the subject
+        # An accessor that raises is not this sweep's subject (hence the suppressions
+        # below). The sweep exists to prove that READING the public surface leaves the trace
+        # saveable; logging every unreadable accessor would bury that signal, and a
+        # raising accessor cannot populate the live state this test inspects.
+        except Exception:  # noqa: BLE001, S112
             continue
 
 
