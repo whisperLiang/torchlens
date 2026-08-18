@@ -672,6 +672,11 @@ def test_nondeterministic_sources_field_vocabulary(tmp_path: Path) -> None:
     assert report.nondeterministic_sources == ("seeded_rng",)
     assert set(report.nondeterministic_sources) <= NONDETERMINISTIC_SOURCE_VOCABULARY
 
-    live_trace = tl.trace(nn.Linear(4, 3).eval(), x.clone(), capture=_CAPTURE)
+    # Bind the model to a NAME: a live Trace holds its source model only weakly, so an
+    # inline-constructed model is collected at the first gc pass after capture and `.run()`
+    # then refuses RunCapabilityUnavailableError. This passed by luck until the
+    # collection-finish gc.freeze changed when automatic collections land.
+    live_model = nn.Linear(4, 3).eval()
+    live_trace = tl.trace(live_model, x.clone(), capture=_CAPTURE)
     live_report = live_trace.run(inputs=x.clone()).report
     assert live_report.nondeterministic_sources == ()
