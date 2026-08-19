@@ -390,6 +390,7 @@ def _evict_live_id(entry_id: int) -> Callable[[Any], None]:
     """Death callback evicting ``entry_id`` from the sweep pre-filter live set."""
 
     def _evict(_ref: Any) -> None:
+        """Discard the captured id when its referent is finalized."""
         _swept_ids_live.discard(entry_id)
 
     return _evict
