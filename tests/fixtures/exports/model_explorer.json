@@ -1,5 +1,5 @@
 {
-  "disclaimer": "TorchLens writes and structurally validates this Google Model Explorer graph JSON; acceptance by any particular external Model Explorer release is not guaranteed.",
+  "disclaimer": "TorchLens graph-collection JSON for Google Model Explorer; a data export of the captured graph, not a runnable model. The top-level label/graphs shape matches Model Explorer's file-ingest contract (pinned against ai-edge-model-explorer 0.1.32); acceptance by future external releases is not guaranteed.",
   "graphs": [
     {
       "id": "<trace-id>",
@@ -103,5 +103,6 @@
       ]
     }
   ],
-  "schema": "torchlens.model_explorer.v1"
+  "label": "<trace-id>",
+  "schema": "torchlens.model_explorer.v2"
 }

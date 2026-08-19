@@ -9,16 +9,18 @@ captured Trace.
 
 | File | Purpose |
 |------|---------|
-| `__init__.py` | Public re-exports only; the 11-name `__all__` below |
+| `__init__.py` | Public re-exports only; the 12-name `__all__` below |
 | `_core.py` | `AttributionError`, `AttributionResult`, input normalization / leaf minting / baseline validation machinery, and the input-level methods (`saliency`, `input_x_grad`, `integrated_gradients`, `smoothgrad`); IG always reports its completeness residual |
 | `_layer.py` | Layer-level methods: `layer_attribution`, `layer_integrated_gradients`, `layer_conductance`, `grad_cam` |
 | `_occlusion.py` | Selection-addressed scored occlusion through `Trace.fork().do(...)`, with explicit zeros/mean/blur baselines |
+| `_viz.py` | `overlay`: bridges layer-scoped results (or explicit mappings) onto `Trace.draw(color_by=...)`; uncovered nodes return `None` (unencoded) |
 
-## Public surface (`__all__`, 11 names)
+## Public surface (`__all__`, 12 names)
 
 `AttributionError`, `AttributionResult`, `saliency`, `input_x_grad`,
 `integrated_gradients`, `smoothgrad`, `layer_attribution`,
-`layer_integrated_gradients`, `layer_conductance`, `grad_cam`, `occlusion`.
+`layer_integrated_gradients`, `layer_conductance`, `grad_cam`, `occlusion`,
+`overlay`.
 
 ## Gotchas
 

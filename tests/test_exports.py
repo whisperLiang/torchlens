@@ -49,8 +49,9 @@ def _assert_model_explorer_structure(payload: dict[str, Any]) -> None:
         Parsed Model Explorer artifact.
     """
 
-    assert payload["schema"] == "torchlens.model_explorer.v1"
+    assert payload["schema"] == "torchlens.model_explorer.v2"
     assert isinstance(payload["disclaimer"], str)
+    assert isinstance(payload["label"], str) and payload["label"]
     assert isinstance(payload["graphs"], list) and payload["graphs"]
     for graph in payload["graphs"]:
         assert isinstance(graph["id"], str)
@@ -78,36 +79,42 @@ def _assert_model_explorer_structure(payload: dict[str, Any]) -> None:
 
 
 def _assert_netron_structure(payload: dict[str, Any]) -> None:
-    """Validate required Netron-shaped keys and graph referential integrity.
+    """Validate required ONNX-JSON keys and graph referential integrity.
 
     Parameters
     ----------
     payload:
-        Parsed Netron-shaped artifact.
+        Parsed ONNX ``ModelProto`` JSON artifact.
     """
 
-    assert payload["ir_version"] == "torchlens-lossy-onnx-shaped-v1"
-    assert payload["producer_name"] == "torchlens"
-    assert payload["runnable"] is False
-    assert isinstance(payload["disclaimer"], str)
+    assert payload["irVersion"] == 8
+    assert payload["producerName"] == "torchlens"
+    assert payload["opsetImport"] == [{"domain": "ai.torchlens.lossy", "version": 1}]
+    assert "not a runnable ONNX model" in payload["docString"]
+    assert {prop["key"]: prop["value"] for prop in payload["metadataProps"]} == {
+        "torchlens.lossy_export": "true",
+        "torchlens.runnable": "false",
+    }
     graph = payload["graph"]
     assert isinstance(graph["name"], str)
+    assert "not a runnable ONNX model" in graph["docString"]
     assert isinstance(graph["node"], list) and graph["node"]
     node_names = [node["name"] for node in graph["node"]]
     outputs = [output for node in graph["node"] for output in node["output"]]
     assert len(node_names) == len(set(node_names))
     assert len(outputs) == len(set(outputs))
     for node in graph["node"]:
-        assert isinstance(node["op_type"], str)
+        assert isinstance(node["opType"], str)
+        assert node["domain"] == "ai.torchlens.lossy"
         assert isinstance(node["input"], list)
         assert all(isinstance(input_id, str) and input_id in outputs for input_id in node["input"])
         assert isinstance(node["output"], list) and node["output"]
-        assert isinstance(node["attribute"], list)
         assert all(
             isinstance(attribute, dict)
-            and isinstance(attribute.get("name"), str)
-            and isinstance(attribute.get("value"), list)
-            for attribute in node["attribute"]
+            and attribute.get("name") == "shape"
+            and attribute.get("type") == "INTS"
+            and isinstance(attribute.get("ints"), list)
+            for attribute in node.get("attribute", [])
         )
 
 
@@ -168,6 +175,8 @@ def _normalize_export_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = json.loads(json.dumps(payload))
     if "graphs" in normalized:
         normalized["graphs"][0]["id"] = "<trace-id>"
+        if "label" in normalized:
+            normalized["label"] = "<trace-id>"
     else:
         normalized["graph"]["name"] = "<trace-id>"
     return normalized
@@ -422,7 +431,7 @@ def test_static_graph_adapters_and_hub_dry_run(export_log: Any, tmp_path: Path) 
     explorer_payload = json.loads(explorer_path.read_text(encoding="utf-8"))
     _assert_model_explorer_structure(explorer_payload)
     assert (
-        "acceptance by any particular external Model Explorer release is not guaranteed"
+        "acceptance by future external releases is not guaranteed"
         in (explorer_payload["disclaimer"])
     )
     regenerated = _assert_or_regenerate_export_golden(
@@ -432,8 +441,6 @@ def test_static_graph_adapters_and_hub_dry_run(export_log: Any, tmp_path: Path) 
     netron_path = tl.export.netron(export_log, tmp_path / "netron.json")
     netron_payload = json.loads(netron_path.read_text(encoding="utf-8"))
     _assert_netron_structure(netron_payload)
-    assert "not a real ONNX model" in netron_payload["disclaimer"]
-    assert "acceptance by Netron is not guaranteed" in netron_payload["disclaimer"]
     regenerated |= _assert_or_regenerate_export_golden(
         "netron.json", _normalize_export_payload(netron_payload)
     )
@@ -587,3 +594,97 @@ def test_depyf_bridge_fails_soft_when_extra_missing() -> None:
         pytest.skip("Installed depyf API varies; smoke coverage is in the extras matrix.")
     with pytest.raises(ImportError, match=r"torchlens\[depyf\]"):
         tl.bridge.depyf.dump(nn.Linear(1, 1), torch.randn(1, 1))
+
+
+def test_netron_export_is_valid_onnx_modelproto_json(export_log: Any, tmp_path: Path) -> None:
+    """The Netron artifact parses into ``onnx.ModelProto`` via strict protobuf JSON.
+
+    Netron's ONNX JSON reader decodes the file with the protobuf JSON mapping
+    (``onnx.ProtoReader`` ``encoding='json'``), so a strict
+    ``google.protobuf.json_format.Parse`` into ``onnx.ModelProto`` — which
+    refuses unknown fields — is the real external acceptance contract.
+    """
+
+    onnx = pytest.importorskip("onnx")
+    json_format = pytest.importorskip("google.protobuf.json_format")
+
+    netron_path = tl.export.netron(export_log, tmp_path / "netron.json")
+    model = json_format.Parse(netron_path.read_text(encoding="utf-8"), onnx.ModelProto())
+    assert model.ir_version == 8
+    assert model.producer_name == "torchlens"
+    assert len(model.graph.node) > 0
+    assert all(node.domain == "ai.torchlens.lossy" for node in model.graph.node)
+
+
+def test_netron_export_passes_netron_onnx_json_sniffer(export_log: Any, tmp_path: Path) -> None:
+    """The artifact satisfies Netron's ONNX-JSON acceptance predicate.
+
+    The predicate is transcribed from netron 9.2.2 ``onnx.js`` (ProtoReader
+    ``open``): the object must carry NO snake_case ONNX markers and at least
+    one camelCase ``ModelProto`` marker. The historical snake_case export
+    failed the first conjunct and Netron refused to open it.
+    """
+
+    netron_path = tl.export.netron(export_log, tmp_path / "netron.json")
+    obj = json.loads(netron_path.read_text(encoding="utf-8"))
+    no_snake_markers = (
+        obj.get("ir_version") is None
+        and obj.get("producer_name") is None
+        and not isinstance(obj.get("opset_import"), list)
+        and not isinstance(obj.get("metadata_props"), list)
+    )
+    camel_markers = (
+        obj.get("irVersion") is not None
+        or obj.get("producerName") is not None
+        or isinstance(obj.get("opsetImport"), list)
+        or isinstance(obj.get("metadataProps"), list)
+        or (isinstance(obj.get("graph"), list) and isinstance(obj["graph"].get("node"), list))
+    )
+    assert no_snake_markers and camel_markers
+
+
+def test_model_explorer_export_passes_ingest_normalizer(export_log: Any, tmp_path: Path) -> None:
+    """The artifact satisfies Model Explorer's JSON file-ingest contract.
+
+    The normalizer is transcribed from the ai-edge-model-explorer 0.1.32 web
+    app: a file is a graph collection iff top-level ``label`` AND ``graphs``
+    are both non-null (extra keys are ignored); anything else refuses with
+    "Unsupported JSON format". The historical export omitted ``label`` and
+    was refused. Node shapes are checked against the vendor's
+    ``graph_builder`` dataclass fields (same release).
+    """
+
+    explorer_path = tl.export.model_explorer(export_log, tmp_path / "explorer.json")
+    obj = json.loads(explorer_path.read_text(encoding="utf-8"))
+    assert obj.get("label") is not None and obj.get("graphs") is not None
+
+    graph_fields = {
+        "id",
+        "nodes",
+        "groupNodeAttributes",
+        "groupNodeConfigs",
+        "nodeLabelsToHide",
+        "tasksData",
+        "layoutConfigs",
+    }
+    node_fields = {
+        "id",
+        "label",
+        "namespace",
+        "subgraphIds",
+        "attrs",
+        "incomingEdges",
+        "outputsMetadata",
+        "inputsMetadata",
+        "style",
+        "config",
+    }
+    for graph in obj["graphs"]:
+        assert set(graph) <= graph_fields
+        for node in graph["nodes"]:
+            assert set(node) <= node_fields
+            assert all(set(attr) <= {"key", "value"} for attr in node.get("attrs", []))
+            assert all(
+                set(edge) <= {"sourceNodeId", "sourceNodeOutputId", "targetNodeInputId"}
+                for edge in node.get("incomingEdges", [])
+            )
