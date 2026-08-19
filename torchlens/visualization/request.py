@@ -120,6 +120,10 @@ class ResolvedRenderRequest:
     # every constructor arg; False (default) suppresses args the equality
     # check proves redundant against this trace's captured shapes.
     show_redundant_args: bool = False
+    # Saved-for-backward annotation (DOCUMENTED-UNSTABLE spelling): True adds
+    # a label row on every op whose grad_fn retained tensors for backward,
+    # from the captured autograd_memory/num_autograd_tensors measurements.
+    show_saved_for_backward: bool = False
     font_size: int | None = None
     dpi: int | None = None
     for_paper: bool = False

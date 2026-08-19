@@ -66,6 +66,21 @@ unrolled per-pass nodes carry no summary row. The `node_label_fields`
 selector token `"shape_summary"` adds the row to explicit field pickers
 (skipped when the field is unset).
 
+## Saved-for-backward annotation (opt-in)
+
+`draw(show_saved_for_backward=True)` (DOCUMENTED-UNSTABLE spelling) makes autograd's
+memory behaviour visible per node: every op whose `grad_fn` measurably retained tensors
+for the backward pass gains one plain-text label row,
+`saved for backward: N tensors, X MB`, from the capture-time `num_autograd_tensors` /
+`autograd_memory` measurements (deduped by storage within each op). The row appears
+ONLY where retention was measured as positive — an op that saved nothing, or whose
+backward graph was never built (e.g. a `torch.no_grad()` capture), gets no row, so an
+absent row makes no claim. On rolled multi-pass layers the stored measurements are
+already cross-pass sums and the row discloses `(total across passes)`. Strictly opt-in:
+plain `draw()` labels are unchanged. Explicit `node_label_fields` pickers keep full
+control of their rows (no annotation is injected). Composes with
+`color_by="autograd_memory"` to add a ramp over the same quantity.
+
 ## Checked suppression of redundant constructor args (default-on)
 
 Node labels omit a module constructor arg exactly when the **check licenses

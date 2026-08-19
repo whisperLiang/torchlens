@@ -407,6 +407,7 @@ def _add_node_to_graphviz(
     deduped_edge_registry: dict[tuple[Any, ...], dict[str, Any]] | None = None,
     encoding: Any | None = None,
     suppressed_args: Mapping[int, frozenset[str]] | None = None,
+    show_saved_for_backward: bool = False,
 ) -> None:
     """Adds a node and its relevant edges to the graphviz figure.
 
@@ -493,6 +494,7 @@ def _add_node_to_graphviz(
             show_input_transform_summary,
             encoding=encoding,
             suppressed_args=suppressed_args,
+            show_saved_for_backward=show_saved_for_backward,
         )
 
     _add_edges_for_node(
@@ -544,6 +546,7 @@ def _build_layer_node(
     sibling_counts: Mapping[str, int] | None = None,
     encoding: Any | None = None,
     suppressed_args: Mapping[int, frozenset[str]] | None = None,
+    show_saved_for_backward: bool = False,
 ) -> str:
     """Builds and adds a standard (non-collapsed) layer node to the graphviz graph.
 
@@ -597,6 +600,7 @@ def _build_layer_node(
             node_label_fields=node_label_fields,
             node_overlay=node_overlay,
             suppressed_arg_keys=(suppressed_args or {}).get(id(node), frozenset()),
+            show_saved_for_backward=show_saved_for_backward,
         ),
         shape=node_shape,
         fillcolor=node_bg_color,
@@ -1939,6 +1943,41 @@ def _layer_log_for_node(trace: "Trace", node: GraphNode) -> "Layer":
     return trace.layer_logs[node.layer_label]
 
 
+def _saved_for_backward_line(layer_log: GraphNode, vis_mode: str) -> str | None:
+    """Build the saved-for-backward disclosure row for one node, if any.
+
+    The row appears only when the captured measurement PROVES autograd
+    retained tensors at this op (``num_autograd_tensors > 0``); an op that
+    saved nothing, or whose backward graph was never built, gets no row --
+    an absent row makes no claim. On rolled multi-pass layers the stored
+    fields are already cross-pass sums, disclosed in the row text.
+
+    Parameters
+    ----------
+    layer_log:
+        Op or Layer to annotate.
+    vis_mode:
+        ``"unrolled"`` or ``"rolled"``.
+
+    Returns
+    -------
+    str | None
+        Plain-text label row, or ``None`` when no retention was measured.
+    """
+
+    count = getattr(layer_log, "num_autograd_tensors", None)
+    if count is None or count <= 0:
+        return None
+    suffix = ""
+    if vis_mode == "rolled" and getattr(layer_log, "num_passes", 1) > 1:
+        suffix = " (total across passes)"
+    noun = "tensor" if count == 1 else "tensors"
+    memory = getattr(layer_log, "autograd_memory", None)
+    if memory is not None:
+        return f"saved for backward: {count} {noun}, {format_memory(memory)}{suffix}"
+    return f"saved for backward: {count} {noun}{suffix}"
+
+
 def compute_default_node_lines(
     layer_log: GraphNode,
     node_address: str = "",
@@ -1947,6 +1986,7 @@ def compute_default_node_lines(
     node_label_fields: list[str] | None = None,
     node_overlay: str | OverlayScores | None = None,
     suppressed_arg_keys: frozenset[str] = frozenset(),
+    show_saved_for_backward: bool = False,
 ) -> list[str]:
     """Build default plain-text rows for a layer node.
 
@@ -1965,6 +2005,9 @@ def compute_default_node_lines(
     suppressed_arg_keys:
         Checked-suppression keys (default empty: every arg visible — the
         detached-record degrade rule).
+    show_saved_for_backward:
+        Whether to append the saved-for-backward disclosure row on ops whose
+        grad_fn measurably retained tensors.
 
     Returns
     -------
@@ -2028,6 +2071,11 @@ def compute_default_node_lines(
     if isinstance(shape_summary, str) and shape_summary:
         lines.append(shape_summary)
     lines.append(f"{format_shape(layer_log.shape)}, {format_memory(layer_log.activation_memory)}")
+
+    if show_saved_for_backward:
+        saved_line = _saved_for_backward_line(layer_log, vis_mode)
+        if saved_line is not None:
+            lines.append(saved_line)
 
     module_kwargs = format_module_kwargs(layer_log, suppressed_keys=suppressed_arg_keys)
     if module_kwargs is not None:

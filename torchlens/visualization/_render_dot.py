@@ -581,6 +581,7 @@ def _populate_forward_ir(trace: "Trace", context: _ForwardRenderContext) -> _For
                 deduped_edge_registry,
                 encoding=request.encoding,
                 suppressed_args=suppressed_args,
+                show_saved_for_backward=request.show_saved_for_backward,
             )
     for node_args in pending_container_collapse_nodes:
         forward_ir_builder.node(**node_args)
@@ -979,6 +980,7 @@ def draw(
     scale: "str | None" = None,
     stack_by: "str | bool | Callable[[Any], Any] | None" = None,
     show_redundant_args: bool = False,
+    show_saved_for_backward: bool = False,
 ) -> Any:
     """Render the computational graph through the resolved forward IR pipeline.
 
@@ -1055,6 +1057,7 @@ def draw(
         scale=scale,
         stack_by=stack_by,
         show_redundant_args=show_redundant_args,
+        show_saved_for_backward=show_saved_for_backward,
     )
     request, theme, site_labels = _resolve_draw_request(self, request)
     if (
