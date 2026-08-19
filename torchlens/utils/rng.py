@@ -278,6 +278,42 @@ def aten_qualname_is_seeded_rng(namespace: str | None, qualname: str | None) -> 
     return False
 
 
+def _seed_torch_engines(seed: int) -> None:
+    """Seed torch's CPU and accelerator generators, degrading on a broken stack.
+
+    ``torch.manual_seed`` seeds the accelerator engines (every visible CUDA
+    device, MPS, XPU) BEFORE the CPU default generator.  On a host whose CUDA
+    runtime claims to be initialized but cannot actually serve its generators
+    (device lost mid-session, a stack that lies about initialization), the CUDA
+    leg raises from inside torch -- first observed on real H200 hardware as an
+    ``IndexError`` from ``torch.cuda.default_generators`` -- and the abort
+    escapes before the CPU engine is seeded, killing a pure-CPU capture that
+    never needed a CUDA generator.  A broken accelerator must degrade a CPU
+    capture, never abort it (the same contract as
+    :func:`_snapshot_cuda_rng_states`), so the failure falls back to seeding
+    the CPU default generator directly, with a warning.  The later CUDA RNG
+    snapshot attempt then surfaces (and latches) its own read failure through
+    the existing seam.
+
+    Parameters
+    ----------
+    seed:
+        Seed value to set.
+    """
+    try:
+        torch.manual_seed(seed)
+    except Exception as exc:  # noqa: BLE001 - any broken-accelerator failure mode
+        torch.default_generator.manual_seed(seed)
+        _warnings_module.warn(
+            "Could not seed torch accelerator RNG engines "
+            f"({type(exc).__name__}: {exc}); the torch CPU generator was "
+            "seeded directly and the capture continues. Operations that "
+            "consume accelerator randomness cannot be reproduced exactly "
+            "for this capture.",
+            stacklevel=3,
+        )
+
+
 def set_random_seed(seed: int) -> None:
     """Set the random seed for all RNG engines simultaneously.
 
@@ -302,7 +338,7 @@ def set_random_seed(seed: int) -> None:
     with _suppress_active_monitor_marks():
         random.seed(seed)
         np.random.seed(seed)
-        torch.manual_seed(seed)
+        _seed_torch_engines(seed)
         # Keep torchlens's private barcode RNG in lockstep with the seed so a fixed
         # capture seed yields reproducible tensor barcodes (a fork replay reuses the
         # original seed; matching barcodes keep tensor/op/param cross-references
