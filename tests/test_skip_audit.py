@@ -67,6 +67,13 @@ IMPORTORSKIP_LEDGER: dict[str, tuple[str, str]] = {
     "IPython": (OPTIONAL_PREVIEW, "notebook extra"),
     "PIL": (TEST_EXTRA, "pillow (also a core torchlens dependency)"),
     "brainscore_core": (OPTIONAL_PREVIEW, "neuro extra (brain-score dist)"),
+    "brainscore_vision": (
+        OPTIONAL_PREVIEW,
+        "neuro extra; the ActivationsExtractorHelper adapter contract. The wheel "
+        "requires Python >= 3.11 and this venv is 3.10, so the interface is pinned "
+        "against the real 2.3.22 wheel SOURCE and the live-install test is "
+        "importorskip-gated until a 3.11 env exists (2026-08-19)",
+    ),
     "cairosvg": (
         UNAVAILABLE_OK,
         "undeclared SVG-render inspection helper; extras-gap candidate reported 2026-08-15",
