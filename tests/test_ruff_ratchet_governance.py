@@ -120,7 +120,13 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     "PLR0912": 262,
     # 422->423 (same L8 settle): _build_funcol_payload carries the C0 payload
     # argument surface (mirrors the ledgered _build_payload in collectives).
-    "PLR0913": 423,
+    # 423->425 (2026-08-19 semantic-builds lane): the two new PUBLIC entry
+    # points logit_lens (facet/layers/lens/validate/rtol/atol) and
+    # bisect_precision (input_kwargs/reference_dtype/rtol/atol/seed) keep the
+    # torch.allclose rtol=/atol= convention as separate keywords -- bundling
+    # them into a tolerance object would trade a familiar user surface for a
+    # lint count. Private helpers were reduced instead of ledgered.
+    "PLR0913": 425,
     # 152->155 (same L8 settle): wrapped_funcol + the criterion-3 census body
     # + capture_completeness_witness gained reviewed statements with plane-P.
     "PLR0915": 155,

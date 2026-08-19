@@ -206,7 +206,6 @@ def _compare_traces(
         # a dense floating tensor; cast() records that narrowing for mypy.
         row = _compare_op(
             op,
-            label,
             cast(torch.Tensor, native_out),
             cast(torch.Tensor, reference_out),
             rtol=rtol,
@@ -223,7 +222,6 @@ def _compare_traces(
 
 def _compare_op(
     op: Any,
-    label: str,
     native_out: torch.Tensor,
     reference_out: torch.Tensor,
     *,
@@ -232,6 +230,7 @@ def _compare_op(
 ) -> PrecisionRow | None:
     """Compare one op's native output against the reference output."""
 
+    label = _op_label(op)
     eps = float(torch.finfo(native_out.dtype).eps)
     op_rtol = rtol if rtol is not None else eps**0.5
     op_atol = atol if atol is not None else eps * 10.0
