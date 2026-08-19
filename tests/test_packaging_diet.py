@@ -434,14 +434,40 @@ def test_built_wheel_manifest_is_diet(tmp_path: Path) -> None:
     wheel_dir = tmp_path / "wheelhouse"
     wheel_dir.mkdir()
 
-    if importlib.util.find_spec("build") is not None:
-        command = [sys.executable, "-m", "build", "--wheel", "--outdir", str(wheel_dir)]
+    # Probe build.__main__, not "build": a setuptools `build/` directory in the
+    # repo root is importable as a package named `build` WITHOUT a __main__, so
+    # find_spec("build") can succeed while `python -m build` then dies with
+    # "'build' is a package and cannot be directly executed".
+    if importlib.util.find_spec("build.__main__") is not None:
+        command = [
+            sys.executable,
+            "-m",
+            "build",
+            "--wheel",
+            "--outdir",
+            str(wheel_dir),
+            str(project_root),
+        ]
     elif importlib.util.find_spec("pip") is not None:
-        command = [sys.executable, "-m", "pip", "wheel", ".", "--no-deps", "-w", str(wheel_dir)]
+        command = [
+            sys.executable,
+            "-m",
+            "pip",
+            "wheel",
+            str(project_root),
+            "--no-deps",
+            "-w",
+            str(wheel_dir),
+        ]
     else:
         pytest.skip("neither build nor pip is importable for wheel construction")
 
-    subprocess.run(command, cwd=project_root, check=True)
+    # Neutral cwd + explicit srcdir, for the same shadowing reason: building with
+    # cwd=project_root puts the repo (and any ./build/) on sys.path[0]. A stale
+    # build/lib/ ALSO makes this test report agent docs the current config
+    # correctly excludes -- a false positive that reads exactly like a real
+    # packaging regression (2026-08-19).
+    subprocess.run(command, cwd=tmp_path, check=True)
     wheels = sorted(wheel_dir.glob("torchlens-*.whl"))
     assert len(wheels) == 1
 

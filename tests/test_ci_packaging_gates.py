@@ -403,9 +403,24 @@ def test_built_sdist_manifest_is_governed(tmp_path: Path) -> None:
 
     sdist_dir = tmp_path / "sdist"
     sdist_dir.mkdir()
+    # Build from a NEUTRAL cwd with an explicit srcdir, never cwd=_PROJECT_ROOT.
+    # `python -m build` puts the cwd on sys.path[0], and a setuptools `build/`
+    # directory in the repo root then shadows the installed `build` MODULE:
+    # "No module named build.__main__; 'build' is a package and cannot be
+    # directly executed". That made this test order-dependent -- it passed alone
+    # and failed in CI right after the wheel-diet test, whose own build created
+    # the ./build/ directory that broke it (2026-08-19).
     subprocess.run(
-        [sys.executable, "-m", "build", "--sdist", "--outdir", str(sdist_dir)],
-        cwd=_PROJECT_ROOT,
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--sdist",
+            "--outdir",
+            str(sdist_dir),
+            str(_PROJECT_ROOT),
+        ],
+        cwd=tmp_path,
         check=True,
     )
     archives = sorted(sdist_dir.glob("torchlens-*.tar.gz"))
