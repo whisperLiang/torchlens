@@ -1926,10 +1926,8 @@ class JAXBackend:
                     trace._lookup_keys_to_layer_num_dict[lookup_key] = raw_index
                 trace._layer_num_to_lookup_keys_dict[raw_index].append(lookup_key)
             if op_log.num_passes > 1:
-                # Incidental, not a contract: the bare layer label is a
-                # raw-index artifact every pass overwrites (last pass wins,
-                # torch parity); bare-label addressing of multi-pass layers
-                # refuses on every path that matters.
+                # Incidental raw-index artifact, not a contract: every pass
+                # overwrites the bare layer label (last wins, torch parity).
                 trace.layer_dict_all_keys[op_log.layer_label] = op_log
                 trace._lookup_keys_to_layer_num_dict[op_log.layer_label] = raw_index
             trace.op_labels.append(op_log.label)

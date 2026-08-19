@@ -1746,6 +1746,8 @@ def _threaded_buffer_value(
     recomputed = overlay.get(producer_key) if producer_key is not None else None
 
     def _gap(reason: str) -> None:
+        """Disclose one unthreadable buffer version (raise under strict)."""
+
         message = (
             f"buffer record {_disclosure_label(site)!r} inside the replay cone keeps its "
             f"CAPTURED value: {reason}. Downstream consumers of this buffer version do "
