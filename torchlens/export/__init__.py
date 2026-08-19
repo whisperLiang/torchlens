@@ -576,12 +576,19 @@ def model_explorer(log: Any, path: str | Path) -> Path:
     }
     for edge in data["edges"]:
         incoming_edges[str(edge["target"])].append({"sourceNodeId": str(edge["source"])})
+    label = str(getattr(log, "trace_label", None) or getattr(log, "model_class_name", "model"))
     payload = {
-        "schema": "torchlens.model_explorer.v1",
+        "schema": "torchlens.model_explorer.v2",
         "disclaimer": (
-            "TorchLens writes and structurally validates this Google Model Explorer graph JSON; "
-            "acceptance by any particular external Model Explorer release is not guaranteed."
+            "TorchLens graph-collection JSON for Google Model Explorer; a data export of the "
+            "captured graph, not a runnable model. The top-level label/graphs shape matches "
+            "Model Explorer's file-ingest contract (pinned against ai-edge-model-explorer "
+            "0.1.32); acceptance by future external releases is not guaranteed."
         ),
+        # Model Explorer's JSON ingest requires BOTH top-level keys label and
+        # graphs to treat the file as a graph collection; without label the
+        # app refuses with "Unsupported JSON format".
+        "label": label,
         "graphs": [
             {
                 "id": str(
@@ -607,13 +614,24 @@ def model_explorer(log: Any, path: str | Path) -> Path:
     return destination
 
 
-def netron(log: Any, path: str | Path) -> Path:
-    """Export a lossy ONNX-shaped graph description for Netron inspection.
+#: Disclaimer embedded in the Netron export's model and graph doc strings.
+NETRON_DISCLAIMER = (
+    "TorchLens lossy graph export: not a runnable ONNX model; graph inspection "
+    "only. Ops keep their captured TorchLens names under the ai.torchlens.lossy "
+    "domain and carry no standard-ONNX execution semantics."
+)
 
-    The output is intentionally not a runnable ONNX model. It preserves node
-    names, operation labels, simple tensor shapes, and edges so Netron-style
-    graph inspection tools have something static to inspect without implying
-    execution equivalence.
+
+def netron(log: Any, path: str | Path) -> Path:
+    """Export a lossy ONNX ``ModelProto`` JSON graph that Netron can open.
+
+    The payload is valid ONNX protobuf JSON (camelCase field names, parseable
+    into ``onnx.ModelProto``), which is the exact acceptance contract of
+    Netron's ONNX JSON reader. It is intentionally NOT a runnable model: ops
+    keep their captured TorchLens names under the custom
+    ``ai.torchlens.lossy`` operator domain, only names, edges, and output
+    shapes are preserved, and the disclaimer rides ``docString`` and
+    ``metadataProps``.
 
     Parameters
     ----------
@@ -632,31 +650,33 @@ def netron(log: Any, path: str | Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     entries = _iter_layers(log)
     repeated_labels = _repeated_layer_labels(entries)
+    nodes = []
+    for layer in entries:
+        node_id = _export_node_id(layer, repeated_labels)
+        shape = list(getattr(layer, "shape", ()) or ())
+        node: dict[str, Any] = {
+            "name": node_id,
+            "opType": str(getattr(layer, "layer_type", None) or getattr(layer, "func_name", "")),
+            "domain": "ai.torchlens.lossy",
+            "input": [str(parent) for parent in (getattr(layer, "parents", []) or [])],
+            "output": [node_id],
+        }
+        if shape and all(isinstance(dim, int) and not isinstance(dim, bool) for dim in shape):
+            node["attribute"] = [{"name": "shape", "type": "INTS", "ints": shape}]
+        nodes.append(node)
     payload = {
-        "ir_version": "torchlens-lossy-onnx-shaped-v1",
-        "producer_name": "torchlens",
-        "runnable": False,
-        "disclaimer": (
-            "TorchLens writes and structurally validates this lossy ONNX-shaped JSON; it is not "
-            "a real ONNX model, is not runnable, and acceptance by Netron is not guaranteed."
-        ),
+        "irVersion": 8,
+        "producerName": "torchlens",
+        "docString": NETRON_DISCLAIMER,
+        "opsetImport": [{"domain": "ai.torchlens.lossy", "version": 1}],
+        "metadataProps": [
+            {"key": "torchlens.lossy_export", "value": "true"},
+            {"key": "torchlens.runnable", "value": "false"},
+        ],
         "graph": {
             "name": str(getattr(log, "model_class_name", "TorchLens graph")),
-            "node": [
-                {
-                    "name": _export_node_id(layer, repeated_labels),
-                    "op_type": str(getattr(layer, "func_name", getattr(layer, "layer_type", ""))),
-                    "input": list(getattr(layer, "parents", []) or []),
-                    "output": [_export_node_id(layer, repeated_labels)],
-                    "attribute": [
-                        {
-                            "name": "shape",
-                            "value": list(getattr(layer, "shape", ()) or ()),
-                        }
-                    ],
-                }
-                for layer in entries
-            ],
+            "docString": NETRON_DISCLAIMER,
+            "node": nodes,
         },
     }
     atomic_write_text(destination, _json.dumps(payload, indent=2))

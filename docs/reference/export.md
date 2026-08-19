@@ -52,8 +52,11 @@ trace.html True
 
 ### `model_explorer`
 
-`tl.export.model_explorer(log, path)` writes a static JSON graph with nodes, edges, labels,
-shapes, and memory fields for graph explorer tools. It is a data export, not a runnable model.
+`tl.export.model_explorer(log, path)` writes a static JSON graph collection with nodes, edges,
+labels, shapes, and memory fields that Google Model Explorer opens directly (File > Open —
+the top-level `label`/`graphs` shape and node fields are pinned against the
+ai-edge-model-explorer 0.1.32 ingest contract in `tests/test_exports.py`). It is a data
+export, not a runnable model.
 
 ```python
 from pathlib import Path
@@ -73,8 +76,12 @@ graph.json True
 
 ### `netron`
 
-`tl.export.netron(log, path)` writes a lossy ONNX-shaped JSON description for static Netron-style
-inspection. It deliberately is not a runnable ONNX model; use it only for graph inspection.
+`tl.export.netron(log, path)` writes a lossy ONNX `ModelProto` JSON graph that Netron opens
+through its ONNX JSON reader (the artifact parses into `onnx.ModelProto` via strict protobuf
+JSON — that acceptance contract plus Netron 9.2.2's format sniffer are pinned in
+`tests/test_exports.py`). It deliberately is not a runnable ONNX model: ops keep their
+captured TorchLens names under the custom `ai.torchlens.lossy` domain; use it only for graph
+inspection.
 
 ```python
 from pathlib import Path

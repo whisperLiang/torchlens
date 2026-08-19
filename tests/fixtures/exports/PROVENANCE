@@ -1,0 +1,15 @@
+generator: tests/test_exports.py (model_explorer.json)
+flag: TORCHLENS_REGEN_EXPORT_GOLDENS=1
+reason: netron export rewritten to valid ONNX ModelProto JSON and model_explorer export gained the ingest-required top-level label (lane H item 7: exports made genuinely openable, vendor contracts pinned)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 50ee474f49127d999ea7c5e16ec7dd97f6cef59a (dirty)
+recorded: 2026-08-19T07:37:44.911782+00:00
+---
+generator: tests/test_exports.py (netron.json)
+flag: TORCHLENS_REGEN_EXPORT_GOLDENS=1
+reason: netron export rewritten to valid ONNX ModelProto JSON and model_explorer export gained the ingest-required top-level label (lane H item 7: exports made genuinely openable, vendor contracts pinned)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 50ee474f49127d999ea7c5e16ec7dd97f6cef59a (dirty)
+recorded: 2026-08-19T07:37:44.927973+00:00
