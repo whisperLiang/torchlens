@@ -637,7 +637,7 @@ def _stream_activation_fields(trace: "Trace", fields_dict: dict[str, Any]) -> No
             continue
         blob_id = writer.next_blob_id()
         fields_dict[pending_field] = blob_id
-        writer.write_blob(blob_id, tensor, kind=kind, label=label)
+        writer.submit_blob(blob_id, tensor, kind=kind, label=label)
 
 
 def _retention_device(tensor: torch.Tensor, configured: Any) -> torch.device:

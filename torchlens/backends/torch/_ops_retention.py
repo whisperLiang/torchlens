@@ -413,7 +413,7 @@ def _stream_predicate_payloads(
             continue
         blob_id = writer.next_blob_id()
         fields_dict[pending_field] = blob_id
-        writer.write_blob(blob_id, payload, kind=kind, label=label)
+        writer.submit_blob(blob_id, payload, kind=kind, label=label)
 
 
 def _module_stack_frames_from_fields(fields_dict: dict[str, Any]) -> tuple[ModuleStackFrame, ...]:

@@ -14,6 +14,7 @@ import os
 import pickle
 import platform
 import sys
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,12 @@ from ._canonical_pickle import dump_canonical_metadata
 from ._durability import fsync_dir, fsync_tree
 from .manifest import Manifest, TensorEntry, sha256_of_file
 from .scrub import BlobSpec
+from .streaming_async import (
+    DEFAULT_MAX_PENDING_BYTES,
+    AsyncWriteEngine,
+    AsyncWriteFailedError,
+    PendingWrite,
+)
 from .tensor_policy import FailReason, Ok, SkipReason, is_supported_for_save
 from .tlspec import _TlSpecWriter
 
@@ -97,6 +104,8 @@ class BundleStreamWriter:
         strict: bool = True,
         include_custom_attributes: bool = True,
         include_buffer_values: bool = True,
+        async_writes: bool = False,
+        max_pending_bytes: int | None = None,
     ) -> None:
         """Create the temp bundle directory used for streaming writes.
 
@@ -113,6 +122,17 @@ class BundleStreamWriter:
             Whether captured pre-forward buffer values are persisted in the
             streamed bundle (the tl.save opt-out, mirrored for streaming --
             R62 buffer extension).
+        async_writes:
+            Whether ``submit_blob`` overlaps blob writes with capture through
+            a bounded single-worker pipeline (DOCUMENTED-UNSTABLE spelling).
+            Ordering, failure latching, and the finalize drain barrier are
+            described in ``torchlens/_io/streaming_async.py``. Direct
+            ``write_blob`` calls stay synchronous either way.
+        max_pending_bytes:
+            Pending snapshot byte budget for the async pipeline (defaults to
+            ``streaming_async.DEFAULT_MAX_PENDING_BYTES``). Submissions block
+            once the budget is full, so a slow disk slows capture instead of
+            accumulating unbounded RAM.
 
         Raises
         ------
@@ -142,6 +162,12 @@ class BundleStreamWriter:
         # linear-scanned the entry list once per streamed payload, O(B^2)
         # across a streamed save (~1.2e9 compares at 50k saved ops).
         self._tensor_entry_indexes: dict[str, int] = {}
+        # Entry structures are worker-mutated when the async engine is active;
+        # every read/write of the entry maps and the id reservation set goes
+        # through this lock.
+        self._entries_lock = threading.Lock()
+        self._known_blob_ids: set[str] = set()
+        self._async_engine: AsyncWriteEngine | None = None
 
         try:
             self.tmp_path.parent.mkdir(parents=True, exist_ok=True)
@@ -159,6 +185,15 @@ class BundleStreamWriter:
             raise TorchLensIOError(
                 f"Failed to create streaming temp bundle at {self.tmp_path}."
             ) from exc
+
+        # Started only after the temp tree exists: an __init__ refusal above
+        # must not leak an idle worker thread.
+        if async_writes:
+            self._async_engine = AsyncWriteEngine(
+                max_pending_bytes=(
+                    DEFAULT_MAX_PENDING_BYTES if max_pending_bytes is None else max_pending_bytes
+                )
+            )
 
     def next_blob_id(self) -> str:
         """Return the next monotonic blob id for this writer.
@@ -204,32 +239,7 @@ class BundleStreamWriter:
             If the tensor is unsupported or writing fails.
         """
 
-        self._ensure_writable()
-        if not isinstance(tensor, torch.Tensor):
-            transform_name = "grad_transform" if kind == "grad" else "activation_transform"
-            reason = (
-                f"Streaming {kind} save requires {transform_name} outputs to be torch.Tensor "
-                f"instances, but blob_id={blob_id} ({label}) received {type(tensor).__name__}."
-            )
-            self.abort(reason)
-            raise TorchLensIOError(reason)
-
-        decision = is_supported_for_save(tensor, strict=True)
-        if not isinstance(decision, Ok):
-            if isinstance(decision, (SkipReason, FailReason)):
-                reason_text = decision.text
-            else:
-                reason_text = "unsupported tensor"
-            reason = (
-                f"Unsupported tensor for streaming {kind} save at {label} "
-                f"(blob_id={blob_id}, kind={kind}): {reason_text}"
-            )
-            self.abort(reason)
-            raise TorchLensIOError(reason)
-        if blob_id in self._entries_by_blob_id:
-            reason = f"Duplicate streaming blob_id={blob_id} for {label}."
-            self.abort(reason)
-            raise TorchLensIOError(reason)
+        self._validate_blob_submission(blob_id, tensor, kind=kind, label=label)
 
         try:
             entry = self._write_tensor_blob(blob_id=blob_id, tensor=tensor, kind=kind, label=label)
@@ -255,10 +265,90 @@ class BundleStreamWriter:
                 raise TorchLensIOError(reason) from exc
             raise
 
-        self._tensor_entry_indexes[blob_id] = len(self._tensor_entries)
-        self._tensor_entries.append(entry)
-        self._entries_by_blob_id[blob_id] = entry
+        self._record_entry(entry)
         return entry
+
+    def submit_blob(
+        self,
+        blob_id: str,
+        tensor: torch.Tensor,
+        *,
+        kind: str,
+        label: str,
+    ) -> None:
+        """Persist one tensor blob, overlapping the write with capture when armed.
+
+        The capture-time spelling of ``write_blob``: with the async engine
+        active the payload is snapshotted on THIS thread (value-at-call-time
+        semantics survive later in-place mutation of the source tensor) and
+        the serialize + write + sha256 work runs on the single worker thread,
+        FIFO, under the pending-bytes budget. Without the engine this is
+        exactly ``write_blob``. A failed queued write latches and re-raises
+        as ``TorchLensIOError`` at the next writer interaction; ``finalize``
+        drains every pending write before the bundle can publish.
+
+        Parameters
+        ----------
+        blob_id:
+            Opaque zero-padded blob identifier.
+        tensor:
+            Tensor payload to persist.
+        kind:
+            Logical tensor kind.
+        label:
+            Human-readable or provisional label for the tensor owner.
+
+        Raises
+        ------
+        TorchLensIOError
+            If the tensor is unsupported, snapshotting fails, or an earlier
+            queued write failed.
+        """
+
+        engine = self._async_engine
+        if engine is None:
+            self.write_blob(blob_id, tensor, kind=kind, label=label)
+            return
+
+        self._validate_blob_submission(blob_id, tensor, kind=kind, label=label)
+        try:
+            payload = self._prepare_deferred_snapshot(tensor)
+        except BaseException as exc:
+            # Same safety-net contract as write_blob (round-8 F3): any
+            # snapshot failure marks the temp dir PARTIAL and re-raises
+            # non-Exception BaseExceptions unwrapped.
+            reason = f"Failed to snapshot streaming blob_id={blob_id} for {label}: {exc}"
+            self.abort(reason)
+            if isinstance(exc, Exception):
+                raise TorchLensIOError(reason) from exc
+            raise
+
+        device_at_save = str(tensor.device)
+        requires_grad = bool(tensor.requires_grad)
+
+        def _job() -> None:
+            entry = self._write_prepared_blob(
+                blob_id=blob_id,
+                payload=payload,
+                kind=kind,
+                label=label,
+                device_at_save=device_at_save,
+                requires_grad=requires_grad,
+            )
+            self._record_entry(entry)
+
+        try:
+            engine.submit(
+                PendingWrite(
+                    blob_id=blob_id,
+                    nbytes=int(payload.numel() * payload.element_size()),
+                    job=_job,
+                )
+            )
+        except AsyncWriteFailedError as exc:
+            reason = str(exc)
+            self.abort(reason)
+            raise TorchLensIOError(reason) from (exc.__cause__ or exc)
 
     def finalize(
         self,
@@ -297,6 +387,16 @@ class BundleStreamWriter:
         """
 
         self._ensure_writable()
+        # FINALIZATION barrier: every capture-time write must land before the
+        # manifest is built and the bundle can publish; a latched write
+        # failure aborts here, typed, so a bundle with a silently missing
+        # blob can never be presented as complete. The engine then retires so
+        # the remaining specs below take the ordinary synchronous path.
+        self._drain_async()
+        engine = self._async_engine
+        if engine is not None:
+            engine.shutdown(discard=False)
+            self._async_engine = None
         try:
             for blob_id, tensor, kind, label in blob_specs:
                 if blob_id in self._entries_by_blob_id:
@@ -393,6 +493,12 @@ class BundleStreamWriter:
         if self._finalized:
             return
         self._closed = True
+        engine = self._async_engine
+        if engine is not None:
+            # Queued-but-unwritten blobs are pointless in an aborted bundle;
+            # the bounded join means a wedged disk cannot hang the unwind.
+            self._async_engine = None
+            engine.shutdown(discard=True)
         self._mark_partial(reason)
 
     def relabel_blob(self, blob_id: str, label: str) -> None:
@@ -406,7 +512,9 @@ class BundleStreamWriter:
             Final human-readable label.
         """
 
-        entry = self._entries_by_blob_id.get(blob_id)
+        self._drain_async()
+        with self._entries_lock:
+            entry = self._entries_by_blob_id.get(blob_id)
         if entry is None:
             return
         updated_entry = TensorEntry(
@@ -430,10 +538,11 @@ class BundleStreamWriter:
             transport_dtype=entry.transport_dtype,
             codec_metadata=entry.codec_metadata,
         )
-        self._entries_by_blob_id[blob_id] = updated_entry
-        entry_index = self._tensor_entry_indexes.get(blob_id)
-        if entry_index is not None:
-            self._tensor_entries[entry_index] = updated_entry
+        with self._entries_lock:
+            self._entries_by_blob_id[blob_id] = updated_entry
+            entry_index = self._tensor_entry_indexes.get(blob_id)
+            if entry_index is not None:
+                self._tensor_entries[entry_index] = updated_entry
 
     def get_entry(self, blob_id: str) -> TensorEntry:
         """Return the manifest entry recorded for one blob id.
@@ -454,9 +563,11 @@ class BundleStreamWriter:
             If the blob id is unknown.
         """
 
-        if blob_id not in self._entries_by_blob_id:
-            raise TorchLensIOError(f"Streaming bundle is missing blob_id={blob_id}.")
-        return self._entries_by_blob_id[blob_id]
+        self._drain_async()
+        with self._entries_lock:
+            if blob_id not in self._entries_by_blob_id:
+                raise TorchLensIOError(f"Streaming bundle is missing blob_id={blob_id}.")
+            return self._entries_by_blob_id[blob_id]
 
     def _write_tensor_blob(
         self,
@@ -470,23 +581,189 @@ class BundleStreamWriter:
 
         with pause_logging():
             contiguous_tensor = tensor.resolve_conj().resolve_neg().contiguous()
+        return self._write_prepared_blob(
+            blob_id=blob_id,
+            payload=contiguous_tensor,
+            kind=kind,
+            label=label,
+            device_at_save=str(tensor.device),
+            requires_grad=bool(tensor.requires_grad),
+        )
+
+    def _write_prepared_blob(
+        self,
+        *,
+        blob_id: str,
+        payload: torch.Tensor,
+        kind: str,
+        label: str,
+        device_at_save: str,
+        requires_grad: bool,
+    ) -> TensorEntry:
+        """Serialize one prepared payload to ``blobs/`` and build its entry.
+
+        Worker-thread safe by construction: a CPU-contiguous ``payload``
+        reaches safetensors' raw-pointer serialization without invoking any
+        wrapped torch function, and the sha256 hash is pure hashlib.
+
+        Parameters
+        ----------
+        blob_id:
+            Opaque zero-padded blob identifier.
+        payload:
+            Contiguous tensor payload (CPU when written by the async worker).
+        kind:
+            Logical tensor kind.
+        label:
+            Human-readable or provisional label for the tensor owner.
+        device_at_save:
+            Device string of the ORIGINAL tensor at submission time.
+        requires_grad:
+            ``requires_grad`` of the original tensor at submission time.
+
+        Returns
+        -------
+        TensorEntry
+            Recorded manifest entry.
+        """
+
         relative_path = Path("blobs") / f"{blob_id}.safetensors"
         blob_path = self.tmp_path / relative_path
-        save_file({_BLOB_TENSOR_KEY: contiguous_tensor}, str(blob_path))
+        save_file({_BLOB_TENSOR_KEY: payload}, str(blob_path))
         return TensorEntry(
             blob_id=blob_id,
             kind=kind,
             label=label,
             relative_path=relative_path.as_posix(),
             backend="safetensors",
-            shape=[int(dim) for dim in contiguous_tensor.shape],
-            dtype=str(contiguous_tensor.dtype).replace("torch.", ""),
-            device_at_save=str(tensor.device),
-            layout=str(contiguous_tensor.layout).replace("torch.", ""),
-            bytes=int(contiguous_tensor.numel() * contiguous_tensor.element_size()),
+            shape=[int(dim) for dim in payload.shape],
+            dtype=str(payload.dtype).replace("torch.", ""),
+            device_at_save=device_at_save,
+            layout=str(payload.layout).replace("torch.", ""),
+            bytes=int(payload.numel() * payload.element_size()),
             sha256=sha256_of_file(blob_path),
-            requires_grad=bool(tensor.requires_grad),
+            requires_grad=requires_grad,
         )
+
+    def _prepare_deferred_snapshot(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Return a private CPU-contiguous byte snapshot of one payload.
+
+        Runs on the SUBMITTING thread under ``pause_logging`` so the deferred
+        write preserves the sync path's value-at-call-time semantics: a later
+        in-place mutation of the source tensor (or of storage it aliases)
+        must never reach the artifact. Whenever the resolve/contiguous chain
+        made no copy, the result still aliases the caller's storage and is
+        cloned; non-CPU payloads move to CPU here so the worker never runs a
+        wrapped torch op.
+
+        Parameters
+        ----------
+        tensor:
+            Tensor payload to snapshot.
+
+        Returns
+        -------
+        torch.Tensor
+            CPU-contiguous tensor owning storage no caller can mutate.
+        """
+
+        with pause_logging():
+            snapshot = tensor.resolve_conj().resolve_neg().contiguous()
+            if snapshot.device.type != "cpu":
+                snapshot = snapshot.cpu()
+            elif snapshot is tensor:
+                snapshot = snapshot.clone()
+        return snapshot
+
+    def _validate_blob_submission(
+        self,
+        blob_id: str,
+        tensor: torch.Tensor,
+        *,
+        kind: str,
+        label: str,
+    ) -> None:
+        """Run the synchronous admission checks shared by both write paths.
+
+        Aborts the bundle and raises on an unwritable submission, and
+        reserves ``blob_id`` so a duplicate id refuses even while the first
+        write is still queued on the async worker.
+
+        Parameters
+        ----------
+        blob_id:
+            Opaque zero-padded blob identifier.
+        tensor:
+            Tensor payload to persist.
+        kind:
+            Logical tensor kind.
+        label:
+            Human-readable or provisional label for the tensor owner.
+
+        Raises
+        ------
+        TorchLensIOError
+            If the writer is closed, the payload is not a supported tensor,
+            or the blob id was already submitted.
+        """
+
+        self._ensure_writable()
+        if not isinstance(tensor, torch.Tensor):
+            transform_name = "grad_transform" if kind == "grad" else "activation_transform"
+            reason = (
+                f"Streaming {kind} save requires {transform_name} outputs to be torch.Tensor "
+                f"instances, but blob_id={blob_id} ({label}) received {type(tensor).__name__}."
+            )
+            self.abort(reason)
+            raise TorchLensIOError(reason)
+
+        decision = is_supported_for_save(tensor, strict=True)
+        if not isinstance(decision, Ok):
+            if isinstance(decision, (SkipReason, FailReason)):
+                reason_text = decision.text
+            else:
+                reason_text = "unsupported tensor"
+            reason = (
+                f"Unsupported tensor for streaming {kind} save at {label} "
+                f"(blob_id={blob_id}, kind={kind}): {reason_text}"
+            )
+            self.abort(reason)
+            raise TorchLensIOError(reason)
+        with self._entries_lock:
+            duplicate = blob_id in self._known_blob_ids
+            if not duplicate:
+                self._known_blob_ids.add(blob_id)
+        if duplicate:
+            reason = f"Duplicate streaming blob_id={blob_id} for {label}."
+            self.abort(reason)
+            raise TorchLensIOError(reason)
+
+    def _record_entry(self, entry: TensorEntry) -> None:
+        """Append one completed manifest entry (worker- or caller-thread)."""
+
+        with self._entries_lock:
+            self._tensor_entry_indexes[entry.blob_id] = len(self._tensor_entries)
+            self._tensor_entries.append(entry)
+            self._entries_by_blob_id[entry.blob_id] = entry
+
+    def _drain_async(self) -> None:
+        """Barrier: wait for every queued write; convert a latched failure.
+
+        Raises
+        ------
+        TorchLensIOError
+            If any queued write failed. The bundle is marked PARTIAL first.
+        """
+
+        engine = self._async_engine
+        if engine is None:
+            return
+        try:
+            engine.drain()
+        except AsyncWriteFailedError as exc:
+            reason = str(exc)
+            self.abort(reason)
+            raise TorchLensIOError(reason) from (exc.__cause__ or exc)
 
     def _build_manifest(
         self,

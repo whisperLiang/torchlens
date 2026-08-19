@@ -1447,6 +1447,8 @@ def _run_model_and_save_specified_outs(
     keep_outs_in_memory: bool = True,
     stream_custom_attributes: bool = True,
     stream_buffer_values: bool = True,
+    stream_async_writes: bool | None = None,
+    stream_max_pending_bytes: int | None = None,
     grad_storage_path: str | Path | None = None,
     retain_grads_in_memory: bool = True,
     out_sink: Callable[[str, torch.Tensor], None] | None = None,
@@ -1556,6 +1558,11 @@ def _run_model_and_save_specified_outs(
         stream_buffer_values: Whether captured pre-forward buffer values are
             persisted in the streamed bundle (streaming counterpart of
             tl.save's include_buffer_values).
+        stream_async_writes: Tri-state async-write routing for the streaming
+            writer (StreamingOptions.async_writes): None/True arm the bounded
+            async pipeline, False keeps synchronous per-blob writes.
+        stream_max_pending_bytes: Pending snapshot byte budget for the async
+            pipeline (None uses the writer default).
         keep_outs_in_memory: Whether streamed outs should remain in memory
             after finalization.
         grad_storage_path: Optional portable bundle directory for streaming grad save.
@@ -1872,6 +1879,8 @@ def _run_model_and_save_specified_outs(
                     retain_in_memory=keep_outs_in_memory,
                     include_custom_attributes=stream_custom_attributes,
                     include_buffer_values=stream_buffer_values,
+                    async_writes=stream_async_writes,
+                    max_pending_bytes=stream_max_pending_bytes,
                 )
                 if save_outs_to is not None
                 else None,
@@ -1896,6 +1905,10 @@ def _run_model_and_save_specified_outs(
                 bundle_path,
                 include_custom_attributes=stream_custom_attributes,
                 include_buffer_values=stream_buffer_values,
+                # None = consumer default: trace captures overlap blob writes
+                # with the forward; False is the explicit synchronous opt-out.
+                async_writes=stream_async_writes is not False,
+                max_pending_bytes=stream_max_pending_bytes,
             )
         if episode_resolved is not None:
             # Pre-capture episode declaration marker: rides the partial
@@ -3710,6 +3723,8 @@ def _trace_torch_model(
         keep_outs_in_memory=streaming_options.retain_in_memory,
         stream_custom_attributes=streaming_options.include_custom_attributes,
         stream_buffer_values=streaming_options.include_buffer_values,
+        stream_async_writes=streaming_options.async_writes,
+        stream_max_pending_bytes=streaming_options.max_pending_bytes,
         grad_storage_path=grad_storage_path_value,
         retain_grads_in_memory=retain_grads_in_memory_value,
         out_sink=streaming_options.out_callback,

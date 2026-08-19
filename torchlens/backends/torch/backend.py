@@ -188,7 +188,7 @@ def _write_output_parent_blob(
     if writer is None or payload is None:
         return None
     blob_id = writer.next_blob_id()
-    writer.write_blob(blob_id, payload, kind=kind, label=label_raw)
+    writer.submit_blob(blob_id, payload, kind=kind, label=label_raw)
     return PortableBlobRef(blob_id=blob_id, kind=kind)
 
 
