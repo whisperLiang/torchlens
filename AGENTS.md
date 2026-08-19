@@ -134,6 +134,13 @@ Key entry points:
   Capability gates N1-N5 branch on `tl.errors.CaptureOutcomeError.fields["code"]`;
   swallowed halt/nonfinite signals raise `tl.errors.StopSignalSwallowedError`.
   Doc of record: `docs/reference/capture_outcomes.md`.
+- Queryable nonfinite record (spellings DOCUMENTED-UNSTABLE): `trace.nonfinite_ops`
+  (pass-qualified labels of ops whose output held NaN/Inf) +
+  `trace.nonfinite_coverage` (evidence basis and coverage counts). Default
+  captures serve it from the memoized saved-payload scan at zero capture cost;
+  `CaptureOptions(track_nonfinite=True)` opts into capture-time per-op checks
+  covering unsaved ops, with device flags drained in one batch at the finalize
+  seam (never a per-op CUDA sync). `raise_on_nan` is independent and unchanged.
 - Lazy decoration: `torchlens/backends/torch/model_prep.py:_ensure_model_prepared()` calls
   `wrap_torch()` and the belt/rescue stale-reference machinery
 - Forward-pass orchestration: `torchlens/capture/trace.py`

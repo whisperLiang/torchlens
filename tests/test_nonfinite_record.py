@@ -212,6 +212,75 @@ def test_raise_on_nan_stop_and_throw_unchanged_by_tracking() -> None:
     assert "nan" in str(excinfo.value).lower() or "finite" in str(excinfo.value).lower()
 
 
+class _BufferedNanModel(nn.Module):
+    """BatchNorm-bearing model whose output holds NaN (buffer-source coverage)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.bn = nn.BatchNorm1d(4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Normalize then divide by zero.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Non-finite output tensor.
+        """
+
+        return self.bn(x) / 0.0
+
+
+def test_raise_on_nan_survives_buffer_sources() -> None:
+    """raise_on_nan on a buffered model completes clean / aborts on NaN.
+
+    Regression: the ``tensor.numel()`` read ran OUTSIDE ``pause_logging``, and
+    ``numel`` is a wrapped call -- on a just-committed BUFFER source tensor it
+    re-entered buffer source logging and recursed without bound, so
+    ``raise_on_nan=True`` crashed with RecursionError on ANY BatchNorm-bearing
+    model (resnet18 included). Buffered models had simply never been exercised
+    with the tripwire armed.
+    """
+
+    class _BufferedClean(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.bn = nn.BatchNorm1d(4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.relu(self.bn(x))
+
+    log = tl.trace(
+        _BufferedClean().eval(),
+        torch.randn(2, 4),
+        capture=tl.options.CaptureOptions(raise_on_nan=True),
+    )
+    assert str(log.outcome.status).endswith("COMPLETE")
+    with pytest.raises(Exception) as excinfo:
+        tl.trace(
+            _BufferedNanModel().eval(),
+            torch.randn(2, 4),
+            capture=tl.options.CaptureOptions(raise_on_nan=True),
+        )
+    assert "finite" in str(excinfo.value).lower() or "nan" in str(excinfo.value).lower()
+
+
+def test_track_nonfinite_survives_buffer_sources() -> None:
+    """The recorder handles buffer source commits without recursion."""
+
+    log = tl.trace(
+        _BufferedNanModel().eval(),
+        torch.randn(2, 4),
+        capture=tl.options.CaptureOptions(track_nonfinite=True),
+    )
+    assert any(label.startswith("truediv") for label in log.nonfinite_ops)
+
+
 def test_loaded_trace_restores_default_and_serves_saved_basis(tmp_path) -> None:
     """track_nonfinite is session-time (DROP): load restores the default, and the
     loaded record derives from the archived saved payloads."""

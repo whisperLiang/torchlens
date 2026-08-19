@@ -540,6 +540,32 @@ shims, by declared contract. Each carries the same tag at its definition.
   repeated MODULE RUN. The string legitimately contains `->`; renderers must
   HTML-escape it (escape-at-render, never assert-absence).
 
+**Trace.nonfinite_ops** — *unstable — no deprecation shim owed*
+: The queryable per-op NaN/Inf record: a tuple of pass-qualified op labels
+  (`Op.label`, each a valid `trace[label]` key) whose output held at least one
+  NaN or Inf. On default captures it derives from the memoized saved-payload
+  scan already backing `print(trace)` — zero capture-time cost, one scan paid
+  at first query. When the capture ran with
+  `CaptureOptions(track_nonfinite=True)` it serves the capture-time verdicts
+  instead, which also cover ops that retained no payload. An empty tuple is
+  only as strong as its coverage; read `Trace.nonfinite_coverage` first.
+
+**Trace.nonfinite_coverage** — *unstable — no deprecation shim owed*
+: The frozen evidence disclosure behind `nonfinite_ops`: `basis`
+  (`"capture"` vs `"saved_payloads"`), `checked`, `nonfinite`, `unchecked`
+  (dtypes with no runnable finiteness kernel), `unexamined` (ops the scan
+  could not look at), and `unmapped` (capture-basis events whose op did not
+  survive postprocessing). The programmatic twin of the prose coverage-gap
+  note in `first_nonfinite()`.
+
+**track_nonfinite (CaptureOptions)** — *unstable — no deprecation shim owed*
+: Session-time opt-in: torch capture records a per-op finiteness verdict for
+  every committed op output. Never changes control flow (`raise_on_nan` stays
+  the stop-and-throw and is independent); device flags are drained in one
+  batch after the forward, never a per-op CUDA synchronization.
+  `structure_only=True` refuses the combination typed. Load restores the
+  default `False`; loaded traces serve the saved-payload basis.
+
 **grouping= (trace kwarg) / trace.grouping** — *unstable — no deprecation
 shim owed; S2-gated vocabulary*
 : Closed-vocabulary grouping-policy knob: `"structural"` (default — today's

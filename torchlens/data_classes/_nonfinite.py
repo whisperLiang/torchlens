@@ -526,26 +526,27 @@ def record_op_nonfinite(trace: Any, tensor: torch.Tensor, raw_label: str) -> Non
     if store is None:
         store = {"events": {}, "unchecked": [], "pending": []}
         trace.__dict__[_CAPTURE_STORE_ATTR] = store
-    if tensor.numel() == 0:
-        # An empty tensor holds no elements, so "no NaN/Inf" is exact, not a skip.
-        store["events"][raw_label] = False
-        return
     try:
+        # EVERY tensor read here is under pause_logging -- even ``numel()`` is a
+        # wrapped call, and running it bare mid-commit on a buffer source
+        # re-enters source logging and recurses without bound.
         with pause_logging():
-            # ``.detach()`` / ``.to()`` are decorated; never let the check log itself.
+            if tensor.numel() == 0:
+                # An empty tensor holds no elements: "no NaN/Inf" is exact.
+                store["events"][raw_label] = False
+                return
             probe = tensor.detach()
             if probe.dtype in get_fp8_dtypes():
                 probe = fp8_widen_for_numeric_ops(probe)
             flag = torch.isfinite(probe).all()
+            if flag.device.type == "cpu":
+                store["events"][raw_label] = not bool(flag.item())
+            else:
+                store["pending"].append((raw_label, flag))
     except (RuntimeError, TypeError):
         # No runnable finiteness kernel for this payload (quantized, sparse,
         # exotic layouts). Disclosed via coverage, never silently "finite".
         store["unchecked"].append(raw_label)
-        return
-    if flag.device.type == "cpu":
-        store["events"][raw_label] = not bool(flag.item())
-    else:
-        store["pending"].append((raw_label, flag))
 
 
 def drain_pending_nonfinite(trace: Any) -> None:

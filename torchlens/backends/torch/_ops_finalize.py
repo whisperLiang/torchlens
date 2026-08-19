@@ -352,10 +352,19 @@ def _raise_if_nonfinite_requested(self: Any, tensor: torch.Tensor, entry: Any) -
         If ``self.raise_on_nan`` is enabled and ``tensor`` contains NaN or Inf.
     """
 
-    if not getattr(self, "raise_on_nan", False) or tensor.numel() == 0:
+    if not getattr(self, "raise_on_nan", False):
         return
     try:
         with pause_logging():
+            # The ``numel()`` read MUST also sit under pause_logging: ``numel``
+            # is a wrapped call, and running it bare on a just-committed BUFFER
+            # source tensor (not yet registered as logged) re-entered buffer
+            # source logging and recursed without bound -- raise_on_nan=True
+            # crashed with RecursionError on ANY BatchNorm-bearing model. The
+            # check semantics are byte-identical (empty tensors still return,
+            # the same kernel decides, the same abort fires).
+            if tensor.numel() == 0:
+                return
             # fp8 has no ``isfinite`` kernel, and ``NotImplementedError`` is a
             # ``RuntimeError`` subclass -- so without the exact float32 widening this
             # tripwire SILENTLY declined to check every fp8 activation. Widening keeps
