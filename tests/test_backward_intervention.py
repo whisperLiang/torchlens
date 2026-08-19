@@ -1094,3 +1094,100 @@ def test_grad_clamp_helper_elementwise() -> None:
         run_ctx={},
     )
     assert torch.equal(result[0], torch.tensor([-0.5, 0.0, 0.5]))
+
+
+class _GuidedCNN(nn.Module):
+    """Two-ReLU CNN used by the guided-backprop recipe acceptance tests."""
+
+    def __init__(self, inplace: bool) -> None:
+        """Initialize the model.
+
+        Parameters
+        ----------
+        inplace:
+            Whether the ReLU activations run in-place (the ResNet idiom).
+        """
+
+        super().__init__()
+        self.c1 = nn.Conv2d(3, 8, 3, padding=1)
+        self.r1 = nn.ReLU(inplace=inplace)
+        self.c2 = nn.Conv2d(8, 8, 3, padding=1)
+        self.r2 = nn.ReLU(inplace=inplace)
+        self.pool = nn.AdaptiveAvgPool2d(2)
+        self.fc = nn.Linear(32, 5)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the forward pass."""
+
+        h = self.r1(self.c1(x))
+        h = self.r2(self.c2(h))
+        return self.fc(torch.flatten(self.pool(h), 1))
+
+
+def _guided_backprop_via_torchlens(model: nn.Module, x: torch.Tensor, target: int) -> torch.Tensor:
+    """Return the guided-backprop input gradient using the one-off recipe."""
+
+    guided = tl.when(tl.func("relu"), tl.bwd_hook(lambda g, *, hook: g.clamp(min=0)))
+    trace = tl.trace(
+        model,
+        x.clone().requires_grad_(True),
+        capture=tl.options.CaptureOptions(backward_ready=True, save_grads=True),
+        intervene=guided,
+        save_mode="reference",
+    )
+    out = trace[trace.output_layers[0]].out
+    trace.backward(out[:, target].sum(), retain_graph=True)
+    return trace[trace.input_layers[0]].grad
+
+
+def _guided_backprop_reference(model: nn.Module, x: torch.Tensor, target: int) -> torch.Tensor:
+    """Return the classic module-hook guided-backprop gradient (non-inplace only)."""
+
+    handles = [
+        module.register_full_backward_hook(
+            lambda mod, gin, gout: tuple(g.clamp(min=0) for g in gin)
+        )
+        for module in model.modules()
+        if isinstance(module, nn.ReLU)
+    ]
+    leaf = x.clone().requires_grad_(True)
+    model(leaf)[:, target].sum().backward()
+    for handle in handles:
+        handle.remove()
+    return leaf.grad
+
+
+def test_guided_backprop_recipe_matches_module_hook_reference() -> None:
+    """The one-off guided-backprop recipe reproduces the classic hook recipe exactly."""
+
+    torch.manual_seed(0)
+    model = _GuidedCNN(inplace=False).eval()
+    x = torch.randn(2, 3, 8, 8)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        grad = _guided_backprop_via_torchlens(model, x, target=3)
+    reference = _guided_backprop_reference(model, x, target=3)
+    assert torch.equal(grad, reference)
+    plain_leaf = x.clone().requires_grad_(True)
+    model(plain_leaf)[:, 3].sum().backward()
+    assert not torch.allclose(grad, plain_leaf.grad)
+
+
+def test_guided_backprop_recipe_works_on_inplace_relu() -> None:
+    """The recipe handles in-place ReLU models the classic hook recipe cannot.
+
+    ``register_full_backward_hook`` + in-place ReLU raises torch's
+    view-inplace ``BackwardHookFunction`` error, so the reference gradient is
+    computed on a non-inplace twin sharing the same parameters.
+    """
+
+    torch.manual_seed(0)
+    model = _GuidedCNN(inplace=True).eval()
+    x = torch.randn(2, 3, 8, 8)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        grad = _guided_backprop_via_torchlens(model, x, target=1)
+    twin = _GuidedCNN(inplace=False).eval()
+    twin.load_state_dict(model.state_dict())
+    reference = _guided_backprop_reference(twin, x, target=1)
+    assert torch.equal(grad, reference)
