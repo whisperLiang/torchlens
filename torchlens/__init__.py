@@ -780,11 +780,13 @@ def _extract_layers_with_trace(
         If a lookup does not resolve or did not produce a saved tensor.
     """
 
+    from .options import CaptureOptions as _LazyCaptureOptions
+
     layer_plan = _normalize_extract_layers(layers)
     trace = _resolve_top_level("trace")(
         model,
         x,
-        capture=_CaptureOptions(
+        capture=_LazyCaptureOptions(
             layers_to_save=list(layer_plan.values()),
         ),
     )
