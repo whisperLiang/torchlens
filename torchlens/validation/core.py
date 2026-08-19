@@ -1261,13 +1261,16 @@ def validate_saved_outs(
             setattr(self, "_validation_replay_status", status)
             return status
 
-    # Completeness check: BFS must visit every layer in the graph.
-    expected_layers = {layer.layer_label for layer in self.layer_list}
-    if len(validated_layers) < len(expected_layers):
-        unreached = expected_layers - validated_layers
+    # Completeness check: BFS must visit every op in the graph, counted at
+    # PASS-QUALIFIED grain. Counting bare layer labels let a phantom extra
+    # pass of a legitimate multi-pass layer hide behind its reached siblings
+    # whenever the metadata invariants were skipped.
+    expected_ops = {op.label for op in self.layer_list}
+    if len(validated_op_labels) < len(expected_ops):
+        unreached = expected_ops - validated_op_labels
         if verbose:
             print(
-                f"All saved outs were accurate, but some layers were not reached (check "
+                f"All saved outs were accurate, but some ops were not reached (check "
                 f"that child args logged accurately): {unreached}"
             )
         record_validation_failure(
@@ -1275,7 +1278,7 @@ def validate_saved_outs(
             ValidationFailure(
                 check=CHECK_COMPLETENESS,
                 message=(
-                    f"BFS reached {len(validated_layers)}/{len(expected_layers)} layers; "
+                    f"BFS reached {len(validated_op_labels)}/{len(expected_ops)} ops; "
                     f"{len(unreached)} unreached (e.g. {sorted(unreached)[:3]})"
                 ),
                 extra={"n_unreached": len(unreached)},
@@ -1570,15 +1573,18 @@ def validate_parents_of_saved_layer(
         # checked output or internal sink. Recurrent multi-pass layers can have
         # self/side child edges that are valid but not part of the current
         # representative validation frontier.
-        if parent_op_label not in validated_op_labels:
-            validated_op_labels.add(parent_op_label)
+        # Track ops by their canonical pass-qualified label so the
+        # completeness census compares one spelling per op (parents of
+        # single-pass layers arrive as bare labels, seeds as ``label:1``).
+        if parent_op.label not in validated_op_labels:
+            validated_op_labels.add(parent_op.label)
             validated_layers.add(parent_layer_label)
             # Don't enqueue terminal seeds (inputs, parentless buffers) --
             # they have no parents to validate further.
             if (not parent_op.is_input) and not (
                 parent_op.is_buffer and (parent_op.buffer_source is None)
             ):
-                layers_to_validate_parents_for.append(parent_op_label)
+                layers_to_validate_parents_for.append(parent_op.label)
 
     return ValidationCheckResult.validated("parent_edges_validated")
 
