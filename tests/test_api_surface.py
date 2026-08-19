@@ -129,6 +129,7 @@ TARGET_ALL = [
     "top_changed",
     "stable_across_passes",
     "pass_variance",
+    "subspace",
 ]
 
 CANONICAL_SUBMODULES = [
@@ -204,7 +205,9 @@ def test_all_matches_frozen_96_name_surface() -> None:
     additions from the same sprint. The RUNTIME total is 118 -- asserted
     against TARGET_ALL below rather than re-derived here, because three
     concurrent lanes each computed an increment from 111 without knowing about
-    the others and every hand-derived subtotal was wrong.
+    the others and every hand-derived subtotal was wrong. The subspace
+    producer wave adds `subspace` (direction/subspace support selection with
+    mandatory basis provenance, DOCUMENTED-UNSTABLE) on top of that.
     Paper-era compatibility shims remain available through ``__getattr__`` but
     are not advertised in ``__all__``.
     """

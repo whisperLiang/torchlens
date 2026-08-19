@@ -771,7 +771,8 @@ class Selection:
             (``site_not_in_trace`` / ``value_not_saved`` / ``non_tensor_site``
             / ``no_index_space`` / ``mask_shape_mismatch`` /
             ``facet_write_mask_unavailable`` / ``population_too_small`` /
-            ``multipass_bare_label`` / ``value_criterion_invalid``).
+            ``multipass_bare_label`` / ``value_criterion_invalid`` /
+            ``basis_dim_mismatch``).
         """
 
         return _resolve_node(self._node, trace, self._kind)

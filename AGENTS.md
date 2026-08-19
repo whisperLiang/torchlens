@@ -83,7 +83,12 @@ Key entry points:
   weight payloads) and `tl.stable_across_passes`/`tl.pass_variance`
   (cross-pass range/variance on recurrent layers, pass-qualified, >= 2
   window passes per layer or `population_too_small`, masks land on every
-  window pass-site).
+  window pass-site); subspace producer `tl.subspace(within, basis, *,
+  origin=, method=, dim=, tol=)` (direction/subspace SUPPORT-SET selection —
+  set, not projection; mandatory basis provenance with sha256 digest riding
+  `provenance.source` and do() audits; extent mismatch on the bound axis
+  refuses `basis_dim_mismatch`, never broadcast/truncate; geometry-only
+  resolution, unsaved sites resolve).
   Cross-run (stage 4a): `resolved.align_to(target)`
   re-binds ACT selections across runs on L1 site keys, same-policy captures
   only (`selection_alignment_invalid`, closed six-reason set); `do()` still

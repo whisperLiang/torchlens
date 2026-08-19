@@ -823,6 +823,36 @@ deprecation shim owed*
   edits every window pass. Relation is `exact` (the statistic of this
   capture's passes; the `low_variance` precedent).
 
+**Subspace producer: tl.subspace** — *unstable — no deprecation shim owed*
+: Select the elements a DIRECTION (or small subspace) in activation space
+  lives on — probe directions, steering vectors, PCA components, SAE
+  decoder rows. `subspace(within, basis, *, origin=, method=None, dim=-1,
+  tol=0.0)` takes one direction `[d]` or a stack `[k, d]` (canonicalized to
+  float64) and resolves to the basis's SUPPORT SET: every element whose
+  coordinate on the bound axis carries weight `|w| > tol` in at least one
+  basis vector, expanded across the site's other axes. SET, NOT PROJECTION
+  (the normative boundary): a Selection denotes sets, masks are exact as
+  sets, and `do()` is elementwise — the weights are disclosed but never
+  carried, a dense direction supports the WHOLE axis, and
+  `do(subspace(...), edit)` edits every supported element, never "the
+  component along the direction" (projection-valued selections are a named
+  design fork, not a promise). BASIS PROVENANCE IS MANDATORY: `origin=` is
+  a required non-empty account of where the basis came from; origin,
+  optional `method=`, geometry, and the basis's sha256 content digest are
+  stamped into every resolved entry's `provenance.source` (and therefore
+  `do()` audit records); the frozen
+  `torchlens.selection_subspace.BasisProvenance` record is the programmatic
+  face. DIMENSION HONESTY: `dim=` names the bound site axis (default `-1`,
+  the trailing feature axis; conv channel directions are `dim=1`); a site
+  whose extent there differs from `d` refuses `selection_unresolvable` /
+  `basis_dim_mismatch` — never a silent broadcast, truncation, or padding.
+  `within=` is REQUIRED (a direction is minted for one representation
+  space). Non-finite bases and rows entirely at-or-below `tol` refuse at
+  construction (vacuous direction). Resolution is geometry-only (no payload
+  reads — unsaved sites resolve); relation is `exact`; PARAM/EDGE
+  populations refuse `selection_kind_incompatible` (a parameter-space
+  direction is a named possibility, not a promise).
+
 **SelectionError / selection refusal codes** — *unstable — no deprecation
 shim owed; S2-gated*
 : One carrier class (`torchlens.selection.SelectionError`, catalogued in the
@@ -831,7 +861,7 @@ shim owed; S2-gated*
   `selection_kind_incompatible`, `selection_unresolvable` (closed reason set
   `site_not_in_trace | value_not_saved | non_tensor_site | no_index_space |
   mask_shape_mismatch | facet_write_mask_unavailable | population_too_small |
-  multipass_bare_label | value_criterion_invalid`),
+  multipass_bare_label | value_criterion_invalid | basis_dim_mismatch`),
   `selection_apply_invalid` (stage 2), and `slice_save_unsupported`
   (`tl.save` on a `TraceSlice` presenter). The `multipass_bare_label` reason
   is the `tl.units` face of the multi-pass bare-label ambiguity refusal: a
