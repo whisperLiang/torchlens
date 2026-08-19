@@ -10,7 +10,7 @@ prepares the model and calls `wrap_torch()` from `backends/torch/`.
 
 ```
 import torchlens
-  |- exposes 118 top-level public names in __all__
+  |- exposes 119 top-level public names in __all__
   |- eagerly imports ONLY the light spine: options, errors/_state, ir.*,
   |  captured_run, observers, quantities, _deprecations, _errors, _io,
   |  _literals, _save_budget, utils,
@@ -126,7 +126,7 @@ exclusive with backward-related capture because it discards the autograd graph.
 
 | Path | Purpose |
 |------|---------|
-| `__init__.py` | Top-level API, 118-name `__all__`, deprecation shims, `peek`/`extract` helpers |
+| `__init__.py` | Top-level API, 119-name `__all__`, deprecation shims, `peek`/`extract` helpers |
 | `_state.py` | Global logging toggle, active log, decoration maps, prepared-model registry; no torchlens imports except the sanctioned `errors._base` leaf (a RUNTIME base-class import, cycle-safe; only its TYPE_CHECKING block is typing-only) |
 | `_trace_state.py` | Small runtime state enum exposed through `torchlens.io` |
 | `_errors.py`, `errors/` | Public and legacy exception classes |
@@ -236,7 +236,7 @@ exclusive with backward-related capture because it discards the autograd graph.
 - `intervention/_topology/` - internal bundle supergraph and topology diff support.
 - `merged/` - cross-rank merging (C1): `tl.merge_ranks`/`tl.merge_report`, the
   `MergedTrace` presenter, frozen merge vocabularies, and the merged-directory
-  artifact (routes 2 of the 118 `__all__` names; own AGENTS.md).
+  artifact (routes 2 of the 119 `__all__` names; own AGENTS.md).
 - `distributed/` - explicit-collective capture support: `tl.distributed.arm()`,
   group-lifecycle ledger, membership-lineage audit (own AGENTS.md).
 - `bundle/` - the intervention `Bundle` product and its aligned Super* views.
