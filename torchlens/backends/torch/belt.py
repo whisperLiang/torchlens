@@ -197,6 +197,16 @@ _member_map: dict[int, Any] | None = None
 _swept_module_ids: dict[int, Callable[[], Any | None]] = {}
 """Module identities already swept this wrapper epoch (weak where possible)."""
 
+_swept_ids_live: set[int] = set()
+"""Ids of swept modules PROVABLY still alive, for the O(new) sweep pre-filter.
+
+A weakref death callback discards the id the moment its module is finalized,
+so a reused id is absent from this set and honestly reads as a new module.
+Non-weakrefable modules enter permanently: the memo's strong closure keeps
+them alive, so their id can never be reused. The set is a pure pre-filter --
+membership only ever SKIPS work the per-module weakref memo would also skip;
+any miss falls through to the unchanged authoritative loop."""
+
 _ledger: list[tuple[Callable[[], Any | None], str, Any, Any]] = []
 """(module_ref, attr_name, original, replacement) reversal entries."""
 
@@ -359,12 +369,21 @@ def _weak_module_ref(module: types.ModuleType) -> Callable[[], Any | None]:
 def _weak_swept_module_ref(
     module: types.ModuleType,
 ) -> Callable[[], Any | None]:
-    """Return a weak module reference for the per-module sweep memo."""
+    """Return a weak module reference for the per-module sweep memo.
 
+    Weakrefable modules register a death callback that evicts their id from
+    ``_swept_ids_live``; the strong-closure fallback keeps the module alive,
+    so its id stays valid and may remain in the live set permanently.
+    """
+
+    module_id = id(module)
     try:
-        return weakref.ref(module)
+        ref = weakref.ref(module, lambda _r, _mid=module_id: _swept_ids_live.discard(_mid))
     except TypeError:
+        _swept_ids_live.add(module_id)
         return lambda: module
+    _swept_ids_live.add(module_id)
+    return ref
 
 
 def sweep_stale_belt_references() -> int:
@@ -391,6 +410,13 @@ def sweep_stale_belt_references() -> int:
     # dict lookups with O(new modules) real work.
     report = belt_report()
     if report is None or _member_map is None or not _member_map:
+        return 0
+    # O(new-modules) pre-filter: every id in ``_swept_ids_live`` is a module
+    # this epoch's loop already scanned AND that is provably still the same
+    # object (death callbacks evict dead ids, so a reused id reads as new).
+    # ``set(map(id, ...))`` executes no Python bytecode, so it is atomic
+    # under the GIL like the ``list(sys.modules.items())`` snapshot below.
+    if not set(map(id, sys.modules.values())) - _swept_ids_live:
         return 0
     patched = 0
     for mod_key, module in list(sys.modules.items()):
@@ -440,3 +466,4 @@ def restore_belt_references() -> None:
             continue
     _ledger.clear()
     _swept_module_ids.clear()
+    _swept_ids_live.clear()
