@@ -1,0 +1,110 @@
+"""Cross-backend agreement for the INCIDENTAL bare-label all-keys binding.
+
+There was never a documented contract for what ``layer_dict_all_keys[bare
+layer_label]`` resolves to on a multi-pass layer -- bare-label addressing of
+multi-pass layers refuses on every path that matters
+(``multipass_bare_label_ambiguous``). But the neutral preview finalizer and
+the jax backend used to bind the bare label to the FIRST pass while torch's
+raw-index artifact resolves to the LAST pass: an undocumented cross-backend
+disagreement waiting to be mistaken for behavior. These tests pin the
+alignment: every backend's incidental binding is last-pass-wins, and every
+pass carries the bare label in its ``lookup_keys`` (torch parity).
+"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from types import SimpleNamespace
+
+import pytest
+import torch
+import torch.nn as nn
+
+import torchlens as tl
+from torchlens.backends._finalize import _finalize_single_op
+from torchlens.postprocess.loop_grouping_adapter import RecurrenceAssignment
+
+pytestmark = pytest.mark.smoke
+
+
+def _stub_trace() -> SimpleNamespace:
+    """Return a minimal trace stub with the lookup indexes finalize touches."""
+
+    return SimpleNamespace(
+        layer_list=[],
+        layer_dict_main_keys={},
+        layer_dict_all_keys={},
+        op_labels=[],
+        layer_labels=[],
+        layer_num_calls={},
+        _lookup_keys_to_layer_num_dict={},
+        _layer_num_to_lookup_keys_dict=defaultdict(list),
+    )
+
+
+def _assignment(pass_index: int) -> RecurrenceAssignment:
+    """Return a 2-pass assignment for the shared ``cell`` layer."""
+
+    return RecurrenceAssignment(
+        layer_label="cell",
+        recurrent_labels=("cell_raw_0", "cell_raw_1"),
+        pass_index=pass_index,
+        num_passes=2,
+        equivalence_key="eq:cell",
+        site_key=None,
+    )
+
+
+def test_neutral_finalizer_bare_label_is_last_pass_and_on_every_pass() -> None:
+    """The shared finalizer's bare-label binding is last-pass-wins."""
+
+    trace = _stub_trace()
+    first = SimpleNamespace()
+    second = SimpleNamespace()
+    _finalize_single_op(trace, first, "cell_raw_0", 0, _assignment(1))
+    _finalize_single_op(trace, second, "cell_raw_1", 1, _assignment(2))
+
+    assert trace.layer_dict_all_keys["cell:1"] is first
+    assert trace.layer_dict_all_keys["cell:2"] is second
+    # Incidental raw-index artifact: last pass wins, matching torch.
+    assert trace.layer_dict_all_keys["cell"] is second
+    # Torch parity: EVERY pass lists the bare label among its lookup keys.
+    assert "cell" in first.lookup_keys
+    assert "cell" in second.lookup_keys
+
+
+def test_torch_bare_label_artifact_is_last_pass() -> None:
+    """Pin the torch side of the parity so the agreement cannot drift."""
+
+    class Loop(nn.Module):
+        """Three applications of one shared cell."""
+
+        def __init__(self) -> None:
+            """Build the shared cell."""
+
+            super().__init__()
+            self.cell = nn.Linear(4, 4, bias=True)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Apply the cell three times."""
+
+            h = x
+            for _ in range(3):
+                h = torch.relu(self.cell(h))
+            return h
+
+    torch.manual_seed(0)
+    log = tl.trace(Loop(), torch.randn(2, 4))
+    multi_pass_bare = [
+        key
+        for key, record in log.layer_dict_all_keys.items()
+        if isinstance(key, str) and ":" not in key and record.num_passes > 1
+    ]
+    assert multi_pass_bare, "expected multi-pass layers in the loop trace"
+    for key in multi_pass_bare:
+        record = log.layer_dict_all_keys[key]
+        if key != record.layer_label:
+            continue  # raw/address spellings, not the bare layer label
+        assert record.pass_index == record.num_passes, (
+            f"torch bare-label artifact for {key!r} no longer resolves to the last pass"
+        )
