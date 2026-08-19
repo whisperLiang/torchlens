@@ -35,13 +35,23 @@ import torchlens as tl
 from torchlens import _capture_state_helpers
 from torchlens.utils import _torch_compat
 
-pytestmark = [
-    pytest.mark.heavy,
-    pytest.mark.skipif(
-        not _torch_compat.HAS_SET_STANCE,
-        reason="torch.compiler.set_stance requires torch >= 2.6",
-    ),
-]
+pytestmark = [pytest.mark.heavy]
+
+# MODULE-LEVEL skip, not a skipif mark: this module calls torch.compile at import
+# time (the compiled free function below), and a `pytestmark` skipif is evaluated
+# only AFTER the module body has executed. On the floor row torch 2.2.2 + Python
+# 3.12 that import-time compile raises `RuntimeError: Dynamo is not supported on
+# Python 3.12+`, which is a COLLECTION error -- it aborted the entire smoke run
+# for that row (2026-08-19), so 9k tests never ran because of one unguarded
+# module-level call. Skipping before the body runs is what makes the guard real.
+#
+# HAS_SET_STANCE (torch >= 2.6) is the right predicate for the Dynamo question
+# too: every torch new enough to expose set_stance also supports Dynamo on 3.12.
+if not _torch_compat.HAS_SET_STANCE:
+    pytest.skip(
+        "torch.compiler.set_stance requires torch >= 2.6",
+        allow_module_level=True,
+    )
 
 
 class _CompiledAttrModel(nn.Module):
