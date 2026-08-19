@@ -179,15 +179,10 @@ _INSTALL_STATE_AND_CACHES = frozenset(
         ("torchlens/backends/torch/belt.py", "_ledger"),
         ("torchlens/backends/torch/belt.py", "_member_map"),
         ("torchlens/backends/torch/belt.py", "_report"),
-        # O(new-modules) pre-filter companion to _swept_module_ids: the id of every
-        # module the sweep has already handled, so a capture whose sys.modules gained
-        # nothing skips the authoritative loop entirely. Install bookkeeping, not
-        # capture state -- cleared at the one belt reset site
-        # (restore_belt_references) alongside its companions. It is an ID set, so
-        # correctness rests on EVICTION, not on clearing: weakref death callbacks
-        # discard each id when its module dies, so a recycled id honestly reads as
-        # new rather than as already-swept. Deliberately NOT a _WEAK_SUBJECT_TABLES
-        # row -- the container holds plain ints, not weak references to subjects.
+        # Sweep pre-filter companion to _swept_module_ids, cleared at the same belt
+        # reset site. Holds plain ids, so it is NOT a _WEAK_SUBJECT_TABLES row even
+        # though correctness rests on weakref death-callback EVICTION rather than on
+        # clearing: an evicted id means a recycled id reads as new, never as swept.
         ("torchlens/backends/torch/belt.py", "_swept_ids_live"),
         ("torchlens/backends/torch/belt.py", "_swept_module_ids"),
         # The 8ba75e99 sweep-epoch companions (_swept_modules_dirty,
