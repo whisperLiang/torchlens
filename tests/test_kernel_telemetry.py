@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from _source_corpus import module_ast
 from torch import nn
 
 import torchlens as tl
@@ -289,7 +290,7 @@ def _imported_modules(path: Path) -> set[str]:
         Imported module names.
     """
 
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    tree = module_ast(path)
     names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):

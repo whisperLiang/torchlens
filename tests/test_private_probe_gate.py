@@ -20,6 +20,7 @@ import ast
 from pathlib import Path
 
 import pytest
+from _source_corpus import package_ast, package_files
 
 # Module-wide smoke dropped (r3settle2 budget lint): the full-package AST
 # ledger scan below measures over the 5s smoke partition; per-test marks.
@@ -303,11 +304,11 @@ def _scan_package() -> dict[str, set[str]]:
 
     found: dict[str, set[str]] = {}
     repo_root = _PACKAGE_ROOT.parent
-    for path in sorted(_PACKAGE_ROOT.rglob("*.py")):
+    for path in package_files():
         rel = path.relative_to(repo_root).as_posix()
         if rel in _BOUNDARY_FILES:
             continue
-        touches = _private_touches(ast.parse(path.read_text(encoding="utf-8"), filename=rel))
+        touches = _private_touches(package_ast(path))
         if touches:
             found[rel] = touches
     return found

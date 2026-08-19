@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from _source_corpus import module_ast, module_source
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCANNED_PATHS = (
     REPO_ROOT / "torchlens" / "capture",
@@ -160,8 +162,8 @@ def test_no_bare_detach_outside_training_guardrail_allowlist() -> None:
     detach_ok_exemptions = 0
     for scanned_path in SCANNED_PATHS:
         for path in _python_files(scanned_path):
-            source = path.read_text(encoding="utf-8")
-            tree = ast.parse(source, filename=str(path))
+            source = module_source(path)
+            tree = module_ast(path)
             visitor = _DetachCallVisitor(source.splitlines())
             visitor.visit(tree)
             detach_ok_exemptions += visitor.detach_ok_exemptions

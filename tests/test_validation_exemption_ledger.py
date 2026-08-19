@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from _source_corpus import package_files, package_source
 
 from torchlens.validation import exemptions as ex
 
@@ -77,8 +78,8 @@ def _exemption_emitting_sources() -> list[Path]:
         'decision="exempted"',
     )
     sources: list[Path] = []
-    for path in sorted((_REPO_ROOT / "torchlens").rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
+    for path in package_files():
+        text = package_source(path)
         if any(marker in text for marker in emission_markers):
             sources.append(path)
     return sources

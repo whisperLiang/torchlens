@@ -32,6 +32,7 @@ import functools
 from pathlib import Path
 
 import pytest
+from _source_corpus import package_ast, package_files, package_source
 
 pytestmark = pytest.mark.smoke
 
@@ -374,13 +375,12 @@ def _parsed_package_trees(package_root: Path) -> tuple[tuple[str, str, ast.Modul
     """
 
     parsed: list[tuple[str, str, ast.Module]] = []
-    for path in sorted(package_root.rglob("*.py")):
+    for path in package_files():
         module_parts = path.relative_to(package_root.parent).with_suffix("").parts
         if module_parts[-1] == "__init__":
             module_parts = module_parts[:-1]
         module_name = ".".join(module_parts)
-        source = path.read_text(encoding="utf-8")
-        parsed.append((module_name, source, ast.parse(source, filename=str(path))))
+        parsed.append((module_name, package_source(path), package_ast(path)))
     return tuple(parsed)
 
 

@@ -34,6 +34,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import pytest
+from _source_corpus import package_ast, package_files
 
 from torchlens.data_classes._trace_components import (
     TRACE_EXTERNAL_WRITE_EXEMPTIONS,
@@ -149,12 +150,12 @@ def _scan_external_writes() -> dict[str, list[str]]:
     """Attribute -> sorted ``file:line kind`` write sites outside data_classes/."""
 
     found: dict[str, list[str]] = collections.defaultdict(list)
-    for path in sorted(_PACKAGE_ROOT.rglob("*.py")):
+    for path in package_files():
         parts = path.relative_to(_PACKAGE_ROOT).parts
         if parts[0] == _OWNER_PACKAGE:
             continue
         rel = path.relative_to(_PACKAGE_ROOT.parent).as_posix()
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        tree = package_ast(path)
         for attr, lineno, kind in _external_writes(tree):
             found[attr].append(f"{rel}:{lineno} ({kind})")
     return {attr: sorted(sites) for attr, sites in found.items()}

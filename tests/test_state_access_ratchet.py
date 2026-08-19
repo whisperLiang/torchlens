@@ -17,6 +17,7 @@ import ast
 from pathlib import Path
 
 import pytest
+from _source_corpus import package_ast, package_files
 
 # Module-wide smoke dropped (r3settle2 budget lint): the repo-wide ratchet
 # scan below measures over the 5s smoke partition; per-test marks.
@@ -68,11 +69,11 @@ def _state_access_sites() -> list[tuple[str, int]]:
     """Return every ``_state._*`` attribute access site outside ``_state.py``."""
 
     sites: list[tuple[str, int]] = []
-    for path in sorted(_PACKAGE_ROOT.rglob("*.py")):
+    for path in package_files():
         rel = path.relative_to(_PACKAGE_ROOT.parent).as_posix()
         if rel == "torchlens/_state.py":
             continue
-        tree = ast.parse(path.read_text(), filename=rel)
+        tree = package_ast(path)
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Attribute)

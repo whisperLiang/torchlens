@@ -11,10 +11,10 @@ coupled to the still-refusing L7b capability rows.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 import pytest
 import torch
+from _source_corpus import package_ast, package_files
 from torch import nn
 
 import torchlens as tl
@@ -32,8 +32,6 @@ from torchlens.errors.runnable import StateBindingError
 from torchlens.options import CaptureOptions
 
 smoke = pytest.mark.smoke
-
-TORCHLENS_DIR = Path(tl.__file__).resolve().parent
 
 _SENTINEL_GRAMMAR = re.compile(r"^unavailable:[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -85,10 +83,10 @@ def test_bridge_module_is_imported_nowhere_in_the_package() -> None:
 
     import ast
 
-    for path in TORCHLENS_DIR.rglob("*.py"):
+    for path in package_files():
         if path.name == "_structure_only_bridge.py":
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = package_ast(path)
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 module = node.module or ""

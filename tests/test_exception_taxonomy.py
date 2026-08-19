@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _source_corpus import package_ast, package_files
 
 from torchlens import errors, user_funcs
 from torchlens._io.tlspec import coerce_tlspec_save_level
@@ -1341,13 +1342,13 @@ def _exception_class_definitions() -> dict[str, tuple[str, ...]]:
     definitions: dict[str, tuple[str, ...]] = {}
     name_to_bases: dict[str, set[str]] = {}
     per_module: list[tuple[str, str, tuple[str, ...]]] = []
-    for path in sorted(_CLOSURE_PACKAGE_ROOT.rglob("*.py")):
+    for path in package_files():
         relative = path.relative_to(_CLOSURE_PACKAGE_ROOT.parent)
         parts = list(relative.with_suffix("").parts)
         if parts[-1] == "__init__":
             parts = parts[:-1]
         module_name = ".".join(parts)
-        tree = ast.parse(path.read_text())
+        tree = package_ast(path)
         for node in ast.walk(tree):
             if not isinstance(node, ast.ClassDef):
                 continue

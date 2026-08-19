@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from _source_corpus import package_ast, package_files
 
 import torchlens as tl
 from torchlens.ir.capture_events import CaptureEvents
@@ -77,9 +78,9 @@ def test_intervention_template_ref_is_dead() -> None:
 
     package_root = Path(tl.__file__).resolve().parent
     readers: list[str] = []
-    for path in sorted(package_root.rglob("*.py")):
+    for path in package_files():
         rel = str(path.relative_to(package_root.parent))
-        tree = ast.parse(path.read_text(), filename=rel)
+        tree = package_ast(path)
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Attribute)

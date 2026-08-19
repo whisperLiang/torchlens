@@ -9,6 +9,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 import pytest
+from _source_corpus import package_ast, package_files
 
 from torchlens._runnable_seam import (
     LEGACY_RUNNABLE_TRACE_FIELD_MAP,
@@ -53,11 +54,11 @@ def _direct_runnable_reader_modules() -> frozenset[str]:
 
     field_names = {f"_runnable_{item.name}" for item in fields(RunnableTraceState)}
     readers: set[str] = set()
-    for path in _PACKAGE_ROOT.rglob("*.py"):
+    for path in package_files():
         relative = path.relative_to(_PACKAGE_ROOT).as_posix()
         if relative == "_state.py":
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = package_ast(path)
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr in field_names:
                 readers.add(relative)
