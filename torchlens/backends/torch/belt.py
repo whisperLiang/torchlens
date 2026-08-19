@@ -197,6 +197,16 @@ _member_map: dict[int, Any] | None = None
 _swept_module_ids: dict[int, Callable[[], Any | None]] = {}
 """Module identities already swept this wrapper epoch (weak where possible)."""
 
+_swept_ids_live: set[int] = set()
+"""Ids of swept modules PROVABLY still alive, for the O(new) sweep pre-filter.
+
+A weakref death callback discards the id the moment its module is finalized,
+so a reused id is absent from this set and honestly reads as a new module.
+Non-weakrefable modules enter permanently: the memo's strong closure keeps
+them alive, so their id can never be reused. The set is a pure pre-filter --
+membership only ever SKIPS work the per-module weakref memo would also skip;
+any miss falls through to the unchanged authoritative loop."""
+
 _ledger: list[tuple[Callable[[], Any | None], str, Any, Any]] = []
 """(module_ref, attr_name, original, replacement) reversal entries."""
 
@@ -359,12 +369,31 @@ def _weak_module_ref(module: types.ModuleType) -> Callable[[], Any | None]:
 def _weak_swept_module_ref(
     module: types.ModuleType,
 ) -> Callable[[], Any | None]:
-    """Return a weak module reference for the per-module sweep memo."""
+    """Return a weak module reference for the per-module sweep memo.
 
+    Weakrefable modules register a death callback that evicts their id from
+    ``_swept_ids_live``; the strong-closure fallback keeps the module alive,
+    so its id stays valid and may remain in the live set permanently.
+    """
+
+    module_id = id(module)
     try:
-        return weakref.ref(module)
+        ref = weakref.ref(module, _evict_live_id(module_id))
     except TypeError:
+        _swept_ids_live.add(module_id)
         return lambda: module
+    _swept_ids_live.add(module_id)
+    return ref
+
+
+def _evict_live_id(entry_id: int) -> Callable[[Any], None]:
+    """Death callback evicting ``entry_id`` from the sweep pre-filter live set."""
+
+    def _evict(_ref: Any) -> None:
+        """Discard the captured id when its referent is finalized."""
+        _swept_ids_live.discard(entry_id)
+
+    return _evict
 
 
 def sweep_stale_belt_references() -> int:
@@ -392,9 +421,29 @@ def sweep_stale_belt_references() -> int:
     report = belt_report()
     if report is None or _member_map is None or not _member_map:
         return 0
+    # O(new-modules) pre-filter: every id in ``_swept_ids_live`` is a module
+    # this epoch's loop already scanned AND that is provably still the same
+    # object (death callbacks evict dead ids, so a reused id reads as new).
+    # ``set(map(id, ...))`` executes no Python bytecode, so it is atomic
+    # under the GIL like the ``list(sys.modules.items())`` snapshot below.
+    if not set(map(id, sys.modules.values())) - _swept_ids_live:
+        return 0
     patched = 0
     for mod_key, module in list(sys.modules.items()):
         if not isinstance(module, types.ModuleType):
+            # Non-module sys.modules entries (e.g. the typing.io/typing.re
+            # pseudo-module classes) are never scanned, but they must still
+            # enter the live-id set under the same weakref-eviction contract
+            # or their ids read as new forever and the pre-filter never
+            # fires. Unweakrefable entries stay out: degraded, never wrong.
+            entry_id = id(module)
+            if entry_id not in _swept_ids_live:
+                try:
+                    entry_ref = weakref.ref(module, _evict_live_id(entry_id))
+                except TypeError:
+                    continue
+                _swept_module_ids[entry_id] = entry_ref
+                _swept_ids_live.add(entry_id)
             continue
         previous_ref = _swept_module_ids.get(id(module))
         if previous_ref is not None and previous_ref() is module:
@@ -440,3 +489,4 @@ def restore_belt_references() -> None:
             continue
     _ledger.clear()
     _swept_module_ids.clear()
+    _swept_ids_live.clear()

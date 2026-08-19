@@ -326,6 +326,14 @@ recorded: 2026-08-19T15:42:51.896038+00:00
 ---
 generator: producer_parity/test_ledger.py (full closure)
 flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: belt sweep pre-filter adds a second sys.modules access site in belt.py (ambiguous non-record row)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 02f8f68fbeb75a060cbb71a85a8fd997c470211a (clean)
+recorded: 2026-08-19T16:25:07.301211+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
 reason: renderer thinning moved visualization consumer sites verbatim into _render_ordering/_render_regions/_svg_compose (pure code motion, no SelectionKind semantics change)
 env: py3.10-torch2.13.0
 torch: 2.13.0+cu130

@@ -179,6 +179,11 @@ _INSTALL_STATE_AND_CACHES = frozenset(
         ("torchlens/backends/torch/belt.py", "_ledger"),
         ("torchlens/backends/torch/belt.py", "_member_map"),
         ("torchlens/backends/torch/belt.py", "_report"),
+        # Sweep pre-filter companion to _swept_module_ids, cleared at the same belt
+        # reset site. Holds plain ids, so it is NOT a _WEAK_SUBJECT_TABLES row even
+        # though correctness rests on weakref death-callback EVICTION rather than on
+        # clearing: an evicted id means a recycled id reads as new, never as swept.
+        ("torchlens/backends/torch/belt.py", "_swept_ids_live"),
         ("torchlens/backends/torch/belt.py", "_swept_module_ids"),
         # The 8ba75e99 sweep-epoch companions (_swept_modules_dirty,
         # _swept_sys_modules_size) were deleted with the sys.modules crawler

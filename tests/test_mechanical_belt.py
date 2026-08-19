@@ -137,6 +137,40 @@ def test_belt_sweep_is_epoch_incremental() -> None:
         belt.restore_belt_references()
 
 
+def test_belt_sweep_prefilter_evicts_dead_module_ids() -> None:
+    """The O(new) pre-filter never turns a reused id into a silent skip.
+
+    A drained sweep returns 0 through the id-set fast path; a swept module's
+    death evicts its id from the live set (weakref callback), so an unrelated
+    later allocation reusing that id reads as NEW and gets scanned.
+    """
+
+    original, wrapper = _original_and_wrapper("from_numpy")
+    belt.sweep_stale_belt_references()  # drain: everything live is now swept
+    assert belt.sweep_stale_belt_references() == 0  # fast path: nothing new
+    doomed = types.ModuleType("_tl_belt_doomed")
+    sys.modules[doomed.__name__] = doomed
+    try:
+        belt.sweep_stale_belt_references()
+        doomed_id = id(doomed)
+        assert doomed_id in belt._swept_ids_live
+        sys.modules.pop(doomed.__name__)
+        del doomed
+        assert doomed_id not in belt._swept_ids_live
+        # A genuinely new module is still found after the eviction churn.
+        late = types.ModuleType("_tl_belt_post_eviction")
+        late.op = original
+        sys.modules[late.__name__] = late
+        try:
+            assert belt.sweep_stale_belt_references() >= 1
+            assert late.op is wrapper
+        finally:
+            sys.modules.pop(late.__name__, None)
+    finally:
+        sys.modules.pop("_tl_belt_doomed", None)
+        belt.restore_belt_references()
+
+
 def test_probe_rng_bracket_restores_global_seed() -> None:
     """The probe framework is RNG-neutral by construction (b8-fable R56).
 
