@@ -5,6 +5,9 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Final
 
+from .._errors import InvalidArgumentError
+from ..quantities import Duration
+from ..utils._multipass_access import get_multipass_attr, is_multipass_layer
 from ..utils.display import human_readable_size
 
 PARAM_SEPARATOR: Final[str] = " · "
@@ -353,3 +356,93 @@ def _param_items(params: Any) -> list[Any]:
     if isinstance(params, Iterable) and not isinstance(params, str):
         return list(params)
     return []
+
+
+def compute_selected_node_lines(
+    layer_log: Any,
+    node_address: str,
+    vis_mode: str,
+    node_label_fields: list[str],
+) -> list[str]:
+    """Build node-label rows from an explicit field picker.
+
+    Parameters
+    ----------
+    layer_log:
+        Op or Layer to render.
+    node_address:
+        Existing address suffix from TorchLens node address logic.
+    vis_mode:
+        ``"unrolled"`` or ``"rolled"``.
+    node_label_fields:
+        Requested field names.
+
+    Returns
+    -------
+    list[str]
+        Selected label rows.
+
+    Raises
+    ------
+    ValueError
+        If an unknown field is requested.
+    """
+
+    rows: list[str] = []
+    for field_name in node_label_fields:
+        if field_name in {"label", "name"}:
+            rows.append(str(getattr(layer_log, "layer_label", "")))
+        elif field_name in {"type", "op", "operation"}:
+            rows.append(str(getattr(layer_log, "func_name", None) or layer_log.layer_type))
+        elif field_name == "shape":
+            rows.append(format_shape(layer_log.shape))
+        elif field_name == "shape_summary":
+            # L1's across-pass summary: row only when the field is set
+            # (same skip-when-absent semantics as "params").
+            summary = getattr(layer_log, "shape_summary", None)
+            if isinstance(summary, str) and summary:
+                rows.append(summary)
+        elif field_name in {"memory", "bytes"}:
+            rows.append(str(getattr(layer_log, "activation_memory", "")))
+        elif field_name == "module":
+            rows.append(format_module_path(node_address) or "@root")
+        elif field_name == "params":
+            param_line = format_param_list(layer_log)
+            if param_line is not None:
+                rows.append(param_line)
+        elif field_name == "pass":
+            if vis_mode == "unrolled":
+                # Per-pass leaf node: show the op's real 1-based recurrent pass
+                # (``pass_index``). The old ``call_index`` default read 1 for every
+                # pass because Ops carry no ``call_index`` -- a field literally
+                # named "pass" that always says 1 is silent wrongness.
+                rows.append(str(get_multipass_attr(layer_log, "pass_index", 1, multipass=1)))
+            else:
+                rows.append(str(get_multipass_attr(layer_log, "num_passes", 1)))
+        elif field_name == "flops":
+            rows.append(str(getattr(layer_log, "flops_forward", 0) or 0))
+        elif field_name == "time":
+            if is_multipass_layer(layer_log):
+                # Rolled recurrent node: ``func_duration`` is per-pass and would
+                # leak the multi-pass ValueError tripwire. Report the aggregate
+                # total across passes (same choice as the rolled summary builder's
+                # ``total_func_duration``), an honest total rather than a crash.
+                duration = float(getattr(layer_log, "total_func_duration", 0.0) or 0.0)
+            else:
+                duration = float(get_multipass_attr(layer_log, "func_duration", 0.0) or 0.0)
+            rows.append(str(Duration(duration)))
+        else:
+            raise InvalidArgumentError(
+                f"Unsupported node label field: {field_name!r}",
+                code="node_label_field_invalid",
+                remedy="pass documented node label field names",
+                field=str(field_name),
+            )
+    if rows:
+        return rows
+    # Empty selection (every requested row skipped) falls back to the
+    # default label rows; lazy import avoids a module cycle with the
+    # node renderer that calls this picker.
+    from ._render_nodes import compute_default_node_lines
+
+    return list(compute_default_node_lines(layer_log, node_address, vis_mode))
