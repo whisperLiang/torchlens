@@ -18,6 +18,23 @@
 - Registry state is module-global (`_REGISTRY`, `_REGISTRY_VERSION`); `using()`
   layers recipes through the `_CONTEXT_RECIPES` contextvar.
 
+## logit_lens.py
+- `logit_lens()` projects per-block residual facets through the model's own
+  final norm + unembedding; generic math over the `language_model_head` facet
+  vocabulary (architecture knowledge stays in recipes). The reconstructed lens
+  is VALIDATED against the captured last-block `resid_post` -> logits pair and
+  refuses (`LogitLensError`) on mismatch; `lens=` supplies a user lens,
+  `validate=False` is the explicit opt-out. Results: `LogitLensResult` /
+  `LogitLensEntry` (`stacked()`, `top_tokens()`, `summary()`). All spellings
+  DOCUMENTED-UNSTABLE.
+
+## coverage.py
+- `facet_coverage(trace)` -> `FacetCoverageReport` (`ModuleCoverageRow` per
+  module): recipes matched, readable facets, typed absences, structural-only
+  candidates, and disclosed `unresolved` rows for multi-call facet refusals.
+  Input to `tools/facet_maintenance/` (proposals only; recipes are NEVER
+  auto-merged). DOCUMENTED-UNSTABLE spellings.
+
 ## patching.py
 - Prebuilt counterfactual helpers: `activation_patch_residual_stream()`,
   `activation_patch_attention_output()`, `activation_patch_attention_heads()`,
@@ -34,10 +51,15 @@
   `MissingFacet`, never a wrong tensor.
 
 ## recipes/ subpackage
-- Builtin recipes live in `attention.py`, `embedding.py`, `mlp.py`, `norm.py`,
-  `residual.py`; each function is registered with a `@register(...)` decorator at
-  import time (e.g. `gpt2_attention`, `gated_mlp`, `layer_norm`,
-  `transformer_residuals`).
+- Builtin recipes live in `attention.py`, `embedding.py`, `lm_head.py`,
+  `mlp.py`, `norm.py`, `residual.py`; each function is registered with a
+  `@register(...)` decorator at import time (e.g. `gpt2_attention`,
+  `gated_mlp`, `layer_norm`, `transformer_residuals`, `language_model_head`).
+- `lm_head.py` anchors unembedding facets (`logits`, `unembed_weight`/`_bias`,
+  `final_norm_kind`/`_eps`/`_gamma`/`_beta`/`_input`); the final norm is derived
+  from the head's input-op module stack (structural, not a name search), and
+  the broad `*RMSNorm` class suffix match is safe only because logit_lens
+  numerically validates before trusting the reconstruction.
 - `recipes/__init__.py` declares `BUILTIN_FACET_CAPABILITY_INVENTORY`, calls
   `mark_current_registry_as_builtins()`, then `_load_entrypoint_recipes()` loads
   `torchlens.recipes` entry points fail-safely (only callables flagged
