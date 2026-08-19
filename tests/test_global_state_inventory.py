@@ -129,13 +129,7 @@ _INSTALL_STATE_AND_CACHES = frozenset(
         ("torchlens/_io/prerelease.py", "_ACTIVE"),
         ("torchlens/_io/prerelease.py", "_ANNOTATIONS_KEY_REGISTRY"),
         ("torchlens/_io/prerelease.py", "_REGISTRY"),
-        # Selection-AST term dispatch (producer waves). register_term_resolver
-        # is an INTERNAL seam: sibling producer modules (selection_values,
-        # selection_graph) append their frozen term types at THEIR import, and
-        # a term can only enter an AST through a constructor living in the
-        # registering module, so registration always precedes the first
-        # resolve. An import-time declaration table like the prerelease
-        # registrar above, not user-driven registration state.
+        # Selection-AST term dispatch: import-time table, sibling producers register at import.
         ("torchlens/selection.py", "_TERM_RESOLVERS"),
         # Wrapper-lifecycle slots rebound only through the module object
         # (visible since the cross-module rebind detector, hunt-b2-sol R54).
