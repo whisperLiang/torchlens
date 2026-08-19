@@ -193,6 +193,50 @@ graph = trace.draw(
 assert graph is not None
 ```
 
+## Machine-readable trace dump and budgeted reports
+
+Two agent-facing spellings (both DOCUMENTED-UNSTABLE pending the naming ratification
+sprint) describe the same surface the rest of this page drives:
+
+- `trace.to_agent_json()` returns a JSON-serializable, self-describing dump under the
+  `torchlens.agent_trace.v1` schema: capture outcome/verification honesty facts, counts,
+  execution-ordered pass-qualified op rows with graph edges, the module hierarchy, and an
+  embedded `guide` block that maps every record back to the live spelling to call next.
+  Tensor payloads are never inlined; read them as `trace[layer_label].out`. Pass
+  `max_ops=N` to cap op rows — any omission is disclosed in the `truncation` block, and
+  the `counts` block stays full-capture truth.
+- `tl.report.explain(trace, max_tokens=N)` budget-prunes the text report by whole
+  sections (low-value first), disclosing every drop in a trailing `Truncation` section.
+  The `Capture status` honesty facts and partial-capture failure evidence are never
+  dropped: a budget below that floor returns the floor plus a disclosure instead of a
+  misleading fragment. `max_tokens` refuses with `format="json"` (that schema is
+  fixed-shape and already minimal).
+
+```python
+import json
+
+import torch
+from torch import nn
+
+import torchlens as tl
+
+
+model = nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 2)).eval()
+x = torch.randn(2, 4)
+trace = tl.trace(model, x, save=tl.func("relu"))
+
+dump = trace.to_agent_json()
+assert dump["schema"] == "torchlens.agent_trace.v1"
+assert json.loads(json.dumps(dump)) == dump
+relu_row = next(row for row in dump["ops"] if row["layer_label"] == "relu_1_2")
+assert relu_row["saved"] is True
+assert trace[relu_row["layer_label"]].out.shape == (2, 4)
+
+budgeted = tl.report.explain(trace, max_tokens=120)
+assert "Capture status" in budgeted
+assert "Truncation" in budgeted  # drops are disclosed, never silent
+```
+
 ## Anti-patterns
 
 - Do not trace `torch.compile`, `torch.jit`, or `torch.export` artifacts. Trace the original

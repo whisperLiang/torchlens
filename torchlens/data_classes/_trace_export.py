@@ -208,6 +208,33 @@ _TO_PANDAS_EXCLUDED_OP_FIELDS: frozenset[str] = frozenset(
 class TraceExportMixin(_TraceMixinBase):
     """``Trace`` export surface: dataframe, dict, and tabular projections."""
 
+    def to_agent_json(self: "Trace", *, max_ops: int | None = None) -> dict[str, Any]:
+        """Return a self-describing machine-readable dump of this trace.
+
+        DOCUMENTED-UNSTABLE spelling (naming ratification pending). The dump
+        is a navigation aid over the SAME public surface a human drives: it
+        embeds a ``guide`` block mapping every record back to the live
+        spelling to call next (``trace[label]``, ``tl.report.explain``, ...),
+        and carries the capture outcome/verification honesty facts verbatim.
+        Tensor payloads are never inlined.
+
+        Parameters
+        ----------
+        max_ops:
+            Optional cap on emitted op rows (execution order, first ``max_ops``
+            kept). Any omission is disclosed in the ``truncation`` block.
+
+        Returns
+        -------
+        dict[str, Any]
+            JSON-serializable dump under the ``torchlens.agent_trace.v1``
+            schema.
+        """
+
+        from ..report._agent_json import build_agent_json
+
+        return build_agent_json(self, max_ops=max_ops)
+
     def to_pandas(self: "Trace", include_decoded_output_summary: bool = False) -> "pd.DataFrame":
         """Return a dataframe containing one row per layer pass.
 

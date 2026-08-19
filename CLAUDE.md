@@ -769,6 +769,15 @@ print(tl.compat.report(model, x).to_markdown())
   on the user's object, stamps no loader-consulted attribute). The registry
   is INERT until consumers adopt name acceptance. `intervene=`/grad slots are
   outside the contract. Contract: `docs/reference/predicate_runtime.md`.
+- AGENT SURFACE (both spellings DOCUMENTED-UNSTABLE pending naming ratification):
+  `Trace.to_agent_json(max_ops=None)` emits the self-describing JSON-serializable
+  `torchlens.agent_trace.v1` dump (capture honesty facts, counts, pass-qualified op rows
+  with graph edges, module hierarchy, embedded navigation guide pointing back at the live
+  public surface; payloads never inlined; `max_ops` truncation disclosed, never silent).
+  `tl.report.explain(trace, max_tokens=N)` budget-prunes the text report by whole
+  sections low-value-first with a disclosed `Truncation` section; capture-status honesty
+  facts and partial-capture failure evidence never drop, and `max_tokens` refuses typed
+  with `format="json"`. Doc: `docs/for-ai-agents.md`.
 - `torchlens.debug` owns power-user diagnostics such as `bisect_nan` and `hot_path`;
   the submodule is imported as `tl.debug` and is deliberately not in `__all__`.
 - `tl.receptive_field` is a lazy power-user submodule. `Op`, `Layer`, `ModuleCall`, and
