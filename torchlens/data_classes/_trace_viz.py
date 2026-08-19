@@ -28,7 +28,12 @@ from .._literals import (
 )
 from .._source_links import file_line_text, terminal_file_line_link, vscode_file_line_link
 from ..intervention.types import FireRecord
-from ._nonfinite import coverage_gap_note, first_nonfinite_layer
+from ._nonfinite import (
+    coverage_gap_note,
+    first_nonfinite_layer,
+    nonfinite_coverage,
+    nonfinite_op_labels,
+)
 from .module import Module
 
 
@@ -415,6 +420,48 @@ class TraceVisualizationMixin(_TraceMixinBase):
             + "root.querySelector('[data-action=pause]').onclick=function(){clearInterval(t);t=null;};"
             + "})();</script></div>"
         )
+
+    @property
+    def nonfinite_ops(self: "Trace") -> tuple[str, ...]:
+        """Return pass-qualified labels of ops whose output held NaN or Inf.
+
+        DOCUMENTED-UNSTABLE spelling (pending naming-session ratification; no
+        deprecation shim owed on rename). This is the queryable per-op record:
+        when this capture ran with ``CaptureOptions(track_nonfinite=True)`` it
+        serves the capture-time verdicts (covering ops that retained no
+        payload); otherwise it derives the answer from the memoized
+        saved-payload scan already backing ``print(trace)``, at zero
+        capture-time cost. An empty tuple is only as strong as its coverage --
+        read :attr:`nonfinite_coverage` before trusting a clean answer from a
+        capture that retained few payloads.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Pass-qualified op labels (``Op.label``) in scan order; each is a
+            valid ``trace[label]`` key.
+        """
+
+        return nonfinite_op_labels(self)
+
+    @property
+    def nonfinite_coverage(self: "Trace") -> Any:
+        """Return the evidence basis and coverage behind :attr:`nonfinite_ops`.
+
+        DOCUMENTED-UNSTABLE spelling (pending naming-session ratification; no
+        deprecation shim owed on rename). A clean :attr:`nonfinite_ops` answer
+        must not read as a whole-capture verdict when the scan could not
+        examine everything; this discloses the basis (``"capture"`` vs
+        ``"saved_payloads"``) and the checked / unchecked / unexamined counts.
+
+        Returns
+        -------
+        NonfiniteCoverage
+            Frozen coverage record (see
+            :class:`torchlens.data_classes._nonfinite.NonfiniteCoverage`).
+        """
+
+        return nonfinite_coverage(self)
 
     def first_nonfinite(
         self: "Trace", link_format: Literal["terminal", "html", "text"] = "terminal"

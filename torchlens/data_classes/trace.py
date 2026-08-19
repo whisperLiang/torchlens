@@ -2518,52 +2518,6 @@ class Trace(
         return outcome_for(self)
 
     @property
-    def nonfinite_ops(self) -> tuple[str, ...]:
-        """Return pass-qualified labels of ops whose output held NaN or Inf.
-
-        DOCUMENTED-UNSTABLE spelling (pending naming-session ratification; no
-        deprecation shim owed on rename). This is the queryable per-op record:
-        when this capture ran with ``CaptureOptions(track_nonfinite=True)`` it
-        serves the capture-time verdicts (covering ops that retained no
-        payload); otherwise it derives the answer from the memoized
-        saved-payload scan already backing ``print(trace)``, at zero
-        capture-time cost. An empty tuple is only as strong as its coverage --
-        read :attr:`nonfinite_coverage` before trusting a clean answer from a
-        capture that retained few payloads.
-
-        Returns
-        -------
-        tuple[str, ...]
-            Pass-qualified op labels (``Op.label``) in scan order; each is a
-            valid ``trace[label]`` key.
-        """
-
-        from ._nonfinite import nonfinite_op_labels
-
-        return nonfinite_op_labels(self)
-
-    @property
-    def nonfinite_coverage(self) -> Any:
-        """Return the evidence basis and coverage behind :attr:`nonfinite_ops`.
-
-        DOCUMENTED-UNSTABLE spelling (pending naming-session ratification; no
-        deprecation shim owed on rename). A clean :attr:`nonfinite_ops` answer
-        must not read as a whole-capture verdict when the scan could not
-        examine everything; this discloses the basis (``"capture"`` vs
-        ``"saved_payloads"``) and the checked / unchecked / unexamined counts.
-
-        Returns
-        -------
-        NonfiniteCoverage
-            Frozen coverage record (see
-            :class:`torchlens.data_classes._nonfinite.NonfiniteCoverage`).
-        """
-
-        from ._nonfinite import nonfinite_coverage
-
-        return nonfinite_coverage(self)
-
-    @property
     def model_cls(self) -> type[Any] | None:
         """Return the live source model class when the model is still alive.
 

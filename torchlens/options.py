@@ -1060,20 +1060,11 @@ class CaptureOptions:
     raise_on_nan:
         Whether capture should stop at the first NaN or Inf tensor.
     track_nonfinite:
-        Whether torch capture records a per-op finiteness verdict for every
-        committed op output (DOCUMENTED-UNSTABLE spelling, pending
-        naming-session ratification; no deprecation shim owed on rename).
-        The record is queryable through ``Trace.nonfinite_ops`` /
-        ``Trace.nonfinite_coverage`` and covers ops that retain no payload,
-        which the default post-hoc saved-payload basis cannot examine.
-        Recording never changes control flow (``raise_on_nan`` stays the
-        stop-and-throw). Device (CUDA/MPS) verdict flags are read in one
-        batch after the forward, never per op. OFF by default: on default
-        exhaustive-save captures the free post-hoc basis already covers
-        every op, so paying the per-op check only buys coverage on
-        selective-save captures. Like ``measure_python_peak_memory`` this is
-        a session-time knob: it changes what capture pays for, not what a
-        trace means, and load restores the default.
+        Whether torch capture records a per-op finiteness verdict
+        (DOCUMENTED-UNSTABLE), served by ``Trace.nonfinite_ops`` /
+        ``Trace.nonfinite_coverage``; covers unsaved ops, never changes
+        control flow, reads device flags in one post-forward batch. A
+        session-time knob. Doc: ``docs/reference/capture_outcomes.md``.
     structure_only:
         Whether this capture runs under the structure-only contract
         (DOCUMENTED-UNSTABLE surface, pending naming-session/S2 ratification;
