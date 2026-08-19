@@ -233,3 +233,84 @@ def test_recompute_candidates_ranks_budget_and_excludes_zero_flops() -> None:
     assert frame.attrs["total_freeable"] > 0
     assert zero.attrs["excluded_nonpositive_flops_forward_count"] > 0
     assert len(zero) == 0
+
+
+def test_compare_params_matches_diverges_and_aligns_names() -> None:
+    """compare_params aligns qualified names and detects value divergence."""
+
+    torch.manual_seed(7)
+    model_a = TinyMlp()
+    model_b = TinyMlp()
+    model_b.load_state_dict(model_a.state_dict())
+    with torch.no_grad():
+        model_b.net[0].bias.add_(1.0)
+
+    frame = tl.debug.compare_params(model_a, model_b)
+
+    assert frame.attrs["value_diverged"] == 1
+    assert frame.attrs["matched"] == len(frame) - 1
+    diverged = frame.loc[frame["allclose"] == False, "name"].tolist()  # noqa: E712
+    assert diverged == ["net.0.bias"]
+    assert set(frame["kind"]) == {"parameter"}
+
+
+def test_compare_params_reports_one_sided_and_shape_mismatch() -> None:
+    """compare_params flags only-a/only-b names and shape mismatches."""
+
+    torch.manual_seed(8)
+    small = nn.Linear(4, 2)
+    wide = nn.Linear(4, 3)
+    frame = tl.debug.compare_params(small, wide)
+    assert frame.attrs["shape_mismatch"] == 2
+    assert all(frame.loc[~frame["shape_match"], "reason"] == "shape-or-dtype-mismatch")
+
+    stacked = nn.Sequential(nn.Linear(4, 2), nn.Linear(2, 2))
+    one_sided = tl.debug.compare_params(nn.Sequential(nn.Linear(4, 2)), stacked)
+    assert one_sided.attrs["only_b"] == 2
+    assert set(one_sided.loc[one_sided["status"] == "only-b", "name"]) == {
+        "1.weight",
+        "1.bias",
+    }
+
+
+def test_compare_params_include_buffers_covers_integer_buffers() -> None:
+    """include_buffers=True compares running stats and integer counters exactly."""
+
+    torch.manual_seed(9)
+    model_a = nn.BatchNorm1d(3)
+    model_b = nn.BatchNorm1d(3)
+    model_b.load_state_dict(model_a.state_dict())
+    model_b.num_batches_tracked.add_(5)
+
+    without = tl.debug.compare_params(model_a, model_b)
+    frame = tl.debug.compare_params(model_a, model_b, include_buffers=True)
+
+    assert "num_batches_tracked" not in set(without["name"])
+    counter = frame.loc[frame["name"] == "num_batches_tracked"].iloc[0]
+    assert counter["kind"] == "buffer"
+    assert counter["allclose"] is not None
+    assert not bool(counter["allclose"])
+    assert counter["max_abs"] == 5.0
+    assert frame.attrs["value_diverged"] >= 1
+
+
+def test_compare_params_meta_tensors_are_incomparable_not_compared() -> None:
+    """Meta parameters skip the value comparison with a recorded reason."""
+
+    with torch.device("meta"):
+        meta_model = nn.Linear(4, 2)
+    frame = tl.debug.compare_params(meta_model, nn.Linear(4, 2))
+
+    assert frame.attrs["incomparable"] == 2
+    assert all(frame["reason"] == "meta-tensor-has-no-data")
+    assert frame["allclose"].isna().all()
+
+
+def test_compare_params_defaults_are_locked() -> None:
+    """compare_params exposes the specified defaults."""
+
+    params = signature(tl.debug.compare_params).parameters
+
+    assert params["rtol"].default == 1e-5
+    assert params["atol"].default == 1e-8
+    assert params["include_buffers"].default is False

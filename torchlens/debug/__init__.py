@@ -21,6 +21,7 @@ from ._graph_breaks import (
 )
 from ._infer_input_shape import InferInputShapeResult, infer_input_shape
 from ._nan import BisectNanResult, FindNanResult, bisect_nan, find_nan
+from ._params import compare_params
 from ._precision import BisectPrecisionResult, PrecisionRow, bisect_precision
 from ._recompute import recompute_candidates
 
@@ -45,6 +46,7 @@ __all__ = [
     "bisect_precision",
     "find_nan",
     "compare",
+    "compare_params",
     "count_compiles",
     "dead_neurons",
     "dtype_range_audit",
