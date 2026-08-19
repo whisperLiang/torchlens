@@ -267,6 +267,15 @@ torchlens = [
 "*" = ["CLAUDE.md", "AGENTS.md"]
 
 [tool.pytest.ini_options]
+# Repo root on sys.path, EXPLICITLY. Several suites import first-party helpers
+# by path (`import scripts.*`, `from tests.support import ...`). `python -m
+# pytest` prepends the cwd automatically but bare `pytest` does NOT, so those
+# modules imported fine locally and failed collection in CI with
+# "ModuleNotFoundError: No module named 'scripts'" / "'tests'" -- an
+# invocation-dependent import environment that hid a whole class of breakage
+# from local verification (2026-08-19). Setting it here makes both invocations
+# identical instead of relying on how pytest happened to be launched.
+pythonpath = ["."]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "heavy: marks mid-cost tests excluded from the fast per-step gate (select/deselect with '-m heavy' / '-m \"not heavy\"')",
