@@ -60,7 +60,10 @@ _WARN_ONCE_SENTINELS: tuple[tuple[str, str, object], ...] = (
     ("torchlens.utils.introspection", "_col_offset_cache_warned", False),
     ("torchlens.validation._stock_layer_grads", "_PASS_INDEX_PARSE_WARNED", False),
     ("torchlens.visualization._render_common", "_SIBLING_ORDER_WARNING_EMITTED", False),
-    ("torchlens.visualization._render_dot", "_SIBLING_ORDER_WARNING_EMITTED", False),
+    # The functional (global-mutated) copy moved to _render_ordering with the
+    # renderer-thinning extraction; _render_dot keeps only an inert
+    # star-import binding.
+    ("torchlens.visualization._render_ordering", "_SIBLING_ORDER_WARNING_EMITTED", False),
     ("torchlens.visualization.auto_collapse", "_COUNT_MISMATCH_WARNING_EMITTED", False),
     # WeakSet of Traces that already got the collapse-ceiling decline warning;
     # a plain set() reset would strong-pin those Traces for the session.
