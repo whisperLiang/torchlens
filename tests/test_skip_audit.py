@@ -927,6 +927,11 @@ _CUDA_DARK = (
 )
 
 DEVICE_GATED_SKIPIF_LEDGER: dict[str, str] = {
+    "backend_parity/test_b10_torch_characterization.py::test_paramless_model_cuda_inputs_stay_on_cuda": (
+        "[2026-08-19] device-preservation pin for the H200 finding (a device-less "
+        "model's CUDA inputs silently computed on CPU); dark on CPU-only CI, "
+        "executed on the Fellows-cluster CUDA leg"
+    ),
     "test_hash_determinism.py::test_graph_shape_hash_matches_between_cpu_and_cuda": _CUDA_DARK,
     "test_kernel_telemetry.py::test_real_cuda_cupti_correlation_matrix": (
         "[2026-08-17] L3 telemetry OPTIONAL_INTEGRATION: the exact Kineto CUDA/CUPTI "
