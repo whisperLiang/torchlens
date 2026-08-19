@@ -209,7 +209,6 @@ def splice(
     site: Any,
     sae: Any,
     latents_edit: Callable[[torch.Tensor], torch.Tensor] | None = None,
-    fork_name: str = "sae_splice",
 ) -> SpliceResult:
     """Run the standard SAE splice experiment at one site.
 
@@ -233,8 +232,6 @@ def splice(
     latents_edit:
         Optional transform applied to the encoded latents before decoding --
         the causal-testing knob (ablate or steer individual features).
-    fork_name:
-        Name for the spliced fork.
 
     Returns
     -------
@@ -282,7 +279,7 @@ def splice(
         1.0 - float(residual.pow(2).sum()) / total_variance if total_variance > 0.0 else 0.0
     )
 
-    spliced = clean.fork(fork_name)
+    spliced = clean.fork("sae_splice")
     spliced.attach_hooks(
         label_selector(site_label),
         splice_module(_SAEReconstruction(sae, latents_edit), input="out"),

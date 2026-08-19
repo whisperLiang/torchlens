@@ -6873,18 +6873,10 @@
  },
  {
   "ambiguous": true,
-  "field": "kind",
-  "file": "torchlens/visualization/_render_dot.py",
-  "has_default": false,
-  "sites": 1,
-  "via_getattr": false
- },
- {
-  "ambiguous": true,
   "field": "modules",
   "file": "torchlens/visualization/_render_dot.py",
   "has_default": false,
-  "sites": 8,
+  "sites": 2,
   "via_getattr": false
  },
  {
@@ -7101,6 +7093,22 @@
   "file": "torchlens/visualization/_render_nodes.py",
   "has_default": false,
   "sites": 2,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": true,
+  "field": "kind",
+  "file": "torchlens/visualization/_render_regions.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": true,
+  "field": "modules",
+  "file": "torchlens/visualization/_render_regions.py",
+  "has_default": false,
+  "sites": 6,
   "via_getattr": false
  },
  {

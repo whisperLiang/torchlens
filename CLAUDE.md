@@ -765,7 +765,12 @@ print(tl.compat.report(model, x).to_markdown())
   `Module` expose `receptive_field` and `projective_field` views; `Trace` exposes the matching
   `receptive_fields()` and `projective_fields()` tables.
 - `torchlens.bridge` contains optional adapters for Captum, HF, SHAP, SAE Lens, LIT,
-  profiler, and related tools. `bridge.brain_score` additionally serves Brain-Score's
+  profiler, and related tools. `bridge.sae.splice(model_or_log, inputs, site=, sae=,
+  latents_edit=)` (DOCUMENTED-UNSTABLE) is the packaged SAE splice experiment: fork +
+  `tl.splice_module` + push swaps a duck-typed SAE's reconstruction (`encode`/`decode`
+  pair, no SAE package required) in at one site and reports reconstruction fidelity plus
+  output-level causal effect; `latents_edit=` is the per-feature causal knob (demo:
+  `notebooks/sae_splice_tutorial.ipynb`). `bridge.brain_score` additionally serves Brain-Score's
   `ActivationsExtractorHelper` seam: `get_activations_fn(model)` is the offline
   per-batch callable (module dotted paths or any TorchLens lookup; `"logits"` = model
   output) and `activations_extractor(...)` wires it into the real helper (requires
