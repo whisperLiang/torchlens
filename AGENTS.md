@@ -41,6 +41,19 @@ Key entry points:
   Persisted rows are live as of the tlspec v8 bump (load-validated); join/fold
   machinery in `torchlens/postprocess/_site_key.py` / `_site_join.py` /
   `_grouping_stamp.py`.
+- Agent surface (both spellings DOCUMENTED-UNSTABLE pending naming
+  ratification): `Trace.to_agent_json(max_ops=None)` emits the self-describing
+  JSON-serializable `torchlens.agent_trace.v1` dump (capture honesty facts,
+  counts, pass-qualified op rows with graph edges, module hierarchy, embedded
+  navigation guide; payloads never inlined; `max_ops` truncation disclosed).
+  `tl.report.explain(trace, max_tokens=N)` budget-prunes the text report by
+  whole sections low-value-first with a disclosed `Truncation` section;
+  capture-status honesty facts and partial-capture failure evidence never
+  drop; refuses typed with `format="json"`. `torchlens.bridge.mcp` (extra
+  `torchlens[mcp]`, mcp>=2.0) serves read-only MCP stdio tools over saved
+  `.tlspec` artifacts + environment (doctor / api_map / load_overview /
+  agent_dump / explain); no user-code execution, no mutation.
+  Doc: `docs/for-ai-agents.md`.
 - Structure-only capture (DOCUMENTED-UNSTABLE, D8-default):
   `tl.trace(model, x, capture=CaptureOptions(structure_only=True))` records
   structure + shape/dtype HYPOTHESES, never values; value consumers refuse

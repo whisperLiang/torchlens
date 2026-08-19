@@ -5746,6 +5746,30 @@
  {
   "ambiguous": true,
   "field": "modules",
+  "file": "torchlens/report/_agent_json.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": true,
+  "field": "parents",
+  "file": "torchlens/report/_agent_json.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": false,
+  "field": "pass_index",
+  "file": "torchlens/report/_agent_json.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": true,
+  "field": "modules",
   "file": "torchlens/report/_explain.py",
   "has_default": true,
   "sites": 1,

@@ -37,6 +37,15 @@ optional dependency.
   needs Python >= 3.11 — wiring is pinned against the 2.3.22 wheel source
   and stub-tested, but UNVERIFIED against a running install here).
 - `rsatoolbox.py`: `dataset()` (extra: `torchlens[neuro]`).
+- `mcp.py`: Model Context Protocol stdio server (`python -m
+  torchlens.bridge.mcp`; extra: `torchlens[mcp]`, mcp>=2.0). Read-only tools
+  over SAVED `.tlspec` artifacts + environment: `torchlens_doctor`,
+  `torchlens_api_map`, `torchlens_load_overview`, `torchlens_agent_dump`,
+  `torchlens_explain`. The pure layer (`TOOL_SPECS`/`call_tool`) has NO mcp
+  dependency and is what tests drive; `_build_server()` wires the mcp>=2.0
+  `MCPServer` high-level API (schemas derived from handler signatures — keep
+  handler params in sync with `TOOL_SPECS`). No tool executes user code or
+  mutates state; live capture stays a Python-process concern.
 - `nnsight.py`: `from_trace()` normalizes a cached nnsight-style trace into a
   stable payload schema; offline, no import gate.
 - `inseq.py`: `attribute()` (extra: `torchlens[inseq]`).

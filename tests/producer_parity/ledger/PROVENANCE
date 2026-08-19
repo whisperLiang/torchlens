@@ -339,3 +339,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: a520371e267478ba1a87c3f226c694567faffac0 (dirty)
 recorded: 2026-08-19T16:25:23.652101+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: agentic-surface lane: torchlens.bridge.mcp + report/_agent_json add SelectionKind consumer sites
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 05148a3b1f93b4dbd45da4e20abde6f8873abe91 (dirty)
+recorded: 2026-08-19T17:38:36.052984+00:00

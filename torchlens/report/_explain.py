@@ -22,6 +22,8 @@ def explain(
     log: Any,
     audience: Audience = "auto",
     format: ExplainFormat = "text",
+    *,
+    max_tokens: int | None = None,
 ) -> str | dict[str, Any]:
     """Explain a TorchLens log in plain language.
 
@@ -36,6 +38,15 @@ def explain(
     format:
         ``"text"`` for the existing prose report or ``"json"`` for a
         structured dictionary.
+    max_tokens:
+        Optional token budget for the text report (DOCUMENTED-UNSTABLE
+        spelling, naming ratification pending). Whole sections are dropped in
+        a fixed low-value-first order until the estimate (~4 characters per
+        token) fits, and every drop is disclosed in a trailing ``Truncation``
+        section. The ``Capture status`` honesty section is never dropped: a
+        budget below that floor returns the floor plus a disclosure rather
+        than a misleading fragment. Not supported with ``format="json"``
+        (that schema is fixed-shape and already minimal).
 
     Returns
     -------
@@ -45,7 +56,7 @@ def explain(
     Raises
     ------
     ValueError
-        If ``audience`` or ``format`` is not supported.
+        If ``audience``, ``format``, or ``max_tokens`` is not supported.
 
     Notes
     -----
@@ -68,41 +79,194 @@ def explain(
         raise ValueError("audience must be 'researcher', 'practitioner', or 'auto'.")
     if format not in {"text", "json"}:
         raise ValueError("format must be 'text' or 'json'.")
+    if max_tokens is not None:
+        if format == "json":
+            raise ValueError(
+                "max_tokens applies to format='text' only: the "
+                "torchlens.explain.v1 JSON schema is fixed-shape and already "
+                "minimal. Drop max_tokens, or use format='text'."
+            )
+        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
+            raise ValueError(
+                "max_tokens must be a positive integer token budget for the "
+                "text report; omit it for the full report."
+            )
 
     if _is_partial_trace(log):
         diagnosis = _partial_diagnosis(log)
         if format == "json":
             return _partial_json(log, audience, diagnosis)
-        return _partial_text(diagnosis)
+        return _budgeted_report(_partial_sections(diagnosis), max_tokens, drop_order=())
 
     if format == "json":
         return _full_json(log, audience)
 
-    lines = [
-        "TorchLens report",
-        "",
-        "Capture status",
-        *_capture_status_lines(log),
-        "",
-        "Model summary",
-        *_model_summary_lines(log),
-        "",
-        "Capture summary",
-        *_capture_summary_lines(log),
-        "",
-        "Backward summary",
-        *_backward_summary_lines(log),
-        "",
-        "Anomalies",
-        *_anomaly_lines(log),
-        "",
-        "Interventions",
-        *_intervention_lines(log),
-        "",
-        "Notable patterns",
-        *_pattern_lines(log, audience=audience),
+    sections = [
+        ("Capture status", _capture_status_lines(log)),
+        ("Model summary", _model_summary_lines(log)),
+        ("Capture summary", _capture_summary_lines(log)),
+        ("Backward summary", _backward_summary_lines(log)),
+        ("Anomalies", _anomaly_lines(log)),
+        ("Interventions", _intervention_lines(log)),
+        ("Notable patterns", _pattern_lines(log, audience=audience)),
     ]
+    return _budgeted_report(sections, max_tokens, drop_order=_SECTION_DROP_ORDER)
+
+
+#: Low-value-first order in which ``max_tokens`` drops report sections.
+#: ``Capture status`` is deliberately absent: the honesty facts never drop.
+_SECTION_DROP_ORDER: tuple[str, ...] = (
+    "Notable patterns",
+    "Interventions",
+    "Backward summary",
+    "Capture summary",
+    "Model summary",
+    "Anomalies",
+)
+
+
+def _estimate_tokens(text: str) -> int:
+    """Estimate the token count of a report at ~4 characters per token.
+
+    Parameters
+    ----------
+    text:
+        Rendered report text.
+
+    Returns
+    -------
+    int
+        Conservative whole-token estimate (always at least 1).
+    """
+
+    return max(1, (len(text) + 3) // 4)
+
+
+def _partial_sections(diagnosis: dict[str, Any]) -> list[tuple[str, list[str]]]:
+    """Return the section structure of a partial-capture report.
+
+    Parameters
+    ----------
+    diagnosis:
+        Evidence fields from :func:`_partial_diagnosis`.
+
+    Returns
+    -------
+    list[tuple[str, list[str]]]
+        Ordered (title, bullet lines) sections; all are budget-undroppable
+        because every line is failure evidence.
+    """
+
+    return [
+        (
+            "Capture status",
+            [
+                "- This is a partial capture; only operations completed"
+                " before the failure are known.",
+            ],
+        ),
+        (
+            "Failure diagnosis",
+            [
+                (
+                    "- Last completed op: "
+                    f"{diagnosis['last_completed_op_label']} "
+                    f"(shape={diagnosis['last_completed_op_shape']}, "
+                    f"dtype={diagnosis['last_completed_op_dtype']}, "
+                    f"device={diagnosis['last_completed_op_device']})."
+                ),
+                f"- Failing boundary: {diagnosis['failing_boundary']}.",
+                (
+                    "- Captured exception: "
+                    f"{diagnosis['exception_type']}: {diagnosis['exception_message']}"
+                ),
+                f"- First non-finite evidence: {diagnosis['first_nonfinite']}",
+            ],
+        ),
+    ]
+
+
+def _render_report(
+    sections: list[tuple[str, list[str]]],
+    dropped: list[str],
+    max_tokens: int | None,
+    *,
+    below_floor: bool,
+) -> str:
+    """Render report sections, appending a truncation disclosure if needed.
+
+    Parameters
+    ----------
+    sections:
+        Ordered (title, bullet lines) sections to render.
+    dropped:
+        Titles of sections dropped to honor the budget.
+    max_tokens:
+        Requested token budget, for the disclosure line.
+    below_floor:
+        Whether the undroppable floor still exceeds the budget.
+
+    Returns
+    -------
+    str
+        Rendered report text.
+    """
+
+    lines = ["TorchLens report"]
+    for title, body in sections:
+        lines.extend(["", title, *body])
+    if dropped or below_floor:
+        lines.extend(["", "Truncation"])
+        if dropped:
+            lines.append(
+                f"- Sections dropped to fit max_tokens={max_tokens} "
+                f"(~4 characters/token estimate): {', '.join(dropped)}."
+            )
+        if below_floor:
+            lines.append(
+                "- The budget is below the undroppable floor; the capture-"
+                "status and failure-evidence facts above are never dropped."
+            )
     return "\n".join(lines)
+
+
+def _budgeted_report(
+    sections: list[tuple[str, list[str]]],
+    max_tokens: int | None,
+    *,
+    drop_order: tuple[str, ...],
+) -> str:
+    """Render a report, dropping whole sections to honor a token budget.
+
+    Parameters
+    ----------
+    sections:
+        Ordered (title, bullet lines) sections.
+    max_tokens:
+        Token budget, or ``None`` for the full report (byte-identical to the
+        historical unbudgeted rendering).
+    drop_order:
+        Section titles eligible for dropping, lowest-value first.
+
+    Returns
+    -------
+    str
+        Rendered report; any dropped content is disclosed in a trailing
+        ``Truncation`` section, never silently omitted.
+    """
+
+    if max_tokens is None:
+        return _render_report(sections, [], None, below_floor=False)
+    dropped: list[str] = []
+    while True:
+        kept = [(title, body) for title, body in sections if title not in dropped]
+        text = _render_report(kept, dropped, max_tokens, below_floor=False)
+        if _estimate_tokens(text) <= max_tokens:
+            return text
+        remaining = [title for title in drop_order if title not in dropped]
+        if not remaining:
+            return _render_report(kept, dropped, max_tokens, below_floor=True)
+        dropped.append(remaining[0])
 
 
 def _is_partial_trace(log: Any) -> bool:
@@ -210,45 +374,6 @@ def _partial_diagnosis(log: Any) -> dict[str, Any]:
         "exception_message": str(exception),
         "first_nonfinite": str(log.first_nonfinite()),
     }
-
-
-def _partial_text(diagnosis: dict[str, Any]) -> str:
-    """Render a partial-capture diagnosis as text.
-
-    Parameters
-    ----------
-    diagnosis:
-        Evidence fields from :func:`_partial_diagnosis`.
-
-    Returns
-    -------
-    str
-        Human-readable failed-capture report.
-    """
-
-    return "\n".join(
-        [
-            "TorchLens report",
-            "",
-            "Capture status",
-            "- This is a partial capture; only operations completed before the failure are known.",
-            "",
-            "Failure diagnosis",
-            (
-                "- Last completed op: "
-                f"{diagnosis['last_completed_op_label']} "
-                f"(shape={diagnosis['last_completed_op_shape']}, "
-                f"dtype={diagnosis['last_completed_op_dtype']}, "
-                f"device={diagnosis['last_completed_op_device']})."
-            ),
-            f"- Failing boundary: {diagnosis['failing_boundary']}.",
-            (
-                "- Captured exception: "
-                f"{diagnosis['exception_type']}: {diagnosis['exception_message']}"
-            ),
-            f"- First non-finite evidence: {diagnosis['first_nonfinite']}",
-        ]
-    )
 
 
 def _capture_verification(log: Any) -> dict[str, Any]:

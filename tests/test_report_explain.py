@@ -314,3 +314,78 @@ def test_summary_surfaces_unverified_capture() -> None:
     text = log.summary()
     assert "UNVERIFIED" in text
     assert "dynamo_region_not_logged" in text
+
+
+def test_explain_without_max_tokens_is_unchanged_by_the_budget_refactor() -> None:
+    """The default rendering must stay byte-identical to the section list."""
+
+    log = _captured_log()
+    text = tl.report.explain(log)
+    assert isinstance(text, str)
+    assert "Truncation" not in text
+    assert text.startswith("TorchLens report\n\nCapture status\n")
+
+
+def test_explain_max_tokens_drops_low_value_sections_and_discloses_them() -> None:
+    """A tight budget drops sections in the fixed order with full disclosure."""
+
+    log = _captured_log()
+    full = tl.report.explain(log)
+    budget = 120
+    text = tl.report.explain(log, max_tokens=budget)
+
+    assert isinstance(text, str)
+    assert len(text) < len(full)
+    assert (len(text) + 3) // 4 <= budget
+    assert "Capture status" in text
+    assert "Truncation" in text
+    assert f"max_tokens={budget}" in text
+    assert "Notable patterns" not in text.split("Truncation")[0]
+    # Every dropped section is named in the disclosure line.
+    disclosure = text.split("Truncation")[1]
+    for title in ("Notable patterns", "Interventions"):
+        assert title in disclosure
+
+
+def test_explain_max_tokens_below_floor_keeps_honesty_facts_and_says_so() -> None:
+    """A budget below the floor returns capture status plus a floor notice."""
+
+    text = tl.report.explain(_captured_log(), max_tokens=1)
+    assert "Capture status" in text
+    assert "Capture outcome" in text
+    assert "below the undroppable floor" in text
+
+
+def test_explain_max_tokens_large_budget_returns_full_report() -> None:
+    """A generous budget changes nothing and adds no truncation section."""
+
+    log = _captured_log()
+    assert tl.report.explain(log, max_tokens=100_000) == tl.report.explain(log)
+
+
+def test_explain_max_tokens_never_drops_partial_failure_evidence() -> None:
+    """Partial-capture reports keep every failure fact under any budget."""
+
+    with pytest.raises(RuntimeError) as exc_info:
+        tl.trace(FailingShapeModel(), torch.randn(2, 4))
+    partial = tl.partial.from_failed_capture(exc_info.value)
+
+    text = tl.report.explain(partial, max_tokens=1)
+    assert "This is a partial capture" in text
+    assert "Failure diagnosis" in text
+    assert "RuntimeError" in text
+    assert "below the undroppable floor" in text
+    unbudgeted = tl.report.explain(partial)
+    assert unbudgeted.split("\n\nTruncation")[0] == text.split("\n\nTruncation")[0]
+
+
+def test_explain_max_tokens_refusals_teach_the_fix() -> None:
+    """Invalid budgets and the json combination refuse with the remedy named."""
+
+    log = _captured_log()
+    with pytest.raises(ValueError, match="positive integer"):
+        tl.report.explain(log, max_tokens=0)
+    with pytest.raises(ValueError, match="positive integer"):
+        tl.report.explain(log, max_tokens=True)
+    with pytest.raises(ValueError, match="format='text'"):
+        tl.report.explain(log, format="json", max_tokens=50)
