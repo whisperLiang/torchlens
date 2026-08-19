@@ -288,3 +288,67 @@ def test_dagua_graph_carries_container_semantic_attrs() -> None:
     assert "dict" in graph.container_kind
     assert "a" in graph.container_role
     assert "b" in graph.edge_container_role
+
+
+class RecurrentDictOutputModel(nn.Module):
+    """Run a layer three times, returning a dict output (multi-pass layers)."""
+
+    def __init__(self) -> None:
+        """Initialize the recurrent layer."""
+
+        super().__init__()
+        self.lin = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Apply the layer three times and return a container output."""
+
+        for _ in range(3):
+            x = torch.relu(self.lin(x))
+        return {"out": x, "double": x * 2}
+
+
+@pytest.mark.parametrize("vis_mode", ["rolled", "unrolled"])
+@pytest.mark.parametrize("show_containers", ["labels", "cluster", "collapsed", "auto", "nodes"])
+def test_show_containers_survives_multipass_layers(
+    tmp_path: Path, vis_mode: str, show_containers: str
+) -> None:
+    """Container modes never leak the multi-pass tripwire on recurrent traces.
+
+    Regression: ``_container_edge_label`` (and its group/role siblings) read
+    ``container_path`` with a plain ``getattr`` default, which swallows only
+    ``AttributeError``; on a rolled multi-pass Layer the deliberate
+    ``layer_pass_ambiguous`` ValueError escaped and crashed ``draw()``.
+    Container metadata is per-pass, so the rolled aggregate explicitly
+    degrades to no container decoration instead.
+    """
+
+    trace = tl.trace(RecurrentDictOutputModel(), torch.randn(2, 4))
+    trace.draw(
+        vis_mode=vis_mode,
+        show_containers=show_containers,
+        vis_save_only=True,
+        vis_fileformat="dot",
+        vis_outpath=str(tmp_path / f"{vis_mode}_{show_containers}"),
+    )
+
+
+def test_dagua_container_semantics_survive_multipass_layers() -> None:
+    """The dagua bridge degrades per-pass container reads on rolled Layers.
+
+    Exercises the bridge helper directly so the regression is covered even
+    without the optional dagua runtime installed.
+    """
+
+    from torchlens.experimental.dagua._bridge import _container_semantic_attrs
+
+    trace = tl.trace(RecurrentDictOutputModel(), torch.randn(2, 4))
+    multipass_layer = trace.layers["relu_1_2"]
+    assert multipass_layer.num_passes > 1
+
+    attrs = _container_semantic_attrs(multipass_layer)
+
+    assert attrs == {
+        "container_group": None,
+        "container_kind": None,
+        "container_role": None,
+    }

@@ -3,6 +3,7 @@
 # ruff: noqa: F403, F405
 
 from .._errors import InvalidArgumentError
+from ..utils._multipass_access import get_multipass_attr
 from ._render_common import *
 from ._render_edges import *
 from ._render_leaf import *
@@ -731,7 +732,9 @@ def _collapsed_endpoint_for_emission(
 def _container_role(node: BaseGraphNode) -> str | None:
     """Return the node's role within its container, if present."""
 
-    path = tuple(getattr(node, "container_path", ()) or ())
+    # Per-pass field: a rolled multi-pass Layer degrades to no role (see
+    # _container_group_id) instead of leaking the multi-pass tripwire.
+    path = tuple(get_multipass_attr(node, "container_path", (), multipass=None) or ())
     if not path:
         return None
     return _container_component_role(path[-1])
