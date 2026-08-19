@@ -211,3 +211,51 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 3d3fe9b0f01c15239e22447c14a4629d2b6e713c (clean)
 recorded: 2026-08-17T18:35:25.357396+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: nonfinite lane (b68b8155) added Trace.nonfinite_ops/nonfinite_coverage public accessors; surface snapshots gain exactly those two entries per trace stage
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: fa9e0ca23397954e4238d0823e95fecf0a748251 (clean)
+recorded: 2026-08-19T15:49:11.733773+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: nonfinite lane (b68b8155) added Trace.nonfinite_ops/nonfinite_coverage public accessors; surface snapshots gain exactly those two entries per trace stage
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: fa9e0ca23397954e4238d0823e95fecf0a748251 (clean)
+recorded: 2026-08-19T15:49:11.753784+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: nonfinite lane (b68b8155) added Trace.nonfinite_ops/nonfinite_coverage public accessors; surface snapshots gain exactly those two entries per trace stage
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: fa9e0ca23397954e4238d0823e95fecf0a748251 (clean)
+recorded: 2026-08-19T15:49:11.772369+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: nonfinite lane (b68b8155) added Trace.nonfinite_ops/nonfinite_coverage public accessors; surface snapshots gain exactly those two entries per trace stage
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: fa9e0ca23397954e4238d0823e95fecf0a748251 (clean)
+recorded: 2026-08-19T15:49:11.791111+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: nonfinite lane (b68b8155) added Trace.nonfinite_ops/nonfinite_coverage public accessors; surface snapshots gain exactly those two entries per trace stage
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: fa9e0ca23397954e4238d0823e95fecf0a748251 (clean)
+recorded: 2026-08-19T15:49:11.809895+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: nonfinite lane (b68b8155) added Trace.nonfinite_ops/nonfinite_coverage public accessors; surface snapshots gain exactly those two entries per trace stage
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: fa9e0ca23397954e4238d0823e95fecf0a748251 (clean)
+recorded: 2026-08-19T15:49:11.834311+00:00
