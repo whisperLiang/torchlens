@@ -70,10 +70,17 @@ def _rank_prefixed_streaming_options(
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         rank = torch.distributed.get_rank()
     bundle_path = Path(streaming.bundle_path)
+    # Rewrite ONLY bundle_path: rebuilding from defaults silently dropped the
+    # R62 include_* opt-outs (and now the async-write routing) for rank-split
+    # recordings.
     return StreamingOptions(
         bundle_path=bundle_path.parent / f"rank_{rank:02d}" / bundle_path.name,
         retain_in_memory=streaming.retain_in_memory,
         out_callback=streaming.out_callback,
+        include_custom_attributes=streaming.include_custom_attributes,
+        include_buffer_values=streaming.include_buffer_values,
+        async_writes=streaming.async_writes,
+        max_pending_bytes=streaming.max_pending_bytes,
     )
 
 

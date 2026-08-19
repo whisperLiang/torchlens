@@ -112,6 +112,18 @@ class DiskStorageBackend:
 
         if options.streaming is None or options.streaming.bundle_path is None:
             raise RecordingConfigError("DiskStorageBackend requires streaming.bundle_path")
+        if options.streaming.async_writes is True:
+            # The fastlog recorder consumes each blob's manifest entry
+            # synchronously per record (index lines, record metadata), so an
+            # explicitly requested async pipeline cannot be honored here --
+            # refuse rather than silently downgrade. The default (None)
+            # means synchronous for record() and stays accepted.
+            raise RecordingConfigError(
+                "async_writes=True is not supported for record() streaming: the "
+                "fastlog recorder consumes each blob's manifest entry synchronously. "
+                "Remove async_writes (or set it False) for record(); trace(storage=...) "
+                "supports the async pipeline."
+            )
         self.options = options
         self.recording = recording
         self.disk_only = not options.streaming.retain_in_memory

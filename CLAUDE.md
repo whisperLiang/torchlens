@@ -432,6 +432,15 @@ print(tl.compat.report(model, x).to_markdown())
   is an explicitly-labelled lower bound.
   Like `measure_python_peak_memory` it is a session-time knob (`FieldPolicy.DROP`, not in
   `MODEL_LOG_FIELD_ORDER`) and load restores the default.
+- STREAMED DISK WRITES ARE ASYNC BY DEFAULT for `trace(storage=tl.to_disk(...))` (spellings
+  DOCUMENTED-UNSTABLE): blob serialize+write+sha256 overlap the forward on ONE FIFO worker
+  (manifest order preserved), payloads are snapshotted at submission (value-at-call-time survives
+  later in-place mutation; the worker never runs a wrapped torch op),
+  `to_disk(max_pending_bytes=)` (default 256 MiB) BLOCKS capture when the disk falls behind
+  (bounded RAM, measured exact), a failed write latches and raises typed `TorchLensIOError`
+  marking the temp bundle PARTIAL, and finalize drains every pending write before publish —
+  async and sync bundles are byte-identical. `to_disk(async_writes=False)` restores synchronous
+  writes; `tl.record` streaming stays synchronous and refuses an explicit `True`.
 - `torch.compile` coexists with capture as a boundary UPGRADE on torch >= 2.6 and a graceful
   boundary below. Behind the feature-detected `HAS_SET_STANCE` flag, every capture holds the public
   `torch.compiler.set_stance("force_eager")` scoped to the forward (skipped when Dynamo was never

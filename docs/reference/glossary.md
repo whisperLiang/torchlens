@@ -193,7 +193,14 @@ attribution-target alias. See the [attribution reference](attribution.md).
 
 **Streaming storage**
 : A `storage=tl.to_disk(...)` capture that writes selected payloads while capture proceeds. It is
-  distinct from saving a completed in-memory Trace.
+  distinct from saving a completed in-memory Trace. `trace` blob writes overlap the forward on a
+  bounded single-worker pipeline by default (`to_disk(..., async_writes=...)`, a
+  DOCUMENTED-UNSTABLE spelling): payloads are snapshotted at submission so later in-place
+  mutation never reaches the artifact, writes land in submission order, `max_pending_bytes`
+  (default 256 MiB) blocks capture when the disk falls behind, a failed write raises a typed
+  `TorchLensIOError` and marks the temp bundle `PARTIAL`, and finalization waits for every
+  pending write before the bundle publishes. `tl.record` streaming stays synchronous and
+  refuses an explicit `async_writes=True`.
 
 **Capture cache**
 : The opt-in `cache=True` content-hash store of finished captures. A hit requires the model's

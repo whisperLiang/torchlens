@@ -4551,7 +4551,7 @@ class Op(_SelectionOperand):
             raise TorchLensIOError(message)
         blob_id = writer.next_blob_id()
         setattr(self, pending_field, blob_id)
-        writer.write_blob(
+        writer.submit_blob(
             blob_id,
             tensor,
             kind=kind,

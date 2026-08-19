@@ -180,6 +180,8 @@ _STREAMING_FIELDS: Final[tuple[str, ...]] = (
     "out_callback",
     "include_custom_attributes",
     "include_buffer_values",
+    "async_writes",
+    "max_pending_bytes",
 )
 
 _CAPTURE_FLAT_TO_GROUP: Final[dict[str, str]] = {
@@ -2050,6 +2052,22 @@ class StreamingOptions:
         (``Trace._buffer_initial_values``) are persisted in the streamed
         bundle. The streamed-bundle counterpart of
         ``tl.save(..., include_buffer_values=)`` (R62 buffer extension).
+    async_writes:
+        Whether ``trace(..., storage=...)`` blob writes overlap forward
+        capture through a bounded single-worker pipeline instead of pausing
+        capture for each write (DOCUMENTED-UNSTABLE spelling, naming deferred
+        to the UI sprint). Tri-state: ``None`` (default) means the consumer
+        default — async for ``trace`` captures, synchronous for
+        ``tl.record`` streaming; ``False`` forces synchronous writes;
+        ``True`` requires the async pipeline and refuses typed on consumers
+        that cannot honor it (``tl.record``). Ordering, backpressure,
+        failure latching, and the finalize drain barrier are documented on
+        ``BundleStreamWriter``.
+    max_pending_bytes:
+        Pending snapshot byte budget for the async pipeline (``None`` uses
+        the 256 MiB default). Once pending writes hold this many bytes,
+        capture blocks until the disk catches up, so a slow disk slows
+        capture instead of accumulating unbounded RAM.
 
     Examples
     --------
@@ -2063,6 +2081,8 @@ class StreamingOptions:
     out_callback: Callable[[str, torch.Tensor], None] | None = None
     include_custom_attributes: bool = True
     include_buffer_values: bool = True
+    async_writes: bool | None = None
+    max_pending_bytes: int | None = None
     _specified_fields: frozenset[str] = field(default_factory=frozenset, init=False, repr=False)
 
     def __init__(
@@ -2073,6 +2093,8 @@ class StreamingOptions:
         *,
         include_custom_attributes: bool | MissingType = MISSING,
         include_buffer_values: bool | MissingType = MISSING,
+        async_writes: bool | None | MissingType = MISSING,
+        max_pending_bytes: int | None | MissingType = MISSING,
         save_outs_to: str | Path | None | MissingType = MISSING,
         keep_outs_in_memory: bool | MissingType = MISSING,
         out_sink: Callable[[str, torch.Tensor], None] | None | MissingType = MISSING,
@@ -2115,6 +2137,12 @@ class StreamingOptions:
             "include_buffer_values": _resolve_option_value(
                 "include_buffer_values", include_buffer_values, True, specified_fields
             ),
+            "async_writes": _resolve_option_value(
+                "async_writes", async_writes, None, specified_fields
+            ),
+            "max_pending_bytes": _resolve_option_value(
+                "max_pending_bytes", max_pending_bytes, None, specified_fields
+            ),
         }
         _set_frozen_fields(self, _STREAMING_FIELDS, values)
         object.__setattr__(self, "_specified_fields", frozenset(specified_fields))
@@ -2149,6 +2177,8 @@ def to_disk(
     retain_in_memory: bool = False,
     include_custom_attributes: bool = True,
     include_buffer_values: bool = True,
+    async_writes: bool | None = None,
+    max_pending_bytes: int | None = None,
 ) -> StreamingOptions:
     """Return storage options that stream selected payloads to a bundle.
 
@@ -2164,6 +2194,22 @@ def to_disk(
     include_buffer_values:
         Whether captured pre-forward buffer values are persisted in the
         streamed bundle (the ``tl.save`` opt-out, mirrored for streaming).
+    async_writes:
+        Whether ``trace(..., storage=...)`` blob writes overlap capture on a
+        bounded single-worker pipeline instead of pausing the forward for
+        each write (DOCUMENTED-UNSTABLE spelling, naming deferred to the UI
+        sprint). Tri-state: ``None`` (default) means async for ``trace``
+        captures and synchronous for ``tl.record`` streaming; ``False``
+        forces synchronous writes; ``True`` requires the async pipeline and
+        refuses typed where it cannot be honored (``tl.record``). Writes
+        land in submission order, a failed write raises
+        ``TorchLensIOError`` and marks the bundle PARTIAL, and finalization
+        waits for every pending write before the bundle publishes.
+    max_pending_bytes:
+        Pending snapshot byte budget for the async pipeline (``None`` uses
+        the 256 MiB default). Once pending writes hold this many bytes,
+        capture blocks until the disk catches up, bounding the RAM the
+        deferred writes may occupy.
 
     Returns
     -------
@@ -2177,6 +2223,8 @@ def to_disk(
         retain_in_memory=retain_in_memory,
         include_custom_attributes=include_custom_attributes,
         include_buffer_values=include_buffer_values,
+        async_writes=async_writes,
+        max_pending_bytes=max_pending_bytes,
     )
 
 
