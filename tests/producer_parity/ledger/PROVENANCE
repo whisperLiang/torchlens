@@ -302,3 +302,8 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: e076a50e3f475674645cc5475dfdf9c7bb5700c7 (clean)
 recorded: 2026-08-19T07:59:25.698510+00:00
+reason: comparative producers add SelectionKind consumer sites in torchlens/selection_compare.py (kind field reads in the differential/cross-pass resolvers)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 5927685fa1a3c183ed52af4d970256ddaef7b438 (clean)
+recorded: 2026-08-19T07:52:35.681515+00:00
