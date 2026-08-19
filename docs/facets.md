@@ -443,6 +443,19 @@ TransformerLens hook_resid_post  -> facets.resid_post
 nnsight module.path.output       -> log.modules["module.path"].facets["out"]
 ```
 
+## Coverage and Recipe Maintenance
+
+`torchlens.semantic.facet_coverage(log)` (DOCUMENTED-UNSTABLE spelling) reports
+per-module recipe coverage for a completed trace: which recipes matched, which
+declared facets are readable, typed absence reasons, an inventory of
+structural-only module classes (recipe candidates), and disclosed rows for
+modules whose facet view refuses (e.g. multi-call reuse). It is the
+machine-readable input to the facet-maintenance pipeline in
+`tools/facet_maintenance/` (`DISCOVER_FACETS.md` is the durable sweep prompt;
+`run_facet_audit.py` is the repeatable runner). The pipeline produces
+PROPOSALS FOR REVIEW only -- facet recipes are never auto-merged, because a
+wrong facet label is a confidently mislabelled part of someone's model.
+
 ## Recipe Plugins
 
 On FIRST USE of the facet-recipe subsystem (not at `import torchlens` --

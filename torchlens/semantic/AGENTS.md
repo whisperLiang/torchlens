@@ -28,6 +28,13 @@
   `LogitLensEntry` (`stacked()`, `top_tokens()`, `summary()`). All spellings
   DOCUMENTED-UNSTABLE.
 
+## coverage.py
+- `facet_coverage(trace)` -> `FacetCoverageReport` (`ModuleCoverageRow` per
+  module): recipes matched, readable facets, typed absences, structural-only
+  candidates, and disclosed `unresolved` rows for multi-call facet refusals.
+  Input to `tools/facet_maintenance/` (proposals only; recipes are NEVER
+  auto-merged). DOCUMENTED-UNSTABLE spellings.
+
 ## patching.py
 - Prebuilt counterfactual helpers: `activation_patch_residual_stream()`,
   `activation_patch_attention_output()`, `activation_patch_attention_heads()`,
