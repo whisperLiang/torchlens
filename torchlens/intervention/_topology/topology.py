@@ -405,6 +405,11 @@ class SupergraphNode:
         Representative ``module`` (or ``None`` if not in a module).
     module_type:
         Representative module class name when available from ``Trace.modules``.
+    comparisons:
+        Named per-node comparison values stamped by
+        ``Bundle.store_comparison`` (comparison name -> member name ->
+        distance). Session-level: stored on the built supergraph so queries
+        and renders read instead of recomputing; never serialized.
     """
 
     name: str
@@ -414,6 +419,7 @@ class SupergraphNode:
     op_type: str = ""
     module_path: str | None = None
     module_type: str | None = None
+    comparisons: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 @dataclass
