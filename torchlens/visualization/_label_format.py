@@ -191,6 +191,41 @@ def _shape_with_trainability(shape: Any, trainable: bool | None) -> str:
     return f"[{shape_text[1:-1]}]"
 
 
+def saved_for_backward_line(layer_log: Any, vis_mode: str) -> str | None:
+    """Build the saved-for-backward disclosure row for one node, if any.
+
+    The row appears only when the captured measurement PROVES autograd
+    retained tensors at this op (``num_autograd_tensors > 0``); an op that
+    saved nothing, or whose backward graph was never built, gets no row --
+    an absent row makes no claim. On rolled multi-pass layers the stored
+    fields are already cross-pass sums, disclosed in the row text.
+
+    Parameters
+    ----------
+    layer_log:
+        Op or Layer to annotate.
+    vis_mode:
+        ``"unrolled"`` or ``"rolled"``.
+
+    Returns
+    -------
+    str | None
+        Plain-text label row, or ``None`` when no retention was measured.
+    """
+
+    count = getattr(layer_log, "num_autograd_tensors", None)
+    if count is None or count <= 0:
+        return None
+    suffix = ""
+    if vis_mode == "rolled" and getattr(layer_log, "num_passes", 1) > 1:
+        suffix = " (total across passes)"
+    noun = "tensor" if count == 1 else "tensors"
+    memory = getattr(layer_log, "autograd_memory", None)
+    if memory is not None:
+        return f"saved for backward: {count} {noun}, {format_memory(memory)}{suffix}"
+    return f"saved for backward: {count} {noun}{suffix}"
+
+
 def format_memory(bytes_or_quantity: Any) -> str:
     """Render memory in TorchLens' human-readable style.
 

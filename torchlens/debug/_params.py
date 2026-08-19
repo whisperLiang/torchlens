@@ -102,6 +102,46 @@ def _comparable_values(
     return value_a, value_b
 
 
+def _value_comparison(
+    value_a: torch.Tensor,
+    value_b: torch.Tensor,
+    rtol: float,
+    atol: float,
+) -> tuple[float, float, bool]:
+    """Compare two same-shape, same-dtype detached tensors.
+
+    Parameters
+    ----------
+    value_a:
+        First tensor.
+    value_b:
+        Second tensor.
+    rtol:
+        Relative tolerance for ``torch.allclose``.
+    atol:
+        Absolute tolerance for ``torch.allclose``.
+
+    Returns
+    -------
+    tuple[float, float, bool]
+        ``(max_abs, mean_abs, allclose)``; integer and boolean tensors
+        compare exactly.
+    """
+
+    if value_a.is_complex():
+        delta = torch.abs(value_a.to(torch.complex128) - value_b.to(torch.complex128))
+        allclose = bool(torch.allclose(value_a, value_b, rtol=rtol, atol=atol))
+    elif value_a.is_floating_point():
+        delta = torch.abs(value_a.to(torch.float64) - value_b.to(torch.float64))
+        allclose = bool(torch.allclose(value_a, value_b, rtol=rtol, atol=atol))
+    else:
+        delta = torch.abs(value_a.long() - value_b.long())
+        allclose = bool(torch.equal(value_a, value_b))
+    max_abs = float(delta.max().item()) if delta.numel() else 0.0
+    mean_abs = float(delta.float().mean().item()) if delta.numel() else 0.0
+    return max_abs, mean_abs, allclose
+
+
 def compare_params(
     model_a: torch.nn.Module,
     model_b: torch.nn.Module,
@@ -193,18 +233,9 @@ def compare_params(
             row["reason"] = "meta-tensor-has-no-data"
             rows.append(row)
             continue
-        value_a, value_b = values
-        if value_a.is_complex():
-            delta = torch.abs(value_a.to(torch.complex128) - value_b.to(torch.complex128))
-            allclose = bool(torch.allclose(value_a, value_b, rtol=rtol, atol=atol))
-        elif value_a.is_floating_point():
-            delta = torch.abs(value_a.to(torch.float64) - value_b.to(torch.float64))
-            allclose = bool(torch.allclose(value_a, value_b, rtol=rtol, atol=atol))
-        else:
-            delta = torch.abs(value_a.long() - value_b.long())
-            allclose = bool(torch.equal(value_a, value_b))
-        row["max_abs"] = float(delta.max().item()) if delta.numel() else 0.0
-        row["mean_abs"] = float(delta.float().mean().item()) if delta.numel() else 0.0
+        max_abs, mean_abs, allclose = _value_comparison(*values, rtol, atol)
+        row["max_abs"] = max_abs
+        row["mean_abs"] = mean_abs
         row["allclose"] = allclose
         if allclose:
             summary["matched"] += 1

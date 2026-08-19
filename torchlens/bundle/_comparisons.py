@@ -37,6 +37,8 @@ def _bundle_store_comparison(
 
     Parameters
     ----------
+    self:
+        Bundle whose supergraph receives the stored comparison.
     metric:
         Metric name from ``torchlens.intervention._metrics`` or a callable.
     name:
@@ -90,6 +92,8 @@ def _bundle_stored_comparison(self: Bundle, name: str) -> dict[str, dict[str, fl
 
     Parameters
     ----------
+    self:
+        Bundle whose supergraph holds the stored comparisons.
     name:
         Comparison name returned by :meth:`Bundle.store_comparison`.
 

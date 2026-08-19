@@ -1943,41 +1943,6 @@ def _layer_log_for_node(trace: "Trace", node: GraphNode) -> "Layer":
     return trace.layer_logs[node.layer_label]
 
 
-def _saved_for_backward_line(layer_log: GraphNode, vis_mode: str) -> str | None:
-    """Build the saved-for-backward disclosure row for one node, if any.
-
-    The row appears only when the captured measurement PROVES autograd
-    retained tensors at this op (``num_autograd_tensors > 0``); an op that
-    saved nothing, or whose backward graph was never built, gets no row --
-    an absent row makes no claim. On rolled multi-pass layers the stored
-    fields are already cross-pass sums, disclosed in the row text.
-
-    Parameters
-    ----------
-    layer_log:
-        Op or Layer to annotate.
-    vis_mode:
-        ``"unrolled"`` or ``"rolled"``.
-
-    Returns
-    -------
-    str | None
-        Plain-text label row, or ``None`` when no retention was measured.
-    """
-
-    count = getattr(layer_log, "num_autograd_tensors", None)
-    if count is None or count <= 0:
-        return None
-    suffix = ""
-    if vis_mode == "rolled" and getattr(layer_log, "num_passes", 1) > 1:
-        suffix = " (total across passes)"
-    noun = "tensor" if count == 1 else "tensors"
-    memory = getattr(layer_log, "autograd_memory", None)
-    if memory is not None:
-        return f"saved for backward: {count} {noun}, {format_memory(memory)}{suffix}"
-    return f"saved for backward: {count} {noun}{suffix}"
-
-
 def compute_default_node_lines(
     layer_log: GraphNode,
     node_address: str = "",
@@ -2072,10 +2037,8 @@ def compute_default_node_lines(
         lines.append(shape_summary)
     lines.append(f"{format_shape(layer_log.shape)}, {format_memory(layer_log.activation_memory)}")
 
-    if show_saved_for_backward:
-        saved_line = _saved_for_backward_line(layer_log, vis_mode)
-        if saved_line is not None:
-            lines.append(saved_line)
+    if show_saved_for_backward and (saved := saved_for_backward_line(layer_log, vis_mode)):
+        lines.append(saved)
 
     module_kwargs = format_module_kwargs(layer_log, suppressed_keys=suppressed_arg_keys)
     if module_kwargs is not None:
@@ -2088,8 +2051,7 @@ def compute_default_node_lines(
     address_line = format_module_path(node_address)
     if address_line is not None:
         lines.append(address_line)
-    overlay = overlay_line(layer_log, node_overlay)
-    if overlay is not None:
+    if (overlay := overlay_line(layer_log, node_overlay)) is not None:
         lines.append(overlay)
     return lines
 
