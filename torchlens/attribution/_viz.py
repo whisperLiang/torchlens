@@ -101,6 +101,56 @@ def _entry_items(source: Any) -> list[tuple[str, Any]]:
     )
 
 
+def _classify_entries(
+    trace: Any,
+    source: Any,
+    reduce: str,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Resolve overlay entries into module-address and layer-label value maps.
+
+    Parameters
+    ----------
+    trace
+        Trace whose module outputs and layer labels anchor the keys.
+    source
+        Overlay source accepted by :func:`overlay`.
+    reduce
+        Validated closed-vocabulary reduction name.
+
+    Returns
+    -------
+    tuple[dict[str, float], dict[str, float]]
+        Module-address-keyed and layer-label-keyed scalar maps.
+
+    Raises
+    ------
+    AttributionError
+        If a key matches neither a module output nor a layer label.
+    """
+
+    known_modules: set[str] = set()
+    known_labels: set[str] = set()
+    for label in trace.layer_labels:
+        known_labels.add(label)
+        known_modules.update(trace[label].output_of_modules)
+
+    module_values: dict[str, float] = {}
+    label_values: dict[str, float] = {}
+    for key, raw in _entry_items(source):
+        value = _reduce_value(raw, reduce)
+        if key in known_modules:
+            module_values[key] = value
+        elif key in known_labels:
+            label_values[key] = value
+        else:
+            raise AttributionError(
+                f"overlay key {key!r} matches no module output and no layer "
+                "label on this trace; use a name from model.named_modules() "
+                "or a label from trace.layer_labels"
+            )
+    return module_values, label_values
+
+
 def overlay(
     trace: Any,
     source: Any,
@@ -143,28 +193,7 @@ def overlay(
 
     if reduce not in _REDUCERS:
         raise AttributionError(f"reduce must be one of {sorted(_REDUCERS)}; received {reduce!r}")
-    module_values: dict[str, float] = {}
-    label_values: dict[str, float] = {}
-
-    known_modules: set[str] = set()
-    known_labels: set[str] = set()
-    for label in trace.layer_labels:
-        known_labels.add(label)
-        for address in trace[label].output_of_modules:
-            known_modules.add(address)
-
-    for key, raw in _entry_items(source):
-        value = _reduce_value(raw, reduce)
-        if key in known_modules:
-            module_values[key] = value
-        elif key in known_labels:
-            label_values[key] = value
-        else:
-            raise AttributionError(
-                f"overlay key {key!r} matches no module output and no layer "
-                "label on this trace; use a name from model.named_modules() "
-                "or a label from trace.layer_labels"
-            )
+    module_values, label_values = _classify_entries(trace, source, reduce)
 
     def attribution_overlay(node: Any) -> float | None:
         """Return the attributed magnitude for one rendered node."""

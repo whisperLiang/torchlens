@@ -105,10 +105,14 @@ def real_model_rows(names: list[str], n: int) -> dict[str, dict[str, float]]:
         for name in names:
             model, x, predicate = _build_model(name)
             with torch.no_grad():
-                native = measure_median_ms(lambda: model(x), n=n)
-            record = measure_median_ms(lambda: tl.record(model, x, save=predicate), n=n)
-            trace_pred = measure_median_ms(lambda: tl.trace(model, x, save=predicate), n=n)
-            trace_default = measure_median_ms(lambda: tl.trace(model, x), n=n)
+                native = measure_median_ms(lambda m=model, inp=x: m(inp), n=n)
+            record = measure_median_ms(
+                lambda m=model, inp=x, p=predicate: tl.record(m, inp, save=p), n=n
+            )
+            trace_pred = measure_median_ms(
+                lambda m=model, inp=x, p=predicate: tl.trace(m, inp, save=p), n=n
+            )
+            trace_default = measure_median_ms(lambda m=model, inp=x: tl.trace(m, inp), n=n)
             rows[name] = {
                 "native_ms": native["median_ms"],
                 "record_ms": record["median_ms"],
