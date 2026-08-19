@@ -421,6 +421,21 @@ def sweep_stale_belt_references() -> int:
     patched = 0
     for mod_key, module in list(sys.modules.items()):
         if not isinstance(module, types.ModuleType):
+            # Non-module sys.modules entries (e.g. the typing.io/typing.re
+            # pseudo-module classes) are never scanned, but they must still
+            # enter the live-id set under the same weakref-eviction contract
+            # or their ids read as new forever and the pre-filter never
+            # fires. Unweakrefable entries stay out: degraded, never wrong.
+            entry_id = id(module)
+            if entry_id not in _swept_ids_live:
+                try:
+                    entry_ref = weakref.ref(
+                        module, lambda _r, _eid=entry_id: _swept_ids_live.discard(_eid)
+                    )
+                except TypeError:
+                    continue
+                _swept_module_ids[entry_id] = entry_ref
+                _swept_ids_live.add(entry_id)
             continue
         previous_ref = _swept_module_ids.get(id(module))
         if previous_ref is not None and previous_ref() is module:
