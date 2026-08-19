@@ -1916,7 +1916,7 @@ class JAXBackend:
             ]
             op_log.equivalent_ops = equivalent_labels_by_key.get(op_log.equivalence_class, set())
             op_log.lookup_keys = [label, op_log.label]
-            if op_log.layer_label not in trace.layer_dict_all_keys:
+            if op_log.num_passes > 1:
                 op_log.lookup_keys.append(op_log.layer_label)
             trace.layer_list.append(op_log)
             trace.layer_dict_main_keys[op_log.label] = op_log
@@ -1925,6 +1925,11 @@ class JAXBackend:
                     trace.layer_dict_all_keys[lookup_key] = op_log
                     trace._lookup_keys_to_layer_num_dict[lookup_key] = raw_index
                 trace._layer_num_to_lookup_keys_dict[raw_index].append(lookup_key)
+            if op_log.num_passes > 1:
+                # Incidental raw-index artifact, not a contract: every pass
+                # overwrites the bare layer label (last wins, torch parity).
+                trace.layer_dict_all_keys[op_log.layer_label] = op_log
+                trace._lookup_keys_to_layer_num_dict[op_log.layer_label] = raw_index
             trace.op_labels.append(op_log.label)
             if op_log.layer_label not in trace.layer_labels:
                 trace.layer_labels.append(op_log.layer_label)

@@ -189,6 +189,17 @@ For full `tl.trace(...)` failures, inspect `exc.partial_log` directly or call
 | `log.run(model, x, append=False)` | Re-execute the model under the active spec (`rerun` is a deprecated alias that warns). |
 | `log.save_intervention(path, level=...)` | Write a `.tlspec/` intervention recipe. |
 
+There are two distinct intervention paths, and they do not mix implicitly:
+(1) edit a SAVED value and push the effect downstream on the captured DAG
+(`do()` on a resolved selection, `push_from`, direct writes), and (2)
+intervene on a FRESH execution (`do(..., engine="rerun", model=..., x=...)`
+or a new capture with `intervene=...`). A new-input `run(inputs=...)` on a
+trace carrying path-1 value-edits is a fresh execution — the edits do NOT
+apply to it, and TorchLens discloses that at the run door with
+`PendingValueEditsWarning` (documented-unstable spelling) rather than
+silently returning an un-edited verified run. The run itself proceeds:
+this is a disclosure, never a refusal.
+
 `Trace.draw(vis_intervention_mode=...)` visualizes the planned intervention
 recipe stored on an intervention-ready trace, such as sites registered with
 `log.set(...)` or `log.do(...)`. Capture-time `intervene=...` calls record

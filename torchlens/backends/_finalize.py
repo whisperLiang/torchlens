@@ -550,8 +550,12 @@ def _finalize_single_op(
         singleton assignment) reproduces the historical single-pass layout:
         the raw label stays the layer label and the main lookup key. Multi-pass
         members become pass-qualified: ``label`` is ``layer_label:pass_index``,
-        the main key is the pass label, and the shared layer label resolves to
-        the first pass.
+        and the main key is the pass label. The bare shared layer label lands
+        in ``layer_dict_all_keys`` as an INCIDENTAL raw-index artifact (each
+        pass overwrites it, so it resolves to the LAST pass, matching the
+        torch backend) — it is NOT a contract; bare-label addressing of
+        multi-pass layers refuses on every path that matters
+        (``multipass_bare_label_ambiguous``).
 
     Returns
     -------
@@ -578,7 +582,9 @@ def _finalize_single_op(
     trace.layer_dict_main_keys[label if num_passes == 1 else pass_label] = op_log
     trace.layer_dict_all_keys[label] = op_log
     trace.layer_dict_all_keys[pass_label] = op_log
-    if num_passes > 1 and layer_label not in trace.layer_dict_all_keys:
+    if num_passes > 1:
+        # Incidental, not a contract: the bare layer label is a raw-index
+        # artifact that every pass overwrites (last pass wins, torch parity).
         trace.layer_dict_all_keys[layer_label] = op_log
         op_log.lookup_keys.append(layer_label)
     trace.op_labels.append(pass_label)

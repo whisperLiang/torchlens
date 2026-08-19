@@ -156,6 +156,56 @@ def _warn_stateful_live_run_once(trace: Any, model: nn.Module) -> None:
     trace.__dict__["_stateful_run_warning_emitted"] = True
 
 
+def _warn_pending_value_edits_on_new_input_run(trace: Any) -> None:
+    """Disclose that value-edits on this trace do not apply to a new-input run.
+
+    There are two legitimate intervention paths: (1) edit a SAVED value and
+    push the effect downstream on the captured DAG (``do()``/``push_from``/
+    direct writes), and (2) intervene on a FRESH execution (``engine="rerun"``
+    with a model and input, or a new capture with ``intervene=``). A
+    ``run(inputs=...)`` on a trace carrying path-1 edits is a fresh execution:
+    the edits say nothing about the new inputs, so the run is coherent but the
+    edits have NO effect on it. That combination tripped a real user flow, so
+    it is disclosed plainly instead of silently returning an un-edited
+    verified run.
+
+    Parameters
+    ----------
+    trace:
+        Live Trace about to be re-executed on new inputs.
+    """
+
+    from .._trace_state import TraceState
+
+    state = getattr(trace, "state", None)
+    has_value_edits = (
+        state
+        in {
+            TraceState.REPLAY_PROPAGATED,
+            TraceState.RERUN_PROPAGATED,
+            TraceState.DIRECT_WRITE_DIRTY,
+        }
+        or bool(getattr(trace, "intervention_audit", None))
+        or bool(getattr(trace, "_has_direct_writes", False))
+    )
+    if not has_value_edits:
+        return
+    import warnings
+
+    from ..intervention.errors import PendingValueEditsWarning
+
+    warnings.warn(
+        "run(inputs=...) is a FRESH execution of the live model, but this trace "
+        "carries value-edits (do()/push/direct writes) applied to its SAVED "
+        "values -- those edits do NOT apply to a new-input run and its result "
+        "reflects the un-edited model. To intervene on new inputs, rerun with "
+        "hooks (do(..., engine='rerun', model=..., x=...)) or capture the new "
+        "input with intervene=.",
+        PendingValueEditsWarning,
+        stacklevel=3,
+    )
+
+
 def _loaded_non_torch_validation_replay_unavailable(trace: Any) -> bool:
     """Return whether loaded non-torch replay validation cannot run.
 
@@ -800,6 +850,7 @@ class TraceValidationMixin(_TraceMixinBase):
             from .._runnable_execution import _LiveRunOptions, run_live_trace
 
             _refuse_state_compromised_live_run(self)
+            _warn_pending_value_edits_on_new_input_run(self)
             source_ref = getattr(self, "_source_model_ref", None)
             live_model = source_ref() if source_ref is not None else None
             if live_model is not None:
