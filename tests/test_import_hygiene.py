@@ -372,7 +372,7 @@ for facade_name, module_path in facades.items():
 assert collisions == {
     "attribution": [], "autoroute": ["input", "output"],
     "compat": ["lovely", "torchextractor", "torchshow"],
-    "data_classes": [], "debug": [], "distributed": [], "examples": [],
+    "data_classes": [], "dataset_extraction": [], "debug": [], "distributed": [], "examples": [],
     "experimental": ["dagua", "node_styles"], "export": [],
     "fastlog": ["dry_run", "recover"], "intervention": ["replay", "rerun", "sites"],
     "hash": [], "io": [], "merged": [], "partial": [], "report": [], "repgeom": [],

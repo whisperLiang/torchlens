@@ -66,6 +66,10 @@ _LAZY_ATTRS = {
     "decide_recording_of_batch": ("torchlens.user_funcs", "decide_recording_of_batch"),
     "debug": ("torchlens.debug", None),
     "data_classes": ("torchlens.data_classes", None),
+    # Dataset extraction (D7/V5): the implementation module is lazy so the
+    # manifest/resume machinery costs nothing until first use.
+    "dataset_extraction": ("torchlens.dataset_extraction", None),
+    "extract_dataset": ("torchlens.dataset_extraction", "extract_dataset"),
     "distributed": ("torchlens.distributed", None),
     "do": ("torchlens.intervention", "do"),
     "examples": ("torchlens.examples", None),
@@ -734,6 +738,61 @@ def peek(model: _nn.Module, x: Any, layer: str, stop_after: Any | None = None) -
     return pluck(model, x, layer, stop_after)
 
 
+def _extract_layers_with_trace(
+    model: _nn.Module,
+    x: Any,
+    layers: _Iterable[str] | _Mapping[str, str],
+) -> tuple[Trace, dict[str, _torch.Tensor], dict[str, Any]]:
+    """Run one selective capture and resolve the requested layers.
+
+    Parameters
+    ----------
+    model:
+        PyTorch model to run.
+    x:
+        Positional input argument or argument container for ``model.forward``.
+    layers:
+        Either a list of layer lookups or a mapping of ``user_label -> layer_lookup``.
+
+    Returns
+    -------
+    tuple[Trace, dict[str, torch.Tensor], dict[str, Any]]
+        The capture trace, the saved outs keyed as :func:`extract` keys them,
+        and the resolved ``Layer`` views under the same keys.
+
+    Raises
+    ------
+    ValueError
+        If a lookup does not resolve or did not produce a saved tensor.
+    """
+
+    layer_plan = _normalize_extract_layers(layers)
+    trace = _resolve_top_level("trace")(
+        model,
+        x,
+        capture=_CaptureOptions(
+            layers_to_save=list(layer_plan.values()),
+        ),
+    )
+    outputs: dict[str, _torch.Tensor] = {}
+    views: dict[str, Any] = {}
+    if isinstance(layers, _Mapping):
+        for label, pattern in layer_plan.items():
+            outputs[label] = _out_from_log(trace, pattern)
+            views[label] = trace[pattern]
+        return trace, outputs, views
+
+    for pattern in layer_plan.values():
+        matches = _matching_saved_layer_labels(trace, pattern)
+        if not matches:
+            suggestions = trace.find_layers(pattern)
+            raise ValueError(_did_you_mean_message(pattern, suggestions))
+        for match in matches:
+            outputs[match] = _out_from_log(trace, match)
+            views[match] = trace[match]
+    return trace, outputs, views
+
+
 def extract(
     model: _nn.Module,
     x: Any,
@@ -757,222 +816,8 @@ def extract(
         resolved layer labels to outs for list inputs.
     """
 
-    layer_plan = _normalize_extract_layers(layers)
-    trace = _resolve_top_level("trace")(
-        model,
-        x,
-        capture=_CaptureOptions(
-            layers_to_save=list(layer_plan.values()),
-        ),
-    )
-    if isinstance(layers, _Mapping):
-        return {label: _out_from_log(trace, pattern) for label, pattern in layer_plan.items()}
-
-    outputs: dict[str, _torch.Tensor] = {}
-    for pattern in layer_plan.values():
-        matches = _matching_saved_layer_labels(trace, pattern)
-        if not matches:
-            suggestions = trace.find_layers(pattern)
-            raise ValueError(_did_you_mean_message(pattern, suggestions))
-        for match in matches:
-            outputs[match] = _out_from_log(trace, match)
+    _trace, outputs, _views = _extract_layers_with_trace(model, x, layers)
     return outputs
-
-
-def _move_nested_to_device(value: Any, device: _torch.device | str | None) -> Any:
-    """Move tensors in a nested value to a device.
-
-    Parameters
-    ----------
-    value:
-        Tensor or nested Python container.
-    device:
-        Target device, or ``None`` to leave values unchanged.
-
-    Returns
-    -------
-    Any
-        Value with tensors moved to ``device``.
-    """
-
-    if device is None:
-        return value
-    if isinstance(value, _torch.Tensor):
-        return value.to(device)
-    if isinstance(value, tuple):
-        return tuple(_move_nested_to_device(item, device) for item in value)
-    if isinstance(value, list):
-        return [_move_nested_to_device(item, device) for item in value]
-    if isinstance(value, dict):
-        return {key: _move_nested_to_device(item, device) for key, item in value.items()}
-    return value
-
-
-def _collate_batch(items: list[Any]) -> Any:
-    """Collate a small list of stimuli into one model input.
-
-    Parameters
-    ----------
-    items:
-        Stimulus items accumulated for one batch.
-
-    Returns
-    -------
-    Any
-        Batched tensor or nested container.
-    """
-
-    if not items:
-        raise ValueError("Cannot collate an empty batch.")
-    first = items[0]
-    if isinstance(first, _torch.Tensor):
-        return _torch.stack(items)
-    if isinstance(first, tuple):
-        return tuple(_collate_batch([item[index] for item in items]) for index in range(len(first)))
-    if isinstance(first, list):
-        return [_collate_batch([item[index] for item in items]) for index in range(len(first))]
-    if isinstance(first, dict):
-        return {key: _collate_batch([item[key] for item in items]) for key in first}
-    return items
-
-
-def _iter_batches(stimuli: Any, batch_size: int) -> _Iterable[Any]:
-    """Yield batched model inputs from tensors or iterables.
-
-    Parameters
-    ----------
-    stimuli:
-        Tensor with batch dimension or iterable stimulus set.
-    batch_size:
-        Number of items per batch.
-
-    Yields
-    ------
-    Any
-        One batch suitable for ``model.forward``.
-    """
-
-    if isinstance(stimuli, _torch.Tensor):
-        for start in range(0, stimuli.shape[0], batch_size):
-            yield stimuli[start : start + batch_size]
-        return
-
-    batch: list[Any] = []
-    for item in stimuli:
-        batch.append(item)
-        if len(batch) == batch_size:
-            yield _collate_batch(batch)
-            batch = []
-    if batch:
-        yield _collate_batch(batch)
-
-
-def _merge_batch_outputs(
-    accumulator: dict[str, list[_torch.Tensor]],
-    batch_outputs: dict[str, _torch.Tensor],
-    transform: _Callable[[_torch.Tensor], _torch.Tensor] | None,
-) -> None:
-    """Append one batch of extracted outs to an accumulator.
-
-    Parameters
-    ----------
-    accumulator:
-        Mutable mapping from layer label to per-batch tensors.
-    batch_outputs:
-        Extraction output from one batch.
-    transform:
-        Optional transform applied to each out before storage.
-    """
-
-    for layer_name, tensor in batch_outputs.items():
-        stored = transform(tensor) if transform is not None else tensor
-        accumulator.setdefault(layer_name, []).append(stored.detach().cpu())
-
-
-def extract_dataset(
-    model: _nn.Module,
-    stimuli: Any,
-    layers: _Iterable[str] | _Mapping[str, str],
-    batch_size: int = 32,
-    device: _torch.device | str | None = None,
-    output_dir: str | _Path | None = None,
-    transform: _Callable[[_torch.Tensor], _torch.Tensor] | None = None,
-    progress: bool = True,
-) -> dict[str, _torch.Tensor] | list[_Path]:
-    """Extract outs from an iterable dataset in batches.
-
-    Row ``i`` of every returned tensor corresponds to stimulus ``i`` in iteration
-    order. Batch files are consumed in ``batch_00000.pt``, ``batch_00001.pt``, ...
-    order.
-
-    Parameters
-    ----------
-    model:
-        PyTorch model to run.
-    stimuli:
-        Tensor with a leading batch dimension or iterable of stimulus items.
-    layers:
-        List or mapping accepted by :func:`extract`.
-    batch_size:
-        Number of stimuli per forward pass.
-    device:
-        Optional device for model and stimuli.
-    output_dir:
-        Optional directory. When supplied, each batch output is written as
-        ``batch_XXXXX.pt`` and paths are returned.
-    transform:
-        Optional tensor transform applied to each out before storage.
-    progress:
-        Whether to wrap batch iteration with ``tqdm``.
-
-    Returns
-    -------
-    dict[str, torch.Tensor] | list[pathlib.Path]
-        In-memory concatenated outs, or written batch paths.
-    """
-
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive.")
-    if device is not None:
-        model = model.to(device)
-
-    batch_iterable = _iter_batches(stimuli, batch_size)
-    total = None
-    if isinstance(stimuli, _torch.Tensor):
-        total = (stimuli.shape[0] + batch_size - 1) // batch_size
-    if progress:
-        from .utils.display import progress_bar
-
-        batch_iterable = progress_bar(
-            batch_iterable,
-            total=total,
-            desc="torchlens.extract",
-            enabled=progress,
-        )
-
-    container_paths: list[_Path] = []
-    in_memory: dict[str, list[_torch.Tensor]] = {}
-    container_path = _Path(output_dir) if output_dir is not None else None
-    if container_path is not None:
-        container_path.mkdir(parents=True, exist_ok=True)
-
-    for batch_index, batch in enumerate(batch_iterable):
-        batch = _move_nested_to_device(batch, device)
-        batch_outputs = extract(model, batch, layers)
-        if container_path is not None:
-            processed = {
-                label: (transform(tensor) if transform is not None else tensor).detach().cpu()
-                for label, tensor in batch_outputs.items()
-            }
-            batch_path = container_path / f"batch_{batch_index:05d}.pt"
-            _torch.save(processed, batch_path)
-            container_paths.append(batch_path)
-        else:
-            _merge_batch_outputs(in_memory, batch_outputs, transform)
-
-    if container_path is not None:
-        return container_paths
-    return {label: _torch.cat(tensors, dim=0) for label, tensors in in_memory.items()}
 
 
 def batched_extract(
@@ -999,9 +844,10 @@ def batched_extract(
     """
 
     from ._deprecations import warn_deprecated_alias
+    from .dataset_extraction import extract_dataset as _extract_dataset
 
     warn_deprecated_alias("batched_extract", "extract_dataset")
-    return extract_dataset(
+    return _extract_dataset(
         model, stimuli, layers, batch_size, device, output_dir, transform, progress
     )
 
