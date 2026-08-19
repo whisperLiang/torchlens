@@ -83,6 +83,19 @@ small inputs, vector/2D/complex inputs, and output directories.
 `tests/test_train_mode/conftest.py` supplies train-mode fixtures. Model fixtures/classes live
 primarily in `tests/example_models.py`.
 
+## Shared package-source corpus
+A lint/census test that walks `torchlens/` source must consume
+`tests/_source_corpus.py` (`package_files()` / `package_source(path)` /
+`package_ast(path)`; `module_ast()` / `module_source()` for helpers that may
+also receive non-package paths) instead of running its own
+`rglob` + `ast.parse` sweep — each private sweep costs ~5s CPU and ~270 MB of
+AST churn, duplicated per file. Import `_source_corpus` at MODULE level: that
+import is what triggers the one prewarm in
+`conftest.pytest_collection_finish`, BEFORE the import-time `gc.freeze()`, so
+the corpus lands in the frozen generation and gen-2 collections never scan
+it. Returned trees and sources are SHARED — never mutate them (a scanner that
+annotates parent pointers keeps its own private parse instead).
+
 ## Output Directories
 All generated outputs go under pytest's private basetemp at
 `<basetemp>/torchlens-generated/` (assigned in `tests/conftest.py::pytest_configure` and
