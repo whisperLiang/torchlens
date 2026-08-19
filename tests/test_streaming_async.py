@@ -125,7 +125,8 @@ def test_engine_latches_first_failure_and_discards_queue() -> None:
 def test_deferred_snapshot_preserves_value_at_call_time(tmp_path: Path) -> None:
     """A later in-place mutation of the source tensor never reaches the blob."""
 
-    writer = BundleStreamWriter(tmp_path / "bundle.tlspec", async_writes=True)
+    writer = BundleStreamWriter(tmp_path / "bundle.tlspec")
+    writer.arm_async_writes()
     tensor = torch.ones(64, 64)
     expected = tensor.clone()
     writer.submit_blob("0000000001", tensor, kind="out", label="probe")
@@ -140,7 +141,8 @@ def test_deferred_snapshot_preserves_value_at_call_time(tmp_path: Path) -> None:
 def test_duplicate_blob_id_refuses_while_write_is_still_queued(tmp_path: Path) -> None:
     """The id reservation catches duplicates even before the worker lands them."""
 
-    writer = BundleStreamWriter(tmp_path / "bundle.tlspec", async_writes=True)
+    writer = BundleStreamWriter(tmp_path / "bundle.tlspec")
+    writer.arm_async_writes()
     writer.submit_blob("0000000001", torch.ones(4), kind="out", label="first")
     with pytest.raises(TorchLensIOError, match="Duplicate streaming blob_id"):
         writer.submit_blob("0000000001", torch.ones(4), kind="out", label="second")

@@ -164,7 +164,9 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     # every feature lane's grouped options must land on, so reviewed
     # per-merge raises here are the ratchet working as intended (growth
     # noticed, reason stated), not silent god-file regrowth.
-    "torchlens/options.py": 2550,
+    # 2550 -> 2600 (2026-08-19 async disk writes): StreamingOptions gains the
+    # documented async_writes/max_pending_bytes knobs + to_disk docstrings.
+    "torchlens/options.py": 2600,
     "torchlens/intervention/save.py": 2350,
     # Raised 2400 -> 2425 at the facet-cache persistence fix (2026-08-17): the
     # +22 lines are the TEACHING half of the completeness refusal -- for an

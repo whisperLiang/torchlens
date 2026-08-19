@@ -137,7 +137,13 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     # mandatory origin= provenance + method/dim/tol); folding origin/method
     # into a provenance object would add a construction step to the honesty
     # requirement the producer exists to enforce.
-    "PLR0913": 427,
+    # 427->428 (2026-08-19 async-disk lane): tl.to_disk gains the documented
+    # async_writes/max_pending_bytes knobs; the flat options factory IS the
+    # deliberate public API shape (grouping two user knobs into a sub-object to
+    # dodge the count would be a worse surface). FOUR independent lanes each
+    # raised this ceiling this sprint with a stated reason; the value is their
+    # UNION, measured at merge, never a hand-derived subtotal or a pick-one.
+    "PLR0913": 428,
     # 152->155 (same L8 settle): wrapped_funcol + the criterion-3 census body
     # + capture_completeness_witness gained reviewed statements with plane-P.
     "PLR0915": 155,

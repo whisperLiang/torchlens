@@ -1905,11 +1905,11 @@ def _run_model_and_save_specified_outs(
                 bundle_path,
                 include_custom_attributes=stream_custom_attributes,
                 include_buffer_values=stream_buffer_values,
-                # None = consumer default: trace captures overlap blob writes
-                # with the forward; False is the explicit synchronous opt-out.
-                async_writes=stream_async_writes is not False,
-                max_pending_bytes=stream_max_pending_bytes,
             )
+            # None = consumer default: trace captures overlap blob writes
+            # with the forward; False is the explicit synchronous opt-out.
+            if stream_async_writes is not False:
+                trace._out_writer.arm_async_writes(stream_max_pending_bytes)
         if episode_resolved is not None:
             # Pre-capture episode declaration marker: rides the partial
             # product on failure and is visible to postprocess consumers; the

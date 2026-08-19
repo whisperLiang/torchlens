@@ -540,6 +540,12 @@ pytest tests/ -m "not rare and not slow" -x --tb=short
   `capture=tl.options.CaptureOptions(layers_to_save="all")` plus `to_disk(...)`
   stays budgeted until postprocess eviction (the bare flat `layers_to_save=` kwarg is a deprecated
   alias and warns). Unmeasurable auto devices warn on first charge.
+- Streamed disk writes are ASYNC BY DEFAULT for `trace(storage=tl.to_disk(...))` (spellings
+  DOCUMENTED-UNSTABLE): one FIFO worker overlaps blob serialize+write+sha256 with the forward,
+  payloads snapshot at submission, `to_disk(max_pending_bytes=)` (256 MiB default) blocks capture
+  when the disk falls behind, a failed write raises typed `TorchLensIOError` + PARTIAL, finalize
+  drains before publish, and bundles are byte-identical to sync. `async_writes=False` opts out;
+  `tl.record` streaming stays synchronous and refuses an explicit `True`.
 - On torch >= 2.6 (`HAS_SET_STANCE`), every capture holds
   `torch.compiler.set_stance("force_eager")` scoped to the forward (entered inside
   `prepare_compiled_capture`; skipped when `torch._dynamo` was never imported), so compiled plain
