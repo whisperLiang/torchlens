@@ -183,10 +183,14 @@ def solve_from(trace: Trace, source: Op) -> _ReceptiveFieldSolution:
 
     epoch = _rf_rules_epoch()
     graph_revision = _graph_revision(trace)
-    cache = trace.__dict__.get("_rf_source_solutions")
+    caches = trace.__dict__.get("_rf_directional_solutions")
+    if not isinstance(caches, dict):
+        caches = {}
+        trace.__dict__["_rf_directional_solutions"] = caches
+    cache = caches.get("source")
     if not isinstance(cache, OrderedDict):
         cache = OrderedDict()
-        trace.__dict__["_rf_source_solutions"] = cache
+        caches["source"] = cache
 
     cached = cache.get(source.label)
     if cached is not None:

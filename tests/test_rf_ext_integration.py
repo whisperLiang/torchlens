@@ -379,19 +379,18 @@ def test_source_target_caches_reuse_and_drop_across_portable_round_trip(
     source, target = _ops(trace, "conv2d")
 
     target.receptive_field.at((3, 3), source=source)  # type: ignore[union-attr]
-    source_cache = trace.__dict__["_rf_source_solutions"]
+    source_cache = trace.__dict__["_rf_directional_solutions"]["source"]
     first_source_solution = source_cache[source.label][2]  # type: ignore[union-attr]
     target.receptive_field.at((3, 3), source=source)  # type: ignore[union-attr]
     assert source_cache[source.label][2] is first_source_solution  # type: ignore[union-attr]
 
     source.projective_field.at((3, 3), target=target)  # type: ignore[union-attr]
-    target_cache = trace.__dict__["_rf_target_solutions"]
+    target_cache = trace.__dict__["_rf_directional_solutions"]["target"]
     target_key = (target.label,)  # type: ignore[union-attr]
     first_target_solution = target_cache[target_key][2]
     source.projective_field.at((3, 3), target=target)  # type: ignore[union-attr]
     assert target_cache[target_key][2] is first_target_solution
-    assert type(trace).PORTABLE_STATE_SPEC["_rf_source_solutions"] is FieldPolicy.DROP
-    assert type(trace).PORTABLE_STATE_SPEC["_rf_target_solutions"] is FieldPolicy.DROP
+    assert type(trace).PORTABLE_STATE_SPEC["_rf_directional_solutions"] is FieldPolicy.DROP
 
     path = tmp_path / "rf-endpoint-caches.tlspec"
     trace.save(path)
@@ -399,8 +398,7 @@ def test_source_target_caches_reuse_and_drop_across_portable_round_trip(
     loaded_source = loaded.ops[source.label]  # type: ignore[union-attr]
     loaded_target = loaded.ops[target.label]  # type: ignore[union-attr]
 
-    assert loaded.__dict__.get("_rf_source_solutions") is None
-    assert loaded.__dict__.get("_rf_target_solutions") is None
+    assert loaded.__dict__.get("_rf_directional_solutions") is None
     assert loaded_target.receptive_field.at((3, 3), source=loaded_source).exact
     assert loaded_source.projective_field.at((3, 3), target=loaded_target).exact
     with pytest.raises(ReceptiveFieldUnavailableError, match="backward_ready=True"):

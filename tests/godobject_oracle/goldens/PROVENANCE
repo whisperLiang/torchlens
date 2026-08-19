@@ -93,3 +93,19 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: d79305f6d0f957518f2166b786f266c8420ae4bb (dirty)
 recorded: 2026-08-17T05:22:23.739472+00:00
+---
+generator: tests/godobject_oracle legacy
+flag: TORCHLENS_UPDATE_LEGACY_ARTIFACT_ORACLE=1
+reason: nonfinite lane (b68b8155) added Trace.nonfinite_ops/nonfinite_coverage accessors; legacy v6 artifact still loads byte-identically, new accessors serve the honest saved-payload basis (checked=6, unexamined=0)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 121aa5c8e0251f53aea55aeade4a273c24793d05 (clean)
+recorded: 2026-08-19T15:47:21.878204+00:00
+---
+generator: tests/test_state_keyset_contract.py
+flag: TORCHLENS_UPDATE_STATE_KEYSET_ORACLE=1
+reason: nonfinite lane (b68b8155) added the persisted track_nonfinite capture-config knob to four state keysets; session-time _nonfinite_capture and the consolidated _rf_directional_solutions are DROP fields and never enter the keysets
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: e1b6d2049f3b4afbaef4b88c3a3b9ec3cb1b3ba8 (clean)
+recorded: 2026-08-19T15:58:32.614703+00:00

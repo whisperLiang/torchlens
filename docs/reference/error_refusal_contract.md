@@ -81,6 +81,8 @@ add names to the top-level `torchlens` namespace:
 | `code_panel_model_collected` | Callable code panel needs the live model | Use a built-in code_panel mode |
 | `code_panel_option_invalid` | Code panel mode literal is unknown (`InvalidArgumentError`) | Pass a documented mode or a callable |
 | `code_panel_side_invalid` | Code panel side is unknown | Pass `side='right'` or `'left'` |
+| `comparison_name_required` | Bundle comparison metric is a callable, which has no derivable stable storage name (`InvalidArgumentError`) | Pass an explicit `name=` for callable metrics |
+| `comparison_unknown` | No Bundle comparison was stored under the requested name (`InvalidArgumentError`; the message lists the stored names) | Store the comparison first or query a stored name |
 | `custom_callable_import_path_missing` | Custom function registry key lacks its `import_path` reference (`InvalidArgumentError`) | Supply `import_path='module:qualname'` on the registry key entry |
 | `custom_callable_module_denied` | Custom callable resolves from a dangerous or stdlib/builtin module; denied even under trust (`UntrustedCallableError`) | Ship the recipe in a user module; dangerous modules never resolve |
 | `custom_callable_module_not_allowlisted` | Custom callable's module is not in `allowed_custom_callable_modules` (`UntrustedCallableError`) | Add the named module to the allowlist if trusted |
@@ -225,6 +227,7 @@ add names to the top-level `torchlens` namespace:
 | `record_not_bound` | Record's owning Trace reference is gone | Keep the owning Trace alive |
 | `recording_events_not_retained` | `to_trace()` on a disk-recovered Recording | Convert the in-session Recording |
 | `recording_backward_halted` | `log_backward()` on a halted Recording (the sparse frontier retained no complete output to root the backward walk) | Re-record without `halt=` or use `trace(halt=...)` for prefix backward |
+| `recording_event_stream_unavailable` | Raw per-event metadata read on a Recording that no longer holds its capture event stream — explicitly cleaned, or restored from a payload-only projection (`RecorderStateError`) | Read events on the in-session Recording before cleanup |
 | `recording_failed_not_convertible` | `to_trace()` on a failed partial Recording | Fix the forward and re-record |
 | `recording_halt_frontier_missing` | Halted Recording retained no frontier payload | Save the halt frontier or use `trace(halt=...)` |
 | `recording_halt_predicate_type_invalid` | `tl.record` `halt` is not callable (`InvalidArgumentError`, `ValueError` lineage; the `tl.trace` twin is `halt_predicate_type_invalid`) | Pass a halt predicate or `None` |

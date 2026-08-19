@@ -85,10 +85,14 @@ def solve_projective(trace: Trace, target_ops: Iterable[Op | str]) -> _Projectiv
     target_labels = tuple(target.label for target in targets)
     epoch = _rf_rules_epoch()
     revision = _graph_revision(trace)
-    cache = trace.__dict__.get("_rf_target_solutions")
+    caches = trace.__dict__.get("_rf_directional_solutions")
+    if not isinstance(caches, dict):
+        caches = {}
+        trace.__dict__["_rf_directional_solutions"] = caches
+    cache = caches.get("target")
     if not isinstance(cache, OrderedDict):
         cache = OrderedDict()
-        trace.__dict__["_rf_target_solutions"] = cache
+        caches["target"] = cache
 
     cached = cache.get(target_labels)
     if cached is not None:

@@ -158,7 +158,7 @@ def test_pickle_and_deepcopy_after_receptive_field_access() -> None:
 
     Hunt-6 incidental HIGH: after ANY receptive-field access the lazy
     influence-geometry caches (``_receptive_field_solution`` /
-    ``_rf_source_solutions`` / ``_rf_target_solutions``) held
+    ``_rf_directional_solutions``) held
     mappingproxy-bearing solution objects that ``__getstate__`` carried
     verbatim, so ``pickle.dumps(trace)`` and ``copy.deepcopy(trace)`` raised
     ``TypeError: cannot pickle 'mappingproxy' object`` while the SAME calls

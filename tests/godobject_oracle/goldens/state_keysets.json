@@ -661,6 +661,7 @@
    "total_param_gradient_memory",
    "total_param_memory",
    "trace_label",
+   "track_nonfinite",
    "transform_repr",
    "verbose"
   ]
@@ -1330,6 +1331,7 @@
    "total_param_gradient_memory",
    "total_param_memory",
    "trace_label",
+   "track_nonfinite",
    "transform_repr",
    "verbose"
   ]
@@ -2004,6 +2006,7 @@
    "total_param_gradient_memory",
    "total_param_memory",
    "trace_label",
+   "track_nonfinite",
    "transform_repr",
    "verbose"
   ]
@@ -2673,6 +2676,7 @@
    "total_param_gradient_memory",
    "total_param_memory",
    "trace_label",
+   "track_nonfinite",
    "transform_repr",
    "verbose"
   ]

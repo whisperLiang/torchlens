@@ -186,7 +186,7 @@ def _warn_pending_value_edits_on_new_input_run(trace: Any) -> None:
             TraceState.DIRECT_WRITE_DIRTY,
         }
         or bool(getattr(trace, "intervention_audit", None))
-        or bool(getattr(trace, "_has_direct_writes", False))
+        or bool(trace._has_direct_writes)
     )
     if not has_value_edits:
         return

@@ -129,6 +129,8 @@ _INSTALL_STATE_AND_CACHES = frozenset(
         ("torchlens/_io/prerelease.py", "_ACTIVE"),
         ("torchlens/_io/prerelease.py", "_ANNOTATIONS_KEY_REGISTRY"),
         ("torchlens/_io/prerelease.py", "_REGISTRY"),
+        # Selection-AST term dispatch: import-time table, sibling producers register at import.
+        ("torchlens/selection.py", "_TERM_RESOLVERS"),
         # Wrapper-lifecycle slots rebound only through the module object
         # (visible since the cross-module rebind detector, hunt-b2-sol R54).
         # Kernel-telemetry correlation installs by rebinding these two aten-call
