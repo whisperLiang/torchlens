@@ -152,6 +152,15 @@ _LAZY_ATTRS = {
     "units": ("torchlens.selection", "units"),
     "params": ("torchlens.selection", "params"),
     "random_selection": ("torchlens.selection", "random_selection"),
+    # L6 value-based + statistical producers (DOCUMENTED-UNSTABLE pending
+    # naming-session ratification; megasprint provisional-name protocol).
+    "top_k": ("torchlens.selection_values", "top_k"),
+    "top_fraction": ("torchlens.selection_values", "top_fraction"),
+    "threshold": ("torchlens.selection_values", "threshold"),
+    "sign": ("torchlens.selection_values", "sign"),
+    "dead": ("torchlens.selection_values", "dead"),
+    "saturated": ("torchlens.selection_values", "saturated"),
+    "low_variance": ("torchlens.selection_values", "low_variance"),
 }
 
 _MOVED_OBJECTS = {
@@ -1381,4 +1390,11 @@ __all__ = [
     "random_selection",
     "Edit",
     "patch_from",
+    "top_k",
+    "top_fraction",
+    "threshold",
+    "sign",
+    "dead",
+    "saturated",
+    "low_variance",
 ]
