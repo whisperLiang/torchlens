@@ -282,18 +282,14 @@ def _seed_torch_engines(seed: int) -> None:
     """Seed torch's CPU and accelerator generators, degrading on a broken stack.
 
     ``torch.manual_seed`` seeds the accelerator engines (every visible CUDA
-    device, MPS, XPU) BEFORE the CPU default generator.  On a host whose CUDA
-    runtime claims to be initialized but cannot actually serve its generators
-    (device lost mid-session, a stack that lies about initialization), the CUDA
-    leg raises from inside torch -- first observed on real H200 hardware as an
-    ``IndexError`` from ``torch.cuda.default_generators`` -- and the abort
-    escapes before the CPU engine is seeded, killing a pure-CPU capture that
-    never needed a CUDA generator.  A broken accelerator must degrade a CPU
-    capture, never abort it (the same contract as
-    :func:`_snapshot_cuda_rng_states`), so the failure falls back to seeding
-    the CPU default generator directly, with a warning.  The later CUDA RNG
-    snapshot attempt then surfaces (and latches) its own read failure through
-    the existing seam.
+    device, MPS, XPU) BEFORE the CPU default generator, so a CUDA runtime that
+    claims initialization but cannot serve its generators (first observed on
+    real H200 hardware as an ``IndexError`` from
+    ``torch.cuda.default_generators``) aborted a pure-CPU capture with the CPU
+    engine still unseeded.  A broken accelerator must degrade a capture, never
+    abort it (the :func:`_snapshot_cuda_rng_states` contract): the failure
+    falls back to seeding the CPU default generator directly, with a warning;
+    the later CUDA RNG snapshot surfaces and latches its own read failure.
 
     Parameters
     ----------
