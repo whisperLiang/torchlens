@@ -190,6 +190,8 @@ def _edge_partition(
     position = {label: index for index, label in enumerate(graph.order)}
 
     def _ordered(labels: frozenset[str]) -> list[str]:
+        """Sort parent labels by execution position (deterministic edge order)."""
+
         return sorted(labels, key=lambda label: position.get(label, len(position)))
 
     internal: list[tuple[str, str]] = []
