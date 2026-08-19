@@ -67,7 +67,7 @@ in [structure_only_capabilities.md](structure_only_capabilities.md).
 | An op has no meta kernel on a meta-context tensor. | `MetaKernelUnavailableError` (`meta_kernel_unavailable`) at the failing callsite, with torch's original error chained. | Run a real capture, or upgrade torch for broader meta-kernel coverage. |
 | `structure_only=True` combined with `raise_on_nan`, `intervention_ready`, or a not-provably-value-free `halt=`. | `structure_only_option_conflict` at entry. | Drop the conflicting option; use structured value-free selectors as `halt=`. |
 | Any value-payload request (save selection, gradients, streaming sinks, raw input/output retention, output decoding). | `structure_only_values_unsupported` at entry. | Drop the payload request or run a real capture. |
-| Saving / replaying / validating / backward on a structure-only trace. | Typed `structure_only_*_unsupported` refusals via the capability chokepoint; persistence unlocks at the coordinated tlspec bump. | Keep the trace in-session; verify hypotheses with `trace.discharge_against(real_trace)`. |
+| Replaying / validating / backward / runnable save on a structure-only trace. | Typed `structure_only_*_unsupported` refusals via the capability chokepoint. Analysis-level saves work as of tlspec v8: the artifact persists the `structure_only` marker plainly and every value claim stays a HYPOTHESIS on load. | Verify hypotheses with `trace.discharge_against(real_trace)`. |
 | A meta-materialized model (HF `device_map='meta'`). | The entry gate refuses unchanged (`unsupported_tensor_variant`): admission is decision point D8, unruled. | Materialize on a real device, or wait for a D8 ruling. |
 
 Unenumerated REAL-value escapes in form (b) do not die and cannot be

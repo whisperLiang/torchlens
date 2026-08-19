@@ -12,7 +12,7 @@ import torchlens as tl
 
 pytestmark = pytest.mark.smoke
 
-PUBLIC_SURFACE_SIZE = 118
+PUBLIC_SURFACE_SIZE = 119
 PUBLIC_SURFACE_DOCS = (
     "CLAUDE.md",
     "torchlens/AGENTS.md",
@@ -270,6 +270,96 @@ def test_shipped_glossary_covers_the_public_surface() -> None:
         f"public names absent from docs/reference/glossary.md: {missing} — the "
         "shipped glossary is release surface; update it in the same change as "
         "the rename/addition (LOCKED lockstep rule)"
+    )
+
+
+#: Deliberate doc spellings that do not resolve at runtime yet (each entry
+#: needs a one-line reason). Empty today; a glossary entry naming a future
+#: surface must be listed here explicitly instead of silently passing.
+GLOSSARY_FUTURE_SPELLINGS: dict[str, str] = {}
+
+DOTTED_SPELLING_RE = re.compile(r"`(?:tl|torchlens)((?:\.[A-Za-z_][A-Za-z0-9_]*)+)")
+
+
+def test_documented_dotted_spellings_resolve() -> None:
+    """Every backticked `tl.*`/`torchlens.*` glossary spelling resolves in code.
+
+    The reverse half of the LOCKED docs-lockstep rule ("a rename is not done
+    until the docs match"): a doc entry naming something that no longer
+    exists must FAIL. The wave-3 audit found the forward gaps by hand; this
+    keeps renames from stranding stale glossary spellings. Attribute chains
+    resolve via getattr with a submodule-import fallback (lazy namespaces).
+    """
+
+    import warnings
+
+    text = (_repo_root() / "docs" / "reference" / "glossary.md").read_text(encoding="utf-8")
+    unresolved: list[str] = []
+    for token in sorted({match.group(1) for match in DOTTED_SPELLING_RE.finditer(text)}):
+        if token in GLOSSARY_FUTURE_SPELLINGS:
+            continue
+        parts = token.strip(".").split(".")
+        obj: object = tl
+        for index, part in enumerate(parts):
+            try:
+                with warnings.catch_warnings():
+                    # The glossary documents deprecated aliases deliberately;
+                    # resolving them must not fail a warnings-as-errors run.
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    obj = getattr(obj, part)
+            except AttributeError:
+                try:
+                    obj = importlib.import_module("torchlens." + ".".join(parts[: index + 1]))
+                except Exception:
+                    unresolved.append(token)
+                    break
+    assert not unresolved, (
+        f"glossary spellings that no longer resolve at runtime: {unresolved} — "
+        "either the code renamed without updating docs/reference/glossary.md "
+        "(fix the docs in the same change, LOCKED lockstep rule) or the entry "
+        "deliberately names future surface (list it in GLOSSARY_FUTURE_SPELLINGS "
+        "with a reason)"
+    )
+
+
+#: Curated user-facing analysis namespaces and each one's doc of record.
+#: Every public CALLABLE in these modules' ``__all__`` must be named in the
+#: glossary, an agent guide, or the module's doc of record — this is the
+#: check that would have caught `logit_lens` / `bisect_precision` /
+#: `compare_params` / `audit_trace` / `dtype_range_audit` shipping with zero
+#: documentation (wave-3 audit residue). Classes/constants are exempt: the
+#: docs cover them at concept level, name-by-name coverage would be noise.
+CURATED_NAMESPACE_DOCS = {
+    "torchlens.attribution": ("docs/reference/attribution.md",),
+    "torchlens.semantic": ("docs/facets.md",),
+    "torchlens.debug": ("docs/reference/debug.md",),
+}
+CURATED_COMMON_VENUES = ("docs/reference/glossary.md", "CLAUDE.md", "AGENTS.md")
+
+
+def test_curated_namespace_callables_are_documented() -> None:
+    """Every public callable in the curated analysis namespaces has a doc row."""
+
+    import inspect
+
+    root = _repo_root()
+    common = "\n".join(
+        (root / venue).read_text(encoding="utf-8") for venue in CURATED_COMMON_VENUES
+    )
+    problems: list[str] = []
+    for module_name, doc_paths in CURATED_NAMESPACE_DOCS.items():
+        module = importlib.import_module(module_name)
+        text = common + "\n".join((root / path).read_text(encoding="utf-8") for path in doc_paths)
+        for name in module.__all__:
+            member = getattr(module, name)
+            if not (inspect.isfunction(member) or inspect.isbuiltin(member)):
+                continue
+            if not re.search(rf"\b{re.escape(name)}\b", text):
+                problems.append(f"{module_name}.{name} (doc of record: {doc_paths[0]})")
+    assert not problems, (
+        f"public callables with no documentation row anywhere: {problems} — "
+        "register each in its doc of record (or the glossary) in the same "
+        "change that ships it (LOCKED lockstep rule)"
     )
 
 

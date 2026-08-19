@@ -42,6 +42,32 @@ degraded-but-usable states. For per-model compatibility questions (unsupported t
 variants, distributed state, wrapper coverage), use `tl.compat.report(model, x)`
 instead — `doctor()` checks the environment, `compat.report()` checks one model.
 
+## `audit_trace`
+
+`tl.debug.audit_trace(trace)` runs every trace-local health diagnostic one capture
+supports and returns a `TraceAudit`: findings from `find_nan`, `bisect_nan`
+(full-coverage traces), `dtype_range_audit`, and `gradient_flow_audit` (exactly one
+captured backward pass). Diagnostics that need more than the trace itself (a second
+trace, a fresh execution, a start op, a `bwd=` selection) are listed in `skipped`
+with a reason and are never counted as checks that ran. Accepts a completed `Trace`
+or a failed `PartialTrace`.
+
+```python
+import torch
+from torch import nn
+import torchlens as tl
+
+trace = tl.trace(nn.ReLU(), torch.tensor([[-1.0, 2.0]]))
+report = tl.debug.audit_trace(trace)
+print(report.checks_run, len(report.skipped) > 0)
+```
+
+Output:
+
+```text
+('find_nan', 'bisect_nan', 'dtype_range_audit') True
+```
+
 ## `bisect_nan`
 
 `tl.debug.bisect_nan(trace)` returns the first saved operation with a NaN or Inf output.
@@ -231,6 +257,32 @@ Output:
 
 ```text
 ['op', 'total_units', 'dead_count', 'dead_frac', 'sample_dead_idx', 'reason']
+```
+
+## `dtype_range_audit`
+
+`tl.debug.dtype_range_audit(trace, *, max_fraction=0.9, subnormal_fraction_threshold=0.1)`
+audits saved activations for numeric-range and precision hazards: non-finite values
+(same classifier as [`find_nan`](#find_nan)), finite magnitudes near the saved dtype's
+finite maximum, subnormal-heavy tensors, and downcasts from recorded wider input dtypes.
+Returns a `DTypeRangeAudit` with structured findings and audited/total coverage
+(`n_ops_audited` / `n_ops_total`) — unsaved and non-tensor payloads are never
+inspected, and the coverage says so.
+
+```python
+import torch
+from torch import nn
+import torchlens as tl
+
+trace = tl.trace(nn.ReLU(), torch.tensor([[-1.0, 2.0]]))
+audit = tl.debug.dtype_range_audit(trace)
+print(len(audit.findings), audit.n_ops_audited <= audit.n_ops_total)
+```
+
+Output:
+
+```text
+0 True
 ```
 
 ## `gradient_flow_audit`
