@@ -2740,6 +2740,14 @@ def trace(
             "module_identity_mode": module_identity_mode,
             "payload_policy": payload_policy,
             "save_preview": save_preview,
+            # Forwarded so re-entrant trace() calls inside detectors honor or
+            # refuse them typed; omitted they were SILENTLY DROPPED (e.g.
+            # trace(hf_model, "text", structure_only=True) returned a full
+            # value-bearing capture). transform/chunk_*/jax_static_argnums/
+            # grad_options are provably guarded before this branch.
+            "structure_only": structure_only,
+            "episode": episode,
+            "grouping": grouping,
         }
         for detector in autoroute.input.iter_by_priority():
             result = detector(model, input_args, **autoroute_kwargs)
