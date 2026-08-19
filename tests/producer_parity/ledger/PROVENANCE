@@ -307,3 +307,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 5927685fa1a3c183ed52af4d970256ddaef7b438 (clean)
 recorded: 2026-08-19T07:52:35.681515+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: post-rebase reconciliation: comparative producers on top of the graph producers and eleven other merged lanes; consumer-site set is the union, no relocations
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 621c7d75376de29e088798a83a2d00e3e68654e3 (clean)
+recorded: 2026-08-19T15:39:21.451382+00:00
