@@ -330,11 +330,13 @@ def _resolve_rank_criterion(node: _ValueTerm, trace: Any) -> ResolvedSelection:
         per_entry.append((entry, keys.reshape(-1), valid.reshape(-1)))
     total_valid = int(sum(valid.sum().item() for _, _, valid in per_entry))
     if node.criterion == "top_fraction":
-        assert node.fraction is not None
+        if node.fraction is None:
+            raise RuntimeError("top_fraction node lost its fraction")
         k = math.ceil(node.fraction * total_valid)
         source = f"top_fraction(fraction={node.fraction}, by={node.by!r}, largest={node.largest})"
     else:
-        assert node.k is not None
+        if node.k is None:
+            raise RuntimeError("top_k node lost its k")
         k = node.k
         source = f"top_k(k={k}, by={node.by!r}, largest={node.largest})"
         if k > total_valid:
@@ -623,6 +625,8 @@ def _resolve_stat_term(node: _StatTerm, trace: Any) -> ResolvedSelection:
                 f"high={node.high}, tol={node.tol})"
             )
         else:
+            if node.threshold is None:
+                raise RuntimeError("low_variance node lost its threshold")
             stacked = torch.stack([value.to(torch.float64) for value in values])
             dense = torch.var(stacked, dim=0) < node.threshold
             relation = "exact"
