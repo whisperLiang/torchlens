@@ -68,7 +68,7 @@
   "field": "modules",
   "file": "torchlens/_io/bundle.py",
   "has_default": false,
-  "sites": 2,
+  "sites": 3,
   "via_getattr": false
  },
  {
@@ -2772,7 +2772,7 @@
   "field": "modules",
   "file": "torchlens/data_classes/_trace_intervention.py",
   "has_default": false,
-  "sites": 1,
+  "sites": 2,
   "via_getattr": false
  },
  {
@@ -5794,6 +5794,30 @@
  {
   "ambiguous": true,
   "field": "kind",
+  "file": "torchlens/selection_graph.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": true,
+  "field": "parents",
+  "file": "torchlens/selection_graph.py",
+  "has_default": false,
+  "sites": 4,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": false,
+  "field": "pass_index",
+  "file": "torchlens/selection_graph.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": true,
+  "field": "kind",
   "file": "torchlens/selection_values.py",
   "has_default": false,
   "sites": 4,
@@ -5974,6 +5998,22 @@
   "has_default": false,
   "sites": 1,
   "via_getattr": false
+ },
+ {
+  "ambiguous": true,
+  "field": "kind",
+  "file": "torchlens/trace_slice.py",
+  "has_default": false,
+  "sites": 3,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": false,
+  "field": "pass_index",
+  "file": "torchlens/trace_slice.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
  },
  {
   "ambiguous": false,
