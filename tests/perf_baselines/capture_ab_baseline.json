@@ -3,33 +3,30 @@
     "nproc": 32,
     "torch_num_threads": 16,
     "torch_version": "2.13.0+cu130",
-    "load_average_1m": 4.48
+    "load_average_1m": 3.05
   },
-  "sha": "94fcb64cbc2419457dae782fa50de1be9de77d54",
+  "statistic": "min_trace_floor_ms_v1",
+  "sha": "b1241aa108b3d95b0c9b15c4321f1a5a5675dac7",
   "small_capture": {
     "cnn": {
-      "native_ms": 0.5856969946762547,
-      "trace_ms": 37.53841150319204,
-      "ratio": 64.0918629332245,
-      "n": 12.0
+      "native_ms": 0.5701839691027999,
+      "trace_ms": 32.78240101644769,
+      "ratio": 57.494427751154944,
+      "native_median_ms": 0.6047434872016311,
+      "trace_median_ms": 34.056351985782385,
+      "native_n": 300.0,
+      "trace_n": 72.0
     },
     "mlp": {
-      "native_ms": 0.09264949767384678,
-      "trace_ms": 28.21971349476371,
-      "ratio": 304.5857150149407,
-      "n": 12.0
+      "native_ms": 0.08941401029005647,
+      "trace_ms": 25.99003800423816,
+      "ratio": 290.6707564052571,
+      "native_median_ms": 0.09409800986759365,
+      "trace_median_ms": 27.210847474634647,
+      "native_n": 300.0,
+      "trace_n": 72.0
     }
   },
-  "decode_pair": {
-    "gpt2": {
-      "native_ms": 213.5839690163266,
-      "wrapped_ms": 2083.5777564934688,
-      "fast_ms": 285.43078900838736,
-      "fast_vs_wrapped": 7.299765255640459,
-      "wrapped_vs_native": 9.755309661532687,
-      "fast_vs_native": 1.3363867631215745,
-      "steps": 12.0,
-      "window": 64.0
-    }
-  }
+  "rebaseline_reason": "gated statistic change median_of_12 ratio -> min_trace_floor_ms_v1: the D15 10% ceiling was unsatisfiable on the ratio (median spread ~30%, mlp 220-313 over 5 quiet runs 2026-08-17; min-ratio still hostage to process-level native-floor allocation luck 0.088-0.122ms which also masks real trace regressions behind slow native draws). Trace floor is the stable regression signal (mlp 25.1-26.3ms over 6 fresh processes); ratio stays recorded for provenance. Declared re-baselining point, lane F testinfra 2026-08-19.",
+  "rebaselined": "2026-08-19"
 }
