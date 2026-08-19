@@ -494,6 +494,14 @@ attribution-target alias. See the [attribution reference](attribution.md).
   frozen vocabularies in `torchlens.merged`, release-gated against
   [the merged-trace contract](merged_trace_contract.md).
 
+**Trace.distributed_scope** — *unstable — no deprecation shim owed*
+: The persisted shard-local capture marker (L8/F6): `None` for ordinary captures,
+  `"rank_local_shard"` when any parameter or input the capture saw was one rank's local
+  shard — the trace is a rank-local recording, never whole-model truth. Persists as of
+  tlspec v8 with closed-vocabulary load validation; the bundle-save chokepoint refuses
+  `shard_local_persistence_unsupported` under any schema that would silently drop the
+  disclosure (see the [error and refusal contract](error_refusal_contract.md)).
+
 ## Unstable surfaces (documented-unstable; no deprecation shim owed)
 
 Spellings below shipped ahead of their naming-session/S2 ratification under
@@ -1015,9 +1023,9 @@ shim owed*
   per-node keyed LIFO (stale entries are discarded, never paired); untimed
   fires read `None`, never a false zero. Served from the runtime
   `GradFnFired` event stream, which never persists: loaded or cleaned traces
-  refuse typed `grad_fn_fire_timing_unavailable`. The persisted `GradFnCall`
-  timing fields keep their shipped wall-stamp semantics until the
-  coordinated tlspec bump.
+  refuse typed `grad_fn_fire_timing_unavailable`. As of the tlspec v8 bump
+  the persisted `GradFnCall` timing fields carry the per-fire
+  `perf_counter` pair, discriminated by `Trace.grad_fn_timing_provenance`.
 
 **Trace.grad_fn_timing_provenance** — *unstable — no deprecation shim owed*
 : The per-fire timing clock-provenance marker: `"unmeasured"` until a timing
@@ -1054,3 +1062,37 @@ shim owed*
   when the queued final callback journaled the close, `"sync_point"` for
   every backstop path, `None` on explicit passes. The projected
   `BackwardPass` record field waits for the wave-3 bump.
+
+**until= (run kwarg) / report.truncated / report.stopped_at** — *unstable — no
+deprecation shim owed*
+: `trace.run(until=...)` executes only the dependency closure (or disclosed
+  sequential prefix) needed to reach the named sites. Truncation is a
+  RESULT/REPORT term, never a capture outcome: the report's flat surface is
+  `report.truncated` (bool) and `report.stopped_at` (the stop-frontier site
+  label), with the full `RunTruncation` disclosure on `report.truncation`
+  (regime, requested sites, executed/skipped counts, skipped-site digest).
+  Skipped sites are "not-run", never "passed". Full contract:
+  [the runnable tlspec contract](runnable_tlspec_contract.md).
+
+**Trace.sites_table()** — *unstable — no deprecation shim owed*
+: The tabular view of a trace's structural sites: one row per distinct L1
+  `site_key` in first-occurrence execution order, aggregating the ops that
+  share the site (`module_site`, `layer_type`, `output_slot`,
+  `call_ordinal`, `n_ops`, labels, passes, shapes). Requires the `tabular`
+  extra (pandas); legacy artifacts without site keys refuse
+  `site_key_unavailable`, never a silently empty table.
+
+**Trace.bill_of_materials()** — *unstable — no deprecation shim owed*
+: The inventory of what a trace actually contains: a nested, JSON-friendly
+  dict of sections (`capture`, `graph`, `parameters`, `buffers`,
+  `activations`, `backward`, `annotations`), every figure read from fields
+  the trace already carries — the rollup mints no new claims.
+
+**logit_lens (torchlens.semantic)** — *unstable — no deprecation shim owed*
+: `torchlens.semantic.logit_lens(trace)` projects each block's
+  residual-stream facet through the model's own final norm + unembedding,
+  returning a `LogitLensResult` (per-layer logits, `summary()`,
+  `top_tokens()`). The reconstructed lens is validated against the captured
+  logits before use and refuses `LogitLensError` when the head cannot be
+  represented; pass `lens=` for a tuned lens or `validate=False` to trust
+  the reconstruction explicitly. See [facets](../facets.md).

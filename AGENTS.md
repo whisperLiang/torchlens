@@ -116,6 +116,16 @@ Key entry points:
   string/`tl.label` addressing; `selection_unresolvable` /
   `multipass_bare_label` on `tl.units`); single-pass bare labels stay
   accepted and `log[label].__selection__()` is the all-passes spelling.
+- Edge substitution (L6 stage 3; DOCUMENTED-UNSTABLE): `trace.edges` is the
+  dataflow edge family (EdgeUseRecords; requires an `intervention_ready`
+  capture, refusal `edge_provenance_unavailable`; canonical occurrence
+  address `(child_func_call_id, arg_kind, arg_path)`).
+  `fork.do(edge_selection, edit)` replaces the value CONSUMED on the edge on
+  the replay/push engine only (`edge_intervention_engine_unsupported`
+  otherwise); the substituted value rides `Op.edge_substitutions` (+
+  `edge_replacement_stamps`, `FireRecord.edge_address`; persisted as of
+  tlspec v8) while capture truth stays unmodified, and uncorroborated
+  entries FAIL validation (`edge_intervention_boundary`).
 - Backward residuals (L9; DOCUMENTED-UNSTABLE): per-fire timing -- one clock
   (`perf_counter`), per-node keyed-LIFO pairing, stamps on the runtime
   `GradFnFired` event only; live-only `trace.grad_fn_fire_timings` (loaded
@@ -165,6 +175,15 @@ Key entry points:
   `CaptureOptions(track_nonfinite=True)` opts into capture-time per-op checks
   covering unsaved ops, with device flags drained in one batch at the finalize
   seam (never a per-op CUDA sync). `raise_on_nan` is independent and unchanged.
+- Attribution kit (DOCUMENTED-UNSTABLE): `torchlens.attribution` ships
+  `integrated_gradients`, `occlusion`, `grad_cam`, and the display-only
+  `overlay` renderer, all operating on Traces. Doc of record:
+  `docs/reference/attribution.md`; glossary carries the unstable index.
+- Kernel telemetry (optional CUDA/CUPTI adapter, DOCUMENTED-UNSTABLE):
+  importing `torchlens.kernel_telemetry` installs `gpu_kernels` views over
+  the ATen execution profile; rows persist as of tlspec v8 (`FieldPolicy.KEEP`)
+  and counts are lower bounds wherever `mode_paused_interior` is non-empty.
+  Doc of record: `docs/reference/kernel_telemetry.md`.
 - Lazy decoration: `torchlens/backends/torch/model_prep.py:_ensure_model_prepared()` calls
   `wrap_torch()` and the belt/rescue stale-reference machinery
 - Forward-pass orchestration: `torchlens/capture/trace.py`
