@@ -35,6 +35,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import pytest
+from _source_corpus import package_ast, package_files
 
 from torchlens.merged._errors import MergeInputError
 from torchlens.merged._presenter import MergedTrace, _rank_raw_to_final_op_labels
@@ -272,9 +273,9 @@ def _scan_package() -> dict[str, list[str]]:
     """Package -> sorted ``file:line builtin attr`` reach-in sites."""
 
     found: dict[str, list[str]] = collections.defaultdict(list)
-    for path in sorted(_PACKAGE_ROOT.rglob("*.py")):
+    for path in package_files():
         rel = path.relative_to(_PACKAGE_ROOT.parent).as_posix()
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        tree = package_ast(path)
         for lineno, builtin, attr in _trace_reachins(tree):
             found[_package_of(path)].append(f"{rel}:{lineno} {builtin}(..., {attr!r})")
     return {package: sorted(sites) for package, sites in found.items()}

@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 import torch
+from _source_corpus import module_ast, package_files
 from torch import Tensor, nn
 
 import torchlens as tl
@@ -135,7 +136,7 @@ def test_occlusion_rejects_an_implicit_or_invalid_baseline() -> None:
 def _imported_modules(path: Path) -> set[str]:
     """Return absolute import targets in one Python source file."""
 
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    tree = module_ast(path)
     names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -152,7 +153,7 @@ def test_attribution_kit_lane_is_detachable_from_stage4a_and_capture_core() -> N
 
     package_offenders = {
         str(path.relative_to(_REPO_ROOT)): sorted(_imported_modules(path))
-        for path in (_REPO_ROOT / "torchlens").rglob("*.py")
+        for path in package_files()
         if "attribution" not in path.relative_to(_REPO_ROOT / "torchlens").parts
         and any(
             name == _ATTRIBUTION_PREFIX or name.startswith(f"{_ATTRIBUTION_PREFIX}.")

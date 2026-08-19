@@ -25,6 +25,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from _source_corpus import package_ast, package_files
 
 import torchlens
 from torchlens._io._torch_symbols import torch_attr
@@ -40,7 +41,7 @@ def _guarded_files() -> list[Path]:
     ``hasattr(torch, <var>)`` ANYWHERE in the package reintroduces the PEP-562 lazy-import /
     deprecated-replacement hazard."""
 
-    files = sorted(_PKG_ROOT.rglob("*.py"))
+    files = list(package_files())
     assert files, "no package files discovered"
     return files
 
@@ -167,7 +168,7 @@ def test_no_bare_getattr_torch_anywhere_in_package() -> None:
     total_probes = 0
     offenders: list[str] = []
     for path in files:
-        tree = ast.parse(path.read_text(), filename=str(path))
+        tree = package_ast(path)
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call)

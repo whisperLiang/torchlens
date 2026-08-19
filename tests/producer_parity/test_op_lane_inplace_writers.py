@@ -23,6 +23,7 @@ import ast
 from pathlib import Path
 
 import pytest
+from _source_corpus import package_ast, package_files
 
 import torchlens as tl
 
@@ -64,7 +65,12 @@ def _subscript_over_op_events(node: ast.expr) -> bool:
 def _scan_source(source: str, relative: str) -> set[tuple[str, str, str]]:
     """Return every in-place op-lane mutation site in one module's source."""
 
-    tree = ast.parse(source)
+    return _scan_tree(ast.parse(source), relative)
+
+
+def _scan_tree(tree: ast.AST, relative: str) -> set[tuple[str, str, str]]:
+    """Return every in-place op-lane mutation site in one parsed module."""
+
     found: set[tuple[str, str, str]] = set()
 
     def _visit(node: ast.AST, stack: tuple[str, ...]) -> None:
@@ -110,17 +116,17 @@ def _scan_source(source: str, relative: str) -> set[tuple[str, str, str]]:
 def test_inplace_op_lane_writers_match_the_sanctioned_ledger() -> None:
     """Package-wide scan: op-lane mutators == the reason-bearing ledger, exactly.
 
-    ``heavy`` by measured cost, not preference: the package-wide AST scan
-    crossed the 5s smoke/unmarked boundary as the feature-sprint lanes grew
-    the tree (5.3s standalone, 2026-08-17); the 5-20s partition rule places
-    it in the mid backstop.
+    ``heavy`` by measured cost at marking time (5.3s standalone package
+    scan, 2026-08-17). The scan now reads the shared session corpus
+    (tests/_source_corpus.py), so the per-test cost is the walk only; the
+    tier stays conservative rather than tracking every infrastructure win.
     """
 
     package_root = Path(tl.__file__).parent
     observed: set[tuple[str, str, str]] = set()
-    for source_path in sorted(package_root.rglob("*.py")):
+    for source_path in package_files():
         relative = source_path.relative_to(package_root).as_posix()
-        observed |= _scan_source(source_path.read_text(encoding="utf-8"), relative)
+        observed |= _scan_tree(package_ast(source_path), relative)
 
     unsanctioned = observed - SANCTIONED_INPLACE_OP_LANE_WRITERS
     assert not unsanctioned, (

@@ -509,9 +509,18 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     collectable; frozen objects are import-time state that was never eligible
     for collection while the session lives. Modules imported lazily mid-session
     land post-freeze and are simply scanned as normal.
+
+    The shared package-source corpus (``tests/_source_corpus.py``) is
+    prewarmed here, before the freeze, iff a consumer test module was
+    imported during collection: built lazily mid-session its ~270 MB of AST
+    nodes would be scanned by every later gen-2 collection — exactly the
+    per-test gc drag this freeze exists to kill.
     """
 
     del session
+    corpus = sys.modules.get("_source_corpus")
+    if corpus is not None:
+        corpus.prewarm()
     gc.collect()
     gc.freeze()
 

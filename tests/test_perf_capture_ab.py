@@ -12,10 +12,40 @@ ceiling: a re-measured gate metric may not exceed its baseline by more than
 Two workloads:
 
 1. **Small-capture A/B** — native forward vs ``tl.trace`` on the tiny
-   CNN/MLP reference pair (verbatim from the original harness). The gated
-   metric is the dimensionless overhead ratio ``trace_ms / native_ms``,
-   which self-normalizes across boxes far better than raw milliseconds;
-   the raw medians are recorded alongside for provenance.
+   CNN/MLP reference pair. The gated metric is the TRACE FLOOR in
+   milliseconds: ``min(trace samples)``, compared same-box against the
+   committed baseline (a context guard fails the gate with a re-baseline
+   instruction when torch or the box changes — raw milliseconds are only
+   meaningful against a baseline from the same environment). The minimum
+   is the robust estimator of "how fast can this go": interference can
+   only add time, so the min converges to the true floor from above and
+   rejects load spikes by construction.
+
+   Two prior statistics were measured and rejected (2026-08-19, quiet
+   32-core devbox):
+
+   * median-of-12 ratio (original): ~30% run-to-run spread (mlp ratios
+     220-313 over 5 quiet runs, 2026-08-17) against a ceiling only 10%
+     over baseline — unsatisfiable as written.
+   * min-based ratio ``min(trace)/min(native)``: the trace floor is
+     stable (mlp 25.1-26.3 ms over 6 fresh processes, ~5% width) but the
+     NATIVE floor of a ~90 µs forward is process-level allocation luck
+     (0.088-0.122 ms across fresh processes, stable within a process, so
+     in-process pooling cannot remove it). That noise cuts both ways: a
+     low native draw flakes the gate red, and a HIGH native draw (the
+     0.122 ms outlier gave ratio 212 vs baseline 270) would mask a real
+     +30% trace regression — leaky green, not just flaky red. The
+     native term is 300-2800x smaller than the trace term, so dividing
+     by it adds no regression-detection power on a fixed box; the ratio
+     is still RECORDED for reporting, never gated.
+
+   In-test ESCALATION handles cold-process/interference inflation: a row
+   over the ceiling is re-measured with more samples and the samples
+   POOLED (min over the union) — more samples only move the estimate
+   toward the true floor, so escalation rejects interference but can
+   never take a genuine floor regression under the ceiling. This is
+   more-samples-on-demand, never a wider gate. Medians and the native
+   floor ride alongside for provenance.
 2. **Fast-tier decode pair** — native vs wrapped-episode (``tl.trace`` per
    decode step) vs guarded-fast (``trace.run(inputs=..., fast=True)`` per
    step) on a fixed-window greedy decode loop over a HuggingFace causal LM.
@@ -30,15 +60,23 @@ Two workloads:
 
 Marked ``rare``: this file must never run in smoke or the default tier
 (``addopts = -m 'not rare'`` deselects it); perf measurement needs a quiet
-box and the decode rows take tens of seconds. Select it explicitly:
+box and the decode rows take tens of seconds. The quiet box is enforced as
+a measurement PRECONDITION: above ``QUIET_LOAD_FRACTION`` of cores in the
+1-minute load average the gate SKIPS with the load in the reason — a floor
+measured under sustained load is no measurement (neither pass nor fail);
+rerun on a quiet box. Select it explicitly:
 
     pytest tests/test_perf_capture_ab.py -m rare
 
 or run it as a script for a measurement/report pass (prints all rows plus
-load context; ``--write-baseline`` refreshes the committed baseline — only
-do that at a declared re-baselining point, never to absorb a regression):
+load context; ``--write-baseline --reason "..."`` refreshes the committed
+baseline with the reason recorded in the JSON — only do that at a declared
+re-baselining point, never to absorb a regression; baseline writes pool
+``--repeats`` independent measurements so the recorded ratio is a floor
+estimate, the same quantity the gate's escalation converges to):
 
-    python tests/test_perf_capture_ab.py [--decode-model gpt2] [--write-baseline]
+    python tests/test_perf_capture_ab.py [--decode-model gpt2] \
+        [--write-baseline --reason "..."]
 """
 
 from __future__ import annotations
@@ -67,6 +105,33 @@ pytestmark = pytest.mark.rare
 
 #: D15 ruling: blocking merge gate — measured metric <= baseline * (1 + 10%).
 GATE_CEILING_FRACTION = 0.10
+
+#: Statistic identity stamped into the baseline. The gate REFUSES to compare
+#: against a baseline recorded under a different statistic: a min-based
+#: measurement compared to a median-era baseline would read systematically
+#: low and wave regressions through.
+SMALL_CAPTURE_STATISTIC = "min_trace_floor_ms_v1"
+
+#: Base sample counts. The native forward is tens-to-hundreds of
+#: microseconds, so its floor is sampled heavily for near-free; the traced
+#: forward is tens of milliseconds, so its count is bounded.
+TRACE_SAMPLES = 24
+NATIVE_SAMPLES = 100
+
+#: In-test escalation: rows over the ceiling are re-measured up to this many
+#: times with the larger counts, all samples pooled (min over the union).
+ESCALATION_ROUNDS = 2
+ESCALATION_TRACE_SAMPLES = 48
+ESCALATION_NATIVE_SAMPLES = 200
+
+#: Quiet-box measurement precondition: above this 1-minute load average as a
+#: fraction of cores, a floor measurement is NO measurement (measured
+#: 2026-08-19: sustained load 9-16 on the 32-core devbox inflated trace
+#: floors 10-90%, and CPU-time floors inflated identically — the contention
+#: is memory-bandwidth/cache, not descheduling, so no statistic recovers the
+#: quiet floor). The gate SKIPS with the load in the reason instead of
+#: emitting a verdict either way; rerun on a quiet box.
+QUIET_LOAD_FRACTION = 0.25
 
 #: METAPLAN P2 r3 decision rule: guarded-fast must beat wrapped-episode by
 #: >= this factor (wall clock) on the primary CPU decode row, or the default
@@ -112,8 +177,8 @@ SMALL_CAPTURE_CASES: tuple[tuple[str, Callable[[], nn.Module], tuple[int, ...]],
 )
 
 
-def measure_median_ms(fn: Callable[[], Any], n: int = 12, warmup: int = 1) -> dict[str, float]:
-    """Return median/min/p75 wall-clock milliseconds over ``n`` timed calls."""
+def measure_samples_ms(fn: Callable[[], Any], n: int, warmup: int = 2) -> list[float]:
+    """Return ``n`` raw wall-clock millisecond samples after ``warmup`` calls."""
 
     for _ in range(warmup):
         fn()
@@ -122,13 +187,7 @@ def measure_median_ms(fn: Callable[[], Any], n: int = 12, warmup: int = 1) -> di
         start = time.perf_counter()
         fn()
         times.append((time.perf_counter() - start) * 1000.0)
-    times.sort()
-    return {
-        "median_ms": statistics.median(times),
-        "min_ms": times[0],
-        "p75_ms": times[(3 * len(times)) // 4],
-        "n": float(n),
-    }
+    return times
 
 
 def load_context() -> dict[str, Any]:
@@ -157,25 +216,65 @@ class _single_torch_thread:
         torch.set_num_threads(self._saved)
 
 
-def capture_overhead_rows(n: int = 12) -> dict[str, dict[str, float]]:
-    """Measure native forward vs ``tl.trace`` on the small-capture pair."""
+def capture_overhead_rows(
+    trace_n: int = TRACE_SAMPLES,
+    native_n: int = NATIVE_SAMPLES,
+    cases: tuple[str, ...] | None = None,
+) -> dict[str, dict[str, float]]:
+    """Measure native forward vs ``tl.trace`` on the small-capture pair.
+
+    ``native_ms`` / ``trace_ms`` are the SAMPLE MINIMA and ``ratio`` their
+    quotient (the gated statistic); medians ride alongside for provenance.
+    ``cases`` restricts measurement to a subset of case names (escalation).
+    """
 
     rows: dict[str, dict[str, float]] = {}
     with _single_torch_thread():
         torch.manual_seed(0)
         for name, build, shape in SMALL_CAPTURE_CASES:
+            if cases is not None and name not in cases:
+                continue
             model = build().eval()
             x = torch.randn(*shape)
             with torch.no_grad():
-                native = measure_median_ms(lambda m=model, inp=x: m(inp), n=n)
-            trace = measure_median_ms(lambda m=model, inp=x: tl.trace(m, inp), n=n)
+                native = measure_samples_ms(lambda m=model, inp=x: m(inp), n=native_n)
+            trace = measure_samples_ms(lambda m=model, inp=x: tl.trace(m, inp), n=trace_n)
             rows[name] = {
-                "native_ms": native["median_ms"],
-                "trace_ms": trace["median_ms"],
-                "ratio": trace["median_ms"] / native["median_ms"],
-                "n": float(n),
+                "native_ms": min(native),
+                "trace_ms": min(trace),
+                "ratio": min(trace) / min(native),
+                "native_median_ms": statistics.median(native),
+                "trace_median_ms": statistics.median(trace),
+                "native_n": float(native_n),
+                "trace_n": float(trace_n),
             }
     return rows
+
+
+def pooled_capture_overhead_rows(
+    repeats: int = 3,
+    trace_n: int = TRACE_SAMPLES,
+    native_n: int = NATIVE_SAMPLES,
+) -> dict[str, dict[str, float]]:
+    """Pool ``repeats`` independent measurements (min over the union).
+
+    Used for baseline writes so the recorded ratio estimates the true floor
+    (fresh model instances per repeat also vary allocation placement).
+    """
+
+    pooled: dict[str, dict[str, float]] = {}
+    for _ in range(repeats):
+        for name, row in capture_overhead_rows(trace_n=trace_n, native_n=native_n).items():
+            if name not in pooled:
+                pooled[name] = dict(row)
+            else:
+                pooled[name]["native_ms"] = min(pooled[name]["native_ms"], row["native_ms"])
+                pooled[name]["trace_ms"] = min(pooled[name]["trace_ms"], row["trace_ms"])
+                pooled[name]["native_n"] += row["native_n"]
+                pooled[name]["trace_n"] += row["trace_n"]
+    for row in pooled.values():
+        row["ratio"] = row["trace_ms"] / row["native_ms"]
+    return pooled
 
 
 def decode_pair_rows(
@@ -254,33 +353,95 @@ def _load_baseline() -> dict[str, Any]:
     return json.loads(BASELINE_PATH.read_text())
 
 
+def _require_quiet_box(when: str) -> None:
+    """Skip (never pass, never fail) when the box is provably loaded."""
+
+    nproc = os.cpu_count() or 1
+    try:
+        load_1m = os.getloadavg()[0]
+    except OSError:
+        return  # cannot prove loaded; measure and let escalation judge
+    if load_1m > nproc * QUIET_LOAD_FRACTION:
+        pytest.skip(
+            f"box load {load_1m:.1f} > {QUIET_LOAD_FRACTION} x {nproc} cores "
+            f"{when}: a floor measured under sustained load is no "
+            f"measurement (contention inflates CPU and wall floors alike); "
+            f"rerun on a quiet box"
+        )
+
+
 @pytest.mark.serial
 def test_small_capture_overhead_within_gate() -> None:
-    """D15 gate: overhead ratio within 10% of the merge-base baseline.
+    """D15 gate: trace floor within 10% of the merge-base baseline floor.
 
-    ``serial`` (the repo's remedy for load-sensitive ratio gates, precedent
-    ``test_pinned_small_capture_fixed_cost_ratio_gate``): the gated metric
-    divides by a tens-of-microseconds native forward, so parallel worker
-    load inflates the ratio directly. Serial does NOT close the quiet-box
-    variance, though — the mlp row's run-to-run spread measured ~30%
-    (ratios 220-313 over 5 quiet runs, 2026-08-17) against a ceiling only
-    10% above baseline, so occasional reds remain possible even unloaded.
-    The durable fix is a measurement-methodology change (more samples or a
-    min-based statistic), which requires a declared re-baselining point —
-    never a wider gate.
+    ``serial`` (the repo's remedy for load-sensitive perf gates, precedent
+    ``test_pinned_small_capture_fixed_cost_ratio_gate``): parallel worker
+    load inflates wall-clock samples directly. On top of serial, the
+    statistic is the min-based trace floor with in-test escalation (see
+    module docstring): a row over the ceiling is re-measured and its
+    samples pooled — pooling only moves a floor estimate DOWN toward the
+    true floor, so escalation absorbs interference and cold-process
+    inflation but a genuine regression stays red. The gate ceiling itself
+    is never widened. Raw milliseconds are same-box quantities, so the
+    context guard turns a torch/box change into an explicit re-baselining
+    point instead of a silently meaningless comparison.
     """
 
     baseline = _load_baseline()
+    assert baseline.get("statistic") == SMALL_CAPTURE_STATISTIC, (
+        f"baseline statistic {baseline.get('statistic')!r} != "
+        f"{SMALL_CAPTURE_STATISTIC!r}: re-record the baseline with "
+        f"`python {Path(__file__).name} --write-baseline --reason ...` — "
+        f"cross-statistic comparison is meaningless"
+    )
+    context = load_context()
+    for key in ("torch_version", "nproc"):
+        assert baseline["context"][key] == context[key], (
+            f"baseline {key}={baseline['context'][key]!r} but this box has "
+            f"{context[key]!r}: millisecond floors are same-box quantities. "
+            f"Re-baseline on this box at a declared point with "
+            f"`python {Path(__file__).name} --write-baseline --reason ...`"
+        )
+    _require_quiet_box("at measurement entry")
     rows = capture_overhead_rows()
-    failures: list[str] = []
-    for name, row in rows.items():
-        base_ratio = baseline["small_capture"][name]["ratio"]
-        ceiling = base_ratio * (1.0 + GATE_CEILING_FRACTION)
-        if row["ratio"] > ceiling:
-            failures.append(
-                f"{name}: ratio {row['ratio']:.2f} > gate {ceiling:.2f} "
-                f"(baseline {base_ratio:.2f} @ {baseline['sha'][:8]})"
-            )
+
+    def over_ceiling() -> dict[str, float]:
+        out: dict[str, float] = {}
+        for name, row in rows.items():
+            base_floor = baseline["small_capture"][name]["trace_ms"]
+            ceiling = base_floor * (1.0 + GATE_CEILING_FRACTION)
+            if row["trace_ms"] > ceiling:
+                out[name] = ceiling
+        return out
+
+    escalations = 0
+    while over_ceiling() and escalations < ESCALATION_ROUNDS:
+        escalations += 1
+        retry = capture_overhead_rows(
+            trace_n=ESCALATION_TRACE_SAMPLES,
+            native_n=ESCALATION_NATIVE_SAMPLES,
+            cases=tuple(over_ceiling()),
+        )
+        for name, row in retry.items():
+            pooled = rows[name]
+            pooled["native_ms"] = min(pooled["native_ms"], row["native_ms"])
+            pooled["trace_ms"] = min(pooled["trace_ms"], row["trace_ms"])
+            pooled["ratio"] = pooled["trace_ms"] / pooled["native_ms"]
+            pooled["native_n"] += row["native_n"]
+            pooled["trace_n"] += row["trace_n"]
+
+    if over_ceiling():
+        # A breach on a box that became loaded mid-run is an invalidated
+        # measurement, not a verdict; a breach on a quiet box is a real red.
+        _require_quiet_box("after escalation")
+    failures = [
+        f"{name}: trace floor {rows[name]['trace_ms']:.2f}ms > gate "
+        f"{ceiling:.2f}ms (baseline "
+        f"{baseline['small_capture'][name]['trace_ms']:.2f}ms @ "
+        f"{baseline['sha'][:8]}, {escalations} escalation(s), "
+        f"{rows[name]['trace_n']:.0f} trace samples pooled)"
+        for name, ceiling in over_ceiling().items()
+    ]
     assert not failures, "; ".join(failures)
 
 
@@ -304,12 +465,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--decode-model", default=os.environ.get("TL_PERF_AB_DECODE_MODEL"))
     parser.add_argument("--steps", type=int, default=DECODE_STEPS)
-    parser.add_argument("--n", type=int, default=12)
+    parser.add_argument("--trace-n", type=int, default=TRACE_SAMPLES)
+    parser.add_argument("--native-n", type=int, default=NATIVE_SAMPLES)
+    parser.add_argument("--repeats", type=int, default=3, help="pooled repeats for baseline writes")
     parser.add_argument("--skip-small", action="store_true")
     parser.add_argument("--write-baseline", action="store_true")
+    parser.add_argument(
+        "--reason",
+        help="required with --write-baseline: why this is a declared re-baselining point",
+    )
     args = parser.parse_args()
+    if args.write_baseline and not args.reason:
+        raise SystemExit("--write-baseline requires --reason (declared re-baselining point)")
 
-    payload: dict[str, Any] = {"context": load_context()}
+    payload: dict[str, Any] = {
+        "context": load_context(),
+        "statistic": SMALL_CAPTURE_STATISTIC,
+    }
     try:
         payload["sha"] = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -322,7 +494,14 @@ def main() -> None:
         payload["sha"] = "unknown"
 
     if not args.skip_small:
-        payload["small_capture"] = capture_overhead_rows(n=args.n)
+        if args.write_baseline:
+            payload["small_capture"] = pooled_capture_overhead_rows(
+                repeats=args.repeats, trace_n=args.trace_n, native_n=args.native_n
+            )
+        else:
+            payload["small_capture"] = capture_overhead_rows(
+                trace_n=args.trace_n, native_n=args.native_n
+            )
     if args.decode_model:
         payload["decode_pair"] = {
             args.decode_model: decode_pair_rows(args.decode_model, steps=args.steps)
@@ -332,6 +511,8 @@ def main() -> None:
     if args.write_baseline:
         if "small_capture" not in payload:
             raise SystemExit("--write-baseline requires the small-capture rows")
+        payload["rebaseline_reason"] = args.reason
+        payload["rebaselined"] = time.strftime("%Y-%m-%d")
         BASELINE_PATH.parent.mkdir(parents=True, exist_ok=True)
         BASELINE_PATH.write_text(json.dumps(payload, indent=2) + "\n")
         print(f"baseline written: {BASELINE_PATH}")

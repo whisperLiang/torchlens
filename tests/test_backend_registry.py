@@ -13,6 +13,7 @@ from typing import Any, cast
 
 import pytest
 import torch
+from _source_corpus import package_ast, package_files, package_source
 from torch import nn
 
 import torchlens as tl
@@ -971,13 +972,13 @@ def test_public_backend_literal_branches_stay_in_registry_or_backends() -> None:
     backend_literals = {"torch", "mlx", "jax", "tinygrad", "paddle", "fake"}
     offenders: list[str] = []
 
-    for source_path in sorted((project_root / "torchlens").rglob("*.py")):
+    for source_path in package_files():
         if any(source_path.is_relative_to(allowed_dir) for allowed_dir in allowed_dirs):
             continue
         if source_path in allowed_files:
             continue
-        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
-        source = source_path.read_text(encoding="utf-8")
+        tree = package_ast(source_path)
+        source = package_source(source_path)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Compare):
                 continue

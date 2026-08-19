@@ -33,7 +33,20 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from _source_corpus import PACKAGE_ROOT as _CORPUS_PACKAGE_ROOT, package_ast, package_files
+
 from torchlens.ir.events import OpEvent
+
+
+def _require_corpus_root(package_root: Path) -> None:
+    """These scans read the shared session corpus, which covers exactly the
+    repo package; any other root would silently scan the wrong tree."""
+
+    resolved = package_root.resolve()
+    assert resolved == _CORPUS_PACKAGE_ROOT, (
+        f"scan root {resolved} != shared corpus root {_CORPUS_PACKAGE_ROOT}"
+    )
+
 
 OPEVENT_FIELDS: frozenset[str] = frozenset(f.name for f in dataclasses.fields(OpEvent))
 
@@ -72,10 +85,11 @@ class ReadSite:
 def static_scan(package_root: Path) -> list[ReadSite]:
     """AST-scan the package for OpEvent-field read sites."""
 
+    _require_corpus_root(package_root)
     sites: list[ReadSite] = []
-    for path in sorted(package_root.rglob("*.py")):
+    for path in package_files():
         rel = str(path.relative_to(package_root.parent))
-        tree = ast.parse(path.read_text(), filename=rel)
+        tree = package_ast(path)
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr in OPEVENT_FIELDS:
                 if isinstance(node.ctx, ast.Load):
@@ -179,13 +193,13 @@ def mutator_inventory(package_root: Path) -> dict[str, list[str]]:
     the ledger PROVES they stay at zero.
     """
 
+    _require_corpus_root(package_root)
     replace_callers: list[str] = []
     amendment_callers: list[str] = []
     inplace_list_writes: list[str] = []
-    for path in sorted(package_root.rglob("*.py")):
+    for path in package_files():
         rel = str(path.relative_to(package_root.parent))
-        text = path.read_text()
-        tree = ast.parse(text, filename=rel)
+        tree = package_ast(path)
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
                 func = node.func

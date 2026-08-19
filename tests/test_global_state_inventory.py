@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import pytest
 import torch
+from _source_corpus import package_ast
 from torch import nn
 
 import torchlens as tl
@@ -887,8 +888,7 @@ def _mutable_module_state_cached(repo: Path) -> dict[tuple[str, str], str]:
     """
 
     trees = {
-        path.relative_to(repo).as_posix(): ast.parse(path.read_text())
-        for path in _package_python_paths(repo)
+        path.relative_to(repo).as_posix(): package_ast(path) for path in _package_python_paths(repo)
     }
     mutated_names = _names_mutated_in_place(trees)
     state: dict[tuple[str, str], str] = {}
@@ -1260,9 +1260,7 @@ def test_hot_state_subset_census_runs_in_the_commit_gate() -> None:
         for path in _package_python_paths(repo)
         if path.relative_to(repo).as_posix().startswith(_HOT_STATE_SUBSET_PREFIXES)
     ]
-    trees = {
-        path.relative_to(repo).as_posix(): ast.parse(path.read_text()) for path in subset_paths
-    }
+    trees = {path.relative_to(repo).as_posix(): package_ast(path) for path in subset_paths}
     mutated_names = _names_mutated_in_place(trees)
     observed: set[tuple[str, str]] = set()
     for relative, tree in trees.items():

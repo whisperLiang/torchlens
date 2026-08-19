@@ -31,6 +31,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import pytest
+from _source_corpus import module_ast as _corpus_ast, module_source as _corpus_source
 
 import torchlens as tl
 from torchlens import options as tl_options
@@ -430,7 +431,7 @@ def scan_package(package_root: Path, base: Path) -> _PackageScan:
     alias_sites: set[str] = set()
     documented: set[str] = set()
     for path in sorted(package_root.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
+        text = _corpus_source(path)
         # Cheap prefilter: nothing this scan looks for is possible unless one of
         # these tokens appears literally in the source, so only those files are
         # parsed. This is what keeps a whole-package AST audit inside the smoke
@@ -441,7 +442,7 @@ def scan_package(package_root: Path, base: Path) -> _PackageScan:
         ):
             continue
         relative = path.relative_to(base).as_posix()
-        tree = ast.parse(text)
+        tree = _corpus_ast(path)
         _visit(tree, relative, "<module>", sites, alias_names, alias_sites)
         _visit_docstrings(tree, relative, documented)
     return _PackageScan(

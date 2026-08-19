@@ -43,6 +43,7 @@ from functools import cache
 from pathlib import Path
 
 import pytest
+from _source_corpus import package_ast, package_files
 
 from torchlens.merged import MergedErrorCode
 from torchlens.runnable import RunnableErrorCode
@@ -701,8 +702,8 @@ def _codeless_io_raises() -> list[str]:
     """Return ``path:line`` for every IO-family raise without a ``code=``."""
 
     offenders: list[str] = []
-    for path in sorted(_PACKAGE_ROOT.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+    for path in package_files():
+        tree = package_ast(path)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Raise) or not isinstance(node.exc, ast.Call):
                 continue

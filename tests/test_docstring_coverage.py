@@ -20,6 +20,7 @@ import functools
 import pathlib
 
 import pytest
+from _source_corpus import module_ast, package_files
 
 PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[1] / "torchlens"
 
@@ -102,7 +103,7 @@ def _is_trivial_property(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
 def _undocumented(path: pathlib.Path) -> list[tuple[str, int]]:
     """Return ``(qualname, lineno)`` for every required-but-undocumented def."""
 
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = module_ast(path)
     found: list[tuple[str, int]] = []
 
     def walk(node: ast.AST, prefix: str) -> None:
@@ -166,7 +167,7 @@ def _scan() -> dict[tuple[str, str], list[int]]:
     """
 
     result: dict[tuple[str, str], list[int]] = {}
-    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+    for path in package_files():
         relative = path.relative_to(PACKAGE_ROOT).as_posix()
         for qualname, lineno in _undocumented(path):
             result.setdefault((relative, qualname), []).append(lineno)
