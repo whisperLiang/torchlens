@@ -40,6 +40,9 @@ The `_render_dot.py` entry point is split across sibling helper modules; all are
 | `_render_nodes.py` | Node construction and raw value helpers |
 | `_render_edges.py` | Edge and endpoint helpers |
 | `_render_leaf.py` | Backward/grad-fn leaf placement and module inference |
+| `_render_ordering.py` | Sibling-ordering scope decision, plain-layout verification, and the DOT rank-group post-pass |
+| `_render_regions.py` | Nested module-cluster (region) subgraph emission and empty-subtree pruning |
+| `_svg_compose.py` | SVG post-processing (image inlining, viewBox normalization) and code-panel composition |
 | `_render_utils.py` | Internal Graphviz helpers shared across rendering paths (subprocess execution, HTML escaping) |
 | `_label_format.py` | Node label formatting helpers |
 | `_edge_multiplicity.py` | Rendered-edge multiplicity disclosure (dedupe registry, honest `xN` edge labels) |

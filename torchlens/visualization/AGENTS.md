@@ -53,6 +53,9 @@ pure-Python rank layout above 20,000 cost units.
 - `_render_nodes.py`: node construction and raw-value helpers for Graphviz rendering.
 - `_render_edges.py`: edge and endpoint helpers for Graphviz rendering.
 - `_render_flow.py`: focus, skip, container, and sibling setup helpers.
+- `_render_ordering.py`: sibling-ordering scope decision, plain-layout verification, and the DOT rank-group post-pass.
+- `_render_regions.py`: nested module-cluster (region) subgraph emission and empty-subtree pruning.
+- `_svg_compose.py`: SVG post-processing (image inlining, viewBox normalization) and code-panel composition.
 - `_render_utils.py`: internal Graphviz helpers shared across rendering paths.
 - `_label_format.py`: node-label formatting helpers.
 - `_edge_multiplicity.py`: rendered-edge multiplicity disclosure (r19 dedupe registry).
@@ -63,7 +66,7 @@ pure-Python rank layout above 20,000 cost units.
 - Graphviz render writes a DOT source file alongside rendered output.
 - Sibling ordering is intentionally scoped to forward unrolled Graphviz dot renders under
   the node cap. The exact in-scope predicate is `_should_order_siblings`
-  (`_render_dot.py`): dot engine AND unrolled mode AND node count under
+  (`_render_ordering.py`): dot engine AND unrolled mode AND node count under
   `SIBLING_ORDER_NODE_CAP` AND no `module=` focus AND
   `vis_intervention_mode == "node_mark"` AND `vis_call_depth >= 1000` — so
   rolled, focused, rank-layout, capped-depth, and large graphs no-op there

@@ -185,7 +185,6 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/debug/_infer_input_shape.py": 2250,
     "torchlens/postprocess/ast_branches.py": 2250,
     "torchlens/visualization/_summary_internal/_builder.py": 2200,
-    "torchlens/visualization/_render_dot.py": 2200,
     "torchlens/visualization/_render_nodes.py": 2150,
     "torchlens/_io/_safe_unpickle.py": 2100,
     "torchlens/visualization/_render_flow.py": 2100,

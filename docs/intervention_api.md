@@ -98,6 +98,15 @@ Forward helpers return `HelperSpec` objects that can be passed to `set`,
 | `tl.swap_with` | `swap_with(other_label, *, force_shape_change=False)` | Tensor and Op-like (`.out`) sources work in memory; **string labels are not supported and raise `HookValueError` immediately** -- no execution path resolves a bare label to another site's tensor today. |
 | `tl.splice_module` | `splice_module(module, *, input="in", output="out", force_shape_change=False)` | Executable in the same environment; not portable and not append-compatible. |
 
+The packaged SAE splice experiment, `torchlens.bridge.sae.splice(...)`
+(documented-unstable), composes `splice_module` with fork + push: it swaps a
+duck-typed SAE's reconstruction (`encode`/`decode` pair; no SAE package
+required) back into the model at one site, replays downstream, and reports
+reconstruction fidelity plus output-level causal effect. The optional
+`latents_edit=` callable transforms the encoded latents before decoding --
+the feature-level causal-testing knob. See
+`notebooks/sae_splice_tutorial.ipynb` for the end-to-end experiment.
+
 ## Backward Helpers
 
 Backward helpers are Tier-1 live/rerun-only helpers.

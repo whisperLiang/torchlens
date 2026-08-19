@@ -254,7 +254,7 @@ _WARN_ONCE_STATE = frozenset(
         ("torchlens/utils/_torch_compat.py", "_warned_missing_capabilities"),
         ("torchlens/utils/introspection.py", "_col_offset_cache_warned"),
         ("torchlens/validation/_stock_layer_grads.py", "_PASS_INDEX_PARSE_WARNED"),
-        ("torchlens/visualization/_render_dot.py", "_SIBLING_ORDER_WARNING_EMITTED"),
+        ("torchlens/visualization/_render_ordering.py", "_SIBLING_ORDER_WARNING_EMITTED"),
         ("torchlens/visualization/auto_collapse.py", "_COUNT_MISMATCH_WARNING_EMITTED"),
     }
 )
