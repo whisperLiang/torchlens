@@ -794,7 +794,11 @@ print(tl.compat.report(model, x).to_markdown())
   per-batch callable (module dotted paths or any TorchLens lookup; `"logits"` = model
   output) and `activations_extractor(...)` wires it into the real helper (requires
   `brainscore_vision`, Python >= 3.11; pinned to the 2.3.22 wheel source, stub-tested,
-  UNVERIFIED against a running install).
+  UNVERIFIED against a running install). `torchlens.bridge.mcp` (extra `torchlens[mcp]`,
+  mcp>=2.0; DOCUMENTED-UNSTABLE) is the Model Context Protocol stdio server (`python -m
+  torchlens.bridge.mcp`): read-only tools over saved `.tlspec` artifacts + environment
+  (doctor / api_map / load_overview / agent_dump / explain), wrapping the same public
+  surface -- no user-code execution, no mutation.
 - DATASET EXTRACTION (D7/V5; `resume=`, `stimulus_ids=`, and the loader
   DOCUMENTED-UNSTABLE): disk-mode `tl.extract_dataset(..., output_dir=)` writes atomic
   shards plus a self-describing `manifest.json` (run signature, per-site identity with

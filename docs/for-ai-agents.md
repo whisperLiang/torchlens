@@ -237,6 +237,33 @@ assert "Capture status" in budgeted
 assert "Truncation" in budgeted  # drops are disclosed, never silent
 ```
 
+## MCP server (`torchlens.bridge.mcp`)
+
+For hosts that speak the Model Context Protocol, `python -m torchlens.bridge.mcp` runs a
+local stdio server (extra: `pip install torchlens[mcp]`, requires `mcp>=2.0`;
+DOCUMENTED-UNSTABLE). It exposes read-only tools over SAVED `.tlspec` artifacts and the
+runtime environment — the same public surface as the rest of this page, never a parallel
+API, with no user-code execution and no mutation:
+
+- `torchlens_doctor` — environment health check (`tl.utils.doctor()` rows).
+- `torchlens_api_map` — machine-readable index of `torchlens.__all__` (name, kind, first
+  docstring line) plus the deliberately-unlisted submodules.
+- `torchlens_load_overview` — `tl.load(path)` + `trace.summary()` + capture honesty facts.
+- `torchlens_agent_dump` — `trace.to_agent_json(max_ops=...)` over a saved artifact.
+- `torchlens_explain` — `tl.report.explain(trace, max_tokens=..., audience=...)`.
+
+Live capture stays a Python-process concern: run `tl.trace(...)` in code, `tl.save(...)`
+the result, and point the tools at the artifact. The tool registry is importable without
+the `mcp` package for direct in-process use:
+
+```python
+import torchlens.bridge.mcp as tlmcp
+
+api_map = tlmcp.call_tool("torchlens_api_map")
+assert api_map["schema"] == "torchlens.api_map.v1"
+assert {row["name"] for row in api_map["names"]} == set(__import__("torchlens").__all__)
+```
+
 ## Anti-patterns
 
 - Do not trace `torch.compile`, `torch.jit`, or `torch.export` artifacts. Trace the original

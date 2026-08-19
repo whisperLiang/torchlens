@@ -98,6 +98,9 @@ neuro = [
 viz = ["torchshow~=0.5", "lovely-tensors~=0.1.18"]
 tabular = ["pandas>=2.0", "pyarrow>=14"]
 captum = ["captum~=0.7"]
+# `mcp` gates the torchlens.bridge.mcp stdio server (python -m torchlens.bridge.mcp);
+# the pure tool layer (TOOL_SPECS / call_tool) works without it.
+mcp = ["mcp>=2.0"]
 sae = ["sae-lens~=6.45; python_version >= '3.10'"]
 # `profiler` is an intentional no-op capability marker: torch.profiler ships with
 # torch itself, so this extra pulls no extra packages but stays advertised so users

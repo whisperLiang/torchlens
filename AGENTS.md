@@ -49,7 +49,11 @@ Key entry points:
   `tl.report.explain(trace, max_tokens=N)` budget-prunes the text report by
   whole sections low-value-first with a disclosed `Truncation` section;
   capture-status honesty facts and partial-capture failure evidence never
-  drop; refuses typed with `format="json"`. Doc: `docs/for-ai-agents.md`.
+  drop; refuses typed with `format="json"`. `torchlens.bridge.mcp` (extra
+  `torchlens[mcp]`, mcp>=2.0) serves read-only MCP stdio tools over saved
+  `.tlspec` artifacts + environment (doctor / api_map / load_overview /
+  agent_dump / explain); no user-code execution, no mutation.
+  Doc: `docs/for-ai-agents.md`.
 - Structure-only capture (DOCUMENTED-UNSTABLE, D8-default):
   `tl.trace(model, x, capture=CaptureOptions(structure_only=True))` records
   structure + shape/dtype HYPOTHESES, never values; value consumers refuse
