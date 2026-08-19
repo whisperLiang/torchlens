@@ -123,6 +123,8 @@ TARGET_ALL = [
     "dead",
     "saturated",
     "low_variance",
+    "neighborhood",
+    "between",
 ]
 
 CANONICAL_SUBMODULES = [
@@ -190,7 +192,9 @@ def test_all_matches_frozen_96_name_surface() -> None:
     and `patch_from` = 104. The L6 producer wave adds the value-based and
     statistical selection producers (DOCUMENTED-UNSTABLE) `top_k`,
     `top_fraction`, `threshold`, `sign`, `dead`, `saturated`, and
-    `low_variance` = 111.
+    `low_variance` = 111. The graph-structural producer wave adds
+    `neighborhood` and `between` (DOCUMENTED-UNSTABLE; the executed-DAG
+    n-hop region and the source-to-sink influence sub-DAG) = 113.
     Paper-era compatibility shims remain available through ``__getattr__`` but
     are not advertised in ``__all__``.
     """

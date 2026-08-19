@@ -178,6 +178,10 @@ _LAZY_ATTRS = {
     "dead": ("torchlens.selection_values", "dead"),
     "saturated": ("torchlens.selection_values", "saturated"),
     "low_variance": ("torchlens.selection_values", "low_variance"),
+    # L6 graph-structural producers (DOCUMENTED-UNSTABLE pending
+    # naming-session ratification; megasprint provisional-name protocol).
+    "neighborhood": ("torchlens.selection_graph", "neighborhood"),
+    "between": ("torchlens.selection_graph", "between"),
 }
 
 _MOVED_OBJECTS = {
@@ -1259,4 +1263,6 @@ __all__ = [
     "dead",
     "saturated",
     "low_variance",
+    "neighborhood",
+    "between",
 ]

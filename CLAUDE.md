@@ -161,7 +161,7 @@ print(tl.compat.report(model, x).to_markdown())
 
 ## Current 2.x Surface
 
-- Top-level `torchlens.__all__` has 105 names: capture, save/load, intervention,
+- Top-level `torchlens.__all__` has 113 names: capture, save/load, intervention,
   selectors, helper transforms, observers, validation, and the three main log classes.
 - Relation accessors on FINISHED traces return IMMUTABLE views (authorized public type
   break, JMT 2026-08-12): label sequences (`op.parents`, `op.children`, `op.modules`,
@@ -566,7 +566,30 @@ print(tl.compat.report(model, x).to_markdown())
   `exact`, and missing/unsaved/shape-drifted sample evidence refuses typed
   with the offending sample named. New extension seam:
   `torchlens.selection.register_term_resolver` (producer modules register
-  frozen AST terms at import; `torchlens/selection_values.py`).
+  frozen AST terms at import; `torchlens/selection_values.py`,
+  `torchlens/selection_graph.py`).
+  GRAPH-STRUCTURAL PRODUCERS + SLICE VIEW (graph wave; DOCUMENTED-UNSTABLE):
+  `tl.neighborhood(of, hops=, direction='both'|'upstream'|'downstream')`
+  (every op within N recorded dataflow hops of the seed region; `hops=0` =
+  the seed family) and `tl.between(sources, sinks)` (the executed sub-DAG on
+  at least one directed source-to-sink path, endpoints included; operands
+  accept lists; no path = EMPTY selection, disclosure not error) select by
+  STRUCTURAL POSITION — whole-site masks, `relation="exact"`, element masks
+  never shrink a graph region (family semantics), PARAM/EDGE operands refuse
+  `selection_kind_incompatible`. Both are pure functions over the ONE
+  executed-DAG substrate (`selection_graph._TraceGraph`, adjacency shared
+  verbatim with the influence-geometry path machinery) — a future graph-
+  MOTIF producer is one more pure function over the same object, not a
+  rewrite. `trace.between(sources, sinks)` returns the SAME region as a
+  `TraceSlice` — a frozen PRESENTER (composition, never a Trace subclass,
+  the MergedTrace precedent): member ops in execution order, internal
+  dataflow edges, and an EXPLICIT boundary (`boundary_in_edges` /
+  `boundary_out_edges` name every crossing edge; `source_ops`/`sink_ops`
+  the entry/exit ops). A slice offers NO save/replay/validate; `tl.save`
+  refuses `slice_save_unsupported`; `__selection__` lifts the member family
+  back into the algebra (slices compose and feed `do()`).
+  `trace.subgraph(selection)` is the general door presenting ANY ACT region
+  as the same view. Session-time only; never persisted.
   CROSS-RUN (L6 stage 4a; DOCUMENTED-UNSTABLE): `resolved.align_to(target)`
   re-binds an ACT selection onto another trace keyed on the L1 structural
   site keys each `SiteEntry` records (`structural_site_key`, now live data),

@@ -470,6 +470,22 @@ def save(
             "tl.save(merged.ranks[r], path).",
             code=MergedErrorCode.MERGED_SURFACE_UNSUPPORTED,
         )
+    # A TraceSlice is likewise a presenter, never a Trace: a slice has
+    # dangling boundary edges whose other ends live outside it, so a
+    # persisted slice would imply replay/validation capabilities it cannot
+    # honour. Same sys.modules gate shape as the MergedTrace refusal above
+    # (owners disjoint; a slice can only exist after its module imported).
+    slice_presenter = sys.modules.get("torchlens.trace_slice")
+    if slice_presenter is not None and isinstance(trace, slice_presenter.TraceSlice):
+        from ..selection import SelectionError
+
+        raise SelectionError(
+            "tl.save() does not support TraceSlice: a slice is a VIEW with "
+            "declared dangling boundary edges, not a self-contained capture. "
+            "Save the underlying trace (tl.save(slice.source_trace, path)) "
+            "and re-derive the view after loading.",
+            code="slice_save_unsupported",
+        )
     # N1: the settled capture outcome gates every export. FAILED, aborted, and
     # UNKNOWN captures never produce a portable artifact (the historical
     # ungated pass-through of failed partials was the hole this closes);

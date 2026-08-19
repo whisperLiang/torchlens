@@ -264,6 +264,7 @@ add names to the top-level `torchlens` namespace:
 | `selector_function_pattern_type_invalid` | `func()` pattern is not a string | Pass a function-name string |
 | `selector_subtraction_operand_invalid` | `selector - other` with a non-selector right operand; subtraction desugars to `and(a, not(b))` over selectors only (L6; spelling DOCUMENTED-UNSTABLE) | Subtract a selector, or build the composition from predicate terms |
 | `skip_fn_boundary_invalid` | `skip_fn` tried to skip an input or output layer | Return False for boundary layers |
+| `slice_save_unsupported` | `tl.save()` received a `TraceSlice`: a slice is a presenter over one trace's sub-DAG with declared dangling boundary edges, never a self-contained capture, so persisting it would imply replay/validation capabilities it cannot honour (L6 graph slice; spelling DOCUMENTED-UNSTABLE) | Save the underlying trace (`tl.save(slice.source_trace, path)`) and re-derive the view after loading |
 | `spec_format_version_unsupported` | Intervention `.tlspec` format version is unknown | Use a supported format version |
 | `summary_fields_invalid` | Summary field names are unknown | Pass documented summary fields |
 | `summary_level_invalid` | Summary level is unknown | Pass a documented summary level |

@@ -725,6 +725,51 @@ shim owed*
   `value_not_saved` / `mask_shape_mismatch` with the offending sample
   named), never silently shrink the evidence set.
 
+**Graph-structural producers: tl.neighborhood / tl.between** — *unstable —
+no deprecation shim owed*
+: Select by WHERE OPS SIT IN THE EXECUTED DAG.
+  `neighborhood(of, hops=, direction=)` selects every op within N recorded
+  dataflow hops of a seed region (`hops=0` is the seed family itself;
+  `direction` is `'both' | 'upstream' | 'downstream'`).
+  `between(sources, sinks)` selects the executed sub-DAG carrying influence
+  from the source region to the sink region — exactly the ops on at least
+  one directed source-to-sink path, endpoints included; no directed path
+  resolves to the EMPTY selection (emptiness is disclosure, never an
+  error). Operands are site label strings (a bare layer label on a
+  multi-pass layer is the all-passes Layer spelling), `Op`/`Layer` handles,
+  or any ACT selection; `between` endpoints also accept lists of regions.
+  Element masks never shrink a graph region (a touched site is a touched
+  node — family semantics). Membership is a structural fact about THIS
+  capture, so entries are whole-site masks with
+  `provenance.relation="exact"`. PARAM/EDGE operands refuse
+  `selection_kind_incompatible`; unknown sites refuse `site_not_in_trace`;
+  member sites with no output index space refuse `non_tensor_site` /
+  `no_index_space`. Both producers are pure functions over the ONE
+  executed-DAG graph substrate (`torchlens.selection_graph._TraceGraph`,
+  shared with the influence-geometry path machinery), the seam a future
+  graph-MOTIF producer plugs into.
+
+**TraceSlice / trace.between / trace.subgraph** — *unstable — no
+deprecation shim owed*
+: `trace.between(sources, sinks)` returns the influence region as a
+  sub-DAG VIEW: the same member set the `tl.between` producer selects (one
+  idea, two binding modes), presented as a `TraceSlice` — a frozen
+  presenter (composition, never a `Trace`/`Bundle` subclass, exactly like
+  `MergedTrace`) exposing the member `Op` records in execution order, the
+  region's internal dataflow edges, and an EXPLICIT BOUNDARY: every edge
+  crossing into the region (`boundary_in_edges` — the external
+  dependencies) or out of it (`boundary_out_edges`) is declared, never
+  silently dropped, plus the region's entry/exit ops
+  (`source_ops`/`sink_ops`). A slice deliberately offers NO
+  save/replay/validate (a region with dangling external inputs cannot
+  honour them); `tl.save` refuses it typed (`slice_save_unsupported`).
+  `__selection__` lifts the member family back into the algebra, so a
+  slice composes under `| & - ~` and feeds `do()`.
+  `trace.subgraph(selection)` is the general door: any ACT region — an
+  n-hop neighborhood, explicit units, a future motif matcher's hits —
+  presents as the same view via its touched-site family. Session-time
+  only; never persisted.
+
 **SelectionError / selection refusal codes** — *unstable — no deprecation
 shim owed; S2-gated*
 : One carrier class (`torchlens.selection.SelectionError`, catalogued in the
@@ -734,7 +779,8 @@ shim owed; S2-gated*
   `site_not_in_trace | value_not_saved | non_tensor_site | no_index_space |
   mask_shape_mismatch | facet_write_mask_unavailable | population_too_small |
   multipass_bare_label | value_criterion_invalid`),
-  and `selection_apply_invalid` (stage 2). The `multipass_bare_label` reason
+  `selection_apply_invalid` (stage 2), and `slice_save_unsupported`
+  (`tl.save` on a `TraceSlice` presenter). The `multipass_bare_label` reason
   is the `tl.units` face of the multi-pass bare-label ambiguity refusal: a
   bare layer label addresses only single-pass layers, and each pass of a
   recurrence-grouped layer must be named pass-qualified (`label:pass`); the

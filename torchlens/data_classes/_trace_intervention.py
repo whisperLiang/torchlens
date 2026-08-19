@@ -6,6 +6,7 @@ fork dispatch, spec management, history records).
 """
 
 import copy
+import sys
 import time
 import uuid
 import warnings
@@ -745,6 +746,13 @@ class TraceInterventionMixin(_TraceMixinBase):
 
         from ..selection import ResolvedSelection, Selection
 
+        # A TraceSlice targets its member family: lift it to the whole-site
+        # QUERY (re-resolved on THIS trace by site name, so a slice built on
+        # the source log addresses the same sites on a fork). sys.modules
+        # gate keeps ordinary do() free of any slice import.
+        slice_module = sys.modules.get("torchlens.trace_slice")
+        if slice_module is not None and isinstance(hooks_or_site, slice_module.TraceSlice):
+            hooks_or_site = hooks_or_site.__selection__()
         if isinstance(hooks_or_site, (Selection, ResolvedSelection)):
             self._warn_if_root_mutation(confirm_mutation=confirm_mutation)
             return self._apply_selection_do(
