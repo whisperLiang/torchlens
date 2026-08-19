@@ -1465,6 +1465,7 @@ def _run_model_and_save_specified_outs(
     distributed_witness: str = "none",
     save_budget: SaveBudgetOption = "auto",
     raise_on_nan: bool = False,
+    track_nonfinite: bool = False,
     structure_only: bool = False,
     transform: Callable[[Any], Any] | None = None,
     raw_input: Any | None = None,
@@ -1595,6 +1596,9 @@ def _run_model_and_save_specified_outs(
             before allocation; this is not a general OOM-prevention guarantee.
         raise_on_nan: If True, stop capture at the first NaN or Inf tensor and raise
             ``CaptureError`` with the offending operation metadata.
+        track_nonfinite: If True, record a per-op finiteness verdict for every
+            committed op output, served by ``Trace.nonfinite_ops`` (session-time
+            knob; never changes control flow).
         transform: Optional callable used to produce model-ready inputs from raw user input.
         raw_input: Original user input before ``transform`` was applied.
         save_raw_input: Portable save policy for the original raw input.
@@ -1829,6 +1833,7 @@ def _run_model_and_save_specified_outs(
         trace._defer_streaming_bundle_finalization = grad_storage_path is not None
         trace._wrapper_runtime_ws.in_exhaustive_pass = True
         trace.raise_on_nan = raise_on_nan
+        trace.track_nonfinite = track_nonfinite
         # L7a mode-marker prep (S2 SEAM, labeled): the flag DECLARES the mode
         # (memo sec 1.5) and stamps the mirror field here at entry. At S2
         # ratification the settlement-side stamp moves to the
@@ -3139,6 +3144,7 @@ def _trace_torch_model(
     cache_dir_value = capture_options.cache_dir
     module_filter_value = capture_options.module_filter
     raise_on_nan_value = capture_options.raise_on_nan
+    track_nonfinite_value = capture_options.track_nonfinite
     structure_only_value = capture_options.structure_only
     facet_recipes = None if isinstance(recipes, MissingType) else recipes
     if capture_options.stop_after is not None:
@@ -3180,6 +3186,7 @@ def _trace_torch_model(
                 streaming_options=streaming_options,
                 lookback_payload_policy=lookback_payload_policy,
                 raise_on_nan_value=raise_on_nan_value,
+                track_nonfinite_value=track_nonfinite_value,
                 intervention_ready=intervention_ready,
                 should_save_grads=should_save_grads,
             ),
@@ -3438,6 +3445,7 @@ def _trace_torch_model(
             payload_policy=capture_options.payload_policy,
             save_preview=capture_options.save_preview,
             raise_on_nan=raise_on_nan_value,
+            track_nonfinite=track_nonfinite_value,
             structure_only=structure_only_value,
         )
         recursive_save_options = SaveOptions(
@@ -3712,6 +3720,7 @@ def _trace_torch_model(
         distributed_witness=capture_options.distributed_witness,
         save_budget=capture_options.save_budget,
         raise_on_nan=raise_on_nan_value,
+        track_nonfinite=track_nonfinite_value,
         structure_only=structure_only_value,
         transform=input_transform,
         raw_input=raw_input,

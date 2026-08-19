@@ -115,6 +115,7 @@ _CAPTURE_FIELDS: Final[tuple[str, ...]] = (
     "save_budget",
     "distributed_witness",
     "raise_on_nan",
+    "track_nonfinite",
     "structure_only",
 )
 _SAVE_FIELDS: Final[tuple[str, ...]] = (
@@ -1058,6 +1059,21 @@ class CaptureOptions:
         cap to enforce those devices.
     raise_on_nan:
         Whether capture should stop at the first NaN or Inf tensor.
+    track_nonfinite:
+        Whether torch capture records a per-op finiteness verdict for every
+        committed op output (DOCUMENTED-UNSTABLE spelling, pending
+        naming-session ratification; no deprecation shim owed on rename).
+        The record is queryable through ``Trace.nonfinite_ops`` /
+        ``Trace.nonfinite_coverage`` and covers ops that retain no payload,
+        which the default post-hoc saved-payload basis cannot examine.
+        Recording never changes control flow (``raise_on_nan`` stays the
+        stop-and-throw). Device (CUDA/MPS) verdict flags are read in one
+        batch after the forward, never per op. OFF by default: on default
+        exhaustive-save captures the free post-hoc basis already covers
+        every op, so paying the per-op check only buys coverage on
+        selective-save captures. Like ``measure_python_peak_memory`` this is
+        a session-time knob: it changes what capture pays for, not what a
+        trace means, and load restores the default.
     structure_only:
         Whether this capture runs under the structure-only contract
         (DOCUMENTED-UNSTABLE surface, pending naming-session/S2 ratification;
@@ -1120,6 +1136,7 @@ class CaptureOptions:
     save_budget: SaveBudgetOption = "auto"
     distributed_witness: str = "none"
     raise_on_nan: bool = False
+    track_nonfinite: bool = False
     structure_only: bool = False
     _specified_fields: frozenset[str] = field(default_factory=frozenset, init=False, repr=False)
 
@@ -1171,6 +1188,7 @@ class CaptureOptions:
         distributed_witness: str | MissingType = MISSING,
         raise_on_nan: bool | MissingType = MISSING,
         *,
+        track_nonfinite: bool | MissingType = MISSING,
         structure_only: bool | MissingType = MISSING,
         mark_layer_depths: bool | MissingType = MISSING,
         num_context_lines: int | MissingType = MISSING,
@@ -1342,6 +1360,9 @@ class CaptureOptions:
             ),
             "raise_on_nan": _resolve_option_value(
                 "raise_on_nan", raise_on_nan, False, specified_fields
+            ),
+            "track_nonfinite": _resolve_option_value(
+                "track_nonfinite", track_nonfinite, False, specified_fields
             ),
             "structure_only": _resolve_option_value(
                 "structure_only", structure_only, False, specified_fields

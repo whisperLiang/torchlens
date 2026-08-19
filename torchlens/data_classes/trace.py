@@ -222,6 +222,7 @@ _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
     "distributed_witness": "none",
     "save_budget": "auto",
     "raise_on_nan": False,
+    "track_nonfinite": False,
     "structure_only": False,
     "intervention_audit": [],
     "keep_orphans": False,
@@ -1332,6 +1333,11 @@ class Trace(
         # ``MODEL_LOG_FIELD_ORDER`` and out of the portable schema.
         "save_budget": FieldPolicy.DROP,
         "raise_on_nan": FieldPolicy.KEEP,
+        # Session-time recording knob (same class as measure_python_peak_memory):
+        # it selects what capture PAID FOR (per-op finiteness checks), not what a
+        # trace means. Portable load restores the default False, so it stays out
+        # of MODEL_LOG_FIELD_ORDER and out of the portable schema.
+        "track_nonfinite": FieldPolicy.DROP,
         "annotations": FieldPolicy.KEEP,
         "observer_spans": FieldPolicy.KEEP,
         "manual_tensor_connections": FieldPolicy.KEEP,
@@ -1531,6 +1537,10 @@ class Trace(
         # invariant. Registered in _io/scrub.py's runtime-only list; declared here
         # so the portable-state cover stays exhaustive. Never portable.
         "_capture_parent_edge_truth": FieldPolicy.DROP,
+        # track_nonfinite's runtime store (events/unchecked/pending), set lazily
+        # by the torch op-finalize hook; same runtime-bookkeeping class as
+        # _capture_parent_edge_truth: never persisted, absent on loaded traces.
+        "_nonfinite_capture": FieldPolicy.DROP,
         "_capture_events": FieldPolicy.DROP,
         "_capture_session": FieldPolicy.DROP,
         "_tl_backward_hooked_tensor_keys": FieldPolicy.DROP,
@@ -1833,6 +1843,7 @@ class Trace(
         self._save_budget_accountant = SaveBudget.from_option(save_budget)
         self.facet_registry_snapshot = facet_registry_snapshot
         self.raise_on_nan: bool = False
+        self.track_nonfinite: bool = False
         self.annotations: dict[str, Any] = {}
         self.code_context: list[FuncCallLocation] = []
         self.manual_tensor_connections: list[tuple[str, str]] = []
@@ -2507,6 +2518,52 @@ class Trace(
         return outcome_for(self)
 
     @property
+    def nonfinite_ops(self) -> tuple[str, ...]:
+        """Return pass-qualified labels of ops whose output held NaN or Inf.
+
+        DOCUMENTED-UNSTABLE spelling (pending naming-session ratification; no
+        deprecation shim owed on rename). This is the queryable per-op record:
+        when this capture ran with ``CaptureOptions(track_nonfinite=True)`` it
+        serves the capture-time verdicts (covering ops that retained no
+        payload); otherwise it derives the answer from the memoized
+        saved-payload scan already backing ``print(trace)``, at zero
+        capture-time cost. An empty tuple is only as strong as its coverage --
+        read :attr:`nonfinite_coverage` before trusting a clean answer from a
+        capture that retained few payloads.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Pass-qualified op labels (``Op.label``) in scan order; each is a
+            valid ``trace[label]`` key.
+        """
+
+        from ._nonfinite import nonfinite_op_labels
+
+        return nonfinite_op_labels(self)
+
+    @property
+    def nonfinite_coverage(self) -> Any:
+        """Return the evidence basis and coverage behind :attr:`nonfinite_ops`.
+
+        DOCUMENTED-UNSTABLE spelling (pending naming-session ratification; no
+        deprecation shim owed on rename). A clean :attr:`nonfinite_ops` answer
+        must not read as a whole-capture verdict when the scan could not
+        examine everything; this discloses the basis (``"capture"`` vs
+        ``"saved_payloads"``) and the checked / unchecked / unexamined counts.
+
+        Returns
+        -------
+        NonfiniteCoverage
+            Frozen coverage record (see
+            :class:`torchlens.data_classes._nonfinite.NonfiniteCoverage`).
+        """
+
+        from ._nonfinite import nonfinite_coverage
+
+        return nonfinite_coverage(self)
+
+    @property
     def model_cls(self) -> type[Any] | None:
         """Return the live source model class when the model is still alive.
 
@@ -3087,6 +3144,7 @@ class Trace(
             "chunked_forward": False,
             "module_filter": None,
             "raise_on_nan": False,
+            "track_nonfinite": False,
             "structure_only": False,
             "intervention_audit": [],
             "keep_orphans": False,

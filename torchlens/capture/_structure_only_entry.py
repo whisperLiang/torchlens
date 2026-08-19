@@ -25,6 +25,7 @@ class _StructureOnlyEntryFacts:
     streaming_options: Any
     lookback_payload_policy: str
     raise_on_nan_value: bool
+    track_nonfinite_value: bool
     intervention_ready: bool
     should_save_grads: bool
 
@@ -76,6 +77,15 @@ def _refuse_structure_only_conflicts(facts: _StructureOnlyEntryFacts) -> None:
             code="structure_only_option_conflict",
             remedy=conflict_remedy,
             arguments=("structure_only", "raise_on_nan"),
+        )
+    if facts.track_nonfinite_value:
+        raise StructureOnlyOptionConflictError(
+            "structure_only=True cannot combine with track_nonfinite=True: a "
+            "structure-only capture has no tensor values for a per-op "
+            "finiteness check to examine",
+            code="structure_only_option_conflict",
+            remedy=conflict_remedy,
+            arguments=("structure_only", "track_nonfinite"),
         )
     if facts.intervention_ready:
         raise StructureOnlyOptionConflictError(
