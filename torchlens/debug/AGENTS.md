@@ -11,6 +11,16 @@ nothing mutates a trace or the capture pipeline.
 - Results are `FindNanResult` / `BisectNanResult`; unsaved ancestors become an
   explicit `uncertainty_zone`, never a silent guess.
 
+## _precision.py
+- `bisect_precision(model, input_args, input_kwargs=None, *, reference_dtype=fp64,
+  rtol=None, atol=None, seed=0)` runs the same seeded forward at native precision and
+  at the reference dtype (deep copies, forked RNG -- caller model/RNG untouched) and
+  returns `BisectPrecisionResult`: first divergent op + full `PrecisionRow` table +
+  disclosed skips. Per-op default tolerances derive from the NATIVE dtype
+  (`rtol=eps**0.5`, `atol=eps*10`); stochastic ops (dropout et al.) are flagged, since
+  RNG consumption is not comparable across dtypes. fp64-on-MPS refuses typed.
+  DOCUMENTED-UNSTABLE spellings.
+
 ## _cost.py
 - `hot_path(trace, by="flops")` ranks ops by cost metric into a pandas DataFrame.
 - `theoretical_op_bytes(op)` estimates input/parameter traffic from metadata only.

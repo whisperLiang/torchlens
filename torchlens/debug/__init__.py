@@ -21,10 +21,13 @@ from ._graph_breaks import (
 )
 from ._infer_input_shape import InferInputShapeResult, infer_input_shape
 from ._nan import BisectNanResult, FindNanResult, bisect_nan, find_nan
+from ._precision import BisectPrecisionResult, PrecisionRow, bisect_precision
 from ._recompute import recompute_candidates
 
 __all__ = [
     "BisectNanResult",
+    "BisectPrecisionResult",
+    "PrecisionRow",
     "AuditFinding",
     "CompileCounts",
     "CompileCountsUnavailableError",
@@ -39,6 +42,7 @@ __all__ = [
     "TraceAudit",
     "audit_trace",
     "bisect_nan",
+    "bisect_precision",
     "find_nan",
     "compare",
     "count_compiles",

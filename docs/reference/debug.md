@@ -64,6 +64,49 @@ Output:
 True nan
 ```
 
+## `bisect_precision`
+
+`tl.debug.bisect_precision(model, input_args)` (DOCUMENTED-UNSTABLE spelling) runs the
+same seeded forward twice -- once at native precision, once with floating state and
+inputs cast to `reference_dtype` (fp64 by default) -- and returns a
+`BisectPrecisionResult` naming the first op whose native output separates from the
+high-precision reference beyond tolerance, plus the full per-op error table in
+`result.rows` and disclosed skips in `result.skipped`. Both runs happen on deep copies
+under a forked RNG, so the caller's model and global RNG are untouched. Default
+tolerances derive from each op's native dtype (`rtol = eps ** 0.5`, `atol = eps * 10`),
+so "diverged" means "lost meaningfully more precision than the dtype itself explains".
+A first divergence at a stochastic op (dropout et al.) is flagged: random kernels may
+consume RNG differently across dtypes, so that usually means mask mismatch, not
+precision loss -- bisect in eval mode.
+
+```python
+import torch
+from torch import nn
+import torchlens as tl
+
+
+class Cancelling(nn.Module):
+    """Model that destroys fp32 mantissa bits at a known op."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pre = nn.Linear(8, 8)
+
+    def forward(self, x):
+        return (self.pre(x) + 1e7) - 1e7
+
+
+torch.manual_seed(0)
+result = tl.debug.bisect_precision(Cancelling().eval(), torch.randn(2, 8))
+print(result.found, result.func_name)
+```
+
+Output:
+
+```text
+True __sub__
+```
+
 ## `compare`
 
 `tl.debug.compare(trace_a, trace_b, *, rtol=1e-5, atol=1e-8)` compares saved dense
