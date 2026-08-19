@@ -3219,6 +3219,11 @@ class Trace(
             state["backward_ready"] = False
         if state.get("measure_python_peak_memory") is None:
             state["measure_python_peak_memory"] = False
+        # ``track_nonfinite`` is FieldPolicy.DROP for the same reason: a loaded
+        # artifact never re-records, so load restores the default and the
+        # queryable record falls back to the saved-payload basis.
+        if state.get("track_nonfinite") is None:
+            state["track_nonfinite"] = False
         if state.get("distributed_witness") is None:
             state["distributed_witness"] = "none"
         # ``save_budget`` is FieldPolicy.DROP, so a portable artifact never
