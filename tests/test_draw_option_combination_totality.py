@@ -152,6 +152,11 @@ DECLARED: dict[str, tuple[str, Any]] = {
     "container_max_inline": (PAIRED, 2),
     "show_input_transform_summary": (PAIRED, True),
     "show_orphans": (PAIRED, True),
+    # Added by the small-builds lane (saved-for-backward viz annotation): marks which
+    # tensors autograd retained, so memory behaviour is visible rather than guessed.
+    # Caught landing UNDECLARED by this suite's own signature tripwire -- the first
+    # cross-lane catch by a totality test built in the same sprint.
+    "show_saved_for_backward": (PAIRED, True),
     "color_by": (PAIRED, "time"),
     "size_by": (PAIRED, "dims"),
     "scale": (PAIRED, "linear"),
