@@ -536,6 +536,10 @@ _PROCESS_CACHES = frozenset(
         ("torchlens/backends/torch/completeness_witness.py", "_FRAMEWORK_FILENAME_VERDICTS"),
         ("torchlens/backends/torch/model_prep.py", "_module_class_metadata_cache"),
         ("torchlens/backends/torch/ops.py", "_CAPTURE_PRODUCER_POLICIES"),
+        # MCP reload cache for saved .tlspec artifacts: mtime-keyed, FIFO-evicted at
+        # 4. Holds traces STRONGLY, so NOT a _WEAK_SUBJECT_TABLES row -- the bound,
+        # not weakness, is what keeps it finite; staleness is the mtime's job.
+        ("torchlens/bridge/mcp.py", "_TRACE_CACHE"),
         ("torchlens/capture/arg_positions.py", "FUNC_ARG_SPECS"),
         ("torchlens/capture/projections.py", "_CAPTURE_POLICY_CACHE"),
         ("torchlens/capture/projectors.py", "_REFRESH_SOURCES"),

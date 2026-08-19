@@ -220,13 +220,16 @@ _MAX_LEDGER_SLACK = 100
 #: 2026-08-17 FEATURE MEGASPRINT wave-0 settle debt record: the L3 telemetry
 #: weak-launch-relation lifecycle row lands after census-settle growth;
 #: test_global_state_inventory re-steps 2450->2500 pending the debloat pass.
-#: 2026-08-19 post-tour sprint: test_global_state_inventory re-steps 2500->2505
-#: for the belt sweep pre-filter's lifecycle row and its 4-line rationale.
-#: Stepped TIGHT (exact, no headroom) on purpose -- this is the THIRD consecutive
-#: conscious raise on this one file, so it is now the top candidate for the SPLIT
-#: this ratchet prefers over a raise. The lifecycle-class frozensets are the
-#: natural seam: they are pure data and carry most of the line count, while the
-#: census machinery and the assertions are what actually need to be read together.
+#: 2026-08-19 post-tour sprint: test_global_state_inventory re-steps 2500->2509
+#: for TWO lifecycle rows landed by two different lanes -- the belt sweep
+#: pre-filter id set and the MCP bridge's bounded reload cache -- each with a
+#: condensed rationale. Stepped EXACT (no headroom) on purpose.
+#: SPLIT THIS FILE. It needed THREE conscious raises inside a SINGLE session,
+#: which is the ratchet saying the file is the problem, not the rows. The natural
+#: seam: the lifecycle-class frozensets are pure data and carry most of the line
+#: count, while the census machinery and the assertions are what must be read
+#: together. Every new global in the package lands here, so the growth is
+#: structural and will recur until the data moves out.
 _TEST_FILE_CEILINGS: dict[str, int] = {
     "tests/test_validation.py": 8600,
     "tests/example_models.py": 5500,
@@ -235,7 +238,7 @@ _TEST_FILE_CEILINGS: dict[str, int] = {
     "tests/test_auto_collapse_metrics.py": 3200,
     "tests/test_backward.py": 2550,
     "tests/validation_goldens/test_validation_exemption_hardening.py": 2400,
-    "tests/test_global_state_inventory.py": 2505,
+    "tests/test_global_state_inventory.py": 2509,
     "tests/test_conditional_branches.py": 2150,
     "tests/test_tlspec_runnable_r41_crossthread_witness.py": 2050,
 }
