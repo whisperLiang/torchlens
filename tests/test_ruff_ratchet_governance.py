@@ -132,7 +132,12 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     # k/fraction into one dual-typed arg would trade an arg-count point for
     # one-name-two-meanings ambiguity. Two independent lanes each raised this
     # ceiling with a stated reason; the count is their UNION, not a pick-one.
-    "PLR0913": 426,
+    # 426->427 (2026-08-19 subspace-producer lane): tl.subspace is a public
+    # producer constructor whose surface is the designed API (within + basis +
+    # mandatory origin= provenance + method/dim/tol); folding origin/method
+    # into a provenance object would add a construction step to the honesty
+    # requirement the producer exists to enforce.
+    "PLR0913": 427,
     # 152->155 (same L8 settle): wrapped_funcol + the criterion-3 census body
     # + capture_completeness_witness gained reviewed statements with plane-P.
     "PLR0915": 155,

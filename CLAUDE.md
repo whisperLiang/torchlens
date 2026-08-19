@@ -587,10 +587,29 @@ print(tl.compat.report(model, x).to_markdown())
   claim, teaching message), cross-pass shape drift refuses, the element
   population is the INTERSECTION of window masks, and the mask lands on
   EVERY window pass-site (`do()` edits every window pass);
-  `relation="exact"`. New extension seam:
+  `relation="exact"`.
+  SUBSPACE PRODUCER (subspace wave; DOCUMENTED-UNSTABLE):
+  `tl.subspace(within, basis, *, origin=, method=None, dim=-1, tol=0.0)`
+  selects the elements a DIRECTION in activation space lives on (probe
+  directions, steering vectors, PCA components, SAE decoder rows; basis
+  `[d]` or `[k, d]`, canonicalized float64). SET, NOT PROJECTION: it
+  resolves to the basis SUPPORT SET (`|w| > tol` on the bound axis, union
+  over rows, expanded across other axes; a dense direction supports the
+  WHOLE axis and `do()` edits every supported element, never "the
+  component along the direction" — projection-valued selections are a
+  named design fork, not a promise). BASIS PROVENANCE MANDATORY:
+  `origin=` required non-empty; origin/method/geometry/sha256 content
+  digest ride `provenance.source` and `do()` audit records
+  (`selection_subspace.BasisProvenance` is the programmatic face).
+  DIMENSION HONESTY: extent mismatch on the bound `dim=` (default `-1`;
+  conv channels `dim=1`) refuses `basis_dim_mismatch`, never
+  broadcast/truncate; `within=` REQUIRED; non-finite or sub-tol-row bases
+  refuse at construction; resolution is geometry-only (unsaved sites
+  resolve); relation `exact`; PARAM/EDGE refuse
+  `selection_kind_incompatible`. New extension seam:
   `torchlens.selection.register_term_resolver` (producer modules register
   frozen AST terms at import; `torchlens/selection_values.py`,
-  `torchlens/selection_graph.py`).
+  `torchlens/selection_graph.py`, `torchlens/selection_subspace.py`).
   GRAPH-STRUCTURAL PRODUCERS + SLICE VIEW (graph wave; DOCUMENTED-UNSTABLE):
   `tl.neighborhood(of, hops=, direction='both'|'upstream'|'downstream')`
   (every op within N recorded dataflow hops of the seed region; `hops=0` =

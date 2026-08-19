@@ -188,6 +188,9 @@ _LAZY_ATTRS = {
     "top_changed": ("torchlens.selection_compare", "top_changed"),
     "stable_across_passes": ("torchlens.selection_compare", "stable_across_passes"),
     "pass_variance": ("torchlens.selection_compare", "pass_variance"),
+    # L6 subspace producer (DOCUMENTED-UNSTABLE pending naming-session
+    # ratification; megasprint provisional-name protocol).
+    "subspace": ("torchlens.selection_subspace", "subspace"),
 }
 
 _MOVED_OBJECTS = {
@@ -1275,4 +1278,5 @@ __all__ = [
     "top_changed",
     "stable_across_passes",
     "pass_variance",
+    "subspace",
 ]
