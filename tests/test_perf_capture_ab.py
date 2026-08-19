@@ -9,6 +9,14 @@ to measurements taken at the sprint merge-base, recorded in
 ceiling: a re-measured gate metric may not exceed its baseline by more than
 10%. The 2% strict advisory mode arrives with the post-features perf pass.
 
+**RATIFIED METRIC (JMT 2026-08-19): the TRACE FLOOR, not a ratio.** D14/D15
+were worded around a native-vs-trace ratio; the ratio was measured to be both
+flaky-red and leaky-green (see the rejected-statistics list below) and is
+therefore superseded. The floor is now the locked gated statistic and the
+ratio is RECORDED FOR PROVENANCE ONLY, never gated. This supersession is
+ruled, not provisional -- do not "restore" the ratio gate on the strength of
+the D14/D15 wording alone.
+
 Two workloads:
 
 1. **Small-capture A/B** — native forward vs ``tl.trace`` on the tiny
@@ -110,6 +118,11 @@ GATE_CEILING_FRACTION = 0.10
 #: against a baseline recorded under a different statistic: a min-based
 #: measurement compared to a median-era baseline would read systematically
 #: low and wave regressions through.
+#:
+#: LOCKED (JMT 2026-08-19): the trace floor is the RATIFIED gated statistic,
+#: superseding the D14/D15 native-vs-trace ratio wording. Changing this token
+#: changes what the gate means and forces a re-baseline, so it takes an
+#: explicit ruling -- not a lane's judgement call.
 SMALL_CAPTURE_STATISTIC = "min_trace_floor_ms_v1"
 
 #: Base sample counts. The native forward is tens-to-hundreds of
