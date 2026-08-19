@@ -374,6 +374,61 @@ def test_complement_is_the_off_support_set(log):
     assert torch.equal(resolved[0].mask, expected)
 
 
+def test_bare_layer_label_on_multipass_layer_supports_every_pass():
+    """A bare recurrent-layer label is the all-passes spelling; each pass is checked."""
+
+    class _Recurrent(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cell = nn.Linear(4, 4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            for _ in range(3):
+                x = torch.tanh(self.cell(x))
+            return x
+
+    torch.manual_seed(3)
+    trace = tl.trace(_Recurrent(), torch.randn(1, 4))
+    try:
+        direction = torch.tensor([1.0, 0.0, 0.0, 1.0])
+        resolved = tl.subspace("tanh_1_2", direction, origin="recurrent probe").resolve(trace)
+        assert len(resolved) == 3  # one entry per pass
+        assert {entry.site_key for entry in resolved} == {
+            ("tanh_1_2", 1),
+            ("tanh_1_2", 2),
+            ("tanh_1_2", 3),
+        }
+        for entry in resolved:
+            expected = torch.zeros(1, 4, dtype=torch.bool)
+            expected[:, [0, 3]] = True
+            assert torch.equal(entry.mask, expected)
+        # The dim check runs per pass: a wrong-width basis refuses on the same spelling.
+        with pytest.raises(SelectionError) as excinfo:
+            tl.subspace("tanh_1_2", torch.ones(5), origin="wrong width").resolve(trace)
+        assert excinfo.value.fields["reason"] == "basis_dim_mismatch"
+    finally:
+        trace.cleanup()
+
+
+def test_align_to_rebinds_a_resolved_subspace_selection(model):
+    """The resolved support set crosses runs through the align_to door."""
+
+    torch.manual_seed(4)
+    trace_a = tl.trace(model, torch.randn(2, 8))
+    torch.manual_seed(5)
+    trace_b = tl.trace(model, torch.randn(2, 8))
+    try:
+        resolved = tl.subspace(_RELU, _sparse_direction(), origin="cross-run probe").resolve(
+            trace_a
+        )
+        rebound = resolved.align_to(trace_b)
+        assert torch.equal(rebound[0].mask, resolved[0].mask)
+        assert "cross-run probe" in rebound[0].provenance.source
+    finally:
+        trace_a.cleanup()
+        trace_b.cleanup()
+
+
 def test_within_selection_restricts_the_population(log):
     """An element-masked within intersects with the support (JOIN composition)."""
 
