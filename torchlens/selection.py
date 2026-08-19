@@ -771,7 +771,7 @@ class Selection:
             (``site_not_in_trace`` / ``value_not_saved`` / ``non_tensor_site``
             / ``no_index_space`` / ``mask_shape_mismatch`` /
             ``facet_write_mask_unavailable`` / ``population_too_small`` /
-            ``multipass_bare_label``).
+            ``multipass_bare_label`` / ``value_criterion_invalid``).
         """
 
         return _resolve_node(self._node, trace, self._kind)
@@ -1960,7 +1960,7 @@ def _edge_family_complement(resolved: ResolvedSelection) -> ResolvedSelection:
 
 
 #: Ordered term-type dispatch for ``_resolve_node`` (combinators handled first).
-_TERM_RESOLVERS: tuple[tuple[type, Any], ...] = (
+_TERM_RESOLVERS: list[tuple[type, Any]] = [
     (_SelectorTerm, _resolve_selector_term),
     (_BoxTerm, _resolve_box_term),
     (_GradientTerm, _resolve_gradient_term),
@@ -1970,4 +1970,16 @@ _TERM_RESOLVERS: tuple[tuple[type, Any], ...] = (
     (_WholeSiteTerm, _resolve_whole_site_term),
     (_RandomTerm, _resolve_random_term),
     (_EdgeTerm, _resolve_edge_term),
-)
+]
+
+
+def register_term_resolver(term_type: type, resolver: Any) -> None:
+    """Register one selection AST term resolver (producer-extension seam).
+
+    Internal seam: sibling producer modules (``selection_values``) register
+    their frozen term types at import time. A term can only enter an AST
+    through its constructor, and the constructor lives in the registering
+    module, so registration always precedes the first resolve of that term.
+    """
+
+    _TERM_RESOLVERS.append((term_type, resolver))

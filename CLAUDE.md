@@ -532,6 +532,28 @@ print(tl.compat.report(model, x).to_markdown())
   `SelectionError` with `selection_unresolvable` + a closed reason set.
   Producers: `tl.units(site, indices)`, `tl.params(name, mask=None)`,
   `tl.random_selection(like=, within=, seed=)` (seeded size-matched control).
+  VALUE + STATISTICAL PRODUCERS (producer wave; DOCUMENTED-UNSTABLE):
+  `tl.top_k(within, k, by=, largest=)` / `tl.top_fraction(within, fraction)`
+  (global deterministic ranking over the population; too-few rankable
+  elements refuse `population_too_small`), `tl.threshold(within, above=,
+  below=, by=)`, `tl.sign(within, 'positive'|'negative'|'zero'|'nonzero',
+  tol=)` (`'zero'` = the sparsity mask / single-capture "didn't fire") read
+  the RESOLUTION trace's retained activations at resolve time — exact-as-set
+  claims about THIS capture (`relation="exact"`); `within=None` means every
+  retained tensor site, PARAM/EDGE populations refuse
+  `selection_kind_incompatible`, unsaved payloads refuse `value_not_saved`,
+  NaN never satisfies a criterion, complex ordered comparisons refuse
+  `value_criterion_invalid`. `tl.dead(samples, tol=)` / `tl.saturated(
+  samples, low=, high=, tol=)` / `tl.low_variance(samples, threshold=)` are
+  explicitly MULTI-SAMPLE (`samples=` iterable of >= 2 Traces; Bundle
+  iterates; the single-capture form is deliberately the different spelling
+  `sign(site,'zero')`): the resolution trace supplies geometry/population
+  only, dispositional claims (dead/saturated) declare
+  `relation="upper_bound"`, the sample statistic (low_variance) declares
+  `exact`, and missing/unsaved/shape-drifted sample evidence refuses typed
+  with the offending sample named. New extension seam:
+  `torchlens.selection.register_term_resolver` (producer modules register
+  frozen AST terms at import; `torchlens/selection_values.py`).
   CROSS-RUN (L6 stage 4a; DOCUMENTED-UNSTABLE): `resolved.align_to(target)`
   re-binds an ACT selection onto another trace keyed on the L1 structural
   site keys each `SiteEntry` records (`structural_site_key`, now live data),

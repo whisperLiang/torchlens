@@ -273,3 +273,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: c5dbbf54e309f99aafb0b00104edcdaa68c6289b (clean)
 recorded: 2026-08-17T22:19:24.604475+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: value/statistical selection producers (selection_values.py) add 4 reviewed SelectionKind consumer sites; producers land as new public names, not a relocation of existing ones
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 42c610dd812a339ce79b4643b912af7c090ad438 (clean)
+recorded: 2026-08-19T07:29:12.058667+00:00

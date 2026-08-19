@@ -116,6 +116,13 @@ TARGET_ALL = [
     "random_selection",
     "Edit",
     "patch_from",
+    "top_k",
+    "top_fraction",
+    "threshold",
+    "sign",
+    "dead",
+    "saturated",
+    "low_variance",
 ]
 
 CANONICAL_SUBMODULES = [
@@ -180,7 +187,10 @@ def test_all_matches_frozen_96_name_surface() -> None:
     naming-session ratification) adds `Selection`, `ResolvedSelection`,
     `units`, `params`, and `random_selection` = 102; its stage 2 adds
     `Edit` (public edit-object type; HelperSpec is the deprecated alias)
-    and `patch_from` = 104.
+    and `patch_from` = 104. The L6 producer wave adds the value-based and
+    statistical selection producers (DOCUMENTED-UNSTABLE) `top_k`,
+    `top_fraction`, `threshold`, `sign`, `dead`, `saturated`, and
+    `low_variance` = 111.
     Paper-era compatibility shims remain available through ``__getattr__`` but
     are not advertised in ``__all__``.
     """

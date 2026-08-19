@@ -5794,6 +5794,22 @@
  {
   "ambiguous": true,
   "field": "kind",
+  "file": "torchlens/selection_values.py",
+  "has_default": false,
+  "sites": 4,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": false,
+  "field": "pass_index",
+  "file": "torchlens/selection_values.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": true,
+  "field": "kind",
   "file": "torchlens/semantic/facets.py",
   "has_default": false,
   "sites": 9,
