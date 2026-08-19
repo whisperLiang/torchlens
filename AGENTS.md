@@ -64,7 +64,18 @@ Key entry points:
   `tl.dead`/`tl.saturated`/`tl.low_variance` (explicitly multi-sample:
   `samples=` iterable of >= 2 Traces, Bundle iterates; dead/saturated are
   dispositional `upper_bound` claims, low_variance is the `exact` sample
-  statistic; the single-capture form is `sign(site,'zero')`).
+  statistic; the single-capture form is `sign(site,'zero')`); graph
+  producers `tl.neighborhood(of, hops=, direction=)` / `tl.between(sources,
+  sinks)` (structural position on the executed DAG: n-hop region and the
+  source-to-sink influence sub-DAG; whole-site exact masks, family
+  semantics, empty = disclosure; pure functions over the one
+  `selection_graph._TraceGraph` substrate a future motif producer extends).
+  `trace.between(sources, sinks)` presents the same region as a
+  `TraceSlice` (frozen presenter, never a Trace: member ops, internal
+  edges, EXPLICIT `boundary_in_edges`/`boundary_out_edges`, no
+  save/replay/validate — `tl.save` refuses `slice_save_unsupported`;
+  `__selection__` lifts it back into the algebra);
+  `trace.subgraph(selection)` is the general slice door for any ACT region.
   Cross-run (stage 4a): `resolved.align_to(target)`
   re-binds ACT selections across runs on L1 site keys, same-policy captures
   only (`selection_alignment_invalid`, closed six-reason set); `do()` still

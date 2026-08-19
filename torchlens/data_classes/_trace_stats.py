@@ -11,6 +11,7 @@ if TYPE_CHECKING:
         ReceptiveFieldStatus,
     )
     from ..report._profile import TraceProfile
+    from ..trace_slice import TraceSlice
     from ..visualization.collapse_plan import CollapsePlan, CollapseSchedule, RenderContext
     from .buffer import BufferAccessor
     from .layer import LayerAccessor
@@ -1752,3 +1753,62 @@ class TraceStatsMixin(_TraceMixinBase):
     def num_grad_fns_without_op(self: "Trace") -> int:
         """Number of grad_fn_handle nodes without a corresponding forward Layer."""
         return sum(1 for grad_fn_handle in self.grad_fn_logs.values() if not grad_fn_handle.has_op)
+
+    def between(self: "Trace", sources: Any, sinks: Any) -> "TraceSlice":
+        """Return the sub-DAG view carrying influence from sources to sinks.
+
+        The graph-VIEW binding of the one influence-region idea: the same
+        member set the ``tl.between(sources, sinks)`` producer selects,
+        presented as a :class:`torchlens.trace_slice.TraceSlice` — member
+        ops, internal dataflow edges, and an EXPLICIT boundary (every edge
+        crossing in or out is declared, so external dependencies are
+        visible rather than silently dropped). A slice is a presenter,
+        never a ``Trace``: it offers no save/replay/validate. No directed
+        path yields the EMPTY slice (emptiness is disclosure).
+        DOCUMENTED-UNSTABLE spelling.
+
+        Parameters
+        ----------
+        sources:
+            One region or a list of regions: site label strings,
+            ``Op``/``Layer`` handles, or any ACT selection.
+        sinks:
+            Same forms as ``sources``.
+
+        Returns
+        -------
+        torchlens.trace_slice.TraceSlice
+            Frozen sub-DAG view (session-time only; never persisted).
+        """
+
+        from ..trace_slice import build_slice_between
+
+        return build_slice_between(self, sources, sinks)
+
+    def subgraph(self: "Trace", selection: Any) -> "TraceSlice":
+        """Return the sub-DAG view of any ACT region of this trace.
+
+        The general slice door: whatever produced the region —
+        ``tl.neighborhood(...)``, ``tl.between(...)``, an explicit
+        ``tl.units(...)``, an ``Op``/``Layer``, or a future graph-motif
+        producer's hits — its touched-site FAMILY becomes the member set
+        (element masks never shrink a graph region), presented with the
+        same explicit-boundary :class:`~torchlens.trace_slice.TraceSlice`
+        contract as :meth:`between`. DOCUMENTED-UNSTABLE spelling.
+
+        Parameters
+        ----------
+        selection:
+            A selection-shaped ACT region (Selection, ResolvedSelection,
+            Op/Layer, receptive-field region, or site label string).
+            PARAM/EDGE selections refuse ``selection_kind_incompatible``.
+
+        Returns
+        -------
+        torchlens.trace_slice.TraceSlice
+            Frozen sub-DAG view (session-time only; never persisted).
+        """
+
+        from ..trace_slice import build_slice_from_selection
+
+        return build_slice_from_selection(self, selection)
