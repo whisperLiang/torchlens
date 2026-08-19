@@ -378,12 +378,21 @@ def _weak_swept_module_ref(
 
     module_id = id(module)
     try:
-        ref = weakref.ref(module, lambda _r, _mid=module_id: _swept_ids_live.discard(_mid))
+        ref = weakref.ref(module, _evict_live_id(module_id))
     except TypeError:
         _swept_ids_live.add(module_id)
         return lambda: module
     _swept_ids_live.add(module_id)
     return ref
+
+
+def _evict_live_id(entry_id: int) -> Callable[[Any], None]:
+    """Death callback evicting ``entry_id`` from the sweep pre-filter live set."""
+
+    def _evict(_ref: Any) -> None:
+        _swept_ids_live.discard(entry_id)
+
+    return _evict
 
 
 def sweep_stale_belt_references() -> int:
@@ -429,9 +438,7 @@ def sweep_stale_belt_references() -> int:
             entry_id = id(module)
             if entry_id not in _swept_ids_live:
                 try:
-                    entry_ref = weakref.ref(
-                        module, lambda _r, _eid=entry_id: _swept_ids_live.discard(_eid)
-                    )
+                    entry_ref = weakref.ref(module, _evict_live_id(entry_id))
                 except TypeError:
                     continue
                 _swept_module_ids[entry_id] = entry_ref
