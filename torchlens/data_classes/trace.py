@@ -1179,8 +1179,7 @@ class Trace(
     _op_accessor_cache: Any
     _layer_accessor_cache: Any
     _receptive_field_solution: Any
-    _rf_source_solutions: Any
-    _rf_target_solutions: Any
+    _rf_directional_solutions: Any
     _tl_rf_probe_active: Any
 
     PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
@@ -1219,8 +1218,7 @@ class Trace(
         "_op_accessor_cache": FieldPolicy.DROP,
         "_layer_accessor_cache": FieldPolicy.DROP,
         "_receptive_field_solution": FieldPolicy.DROP,
-        "_rf_source_solutions": FieldPolicy.DROP,
-        "_rf_target_solutions": FieldPolicy.DROP,
+        "_rf_directional_solutions": FieldPolicy.DROP,
         "module_identity_mode": FieldPolicy.KEEP,
         "param_source": FieldPolicy.KEEP,
         "derived_grads": FieldPolicy.KEEP,
@@ -2899,8 +2897,7 @@ class Trace(
         # "cannot pickle 'mappingproxy' object" while tl.save succeeded on
         # the same trace. They rebuild on first access after restore.
         state.pop("_receptive_field_solution", None)
-        state.pop("_rf_source_solutions", None)
-        state.pop("_rf_target_solutions", None)
+        state.pop("_rf_directional_solutions", None)
         # Render diagnostic from the last draw(): its EncodingChannelSpec can
         # hold the RAW user callable a `color_by=lambda ...` passed in, so
         # carrying it made pickle.dumps crash after an ordinary draw while

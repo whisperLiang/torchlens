@@ -169,7 +169,7 @@ def test_source_solution_cache_is_trace_owned_lru_eight() -> None:
     for source in sources[1:]:
         _engine.solve_from(trace, source)
 
-    cache = trace.__dict__["_rf_source_solutions"]
+    cache = trace.__dict__["_rf_directional_solutions"]["source"]
     assert isinstance(cache, OrderedDict)
     assert len(cache) == 8
     assert sources[0].label not in cache
