@@ -254,7 +254,13 @@ def test_package_percentage_aggregation_is_red_capable() -> None:
 #: substring token) lost its pragma and gained a covering test. The one
 #: surviving wave-0 addition is the _encoding.py import-time two-row
 #: classification guard, unreachable while the completeness pin holds.
-_PRAGMA_NO_COVER_CEILING = 50
+#: 50 -> 51 (2026-08-19 post-tour sprint): debug/_params.py's both-entries-None
+#: guard in the param-diff walk. UNREACHABLE by construction -- ``names`` is the
+#: UNION of both state keysets, so a name cannot be absent from both -- which is
+#: also why it cannot gain a covering test the way the wave-0 reachable raise did.
+#: Raised rather than deleted: it is another module's defensive guard, and trading
+#: a guard for a lint point is the worse side of that bargain.
+_PRAGMA_NO_COVER_CEILING = 51
 
 
 def test_pragma_no_cover_census_never_grows() -> None:

@@ -438,6 +438,15 @@ def _trace_method_sweep(tmp_path: Path, sink: Any) -> dict[str, Any]:
         "activations_by_pass": lambda t: t.activations_by_pass(1),
         "activations_by_address": lambda t: t.activations_by_address("linear"),
         "activation_by_raw_label": lambda t: t.activation_by_raw_label(t.layer_list[0].raw_label),
+        # Post-tour sprint additions. All five are pure reads, so they are SWEPT
+        # rather than excluded: "analysis populated a cache with no persistence
+        # policy" is precisely the draw()-then-save() poison this sweep exists to
+        # catch, and a presenter that builds a sub-DAG view is a prime candidate.
+        "bill_of_materials": lambda t: t.bill_of_materials(),
+        "sites_table": lambda t: t.sites_table(),
+        "to_agent_json": lambda t: t.to_agent_json(),
+        "between": lambda t: t.between(t.input_ops[0].label, t.output_ops[0].label),
+        "subgraph": lambda t: t.subgraph(tl.func("relu")),
         "find_sites": lambda t: t.find_sites("relu"),
         "resolve_sites": lambda t: t.resolve_sites("relu"),
         "stack": lambda t: t.stack(tl.func("relu")),

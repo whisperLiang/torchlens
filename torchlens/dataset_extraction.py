@@ -36,6 +36,7 @@ import torch
 from torch import nn
 
 from ._errors import _actionable_message, _ActionableErrorMixin
+from ._io import _json
 from .errors._base import ConfigurationError
 
 #: Manifest schema identifier written to and required from ``manifest.json``.
@@ -473,7 +474,12 @@ def _load_manifest(manifest_path: Path) -> dict[str, Any]:
     """
 
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        # read_bounded, never json.loads(read_text()): the manifest is a
+        # user-supplied artifact, so read_text() would materialize the whole
+        # file before any ceiling could apply (an over-size manifest is an
+        # allocation DoS). It raises json.JSONDecodeError, a ValueError, so the
+        # handler below catches over-size and over-nested payloads unchanged.
+        manifest = _json.read_bounded(manifest_path)
     except (OSError, ValueError) as exc:
         raise DatasetExtractionResumeError(
             f"Extraction manifest {str(manifest_path)!r} could not be parsed ({exc}).",

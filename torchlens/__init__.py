@@ -34,6 +34,13 @@ _LAZY_ATTRS = {
     # eager import block (options/captured_run+ir/observers/quantities/errors
     # and their transitive chains) is fully deferred behind these rows -- the
     # marginal-import guard in tests/test_import_hygiene.py holds the line.
+    # The single advertised removal window. P4 dropped the eager
+    # ``from ._deprecations import REMOVED_IN as _REMOVED_IN`` to keep
+    # _deprecations off the import path, which also removed the module
+    # attribute the deprecation inventory reads to prove every route
+    # advertises the SAME window. Lazy keeps both: no eager import, name
+    # still resolvable.
+    "_REMOVED_IN": ("torchlens._deprecations", "REMOVED_IN"),
     "ActivationLookup": ("torchlens.captured_run", "ActivationLookup"),
     "AmbiguousOpLookupError": ("torchlens._errors", "AmbiguousOpLookupError"),
     "Bytes": ("torchlens.quantities", "Bytes"),
