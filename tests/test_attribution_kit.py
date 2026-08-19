@@ -30,17 +30,23 @@ _DOCUMENTED_UNSTABLE_TOKENS = {
     "integrated_gradients",
     "layer",
     "mean",
+    "abs_mean",
+    "abs_sum",
+    "max",
     "n_steps",
     "native_map_resolution",
     "occluded_score",
     "occlusion",
     "original_score",
     "overlay",
+    "reduce",
     "relu",
     "rendered_map_resolution",
     "score",
     "selection",
     "selection_digest",
+    "source",
+    "sum",
     "target",
     "target_delta",
     "upsampling",
@@ -181,3 +187,63 @@ def test_attribution_detachability_scanner_is_red_capable(tmp_path: Path) -> Non
     coupled = tmp_path / "coupled.py"
     coupled.write_text("from torchlens.attribution import occlusion\n", encoding="utf-8")
     assert _ATTRIBUTION_PREFIX in _imported_modules(coupled)
+
+
+def _overlay_model() -> nn.Sequential:
+    """Return the small CNN used by the overlay bridge tests."""
+
+    torch.manual_seed(0)
+    return nn.Sequential(
+        nn.Conv2d(3, 4, 3, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(4, 4, 1),
+        nn.ReLU(),
+        nn.AdaptiveAvgPool2d(1),
+        nn.Flatten(),
+        nn.Linear(4, 3),
+    )
+
+
+@pytest.mark.smoke
+def test_overlay_paints_attributed_module_outputs_and_nothing_else() -> None:
+    """Layer-scoped results color their module-output nodes; others stay None."""
+
+    model = _overlay_model()
+    inputs = torch.randn(2, 3, 8, 8)
+    result = tl.attribution.layer_attribution(model, inputs, target=1, layer="2")
+    trace = tl.trace(model, inputs)
+    try:
+        color_by = tl.attribution.overlay(trace, result)
+        expected = result.values.abs().sum().item()
+        assert color_by(trace["conv2d_2_3"]) == pytest.approx(expected)
+        assert color_by(trace["relu_1_2"]) is None
+        assert color_by(trace[trace.input_layers[0]]) is None
+        assert color_by(trace[trace.output_layers[0]]) is None
+    finally:
+        trace.cleanup()
+
+
+@pytest.mark.smoke
+def test_overlay_accepts_mappings_reduces_and_refuses_unknown_keys() -> None:
+    """Mapping keys resolve by module name or layer label; misses refuse typed."""
+
+    model = _overlay_model()
+    inputs = torch.randn(2, 3, 8, 8)
+    trace = tl.trace(model, inputs)
+    try:
+        color_by = tl.attribution.overlay(
+            trace, {"2": torch.tensor([[1.0, -3.0]]), "relu_1_2": 0.5}, reduce="max"
+        )
+        assert color_by(trace["conv2d_2_3"]) == pytest.approx(1.0)
+        assert color_by(trace["relu_1_2"]) == pytest.approx(0.5)
+        with pytest.raises(tl.attribution.AttributionError, match="matches no module"):
+            tl.attribution.overlay(trace, {"not_a_layer": 1.0})
+        with pytest.raises(tl.attribution.AttributionError, match="reduce must be"):
+            tl.attribution.overlay(trace, {"2": 1.0}, reduce="median")
+        with pytest.raises(tl.attribution.AttributionError, match="no extra\\['layer'\\]"):
+            tl.attribution.overlay(
+                trace,
+                [tl.attribution.saliency(model, inputs, target=0)],
+            )
+    finally:
+        trace.cleanup()

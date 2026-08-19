@@ -224,6 +224,51 @@ Output:
 AttributionResult(method='layer_conductance', values=Tensor(shape=(1, 2), dtype=torch.float32, device='cpu'), target_repr='index=0', extra_keys=['layer', 'n_steps'])
 ```
 
+## `overlay` — drawing attribution on the graph
+
+`tl.attribution.overlay(trace, source, *, reduce="abs_sum")` bridges attribution numbers onto
+the graph: it returns a callable for `Trace.draw(color_by=...)` that paints each attributed
+layer's reduced magnitude onto its module-output node and leaves every other node unencoded
+(the legend carries the `n/a = unencoded` note). `source` is one layer-scoped
+`AttributionResult` (its `extra["layer"]` anchors it), an iterable of them, or an explicit
+mapping from `model.named_modules()` name or trace layer label to a result, tensor, or real
+scalar. `reduce` is closed vocabulary: `"abs_sum"` (default), `"abs_mean"`, `"sum"`, `"max"`.
+Unknown keys and unknown reductions raise `AttributionError` naming the fix. A module fired
+several times paints its per-layer total on every one of its nodes; per-pass splits are not
+claimed.
+
+```python
+import torch
+from torch import nn
+import torchlens as tl
+
+torch.manual_seed(0)
+model = nn.Sequential(nn.Linear(2, 4), nn.ReLU(), nn.Linear(4, 2))
+inputs = torch.ones(1, 2)
+results = [
+    tl.attribution.layer_attribution(model, inputs, target=0, layer=name)
+    for name in ("0", "2")
+]
+trace = tl.trace(model, inputs)
+color_by = tl.attribution.overlay(trace, results)
+print(round(color_by(trace["linear_1_1"]), 6) == round(results[0].values.abs().sum().item(), 6))
+print(color_by(trace["relu_1_2"]))
+```
+
+Output:
+
+```text
+True
+None
+```
+
+To render, pass the callable to the ordinary encoding channel — the legend discloses the
+callable source and the min/mid/max ramp:
+
+```text
+trace.draw(color_by=tl.attribution.overlay(trace, results), vis_outpath="attribution_graph")
+```
+
 ## `layer_attribution`
 
 `tl.attribution.layer_attribution(model, inputs, input_kwargs=None, *, target=..., layer=...,
