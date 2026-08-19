@@ -475,7 +475,9 @@ class TorchBackend:
              by inspecting the model's forward() signature.
           3. ``safe_copy_args/kwargs``: clone tensors so in-place device moves
              (in ``fetch_label_move_input_tensors``) don't mutate the caller's data.
-          4. Detect model device from first param or buffer (for auto-moving inputs).
+          4. Detect model device from first param or buffer (for auto-moving
+             inputs). A model with neither pins no device: ``model_device`` is
+             ``None`` and inputs are never moved.
         """
         torch_model = cast(torch.nn.Module, model)
         if isinstance(torch_model, torch.nn.DataParallel):
@@ -488,15 +490,22 @@ class TorchBackend:
         if not input_kwargs:
             input_kwargs = {}
 
-        # Detect device from first param or buffer; fall back to CPU for param-free models.
+        # Detect device from first param or buffer. A model with NO parameters
+        # and NO buffers pins no device: eager execution runs each op on its
+        # operands' devices, so the inputs must stay exactly where the caller
+        # put them (``None`` = no move). The historical ``"cpu"`` fallback
+        # silently dragged CUDA inputs to the CPU and computed the whole
+        # forward there -- first observed on real H200 hardware when the
+        # CUPTI correlation matrix came back empty because the "CUDA" capture
+        # had launched zero kernels.
         first_param = next(torch_model.parameters(), None)
         first_buffer = next(torch_model.buffers(), None)
         if first_param is not None:
-            model_device: object = first_param.device
+            model_device: object | None = first_param.device
         elif first_buffer is not None:
             model_device = first_buffer.device
         else:
-            model_device = "cpu"
+            model_device = None
 
         # Copy args and kwargs as ONE graph so repeated tensor identity, shared
         # storage, view geometry, strides, and offsets survive caller protection.
@@ -535,7 +544,9 @@ class TorchBackend:
         input_kwargs:
             Copied keyword inputs that may be mutated for internal device moves.
         model_device:
-            Device selected by :meth:`setup_inputs_and_device`.
+            Device selected by :meth:`setup_inputs_and_device`, or ``None``
+            for a device-less (parameter- and buffer-free) model whose inputs
+            must stay on their own devices.
 
         Returns
         -------
@@ -604,7 +615,10 @@ class TorchBackend:
             for tensor_idx, (tensor, addr, addr_full) in enumerate(input_arg_tensors[arg_idx]):
                 moved_tensor = moved_tensors_by_id.get(id(tensor))
                 if moved_tensor is None:
-                    moved_tensor = tensor.to(model_device)
+                    # ``model_device is None`` = the model pins no device
+                    # (no parameters or buffers); inputs stay on their own
+                    # devices, matching eager semantics.
+                    moved_tensor = tensor if model_device is None else tensor.to(model_device)
                     moved_tensors_by_id[id(tensor)] = moved_tensor
                 if bool(getattr(tensor, INPUT_WAS_PARAMETER_ATTR, False)):
                     setattr(moved_tensor, INPUT_WAS_PARAMETER_ATTR, True)
@@ -622,7 +636,7 @@ class TorchBackend:
             for tensor_idx, (tensor, addr, addr_full) in enumerate(input_kwarg_tensors[kwarg_idx]):
                 moved_tensor = moved_tensors_by_id.get(id(tensor))
                 if moved_tensor is None:
-                    moved_tensor = tensor.to(model_device)
+                    moved_tensor = tensor if model_device is None else tensor.to(model_device)
                     moved_tensors_by_id[id(tensor)] = moved_tensor
                 if bool(getattr(tensor, INPUT_WAS_PARAMETER_ATTR, False)):
                     setattr(moved_tensor, INPUT_WAS_PARAMETER_ATTR, True)

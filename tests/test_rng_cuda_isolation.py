@@ -342,3 +342,32 @@ def test_cuda_initialized_probe_is_not_cached(monkeypatch: pytest.MonkeyPatch) -
     assert tensor_utils._is_cuda_initialized() is False
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
     assert tensor_utils._is_cuda_initialized() is True
+
+
+@pytest.mark.smoke
+def test_seeding_degrades_when_accelerator_seed_leg_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising accelerator seed leg warns and still seeds the CPU engine.
+
+    ``torch.manual_seed`` seeds every accelerator engine BEFORE the CPU default
+    generator, so an abort from a broken CUDA stack (first observed on real
+    H200 hardware as an ``IndexError`` from ``torch.cuda.default_generators``)
+    used to escape ``set_random_seed`` with the CPU engine unseeded and kill
+    the capture. The degrade path must leave the CPU generator in exactly the
+    state a healthy ``torch.manual_seed`` would have produced.
+    """
+
+    torch.default_generator.manual_seed(1234)
+    expected = torch.randn(4)
+
+    def _explode(seed: int) -> None:
+        """Simulate the CUDA seed leg raising from inside torch."""
+
+        raise IndexError("tuple index out of range")
+
+    monkeypatch.setattr(torch.cuda, "manual_seed_all", _explode)
+
+    with pytest.warns(UserWarning, match="Could not seed torch accelerator RNG"):
+        tl_rng.set_random_seed(1234)
+    assert torch.equal(torch.randn(4), expected)

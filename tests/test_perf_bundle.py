@@ -336,7 +336,15 @@ class TestCudaProbeGating:
         reason="CUDA-only sanity check; skipped without a real CUDA device.",
     )
     def test_cuda_path_still_runs_when_available(self) -> None:
-        """On a CUDA host, ``empty_cache`` must still be invoked."""
+        """On a CUDA host, a CUDA-touching capture still flushes the allocator.
+
+        R36-3 keyed the ``empty_cache`` sites on the CAPTURE having touched
+        CUDA, not on process-wide availability. Both directions are pinned on
+        real hardware: a CUDA-homed capture flushes at least once, and a
+        pure-CPU capture on the same CUDA host must NOT flush the caller's
+        allocator (the exact regression R36-3 fixed -- a CPU-only trace inside
+        a GPU training loop dropping the warm allocator arena).
+        """
 
         from torchlens.utils import tensor_utils
 
@@ -345,11 +353,26 @@ class TestCudaProbeGating:
         with mock.patch.object(
             torch.cuda, "empty_cache", wraps=torch.cuda.empty_cache
         ) as wrapped_empty:
+            model = _NoConditionalModel().to("cuda")
+            x = torch.randn(2, 8, device="cuda")
+            torchlens.trace(model, x)
+
+        assert wrapped_empty.call_count >= 1, (
+            "a CUDA-touching capture on a CUDA host must clear the allocator "
+            f"cache; observed {wrapped_empty.call_count} empty_cache calls."
+        )
+
+        with mock.patch.object(
+            torch.cuda, "empty_cache", wraps=torch.cuda.empty_cache
+        ) as wrapped_empty:
             model = _NoConditionalModel()
             x = torch.randn(2, 8)
             torchlens.trace(model, x)
 
-        assert wrapped_empty.call_count >= 1
+        assert wrapped_empty.call_count == 0, (
+            "a pure-CPU capture on a CUDA host must not flush the caller's "
+            f"allocator (R36-3); observed {wrapped_empty.call_count} calls."
+        )
 
 
 # ---------------------------------------------------------------------------
