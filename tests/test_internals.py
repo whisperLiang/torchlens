@@ -117,11 +117,14 @@ class TestFieldOrderSync:
         # (``save_budget`` was already DROP when this assertion listed only
         # ``measure_python_peak_memory``; that was a stale pin, red on the
         # producer baseline, corrected here. The tlspec v8 bump then added the
-        # two L9 portable markers; the pin went stale the same way again.)
+        # two L9 portable markers; the pin went stale the same way again. The
+        # nonfinite lane's ``track_nonfinite`` is the fourth session knob:
+        # DROP, unordered, load restores the default.)
         session_knobs = {
             "measure_python_peak_memory",
             "save_budget",
             "distributed_witness",
+            "track_nonfinite",
         }
         portable_unordered = {
             "checkpoint_invocation_witness",
