@@ -769,6 +769,59 @@ deprecation shim owed*
   n-hop neighborhood, explicit units, a future motif matcher's hits —
   presents as the same view via its touched-site family. Session-time
   only; never persisted.
+**Differential producers: tl.changed / tl.top_changed** — *unstable — no
+deprecation shim owed*
+: Select by HOW VALUES DIFFER between two runs. The SUBJECT is the resolution
+  trace (masks land on its sites); the REFERENCE is one explicit Trace
+  argument (a fork after `do()`, a capture on another input — deliberately
+  pairwise: multi-sample dispersion is `low_variance(samples=...)`). The
+  delta is directional, `subject - reference`, elementwise in float64;
+  `by='abs'` (default) compares `|delta|`, `by='signed'` the signed delta
+  (increased/decreased). `changed(reference, within=None, above=, below=)`
+  applies strict bounds (neither given defaults to `above=0.0` — bare
+  `changed(ref)` is the "every element that moved" intervention-effect
+  mask); `top_changed(reference, within=None, k= | fraction=, by=,
+  largest=)` globally ranks deltas with the deterministic stable tie-break
+  (exactly one of `k`/`fraction`; `largest=False` selects the least-moved
+  control; too-few rankable refuse `population_too_small`). STRUCTURE
+  HONESTY: the reference must retain a shape-identical payload at every
+  population site's pass-qualified address — missing sites
+  (`site_not_in_trace`), unsaved payloads (`value_not_saved`), shape drift
+  (`mask_shape_mismatch`, all naming the reference), and structural-site-key
+  disagreement (label coincidence across different architectures) refuse
+  typed; structures are NEVER silently intersected, and resolving against
+  the reference itself refuses (vacuous by construction). NaN deltas never
+  satisfy or rank; complex deltas refuse `by='signed'`. Relation is `exact`
+  (the pairwise delta between THESE two captures is complete evidence).
+  PARAM populations refuse `selection_kind_incompatible`: Param records hold
+  a LIVE parameter reference, never capture-time payloads, so
+  "weights that shifted between checkpoints" cannot be claimed honestly from
+  Trace records (compare runnable-save `state_dict_v1` blobs; a
+  capture-time weight differential is a named possibility, not a promise).
+
+**Cross-pass producers: tl.stable_across_passes / tl.pass_variance** —
+*unstable — no deprecation shim owed*
+: Select by behaviour ACROSS a recurrent layer's passes, pass-qualified
+  throughout (one capture is the evidence; population entries group per
+  layer). `stable_across_passes(within=None, tol=, passes=)` selects
+  elements whose range (max - min, float64) across the pass window is
+  `<= tol`; `pass_variance(within=None, above=, below=, passes=)` applies
+  strict bounds on the unbiased (n-1) cross-pass variance (at least one
+  bound; "variance explodes late" = `above=` on a late window).
+  `passes=None` uses every population pass; an explicit window is an
+  iterable of >= 2 distinct 1-based pass indices (each must be in the
+  population, else `site_not_in_trace`, pass-qualified). HONESTY FLOOR: a
+  layer contributing fewer than two window passes refuses
+  `population_too_small` with a teaching message (a single-pass cross-pass
+  claim is vacuous — the default population on a feedforward model refuses
+  loudly rather than returning an everything-mask). Cross-pass shape drift
+  refuses `mask_shape_mismatch`; complex payloads refuse
+  `value_criterion_invalid`; NaN at any window pass excludes the element.
+  The element population is the INTERSECTION of the window entries' masks
+  (complete evidence per element), and the mask lands on EVERY window
+  pass-site — the claim is about the unit across the window, so `do()`
+  edits every window pass. Relation is `exact` (the statistic of this
+  capture's passes; the `low_variance` precedent).
 
 **SelectionError / selection refusal codes** — *unstable — no deprecation
 shim owed; S2-gated*

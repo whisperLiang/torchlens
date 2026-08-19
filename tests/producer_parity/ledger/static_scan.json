@@ -2776,6 +2776,22 @@
   "via_getattr": false
  },
  {
+  "ambiguous": true,
+  "field": "params",
+  "file": "torchlens/data_classes/_trace_inventory.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
+  "ambiguous": false,
+  "field": "pass_index",
+  "file": "torchlens/data_classes/_trace_inventory.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
   "ambiguous": false,
   "field": "is_transform",
   "file": "torchlens/data_classes/_trace_stats.py",
@@ -3272,14 +3288,6 @@
   "via_getattr": true
  },
  {
-  "ambiguous": false,
-  "field": "func_call_id",
-  "file": "torchlens/experimental/dagua/_bridge.py",
-  "has_default": true,
-  "sites": 1,
-  "via_getattr": true
- },
- {
   "ambiguous": true,
   "field": "kind",
   "file": "torchlens/experimental/dagua/_bridge.py",
@@ -3524,7 +3532,7 @@
   "field": "pass_index",
   "file": "torchlens/fastlog/types.py",
   "has_default": false,
-  "sites": 5,
+  "sites": 7,
   "via_getattr": false
  },
  {
@@ -5794,6 +5802,14 @@
  {
   "ambiguous": true,
   "field": "kind",
+  "file": "torchlens/selection_compare.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": true,
+  "field": "kind",
   "file": "torchlens/selection_graph.py",
   "has_default": false,
   "sites": 1,
@@ -6835,6 +6851,14 @@
   "ambiguous": false,
   "field": "layer_type",
   "file": "torchlens/visualization/_label_format.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": false,
+  "field": "layer_type",
+  "file": "torchlens/visualization/_label_format.py",
   "has_default": true,
   "sites": 1,
   "via_getattr": true
@@ -6976,14 +7000,6 @@
   "via_getattr": false
  },
  {
-  "ambiguous": false,
-  "field": "func_call_id",
-  "file": "torchlens/visualization/_render_leaf.py",
-  "has_default": true,
-  "sites": 1,
-  "via_getattr": true
- },
- {
   "ambiguous": true,
   "field": "kind",
   "file": "torchlens/visualization/_render_leaf.py",
@@ -7044,7 +7060,7 @@
   "field": "layer_type",
   "file": "torchlens/visualization/_render_nodes.py",
   "has_default": false,
-  "sites": 4,
+  "sites": 3,
   "via_getattr": false
  },
  {

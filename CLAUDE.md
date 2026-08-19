@@ -564,7 +564,30 @@ print(tl.compat.report(model, x).to_markdown())
   only, dispositional claims (dead/saturated) declare
   `relation="upper_bound"`, the sample statistic (low_variance) declares
   `exact`, and missing/unsaved/shape-drifted sample evidence refuses typed
-  with the offending sample named. New extension seam:
+  with the offending sample named.
+  COMPARATIVE PRODUCERS (comparative wave; DOCUMENTED-UNSTABLE, interface
+  flagged for the UI-sprint review): `tl.changed(reference, within=None,
+  above=, below=, by='abs'|'signed')` / `tl.top_changed(reference,
+  within=None, k=|fraction=, by=, largest=)` select by HOW VALUES DIFFER
+  between two runs — the SUBJECT is the resolution trace, the REFERENCE one
+  explicit Trace (pairwise, directional `subject - reference` in float64;
+  bare `changed(ref)` = the "every element that moved" intervention-effect
+  mask; `relation="exact"`). Structures NEVER silently intersect: reference
+  missing-site/unsaved/shape-drift refusals name the reference, a
+  structural-site-key disagreement refuses (label coincidence across
+  architectures is caught), and self-comparison refuses (vacuous). PARAM
+  populations refuse — Param records hold live refs, never capture-time
+  payloads, so checkpoint weight diffs are not claimable from Traces.
+  `tl.stable_across_passes(within=None, tol=, passes=)` /
+  `tl.pass_variance(within=None, above=, below=, passes=)` select by
+  behaviour ACROSS a recurrent layer's passes (range-within-tol / variance
+  bounds, float64, pass-qualified throughout): windows are explicit >= 2
+  distinct 1-based passes or all population passes, a layer contributing
+  < 2 window passes refuses `population_too_small` (vacuous single-pass
+  claim, teaching message), cross-pass shape drift refuses, the element
+  population is the INTERSECTION of window masks, and the mask lands on
+  EVERY window pass-site (`do()` edits every window pass);
+  `relation="exact"`. New extension seam:
   `torchlens.selection.register_term_resolver` (producer modules register
   frozen AST terms at import; `torchlens/selection_values.py`,
   `torchlens/selection_graph.py`).
@@ -590,6 +613,7 @@ print(tl.compat.report(model, x).to_markdown())
   back into the algebra (slices compose and feed `do()`).
   `trace.subgraph(selection)` is the general door presenting ANY ACT region
   as the same view. Session-time only; never persisted.
+  `torchlens/selection_compare.py`).
   CROSS-RUN (L6 stage 4a; DOCUMENTED-UNSTABLE): `resolved.align_to(target)`
   re-binds an ACT selection onto another trace keyed on the L1 structural
   site keys each `SiteEntry` records (`structural_site_key`, now live data),

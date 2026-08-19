@@ -125,6 +125,10 @@ TARGET_ALL = [
     "low_variance",
     "neighborhood",
     "between",
+    "changed",
+    "top_changed",
+    "stable_across_passes",
+    "pass_variance",
 ]
 
 CANONICAL_SUBMODULES = [
@@ -192,9 +196,15 @@ def test_all_matches_frozen_96_name_surface() -> None:
     and `patch_from` = 104. The L6 producer wave adds the value-based and
     statistical selection producers (DOCUMENTED-UNSTABLE) `top_k`,
     `top_fraction`, `threshold`, `sign`, `dead`, `saturated`, and
-    `low_variance` = 111. The graph-structural producer wave adds
-    `neighborhood` and `between` (DOCUMENTED-UNSTABLE; the executed-DAG
-    n-hop region and the source-to-sink influence sub-DAG) = 113.
+    `low_variance` = 111. Three further 2026-08-19 waves land on top of that,
+    all DOCUMENTED-UNSTABLE: the graph-structural producers `neighborhood` and
+    `between` (executed-DAG n-hop region; source-to-sink influence sub-DAG);
+    the comparative producers `changed`, `top_changed`,
+    `stable_across_passes`, and `pass_variance`; and the semantic/appliance
+    additions from the same sprint. The RUNTIME total is 118 -- asserted
+    against TARGET_ALL below rather than re-derived here, because three
+    concurrent lanes each computed an increment from 111 without knowing about
+    the others and every hand-derived subtotal was wrong.
     Paper-era compatibility shims remain available through ``__getattr__`` but
     are not advertised in ``__all__``.
     """

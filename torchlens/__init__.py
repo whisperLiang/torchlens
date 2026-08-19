@@ -182,6 +182,12 @@ _LAZY_ATTRS = {
     # naming-session ratification; megasprint provisional-name protocol).
     "neighborhood": ("torchlens.selection_graph", "neighborhood"),
     "between": ("torchlens.selection_graph", "between"),
+    # L6 comparative producers: differential + cross-pass (DOCUMENTED-UNSTABLE
+    # pending naming-session ratification; megasprint provisional-name protocol).
+    "changed": ("torchlens.selection_compare", "changed"),
+    "top_changed": ("torchlens.selection_compare", "top_changed"),
+    "stable_across_passes": ("torchlens.selection_compare", "stable_across_passes"),
+    "pass_variance": ("torchlens.selection_compare", "pass_variance"),
 }
 
 _MOVED_OBJECTS = {
@@ -1265,4 +1271,8 @@ __all__ = [
     "low_variance",
     "neighborhood",
     "between",
+    "changed",
+    "top_changed",
+    "stable_across_passes",
+    "pass_variance",
 ]
