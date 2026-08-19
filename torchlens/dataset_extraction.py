@@ -23,6 +23,7 @@ DOCUMENTED-UNSTABLE pending the naming/UI sprint.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -531,10 +532,8 @@ def _clean_orphan_tmp_files(container_path: Path) -> None:
     """
 
     for tmp_path in container_path.glob("*.tmp"):
-        try:
+        with contextlib.suppress(OSError):
             tmp_path.unlink()
-        except OSError:
-            pass
 
 
 def _consume_skipped_stimuli(stimuli: Any, n_skip: int) -> Any:
@@ -624,6 +623,46 @@ def _check_resume_signature(
     )
 
 
+@dataclasses.dataclass(frozen=True)
+class _RunPlan:
+    """Resolved extraction-run configuration shared by the run engines.
+
+    Attributes
+    ----------
+    model:
+        PyTorch model to run (already moved to ``device`` when one was given).
+    stimuli:
+        Stimulus tensor or iterable, as supplied by the caller.
+    layers:
+        The caller's original layer spec (mapping-versus-list semantics).
+    layer_plan:
+        Normalized ``output key -> layer lookup`` plan.
+    layers_kind:
+        ``"mapping"`` or ``"sequence"``.
+    batch_size:
+        Number of stimuli per forward pass.
+    device:
+        Optional device for stimuli movement.
+    transform:
+        Optional tensor transform applied before storage.
+    progress:
+        Whether to wrap batch iteration with ``tqdm``.
+    stimulus_ids:
+        Optional per-stimulus identifiers recorded as provenance.
+    """
+
+    model: nn.Module
+    stimuli: Any
+    layers: Iterable[str] | Mapping[str, str]
+    layer_plan: dict[str, str]
+    layers_kind: str
+    batch_size: int
+    device: torch.device | str | None
+    transform: Callable[[torch.Tensor], torch.Tensor] | None
+    progress: bool
+    stimulus_ids: list[str] | None
+
+
 def extract_dataset(
     model: nn.Module,
     stimuli: Any,
@@ -709,105 +748,197 @@ def extract_dataset(
 
     import torchlens as _tl
 
-    layer_plan = _tl._normalize_extract_layers(layers)
-    layers_kind = "mapping" if isinstance(layers, Mapping) else "sequence"
-    ids_list = list(stimulus_ids) if stimulus_ids is not None else None
+    plan = _RunPlan(
+        model=model,
+        stimuli=stimuli,
+        layers=layers,
+        layer_plan=_tl._normalize_extract_layers(layers),
+        layers_kind="mapping" if isinstance(layers, Mapping) else "sequence",
+        batch_size=batch_size,
+        device=device,
+        transform=transform,
+        progress=progress,
+        stimulus_ids=list(stimulus_ids) if stimulus_ids is not None else None,
+    )
+    if output_dir is None:
+        return _extract_in_memory(plan)
+    return _extract_to_disk(plan, Path(output_dir), resume)
 
-    container_path = Path(output_dir) if output_dir is not None else None
-    manifest: dict[str, Any] | None = None
-    completed_rows: list[dict[str, Any]] = []
-    remaining = stimuli
 
-    if container_path is not None:
-        container_path.mkdir(parents=True, exist_ok=True)
-        manifest_path = container_path / MANIFEST_FILENAME
-        signature = _build_signature(layer_plan, layers_kind, batch_size, transform, stimuli)
-        if resume:
-            if manifest_path.exists():
-                existing = _load_manifest(manifest_path)
-                _check_resume_signature(existing, signature, manifest_path)
-                completed_rows = _completed_prefix(existing, container_path)
-                manifest = existing
-                manifest["batches"] = list(completed_rows)
-                if manifest.get("status") == "complete" and len(completed_rows) == len(
-                    existing.get("batches") or []
-                ):
-                    return [container_path / str(row["file"]) for row in completed_rows]
-                manifest["status"] = "in_progress"
-            elif any(container_path.glob("batch_*.pt")):
-                raise DatasetExtractionResumeError(
-                    f"Output directory {str(container_path)!r} contains batch "
-                    "shards but no manifest; it predates resumable extraction "
-                    "or lost its ledger, so completed work cannot be verified.",
-                    code="extraction_resume_unmanifested_dir",
-                    remedy=(
-                        "delete the output directory (or point output_dir at a "
-                        "fresh one) and re-run"
-                    ),
-                    output_dir=str(container_path),
-                )
-        if manifest is None:
-            manifest = _base_manifest(signature, ids_list)
-        elif ids_list is not None:
-            manifest["stimulus_provenance"]["stimulus_ids"] = ids_list
-        _clean_orphan_tmp_files(container_path)
-        _atomic_write_json(manifest_path, manifest)
-        n_skip = sum(int(row["n_stimuli"]) for row in completed_rows)
-        if n_skip:
-            remaining = _consume_skipped_stimuli(stimuli, n_skip)
+def _batch_iterable(plan: _RunPlan, remaining: Any) -> Iterable[Any]:
+    """Build the (optionally progress-wrapped) batch iterator for a run.
 
-    start_index = len(completed_rows)
-    batch_iterable = _iter_batches(remaining, batch_size)
+    Parameters
+    ----------
+    plan:
+        Resolved run configuration.
+    remaining:
+        Stimuli still to extract (full set, tensor slice, or advanced iterator).
+
+    Returns
+    -------
+    Iterable[Any]
+        Batches suitable for ``model.forward``.
+    """
+
+    batches = _iter_batches(remaining, plan.batch_size)
     total = None
     if isinstance(remaining, torch.Tensor):
-        total = (remaining.shape[0] + batch_size - 1) // batch_size
-    if progress:
+        total = (remaining.shape[0] + plan.batch_size - 1) // plan.batch_size
+    if plan.progress:
         from .utils.display import progress_bar
 
-        batch_iterable = progress_bar(
-            batch_iterable,
-            total=total,
-            desc="torchlens.extract",
-            enabled=progress,
+        batches = progress_bar(batches, total=total, desc="torchlens.extract", enabled=True)
+    return batches
+
+
+def _extract_in_memory(plan: _RunPlan) -> dict[str, torch.Tensor]:
+    """Run the in-memory extraction engine.
+
+    Parameters
+    ----------
+    plan:
+        Resolved run configuration.
+
+    Returns
+    -------
+    dict[str, torch.Tensor]
+        Concatenated outs keyed as :func:`torchlens.extract` keys them.
+    """
+
+    import torchlens as _tl
+
+    accumulator: dict[str, list[torch.Tensor]] = {}
+    for batch in _batch_iterable(plan, plan.stimuli):
+        batch = _move_nested_to_device(batch, plan.device)
+        _trace, batch_outputs, _views = _tl._extract_layers_with_trace(
+            plan.model, batch, plan.layers
         )
+        _merge_batch_outputs(accumulator, batch_outputs, plan.transform)
+    return {label: torch.cat(tensors, dim=0) for label, tensors in accumulator.items()}
 
-    container_paths: list[Path] = (
-        [container_path / str(row["file"]) for row in completed_rows]
-        if container_path is not None
-        else []
+
+def _prepare_disk_run(
+    plan: _RunPlan, container_path: Path, resume: bool
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[Path] | None]:
+    """Prepare the disk-mode manifest and resolve the resume state.
+
+    Parameters
+    ----------
+    plan:
+        Resolved run configuration.
+    container_path:
+        Extraction directory.
+    resume:
+        Whether to continue from an existing ledger.
+
+    Returns
+    -------
+    tuple[dict[str, Any], list[dict[str, Any]], list[Path] | None]
+        The (written) manifest, the trusted completed-shard ledger rows, and —
+        when the artifact is already complete with every shard present — the
+        final shard paths (callers return them without running the model).
+
+    Raises
+    ------
+    DatasetExtractionResumeError
+        On unmanifested shard directories or signature mismatches.
+    """
+
+    container_path.mkdir(parents=True, exist_ok=True)
+    manifest_path = container_path / MANIFEST_FILENAME
+    signature = _build_signature(
+        plan.layer_plan, plan.layers_kind, plan.batch_size, plan.transform, plan.stimuli
     )
-    in_memory: dict[str, list[torch.Tensor]] = {}
-
-    for offset, batch in enumerate(batch_iterable):
-        batch_index = start_index + offset
-        batch = _move_nested_to_device(batch, device)
-        _trace, batch_outputs, layer_views = _tl._extract_layers_with_trace(model, batch, layers)
-        if container_path is not None and manifest is not None:
-            processed = {
-                label: (transform(tensor) if transform is not None else tensor).detach().cpu()
-                for label, tensor in batch_outputs.items()
-            }
-            if manifest.get("layers") is None:
-                manifest["layers"] = _layer_metadata(layer_views, processed)
-            batch_path = container_path / _shard_filename(batch_index)
-            _atomic_torch_save(processed, batch_path)
-            n_rows = next(iter(processed.values())).shape[0] if processed else 0
-            manifest["batches"].append(
-                {"index": batch_index, "file": batch_path.name, "n_stimuli": n_rows}
+    manifest: dict[str, Any] | None = None
+    completed_rows: list[dict[str, Any]] = []
+    if resume and manifest_path.exists():
+        existing = _load_manifest(manifest_path)
+        _check_resume_signature(existing, signature, manifest_path)
+        ledgered_total = len(existing.get("batches") or [])
+        completed_rows = _completed_prefix(existing, container_path)
+        manifest = existing
+        manifest["batches"] = list(completed_rows)
+        if manifest.get("status") == "complete" and len(completed_rows) == ledgered_total:
+            return (
+                manifest,
+                completed_rows,
+                [container_path / str(row["file"]) for row in completed_rows],
             )
-            _atomic_write_json(container_path / MANIFEST_FILENAME, manifest)
-            container_paths.append(batch_path)
-        else:
-            _merge_batch_outputs(in_memory, batch_outputs, transform)
+        manifest["status"] = "in_progress"
+    elif resume and any(container_path.glob("batch_*.pt")):
+        raise DatasetExtractionResumeError(
+            f"Output directory {str(container_path)!r} contains batch shards "
+            "but no manifest; it predates resumable extraction or lost its "
+            "ledger, so completed work cannot be verified.",
+            code="extraction_resume_unmanifested_dir",
+            remedy="delete the output directory (or point output_dir at a fresh one) and re-run",
+            output_dir=str(container_path),
+        )
+    if manifest is None:
+        manifest = _base_manifest(signature, plan.stimulus_ids)
+    elif plan.stimulus_ids is not None:
+        manifest["stimulus_provenance"]["stimulus_ids"] = plan.stimulus_ids
+    _clean_orphan_tmp_files(container_path)
+    _atomic_write_json(manifest_path, manifest)
+    return manifest, completed_rows, None
 
-    if container_path is not None and manifest is not None:
-        manifest["status"] = "complete"
-        manifest["stimulus_provenance"]["n_stimuli"] = sum(
-            int(row["n_stimuli"]) for row in manifest["batches"]
+
+def _extract_to_disk(plan: _RunPlan, container_path: Path, resume: bool) -> list[Path]:
+    """Run the disk-mode extraction engine (atomic shards + manifest ledger).
+
+    Parameters
+    ----------
+    plan:
+        Resolved run configuration.
+    container_path:
+        Extraction directory.
+    resume:
+        Whether to continue from an existing ledger.
+
+    Returns
+    -------
+    list[pathlib.Path]
+        Every shard path in consumption order, including resumed prefixes.
+    """
+
+    import torchlens as _tl
+
+    manifest, completed_rows, complete_paths = _prepare_disk_run(plan, container_path, resume)
+    if complete_paths is not None:
+        return complete_paths
+    n_skip = sum(int(row["n_stimuli"]) for row in completed_rows)
+    remaining = _consume_skipped_stimuli(plan.stimuli, n_skip) if n_skip else plan.stimuli
+    start_index = len(completed_rows)
+    container_paths = [container_path / str(row["file"]) for row in completed_rows]
+
+    for offset, batch in enumerate(_batch_iterable(plan, remaining)):
+        batch_index = start_index + offset
+        batch = _move_nested_to_device(batch, plan.device)
+        _trace, batch_outputs, layer_views = _tl._extract_layers_with_trace(
+            plan.model, batch, plan.layers
+        )
+        processed = {
+            label: (plan.transform(tensor) if plan.transform is not None else tensor).detach().cpu()
+            for label, tensor in batch_outputs.items()
+        }
+        if manifest.get("layers") is None:
+            manifest["layers"] = _layer_metadata(layer_views, processed)
+        batch_path = container_path / _shard_filename(batch_index)
+        _atomic_torch_save(processed, batch_path)
+        n_rows = next(iter(processed.values())).shape[0] if processed else 0
+        manifest["batches"].append(
+            {"index": batch_index, "file": batch_path.name, "n_stimuli": n_rows}
         )
         _atomic_write_json(container_path / MANIFEST_FILENAME, manifest)
-        return container_paths
-    return {label: torch.cat(tensors, dim=0) for label, tensors in in_memory.items()}
+        container_paths.append(batch_path)
+
+    manifest["status"] = "complete"
+    manifest["stimulus_provenance"]["n_stimuli"] = sum(
+        int(row["n_stimuli"]) for row in manifest["batches"]
+    )
+    _atomic_write_json(container_path / MANIFEST_FILENAME, manifest)
+    return container_paths
 
 
 @dataclasses.dataclass(frozen=True)

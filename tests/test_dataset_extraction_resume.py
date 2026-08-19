@@ -198,6 +198,35 @@ def test_resume_recomputes_only_missing_shards(tmp_path: Path) -> None:
         assert torch.equal(loaded.activations[key], tensor)
 
 
+def test_resume_heals_complete_artifact_with_deleted_shard(tmp_path: Path) -> None:
+    """A complete artifact missing a ledgered shard recomputes it, never lies.
+
+    Regression pin: the completeness check must compare against the ledger as
+    recorded, not against the already-truncated trusted prefix (the two
+    aliased the same list in an early draft, which would have returned a
+    truncated path list for a complete-but-damaged artifact).
+    """
+
+    model = _CountingModel().eval()
+    tl.extract_dataset(
+        model, _stimuli(), _LAYERS, batch_size=2, output_dir=tmp_path, progress=False
+    )
+    (tmp_path / "batch_00003.pt").unlink()
+    calls_before = model.n_forward_calls
+    paths = tl.extract_dataset(
+        model,
+        _stimuli(),
+        _LAYERS,
+        batch_size=2,
+        output_dir=tmp_path,
+        progress=False,
+        resume=True,
+    )
+    assert model.n_forward_calls == calls_before + 2, "shards 3 and 4 recomputed"
+    assert [path.name for path in paths] == [f"batch_0000{i}.pt" for i in range(5)]
+    assert load_extraction(tmp_path).manifest["status"] == "complete"
+
+
 def test_resume_with_iterable_stimuli_skips_consumed_prefix(tmp_path: Path) -> None:
     """Iterable stimuli resume by consuming exactly the ledgered prefix."""
 

@@ -208,7 +208,6 @@ def activations_extractor(
     identifier: str | None = None,
     layer_map: Mapping[str, str] | None = None,
     device: torch.device | str | None = None,
-    logits_lookup: str = _LOGITS_LOOKUP,
     **extractor_kwargs: Any,
 ) -> Any:
     """Build a Brain-Score ``ActivationsExtractorHelper`` over TorchLens capture.
@@ -231,10 +230,10 @@ def activations_extractor(
         matching ``PytorchWrapper``.
     layer_map:
         Optional mapping from Brain-Score layer names to TorchLens lookups.
+        The special name ``"logits"`` defaults to the model output; map it
+        here to override.
     device:
         Optional device override for model and stimuli.
-    logits_lookup:
-        TorchLens lookup used for Brain-Score's special ``"logits"`` name.
     **extractor_kwargs:
         Forwarded to ``ActivationsExtractorHelper`` (e.g. ``batch_size=``).
 
@@ -260,12 +259,7 @@ def activations_extractor(
             "(Python >= 3.11): pip install brainscore-vision."
         ) from exc
 
-    get_activations = get_activations_fn(
-        model,
-        layer_map=layer_map,
-        device=device,
-        logits_lookup=logits_lookup,
-    )
+    get_activations = get_activations_fn(model, layer_map=layer_map, device=device)
     return ActivationsExtractorHelper(
         identifier=identifier or model.__class__.__name__,
         get_activations=get_activations,
