@@ -23,6 +23,12 @@ from .facets import (
     transformer_lens_aliases_enabled,
     using,
 )
+from .logit_lens import (
+    LogitLensEntry,
+    LogitLensError,
+    LogitLensResult,
+    logit_lens,
+)
 
 __all__ = [
     "AttentionHeadView",
@@ -33,6 +39,10 @@ __all__ = [
     "FacetRegistrySnapshot",
     "FacetSpec",
     "FacetView",
+    "LogitLensEntry",
+    "LogitLensError",
+    "LogitLensResult",
+    "logit_lens",
     "MissingFacetError",
     "MissingFacet",
     "MissingGradient",

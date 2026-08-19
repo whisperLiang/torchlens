@@ -7,7 +7,7 @@ from importlib import metadata
 from typing import Any
 
 from ..facets import mark_current_registry_as_builtins
-from . import attention, embedding, mlp, norm, residual
+from . import attention, embedding, lm_head, mlp, norm, residual
 
 BUILTIN_FACET_CAPABILITY_INVENTORY: dict[str, dict[str, str]] = {
     "attention": {
@@ -49,6 +49,16 @@ BUILTIN_FACET_CAPABILITY_INVENTORY: dict[str, dict[str, str]] = {
         "resid_pre": "op_structural",
         "resid_mid": "op_structural",
         "resid_post": "op_structural",
+    },
+    "lm_head": {
+        "logits": "op_structural",
+        "unembed_weight": "parameter",
+        "unembed_bias": "parameter",
+        "final_norm_kind": "computed_read_only",
+        "final_norm_eps": "computed_read_only",
+        "final_norm_gamma": "parameter",
+        "final_norm_beta": "parameter",
+        "final_norm_input": "op_structural",
     },
 }
 
@@ -97,6 +107,7 @@ __all__ = [
     "BUILTIN_FACET_CAPABILITY_INVENTORY",
     "attention",
     "embedding",
+    "lm_head",
     "mlp",
     "norm",
     "residual",

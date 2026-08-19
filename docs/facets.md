@@ -355,6 +355,54 @@ find an output projection. `result[..., head, :]` is that head's contribution to
 the projected residual stream; summing heads and adding projection bias matches
 the captured output-projection tensor.
 
+## Unembedding Head and Logit Lens
+
+Every spelling in this section is DOCUMENTED-UNSTABLE pending the naming
+session.
+
+The `language_model_head` recipe matches a module with a conventional
+unembedding child (`lm_head`, `embed_out`, or `output_projection`) and anchors
+the facts a logit-lens projection needs:
+
+```text
+logits            head output op (the model's real output logits)
+unembed_weight    head weight parameter, shape (vocab, d_model)
+unembed_bias      head bias parameter, or structurally absent
+final_norm_kind   "layer_norm" | "rms_norm" for the norm feeding the head
+final_norm_eps    that norm's epsilon
+final_norm_gamma  that norm's weight parameter
+final_norm_beta   that norm's bias parameter (absent for RMSNorm)
+final_norm_input  op-anchored norm input, when the anchor is unambiguous
+```
+
+The final norm is derived structurally from the traced dataflow (the innermost
+classified norm module containing the head's input op), never by a name search
+over the module tree.
+
+`torchlens.semantic.logit_lens` projects each block's residual-stream facet
+through the model's own final norm + unembedding:
+
+```python
+from torchlens.semantic import logit_lens
+
+result = logit_lens(log)                      # resid_post through the model's head
+print(result.summary(tokenizer=tokenizer))    # per-layer top-1 table
+result.entries[3].logits                      # one layer's projected logits
+result.stacked()                              # (n_layers, *logits_shape)
+result.top_tokens(5, tokenizer=tokenizer)     # per-layer top-k (token, prob)
+```
+
+The reconstructed lens is validated before use: applying it to the LAST
+block's captured `resid_post` must reproduce the model's captured logits, so a
+head the reconstruction cannot represent (nonstandard norm scaling such as a
+`(1 + weight)` RMSNorm, an extra projection, dropout before the head) refuses
+with `LogitLensError` instead of silently mislabeling layers. Pass
+`validate=False` to trust the reconstruction explicitly, `lens=` to supply
+your own callable (or per-address mapping, e.g. a tuned lens), and `layers=` /
+`facet=` to control what is projected. Architecture coverage extends through
+facet recipes producing the same facet names -- the appliance never special
+cases architectures.
+
 ## Fallback
 
 Every module has structural facets even with no semantic recipe. This gives a
