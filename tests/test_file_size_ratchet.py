@@ -127,7 +127,12 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     # 4200 -> 4050: the wave-0 governance sweep extracted the structure-only
     # Layer-0 entry contract to capture/_structure_only_entry.py; re-keyed
     # down to the next 50-line step above the post-split measurement.
-    "torchlens/user_funcs.py": 4050,
+    # 4050 -> 4055 (2026-08-19 async-disk lane, measured at merge): tl.to_disk
+    # gains the documented async_writes/max_pending_bytes knobs. The lane settled
+    # its own ceiling to 4050 BEFORE rebasing; main had independently grown the
+    # same file, so 4050 was a pre-rebase subtotal and the merged truth is their
+    # union. Stepped EXACT (no 50-line slack) so the next raise is also conscious.
+    "torchlens/user_funcs.py": 4055,
     "torchlens/backends/torch/backward.py": 4450,
     # 3800 -> 3850: L1 adds the grouping knob mirror + grouping_policy stamp
     # settlement (~25 lines) on top of the re-stepped feature-sprint baseline.
