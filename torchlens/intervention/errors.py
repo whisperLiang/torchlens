@@ -127,6 +127,18 @@ class MultiMatchWarning(TorchLensInterventionWarning):
     """Informational warning for selector queries that resolve multiple sites."""
 
 
+class PendingValueEditsWarning(TorchLensInterventionWarning):
+    """A new-input run was requested on a trace carrying value-edits.
+
+    ``do()``-style edits rewrite SAVED values and push them downstream on the
+    captured DAG (path 1); ``run(inputs=...)`` is a FRESH execution of the
+    live model, so those edits say nothing about the new inputs and are not
+    applied. Emitted at the run door so the coherent-but-surprising
+    combination is disclosed instead of silently returning an un-edited
+    verified run. DOCUMENTED-UNSTABLE spelling pending the naming session.
+    """
+
+
 class BufferThreadGapWarning(TorchLensInterventionWarning):
     """A replayed buffer version could not be threaded from its writing op.
 
