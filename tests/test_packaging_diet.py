@@ -438,7 +438,17 @@ def test_built_wheel_manifest_is_diet(tmp_path: Path) -> None:
     # repo root is importable as a package named `build` WITHOUT a __main__, so
     # find_spec("build") can succeed while `python -m build` then dies with
     # "'build' is a package and cannot be directly executed".
-    if importlib.util.find_spec("build.__main__") is not None:
+    #
+    # find_spec imports the PARENT first and so RAISES ModuleNotFoundError when
+    # `build` is absent entirely, rather than returning None -- which is exactly
+    # the CI case (build is a declared dev dependency now, but this probe must
+    # still degrade to the pip fallback instead of erroring).
+    try:
+        has_build_main = importlib.util.find_spec("build.__main__") is not None
+    except ModuleNotFoundError:
+        has_build_main = False
+
+    if has_build_main:
         command = [
             sys.executable,
             "-m",

@@ -168,6 +168,15 @@ dev = [
     "mypy==2.1.0",
     "pip-audit==2.10.1",
     "pre-commit>=4,<5",
+    # The packaging gates (test_built_wheel_manifest_is_diet,
+    # test_built_sdist_manifest_is_governed) shell out to `python -m build`, and
+    # `build` was declared NOWHERE. It happened to be present in local venvs and
+    # ABSENT in CI, so the sdist gate had never actually run there -- it died on
+    # ModuleNotFoundError, briefly disguised as a `./build/` shadowing error,
+    # while the wheel gate silently fell back to `pip wheel`. Declared so both
+    # gates have a real installed dependency instead of an ambient one
+    # (2026-08-19).
+    "build>=1.2",
     # jsonschema/referencing back the menagerie crawler's payload validation
     # (menagerie/crawler/schema.py: Draft202012Validator + a referencing Registry).
     # This is internal contributor/automation tooling, not a torchlens runtime
