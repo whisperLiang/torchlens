@@ -107,6 +107,11 @@ def test_trace_field_set_subset_of_user_facing() -> None:
         "distributed_witness",
         "save_budget",
         "_save_budget_accountant",
+        # Session-time per-op finiteness recording knob (the exact sibling of
+        # ``measure_python_peak_memory``): declared ``FieldPolicy.DROP`` with
+        # component owner "capture_config"; read back by the op-finalize hook
+        # and never persisted.
+        "track_nonfinite",
         # M5 Op seam: the per-trace columnar row store backing every Op
         # facade. Declared ``FieldPolicy.DROP`` with a component owner
         # (``_trace_components.py`` -> "graph"); plain pickle re-materializes

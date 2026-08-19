@@ -53,6 +53,7 @@ from ...capture.projections import (
 from ...capture.salient_args import extract_salient_args
 from ...capture.session import capture_session_for
 from ...capture.stop import evaluate_halt_stop, stop_directive_for_trace
+from ...data_classes._nonfinite import record_op_nonfinite
 from ...data_classes.internal_types import FuncExecutionContext
 from ...data_classes.op import (
     Op,
@@ -877,6 +878,9 @@ _module_filter_namespace = _rebind_function(_ops_finalize._module_filter_namespa
 _make_layer_log_entry = _rebind_function(_ops_finalize._make_layer_log_entry, globals())
 _raise_if_nonfinite_requested = _rebind_function(
     _ops_finalize._raise_if_nonfinite_requested, globals()
+)
+_record_nonfinite_if_requested = _rebind_function(
+    _ops_finalize._record_nonfinite_if_requested, globals()
 )
 
 _split_namespace = {name: value for name, value in globals().items() if not name.startswith("__")}

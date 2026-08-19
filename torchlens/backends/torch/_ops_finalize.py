@@ -16,6 +16,7 @@ from ...capture.projections import (
 )
 from ...capture.session import capture_session_for
 from ...capture.stop import stop_directive_for_trace
+from ...data_classes._nonfinite import record_op_nonfinite
 from ...data_classes.op import (
     _recursive_safe_copy,
 )
@@ -61,6 +62,7 @@ __all__ = (
     "_module_filter_namespace",
     "_make_layer_log_entry",
     "_raise_if_nonfinite_requested",
+    "_record_nonfinite_if_requested",
 )
 
 
@@ -299,9 +301,37 @@ def _make_layer_log_entry(
     )
     if predicate_ctx is not None and not save_this_activation:
         _retain_lookback_candidate(self, predicate_ctx, fields_dict, t)
+    _record_nonfinite_if_requested(self, t, new_entry)
     _raise_if_nonfinite_requested(self, t, new_entry)
 
     return new_entry
+
+
+def _record_nonfinite_if_requested(self: Any, tensor: torch.Tensor, entry: Any) -> None:
+    """Record this op output's finiteness when ``track_nonfinite`` is enabled.
+
+    Independent of ``raise_on_nan`` (which stays a stop-and-throw and is
+    untouched): recording never changes control flow, only lands a per-op
+    verdict in the trace-side runtime store served by
+    ``Trace.nonfinite_ops`` / ``Trace.nonfinite_coverage``. Device flags are
+    deferred, never read here, so the forward is never synchronized per op.
+
+    Parameters
+    ----------
+    self:
+        Active ``Trace`` instance.
+    tensor:
+        Tensor output produced by the just-logged operation.
+    entry:
+        Newly registered layer pass log for ``tensor``.
+    """
+
+    if not getattr(self, "track_nonfinite", False):
+        return
+    raw_label = getattr(entry, "_label_raw", getattr(entry, "_layer_label_raw", None))
+    if raw_label is None:
+        return
+    record_op_nonfinite(self, tensor, str(raw_label))
 
 
 def _raise_if_nonfinite_requested(self: Any, tensor: torch.Tensor, entry: Any) -> None:
@@ -322,10 +352,19 @@ def _raise_if_nonfinite_requested(self: Any, tensor: torch.Tensor, entry: Any) -
         If ``self.raise_on_nan`` is enabled and ``tensor`` contains NaN or Inf.
     """
 
-    if not getattr(self, "raise_on_nan", False) or tensor.numel() == 0:
+    if not getattr(self, "raise_on_nan", False):
         return
     try:
         with pause_logging():
+            # The ``numel()`` read MUST also sit under pause_logging: ``numel``
+            # is a wrapped call, and running it bare on a just-committed BUFFER
+            # source tensor (not yet registered as logged) re-entered buffer
+            # source logging and recursed without bound -- raise_on_nan=True
+            # crashed with RecursionError on ANY BatchNorm-bearing model. The
+            # check semantics are byte-identical (empty tensors still return,
+            # the same kernel decides, the same abort fires).
+            if tensor.numel() == 0:
+                return
             # fp8 has no ``isfinite`` kernel, and ``NotImplementedError`` is a
             # ``RuntimeError`` subclass -- so without the exact float32 widening this
             # tripwire SILENTLY declined to check every fp8 activation. Widening keeps

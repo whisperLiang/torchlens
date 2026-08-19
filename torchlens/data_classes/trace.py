@@ -222,6 +222,7 @@ _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
     "distributed_witness": "none",
     "save_budget": "auto",
     "raise_on_nan": False,
+    "track_nonfinite": False,
     "structure_only": False,
     "intervention_audit": [],
     "keep_orphans": False,
@@ -1332,6 +1333,11 @@ class Trace(
         # ``MODEL_LOG_FIELD_ORDER`` and out of the portable schema.
         "save_budget": FieldPolicy.DROP,
         "raise_on_nan": FieldPolicy.KEEP,
+        # Session-time recording knob (same class as measure_python_peak_memory):
+        # it selects what capture PAID FOR (per-op finiteness checks), not what a
+        # trace means. Portable load restores the default False, so it stays out
+        # of MODEL_LOG_FIELD_ORDER and out of the portable schema.
+        "track_nonfinite": FieldPolicy.DROP,
         "annotations": FieldPolicy.KEEP,
         "observer_spans": FieldPolicy.KEEP,
         "manual_tensor_connections": FieldPolicy.KEEP,
@@ -1531,6 +1537,10 @@ class Trace(
         # invariant. Registered in _io/scrub.py's runtime-only list; declared here
         # so the portable-state cover stays exhaustive. Never portable.
         "_capture_parent_edge_truth": FieldPolicy.DROP,
+        # track_nonfinite's runtime store (events/unchecked/pending), set lazily
+        # by the torch op-finalize hook; same runtime-bookkeeping class as
+        # _capture_parent_edge_truth: never persisted, absent on loaded traces.
+        "_nonfinite_capture": FieldPolicy.DROP,
         "_capture_events": FieldPolicy.DROP,
         "_capture_session": FieldPolicy.DROP,
         "_tl_backward_hooked_tensor_keys": FieldPolicy.DROP,
@@ -1833,6 +1843,7 @@ class Trace(
         self._save_budget_accountant = SaveBudget.from_option(save_budget)
         self.facet_registry_snapshot = facet_registry_snapshot
         self.raise_on_nan: bool = False
+        self.track_nonfinite: bool = False
         self.annotations: dict[str, Any] = {}
         self.code_context: list[FuncCallLocation] = []
         self.manual_tensor_connections: list[tuple[str, str]] = []
@@ -3087,6 +3098,7 @@ class Trace(
             "chunked_forward": False,
             "module_filter": None,
             "raise_on_nan": False,
+            "track_nonfinite": False,
             "structure_only": False,
             "intervention_audit": [],
             "keep_orphans": False,
@@ -3161,6 +3173,11 @@ class Trace(
             state["backward_ready"] = False
         if state.get("measure_python_peak_memory") is None:
             state["measure_python_peak_memory"] = False
+        # ``track_nonfinite`` is FieldPolicy.DROP for the same reason: a loaded
+        # artifact never re-records, so load restores the default and the
+        # queryable record falls back to the saved-payload basis.
+        if state.get("track_nonfinite") is None:
+            state["track_nonfinite"] = False
         if state.get("distributed_witness") is None:
             state["distributed_witness"] = "none"
         # ``save_budget`` is FieldPolicy.DROP, so a portable artifact never

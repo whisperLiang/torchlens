@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import weakref
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 import torch
@@ -481,3 +482,228 @@ def nonfinite_layers(log: Any, *, kind: str = "saved") -> list[Any]:
     """
 
     return _resolve(log, kind, stop_at_first=False)
+
+
+# ---------------------------------------------------------------------------
+# Capture-time per-op recording (``CaptureOptions(track_nonfinite=True)``)
+# ---------------------------------------------------------------------------
+
+# Trace-side runtime store, set lazily on the first recorded op (same
+# runtime-bookkeeping class as ``_capture_parent_edge_truth``: declared
+# ``FieldPolicy.DROP``, never persisted, absent on loaded traces). Keys:
+# ``events`` maps raw op label -> bool (True = the op's output held a NaN or
+# Inf), ``unchecked`` lists raw labels whose dtype has no runnable finiteness
+# kernel, and ``pending`` holds (raw_label, 0-dim device bool flag) pairs whose
+# host read is deferred so a CUDA/MPS capture never pays a per-op device
+# synchronization -- the flags are drained in ONE batch at the capture
+# finalize seam, after the forward has already completed.
+_CAPTURE_STORE_ATTR = "_nonfinite_capture"
+
+
+def record_op_nonfinite(trace: Any, tensor: torch.Tensor, raw_label: str) -> None:
+    """Record one op output's finiteness during capture.
+
+    Called from the torch op-finalize hot path only when
+    ``trace.track_nonfinite`` is enabled. The check kernel is
+    ``torch.isfinite(out).all()`` (one reduction, no inverted full-size
+    temporary); fp8 payloads are widened exactly first, matching the
+    post-hoc scan's verdict. CPU flags are read immediately (a host read of
+    a CPU scalar is free); flags on any other device are deferred as 0-dim
+    bool tensors and drained at the capture finalize seam so the forward's
+    stream is never synchronized per op.
+
+    Parameters
+    ----------
+    trace:
+        Active ``Trace`` instance.
+    tensor:
+        Tensor output produced by the just-logged operation.
+    raw_label:
+        The op's raw (pre-postprocessing) label, the store key.
+    """
+
+    store = trace.__dict__.get(_CAPTURE_STORE_ATTR)
+    if store is None:
+        store = {"events": {}, "unchecked": [], "pending": []}
+        trace.__dict__[_CAPTURE_STORE_ATTR] = store
+    try:
+        # EVERY tensor read here is under pause_logging -- even ``numel()`` is a
+        # wrapped call, and running it bare mid-commit on a buffer source
+        # re-enters source logging and recurses without bound.
+        with pause_logging():
+            if tensor.numel() == 0:
+                # An empty tensor holds no elements: "no NaN/Inf" is exact.
+                store["events"][raw_label] = False
+                return
+            probe = tensor.detach()
+            if probe.dtype in get_fp8_dtypes():
+                probe = fp8_widen_for_numeric_ops(probe)
+            flag = torch.isfinite(probe).all()
+            if flag.device.type == "cpu":
+                store["events"][raw_label] = not bool(flag.item())
+            else:
+                store["pending"].append((raw_label, flag))
+    except (RuntimeError, TypeError):
+        # No runnable finiteness kernel for this payload (quantized, sparse,
+        # exotic layouts). Disclosed via coverage, never silently "finite".
+        store["unchecked"].append(raw_label)
+
+
+def drain_pending_nonfinite(trace: Any) -> None:
+    """Read every deferred device flag into the capture event record.
+
+    Runs at the capture finalize seam (the forward is complete, and the
+    existing cpu_async D2H fence has already synchronized outstanding copies),
+    and again defensively at query time, so a flag can never be read
+    mid-forward. A flag whose host read fails is moved to the unchecked
+    disclosure rather than poisoning the capture.
+
+    Parameters
+    ----------
+    trace:
+        Trace whose pending capture-time flags should be settled.
+    """
+
+    store = trace.__dict__.get(_CAPTURE_STORE_ATTR)
+    if not store or not store["pending"]:
+        return
+    pending, store["pending"] = store["pending"], []
+    with pause_logging():
+        for raw_label, flag in pending:
+            try:
+                store["events"][raw_label] = not bool(flag.item())
+            except (RuntimeError, TypeError):
+                store["unchecked"].append(raw_label)
+
+
+@dataclass(frozen=True)
+class NonfiniteCoverage:
+    """Disclosure of what evidence backs :attr:`Trace.nonfinite_ops`.
+
+    A clean (empty) answer is only as strong as its coverage, so the counts
+    here must accompany any programmatic read of the record -- the same
+    honesty contract the prose surfaces implement via
+    :func:`coverage_gap_note`.
+
+    Attributes
+    ----------
+    basis:
+        ``"capture"`` when the record comes from capture-time per-op checks
+        (``CaptureOptions(track_nonfinite=True)``; covers every committed op,
+        saved or not), or ``"saved_payloads"`` when it is derived post hoc from
+        the payloads this capture retained.
+    checked:
+        Number of op outputs a finiteness kernel actually ran on.
+    nonfinite:
+        Of those, how many held at least one NaN or Inf.
+    unchecked:
+        Op outputs whose dtype has no runnable finiteness kernel (quantized,
+        sparse); they yield no evidence either way.
+    unexamined:
+        Ops the scan could not look at: on the ``"saved_payloads"`` basis,
+        ops that retained no payload (or whose disk-backed payload reporting
+        deliberately does not materialize); on the ``"capture"`` basis, final
+        ops that no capture-time check covered (synthetic input/output mirror
+        nodes).
+    unmapped:
+        ``"capture"`` basis only: recorded events whose op did not survive
+        postprocessing (e.g. removed orphans), so they map to no final label.
+    """
+
+    basis: str
+    checked: int
+    nonfinite: int
+    unchecked: int
+    unexamined: int
+    unmapped: int = 0
+
+
+def _capture_raw_to_final(log: Any) -> dict[str, str]:
+    """Map each surviving op's raw label to its pass-qualified final label."""
+
+    mapping: dict[str, str] = {}
+    for op in _layer_list(log):
+        raw = getattr(op, "_label_raw", None)
+        label = getattr(op, "label", None)
+        if raw is not None and label is not None:
+            mapping[str(raw)] = str(label)
+    return mapping
+
+
+def _capture_store(log: Any) -> dict[str, Any] | None:
+    """Return the settled capture-time store, draining any deferred flags."""
+
+    store = getattr(log, "__dict__", {}).get(_CAPTURE_STORE_ATTR)
+    if store is None:
+        return None
+    drain_pending_nonfinite(log)
+    return store
+
+
+def nonfinite_op_labels(log: Any) -> tuple[str, ...]:
+    """Return the pass-qualified labels of ops whose output held NaN or Inf.
+
+    Serves the capture-time record when this capture ran with
+    ``track_nonfinite=True`` (basis ``"capture"``); otherwise derives the
+    answer from the memoized saved-payload scan (basis ``"saved_payloads"``,
+    zero capture-time cost). :func:`nonfinite_coverage` names the basis and
+    what the answer could not examine -- read it before trusting an empty
+    tuple from a capture that retained few payloads.
+
+    Parameters
+    ----------
+    log:
+        Finished trace-like object to query.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Pass-qualified op labels (``Op.label``) in scan order.
+    """
+
+    store = _capture_store(log)
+    if store is not None:
+        raw_to_final = _capture_raw_to_final(log)
+        return tuple(
+            raw_to_final[raw] for raw, hit in store["events"].items() if hit and raw in raw_to_final
+        )
+    return tuple(str(getattr(layer, "label", layer)) for layer in _resolve(log, "saved", False))
+
+
+def nonfinite_coverage(log: Any) -> NonfiniteCoverage:
+    """Return the evidence basis and coverage behind :func:`nonfinite_op_labels`.
+
+    Parameters
+    ----------
+    log:
+        Finished trace-like object to query.
+
+    Returns
+    -------
+    NonfiniteCoverage
+        Frozen coverage disclosure; see the class docstring for field meaning.
+    """
+
+    store = _capture_store(log)
+    if store is not None:
+        raw_to_final = _capture_raw_to_final(log)
+        events = store["events"]
+        covered = {raw for raw in events if raw in raw_to_final}
+        covered.update(raw for raw in store["unchecked"] if raw in raw_to_final)
+        return NonfiniteCoverage(
+            basis="capture",
+            checked=len(events),
+            nonfinite=sum(1 for hit in events.values() if hit),
+            unchecked=len(store["unchecked"]),
+            unexamined=max(0, len(raw_to_final) - len(covered)),
+            unmapped=sum(1 for raw in events if raw not in raw_to_final)
+            + sum(1 for raw in store["unchecked"] if raw not in raw_to_final),
+        )
+    _, memo = _resolve_memo(log, "saved", stop_at_first=False)
+    return NonfiniteCoverage(
+        basis="saved_payloads",
+        checked=max(0, len(memo.keys) - len(memo.unchecked)),
+        nonfinite=len(memo.hits),
+        unchecked=len(memo.unchecked),
+        unexamined=unexamined_payload_count(log, kind="saved"),
+    )

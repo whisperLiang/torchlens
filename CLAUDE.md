@@ -214,6 +214,19 @@ print(tl.compat.report(model, x).to_markdown())
   FAILED, never COMPLETE. Refresh re-arms `raise_on_nan`. Halted analysis
   `tl.save` works (the transient-leak refusal is fixed); halted `log_backward`
   and loaded-sparse `run()` remain allowed.
+- QUERYABLE NONFINITE RECORD (spellings DOCUMENTED-UNSTABLE): `trace.nonfinite_ops`
+  returns the pass-qualified labels of ops whose output held NaN/Inf and
+  `trace.nonfinite_coverage` the frozen evidence disclosure (basis + checked/
+  unchecked/unexamined counts — read it before trusting an empty answer). On
+  default captures the record derives from the memoized saved-payload scan at
+  ZERO capture cost; `CaptureOptions(track_nonfinite=True)` opts into
+  capture-time per-op checks that also cover unsaved ops (selective-save
+  captures), costing ~3-15% of capture time on CPU and deferring device flag
+  reads to ONE batch at the finalize seam (never a per-op CUDA sync).
+  `raise_on_nan` stop-and-throw is unchanged and independent; `structure_only`
+  refuses the combination typed. Session-time knob (`FieldPolicy.DROP`): load
+  restores the default and loaded traces serve the saved-payload basis. Doc:
+  `docs/reference/capture_outcomes.md` ("The queryable nonfinite record").
 - EPISODE CAPTURE (torch-only; every spelling DOCUMENTED-UNSTABLE): one wrapped multi-step
   generation run is ONE product — `tl.trace(episode_root, x,
   episode=tl.options.EpisodeSpec(stepped_module=model, n_steps=N))` stamps

@@ -1888,12 +1888,17 @@ def run_and_log_inputs_through_model(
                 boundary_label=swallowed_stop.boundary_label,
             )
         set_capture_phase(self, CapturePhase.FINALIZE)
+        from ..data_classes._nonfinite import drain_pending_nonfinite
         from ..utils.tensor_utils import synchronize_pending_cpu_async_copies
 
         # Fence every cpu_async D2H copy recorded this forward BEFORE any
         # host-side consumer (finalize, postprocess digests, ``op.out``,
         # ``tl.save`` serialization) can observe partial bytes (R36-1).
         synchronize_pending_cpu_async_copies()
+        # Settle deferred track_nonfinite device flags here, after the forward
+        # is complete, so the record costs one batch of scalar reads instead of
+        # a per-op device synchronization (the flags' kernels are long done).
+        drain_pending_nonfinite(self)
         backend.finalize_forward_session(self, self._raw_graph_ws)
 
         output_transform = getattr(self, "_output_transform", None)

@@ -131,6 +131,56 @@ The tripwire checks RAW op-boundary tensors only: a NaN introduced by
 the transform would have sanitized it (ABORTED_NONFINITE), empty tensors are
 skipped, and uncheckable dtypes warn once per capture.
 
+## The queryable nonfinite record
+
+*(Every spelling here is DOCUMENTED-UNSTABLE pending naming-session
+ratification; no deprecation shim owed on rename.)*
+
+`raise_on_nan` is a stop-and-throw; the queryable form is separate and never
+changes control flow. `Trace.nonfinite_ops` returns the pass-qualified labels
+of ops whose output held at least one NaN or Inf (each a valid `trace[label]`
+key), and `Trace.nonfinite_coverage` returns the frozen evidence disclosure:
+`basis`, `checked`, `nonfinite`, `unchecked` (dtypes with no runnable
+finiteness kernel), `unexamined`, and `unmapped`. An empty answer is only as
+strong as its coverage — the programmatic twin of the prose coverage-gap note
+in `first_nonfinite()`.
+
+Two evidence bases:
+
+- **`"saved_payloads"`** (the default): the record derives from the memoized
+  saved-payload scan already backing `print(trace)`. Zero capture-time cost;
+  the one `isfinite` pass over retained payloads is paid at first query and
+  memoized (measured 0.02–0.27 s on resnet18/transformer/gpt2-class models,
+  then ~2 ms memoized). On a selective-save capture this basis is honestly
+  blind to unsaved ops (`unexamined` says how many).
+- **`"capture"`**: `CaptureOptions(track_nonfinite=True)` opts into a per-op
+  `torch.isfinite(out).all()` at op commit, covering every committed op —
+  saved or not. fp8 widens exactly first; empty tensors are exactly finite;
+  uncheckable dtypes land in `unchecked`. CPU flags are read immediately;
+  CUDA/MPS flags are deferred as 0-dim bool tensors and drained in ONE batch
+  at the capture finalize seam, so the forward is never synchronized per op.
+
+Measured cost of `track_nonfinite=True` relative to a default capture
+(min-of-reps, 2026-08-19): CPU (devbox) resnet18-b8 +5.8%, transformer-enc
++14.5%, gpt2 +3.4%; H200 (cu128) resnet18-b8 +4.9%, transformer-enc +6.7%,
+gpt2 +4.3%, with an eager per-op read variant costing +6.9%/+9.3%/+7.3% —
+the deferral is why a device capture never pays a per-op synchronization.
+These numbers are why the knob defaults to OFF everywhere: on default
+exhaustive-save captures the free `"saved_payloads"` basis already covers
+every op, so the per-op check would buy nothing; on selective-save captures
+it is the only way to get verdicts for unsaved ops and is priced above.
+
+The knob is session-time (`FieldPolicy.DROP`, like
+`measure_python_peak_memory`): load restores the default, and a loaded trace
+serves the `"saved_payloads"` basis over its archived payloads.
+`structure_only=True` refuses the combination
+(`structure_only_option_conflict`) — there are no values to check. The
+capture-basis record covers committed ops only: synthetic input/output mirror
+nodes count as `unexamined`, and events whose op was removed by
+postprocessing (orphans) count as `unmapped`. Verdicts reflect the tensors
+ops actually produced — an intervened op's verdict is of the replaced value
+downstream consumers saw.
+
 ## The stop-request latch (F6)
 
 `evaluate_halt`, `raise_nonfinite`, and imperative `tl.fastlog.halt()` all

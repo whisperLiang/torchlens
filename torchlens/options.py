@@ -115,6 +115,7 @@ _CAPTURE_FIELDS: Final[tuple[str, ...]] = (
     "save_budget",
     "distributed_witness",
     "raise_on_nan",
+    "track_nonfinite",
     "structure_only",
 )
 _SAVE_FIELDS: Final[tuple[str, ...]] = (
@@ -1058,6 +1059,12 @@ class CaptureOptions:
         cap to enforce those devices.
     raise_on_nan:
         Whether capture should stop at the first NaN or Inf tensor.
+    track_nonfinite:
+        Whether torch capture records a per-op finiteness verdict
+        (DOCUMENTED-UNSTABLE), served by ``Trace.nonfinite_ops`` /
+        ``Trace.nonfinite_coverage``; covers unsaved ops, never changes
+        control flow, reads device flags in one post-forward batch. A
+        session-time knob. Doc: ``docs/reference/capture_outcomes.md``.
     structure_only:
         Whether this capture runs under the structure-only contract
         (DOCUMENTED-UNSTABLE surface, pending naming-session/S2 ratification;
@@ -1120,6 +1127,7 @@ class CaptureOptions:
     save_budget: SaveBudgetOption = "auto"
     distributed_witness: str = "none"
     raise_on_nan: bool = False
+    track_nonfinite: bool = False
     structure_only: bool = False
     _specified_fields: frozenset[str] = field(default_factory=frozenset, init=False, repr=False)
 
@@ -1171,6 +1179,7 @@ class CaptureOptions:
         distributed_witness: str | MissingType = MISSING,
         raise_on_nan: bool | MissingType = MISSING,
         *,
+        track_nonfinite: bool | MissingType = MISSING,
         structure_only: bool | MissingType = MISSING,
         mark_layer_depths: bool | MissingType = MISSING,
         num_context_lines: int | MissingType = MISSING,
@@ -1342,6 +1351,9 @@ class CaptureOptions:
             ),
             "raise_on_nan": _resolve_option_value(
                 "raise_on_nan", raise_on_nan, False, specified_fields
+            ),
+            "track_nonfinite": _resolve_option_value(
+                "track_nonfinite", track_nonfinite, False, specified_fields
             ),
             "structure_only": _resolve_option_value(
                 "structure_only", structure_only, False, specified_fields
