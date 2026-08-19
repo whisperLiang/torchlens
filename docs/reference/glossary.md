@@ -649,6 +649,47 @@ shim owed*
   sampled without replacement inside `within`; too-small populations refuse
   `selection_unresolvable` / `population_too_small`).
 
+**Value producers: tl.top_k / tl.top_fraction / tl.threshold / tl.sign** —
+*unstable — no deprecation shim owed*
+: Select by WHAT VALUES ARE on the resolution trace's retained activations:
+  `top_k(within, k, by='value'|'abs', largest=)` (global ranking across the
+  population with a deterministic stable tie-break: canonical site order,
+  then flat index; too-few rankable elements refuse `population_too_small`),
+  `top_fraction(within, fraction)` (`k = ceil(fraction * population)`),
+  `threshold(within, above=, below=, by=)` (strict open bounds; both = band),
+  `sign(within, 'positive'|'negative'|'zero'|'nonzero', tol=)` (`'zero'` is
+  the sparsity mask and the single-capture "didn't fire on this input"
+  spelling). `within` is `None` (default population: every retained tensor
+  site — value claims exist only about retained values), a site label
+  string, or any ACT selection; PARAM/EDGE populations refuse
+  `selection_kind_incompatible`. Masks are computed at resolve time and are
+  exact as sets about THIS capture (`provenance.relation="exact"`); unsaved
+  payloads refuse `value_not_saved`; NaN elements never satisfy a criterion;
+  complex payloads refuse ordered comparisons
+  (`value_criterion_invalid` — use `by='abs'`).
+
+**Statistical producers: tl.dead / tl.saturated / tl.low_variance** —
+*unstable — no deprecation shim owed*
+: Inherently MULTI-SAMPLE selections over an explicit evidence set:
+  `samples=` takes an iterable of Traces (a `Bundle` iterates its members),
+  at least TWO — the single-capture form is deliberately a different
+  spelling (`sign(site, 'zero')`), so one name never means two things. The
+  resolution trace supplies geometry and population only; include it in
+  `samples` to count it as evidence. `dead(samples, tol=)` selects elements
+  with `|v| <= tol` in EVERY sample; `saturated(samples, low=, high=, tol=)`
+  selects elements pinned within `tol` of the same declared bound in every
+  sample (a bound is required — saturation is relative to the
+  nonlinearity's range); both make dispositional claims from finite
+  evidence and declare `provenance.relation="upper_bound"` (observed-silent
+  is a superset of truly-dead) with the sample count disclosed in
+  `provenance.source`. `low_variance(samples, threshold=)` names the sample
+  statistic itself (elementwise unbiased variance in float64) and declares
+  `exact`; its touched-family complement `~low_variance(...)` is the
+  high-variance selection. Missing sample sites, unsaved sample payloads,
+  and cross-sample shape drift refuse typed (`site_not_in_trace` /
+  `value_not_saved` / `mask_shape_mismatch` with the offending sample
+  named), never silently shrink the evidence set.
+
 **SelectionError / selection refusal codes** — *unstable — no deprecation
 shim owed; S2-gated*
 : One carrier class (`torchlens.selection.SelectionError`, catalogued in the
@@ -657,7 +698,7 @@ shim owed; S2-gated*
   `selection_kind_incompatible`, `selection_unresolvable` (closed reason set
   `site_not_in_trace | value_not_saved | non_tensor_site | no_index_space |
   mask_shape_mismatch | facet_write_mask_unavailable | population_too_small |
-  multipass_bare_label`),
+  multipass_bare_label | value_criterion_invalid`),
   and `selection_apply_invalid` (stage 2). The `multipass_bare_label` reason
   is the `tl.units` face of the multi-pass bare-label ambiguity refusal: a
   bare layer label addresses only single-pass layers, and each pass of a

@@ -56,7 +56,16 @@ Key entry points:
   producers (BaseSelector, RF box/gradient, FacetSpec, Op, Layer) implement
   `__selection__`; kinds ACT|PARAM|EDGE closed; refusals ride
   `SelectionError` (`selection_*` codes). Producers `tl.units`/`tl.params`/
-  `tl.random_selection`. Cross-run (stage 4a): `resolved.align_to(target)`
+  `tl.random_selection`; value producers `tl.top_k`/`tl.top_fraction`/
+  `tl.threshold`/`tl.sign` (read the resolution trace's retained
+  activations at resolve time, exact-as-set, `within=None` = every retained
+  tensor site, unsaved payloads refuse `value_not_saved`, complex ordered
+  comparisons refuse `value_criterion_invalid`); statistical producers
+  `tl.dead`/`tl.saturated`/`tl.low_variance` (explicitly multi-sample:
+  `samples=` iterable of >= 2 Traces, Bundle iterates; dead/saturated are
+  dispositional `upper_bound` claims, low_variance is the `exact` sample
+  statistic; the single-capture form is `sign(site,'zero')`).
+  Cross-run (stage 4a): `resolved.align_to(target)`
   re-binds ACT selections across runs on L1 site keys, same-policy captures
   only (`selection_alignment_invalid`, closed six-reason set); `do()` still
   refuses foreign resolved selections typed. Parameter substitution
