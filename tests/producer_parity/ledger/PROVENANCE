@@ -315,3 +315,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 621c7d75376de29e088798a83a2d00e3e68654e3 (clean)
 recorded: 2026-08-19T15:39:21.451382+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: post-rebase reconciliation onto the graph-producer-inclusive main; consumer-site set is the union of both producer waves
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 19f5e15d2b94924f14ccf7de1abf5fb0b445425b (clean)
+recorded: 2026-08-19T15:42:51.896038+00:00

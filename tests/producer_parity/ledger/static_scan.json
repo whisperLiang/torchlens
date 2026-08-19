@@ -5802,6 +5802,14 @@
  {
   "ambiguous": true,
   "field": "kind",
+  "file": "torchlens/selection_compare.py",
+  "has_default": false,
+  "sites": 1,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": true,
+  "field": "kind",
   "file": "torchlens/selection_graph.py",
   "has_default": false,
   "sites": 1,
