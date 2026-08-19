@@ -112,7 +112,10 @@ def wide_capture():
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         log = tl.trace(_ParallelStreams(N_STREAMS), torch.randn(3))
-    yield log, caught
+    try:
+        yield log, caught
+    finally:
+        log.cleanup()
 
 
 @pytest.fixture(scope="module")
@@ -121,7 +124,10 @@ def deep_capture():
 
     torch.manual_seed(0)
     log = tl.trace(_DeepRecurrence(), (torch.randn(2, 8), N_PASSES))
-    yield log
+    try:
+        yield log
+    finally:
+        log.cleanup()
 
 
 @pytest.fixture(scope="module")
@@ -131,7 +137,10 @@ def chain_capture():
     torch.manual_seed(0)
     limit_before = sys.getrecursionlimit()
     log = tl.trace(_Chain(), (torch.randn(4), N_CHAIN))
-    yield log, limit_before, sys.getrecursionlimit()
+    try:
+        yield log, limit_before, sys.getrecursionlimit()
+    finally:
+        log.cleanup()
 
 
 def _mult_labels(log) -> list[str]:
