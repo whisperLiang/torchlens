@@ -391,7 +391,15 @@ attribution-target alias. See the [attribution reference](attribution.md).
 **Extraction helpers**
 : `tl.pluck` returns the saved out for one layer, `tl.extract` for many layers, and
   `tl.extract_dataset` extracts outs from an iterable dataset in batches. `tl.peek` and
-  `tl.batched_extract` are deprecated aliases that warn.
+  `tl.batched_extract` are deprecated aliases that warn. Disk-mode `extract_dataset`
+  (``output_dir=``) writes a SELF-DESCRIBING artifact: atomic ``batch_XXXXX.pt`` shards
+  plus a ``manifest.json`` recording the run signature, per-site identity (layer label
+  and structural site key where derivable), stimulus ordering/provenance
+  (``stimulus_ids=`` optional), axis semantics, dtypes, devices, and the TorchLens
+  version. ``resume=True`` (DOCUMENTED-UNSTABLE, like ``stimulus_ids=`` and the loader)
+  continues an interrupted disk run from its last completed shard after a signature
+  check; `torchlens.dataset_extraction.load_extraction` reads the artifact back with
+  its metadata as a `LoadedExtraction`.
 
 **Observers**
 : `tl.tap` creates a tap observer for a site; `tl.span` records a named observer span

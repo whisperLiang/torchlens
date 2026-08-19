@@ -244,7 +244,11 @@ materializes it. Disk-backed chunk accumulation is a future item.
 For activation extraction without a `Trace`, use `tl.extract_dataset(...)` (the old
 `tl.batched_extract` spelling is a deprecated alias that warns); that path returns
 tensors or `.pt` files rather than accumulated graph metadata. `chunk_size=` covers the remaining
-"dataloader wrapper" case for stacked multi-pass trace capture.
+"dataloader wrapper" case for stacked multi-pass trace capture. Disk mode (`output_dir=`) writes
+atomic shards plus a self-describing `manifest.json` (site identity, stimulus provenance, axis
+semantics, dtypes); an interrupted long extraction continues from its last completed shard with
+`resume=True`, and `torchlens.dataset_extraction.load_extraction(...)` reads the artifact back
+with its metadata (both spellings DOCUMENTED-UNSTABLE).
 
 ## Windowed and disk-backed capture
 

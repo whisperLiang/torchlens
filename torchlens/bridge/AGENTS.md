@@ -27,7 +27,15 @@ optional dependency.
   with captured layers; stdlib-only, no import gate.
 - `gradcam.py`: `cam()`, `layer()` (extra: `torchlens[gradcam]`).
 - `brain_score.py`: `per_layer()` takes a CALLABLE offline benchmark (no
-  import gate; raises `TypeError` on non-callables).
+  import gate; raises `TypeError` on non-callables). `get_activations_fn()`
+  builds the `get_activations(images, layer_names) -> OrderedDict[str,
+  np.ndarray]` callable Brain-Score's `ActivationsExtractorHelper` expects
+  (offline, no import gate; layer names are module dotted paths or any
+  TorchLens lookup, `"logits"` maps to the model output);
+  `activations_extractor()` wires it into a real
+  `ActivationsExtractorHelper` (import gate: `brainscore_vision`, which
+  needs Python >= 3.11 — wiring is pinned against the 2.3.22 wheel source
+  and stub-tested, but UNVERIFIED against a running install here).
 - `rsatoolbox.py`: `dataset()` (extra: `torchlens[neuro]`).
 - `nnsight.py`: `from_trace()` normalizes a cached nnsight-style trace into a
   stable payload schema; offline, no import gate.
