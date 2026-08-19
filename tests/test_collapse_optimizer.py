@@ -1814,7 +1814,9 @@ def test_rank_group_parity_guard_survives_python_O() -> None:
     loudly with assertions disabled too.
     """
 
-    from torchlens.visualization._render_dot import _assert_rank_group_parity
+    # Moved out of _render_dot by 1876dde2 (renderer thinning) into the region
+    # emitter that actually calls it; the guard itself is unchanged.
+    from torchlens.visualization._render_regions import _assert_rank_group_parity
 
     _assert_rank_group_parity(3, 3)
     with pytest.raises(RuntimeError, match="sibling rank-group emission mismatch"):

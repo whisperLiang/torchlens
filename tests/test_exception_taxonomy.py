@@ -1325,6 +1325,33 @@ _TAXONOMY_INTERNAL_ALLOWLIST: dict[str, str] = {
     "torchlens.ir.predicate.MLXValueUnavailableError": (
         "MLX preview value-access refusal; preview-backend surface, not yet in the stable registry"
     ),
+    # -- Post-tour sprint (2026-08-19). All five ARE user-facing refusals from
+    # newly shipped features, so registering them on torchlens.errors is the
+    # right end state -- but that publishes five names, and the naming slate is
+    # explicitly the UI/API sprint's call (JMT 2026-08-19). Parked here on the
+    # same pre-ratification pattern as the S2-gated structure-only rows above,
+    # to be retired by that sprint rather than expanded unilaterally. --
+    "torchlens._io.streaming_async.AsyncWriteFailedError": (
+        "raised by to_disk(async_writes=True) when a background write fails; "
+        "errors-namespace registration deferred to the UI/API naming slate"
+    ),
+    "torchlens.dataset_extraction.DatasetExtractionResumeError": (
+        "raised by extract_dataset(resume=True) on a signature/manifest mismatch "
+        "(extraction_resume_* / extraction_manifest_invalid); registration deferred "
+        "to the UI/API naming slate"
+    ),
+    "torchlens.semantic.logit_lens.LogitLensError": (
+        "logit_lens refusal (it refuses rather than mislabel a non-standard final "
+        "norm); registration deferred to the UI/API naming slate"
+    ),
+    "torchlens.intervention.errors.BufferThreadGapWarning": (
+        "intervention buffer-thread coverage-gap disclosure; warning surface, "
+        "registration deferred to the UI/API naming slate"
+    ),
+    "torchlens.intervention.errors.PendingValueEditsWarning": (
+        "intervention pending-edit disclosure; warning surface, registration "
+        "deferred to the UI/API naming slate"
+    ),
 }
 
 
