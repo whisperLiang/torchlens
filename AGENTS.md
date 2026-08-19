@@ -76,6 +76,14 @@ Key entry points:
   save/replay/validate — `tl.save` refuses `slice_save_unsupported`;
   `__selection__` lifts it back into the algebra);
   `trace.subgraph(selection)` is the general slice door for any ACT region.
+  statistic; the single-capture form is `sign(site,'zero')`); comparative
+  producers `tl.changed`/`tl.top_changed` (subject-vs-ONE-reference
+  directional delta, exact-as-set; structure mismatches and self-comparison
+  refuse typed, never silently intersect; PARAM refuses — no capture-time
+  weight payloads) and `tl.stable_across_passes`/`tl.pass_variance`
+  (cross-pass range/variance on recurrent layers, pass-qualified, >= 2
+  window passes per layer or `population_too_small`, masks land on every
+  window pass-site).
   Cross-run (stage 4a): `resolved.align_to(target)`
   re-binds ACT selections across runs on L1 site keys, same-policy captures
   only (`selection_alignment_invalid`, closed six-reason set); `do()` still
