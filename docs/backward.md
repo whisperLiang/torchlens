@@ -154,8 +154,8 @@ engine invocation, and installs per-instance token-bearing pack/unpack wrappers.
 is count-only — the forward-side slot-to-op binding is deliberately NOT claimed (pack hooks run
 before TorchLens logs the producing op). Unpack evidence points are backward-derived: the
 grad-fn fire brackets containing them resolve through the shipped user-op pairing to L1 site-key
-candidates. The projected summary lives on `trace.checkpoint_invocation_witness` (DROP-gated
-until the coordinated tlspec bump): token count, per-token pack counts / unpack window evidence /
+candidates. The projected summary lives on `trace.checkpoint_invocation_witness` (persisted
+as of the tlspec v8 coordinated bump): token count, per-token pack counts / unpack window evidence /
 site-key candidates, degrade flags, and an evidence-scoped completeness verdict. Degrade flags
 cover: classifier unavailable, patch unavailable, exotic subclass, the unmatched-backward warn,
 the reentrant node sentinel (`CheckpointFunctionBackward` in the discovery stream — reentrant
@@ -241,7 +241,7 @@ inside an engine invocation; a deferred finalize runs at the next qualifying syn
 non-engine read, and a read from inside an engine invocation journals without materializing.
 The `BackwardPassEnd` sidecar event discloses which close path fired (`engine_drain` /
 `sync_point`, DOCUMENTED-UNSTABLE values, runtime-only in wave 2; the projected `BackwardPass`
-field waits for the coordinated bump). The engine's final-callback handle resolves through the
+field was deliberately deferred at the tlspec v8 bump and waits for a future one). The engine's final-callback handle resolves through the
 compat chokepoint behind the named `HAS_AUTOGRAD_ENGINE_QUEUE_CALLBACK` capability flag
 (visible in `tl.utils.doctor()` / `tl.compat.report()`); without it every implicit close takes
 the sync-point backstop.

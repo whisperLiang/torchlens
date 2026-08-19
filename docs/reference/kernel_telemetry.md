@@ -37,14 +37,14 @@ kernel, duration, stream, or correlation ID for the paused region.
 
 ## Persistence and shed boundary
 
-Launch rows and their private primitive-sequence relation are declared `FieldPolicy.DROP`. Their
-future persistence path is registered through the prerelease registrar and can round-trip only
-under the pytest activation switch pre-bump; as of tlspec v8 ordinary artifacts persist the telemetry annotation with closed-schema load validation.
+Launch rows and their private primitive-sequence relation are declared `FieldPolicy.KEEP`: as of
+the tlspec v8 coordinated bump ordinary artifacts persist the telemetry annotation plainly, with
+closed-schema load validation (`torchlens/_io/forgery_validation.py`). The pre-v8
+prerelease-registrar/pytest-switch path is retired.
 
 No package module imports the adapter, and no non-telemetry behavioral test depends on it. The
-central prerelease-registrar inventory and frozen public-surface oracle are the only governance
-references: every DROP-gated writer must be enumerated, and the documented computed properties
-must remain visible in the public-surface snapshot. Importing the adapter installs those two views
-for that process. This one-way dependency is the mechanical shed boundary: removing the telemetry
-lane and its two governance references leaves capture, ATen recording, validation, visualization,
+frozen public-surface oracle is the only governance reference: the documented computed properties
+must remain visible in the public-surface snapshot. Importing the adapter installs that view for
+that process. This one-way dependency is the mechanical shed boundary: removing the telemetry
+lane and its governance reference leaves capture, ATen recording, validation, visualization,
 FLOPs, predicates, runnable execution, and persistence acceptance unchanged.

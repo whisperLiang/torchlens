@@ -99,15 +99,14 @@ QUARANTINES the payload with one warning (`episode_ledger_incoherent`) — the
 rows stop being claims and the outcome derivation treats the ledger
 fail-closed.
 
-## Persistence is gated
+## Persistence
 
-`annotations["episode"]` is a NEW persistence key under the frozen tlspec
-version: it never rides a real v7 artifact (the scrub drops it; the live
-trace keeps its session-time ledger). It round-trips only under the
-test-only pre-release activation switch, whose artifacts are marker-stamped
-and refuse to load outside the switch. The coordinated schema bump activates
-the key for real. The same discipline gates the Bundle `member_relations`
-key (below).
+`annotations["episode"]` persists plainly as of the tlspec v8 coordinated
+bump, as does the Bundle `member_relations` key (below). Loads validate
+fail-closed: an undeclared ledger refuses `episode_ledger_without_declaration`
+and geometry violations quarantine `episode_ledger_incoherent`. Pre-v8
+artifacts never carry the key (the v7 scrub dropped it; the live trace kept
+its session-time ledger).
 
 ## Teacher forcing (disclosed, non-verifying)
 

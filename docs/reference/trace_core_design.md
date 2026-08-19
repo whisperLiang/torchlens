@@ -1,6 +1,11 @@
 # Trace core design — the converged god-object columnar re-plumbing
 
-Status: CONVERGED (tri-lab, round 2). Basis tree `781a7559`. This document is the
+Status: CONVERGED (tri-lab, round 2), now HISTORICAL. Basis tree `781a7559`. Every
+schema statement below is as-of that pre-v8 tree: the tlspec v8 coordinated bump has
+since shipped, so "no `TLSPEC_VERSION` bump" and "rows remain `RUNTIME`/DROP-gated"
+sentences describe the sprint's scope at the time, not the current tree — the runtime
+authority is `torchlens/_io/__init__.py` and the per-class `FIELD_POLICY` tables.
+This document is the
 architecture of record for the columnar re-plumbing sprint: it synthesizes the three
 independent round-1 designs and the three round-2 reconciles into ONE plan. Where the
 round-2 documents state a 2-1 HOLD, the majority position is the plan and the minority's

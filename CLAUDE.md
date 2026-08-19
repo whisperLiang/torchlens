@@ -650,16 +650,17 @@ print(tl.compat.report(model, x).to_markdown())
   (rerun/set_only refuse `edge_intervention_engine_unsupported`; rerun-side
   design is an escalated named future) — the child re-executes from the
   substituted input (node-level `intervention_replaced` never fires for
-  edges), the substituted value rides the DROP-gated tier-(ii) store
+  edges), the substituted value rides the tier-(ii) store
   `Op.edge_substitutions` (+ `edge_replacement_stamps`,
-  `FireRecord.edge_address`; all persisted as of tlspec v8), and capture truth
+  `FireRecord.edge_address`; all persisted as of tlspec v8, so ordinary
+  saves of edge-intervened traces proceed), and capture truth
   (saved_args / out_versions_by_child / parent.out) is retained unmodified
   (parity-pinned). Validation: uncorroborated tier-(ii) entries FAIL;
   corroborated children re-execute from the spliced value and must match
-  (distinct verdict `edge_intervention_boundary`). v7 SAVE BOUNDARY at the
-  `_io/bundle.py` save entry (two-conjunct key: entries present AND
-  pre-release switch inactive): ALL four levels refuse
-  `edge_intervention_save_unsupported`, PRECEDING
+  (distinct verdict `edge_intervention_boundary`). SCHEMA-REGRESSION
+  TRIPWIRE at the `_io/bundle.py` save entry (fires IFF tier-(ii) entries
+  are present AND the active schema would drop the carrier): ALL four
+  levels refuse `edge_intervention_save_unsupported`, PRECEDING
   `artifact_save_level_unsupported`; save-entry refusal order is
   MergedTrace -> N1 outcome -> L7a structure-only -> L6 edge boundary (do
   not silently reorder another owner's refusal). `tap(resolved_selection)`
@@ -726,17 +727,17 @@ print(tl.compat.report(model, x).to_markdown())
   per-node keyed LIFO (stale entries discarded, untimed fires `(None,
   None)`, never a cross-clock pair); stamps ride the runtime `GradFnFired`
   event only, served by live-trace-only `trace.grad_fn_fire_timings`
-  (loaded/cleaned traces refuse `grad_fn_fire_timing_unavailable`); NOTHING
-  NEW PERSISTS PRE-BUMP -- persisted `GradFnCall` timing fields keep shipped
-  wall-stamp semantics until the coordinated bump flips them WITH the
-  DROP-gated `Trace.grad_fn_timing_provenance` discriminator; timing
+  (loaded/cleaned traces refuse `grad_fn_fire_timing_unavailable`); as of
+  the tlspec v8 coordinated bump the persisted `GradFnCall` timing fields
+  carry the per-fire `perf_counter` semantics, discriminated by the
+  persisted `Trace.grad_fn_timing_provenance`; timing
   registration failure degrades to untimed, never a coverage gap (D15 A/B
   measured ~4-5%, under the 10% gate; universal path shipped). CHECKPOINT
   TOKENS -- classified non-reentrant `_checkpoint_hook` enters mint one
   per-trace ordinal token (armed owner thread, outside engine invocations;
   fail-closed one-way); pack evidence count-only (forward slot->op binding
   NOT claimed), unpack evidence backward-derived (fire bracket -> user-op
-  pairing -> L1 site keys); DROP-gated `Trace.checkpoint_invocation_witness`
+  pairing -> L1 site keys); persisted `Trace.checkpoint_invocation_witness`
   carries counts/candidates/degrade-flags D1-D6/evidence-scoped verdict; the
   ambiguity REFUSAL is S2-authored (R-L9-1 filed) -- identity-read accessors
   are NOT shipped until it lands. IMPLICIT-BOUNDARY --

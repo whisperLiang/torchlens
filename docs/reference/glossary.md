@@ -38,7 +38,8 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
   `complete`/`interrupted`/`absent` statuses, emitted tokens, and the managed-RNG entry
   seed) at `trace.annotations["episode"]`. A diagnostic-tier product for tens of steps
   (cost is superlinear in step count); the ledger is a disclosure, never a settlement
-  authority, and its persistence is gated until the coordinated schema bump. All episode
+  authority, and it persists plainly as of the tlspec v8 coordinated bump (loads validate
+  fail-closed). All episode
   spellings are provisional (no deprecation shim owed). See
   [Episode capture](episode_capture.md).
 
@@ -120,8 +121,9 @@ alignment is evidence, not semantic equivalence.
 
 ### Documented-unstable kernel telemetry INDEX
 
-The optional CUDA/CUPTI adapter is the detachable trailing lane of the ATen execution profile. It
-is DROP-gated and is not imported by the capture core. Every spelling below is documented unstable
+The optional CUDA/CUPTI adapter is the detachable trailing lane of the ATen execution profile. Its
+rows persist as of the tlspec v8 coordinated bump (`FieldPolicy.KEEP`), and it is not imported by
+the capture core. Every spelling below is documented unstable
 and may be renamed or removed without a compatibility alias.
 
 <!-- KERNEL-TELEMETRY-UNSTABLE-INDEX:START -->
@@ -910,7 +912,7 @@ S2/S3-gated*
   producer truth. Ships on the replay/push engine ONLY
   (`edge_intervention_engine_unsupported` otherwise; the rerun-engine design
   is an escalated named future). Storage fork: the substituted value lives
-  in the DROP-gated `Op.edge_substitutions` store (+
+  in the `Op.edge_substitutions` store, persisted as of the tlspec v8 bump (+
   `Op.edge_replacement_stamps`, `FireRecord.edge_address`); capture truth
   (`saved_args`, `out_versions_by_child`, `parent.out`) is retained
   unmodified — the pre-edit snapshot that makes divergence decidable.

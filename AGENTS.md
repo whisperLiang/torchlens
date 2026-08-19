@@ -119,13 +119,13 @@ Key entry points:
 - Backward residuals (L9; DOCUMENTED-UNSTABLE): per-fire timing -- one clock
   (`perf_counter`), per-node keyed-LIFO pairing, stamps on the runtime
   `GradFnFired` event only; live-only `trace.grad_fn_fire_timings` (loaded
-  traces refuse `grad_fn_fire_timing_unavailable`); NOTHING new persists
-  pre-bump (persisted GradFnCall timing fields unchanged until the
-  coordinated bump flips them with the DROP-gated
-  `Trace.grad_fn_timing_provenance` discriminator). Checkpoint invocation
+  traces refuse `grad_fn_fire_timing_unavailable`); as of the tlspec v8
+  coordinated bump the persisted GradFnCall timing fields carry the per-fire
+  `perf_counter` semantics, discriminated by the persisted
+  `Trace.grad_fn_timing_provenance`. Checkpoint invocation
   tokens: classified non-reentrant `_checkpoint_hook` enters mint per-trace
   ordinal tokens; pack evidence count-only, unpack evidence backward-derived
-  to L1 site keys; DROP-gated `Trace.checkpoint_invocation_witness` with
+  to L1 site keys; persisted `Trace.checkpoint_invocation_witness` with
   degrade flags D1-D6; the ambiguity refusal is S2-authored (R-L9-1) and its
   identity-read accessors are unshipped until the amendment lands.
   Implicit-boundary: journal/scavenge/finalize split with the finalize guard
