@@ -759,12 +759,17 @@ def _container_group_id(node: BaseGraphNode) -> str | None:
         Container group id, or ``None`` when the node has no container.
     """
 
-    spec = getattr(node, "container_spec", None)
-    path = tuple(getattr(node, "container_path", ()) or ())
+    # Container metadata is per-pass: a rolled multi-pass Layer has no single
+    # honest value (typically only the final pass feeds the output container),
+    # so the aggregate node explicitly degrades to "no container decoration" —
+    # the same per-pass "n/a" policy the encoding channel uses. A plain
+    # getattr here leaked the multi-pass ValueError tripwire out of draw().
+    spec = get_multipass_attr(node, "container_spec", None, multipass=None)
+    path = tuple(get_multipass_attr(node, "container_path", (), multipass=None) or ())
     if spec is None or not path:
         return None
-    func_call_id = getattr(node, "func_call_id", None)
-    if bool(getattr(node, "is_output", False)):
+    func_call_id = get_multipass_attr(node, "func_call_id", None, multipass=None)
+    if bool(get_multipass_attr(node, "is_output", False, multipass=False)):
         root = "final_output:0"
     elif func_call_id is not None:
         root = f"call:{func_call_id}"
@@ -2140,7 +2145,9 @@ def _container_edge_label(node: BaseGraphNode | None) -> str | None:
 
     if node is None:
         return None
-    path = tuple(getattr(node, "container_path", ()) or ())
+    # Per-pass field: a rolled multi-pass Layer degrades to no label (see
+    # _container_group_id) instead of leaking the multi-pass tripwire.
+    path = tuple(get_multipass_attr(node, "container_path", (), multipass=None) or ())
     if not path:
         return None
     return _container_component_role(path[-1])

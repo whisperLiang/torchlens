@@ -158,6 +158,179 @@ def test_user_callback_wins_over_mode(tmp_path: Path) -> None:
     assert re.search(r"t=[0-9.]+ms", dot) is None
 
 
+class _RecurrentBlock(nn.Module):
+    """Wrapper that calls one submodule three times (multi-pass layers)."""
+
+    def __init__(self) -> None:
+        """Initialize the repeated block."""
+
+        super().__init__()
+        self.block = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the block three times."""
+
+        for _ in range(3):
+            x = self.block(x)
+        return x
+
+
+def _set_op_durations(log: tl.Trace, seconds: float) -> None:
+    """Stamp a known func_duration on every op for deterministic rows."""
+
+    for layer_log in log.layer_logs.values():
+        for layer_pass in layer_log.ops.values():
+            layer_pass.func_duration = seconds
+
+
+def test_profiling_collapsed_module_does_not_crash(tmp_path: Path) -> None:
+    """V1 regression: profiling x vis_call_depth=1 crashed on ANY collapsed module.
+
+    ``profiling_collapsed_node_mode`` iterated ``Module.layers`` (Layer
+    records) as if they were labels and indexed the trace with a Layer
+    object, so the pair crashed even on single-pass models.
+    """
+
+    class Wrapper(nn.Module):
+        """Single-pass model with one collapsible submodule."""
+
+        def __init__(self) -> None:
+            """Initialize the wrapped block."""
+
+            super().__init__()
+            self.block = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Run the wrapped block."""
+
+            return self.block(x)
+
+    log = tl.trace(Wrapper(), torch.randn(2, 4))
+    _set_op_durations(log, 0.001)
+
+    dot = _render_dot(log, tmp_path, node_mode="profiling", vis_call_depth=1)
+
+    # The collapsed box aggregates its two ops: 2 x 1.00 ms.
+    assert "t=2.00 ms" in dot
+
+
+def test_profiling_collapsed_module_counts_every_pass(tmp_path: Path) -> None:
+    """V1 undercount: a rolled collapsed box must sum ALL passes of its ops.
+
+    Under the crash sat a pass-blind undercount: per-Layer ``func_duration``
+    reads refuse on multi-pass layers, and the swallowed refusal dropped
+    every recurrent layer from the aggregate. The rolled ``@block (x3)`` box
+    covers 2 ops x 3 passes.
+    """
+
+    log = tl.trace(_RecurrentBlock(), torch.randn(2, 4))
+    _set_op_durations(log, 0.001)
+
+    dot = _render_dot(log, tmp_path, node_mode="profiling", vis_call_depth=1, vis_mode="rolled")
+
+    assert "t=6.00 ms" in dot  # 2 ops x 3 passes x 1.00 ms
+    assert "t=2.00 ms" not in dot  # the pass-blind (first-call-only) undercount
+
+
+def test_profiling_collapsed_module_unrolled_box_is_per_call(tmp_path: Path) -> None:
+    """Each unrolled collapsed box covers exactly its own call's ops."""
+
+    log = tl.trace(_RecurrentBlock(), torch.randn(2, 4))
+    _set_op_durations(log, 0.001)
+
+    dot = _render_dot(log, tmp_path, node_mode="profiling", vis_call_depth=1, vis_mode="unrolled")
+
+    # Three per-call boxes, each 2 ops x 1.00 ms — never the 6.00 ms total.
+    assert dot.count("t=2.00 ms") == 3
+    assert "t=6.00 ms" not in dot
+
+
+def test_profiling_multipass_unrolled_nodes_keep_per_pass_rows(tmp_path: Path) -> None:
+    """V2 regression: unrolled multi-pass nodes lost every t=/call= row.
+
+    The renderer handed the preset the aggregate Layer, whose per-pass field
+    reads refuse on multi-pass layers; the swallowed refusal silently
+    dropped the rows while the exact values sat unused on each Op.
+    """
+
+    log = tl.trace(_RecurrentBlock(), torch.randn(2, 4))
+    durations = {1: 0.001, 2: 0.002, 3: 0.004}
+    for layer_label in ("linear_1_1", "relu_1_2"):
+        for pass_index, layer_pass in log.layers[layer_label].ops.items():
+            layer_pass.func_duration = durations[pass_index]
+
+    dot = _render_dot(log, tmp_path, node_mode="profiling")
+
+    # Each pass node carries ITS OWN captured duration (2 ops per pass).
+    assert dot.count("t=1.00 ms") == 2
+    assert dot.count("t=2.00 ms") == 2
+    assert dot.count("t=4.00 ms") == 2
+    # The source-call row survives on multi-pass nodes too.
+    assert "call=" in dot
+
+
+def test_profiling_multipass_rolled_node_discloses_aggregation(tmp_path: Path) -> None:
+    """A rolled multi-pass node shows exact totals with the aggregation disclosed.
+
+    A single undisclosed per-pass value would imply uniformity the render
+    cannot prove; silence (the shipped behavior) hid the data entirely.
+    """
+
+    log = tl.trace(_RecurrentBlock(), torch.randn(2, 4))
+    _set_op_durations(log, 0.001)
+
+    dot = _render_dot(log, tmp_path, node_mode="profiling", vis_mode="rolled")
+
+    assert "t=3.00 ms (total across 3 passes)" in dot
+    assert "(total across 3 passes)" in dot
+
+
+def test_profiling_fold_representative_box_discloses_scope(tmp_path: Path) -> None:
+    """A repeat-fold representative box names the narrower scope of its rows.
+
+    The fold's ellipsis node hides sibling calls; the profiling rows cover
+    only the representative, and the note keeps that unambiguous.
+    """
+
+    class Tower(nn.Module):
+        """Five identical sibling blocks (a repeat-fold run)."""
+
+        def __init__(self) -> None:
+            """Initialize the block tower."""
+
+            super().__init__()
+            self.blocks = nn.Sequential(
+                *[nn.Sequential(nn.Linear(4, 4), nn.ReLU()) for _ in range(5)]
+            )
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Run the tower."""
+
+            return self.blocks(x)
+
+    log = tl.trace(Tower(), torch.randn(2, 4))
+    _set_op_durations(log, 0.001)
+
+    dot = _render_dot(log, tmp_path, node_mode="profiling", collapse="none", fold_repeats=True)
+
+    assert "t=2.00 ms (@blocks.0:1 only)" in dot
+
+
+def test_profiling_multipass_rows_omitted_when_untimed(tmp_path: Path) -> None:
+    """No pass timed -> no t= row on multi-pass nodes (matches single-pass)."""
+
+    log = tl.trace(_RecurrentBlock(), torch.randn(2, 4))
+    for layer_log in log.layer_logs.values():
+        for layer_pass in layer_log.ops.values():
+            layer_pass.func_duration = None
+
+    rolled = _render_dot(log, tmp_path / "rolled", node_mode="profiling", vis_mode="rolled")
+    unrolled = _render_dot(log, tmp_path / "unrolled", node_mode="profiling")
+
+    assert re.search(r"t=[0-9.]+ [mun]?s", rolled) is None
+    assert re.search(r"t=[0-9.]+ [mun]?s", unrolled) is None
+
+
 def test_invalid_mode_raises() -> None:
     """Invalid vis_node_mode values should fail during option merging."""
 
