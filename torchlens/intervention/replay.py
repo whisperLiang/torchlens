@@ -26,6 +26,7 @@ from ..quantities import Bytes
 from ..utils.display import progress_bar
 from ..utils.rng import execute_with_restored_rng_autocast
 from .errors import (
+    BufferThreadGapWarning,
     ControlFlowDivergenceError,
     ControlFlowDivergenceWarning,
     DirectActivationWriteWarning,
@@ -607,6 +608,38 @@ def _run_replay(
         _preflight_group(group)
         replay_group = [member for member in group if not getattr(member, "is_buffer", False)]
         if not replay_group:
+            # A buffer-only group is a written buffer VERSION record: thread
+            # the recomputed writing op's output through it so downstream
+            # consumers of the buffer read the propagated state, not the
+            # captured value.
+            for member in group:
+                member_key = _replay_site_key(member)
+                if preserve_origins and member_key in origin_keys:
+                    continue
+                threaded = _threaded_buffer_value(member, log, overlay, strict=strict)
+                if threaded is None:
+                    continue
+                # Clone: buffer records keep their own storage at capture, so
+                # the committed buffer out must not alias the writing op's
+                # committed out.
+                tensor = threaded.clone()
+                tensor, records = _apply_replay_hooks(
+                    tensor,
+                    site=member,
+                    hook_entries=hook_targets.get(member_key, ()),
+                    run_ctx=_ensure_replay_run_ctx(log),
+                )
+                if differentiable_frontier is not None and member_key in hook_targets:
+                    tensor = _frontier_leaf(
+                        differentiable_frontier, _disclosure_label(member), tensor
+                    )
+                overlay[member_key] = tensor
+                pending_updates[member_key] = tensor
+                if records:
+                    pending_records.setdefault(member_key, []).extend(records)
+                if differentiable_frontier is not None:
+                    _install_replay_tensor_hook(log, member, tensor)
+                _check_edge_expectations(member, strict=strict)
             continue
         representative = replay_group[0]
         args, kwargs = _reconstruct_args_from_template(
@@ -619,6 +652,13 @@ def _run_replay(
             label_keys=label_keys,
         )
         args, kwargs = _splice_param_substitutions(replay_group, args, kwargs)
+        if _call_mutates_tensor_args(representative, kwargs):
+            # An in-place func would otherwise mutate its resolved args BY
+            # IDENTITY -- captured record outs and committed overlay tensors
+            # the replay does not own. That corrupted capture truth (and,
+            # through copy-on-write forks, the SOURCE trace's payloads).
+            args = _clone_tensors_in(args)
+            kwargs = {key: _clone_tensors_in(value) for key, value in kwargs.items()}
         output = _execute_replay_func_strict(representative, args, kwargs)
         if output is None and _is_inplace_none_return(representative):
             output = args[0]
@@ -1604,6 +1644,145 @@ def _is_inplace_none_return(site: Op) -> bool:
 
     func_name = getattr(site.func, "__name__", "") if site.func is not None else ""
     return bool(site.is_inplace) or func_name in {"__setitem__", "zero_", "__delitem__"}
+
+
+def _call_mutates_tensor_args(site: Op, kwargs: Mapping[str, Any]) -> bool:
+    """Return whether a replayed call may write into its argument tensors.
+
+    Covers the captured in-place flag, the torch trailing-underscore
+    convention (dunders excluded), the explicit mutator set from
+    :func:`_is_inplace_none_return`, and a tensor ``out=`` destination. A
+    false positive only costs one defensive clone; a false negative lets the
+    replayed call mutate captured payloads by identity.
+
+    Parameters
+    ----------
+    site:
+        Replayed site.
+    kwargs:
+        Reconstructed keyword arguments.
+
+    Returns
+    -------
+    bool
+        Whether argument tensors must be cloned before execution.
+    """
+
+    if _is_inplace_none_return(site):
+        return True
+    func_name = getattr(site.func, "__name__", "") if site.func is not None else ""
+    if func_name.endswith("_") and not func_name.endswith("__"):
+        return True
+    return isinstance(kwargs.get("out"), torch.Tensor)
+
+
+def _clone_tensors_in(value: Any) -> Any:
+    """Return ``value`` with every tensor leaf cloned, containers rebuilt.
+
+    Parameters
+    ----------
+    value:
+        Resolved argument value (tensor, container, or opaque object).
+
+    Returns
+    -------
+    Any
+        Structure with cloned tensor leaves; non-tensor leaves unchanged.
+    """
+
+    if isinstance(value, torch.Tensor):
+        return value.clone()
+    if isinstance(value, tuple):
+        return tuple(_clone_tensors_in(item) for item in value)
+    if isinstance(value, list):
+        return [_clone_tensors_in(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _clone_tensors_in(item) for key, item in value.items()}
+    return value
+
+
+def _threaded_buffer_value(
+    site: Op,
+    trace: Trace,
+    overlay: Mapping[str, torch.Tensor],
+    *,
+    strict: bool,
+) -> torch.Tensor | None:
+    """Return the recomputed value to thread through one buffer record.
+
+    A written-buffer version record's single parent is the op that performed
+    the write, and for ``inplace``/``reassign`` write kinds that op's output
+    IS the post-write buffer state. Threading is self-certifying: the
+    capture-time buffer value must equal the capture-time producer out, or
+    the record keeps its captured value and a
+    :class:`~torchlens.intervention.errors.BufferThreadGapWarning` discloses
+    the gap (raised under ``strict``).
+
+    Parameters
+    ----------
+    site:
+        Buffer record inside the replay cone.
+    trace:
+        Model log being replayed.
+    overlay:
+        Current replay outs keyed by pass-qualified replay key.
+    strict:
+        Whether a threading gap raises instead of warning.
+
+    Returns
+    -------
+    torch.Tensor | None
+        The recomputed producer out to thread, or None to keep the captured
+        value.
+    """
+
+    parents = tuple(getattr(site, "parents", ()) or ())
+    if not parents:
+        # An unwritten (initial-read) buffer version has no producer; its
+        # captured value is the honest replay value.
+        return None
+    producer_key = parents[0] if len(parents) == 1 else None
+    producer = trace.layer_dict_all_keys.get(producer_key) if producer_key is not None else None
+    recomputed = overlay.get(producer_key) if producer_key is not None else None
+
+    def _gap(reason: str) -> None:
+        message = (
+            f"buffer record {_disclosure_label(site)!r} inside the replay cone keeps its "
+            f"CAPTURED value: {reason}. Downstream consumers of this buffer version do "
+            "not see the propagated edit."
+        )
+        if strict:
+            raise ControlFlowDivergenceError(message)
+        warnings.warn(message, BufferThreadGapWarning, stacklevel=4)
+
+    if producer_key is None:
+        _gap(f"record has {len(parents)} parents, not one writing op")
+        return None
+    if producer is None or recomputed is None:
+        # Producer outside the cone (or not recomputed): captured value is
+        # still the honest replay value, nothing to disclose.
+        return None
+    write_kind = getattr(site, "buffer_write_kind", None)
+    if write_kind not in {"inplace", "reassign"}:
+        _gap(
+            f"write kind {write_kind!r} does not prove the writing op's output equals "
+            "the post-write buffer state"
+        )
+        return None
+    captured_site = site.out
+    captured_producer = producer.out
+    if (
+        not isinstance(captured_site, torch.Tensor)
+        or not isinstance(captured_producer, torch.Tensor)
+        or captured_site.shape != captured_producer.shape
+        or not torch.equal(captured_site, captured_producer)
+    ):
+        _gap(
+            f"capture-time corroboration failed: the buffer value does not equal the "
+            f"writing op {producer_key!r}'s captured output"
+        )
+        return None
+    return recomputed
 
 
 def _ensure_replay_run_ctx(log: Trace) -> dict[str, Any]:
