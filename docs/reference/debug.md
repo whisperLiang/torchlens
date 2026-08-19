@@ -131,6 +131,38 @@ Output:
 (2, 8) 2
 ```
 
+## `compare_params`
+
+`tl.debug.compare_params(model_a, model_b, *, rtol=1e-5, atol=1e-8, include_buffers=False)`
+(DOCUMENTED-UNSTABLE spelling) is the weight-space counterpart of `compare`: it aligns two
+models' parameters on their qualified names and returns a pandas DataFrame with one row per
+name and aggregate counts in `attrs`. Tensors on different devices are compared on CPU;
+shape/dtype mismatches and meta tensors skip the value comparison with the reason recorded.
+`include_buffers=True` adds registered buffers (rows carry `kind="buffer"`).
+
+```python
+import torch
+from torch import nn
+import torchlens as tl
+
+torch.manual_seed(0)
+left = nn.Linear(4, 2)
+right = nn.Linear(4, 2)
+right.load_state_dict(left.state_dict())
+with torch.no_grad():
+    right.bias.add_(1.0)
+report = tl.debug.compare_params(left, right)
+print(report.attrs["matched"], report.attrs["value_diverged"])
+print(report.loc[report["allclose"] == False, "name"].tolist())  # noqa: E712
+```
+
+Output:
+
+```text
+1 1
+['bias']
+```
+
 ## `count_compiles`
 
 `tl.debug.count_compiles()` measures Dynamo compilation events (including recompiles) across a

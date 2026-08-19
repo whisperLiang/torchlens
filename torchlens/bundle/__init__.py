@@ -315,6 +315,8 @@ class Bundle:
             If ``name`` is not a dynamic bundle helper.
         """
 
+        from ._comparisons import _register_comparison_helpers
+
         dynamic_custom_methods: dict[str, Callable[..., Any]] = {
             "aligned_pairs": _bundle_aligned_pairs,
             "compare": _bundle_compare,
@@ -325,6 +327,7 @@ class Bundle:
             "relate": _bundle_relate,
             "show_diff": _bundle_show_diff,
         }
+        _register_comparison_helpers(dynamic_custom_methods)
         helper = dynamic_custom_methods.get(name)
         if helper is None:
             raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")

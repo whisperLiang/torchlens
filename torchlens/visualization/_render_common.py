@@ -73,6 +73,7 @@ from ._label_format import (
     format_module_path,
     format_param_list,
     format_shape,
+    saved_for_backward_line,
 )
 from ._render_utils import (
     _open_file_quietly,
@@ -883,6 +884,7 @@ __all__ = [
     "format_module_path",
     "format_param_list",
     "format_shape",
+    "saved_for_backward_line",
     "graphviz",
     "graphviz_graph_overrides",
     "html",

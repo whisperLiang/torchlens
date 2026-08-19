@@ -24,23 +24,36 @@ from torch import nn as _nn
 
 __version__ = "2.34.1"
 
-from . import options
-from ._errors import AmbiguousOpLookupError
-from ._state import ReentrantTraceError
-from .captured_run import ActivationLookup, CapturedRun
-from .ir.container import register_container
-from .observers import record_span, span, tap
-from .options import CaptureOptions as _CaptureOptions, to_disk
-from .quantities import Bytes, Duration, Flops, Macs, Quantity
-
 if TYPE_CHECKING:
     from .backends import BackendName
     from .data_classes.trace import Trace
     from .intervention import Bundle
 
-from ._deprecations import REMOVED_IN as _REMOVED_IN  # noqa: E402  (single advertised window)
-
 _LAZY_ATTRS = {
+    # Import cold-start laziness (P4, JMT-rebaselined 2026-08-19): the former
+    # eager import block (options/captured_run+ir/observers/quantities/errors
+    # and their transitive chains) is fully deferred behind these rows -- the
+    # marginal-import guard in tests/test_import_hygiene.py holds the line.
+    "ActivationLookup": ("torchlens.captured_run", "ActivationLookup"),
+    "AmbiguousOpLookupError": ("torchlens._errors", "AmbiguousOpLookupError"),
+    "Bytes": ("torchlens.quantities", "Bytes"),
+    "CapturedRun": ("torchlens.captured_run", "CapturedRun"),
+    "Duration": ("torchlens.quantities", "Duration"),
+    "Flops": ("torchlens.quantities", "Flops"),
+    "Macs": ("torchlens.quantities", "Macs"),
+    "Quantity": ("torchlens.quantities", "Quantity"),
+    "ReentrantTraceError": ("torchlens._state", "ReentrantTraceError"),
+    "captured_run": ("torchlens.captured_run", None),
+    "errors": ("torchlens.errors", None),
+    "ir": ("torchlens.ir", None),
+    "observers": ("torchlens.observers", None),
+    "options": ("torchlens.options", None),
+    "quantities": ("torchlens.quantities", None),
+    "record_span": ("torchlens.observers", "record_span"),
+    "register_container": ("torchlens.ir.container", "register_container"),
+    "span": ("torchlens.observers", "span"),
+    "tap": ("torchlens.observers", "tap"),
+    "to_disk": ("torchlens.options", "to_disk"),
     "AtenOp": ("torchlens.data_classes.aten_op", "AtenOp"),
     "Bundle": ("torchlens.intervention", "Bundle"),
     "Container": ("torchlens.data_classes.container", "Container"),
@@ -430,12 +443,12 @@ def _warn_moved_name(name: str, new_module_path: str, new_attr: str) -> None:
         Canonical attribute name inside ``new_module_path``.
     """
 
-    from ._deprecations import TorchLensDeprecationWarning
+    from ._deprecations import REMOVED_IN, TorchLensDeprecationWarning
     from .utils.display import user_stacklevel
 
     _warnings.warn(
         f"torchlens.{name} is deprecated; use {new_module_path}.{new_attr} instead. "
-        f"Removed in {_REMOVED_IN}.",
+        f"Removed in {REMOVED_IN}.",
         TorchLensDeprecationWarning,
         stacklevel=user_stacklevel(),
     )
@@ -452,13 +465,13 @@ def _warn_legacy_api_name(name: str, advice: str) -> None:
         Complete replacement spelling, already resolvable as written.
     """
 
-    from ._deprecations import TorchLensDeprecationWarning
+    from ._deprecations import REMOVED_IN, TorchLensDeprecationWarning
     from .utils.display import user_stacklevel
 
     _warnings.warn(
         f"torchlens.{name} is deprecated; use {advice} instead. "
         f"The old paper-era name remains available as a compatibility shim "
-        f"and will be removed in {_REMOVED_IN}.",
+        f"and will be removed in {REMOVED_IN}.",
         TorchLensDeprecationWarning,
         # Two routes reach this function -- module attribute access (via
         # `__getattr__`, itself reached through the custom module
@@ -708,12 +721,13 @@ def pluck(model: _nn.Module, x: Any, layer: str, stop_after: Any | None = None) 
     """
 
     from .experimental import _active_stop_after_site
+    from .options import CaptureOptions
 
     _ = stop_after if stop_after is not None else _active_stop_after_site()
     trace = _resolve_top_level("trace")(
         model,
         x,
-        capture=_CaptureOptions(layers_to_save=[layer]),
+        capture=CaptureOptions(layers_to_save=[layer]),
     )
     return _out_from_log(trace, layer)
 
@@ -766,11 +780,13 @@ def _extract_layers_with_trace(
         If a lookup does not resolve or did not produce a saved tensor.
     """
 
+    from .options import CaptureOptions as _LazyCaptureOptions
+
     layer_plan = _normalize_extract_layers(layers)
     trace = _resolve_top_level("trace")(
         model,
         x,
-        capture=_CaptureOptions(
+        capture=_LazyCaptureOptions(
             layers_to_save=list(layer_plan.values()),
         ),
     )

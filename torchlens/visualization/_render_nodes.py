@@ -407,6 +407,7 @@ def _add_node_to_graphviz(
     deduped_edge_registry: dict[tuple[Any, ...], dict[str, Any]] | None = None,
     encoding: Any | None = None,
     suppressed_args: Mapping[int, frozenset[str]] | None = None,
+    show_saved_for_backward: bool = False,
 ) -> None:
     """Adds a node and its relevant edges to the graphviz figure.
 
@@ -493,6 +494,7 @@ def _add_node_to_graphviz(
             show_input_transform_summary,
             encoding=encoding,
             suppressed_args=suppressed_args,
+            show_saved_for_backward=show_saved_for_backward,
         )
 
     _add_edges_for_node(
@@ -544,6 +546,7 @@ def _build_layer_node(
     sibling_counts: Mapping[str, int] | None = None,
     encoding: Any | None = None,
     suppressed_args: Mapping[int, frozenset[str]] | None = None,
+    show_saved_for_backward: bool = False,
 ) -> str:
     """Builds and adds a standard (non-collapsed) layer node to the graphviz graph.
 
@@ -597,6 +600,7 @@ def _build_layer_node(
             node_label_fields=node_label_fields,
             node_overlay=node_overlay,
             suppressed_arg_keys=(suppressed_args or {}).get(id(node), frozenset()),
+            show_saved_for_backward=show_saved_for_backward,
         ),
         shape=node_shape,
         fillcolor=node_bg_color,
@@ -1947,6 +1951,7 @@ def compute_default_node_lines(
     node_label_fields: list[str] | None = None,
     node_overlay: str | OverlayScores | None = None,
     suppressed_arg_keys: frozenset[str] = frozenset(),
+    show_saved_for_backward: bool = False,
 ) -> list[str]:
     """Build default plain-text rows for a layer node.
 
@@ -1965,6 +1970,9 @@ def compute_default_node_lines(
     suppressed_arg_keys:
         Checked-suppression keys (default empty: every arg visible — the
         detached-record degrade rule).
+    show_saved_for_backward:
+        Whether to append the saved-for-backward disclosure row on ops whose
+        grad_fn measurably retained tensors.
 
     Returns
     -------
@@ -2029,6 +2037,9 @@ def compute_default_node_lines(
         lines.append(shape_summary)
     lines.append(f"{format_shape(layer_log.shape)}, {format_memory(layer_log.activation_memory)}")
 
+    if show_saved_for_backward and (saved := saved_for_backward_line(layer_log, vis_mode)):
+        lines.append(saved)
+
     module_kwargs = format_module_kwargs(layer_log, suppressed_keys=suppressed_arg_keys)
     if module_kwargs is not None:
         lines.append(module_kwargs)
@@ -2040,8 +2051,7 @@ def compute_default_node_lines(
     address_line = format_module_path(node_address)
     if address_line is not None:
         lines.append(address_line)
-    overlay = overlay_line(layer_log, node_overlay)
-    if overlay is not None:
+    if (overlay := overlay_line(layer_log, node_overlay)) is not None:
         lines.append(overlay)
     return lines
 

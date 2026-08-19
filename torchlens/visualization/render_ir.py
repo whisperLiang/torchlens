@@ -909,6 +909,7 @@ def _resolve_node_decision(
             inputs.sibling_counts,
             encoding=getattr(context, "encoding", None),
             suppressed_args=inputs.suppressed_args,
+            show_saved_for_backward=getattr(context, "show_saved_for_backward", False),
         )
     owned = tuple(
         (owner, dict(args))

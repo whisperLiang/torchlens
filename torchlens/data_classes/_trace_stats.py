@@ -629,6 +629,52 @@ class TraceStatsMixin(_TraceMixinBase):
             top_k=top_k,
         )
 
+    def sites_table(self: "Trace") -> Any:
+        """Return the tabular view of this trace's structural sites.
+
+        DOCUMENTED-UNSTABLE spelling (pending naming-session ratification).
+        One row per distinct L1 ``site_key`` in first-occurrence execution
+        order, aggregating the ops that share the site: ``site_key``,
+        ``module_site``, ``layer_type``, ``output_slot``, ``call_ordinal``,
+        ``n_ops``, ``labels``, ``layer_labels``, ``passes``, ``shapes``.
+        Requires the ``tabular`` extra (pandas).
+
+        Returns
+        -------
+        pandas.DataFrame
+            The sites table.
+
+        Raises
+        ------
+        InvalidArgumentError
+            ``site_key_unavailable`` for legacy artifacts whose ops carry no
+            site keys — consistent with the L1 site accessors, never a
+            silently empty table.
+        """
+
+        from ._trace_inventory import build_sites_table
+
+        return build_sites_table(self)
+
+    def bill_of_materials(self: "Trace") -> dict[str, Any]:
+        """Return the inventory of what this trace actually contains.
+
+        DOCUMENTED-UNSTABLE spelling (pending naming-session ratification).
+        A nested, JSON-friendly dict of sections — ``capture``, ``graph``,
+        ``parameters``, ``buffers``, ``activations``, ``backward``, and
+        ``annotations`` — every figure read from fields the trace already
+        carries (this rollup mints no new claims).
+
+        Returns
+        -------
+        dict[str, Any]
+            The inventory sections.
+        """
+
+        from ._trace_inventory import build_bill_of_materials
+
+        return build_bill_of_materials(self)
+
     def receptive_fields(
         self: "Trace",
         level: Literal["op", "layer", "call", "module"] = "op",

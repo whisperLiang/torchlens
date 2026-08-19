@@ -395,6 +395,37 @@ class RecordingTrace:
         )
 
 
+#: Closed RecordContext field set exported by :meth:`Recording.raw_metadata`.
+#: Metadata-only by construction: payload-bearing and lookback-view fields
+#: (``recent_events``/``recent_ops``, deferred-value booleans) stay out so a
+#: row can never force a payload read.
+_RAW_METADATA_FIELDS = (
+    "kind",
+    "label",
+    "raw_label",
+    "pass_index",
+    "event_index",
+    "step_index",
+    "layer_type",
+    "type_index",
+    "raw_index",
+    "func_name",
+    "address",
+    "module_type",
+    "module_pass_index",
+    "module_stack",
+    "parent_labels",
+    "input_output_address",
+    "shape",
+    "dtype",
+    "tensor_device",
+    "output_index",
+    "is_bottom_level_func",
+    "func_call_id",
+    "is_output_parent",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class Recording(CapturedRun):
     """Result of a fastlog recording session.
@@ -651,6 +682,52 @@ class Recording(CapturedRun):
         if trace is None:
             raise RuntimeError("recording_trace projection was not initialized")
         return trace
+
+    def raw_metadata(self) -> tuple[dict[str, Any], ...]:
+        """Return payload-free raw metadata for every captured event.
+
+        DOCUMENTED-UNSTABLE spelling (pending naming-session ratification).
+        One plain dict per chronological capture event — retained or not —
+        read straight from the recorder's raw event stream with no cooking
+        and no payload access, so it works on failed partial recordings too.
+        Each row carries the closed RecordContext metadata field set plus
+        ``retained`` (whether the predicate kept the event's record).
+
+        Returns
+        -------
+        tuple[dict[str, Any], ...]
+            Chronological per-event metadata rows.
+
+        Raises
+        ------
+        RecorderStateError
+            ``recording_event_stream_unavailable`` when this recording no
+            longer holds its raw event stream (explicitly cleaned, or
+            restored from a payload-only projection) — never a silently
+            empty result.
+        """
+
+        from .exceptions import RecorderStateError
+
+        if self.event_stream is None:
+            raise RecorderStateError(
+                "this Recording no longer holds its raw capture event stream "
+                "(explicitly cleaned, or restored from a payload-only "
+                "projection), so raw per-event metadata is unavailable",
+                code="recording_event_stream_unavailable",
+                remedy=(
+                    "read retained-record metadata via recording.records / "
+                    "to_pandas(), or keep the event stream alive"
+                ),
+            )
+        self._ensure_records()
+        retained_keys = {(record.ctx.pass_index, record.ctx.event_index) for record in self.records}
+        rows: list[dict[str, Any]] = []
+        for ctx in self.recording_trace.contexts:
+            row = {name: getattr(ctx, name) for name in _RAW_METADATA_FIELDS}
+            row["retained"] = (ctx.pass_index, ctx.event_index) in retained_keys
+            rows.append(row)
+        return tuple(rows)
 
     @property
     def activation_transform_repr(self) -> str | None:

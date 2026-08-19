@@ -1,7 +1,8 @@
 """Import-time hygiene regression tests.
 
-The measured import state is healthy -- TorchLens adds ~0.15 s and 30 of its own
-modules on top of torch, pulls no heavy third-party dependency, and is
+The measured import state is healthy -- TorchLens adds ~1.2 ms and exactly one
+of its own modules (the package root) on top of torch after the P4 cold-start
+laziness pass (2026-08-19), pulls no heavy third-party dependency, and is
 warning-clean. This file is the TRIPWIRE for that state, and grind b4 (R31-1)
 found the tripwire could not fail on any of the three ways it can regress:
 
@@ -71,55 +72,20 @@ _HEAVY_IMPORT_DENYLIST = frozenset(
 #: discipline tests/test_module_import_isolation.py uses for import cycles.
 _EAGER_TORCHLENS_MODULES = frozenset(
     {
+        # P4 cold-start laziness (JMT-rebaselined 2026-08-19): the package
+        # root is the ONLY module a bare import executes. The former eager
+        # block (options/captured_run+ir/observers/quantities/errors and
+        # their transitive chains: _deprecations, _errors, _io, _literals,
+        # _save_budget, _state, utils, visualization.node_spec) is fully
+        # deferred behind _LAZY_ATTRS rows.
         "torchlens",
-        "torchlens._deprecations",
-        "torchlens._errors",
-        "torchlens._io",
-        # stdlib-only (os/contextlib) pre-release field registrar; eager because
-        # torchlens._io.read_tlspec_version validates its marker on every load.
-        "torchlens._io.prerelease",
-        "torchlens._literals",
-        "torchlens._save_budget",
-        "torchlens._state",
-        "torchlens.captured_run",
-        "torchlens.errors",
-        "torchlens.errors._base",
-        # errors._base-only leaf (episode/bundle-relation refusal family);
-        # eager because torchlens.errors re-exports it beside .runnable.
-        "torchlens.errors.episode",
-        "torchlens.errors.runnable",
-        "torchlens.ir",
-        "torchlens.ir.capture_events",
-        "torchlens.ir.container",
-        "torchlens.ir.container_registry",
-        "torchlens.ir.events",
-        "torchlens.ir.intervention",
-        "torchlens.ir.live_index",
-        "torchlens.ir.op_record",
-        "torchlens.ir.predicate",
-        "torchlens.ir.refs",
-        "torchlens.ir.semantics",
-        "torchlens.ir.workspaces",
-        "torchlens.observers",
-        "torchlens.options",
-        "torchlens.quantities",
-        "torchlens.utils",
-        "torchlens.utils._multipass_access",
-        "torchlens.visualization",
-        "torchlens.visualization.node_spec",
     }
 )
 
 #: Lazy-facade module paths that a bare import legitimately executes anyway,
-#: with the reason. Shrink-only, like the eager set above.
-_EAGERLY_IMPORTED_LAZY_TARGETS = {
-    "torchlens._io": (
-        "the package eagerly imports torchlens._io for the error/warning classes "
-        "(ArtifactSchemaAgeWarning and friends) that the top-level surface "
-        "re-exports; the lazy _LAZY_ATTRS entries pointing here are for its "
-        "heavier members, which stay deferred inside the module"
-    ),
-}
+#: with the reason. Shrink-only, like the eager set above. Emptied by the P4
+#: cold-start laziness pass: torchlens._io is no longer eagerly imported.
+_EAGERLY_IMPORTED_LAZY_TARGETS: dict[str, str] = {}
 
 #: Non-torchlens modules a bare import may add BEYOND what torch already
 #: imported. Measured at 16 (html, packaging, sysconfig). The ceiling is
@@ -133,13 +99,18 @@ _MAX_MARGINAL_NON_TORCHLENS_MODULES = 40
 #: this guard false-failed at 1.45s under orchestrator load while five fresh
 #: control runs measured 0.32-0.78s and every structural guard stayed green
 #: (grind b4, F31-A): wall stretches with box load, CPU time does not, and an
-#: eager heavy import inflates BOTH. Measured ~0.15 s marginal CPU on the
-#: devbox; the budget is ~10x that. This is a regression tripwire for an
-#: order-of-magnitude change (an eager heavy import), NOT a performance gate --
-#: perf lives in tests/bench/. Documented residual, shared with the tier
-#: budgets: an import that only SLEEPS is no longer catchable here; the module
+#: eager heavy import inflates BOTH. RE-BASELINED (JMT 2026-08-19, P4): the
+#: metric is TorchLens-MARGINAL import time on top of torch, target <= 10 ms
+#: -- total import is torch-dominated and not ours to control. Measured
+#: ~1.2 ms after the cold-start laziness pass (the package root is the only
+#: eagerly executed module), so the budget carries ~8x headroom. The probe
+#: warms the import-path machinery (importlib.util.find_spec) OUTSIDE the
+#: timing window: an editable-install venv otherwise charges ~7-12 ms of
+#: pip's editable finder to the first torchlens import -- install-method
+#: cost, not TorchLens's. Documented residual, shared with the tier budgets:
+#: an import that only SLEEPS is no longer catchable here; the module
 #: allowlist and denylist above remain the structural authority.
-_TORCHLENS_IMPORT_BUDGET_S = 1.5
+_TORCHLENS_IMPORT_BUDGET_S = 0.010
 
 #: Marginal ru_maxrss budget for ``import torchlens`` with torch already
 #: resident (R31 axis b: the duration budget is blind to a CPU-cheap but
@@ -196,6 +167,13 @@ after_torch = set(sys.modules)
 torch_ns_before = {k: id(v) for k, v in vars(torch).items()}
 functional_ns_before = {k: id(v) for k, v in vars(_torch_nn_functional).items()}
 rss_before_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+# Warm the import-path machinery outside the timing window (P4 re-baseline):
+# on an editable-install venv the first find_spec("torchlens") imports pip's
+# editable finder (~7-12 ms of install-method cost that is not TorchLens's
+# marginal import time). find_spec never executes the module itself.
+import importlib.util
+importlib.util.find_spec("torchlens")
 
 start_wall = time.perf_counter()
 start_cpu = time.process_time()
@@ -371,11 +349,14 @@ for facade_name, module_path in facades.items():
 
 assert collisions == {
     "attribution": [], "autoroute": ["input", "output"],
+    "captured_run": [],
     "compat": ["lovely", "torchextractor", "torchshow"],
-    "data_classes": [], "dataset_extraction": [], "debug": [], "distributed": [], "examples": [],
+    "data_classes": [], "dataset_extraction": [], "debug": [], "distributed": [],
+    "errors": [], "examples": [],
     "experimental": ["dagua", "node_styles"], "export": [],
     "fastlog": ["dry_run", "recover"], "intervention": ["replay", "rerun", "sites"],
-    "hash": [], "io": [], "merged": [], "partial": [], "report": [], "repgeom": [],
+    "hash": [], "io": [], "ir": [], "merged": [], "observers": [], "options": [],
+    "partial": [], "quantities": [], "report": [], "repgeom": [],
     "receptive_field": ["rules"], "stats": [], "user_funcs": [], "validation": [], "viz": [],
 }
 

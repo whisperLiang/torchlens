@@ -148,6 +148,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
         scale: str | None = None,
         stack_by: str | bool | Callable[[Any], Any] | None = None,
         show_redundant_args: bool = False,
+        show_saved_for_backward: bool = False,
     ) -> Any:
         """Render the computational graph for this model log.
 
@@ -246,6 +247,19 @@ class TraceVisualizationMixin(_TraceMixinBase):
             data equality on records). A mismatch or unavailable shape
             keeps the arg VISIBLE — the rule can only reveal more, never
             hide a discrepancy. Pass ``True`` to show every captured arg.
+        show_saved_for_backward:
+            UNSTABLE (keyword-only). Saved-for-backward annotation: adds a
+            label row (``saved for backward: N tensors, X MB``) on every op
+            whose grad_fn measurably retained tensors for the backward pass,
+            from the capture-time ``num_autograd_tensors`` /
+            ``autograd_memory`` measurements — the memory autograd is
+            actually holding, made visible per node. Ops that saved nothing
+            (or whose backward graph was never built, e.g. under
+            ``torch.no_grad``) get no row: an absent row makes no claim. On
+            rolled multi-pass layers the stored measurements are cross-pass
+            sums and the row discloses ``(total across passes)``. Composes
+            with ``color_by="autograd_memory"`` for a ramp over the same
+            quantity.
 
         Returns
         -------
@@ -332,6 +346,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
             scale=scale,
             stack_by=stack_by,
             show_redundant_args=show_redundant_args,
+            show_saved_for_backward=show_saved_for_backward,
         )
 
     def add_node_overlay(
