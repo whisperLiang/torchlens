@@ -686,7 +686,21 @@ print(tl.compat.report(model, x).to_markdown())
   `Module` expose `receptive_field` and `projective_field` views; `Trace` exposes the matching
   `receptive_fields()` and `projective_fields()` tables.
 - `torchlens.bridge` contains optional adapters for Captum, HF, SHAP, SAE Lens, LIT,
-  profiler, and related tools.
+  profiler, and related tools. `bridge.brain_score` additionally serves Brain-Score's
+  `ActivationsExtractorHelper` seam: `get_activations_fn(model)` is the offline
+  per-batch callable (module dotted paths or any TorchLens lookup; `"logits"` = model
+  output) and `activations_extractor(...)` wires it into the real helper (requires
+  `brainscore_vision`, Python >= 3.11; pinned to the 2.3.22 wheel source, stub-tested,
+  UNVERIFIED against a running install).
+- DATASET EXTRACTION (D7/V5; `resume=`, `stimulus_ids=`, and the loader
+  DOCUMENTED-UNSTABLE): disk-mode `tl.extract_dataset(..., output_dir=)` writes atomic
+  shards plus a self-describing `manifest.json` (run signature, per-site identity with
+  L1 site keys where derivable, stimulus ordering/provenance, axis semantics, dtypes,
+  devices, transform disclosure, TorchLens version), ledgered per batch. `resume=True`
+  continues an interrupted run from its last completed shard after a signature check
+  (typed refusals `extraction_resume_*` / `extraction_manifest_invalid`);
+  `torchlens.dataset_extraction.load_extraction` reads the artifact back with metadata.
+  Crash-safety is pinned by a hard-process-death test.
 - Appliance packages `notebook` and `neuro` reserve extras boundaries and enforce
   import gating for their optional dependencies.
 
