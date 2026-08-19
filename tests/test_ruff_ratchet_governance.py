@@ -126,7 +126,13 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     # torch.allclose rtol=/atol= convention as separate keywords -- bundling
     # them into a tolerance object would trade a familiar user surface for a
     # lint count. Private helpers were reduced instead of ledgered.
-    "PLR0913": 425,
+    # 425->426 (2026-08-19 comparative-producers lane): tl.top_changed is a
+    # public producer constructor whose surface is the designed API (reference +
+    # population + exactly-one-of k/fraction + by/largest); collapsing
+    # k/fraction into one dual-typed arg would trade an arg-count point for
+    # one-name-two-meanings ambiguity. Two independent lanes each raised this
+    # ceiling with a stated reason; the count is their UNION, not a pick-one.
+    "PLR0913": 426,
     # 152->155 (same L8 settle): wrapped_funcol + the criterion-3 census body
     # + capture_completeness_witness gained reviewed statements with plane-P.
     "PLR0915": 155,
