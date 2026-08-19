@@ -157,13 +157,13 @@ def compare_params(
     for name in names:
         entry_a = state_a.get(name)
         entry_b = state_b.get(name)
-        if entry_a is None:
-            summary["only_b"] += 1
-            rows.append(_param_row(name, entry_b[0], "only-b", "only-b"))
-            continue
-        if entry_b is None:
-            summary["only_a"] += 1
-            rows.append(_param_row(name, entry_a[0], "only-a", "only-a"))
+        if entry_a is None or entry_b is None:
+            present = entry_a if entry_a is not None else entry_b
+            if present is None:  # pragma: no cover - names come from the union
+                continue
+            side = "only-a" if entry_b is None else "only-b"
+            summary[side.replace("-", "_")] += 1
+            rows.append(_param_row(name, present[0], side, side))
             continue
 
         kind_a, tensor_a = entry_a
