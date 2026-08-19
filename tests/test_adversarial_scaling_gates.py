@@ -275,22 +275,62 @@ def test_graph_diameter_closures_exact_at_endpoints(chain_capture) -> None:
     assert log["output_1:1"].parents == (f"add_{N_CHAIN}_{N_CHAIN}",)
 
 
+def _stack_depth() -> int:
+    """Return the current Python stack depth, frames from here to the root."""
+
+    depth = 0
+    frame = sys._getframe()
+    while frame is not None:
+        depth += 1
+        frame = frame.f_back
+    return depth
+
+
+#: Recursion headroom PINNED for the depth-overflow gate, measured 2026-08-19 at
+#: ``NEST_DEPTH_OVERFLOW == 400``: the untraced forward needs 1608 frames and the
+#: captured one needs 2032 (the ~1 extra decorated_forward frame per module call,
+#: x400). Any value strictly inside that window makes the gate mean what it says.
+#: It must NOT be inherited from the ambient limit -- see the test docstring.
+NEST_OVERFLOW_HEADROOM = 1800
+
+
 @pytest.mark.smoke
 def test_depth_overflow_fails_clean_and_restores() -> None:
     """Nesting past the recursion limit fails typed and leaves torch capturable.
 
-    TorchLens adds one decorated_forward frame per module call, so this model
-    (legal untraced at the default limit) overflows only under capture. The
-    contract: the original RecursionError propagates, the typed
-    CaptureAttemptFailedWarning discloses the restore, and an immediate
-    follow-up capture is fully sane.
+    TorchLens adds one decorated_forward frame per module call, so this model is
+    legal untraced and overflows only under capture. The contract: the original
+    RecursionError propagates, the typed CaptureAttemptFailedWarning discloses
+    the restore, and an immediate follow-up capture is fully sane.
+
+    The limit is PINNED rather than inherited, and the untraced premise is
+    ASSERTED, because relying on the ambient limit made this gate both fragile
+    and tautological (2026-08-19):
+
+    * At the default 1000 the untraced forward ALSO overflows (it needs 1608),
+      so the test passed while proving only "400 nesting levels overflow",
+      never "capture is what tips it".
+    * ``jedi/api/__init__.py`` calls ``sys.setrecursionlimit(3000)`` at import
+      time and never restores it. Any earlier test importing IPython (jedi is a
+      dependency) silently raised the ceiling above the captured requirement of
+      2032, so the gate could not fire at all -- it passed alone and failed in
+      a full session, which is the wrong way round for an adversarial gate.
     """
 
     model = _nested_sequential(NEST_DEPTH_OVERFLOW)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        with pytest.raises(RecursionError):
-            tl.trace(model, torch.randn(1, 4))
+    inputs = torch.randn(1, 4)
+    original_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(_stack_depth() + NEST_OVERFLOW_HEADROOM)
+    try:
+        # The premise, asserted: without capture this model runs fine at this
+        # limit. If this ever raises, the gate below proves nothing.
+        model(inputs)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(RecursionError):
+                tl.trace(model, inputs)
+    finally:
+        sys.setrecursionlimit(original_limit)
     assert any(isinstance(w.message, CaptureAttemptFailedWarning) for w in caught), (
         "expected the capture-failed restore disclosure"
     )
