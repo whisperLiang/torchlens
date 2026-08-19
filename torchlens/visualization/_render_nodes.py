@@ -9,6 +9,7 @@ from ..utils._multipass_access import get_multipass_attr, is_multipass_layer
 from ._render_common import *
 from ._render_edges import *
 from ._render_leaf import *
+from .modes import CollapsedModeScope
 
 # Home moved to node_spec (S5 territory) at the L5 wave-1 merge to keep this
 # file under its ratchet ceiling; re-exported here for existing importers.
@@ -1388,6 +1389,9 @@ def _build_collapsed_module_node(
     if vis_mode == "unrolled":
         graph_node_label = "pass".join(module_tuple)
         module_call = ml.ops[int(call_index) - 1]
+        # Mode presets aggregate over exactly the calls this box represents:
+        # this ONE call for an unrolled per-call box.
+        scope_op_labels = tuple(module_call.ops)
         module_num_tensors = module_call.num_layers
         module_num_buffers = sum(self[layer].is_buffer for layer in module_call.ops)
         module_has_input_ancestor = any(self[layer].has_input_ancestor for layer in module_call.ops)
@@ -1413,8 +1417,18 @@ def _build_collapsed_module_node(
             module_nparams = remainder_stats["num_params"]
             module_nparams_trainable = remainder_stats["num_params_trainable"]
             module_nparams_frozen = remainder_stats["num_params_frozen"]
+            # Surfaced ops render as their own nodes with their own rows;
+            # keeping them in the box scope would double-count them and
+            # contradict the box's remainder tensor-count line.
+            surfaced_labels = {str(op.layer_label) for op in surfaced_call_ops}
+            scope_op_labels = tuple(
+                label for label in scope_op_labels if label not in surfaced_labels
+            )
     else:
         graph_node_label = module_tuple[0]
+        # A rolled box stands for every call of the module, so the mode
+        # presets aggregate per-pass op records across all calls.
+        scope_op_labels = tuple(op_label for call in ml.ops.values() for op_label in call.ops)
         module_num_tensors = ml.num_layers
         module_num_buffers = sum(self[layer].is_buffer for layer in ml.layer_labels)
         module_has_input_ancestor = any(self[layer].has_input_ancestor for layer in ml.layer_labels)
@@ -1440,6 +1454,19 @@ def _build_collapsed_module_node(
             module_nparams = remainder_stats["num_params"]
             module_nparams_trainable = remainder_stats["num_params_trainable"]
             module_nparams_frozen = remainder_stats["num_params_frozen"]
+            # The surfaced-exit predicate is a per-layer invariant, so every
+            # pass of a surfaced layer renders outside the rolled box; drop
+            # the whole layer base from the mode-preset scope to match the
+            # remainder tensor count.
+            surfaced_bases = {
+                str(op.layer_label).rsplit(":", 1)[0]
+                for op in _surfaced_own_output_ops(self, address, ml.layer_labels)
+            }
+            scope_op_labels = tuple(
+                op_label
+                for op_label in scope_op_labels
+                if op_label.rsplit(":", 1)[0] not in surfaced_bases
+            )
 
     # Deduplicate: multiple layers in the same collapsed module will each
     # trigger this function, but the node should only be added once.
@@ -1515,8 +1542,17 @@ def _build_collapsed_module_node(
     )
     if theme is not None:
         default_spec = apply_theme_to_spec(default_spec, theme)
+    # A fold-representative box stands for a whole run of siblings while
+    # its op inventory covers only the representative; the note keeps any
+    # aggregate row honest about that narrower scope.
+    scope_note = None
+    if fold is not None:
+        scope_note = (
+            f"@{address}:{call_index} only" if vis_mode == "unrolled" else f"@{address} only"
+        )
+    mode_scope = CollapsedModeScope(op_labels=scope_op_labels, note=scope_note)
     mode_fn = COLLAPSED_MODE_REGISTRY[node_mode]
-    mode_result = mode_fn(ml, default_spec)
+    mode_result = mode_fn(ml, default_spec, mode_scope)
     mode_spec = default_spec if mode_result is None else mode_result
     if collapsed_node_spec_fn is not None:
         result = collapsed_node_spec_fn(ml, mode_spec)
@@ -1861,8 +1897,17 @@ def _apply_node_spec_fn(
     """
 
     layer_log = _layer_log_for_node(trace, node)
+    # Mode presets get the per-pass Op on unrolled nodes: routing them
+    # through the aggregate Layer tripped the multi-pass per-pass-field
+    # refusal, which the preset degrades to omitted rows — the exact
+    # per-pass values were sitting unused on the Op. The user callback
+    # below keeps its documented parent-Layer contract.
+    unwrapped = _unwrap_focus_node(node)
+    # _layer_log_for_node already rejected BoundaryNode, and the unwrap
+    # resolved any FocusNode, so the non-Layer case is a per-pass Op.
+    mode_target = layer_log if isinstance(unwrapped, Layer) else cast("Op", unwrapped)
     mode_fn = MODE_REGISTRY[node_mode]
-    mode_result = mode_fn(layer_log, default_spec)
+    mode_result = mode_fn(mode_target, default_spec)
     mode_spec = default_spec if mode_result is None else mode_result
     if node_spec_fn is None:
         return mode_spec
