@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import traceback
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -103,9 +104,9 @@ class StopDirective:
         Explicit backward-related options that conflict with ``inference_only``.
     """
 
-    halt_options: "RecordingOptions | None" = None
+    halt_options: RecordingOptions | None = None
     raise_on_nan: bool = False
-    forward_error_mode: "ForwardErrorMode" = "raise"
+    forward_error_mode: ForwardErrorMode = "raise"
     inference_only: bool = False
     inference_only_conflicts: tuple[str, ...] = ()
 
@@ -117,7 +118,7 @@ class StopDirective:
 
     def evaluate_halt(
         self,
-        ctx: "RecordContext",
+        ctx: RecordContext,
         frontier_output: Any | None = None,
     ) -> None:
         """Evaluate the compiled halt predicate for one capture event.
@@ -141,9 +142,36 @@ class StopDirective:
             return
         result = self.halt_options.halt(ctx)
         if not isinstance(result, bool):
-            raise PredicateError("halt predicate must return bool", ctx=ctx, result=result)
+            raise PredicateError(
+                "halt predicate must return bool. "
+                "Remedy: return True or False from the halt predicate.",
+                ctx=ctx,
+                result=result,
+                code="predicate_return_invalid",
+            )
         if result:
-            raise HaltSignal(ctx.label, frontier_output=frontier_output)
+            # F6 stop-request latch + settlement boundary facts. The boundary
+            # label prefers ``raw_label`` so the recorded label resolves
+            # through ``trace[...]`` even on the prefix-alias compatibility
+            # retry, where ``ctx.label`` is a bare prefix.
+            boundary_label = getattr(ctx, "raw_label", None) or ctx.label
+            from .. import _state
+            from .outcome import StopRequest
+
+            active_trace = _state._active_trace
+            if active_trace is not None:
+                active_trace.__dict__["_stop_requested"] = StopRequest(
+                    kind="halt",
+                    reason=ctx.label,
+                    boundary_kind=getattr(ctx, "kind", None),
+                    boundary_label=boundary_label,
+                )
+            raise HaltSignal(
+                ctx.label,
+                frontier_output=frontier_output,
+                boundary_kind=getattr(ctx, "kind", None),
+                boundary_label=boundary_label,
+            )
 
     def raise_nonfinite(
         self,
@@ -179,8 +207,16 @@ class StopDirective:
             "TorchLens capture stopped at first non-finite tensor: "
             f"op={func_name!r}, layer={raw_label!r}, shape={shape}, dtype={dtype}."
         )
+        # Structural marker for settle-time classification (and the F6 latch):
+        # the settlement authority reads it to settle ABORTED_NONFINITE instead
+        # of generic FAILED, and the boundary checkpoint uses it to detect a
+        # swallowed abort. Set via the process-level active-trace slot because
+        # this frozen directive has no back-reference by design.
+        from .. import _state
+        from .outcome import StopRequest
+
         file_path, line_no = _live_user_location()
-        raise CaptureError(
+        error = CaptureError(
             message,
             file_path=file_path,
             line_no=line_no,
@@ -191,6 +227,20 @@ class StopDirective:
             dtype=str(dtype),
             parents=parents,
         )
+        active_trace = _state._active_trace
+        if active_trace is not None:
+            # The latch carries the exact exception's identity (weakly):
+            # settlement classifies ABORTED_NONFINITE only for THIS error, so
+            # an unrelated CaptureError after a swallowed abort keeps its own
+            # FAILED diagnostics (R06).
+            active_trace.__dict__["_stop_requested"] = StopRequest(
+                kind="nonfinite",
+                reason=message,
+                boundary_kind="op",
+                boundary_label=raw_label,
+                error_ref=weakref.ref(error),
+            )
+        raise error
 
     def forward_disposition(self, exc: BaseException) -> ForwardStopDisposition:
         """Return the compiled failed-forward disposition.
@@ -241,8 +291,8 @@ def stop_directive_for_trace(trace: object) -> StopDirective:
 
 def evaluate_halt_stop(
     trace: object,
-    ctx: "RecordContext",
-    options: "RecordingOptions",
+    ctx: RecordContext,
+    options: RecordingOptions,
     frontier_output: Any | None = None,
 ) -> None:
     """Evaluate the halt portion of the active stop directive.

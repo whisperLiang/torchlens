@@ -2,8 +2,7 @@
 
 from collections import OrderedDict
 from collections.abc import Collection, Iterator, Mapping
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, TextIO, Tuple, cast
-
+from typing import TYPE_CHECKING, Any, Literal, TextIO, cast
 
 if TYPE_CHECKING:
     from ..receptive_field._types import (
@@ -12,6 +11,7 @@ if TYPE_CHECKING:
         ReceptiveFieldStatus,
     )
     from ..report._profile import TraceProfile
+    from ..trace_slice import TraceSlice
     from ..visualization.collapse_plan import CollapsePlan, CollapseSchedule, RenderContext
     from .buffer import BufferAccessor
     from .layer import LayerAccessor
@@ -23,21 +23,24 @@ else:
     _TraceMixinBase = object
 
 from .._deprecations import warn_deprecated_alias
+from .._errors import InvalidArgumentError
 from ..quantities import Duration, Flops, Macs, as_duration
 from ._accessor_base import Accessor
+from ._backend_capability_guards import raise_if_no_backward_capture
+from ._trace_accessors import (
+    _TRACE_LAYER_ACCESSOR_ATTR,
+    _TRACE_MODULE_CALL_ACCESSOR_ATTR,
+    _TRACE_OP_ACCESSOR_ATTR,
+    OrphanAccessor,
+    TraceGradFnCallAccessor,
+    TraceModuleCallAccessor,
+    TraceOpAccessor,
+)
 from ._trace_profile import (
     ModelProfile,
     _infer_input_modality,
     _raw_input_contains_images,
     _raw_input_num_stimuli,
-)
-from ._trace_accessors import (
-    OrphanAccessor,
-    TraceGradFnCallAccessor,
-    TraceModuleCallAccessor,
-    TraceOpAccessor,
-    _TRACE_LAYER_ACCESSOR_CACHE,
-    _TRACE_OP_ACCESSOR_CACHE,
 )
 from .backward_pass import BackwardPass, BackwardPassAccessor
 from .derived_grad import IntermediateDerivedGradAccessor
@@ -68,8 +71,8 @@ class _CallableDict(dict[Any, Any]):
 
 
 def _legacy_conditional_then_entry_edges(
-    conditional_arm_entry_edges: Mapping[Tuple[int, str], List[Tuple[str, str]]],
-) -> List[Tuple[str, str]]:
+    conditional_arm_entry_edges: Mapping[tuple[int, str], list[tuple[str, str]]],
+) -> list[tuple[str, str]]:
     """Return the legacy THEN-edge view from canonical conditional arm edges.
 
     Parameters
@@ -92,8 +95,8 @@ def _legacy_conditional_then_entry_edges(
 
 
 def _legacy_conditional_elif_entry_edges(
-    conditional_arm_entry_edges: Mapping[Tuple[int, str], List[Tuple[str, str]]],
-) -> List[Tuple[int, int, str, str]]:
+    conditional_arm_entry_edges: Mapping[tuple[int, str], list[tuple[str, str]]],
+) -> list[tuple[int, int, str, str]]:
     """Return the legacy ELIF-edge view from canonical conditional arm edges.
 
     Parameters
@@ -116,8 +119,8 @@ def _legacy_conditional_elif_entry_edges(
 
 
 def _legacy_conditional_else_entry_edges(
-    conditional_arm_entry_edges: Mapping[Tuple[int, str], List[Tuple[str, str]]],
-) -> List[Tuple[int, str, str]]:
+    conditional_arm_entry_edges: Mapping[tuple[int, str], list[tuple[str, str]]],
+) -> list[tuple[int, str, str]]:
     """Return the legacy ELSE-edge view from canonical conditional arm edges.
 
     Parameters
@@ -139,13 +142,51 @@ def _legacy_conditional_else_entry_edges(
     ]
 
 
+def _grad_fn_site_key(
+    grad_fn_record: Any, layer_lookup: Mapping[str, Any]
+) -> tuple[str | None, bool]:
+    """Return one grad-fn's site key and whether it is op-backed."""
+
+    if not getattr(grad_fn_record, "has_op", False) or grad_fn_record.op_label is None:
+        return None, False
+    op = layer_lookup.get(grad_fn_record.op_label)
+    return getattr(op, "site_key", None), True
+
+
+def _accumulate_grad_fn_site_record(
+    entry: dict[str, Any],
+    grad_fn_record: Any,
+    fire_timings: Mapping[str, Duration | None] | None,
+) -> None:
+    """Accumulate one grad-fn record into an existing per-site summary row."""
+
+    entry["grad_fn_labels"].append(grad_fn_record.label)
+    for call_index, call in grad_fn_record.calls.items():
+        entry["fire_count"] += 1
+        if call.backward_pass_index is not None:
+            entry["pass_coverage"].add(int(call.backward_pass_index))
+        span = (
+            fire_timings.get(f"{grad_fn_record.label}:{call_index}")
+            if fire_timings is not None
+            else None
+        )
+        if span is not None:
+            entry["timed_fire_count"] += 1
+            previous = entry["total_fire_duration"]
+            entry["total_fire_duration"] = Duration(
+                (0.0 if previous is None else float(previous)) + float(span)
+            )
+
+
 class TraceStatsMixin(_TraceMixinBase):
+    """``Trace`` computed-statistics surface: derived counts, edges, and summaries."""
+
     # ********************************************
     # ********** Computed Properties *************
     # ********************************************
 
     @property
-    def conditional_then_entry_edges(self: "Trace") -> List[Tuple[str, str]]:
+    def conditional_then_entry_edges(self: "Trace") -> list[tuple[str, str]]:
         """Deprecated THEN-edge view derived from ``conditional_arm_entry_edges``.
 
         Returns
@@ -158,7 +199,7 @@ class TraceStatsMixin(_TraceMixinBase):
         return _legacy_conditional_then_entry_edges(self.conditional_arm_entry_edges)
 
     @conditional_then_entry_edges.setter
-    def conditional_then_entry_edges(self: "Trace", value: List[Tuple[str, str]]) -> None:
+    def conditional_then_entry_edges(self: "Trace", value: list[tuple[str, str]]) -> None:
         """Set the deprecated THEN-edge view by updating canonical arm edges.
 
         Parameters
@@ -178,7 +219,7 @@ class TraceStatsMixin(_TraceMixinBase):
             self.conditional_arm_entry_edges[(0, "then")] = list(value)
 
     @property
-    def conditional_elif_entry_edges(self: "Trace") -> List[Tuple[int, int, str, str]]:
+    def conditional_elif_entry_edges(self: "Trace") -> list[tuple[int, int, str, str]]:
         """Deprecated ELIF-edge view derived from ``conditional_arm_entry_edges``.
 
         Returns
@@ -191,7 +232,7 @@ class TraceStatsMixin(_TraceMixinBase):
         return _legacy_conditional_elif_entry_edges(self.conditional_arm_entry_edges)
 
     @conditional_elif_entry_edges.setter
-    def conditional_elif_entry_edges(self: "Trace", value: List[Tuple[int, int, str, str]]) -> None:
+    def conditional_elif_entry_edges(self: "Trace", value: list[tuple[int, int, str, str]]) -> None:
         """Set the deprecated ELIF-edge view by updating canonical arm edges.
 
         Parameters
@@ -212,7 +253,7 @@ class TraceStatsMixin(_TraceMixinBase):
             ).append((parent, child))
 
     @property
-    def conditional_else_entry_edges(self: "Trace") -> List[Tuple[int, str, str]]:
+    def conditional_else_entry_edges(self: "Trace") -> list[tuple[int, str, str]]:
         """Deprecated ELSE-edge view derived from ``conditional_arm_entry_edges``.
 
         Returns
@@ -225,7 +266,7 @@ class TraceStatsMixin(_TraceMixinBase):
         return _legacy_conditional_else_entry_edges(self.conditional_arm_entry_edges)
 
     @conditional_else_entry_edges.setter
-    def conditional_else_entry_edges(self: "Trace", value: List[Tuple[int, str, str]]) -> None:
+    def conditional_else_entry_edges(self: "Trace", value: list[tuple[int, str, str]]) -> None:
         """Set the deprecated ELSE-edge view by updating canonical arm edges.
 
         Parameters
@@ -404,7 +445,7 @@ class TraceStatsMixin(_TraceMixinBase):
         Returns:
             Callable dict mapping layer_type to forward/backward/count totals.
         """
-        result: Dict[str, Dict[str, int | Flops]] = {}
+        result: dict[str, dict[str, int | Flops]] = {}
         for entry in self.layer_list:
             lt = entry.layer_type
             if lt not in result:
@@ -443,7 +484,7 @@ class TraceStatsMixin(_TraceMixinBase):
         Returns:
             Callable dict mapping layer_type to forward/backward/count totals.
         """
-        result: Dict[str, Dict[str, int | Macs]] = {}
+        result: dict[str, dict[str, int | Macs]] = {}
         for entry in self.layer_list:
             lt = entry.layer_type
             if lt not in result:
@@ -468,13 +509,33 @@ class TraceStatsMixin(_TraceMixinBase):
     def ops(self: "Trace") -> TraceOpAccessor:
         """Access per-invocation Op records by label or index."""
 
-        cache_key = len(self.layer_list)
-        cache_entry = _TRACE_OP_ACCESSOR_CACHE.get(self)
-        if cache_entry is None or cache_entry[0] != cache_key:
-            accessor = TraceOpAccessor(self.layer_list, self.layer_num_calls)
-            _TRACE_OP_ACCESSOR_CACHE[self] = (cache_key, accessor)
-            return accessor
-        return cache_entry[1]
+        # Memoized on the instance, never in a module global: a global
+        # weak-keyed cache value reaches this Trace through the held records
+        # and would pin it forever (the R37 ``trace.run()`` fork leak).
+        # Keyed on container IDENTITY (held strongly in the entry, so a
+        # recycled ``id`` can never mistranslate) plus length: every internal
+        # rebind (build, rerun refresh) changes identity, every removal
+        # changes length, and the in-place rename/refresh paths call
+        # ``_invalidate_trace_op_layer_accessor_caches`` explicitly. The r3
+        # by-value label-tuple key (98909fc7) additionally auto-detected
+        # DIRECT equal-length in-place edits of ``layer_list``, but priced
+        # every memo HIT at O(n), turning hot ``trace.ops`` sweeps O(n^2)
+        # (measured exponent ~2.1) and regressing ``tl.trace`` itself
+        # 6-10% (r3 R52-1/R28-1); the r3 fixplan prescribes this identity+len
+        # key. Direct user in-place mutation of this build product is outside
+        # the memo's auto-detection contract -- the supported spellings are
+        # reassignment or the explicit invalidator.
+        container = self.layer_list
+        cache_entry = self.__dict__.get(_TRACE_OP_ACCESSOR_ATTR)
+        if (
+            cache_entry is not None
+            and cache_entry[0] is container
+            and cache_entry[1] == len(container)
+        ):
+            return cast(TraceOpAccessor, cache_entry[2])
+        accessor = TraceOpAccessor(container, self.layer_num_calls)
+        self.__dict__[_TRACE_OP_ACCESSOR_ATTR] = (container, len(container), accessor)
+        return accessor
 
     @property
     def transforms(self: "Trace") -> tuple[Op, ...]:
@@ -533,6 +594,7 @@ class TraceStatsMixin(_TraceMixinBase):
         *,
         sort_by: Literal["time", "flops", "activation_memory", "param_count"] = "time",
         ascending: bool = False,
+        top_k: int | None = None,
     ) -> "TraceProfile":
         """Return a unified resource profile assembled from this trace.
 
@@ -544,6 +606,8 @@ class TraceStatsMixin(_TraceMixinBase):
             Resource column used for sorting. Time is descending by default.
         ascending:
             Whether to sort the selected metric ascending.
+        top_k:
+            Number of rows to keep after sorting, or ``None`` for all rows.
 
         Returns
         -------
@@ -558,7 +622,59 @@ class TraceStatsMixin(_TraceMixinBase):
 
         from ..report._profile import build_profile
 
-        return build_profile(self, level=level, sort_by=sort_by, ascending=ascending)
+        return build_profile(
+            self,
+            level=level,
+            sort_by=sort_by,
+            ascending=ascending,
+            top_k=top_k,
+        )
+
+    def sites_table(self: "Trace") -> Any:
+        """Return the tabular view of this trace's structural sites.
+
+        DOCUMENTED-UNSTABLE spelling (pending naming-session ratification).
+        One row per distinct L1 ``site_key`` in first-occurrence execution
+        order, aggregating the ops that share the site: ``site_key``,
+        ``module_site``, ``layer_type``, ``output_slot``, ``call_ordinal``,
+        ``n_ops``, ``labels``, ``layer_labels``, ``passes``, ``shapes``.
+        Requires the ``tabular`` extra (pandas).
+
+        Returns
+        -------
+        pandas.DataFrame
+            The sites table.
+
+        Raises
+        ------
+        InvalidArgumentError
+            ``site_key_unavailable`` for legacy artifacts whose ops carry no
+            site keys — consistent with the L1 site accessors, never a
+            silently empty table.
+        """
+
+        from ._trace_inventory import build_sites_table
+
+        return build_sites_table(self)
+
+    def bill_of_materials(self: "Trace") -> dict[str, Any]:
+        """Return the inventory of what this trace actually contains.
+
+        DOCUMENTED-UNSTABLE spelling (pending naming-session ratification).
+        A nested, JSON-friendly dict of sections — ``capture``, ``graph``,
+        ``parameters``, ``buffers``, ``activations``, ``backward``, and
+        ``annotations`` — every figure read from fields the trace already
+        carries (this rollup mints no new claims).
+
+        Returns
+        -------
+        dict[str, Any]
+            The inventory sections.
+        """
+
+        from ._trace_inventory import build_bill_of_materials
+
+        return build_bill_of_materials(self)
 
     def receptive_fields(
         self: "Trace",
@@ -628,13 +744,24 @@ class TraceStatsMixin(_TraceMixinBase):
         """Access aggregate per-layer metadata by label, index, or pass notation."""
         from .layer import LayerAccessor
 
-        cache_key = len(self.layer_logs)
-        cache_entry = _TRACE_LAYER_ACCESSOR_CACHE.get(self)
-        if cache_entry is None or cache_entry[0] != cache_key:
-            accessor = LayerAccessor(self.layer_logs, source_trace=self)
-            _TRACE_LAYER_ACCESSOR_CACHE[self] = (cache_key, accessor)
-            return accessor
-        return cast("LayerAccessor", cache_entry[1])
+        # Memoized on the instance, never in a module global: a global
+        # weak-keyed cache value reaches this Trace through the held records
+        # and would pin it forever (the R37 ``trace.run()`` fork leak).
+        # Same identity+len key scheme (and contract) as ``ops`` above:
+        # reassignment changes identity, removal changes length, and the
+        # in-place rename/refresh paths call the explicit invalidator
+        # (r3 R52-1 -- the by-value key priced every HIT at O(n)).
+        container = self.layer_logs
+        cache_entry = self.__dict__.get(_TRACE_LAYER_ACCESSOR_ATTR)
+        if (
+            cache_entry is not None
+            and cache_entry[0] is container
+            and cache_entry[1] == len(container)
+        ):
+            return cast("LayerAccessor", cache_entry[2])
+        accessor = LayerAccessor(container, source_trace=self)
+        self.__dict__[_TRACE_LAYER_ACCESSOR_ATTR] = (container, len(container), accessor)
+        return accessor
 
     @property
     def modules(self: "Trace") -> "ModuleAccessor":
@@ -716,9 +843,19 @@ class TraceStatsMixin(_TraceMixinBase):
 
         if isinstance(mode, float):
             if not 0.0 <= mode <= 1.0:
-                raise ValueError("collapse float level must be in [0.0, 1.0].")
+                raise InvalidArgumentError(
+                    f"collapse float level must be in [0.0, 1.0]; received {mode!r}",
+                    code="collapse_level_invalid",
+                    remedy="pass a collapse level between 0.0 and 1.0",
+                    argument="mode",
+                )
         elif mode not in {"auto", "max"}:
-            raise ValueError("mode must be one of 'auto', 'max', or a float in [0.0, 1.0].")
+            raise InvalidArgumentError(
+                f"mode must be one of 'auto', 'max', or a float in [0.0, 1.0]; received {mode!r}",
+                code="collapse_mode_invalid",
+                remedy="pass mode='auto', 'max', or an in-range float",
+                argument="mode",
+            )
 
         from ..visualization.collapse_optimizer import select_collapse_level, select_collapse_plan
         from ..visualization.collapse_plan import RenderContext
@@ -731,7 +868,12 @@ class TraceStatsMixin(_TraceMixinBase):
         )
         if result.declined:
             reason = result.reason or "unsupported render context"
-            raise ValueError(f"collapse plan unavailable: {reason}")
+            raise InvalidArgumentError(
+                f"collapse plan unavailable: {reason}",
+                code="collapse_plan_unavailable",
+                remedy="use a render context and mode the collapse optimizer supports",
+                reason=reason,
+            )
         return result.plan
 
     def collapse_schedule(
@@ -780,11 +922,19 @@ class TraceStatsMixin(_TraceMixinBase):
     def module_calls(self: "Trace") -> TraceModuleCallAccessor:
         """Access per-invocation ModuleCall records by call label or index."""
 
+        # Memoized on the instance, never in a module global: the accessor
+        # reaches this Trace through ``ModuleCall._source_trace``, so a global
+        # weak-keyed cache would pin every Trace forever.
+        cached = self.__dict__.get(_TRACE_MODULE_CALL_ACCESSOR_ATTR)
+        if cached is not None:
+            return cached
         calls: OrderedDict[str, Any] = OrderedDict()
         for module in self._module_logs:
             for call in module.calls.values():
                 calls[call.call_label] = call
-        return TraceModuleCallAccessor(calls)
+        accessor = TraceModuleCallAccessor(calls)
+        self.__dict__[_TRACE_MODULE_CALL_ACCESSOR_ATTR] = accessor
+        return accessor
 
     @property
     def num_module_calls(self: "Trace") -> int:
@@ -887,9 +1037,13 @@ class TraceStatsMixin(_TraceMixinBase):
     def num_edges(self: "Trace") -> int:
         """Distinct edges in the per-pass Op graph, including boundary edges."""
 
+        # ``_resolved_op`` is the memoized form of ``self.ops[child_label]``: a
+        # stored child label is not an Op-accessor dict key, so resolving it per
+        # edge otherwise repeats one full accessor lookup for every edge.
+        resolve = self.ops._resolved_op
         return len(
             {
-                (op.label, self.ops[child_label].label)
+                (op.label, resolve(child_label).label)
                 for op in self.ops
                 for child_label in op.children
             }
@@ -899,13 +1053,15 @@ class TraceStatsMixin(_TraceMixinBase):
     def num_compute_edges(self: "Trace") -> int:
         """Distinct Op graph edges whose endpoints are both compute Ops."""
 
-        compute_labels = {op.label for op in self.compute_ops}
+        resolve = self.ops._resolved_op
+        compute_ops = self.compute_ops
+        compute_labels = {op.label for op in compute_ops}
         return len(
             {
-                (op.label, self.ops[child_label].label)
-                for op in self.compute_ops
+                (op.label, resolve(child_label).label)
+                for op in compute_ops
                 for child_label in op.children
-                if self.ops[child_label].label in compute_labels
+                if resolve(child_label).label in compute_labels
             }
         )
 
@@ -913,12 +1069,13 @@ class TraceStatsMixin(_TraceMixinBase):
     def num_buffer_edges(self: "Trace") -> int:
         """Distinct Op graph edges with at least one buffer endpoint."""
 
+        resolve = self.ops._resolved_op
         return len(
             {
-                (op.label, self.ops[child_label].label)
+                (op.label, resolve(child_label).label)
                 for op in self.ops
                 for child_label in op.children
-                if op.is_buffer or self.ops[child_label].is_buffer
+                if op.is_buffer or resolve(child_label).is_buffer
             }
         )
 
@@ -1082,15 +1239,138 @@ class TraceStatsMixin(_TraceMixinBase):
         return TraceGradFnCallAccessor(calls)
 
     @property
+    def grad_fn_fire_timings(self: "Trace") -> "OrderedDict[str, Duration | None]":
+        """Return live per-fire backward timing spans keyed like ``grad_fn_calls``.
+
+        DOCUMENTED-UNSTABLE spelling (L9 memo 1.3; pending naming-session
+        ratification). Serves the paired ``time.perf_counter()`` stamps
+        carried by the runtime ``GradFnFired`` events: a timed fire yields
+        its span as a :class:`~torchlens.quantities.Duration`, an untimed
+        fire (empty keyed LIFO, stale-key discard, or timing-registration
+        failure) yields ``None`` -- never a false zero. Keys are
+        ``"<grad_fn_label>:<call_index>"`` in fold order.
+
+        Raises
+        ------
+        InvalidArgumentError
+            ``grad_fn_fire_timing_unavailable`` on a trace without its
+            runtime capture event stream (loaded artifacts, cleaned traces):
+            events never persist, so such a read has no timing evidence
+            until the coordinated tlspec bump persists the pairs.
+        """
+
+        from ..ir.events import GradFnFired
+
+        stream = self.__dict__.get("capture_events") or self.__dict__.get("_capture_events")
+        fired = [
+            event
+            for event in getattr(stream, "backward_events", ())
+            if isinstance(event, GradFnFired)
+        ]
+        # Evidence test, not a load flag: a rehydrated trace owns a fresh
+        # EMPTY stream, so backward records without any fire event mean the
+        # runtime evidence did not travel (loaded artifact or cleaned trace).
+        if stream is None or (not fired and getattr(self, "grad_fn_logs", {})):
+            raise InvalidArgumentError(
+                "Per-fire backward timing is served from the runtime capture "
+                "event stream, which never persists: this trace (loaded from "
+                "an artifact, or already cleaned up) carries no per-fire "
+                "timing evidence for its backward records.",
+                code="grad_fn_fire_timing_unavailable",
+                remedy=(
+                    "read grad_fn_fire_timings on the live capturing trace; "
+                    "persisted per-fire timing activates at the coordinated "
+                    "tlspec version bump"
+                ),
+            )
+        timings: OrderedDict[str, Duration | None] = OrderedDict()
+        per_object_ordinals: dict[int, int] = {}
+        grad_fn_logs = getattr(self, "grad_fn_logs", {})
+        # Mirrors the _fold_fired_events sort key and per-object ordinal walk
+        # so keys line up 1:1 with trace.grad_fn_calls.
+        for event in sorted(fired, key=lambda item: (item.pass_index, item.timestamp, item.seq)):
+            record = grad_fn_logs.get(event.object_id)
+            if record is None:
+                continue
+            ordinal = per_object_ordinals.get(event.object_id, 0) + 1
+            per_object_ordinals[event.object_id] = ordinal
+            started = event.fire_started_monotonic
+            finished = event.fire_finished_monotonic
+            span = (
+                None
+                if started is None or finished is None
+                else Duration(max(0.0, finished - started))
+            )
+            timings[f"{record.label}:{ordinal}"] = span
+        return timings
+
+    @property
+    def grad_fn_site_summary(self: "Trace") -> "OrderedDict[str | None, dict[str, Any]]":
+        """Return the read-only per-site rollup of backward grad-fn facts.
+
+        DOCUMENTED-UNSTABLE spelling (L9 memo 1.1 grouped-backward floor;
+        pending naming-session ratification). Aggregates GradFn/GradFnCall
+        facts per L1 ``site_key`` (read-only L1 consumption -- reused-module
+        grad-fns share one entry): per entry ``grad_fn_labels``,
+        ``fire_count``, ``pass_coverage``, and -- when live per-fire timing
+        evidence exists -- ``timed_fire_count`` plus ``total_fire_duration``
+        (``None`` when no fire carries timing evidence, never a false zero).
+        Grad-fns without an op FK (AccumulateGrad and other unattributed
+        nodes) aggregate under the ``None`` key. Accessor-level only: no
+        persisted fields.
+
+        Raises
+        ------
+        InvalidArgumentError
+            ``site_key_unavailable`` when op-backed grad-fns exist but no op
+            carries a site key (legacy pre-site-key artifact) -- consistent
+            with the L1 site accessors, never a silently keyless rollup.
+        """
+
+        self._sync_backward_projection_if_needed()
+        try:
+            fire_timings: OrderedDict[str, Duration | None] | None = self.grad_fn_fire_timings
+        except InvalidArgumentError:
+            # Loaded/cleaned traces carry no runtime timing evidence; the
+            # count/coverage rollup still stands on the persisted records.
+            fire_timings = None
+        summary: OrderedDict[str | None, dict[str, Any]] = OrderedDict()
+        any_op_backed = False
+        any_keyed = False
+        layer_lookup = getattr(self, "layer_dict_all_keys", {})
+        for grad_fn_record in getattr(self, "grad_fn_logs", {}).values():
+            site_key, op_backed = _grad_fn_site_key(grad_fn_record, layer_lookup)
+            any_op_backed = any_op_backed or op_backed
+            any_keyed = any_keyed or site_key is not None
+            entry = summary.setdefault(
+                site_key,
+                {
+                    "grad_fn_labels": [],
+                    "fire_count": 0,
+                    "pass_coverage": set(),
+                    "timed_fire_count": 0,
+                    "total_fire_duration": None,
+                },
+            )
+            _accumulate_grad_fn_site_record(entry, grad_fn_record, fire_timings)
+        if any_op_backed and not any_keyed:
+            raise InvalidArgumentError(
+                "This trace's op-backed grad-fns carry no site keys: it was "
+                "captured/saved before site_key_v1 existed, so a per-site "
+                "backward rollup would be silently empty.",
+                code="site_key_unavailable",
+                remedy="re-capture with a current TorchLens to mint site keys",
+            )
+        for entry in summary.values():
+            entry["grad_fn_labels"] = tuple(sorted(entry["grad_fn_labels"]))
+            entry["pass_coverage"] = tuple(sorted(entry["pass_coverage"]))
+        return summary
+
+    @property
     def backward_passes(self: "Trace") -> BackwardPassAccessor:
         """Access backward pass records by 0-based position or named pass number."""
 
-        if getattr(self, "backend", "torch") in {"jax", "mlx", "tinygrad"}:
-            raise ValueError(
-                f"{getattr(self, 'backend', 'backend')} traces do not support true backward "
-                "capture. Use trace.derived_grads for leaf-level derived gradients computed "
-                "by the backend preview."
-            )
+        raise_if_no_backward_capture(self, plural_subject="backward_passes")
         self._sync_backward_projection_if_needed()
         return BackwardPassAccessor(self.backward_pass_logs)
 
@@ -1111,12 +1391,18 @@ class TraceStatsMixin(_TraceMixinBase):
         if not getattr(self, "backward_events", ()):
             return
         from ..backends.torch.backward import (
+            _backward_finalize_pending,
             _close_implicit_backward_pass_if_open,
             _materialize_backward_projections,
         )
 
         _close_implicit_backward_pass_if_open(self)
-        _materialize_backward_projections(self)
+        # A read from INSIDE an engine invocation journals but must not
+        # materialize while the close's FINALIZE step is still pending:
+        # materializing there would publish records ahead of the R36-1 D2H
+        # fence (L9 memo 1.2). The first post-pass read finalizes fully.
+        if not _backward_finalize_pending(self):
+            _materialize_backward_projections(self)
 
     @property
     def num_grad_fn_calls(self: "Trace") -> int:
@@ -1137,12 +1423,7 @@ class TraceStatsMixin(_TraceMixinBase):
     def saved_grad_ops(self: "Trace") -> Accessor[Op]:
         """Access Ops with saved gradients."""
 
-        if getattr(self, "backend", "torch") in {"jax", "mlx", "tinygrad"}:
-            raise ValueError(
-                f"{getattr(self, 'backend', 'backend')} traces do not expose op-level saved "
-                "gradients. Use trace.derived_grads for leaf-level derived gradients computed "
-                "by the backend preview."
-            )
+        raise_if_no_backward_capture(self, plural_subject="op-level saved gradients")
         return TraceOpAccessor(
             [op for op in self.layer_list if op.has_grad],
             self.layer_num_calls,
@@ -1472,3 +1753,62 @@ class TraceStatsMixin(_TraceMixinBase):
     def num_grad_fns_without_op(self: "Trace") -> int:
         """Number of grad_fn_handle nodes without a corresponding forward Layer."""
         return sum(1 for grad_fn_handle in self.grad_fn_logs.values() if not grad_fn_handle.has_op)
+
+    def between(self: "Trace", sources: Any, sinks: Any) -> "TraceSlice":
+        """Return the sub-DAG view carrying influence from sources to sinks.
+
+        The graph-VIEW binding of the one influence-region idea: the same
+        member set the ``tl.between(sources, sinks)`` producer selects,
+        presented as a :class:`torchlens.trace_slice.TraceSlice` — member
+        ops, internal dataflow edges, and an EXPLICIT boundary (every edge
+        crossing in or out is declared, so external dependencies are
+        visible rather than silently dropped). A slice is a presenter,
+        never a ``Trace``: it offers no save/replay/validate. No directed
+        path yields the EMPTY slice (emptiness is disclosure).
+        DOCUMENTED-UNSTABLE spelling.
+
+        Parameters
+        ----------
+        sources:
+            One region or a list of regions: site label strings,
+            ``Op``/``Layer`` handles, or any ACT selection.
+        sinks:
+            Same forms as ``sources``.
+
+        Returns
+        -------
+        torchlens.trace_slice.TraceSlice
+            Frozen sub-DAG view (session-time only; never persisted).
+        """
+
+        from ..trace_slice import build_slice_between
+
+        return build_slice_between(self, sources, sinks)
+
+    def subgraph(self: "Trace", selection: Any) -> "TraceSlice":
+        """Return the sub-DAG view of any ACT region of this trace.
+
+        The general slice door: whatever produced the region —
+        ``tl.neighborhood(...)``, ``tl.between(...)``, an explicit
+        ``tl.units(...)``, an ``Op``/``Layer``, or a future graph-motif
+        producer's hits — its touched-site FAMILY becomes the member set
+        (element masks never shrink a graph region), presented with the
+        same explicit-boundary :class:`~torchlens.trace_slice.TraceSlice`
+        contract as :meth:`between`. DOCUMENTED-UNSTABLE spelling.
+
+        Parameters
+        ----------
+        selection:
+            A selection-shaped ACT region (Selection, ResolvedSelection,
+            Op/Layer, receptive-field region, or site label string).
+            PARAM/EDGE selections refuse ``selection_kind_incompatible``.
+
+        Returns
+        -------
+        torchlens.trace_slice.TraceSlice
+            Frozen sub-DAG view (session-time only; never persisted).
+        """
+
+        from ..trace_slice import build_slice_from_selection
+
+        return build_slice_from_selection(self, selection)

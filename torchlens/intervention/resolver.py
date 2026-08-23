@@ -2,15 +2,35 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Iterator, Sequence
-from dataclasses import dataclass
 import importlib
 import operator
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 import warnings
+from collections.abc import Callable, Collection, Iterator, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
 import torch
 
+from .._errors import InvalidArgumentError
+from ..ir.selector_eval import (
+    ensure_supported,
+    evaluate,
+    normalize_selector_like,
+    walk_selector,
+)
+from ..utils._callable_safety import (
+    _DENIED_MODULES,
+    _matches,
+    _unwrap_capture_wrapper,
+    is_denied_operator_gadget,
+    is_denied_stdlib_or_builtin_module,
+    is_inert_first_party_callable,
+    is_pure_forward_callable,
+    real_callable_module,
+    unsafe_callable_reason,
+)
+from ..utils._torch_compat import resolve_runnable_torch_alias
+from ..utils._torch_symbols import torch_attr
 from .errors import (
     MultiMatchWarning,
     ReplayPreconditionError,
@@ -23,23 +43,8 @@ from .selectors import (
     CompositeSelector,
     NotSelector,
     _classify_selector_direction,
-    in_module,
 )
 from .types import FrozenTargetSpec, FunctionRegistryKey, TargetSpec
-from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
-from ..ir.container_registry import Role
-from ..utils._callable_safety import (
-    _DENIED_MODULES,
-    _matches,
-    is_denied_operator_gadget,
-    is_denied_stdlib_or_builtin_module,
-    is_inert_first_party_callable,
-    is_pure_forward_callable,
-    real_callable_module,
-    unsafe_callable_reason,
-)
-from ..utils._torch_compat import resolve_runnable_torch_alias
-from ..utils._torch_symbols import torch_attr
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -54,29 +59,6 @@ if TYPE_CHECKING:
     Site: TypeAlias = Op | Layer | GradFn
 else:
     Site: TypeAlias = Any
-DIRECTION_AGNOSTIC_KINDS = frozenset(
-    {
-        "label",
-        "func",
-        "in_module",
-        "module",
-        "contains",
-        "regex",
-        "predicate",
-        "func_transform",
-        # These three describe a forward op's output/input container position and
-        # carry no direction of their own; the selector layer
-        # (``_classify_selector_direction``) already treats them as agnostic, so
-        # they must be listed here too. Otherwise a backward (GradFn) site never
-        # bridges to its paired forward op for these kinds and a validly-composed
-        # selector like ``output_at(0) & grad_input()`` silently resolves to 0
-        # sites instead of intersecting meaningfully.
-        "output",
-        "output_at",
-        "input_at",
-    }
-)
-
 _TORCH_INTERNAL_BUILTIN_NAMESPACE = "torch._C._VariableFunctionsClass"
 
 
@@ -109,10 +91,21 @@ def _internal_torch_builtin_key(
         otherwise ``None``.
     """
 
-    internal = getattr(getattr(torch._C, "_VariableFunctionsClass", None), name, None)
+    from ..utils._torch_compat import get_variable_functions_class
+
+    # r-b4 R26-2: routed through _torch_compat (HAS_VARIABLE_FUNCTIONS_CLASS) --
+    # namespace drift used to silently downgrade the recorded replay key to the
+    # public torch wrapper (a different argument convention); it now flips the
+    # named flag so the downgrade is visible in doctor/compat.
+    internal = getattr(get_variable_functions_class(), name, None)
     # r47 secD_1: resolve the public alias through ``torch_attr`` so an attacker callable ``name``
     # reads ``torch.__dict__`` directly and never fires the PEP-562 lazy ``torch.__getattr__``.
+    # While capture wrappers are installed, ``torch.__dict__`` holds the TorchLens wrapper,
+    # whose provenance stamp (B8-1a pickle fix) claims ``__module__ == "torch"`` for every
+    # module-namespace wrapper -- the direct-builtin-export test must read the ORIGINAL.
     public = torch_attr(name)
+    if callable(public):
+        public = _unwrap_capture_wrapper(public)
     if internal is not func or getattr(public, "__module__", None) == "torch":
         return None
     return FunctionRegistryKey(
@@ -149,7 +142,9 @@ def _resolve_internal_torch_builtin_key(
         or qualname != key.qualname
     ):
         return None
-    resolved = getattr(getattr(torch._C, "_VariableFunctionsClass", None), qualname, None)
+    from ..utils._torch_compat import get_variable_functions_class
+
+    resolved = getattr(get_variable_functions_class(), qualname, None)
     return cast(Callable[..., Any], resolved) if callable(resolved) else None
 
 
@@ -259,6 +254,9 @@ def resolve_function_registry_key(
 
     Raises
     ------
+    InvalidArgumentError
+        If a custom key is missing its ``import_path``
+        (``code="custom_callable_import_path_missing"``).
     ReplayPreconditionError
         If the namespace or qualified name cannot be resolved.
     UntrustedCallableError
@@ -279,7 +277,9 @@ def resolve_function_registry_key(
                 raise UntrustedCallableError(
                     "Refusing to resolve bundle-supplied callable "
                     f"{key.import_path} ({unsafe_callable_reason(internal_builtin)}); "
-                    "it is not a pure forward/tensor op and can execute side effects."
+                    "it is not a pure forward/tensor op and can execute side effects.",
+                    code="custom_callable_not_pure",
+                    import_path=key.import_path,
                 )
             return internal_builtin
         if key.namespace in _fixed_roots:
@@ -308,12 +308,29 @@ def resolve_function_registry_key(
                 raise UntrustedCallableError(
                     "Refusing to resolve bundle-supplied callable "
                     f"{key.namespace}.{key.qualname} ({unsafe_callable_reason(resolved)}); "
-                    "it is not a pure forward/tensor op and can execute side effects."
+                    "it is not a pure forward/tensor op and can execute side effects.",
+                    code="custom_callable_not_pure",
+                    import_path=f"{key.namespace}.{key.qualname}",
                 )
             return resolved
         if key.namespace == "custom":
             if not key.import_path:
-                raise AttributeError("custom key is missing import_path")
+                # SF-07: a malformed spec refusal is a typed configuration door
+                # (sibling of resolve_import_ref's ``import_path_invalid``), not a
+                # raw AttributeError laundered through the resolution wrapper.
+                # InvalidArgumentError is not in the wrap-except tuple below, so
+                # it propagates with its code intact.
+                raise InvalidArgumentError(
+                    "custom function registry key is missing import_path",
+                    code="custom_callable_import_path_missing",
+                    remedy=(
+                        "supply the custom callable's import reference as "
+                        "import_path='module:qualname' on the saved function "
+                        "registry key entry"
+                    ),
+                    namespace=key.namespace,
+                    qualname=key.qualname,
+                )
             module_name, _, qualname = key.import_path.partition(":")
             # SECURITY BOUNDARY (tripwire). A bundle-supplied custom key is FOREIGN
             # arbitrary code and default-denies. The only auto-trusted custom
@@ -377,11 +394,14 @@ def resolve_function_registry_key(
 
                 if _matches(resolved_module, _DENIED_MODULES):
                     raise UntrustedCallableError(
-                        "Refusing to resolve bundle-supplied custom callable from "
-                        f"dangerous module {resolved_module!r}; process / OS / "
-                        "serialization / import / dynamic-library modules are DENIED "
-                        "even under trust_custom_callables or an explicit module "
-                        "allowlist. Trust never authorizes importing these modules."
+                        "Refusing to resolve bundle-supplied custom callable "
+                        f"{key.import_path!r} from dangerous module {resolved_module!r}; "
+                        "process / OS / serialization / import / dynamic-library modules "
+                        "are DENIED even under trust_custom_callables or an explicit "
+                        "module allowlist. Trust never authorizes importing these modules.",
+                        code="custom_callable_module_denied",
+                        module=resolved_module,
+                        import_path=key.import_path,
                     )
                 # STRUCTURAL close of the denylist-completeness class (r31): DENY any
                 # STANDARD-LIBRARY / BUILTIN module (keyed on the resolved real
@@ -392,26 +412,41 @@ def resolve_function_registry_key(
                 # user packages are carved out inside the detector.
                 if is_denied_stdlib_or_builtin_module(resolved_module):
                     raise UntrustedCallableError(
-                        "Refusing to resolve bundle-supplied custom callable from "
-                        f"standard-library / builtin module {resolved_module!r}; stdlib "
-                        "and builtin modules are DENIED even under trust_custom_callables "
-                        "or an explicit module allowlist. Trust authorizes running a "
-                        "user recipe, never importing a stdlib/builtin module."
+                        "Refusing to resolve bundle-supplied custom callable "
+                        f"{key.import_path!r} from standard-library / builtin module "
+                        f"{resolved_module!r}; stdlib and builtin modules are DENIED even "
+                        "under trust_custom_callables or an explicit module allowlist. "
+                        "Trust authorizes running a user recipe, never importing a "
+                        "stdlib/builtin module.",
+                        code="custom_callable_module_denied",
+                        module=resolved_module,
+                        import_path=key.import_path,
                     )
                 if allowed_custom_callable_modules is not None:
                     if resolved_module not in allowed_custom_callable_modules:
                         raise UntrustedCallableError(
                             "Refusing to resolve bundle-supplied custom callable "
-                            f"from module {resolved_module!r}; it is not in "
-                            "allowed_custom_callable_modules. Resolving a foreign "
-                            "callable can execute arbitrary code."
+                            f"{key.import_path!r} from module {resolved_module!r}; it is "
+                            "not in allowed_custom_callable_modules. Resolving a foreign "
+                            "callable can execute arbitrary code.",
+                            code="custom_callable_module_not_allowlisted",
+                            module=resolved_module,
+                            import_path=key.import_path,
                         )
                 elif not trust_custom_callables:
+                    # Names the denied import (R65): with several custom callables in
+                    # one spec, the user cannot build the recommended
+                    # allowed_custom_callable_modules allowlist without knowing WHICH
+                    # module was denied here.
                     raise UntrustedCallableError(
-                        "Refusing to resolve bundle-supplied custom callable because "
+                        "Refusing to resolve bundle-supplied custom callable "
+                        f"{key.import_path!r} (module {resolved_module!r}) because "
                         "importing/resolving it can execute arbitrary code. Pass "
-                        "trust_custom_callables=True only for a trusted spec, or "
-                        "supply allowed_custom_callable_modules."
+                        "trust_custom_callables=True only for a trusted spec, or supply "
+                        f"allowed_custom_callable_modules={{{resolved_module!r}}}.",
+                        code="custom_callable_untrusted",
+                        module=resolved_module,
+                        import_path=key.import_path,
                     )
 
             if path_claims_torchlens:
@@ -448,7 +483,10 @@ def resolve_function_registry_key(
                             f"onto a non-torchlens callable ({unsafe_callable_reason(obj)}) "
                             "that is not a pure forward/tensor op; only pure "
                             "forward/tensor ops resolve from a torchlens-path walk onto "
-                            "a foreign callable, even under trust."
+                            "a foreign callable, even under trust.",
+                            code="custom_callable_not_pure",
+                            module=module_name,
+                            import_path=f"{module_name}:{qualname}",
                         )
                 elif not is_inert_first_party_callable(obj):
                     # Defense-in-depth (mirrors the r21 bundle-unpickler narrowing):
@@ -463,7 +501,10 @@ def resolve_function_registry_key(
                         f"{module_name}:{qualname}; only public, side-effect-free "
                         "first-party callables (facet recipes / transforms / "
                         "intervention helpers) are auto-trusted. Private utilities "
-                        "and I/O / import / exec callables are denied."
+                        "and I/O / import / exec callables are denied.",
+                        code="custom_callable_private_first_party",
+                        module=module_name,
+                        import_path=f"{module_name}:{qualname}",
                     )
             else:
                 # Genuinely foreign import path: gate BEFORE importing, because the
@@ -492,7 +533,10 @@ def resolve_function_registry_key(
                         "Refusing bundle-supplied custom callable whose RESOLVED real "
                         f"module {resolved_owner!r} is a dangerous (process / OS / "
                         "serialization / import) module reached by attribute-walking a "
-                        f"dotted qualname off {module_name!r}; denied even under trust."
+                        f"dotted qualname off {module_name!r}; denied even under trust.",
+                        code="custom_callable_module_denied",
+                        module=resolved_owner,
+                        import_path=f"{module_name}:{qualname}",
                     )
                 # STRUCTURAL stdlib/builtin close (r31): a dotted qualname can walk OFF
                 # a permitted user/torch module and land on a stdlib/builtin callable
@@ -504,7 +548,10 @@ def resolve_function_registry_key(
                         "Refusing bundle-supplied custom callable whose RESOLVED real "
                         f"module {resolved_owner!r} is a standard-library / builtin "
                         f"module reached by attribute-walking a dotted qualname off "
-                        f"{module_name!r}; denied even under trust."
+                        f"{module_name!r}; denied even under trust.",
+                        code="custom_callable_module_denied",
+                        module=resolved_owner,
+                        import_path=f"{module_name}:{qualname}",
                     )
                 # PURITY PARITY (secE-1 / secE-r36-1). A callable that walked BACK into
                 # the torch namespace via a dotted qualname -- OR a module-less C tensor
@@ -541,7 +588,10 @@ def resolve_function_registry_key(
                         "C-level tensor method such as resize_/set_/apply_/map_ or a "
                         "side-effecting torch builtin -- that is not a pure forward/tensor "
                         "op; only pure forward/tensor ops resolve from the torch namespace "
-                        "or a module-less C callable, even under trust."
+                        "or a module-less C callable, even under trust.",
+                        code="custom_callable_not_pure",
+                        module=real_owner or module_name,
+                        import_path=f"{module_name}:{qualname}",
                     )
 
             # OPERATOR GADGET name-scope (r33, A-R32-1). The ``operator`` /
@@ -561,7 +611,10 @@ def resolve_function_registry_key(
                     f"{module_name}:{qualname}: it resolves to a generic operator gadget "
                     f"({unsafe_callable_reason(obj)}); only the pure arithmetic / "
                     "comparison / bitwise / index operators resolve from "
-                    "operator/_operator, even under trust."
+                    "operator/_operator, even under trust.",
+                    code="custom_callable_not_pure",
+                    module="operator",
+                    import_path=f"{module_name}:{qualname}",
                 )
             if not callable(obj):
                 raise TypeError(f"{key.import_path!r} resolved to non-callable {obj!r}")
@@ -668,7 +721,12 @@ def resolve_import_ref(
 
     module_name, separator, qualname = import_path.partition(":")
     if not separator or not module_name or not qualname:
-        raise ValueError(f"Invalid import path {import_path!r}")
+        raise InvalidArgumentError(
+            f"Invalid import path {import_path!r}",
+            code="import_path_invalid",
+            remedy="use the 'module:qualname' import reference form",
+            import_path=import_path,
+        )
     key = _import_ref_registry_key(module_name, qualname)
     return resolve_function_registry_key(
         key,
@@ -706,7 +764,7 @@ class SiteTable:
 
         return iter(self._sites)
 
-    def __getitem__(self, idx: int | slice) -> "Site | SiteTable":
+    def __getitem__(self, idx: int | slice) -> Site | SiteTable:
         """Return one site or a sliced site table.
 
         Parameters
@@ -744,7 +802,7 @@ class SiteTable:
         prefix = ", ".join(labels[:3])
         return f"SiteTable({count} sites: {prefix}, ... {labels[-1]})"
 
-    def where(self, predicate: Callable[[Site], bool]) -> "SiteTable":
+    def where(self, predicate: Callable[[Site], bool]) -> SiteTable:
         """Filter the table with a predicate.
 
         Parameters
@@ -798,7 +856,7 @@ class SiteTable:
             for site in self._sites
         )
 
-    def to_dataframe(self) -> "pd.DataFrame":
+    def to_dataframe(self) -> pd.DataFrame:
         """Return a pandas table describing resolved sites.
 
         Returns
@@ -830,8 +888,73 @@ class SiteTable:
         return pd.DataFrame(rows)
 
 
+def multipass_bare_label_message(layer_label: str, pass_indices: Sequence[int]) -> str:
+    """Return the teaching refusal message for a bare multi-pass layer label.
+
+    Parameters
+    ----------
+    layer_label:
+        Bare layer label the caller supplied.
+    pass_indices:
+        Pass indices recorded for the layer, in execution order.
+
+    Returns
+    -------
+    str
+        Message naming the layer, its pass count, and every pass-qualified
+        spelling the caller can address instead.
+    """
+
+    spellings = ", ".join(f"'{layer_label}:{index}'" for index in pass_indices)
+    return (
+        f"bare label {layer_label!r} is ambiguous on this trace: layer "
+        f"{layer_label!r} ran {len(pass_indices)} passes, and each pass is a "
+        "distinct op with its own activation. Bare layer labels address only "
+        "single-pass layers. Remedy: address one pass with a pass-qualified "
+        f"label ({spellings}), or select every pass explicitly with the Layer "
+        f"selection (log[{layer_label!r}].__selection__())."
+    )
+
+
+def _refuse_bare_multipass_label(selector: BaseSelector, matched: Sequence[Site]) -> None:
+    """Refuse an exact-label query that spans several passes of one layer.
+
+    A label selector addresses ONE op; when its spelling is layer-wide on a
+    multi-pass (recurrence-grouped) layer it matches every pass, and any
+    single-op consumer would have to guess a pass — the exact silent
+    wrong-pass corruption the replay engine refuses. Predicate selectors
+    (``tl.func``, module selectors, ...) keep their fan-out semantics.
+
+    Raises
+    ------
+    SiteAmbiguityError
+        With ``fields["code"] == "multipass_bare_label_ambiguous"``.
+    """
+
+    selector_kind = getattr(selector, "selector_kind", None)
+    if len(matched) <= 1 or selector_kind not in ("label", "contains"):
+        return
+    layer_labels = {getattr(site, "layer_label", None) for site in matched}
+    if len(layer_labels) != 1:
+        return
+    layer_label = next(iter(layer_labels))
+    if not isinstance(layer_label, str):
+        return
+    if selector_kind == "contains" and getattr(selector, "selector_value", None) != layer_label:
+        # A genuine substring pattern keeps its documented fan-out semantics;
+        # only the exact bare layer label is the pass-ambiguous address.
+        return
+    pass_indices = sorted(int(getattr(site, "pass_index", 1) or 1) for site in matched)
+    raise SiteAmbiguityError(
+        multipass_bare_label_message(layer_label, pass_indices),
+        code="multipass_bare_label_ambiguous",
+        layer_label=layer_label,
+        pass_indices=tuple(pass_indices),
+    )
+
+
 def resolve_sites(
-    log: "Trace",
+    log: Trace,
     query: SelectorInput,
     *,
     strict: bool = False,
@@ -881,6 +1004,7 @@ def resolve_sites(
         raise SiteResolutionError(
             f"selector {query!r} matched 0 sites. Use log.find_sites(...) to discover labels."
         )
+    _refuse_bare_multipass_label(selector, matched)
     if len(matched) > max_fanout:
         raise SiteAmbiguityError(
             f"site {query!r} matched {len(matched)} sites, exceeding max_fanout={max_fanout}. "
@@ -896,7 +1020,7 @@ def resolve_sites(
 
 
 def find_sites(
-    log: "Trace",
+    log: Trace,
     query: SelectorInput,
     *,
     strict: bool = False,
@@ -943,7 +1067,7 @@ def find_sites(
     return SiteTable(matched, query=query)
 
 
-def _iter_layer_ops(log: "Trace") -> Sequence["Op"]:
+def _iter_layer_ops(log: Trace) -> Sequence[Op]:
     """Return final layer ops from a completed model log.
 
     Parameters
@@ -967,7 +1091,7 @@ def _iter_layer_ops(log: "Trace") -> Sequence["Op"]:
     return log.layer_list
 
 
-def _iter_sites(log: "Trace", direction: Literal["forward", "backward"]) -> Sequence[Site]:
+def _iter_sites(log: Trace, direction: Literal["forward", "backward"]) -> Sequence[Site]:
     """Return candidate sites for the requested graph direction.
 
     Parameters
@@ -1014,68 +1138,15 @@ def _resolve_unchecked(
     """
 
     selector = _normalize_query(query)
-    kind = selector.selector_kind
-    value = selector.selector_value
-
-    if strict and kind == "predicate":
+    if strict and any(
+        isinstance(node, BaseSelector) and node.selector_kind == "predicate"
+        for node in walk_selector(selector)
+    ):
         raise SiteResolutionError(
             "tl.where(...) predicate selectors are non-portable in strict mode."
         )
-
-    if kind == "and" and isinstance(selector, CompositeSelector):
-        left, right = selector.selectors
-        left_site_ids = {id(site) for site in _resolve_unchecked(sites, left, strict=strict)}
-        right_site_ids = {id(site) for site in _resolve_unchecked(sites, right, strict=strict)}
-        return tuple(
-            site for site in sites if id(site) in left_site_ids and id(site) in right_site_ids
-        )
-    if kind == "or" and isinstance(selector, CompositeSelector):
-        left, right = selector.selectors
-        left_site_ids = {id(site) for site in _resolve_unchecked(sites, left, strict=strict)}
-        right_site_ids = {id(site) for site in _resolve_unchecked(sites, right, strict=strict)}
-        return tuple(
-            site for site in sites if id(site) in left_site_ids or id(site) in right_site_ids
-        )
-    if kind == "not" and isinstance(selector, NotSelector):
-        excluded_site_ids = {
-            id(site) for site in _resolve_unchecked(sites, selector.selector, strict=strict)
-        }
-        return tuple(site for site in sites if id(site) not in excluded_site_ids)
-
-    if kind == "label":
-        return tuple(site for site in sites if _resolve_site_kind(site, kind, value))
-    if kind == "func":
-        return tuple(site for site in sites if _resolve_site_kind(site, kind, value))
-    if kind == "func_transform":
-        return tuple(site for site in sites if _resolve_site_kind(site, kind, value))
-    if kind == "module":
-        return tuple(site for site in sites if _resolve_site_kind(site, kind, value))
-    if kind == "output":
-        return tuple(site for site in sites if _resolve_site_kind(site, kind, value))
-    if kind == "output_at":
-        return tuple(site for site in sites if _resolve_site_kind(site, kind, value))
-    if kind == "input_at":
-        return tuple(site for site in sites if _resolve_site_kind(site, kind, value))
-    if kind == "contains":
-        return tuple(site for site in sites if _resolve_site_kind(site, kind, value))
-    if kind == "regex":
-        return tuple(site for site in sites if _resolve_site_kind(site, kind, value))
-    if kind == "in_module":
-        return tuple(site for site in sites if _resolve_site_kind(site, kind, value))
-    if kind == "predicate":
-        return tuple(site for site in sites if _resolve_site_kind(site, kind, value))
-    if kind in {
-        "grad_fn",
-        "grad_fn_handle",
-        "intervening",
-        "without_op",
-        "label",
-        "grad_kind",
-        "backward_pass",
-    }:
-        return tuple(site for site in sites if _resolve_site_kind(site, kind, value))
-
-    raise SiteResolutionError(f"Unsupported selector kind {kind!r}.")
+    ensure_supported(selector, lifecycle="site")
+    return tuple(site for site in sites if evaluate(selector, site, lifecycle="site"))
 
 
 def _selector_resolution_direction(query: SelectorInput) -> Literal["forward", "backward"]:
@@ -1119,371 +1190,6 @@ def _selector_resolution_direction(query: SelectorInput) -> Literal["forward", "
     return "forward"
 
 
-def _resolve_site_kind(site: Site, kind: str, value: Any) -> bool:
-    """Return whether one site matches a simple selector kind.
-
-    Parameters
-    ----------
-    site:
-        Candidate forward or backward site.
-    kind:
-        Selector kind.
-    value:
-        Selector payload.
-
-    Returns
-    -------
-    bool
-        Whether the selector matches.
-    """
-
-    from torchlens.data_classes.grad_fn import GradFn
-
-    if isinstance(site, GradFn):
-        if kind in DIRECTION_AGNOSTIC_KINDS:
-            return _resolve_grad_fn_forward_kind(site, kind, value)
-        return _resolve_grad_fn_kind(site, kind, value)
-
-    if kind == "label":
-        return _label_matches(site, str(value))
-    if kind == "func":
-        if isinstance(value, dict):
-            return site.func_name == value.get("name") and _output_matches(
-                site, value.get("output")
-            )
-        return site.func_name == value
-    if kind == "func_transform":
-        if not bool(getattr(site, "is_transform", False)):
-            return False
-        if value is None:
-            return True
-        transform_kind = getattr(site, "transform_kind", None)
-        if transform_kind is None:
-            return False
-        normalized_site = str(transform_kind).lower().replace("_", "").replace(".", "")
-        normalized_value = str(value).lower().replace("_", "").replace(".", "")
-        return normalized_site == normalized_value
-    if kind == "output":
-        return _output_matches(site, value)
-    if kind == "output_at":
-        return _output_path_matches(tuple(getattr(site, "container_path", ()) or ()), tuple(value))
-    if kind == "input_at":
-        return _input_path_matches(site, tuple(value))
-    if kind == "module":
-        return _module_output_matches(site, str(value))
-    if kind == "contains":
-        return str(value).lower() in str(site.layer_label).lower()
-    if kind == "regex":
-        import re as _re
-
-        return _re.search(str(value), str(site.layer_label)) is not None
-    if kind == "in_module":
-        return bool(in_module(site, str(value)))
-    if kind == "predicate":
-        predicate, _name_hint = _predicate_payload(value)
-        return bool(predicate(site))
-    return False
-
-
-def _resolve_grad_fn_forward_kind(site: "GradFn", kind: str, value: Any) -> bool:
-    """Return whether a GradFn matches a forward selector through its op aliases.
-
-    Parameters
-    ----------
-    site:
-        Candidate grad_fn_handle log.
-    kind:
-        Direction-agnostic selector kind.
-    value:
-        Selector payload.
-
-    Returns
-    -------
-    bool
-        Whether the selector matches the paired op or a synthetic boundary alias
-        sharing the same autograd ``grad_fn`` identity.
-    """
-
-    if site.op is not None and _resolve_site_kind(site.op, kind, value):
-        return True
-    for alias in _grad_fn_boundary_aliases(site):
-        if _resolve_site_kind(alias, kind, value):
-            return True
-    return False
-
-
-def _grad_fn_boundary_aliases(site: "GradFn") -> tuple[Site, ...]:
-    """Return input/output alias ops sharing a GradFn identity with ``site``.
-
-    Parameters
-    ----------
-    site:
-        Candidate grad_fn_handle log.
-
-    Returns
-    -------
-    tuple[Site, ...]
-        Synthetic input/output ops whose ``grad_fn_object_id`` equals the
-        GradFn's object id, excluding the already-paired op.
-    """
-
-    trace = site.source_trace
-    if trace is None:
-        return ()
-    paired_label = site.op_label
-    aliases: list[Site] = []
-    for layer in getattr(trace, "layer_list", ()):
-        if getattr(layer, "layer_label", None) == paired_label:
-            continue
-        if getattr(layer, "grad_fn_object_id", None) != site.grad_fn_object_id:
-            continue
-        if not (getattr(layer, "is_input", False) or getattr(layer, "is_output", False)):
-            continue
-        aliases.append(layer)
-    return tuple(aliases)
-
-
-def _resolve_grad_fn_kind(site: "GradFn", kind: str, value: Any) -> bool:
-    """Return whether one grad_fn_handle site matches a backward-only selector.
-
-    Parameters
-    ----------
-    site:
-        Candidate grad_fn_handle log.
-    kind:
-        Backward selector kind.
-    value:
-        Selector payload.
-
-    Returns
-    -------
-    bool
-        Whether the selector matches.
-    """
-
-    if kind in {"intervening", "without_op"}:
-        return not site.has_op
-    if kind == "label":
-        return site.label == str(value)
-    if kind == "grad_fn":
-        payload = value if isinstance(value, dict) else {}
-        type = payload.get("type")
-        label_pattern = payload.get("grad_fn_label_pattern")
-        is_custom = payload.get("is_custom")
-        if type is not None and not _grad_fn_type_matches(site, str(type)):
-            return False
-        if label_pattern is not None and str(label_pattern) not in site.label:
-            return False
-        if is_custom is not None and bool(site.is_custom) is not bool(is_custom):
-            return False
-        return True
-    if kind == "grad_kind":
-        return _grad_fn_has_saved_grad_kind(site, str(value))
-    if kind == "backward_pass":
-        return _grad_fn_has_backward_pass(site, int(value))
-    return False
-
-
-def _grad_fn_has_saved_grad_kind(site: "GradFn", grad_kind: str) -> bool:
-    """Return whether a grad_fn has calls with the requested saved grad tuple.
-
-    Parameters
-    ----------
-    site:
-        Candidate grad_fn_handle log.
-    grad_kind:
-        ``"grad_input"`` or ``"grad_output"``.
-
-    Returns
-    -------
-    bool
-        Whether at least one call has the requested tuple saved.
-    """
-
-    field_name = "grad_inputs" if grad_kind == "grad_input" else "grad_outputs"
-    return any(getattr(call, field_name, None) is not None for call in _grad_fn_call_values(site))
-
-
-def _grad_fn_has_backward_pass(site: "GradFn", pass_index: int) -> bool:
-    """Return whether a grad_fn participates in a backward pass.
-
-    Parameters
-    ----------
-    site:
-        Candidate grad_fn_handle log.
-    pass_index:
-        One-based global backward pass number.
-
-    Returns
-    -------
-    bool
-        Whether the grad_fn has a call in the requested pass.
-    """
-
-    return any(
-        getattr(call, "backward_pass_index", None) == pass_index
-        for call in _grad_fn_call_values(site)
-    )
-
-
-def _grad_fn_call_values(site: "GradFn") -> tuple[Any, ...]:
-    """Return GradFnCall values from dict or accessor-backed call storage.
-
-    Parameters
-    ----------
-    site:
-        Candidate grad_fn_handle log.
-
-    Returns
-    -------
-    tuple[Any, ...]
-        Recorded GradFnCall values.
-    """
-
-    calls = site.calls
-    if isinstance(calls, dict):
-        return tuple(calls.values())
-    return tuple(calls._list)
-
-
-def _output_matches(site: Site, value: Any) -> bool:
-    """Return whether a forward site matches an output index or role.
-
-    Parameters
-    ----------
-    site:
-        Candidate forward site.
-    value:
-        Output index or semantic role.
-
-    Returns
-    -------
-    bool
-        Whether the site matches the requested output.
-    """
-
-    if isinstance(value, int):
-        return getattr(site, "multi_output_index", None) == value
-    return getattr(site, "multi_output_name", None) == str(value)
-
-
-def _output_path_matches(saved_path: tuple[Any, ...], requested_path: tuple[Any, ...]) -> bool:
-    """Return whether a saved typed path matches a user path.
-
-    Parameters
-    ----------
-    saved_path:
-        Captured typed output path.
-    requested_path:
-        User path using plain indices/keys/field names.
-
-    Returns
-    -------
-    bool
-        Whether the paths address the same output leaf.
-    """
-
-    if len(saved_path) != len(requested_path):
-        return False
-    return all(
-        _output_path_component_matches(saved_component, requested_component)
-        for saved_component, requested_component in zip(saved_path, requested_path)
-    )
-
-
-def _output_path_component_matches(saved_component: Any, requested_component: Any) -> bool:
-    """Return whether one typed path component matches a user component.
-
-    Parameters
-    ----------
-    saved_component:
-        Captured typed path component.
-    requested_component:
-        User path component.
-
-    Returns
-    -------
-    bool
-        Whether the components are equivalent.
-    """
-
-    if isinstance(saved_component, TupleIndex):
-        return saved_component.index == requested_component
-    if isinstance(saved_component, (DictKey, HFKey)):
-        return saved_component.key == requested_component
-    if isinstance(saved_component, (NamedField, DataclassField)):
-        return saved_component.name == requested_component
-    return saved_component == requested_component
-
-
-def _input_path_matches(site: Site, requested_path: tuple[Any, ...]) -> bool:
-    """Return whether a forward site consumes an input at ``requested_path``.
-
-    Parameters
-    ----------
-    site:
-        Candidate forward site.
-    requested_path:
-        User path using plain indices, keys, or field names.
-
-    Returns
-    -------
-    bool
-        Whether any input-container leaf occurrence matches the path.
-    """
-
-    trace = getattr(site, "source_trace", None)
-    site_labels = {
-        label
-        for label in (
-            getattr(site, "layer_label", None),
-            getattr(site, "layer_label_raw", None),
-            getattr(site, "_layer_label_raw", None),
-        )
-        if label is not None
-    }
-    for record in getattr(trace, "_containers", {}).values():
-        for snapshot in getattr(record, "snapshots", ()) or ():
-            if getattr(snapshot, "role", None) != Role.MODEL_INPUT:
-                continue
-            for occurrence in getattr(snapshot, "leaf_occurrences", ()) or ():
-                if occurrence.producer_op_label not in site_labels:
-                    continue
-                if _output_path_matches(tuple(occurrence.path), requested_path):
-                    return True
-    for container in getattr(site, "input_containers", ()) or ():
-        for occurrence in getattr(container, "leaf_occurrences", ()) or ():
-            if _output_path_matches(tuple(occurrence.path), requested_path):
-                return True
-    return False
-
-
-def _grad_fn_type_matches(site: "GradFn", requested: str) -> bool:
-    """Return whether a grad_fn_handle type matches user spelling flexibly.
-
-    Parameters
-    ----------
-    site:
-        Candidate grad_fn_handle log.
-    requested:
-        Requested type string.
-
-    Returns
-    -------
-    bool
-        Whether class name or normalized type matches.
-    """
-
-    lowered = requested.lower()
-    normalized = lowered.removesuffix("backward0").removesuffix("backward")
-    candidates = {
-        site.class_name.lower(),
-        site.type.lower(),
-        site.label.lower(),
-    }
-    return lowered in candidates or normalized in candidates
-
-
 def _normalize_query(query: SelectorInput) -> BaseSelector:
     """Normalize a query object to a selector.
 
@@ -1503,225 +1209,7 @@ def _normalize_query(query: SelectorInput) -> BaseSelector:
         If the query shape is unsupported.
     """
 
-    if isinstance(query, BaseSelector):
-        return query
-    if isinstance(query, str):
-        from .selectors import contains
-
-        return contains(query)
-    if isinstance(query, TargetSpec):
-        return _selector_from_spec(query.selector_kind, query.selector_value, query.metadata)
-    if isinstance(query, FrozenTargetSpec):
-        return _selector_from_spec(
-            query.selector_kind,
-            query.selector_value,
-            dict(query.metadata),
-        )
-    raise SiteResolutionError(f"Unsupported site query {query!r}.")
-
-
-def _selector_from_spec(kind: str, value: Any, metadata: dict[str, Any]) -> BaseSelector:
-    """Build a selector from a target spec payload.
-
-    Parameters
-    ----------
-    kind:
-        Selector kind from a target spec.
-    value:
-        Selector payload.
-    metadata:
-        Selector metadata.
-
-    Returns
-    -------
-    BaseSelector
-        Selector matching the target spec.
-    """
-
-    from .selectors import (
-        contains,
-        facet,
-        func,
-        func_transform,
-        grad_fn,
-        grad_input,
-        grad_output,
-        head,
-        in_backward_pass,
-        input_at,
-        label,
-        module,
-        output,
-        output_at,
-        regex,
-        where,
-        without_op,
-    )
-
-    if kind == "label":
-        return label(str(value))
-    if kind == "func":
-        if isinstance(value, dict):
-            return func(str(value.get("name")), output=value.get("output"))
-        return func(str(value))
-    if kind == "func_transform":
-        return func_transform(None if value is None else str(value))
-    if kind == "module":
-        return module(str(value))
-    if kind == "output":
-        return output(value)
-    if kind == "output_at":
-        return output_at(value)
-    if kind == "input_at":
-        if isinstance(value, Sequence) and not isinstance(value, str):
-            return input_at(*value)
-        return input_at(value)
-    if kind == "contains":
-        return contains(str(value))
-    if kind == "regex":
-        return regex(str(value))
-    if kind == "in_module":
-        from .selectors import in_module as make_in_module
-
-        selector = make_in_module(str(value))
-        if isinstance(selector, BaseSelector):
-            return selector
-    if kind == "facet":
-        if isinstance(value, dict):
-            name = value.get("name")
-            head_index = value.get("head_index")
-            if head_index is not None:
-                return head(int(head_index), None if name is None else str(name))
-            if name is not None:
-                return facet(str(name))
-        raise SiteResolutionError(f"Unsupported facet selector payload {value!r}.")
-    if kind == "predicate" and callable(value):
-        return where(value, name_hint=metadata.get("name_hint"))
-    if kind == "grad_fn":
-        payload = dict(value)
-        return grad_fn(
-            payload.get("type"),
-            label=payload.get("grad_fn_label_pattern"),
-            is_custom=payload.get("is_custom"),
-        )
-    if kind in {"intervening", "without_op"}:
-        return without_op()
-    if kind == "label":
-        return label(str(value))
-    if kind == "not":
-        nested = _normalize_query(value)
-        return ~nested
-    if kind in {"and", "or"}:
-        if not isinstance(value, Sequence) or len(value) != 2:
-            raise SiteResolutionError(f"{kind!r} target specs require two nested selectors.")
-        left, right = value
-        return CompositeSelector(
-            cast("Literal['and', 'or']", kind),
-            (_normalize_query(left), _normalize_query(right)),
-        )
-    if kind == "grad_kind":
-        return grad_input() if value == "grad_input" else grad_output()
-    if kind == "backward_pass":
-        if not isinstance(value, int):
-            raise SiteResolutionError("backward_pass target specs require an integer pass index.")
-        return in_backward_pass(value)
-    raise SiteResolutionError(f"Unsupported target spec selector kind {kind!r}.")
-
-
-def _label_matches(site: Any, label: str) -> bool:
-    """Return whether a layer-pass record has a requested label.
-
-    Parameters
-    ----------
-    site:
-        Layer-pass record.
-    label:
-        Label to match.
-
-    Returns
-    -------
-    bool
-        Whether the label matches any exact label field or lookup key.
-    """
-
-    candidate_labels = (
-        getattr(site, "layer_label", None),
-        getattr(site, "label", None),
-        getattr(site, "layer_label", None),
-        getattr(site, "layer_label_short", None),
-        getattr(site, "label_short", None),
-        getattr(site, "layer_label_short", None),
-        getattr(site, "_layer_label_raw", None),
-    )
-    return label in candidate_labels or label in getattr(site, "lookup_keys", ())
-
-
-def _module_output_matches(site: Any, address: str) -> bool:
-    """Return whether a layer pass is the output boundary for a module.
-
-    Parameters
-    ----------
-    site:
-        Layer-pass record.
-    address:
-        Module address or pass-qualified module label.
-
-    Returns
-    -------
-    bool
-        Whether the site exits the requested module.
-    """
-
-    module_ops = getattr(site, "output_of_module_calls", ())
-    return any(_module_label_matches(module_pass, address) for module_pass in module_ops)
-
-
-def _module_label_matches(module_pass: str, address: str) -> bool:
-    """Return whether a module pass label matches an address.
-
-    Parameters
-    ----------
-    module_pass:
-        Pass-qualified module label.
-    address:
-        Requested module address or pass label.
-
-    Returns
-    -------
-    bool
-        Whether the labels refer to the same module boundary.
-    """
-
-    module_address = module_pass.rsplit(":", 1)[0]
-    return module_pass == address or module_address == address
-
-
-def _predicate_payload(value: Any) -> tuple[Callable[[Any], bool], str | None]:
-    """Validate and unpack a predicate selector payload.
-
-    Parameters
-    ----------
-    value:
-        Stored predicate payload.
-
-    Returns
-    -------
-    tuple[Callable[[Op], bool], str | None]
-        Predicate and optional name hint.
-
-    Raises
-    ------
-    SiteResolutionError
-        If the predicate payload is malformed.
-    """
-
-    if isinstance(value, tuple) and len(value) == 2 and callable(value[0]):
-        predicate = value[0]
-        name_hint = value[1] if value[1] is None or isinstance(value[1], str) else None
-        return predicate, name_hint
-    if callable(value):
-        return value, None
-    raise SiteResolutionError("tl.where(...) requires a callable predicate.")
+    return normalize_selector_like(query, lifecycle="site")
 
 
 __all__ = ["SiteTable", "_selector_resolution_direction", "find_sites", "resolve_sites"]

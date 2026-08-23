@@ -10,11 +10,11 @@ import torch
 from ._accessor_base import SuperAccessor
 from ._base import _TENSOR_FIELD_LITERAL, Super, _TensorBearing
 
-if TYPE_CHECKING:  # pragma: no cover - typing-only
+if TYPE_CHECKING:
     from ...data_classes.buffer import Buffer
-    from ...data_classes.grad_fn_call import GradFnCall
     from ...data_classes.grad_fn import GradFn
-    from ...data_classes.module import ModuleCall, Module
+    from ...data_classes.grad_fn_call import GradFnCall
+    from ...data_classes.module import Module, ModuleCall
     from ...data_classes.param import Param
 
 
@@ -57,6 +57,27 @@ class SuperModule(Super["Module"]):
 class SuperBuffer(Super["Buffer"], _TensorBearing):
     """Aligned view of a buffer address across bundle members."""
 
+    def _get_tensor(self, member: Any, field: _TENSOR_FIELD_LITERAL) -> torch.Tensor | None:
+        """Return the latest public buffer tensor for ``out`` or ``grad``.
+
+        Parameters
+        ----------
+        member:
+            Buffer member.
+        field:
+            Tensor field to collect.
+
+        Returns
+        -------
+        torch.Tensor | None
+            Latest buffer value or gradient when available.
+        """
+
+        if field == "out":
+            value = getattr(member, "final_value", None)
+            return value if isinstance(value, torch.Tensor) else None
+        return super()._get_tensor(member, field)
+
 
 class SuperParam(Super["Param"], _TensorBearing):
     """Aligned view of a parameter address across bundle members."""
@@ -74,7 +95,7 @@ class SuperParam(Super["Param"], _TensorBearing):
         weights = self._tensor_dict("out")
         reference = next((tensor for tensor in weights.values() if tensor is not None), None)
         if reference is None:
-            return {name: math.nan for name in weights}
+            return dict.fromkeys(weights, math.nan)
         diffs: dict[str, float] = {}
         for name, tensor in weights.items():
             if tensor is None:
@@ -102,7 +123,9 @@ class SuperParam(Super["Param"], _TensorBearing):
         if field == "grad":
             value = getattr(member, "grad", None) if getattr(member, "has_grad", False) else None
             return value if isinstance(value, torch.Tensor) else None
-        param = getattr(member, "_param_ref", None)
+        param = getattr(member, "handle", None)
+        if not isinstance(param, torch.Tensor):
+            param = getattr(member, "value", None)
         return param.detach() if isinstance(param, torch.Tensor) else None
 
 

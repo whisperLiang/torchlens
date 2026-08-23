@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import base64
-import inspect
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, is_dataclass
 from typing import Any
 
+from ...backends._finalize import (
+    join_module_address as _join_module_address,
+    module_source_metadata as _module_source_metadata,
+    numel_from_shape as _numel,
+    value_nbytes as _nbytes,
+)
 from ...data_classes.param import Param
 from ...ir.refs import DeviceRef, DtypeRef
 
@@ -232,35 +237,48 @@ def scoped_equinox_module_calls(tree: EquinoxModuleTree) -> Iterator[None]:
     import jax
 
     originals: dict[type[Any], Any] = {}
-    for module_class, address_by_instance_id in tree.modules_by_class.items():
-        original_call = getattr(module_class, "__call__")
-        originals[module_class] = original_call
 
-        def wrapper(
-            self: Any,
-            *args: Any,
-            __address_by_id: dict[int, str] = address_by_instance_id,
-            __original: Any = original_call,
-            **kwargs: Any,
-        ) -> Any:
-            """Call the original module under a TorchLens named scope when known."""
+    def _restore_installed() -> None:
+        """Restore every class ``__call__`` patch that actually landed."""
 
-            address = __address_by_id.get(id(self))
-            if address is None:
-                return __original(self, *args, **kwargs)
-            call_index = tree.call_counts.get(address, 0) + 1
-            tree.call_counts[address] = call_index
-            tree.forward_args_by_call[(address, call_index)] = (args, kwargs)
-            with jax.named_scope(encode_module_scope(address)):
-                with jax.named_scope(encode_module_call_scope(address, call_index)):
+        for module_class, original_call in originals.items():
+            setattr(module_class, "__call__", original_call)
+
+    # R07 (the L4 unwind standard): the install loop mutates process-global
+    # module classes BEFORE the try that owns the yield; a BaseException
+    # escaping it used to strand every wrapper installed so far.
+    try:
+        for module_class, address_by_instance_id in tree.modules_by_class.items():
+            original_call = getattr(module_class, "__call__")  # noqa: B004 - fetches the __call__ object, not a callability test
+            originals[module_class] = original_call
+
+            def wrapper(
+                self: Any,
+                *args: Any,
+                __address_by_id: dict[int, str] = address_by_instance_id,
+                __original: Any = original_call,
+                **kwargs: Any,
+            ) -> Any:
+                """Call the original module under a TorchLens named scope when known."""
+
+                address = __address_by_id.get(id(self))
+                if address is None:
                     return __original(self, *args, **kwargs)
+                call_index = tree.call_counts.get(address, 0) + 1
+                tree.call_counts[address] = call_index
+                tree.forward_args_by_call[(address, call_index)] = (args, kwargs)
+                with jax.named_scope(encode_module_scope(address)):
+                    with jax.named_scope(encode_module_call_scope(address, call_index)):
+                        return __original(self, *args, **kwargs)
 
-        setattr(module_class, "__call__", wrapper)
+            setattr(module_class, "__call__", wrapper)
+    except BaseException:
+        _restore_installed()
+        raise
     try:
         yield
     finally:
-        for module_class, original_call in originals.items():
-            setattr(module_class, "__call__", original_call)
+        _restore_installed()
 
 
 @contextmanager
@@ -281,35 +299,47 @@ def scoped_nnx_module_calls(tree: NnxModuleTree) -> Iterator[None]:
     import jax
 
     originals: dict[type[Any], Any] = {}
-    for module_class, address_by_instance_id in tree.modules_by_class.items():
-        original_call = getattr(module_class, "__call__")
-        originals[module_class] = original_call
 
-        def wrapper(
-            self: Any,
-            *args: Any,
-            __address_by_id: dict[int, str] = address_by_instance_id,
-            __original: Any = original_call,
-            **kwargs: Any,
-        ) -> Any:
-            """Call the original NNX module under a TorchLens named scope when known."""
+    def _restore_installed() -> None:
+        """Restore every class ``__call__`` patch that actually landed."""
 
-            address = __address_by_id.get(id(self))
-            if address is None:
-                return __original(self, *args, **kwargs)
-            call_index = tree.call_counts.get(address, 0) + 1
-            tree.call_counts[address] = call_index
-            tree.forward_args_by_call[(address, call_index)] = (args, kwargs)
-            with jax.named_scope(encode_module_scope(address)):
-                with jax.named_scope(encode_module_call_scope(address, call_index)):
+        for module_class, original_call in originals.items():
+            setattr(module_class, "__call__", original_call)
+
+    # R07 (the L4 unwind standard): same install fence as
+    # :func:`scoped_equinox_module_calls`.
+    try:
+        for module_class, address_by_instance_id in tree.modules_by_class.items():
+            original_call = getattr(module_class, "__call__")  # noqa: B004 - fetches the __call__ object, not a callability test
+            originals[module_class] = original_call
+
+            def wrapper(
+                self: Any,
+                *args: Any,
+                __address_by_id: dict[int, str] = address_by_instance_id,
+                __original: Any = original_call,
+                **kwargs: Any,
+            ) -> Any:
+                """Call the original NNX module under a TorchLens named scope when known."""
+
+                address = __address_by_id.get(id(self))
+                if address is None:
                     return __original(self, *args, **kwargs)
+                call_index = tree.call_counts.get(address, 0) + 1
+                tree.call_counts[address] = call_index
+                tree.forward_args_by_call[(address, call_index)] = (args, kwargs)
+                with jax.named_scope(encode_module_scope(address)):
+                    with jax.named_scope(encode_module_call_scope(address, call_index)):
+                        return __original(self, *args, **kwargs)
 
-        setattr(module_class, "__call__", wrapper)
+            setattr(module_class, "__call__", wrapper)
+    except BaseException:
+        _restore_installed()
+        raise
     try:
         yield
     finally:
-        for module_class, original_call in originals.items():
-            setattr(module_class, "__call__", original_call)
+        _restore_installed()
 
 
 def encode_module_scope(address: str) -> str:
@@ -892,123 +922,6 @@ def _deepest_module_prefix(address: str, module_addresses: set[str]) -> str | No
     return "self" if "self" in module_addresses else None
 
 
-def _module_source_metadata(module: Any) -> dict[str, Any]:
-    """Return best-effort source metadata for a JAX module.
-
-    Parameters
-    ----------
-    module
-        Equinox or Flax NNX module instance.
-
-    Returns
-    -------
-    dict[str, Any]
-        Source metadata compatible with TorchLens module logs.
-    """
-
-    cls = type(module)
-    init = getattr(cls, "__init__", None)
-    call = getattr(cls, "__call__", None)
-    return {
-        "class_source_file": _safe_source_file(cls),
-        "class_source_line": _source_line(cls),
-        "init_source_file": _safe_source_file(init) if init is not None else None,
-        "init_source_line": _source_line(init),
-        "forward_source_file": _safe_source_file(call) if call is not None else None,
-        "forward_source_line": _source_line(call),
-        "class_docstring": inspect.getdoc(cls),
-        "init_signature": _signature_string(init),
-        "init_docstring": inspect.getdoc(init) if init is not None else None,
-        "forward_signature": _signature_string(call),
-        "forward_docstring": inspect.getdoc(call) if call is not None else None,
-    }
-
-
-def _safe_source_file(obj: Any) -> str | None:
-    """Return the source file for ``obj`` when inspectable.
-
-    Parameters
-    ----------
-    obj
-        Object to inspect.
-
-    Returns
-    -------
-    str | None
-        Source file path, or ``None`` when ``obj`` is not inspectable (e.g.
-        a class defined without a backing source file, such as one built
-        via ``exec``/``compile`` or implemented as a builtin).
-    """
-
-    try:
-        return inspect.getsourcefile(obj)
-    except (OSError, TypeError):
-        return None
-
-
-def _source_line(obj: Any) -> int | None:
-    """Return the first source line for ``obj`` when available.
-
-    Parameters
-    ----------
-    obj
-        Object to inspect.
-
-    Returns
-    -------
-    int | None
-        First source line, or ``None``.
-    """
-
-    if obj is None:
-        return None
-    try:
-        return inspect.getsourcelines(obj)[1]
-    except (OSError, TypeError):
-        return None
-
-
-def _signature_string(obj: Any) -> str | None:
-    """Return ``obj``'s signature string when inspectable.
-
-    Parameters
-    ----------
-    obj
-        Callable object.
-
-    Returns
-    -------
-    str | None
-        Signature string, or ``None``.
-    """
-
-    if obj is None:
-        return None
-    try:
-        return str(inspect.signature(obj))
-    except (TypeError, ValueError):
-        return None
-
-
-def _join_module_address(parent: str, child_name: str) -> str:
-    """Return a TorchLens child module address.
-
-    Parameters
-    ----------
-    parent
-        Parent module address.
-    child_name
-        Child field name.
-
-    Returns
-    -------
-    str
-        Joined child address.
-    """
-
-    return child_name if parent == "self" else f"{parent}.{child_name}"
-
-
 def _path_to_string(path: Any) -> str:
     """Convert a JAX pytree path to a dotted string.
 
@@ -1039,41 +952,3 @@ def _path_to_string(path: Any) -> str:
         else:
             parts.append(str(entry).strip("[]'"))
     return ".".join(parts)
-
-
-def _numel(shape: tuple[int, ...]) -> int:
-    """Return number of elements for ``shape``.
-
-    Parameters
-    ----------
-    shape
-        Tensor shape.
-
-    Returns
-    -------
-    int
-        Product of dimensions.
-    """
-
-    result = 1
-    for dim in shape:
-        result *= int(dim)
-    return result
-
-
-def _nbytes(value: object) -> int | None:
-    """Return byte size for an array-like value.
-
-    Parameters
-    ----------
-    value
-        Array-like value.
-
-    Returns
-    -------
-    int | None
-        Byte size when available.
-    """
-
-    nbytes = getattr(value, "nbytes", None)
-    return None if nbytes is None else int(nbytes)

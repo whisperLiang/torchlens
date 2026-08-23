@@ -19,35 +19,40 @@ after a ``loss.backward()`` call) to be reflected without re-logging.
 The check is one-shot: once ``_has_grad`` is True, no further checks are made.
 """
 
-from collections.abc import Iterator
 import weakref
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, Any
 
 import torch
 
-from .._errors import AmbiguousOpLookupError
+from .._errors import AmbiguousOpLookupError, PostTraceParamUnavailable
 from .._io import (
-    FieldPolicy,
     TLSPEC_VERSION,
+    FieldPolicy,
     coerce_container_typed_state,
     default_fill_state,
     read_tlspec_version,
 )
-from .._errors import PostTraceParamUnavailable
 from ..constants import PARAM_LOG_FIELD_ORDER
 from ..ir.refs import DeviceRef, DtypeRef
 from ..quantities import Bytes
 from ._accessor_base import Accessor
-from .field_policy import build_record_field_policy_table, portable_state_spec_from_policy
-from ._runtime_handles import source_model_from_trace
 from ._repr import format_summary_lines
+from ._runtime_handles import source_model_from_trace
+from .field_policy import build_record_field_policy_table, portable_state_spec_from_policy
 from .op import GradientRecord, GradientRecordAccessor
+
+#: Per-accessor id -> position maps for ``Param.ordinal_index`` (weakly keyed
+#: so a dropped accessor releases its map). Entries are verified by identity
+#: against the accessor's current ``_list`` before use, so a stale map can
+#: only trigger a rebuild, never a wrong answer.
+_ORDINAL_INDEX_CACHE: "weakref.WeakKeyDictionary[Any, dict[int, int]]" = weakref.WeakKeyDictionary()
 
 if TYPE_CHECKING:
     import pandas as pd
 
 
-def _param_log_to_row(param_log: "Param") -> Dict[str, Any]:
+def _param_log_to_row(param_log: "Param") -> dict[str, Any]:
     """Convert a Param into one DataFrame row.
 
     Parameters
@@ -120,21 +125,23 @@ class Param:
         "_derived_grad_payload": FieldPolicy.KEEP,
         "_derived_grad_record_path": FieldPolicy.KEEP,
     }
-    FIELD_POLICY = build_record_field_policy_table(PARAM_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC)
+    FIELD_POLICY = build_record_field_policy_table(
+        PARAM_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="param"
+    )
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     def __init__(
         self,
         module_address: str,
         name: str,
-        shape: Tuple[int, ...],
+        shape: tuple[int, ...],
         dtype: torch.dtype,
         num_params: int,
         param_memory: int,
         trainable: bool,
         address: str,
         barcode: str,
-        has_optimizer: Optional[bool] = None,
+        has_optimizer: bool | None = None,
     ) -> None:
         """Initialize persistent metadata for one model parameter.
 
@@ -182,18 +189,18 @@ class Param:
         # Direct reference to the actual nn.Parameter for lazy grad access.
         # Prevents GC of the parameter while this Param is alive (acceptable
         # because Trace lifetime <= model lifetime; cleanup() clears it).
-        self._param_ref: Optional[torch.nn.Parameter] = None
+        self._param_ref: torch.nn.Parameter | None = None
         self._param_ref_released: bool = False
         self._source_trace_ref: Any = None
 
         # Populated during postprocessing:
         self.num_calls: int = 1  # how many forward ops used this param
-        self.used_by_ops: List[str] = []  # op labels that used this param
-        self.used_by_layers: List[str] = []  # layer labels that used this param
-        self.co_parent_params: List[str] = []  # other param addresses used by the same op
+        self.used_by_ops: list[str] = []  # op labels that used this param
+        self.used_by_layers: list[str] = []  # layer labels that used this param
+        self.co_parent_params: list[str] = []  # other param addresses used by the same op
         self._has_grad: bool = False  # one-shot flag: once True, no further checks
-        self._grad_shape: Optional[Tuple[int, ...]] = None
-        self._grad_dtype: Optional[torch.dtype] = None
+        self._grad_shape: tuple[int, ...] | None = None
+        self._grad_dtype: torch.dtype | None = None
         self._grad_memory: Bytes = Bytes(0)
         self._grad_records: list[GradientRecord] = []
         self._derived_grad_payload: Any | None = None
@@ -268,12 +275,34 @@ class Param:
 
     @property
     def ordinal_index(self) -> int:
-        """Return this Param's 0-based position in ``trace.params``."""
+        """Return this Param's 0-based position in ``trace.params``.
+
+        Amortized O(1): the historical ``list(trace.params).index(self)``
+        materialized the accessor (through its ref-rehydrating ``__iter__``)
+        and identity-scanned it on EVERY read, so a full-table sweep measured
+        a ~2.1 scaling exponent. The id-keyed position map is cached per
+        accessor and verified by identity before use (stale caches rebuild),
+        so results are exactly the historical identity semantics.
+        """
 
         trace = self.source_trace
         if trace is None:
             return -1
-        return list(trace.params).index(self)
+        accessor = trace.params
+        items = getattr(accessor, "_list", None)
+        if not isinstance(items, list):
+            return list(accessor).index(self)
+        cache = _ORDINAL_INDEX_CACHE.get(accessor)
+        if cache is not None and len(cache) == len(items):
+            index = cache.get(id(self))
+            if index is not None and items[index] is self:
+                return index
+        cache = {id(param): position for position, param in enumerate(items)}
+        _ORDINAL_INDEX_CACHE[accessor] = cache
+        index = cache.get(id(self))
+        if index is None:
+            raise ValueError(f"{self.address!r} is not in trace.params")
+        return index
 
     @property
     def module(self) -> Any:
@@ -382,40 +411,61 @@ class Param:
 
         return GradientRecordAccessor(self._grad_records)
 
-    def _record_gradient_increment(
+    def _append_gradient_record(
         self,
         *,
         backward_pass_index: int,
-        grad: torch.Tensor,
+        grad: Any | None,
+        shape: tuple[int, ...] | None,
+        dtype: str | None,
+        memory: int | None,
         timestamp: float,
-    ) -> None:
-        """Append one AccumulateGrad increment for this parameter.
+    ) -> "GradientRecord":
+        """Append one projected AccumulateGrad increment for this parameter.
+
+        Called only by the backward projection fold: the ``ParamGradObserved``
+        event stream is the single authoritative source for these records, so
+        the live AccumulateGrad hook never writes them directly.
 
         Parameters
         ----------
         backward_pass_index:
             One-based global backward pass number.
         grad:
-            Incoming gradient increment.
+            Retained gradient payload from the event, already detached.
+        shape:
+            Observed gradient shape from the event.
+        dtype:
+            Observed gradient dtype string from the event.
+        memory:
+            Observed gradient memory in bytes from the event.
         timestamp:
             Event timestamp.
+
+        Returns
+        -------
+        GradientRecord
+            The appended record.
         """
 
-        saved = grad.detach().clone()
-        memory = int(saved.nelement() * saved.element_size())
-        self._grad_records.append(
-            GradientRecord(
-                owner=self,
-                ordinal=len(self._grad_records) + 1,
-                backward_pass_index=backward_pass_index,
-                grad=saved,
-                transformed_grad=None,
-                shape=tuple(saved.shape),
-                dtype=str(saved.dtype),
-                memory=memory,
-                timestamp=timestamp,
-            )
+        record = GradientRecord(
+            owner=self,
+            ordinal=len(self._grad_records) + 1,
+            backward_pass_index=backward_pass_index,
+            grad=grad,
+            transformed_grad=None,
+            shape=shape,
+            dtype=dtype,
+            memory=memory,
+            timestamp=timestamp,
         )
+        self._grad_records.append(record)
+        return record
+
+    def _clear_gradient_records(self) -> None:
+        """Reset projected gradient records ahead of a full projection rebuild."""
+
+        self._grad_records = []
 
     def _check_param_grad(self) -> None:
         """Lazily check if the parameter has a grad and cache the result.
@@ -533,7 +583,7 @@ class Param:
         self._has_grad = value
 
     @property
-    def grad_shape(self) -> Optional[Tuple[int, ...]]:
+    def grad_shape(self) -> tuple[int, ...] | None:
         """Return the grad tensor shape.
 
         Returns
@@ -545,7 +595,7 @@ class Param:
         return self._grad_shape
 
     @grad_shape.setter
-    def grad_shape(self, value: Optional[Tuple[int, ...]]) -> None:
+    def grad_shape(self, value: tuple[int, ...] | None) -> None:
         """Set cached grad tensor shape.
 
         Parameters
@@ -556,7 +606,7 @@ class Param:
         self._grad_shape = value
 
     @property
-    def grad_dtype(self) -> Optional[torch.dtype]:
+    def grad_dtype(self) -> torch.dtype | None:
         """Return the grad tensor dtype.
 
         Returns
@@ -568,7 +618,7 @@ class Param:
         return self._grad_dtype
 
     @grad_dtype.setter
-    def grad_dtype(self, value: Optional[torch.dtype]) -> None:
+    def grad_dtype(self, value: torch.dtype | None) -> None:
         """Set cached grad tensor dtype.
 
         Parameters
@@ -652,16 +702,32 @@ class Param:
         """Return the number of scalar elements in this parameter."""
         return self.num_params
 
-    def __getstate__(self) -> Dict[str, Any]:
+    def __tl_state_items__(self) -> Any:
+        """Yield live state pairs from the backing row (M8 facade hook)."""
+
+        from .._trace_core.record_rows import record_state_items
+
+        return record_state_items(self)
+
+    def __tl_state_restore__(self, mapping: dict[str, Any]) -> None:
+        """Install a state mapping through the cell descriptors (M8 hook)."""
+
+        from .._trace_core.record_rows import record_state_restore
+
+        record_state_restore(self, mapping)
+
+    def __getstate__(self) -> dict[str, Any]:
         """Return pickle state with live parameter references stripped."""
-        state = self.__dict__.copy()
+        from ._state_adapter import state_items
+
+        state = dict(state_items(self))
         state["_param_ref"] = None
         state["_param_ref_released"] = False
         state["_source_trace_ref"] = None
         state["tlspec_version"] = TLSPEC_VERSION
         return state
 
-    def __setstate__(self, state: Dict[str, Any]) -> None:
+    def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore pickle state without reviving live parameter references."""
         read_tlspec_version(state, cls_name=type(self).__name__)
         for removed_field in ("module_class_name", "module_class_qualname", "module_type"):
@@ -699,7 +765,57 @@ class Param:
         from .._io.state_keys import refuse_callable_shadowing_state_keys
 
         refuse_callable_shadowing_state_keys(type(self), state)
-        self.__dict__.update(state)
+        from .._trace_core.record_rows import record_state_restore
+
+        record_state_restore(self, state)
+
+
+# The M8 facade: every declared stored field becomes a row-cell descriptor
+# (the literal ``PORTABLE_STATE_SPEC`` keys above, in declared order); the
+# instance ``__dict__`` keeps only the store binding and user extras.
+_PARAM_STORED_FIELDS: tuple[str, ...] = (
+    "module_address",
+    "name",
+    "shape",
+    "dtype",
+    "dtype_ref",
+    "device_ref",
+    "backend_address",
+    "resolver_status",
+    "num_params",
+    "param_memory",
+    "is_trainable",
+    "address",
+    "all_addresses",
+    "all_module_addresses",
+    "barcode",
+    "has_optimizer",
+    "_param_ref",
+    "_param_ref_released",
+    "_source_trace_ref",
+    "num_calls",
+    "used_by_ops",
+    "used_by_layers",
+    "co_parent_params",
+    "_has_grad",
+    "_grad_shape",
+    "_grad_dtype",
+    "_grad_memory",
+    "_grad_records",
+    "_derived_grad_payload",
+    "_derived_grad_record_path",
+)
+
+
+def _install_param_facade() -> None:
+    """Install the Param row-cell descriptors (import-time, collision-safe)."""
+
+    from .._trace_core.record_rows import install_record_facade
+
+    install_record_facade(Param, _PARAM_STORED_FIELDS)
+
+
+_install_param_facade()
 
 
 class ParamAccessor(Accessor["Param"]):
@@ -719,7 +835,7 @@ class ParamAccessor(Accessor["Param"]):
         "_rehydrate_on_iter": FieldPolicy.DROP,
     }
 
-    def __init__(self, param_logs: Dict[str, "Param"]) -> None:
+    def __init__(self, param_logs: dict[str, "Param"]) -> None:
         """Initialize an accessor over parameter logs.
 
         Parameters
@@ -752,7 +868,13 @@ class ParamAccessor(Accessor["Param"]):
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
-            raise AmbiguousOpLookupError(f"Ambiguous short name '{key}' -- use full address")
+            # Name the bounded candidate set (R65) like the merged-presenter
+            # sibling, instead of telling the user to guess the full address.
+            candidates = tuple(address for match in matches for address in match.all_addresses)
+            raise AmbiguousOpLookupError(
+                f"Ambiguous short name '{key}' -- use a full address: {', '.join(candidates)}",
+                candidates=candidates,
+            )
         return None
 
     def _resolve_pass_qualified(self, key: str) -> "Param | None":

@@ -8,20 +8,56 @@ translation, module cluster styling, and HTML label escaping.
 Keep this module narrow on purpose -- only primitives that take no
 Trace/Bundle context and can be reasoned about as pure utilities.
 The orchestration that knows WHICH nodes / edges / module paths to use
-lives in the per-input-shape callers, such as ``rendering.draw`` for
+lives in the per-input-shape callers, such as ``_render_dot.draw`` for
 Trace.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
+import threading
 import warnings
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any, Iterable, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import graphviz
+
+from .._errors import InvalidArgumentError
+from ..utils.display import user_stacklevel
+
+#: Live viewer child handles (r-b6 R40-1). Retained so every launch can reap
+#: previously-exited viewers; without this the discarded ``Popen`` handle left
+#: one persistent zombie per process (each new spawn reaped the previous
+#: corpse, so the census never returned to baseline).
+_VIEWER_PROCS: list[subprocess.Popen[bytes]] = []
+
+
+def _reap_finished_viewers() -> None:
+    """Drop (and thereby reap) every viewer child that has already exited."""
+
+    _VIEWER_PROCS[:] = [proc for proc in _VIEWER_PROCS if proc.poll() is None]
+
+
+def _wait_and_release_viewer(proc: subprocess.Popen[bytes]) -> None:
+    """Reap one viewer child the moment it exits.
+
+    r3 b6-opus/sol R40 (carried MED): the registry alone reaped only on the
+    NEXT launch, so one ``draw()`` that opened a viewer left one zombie for
+    the life of the process — and retaining the ``Popen`` handle disabled
+    even the finalizer's opportunistic reap. A per-viewer daemon waiter
+    holds no lock, blocks nothing, and removes the handle as soon as the
+    child is waited on; the launch-time sweep stays as a belt for waiter
+    threads that die abnormally.
+    """
+
+    try:
+        proc.wait()
+    finally:
+        with contextlib.suppress(ValueError):  # already swept at next launch
+            _VIEWER_PROCS.remove(proc)
 
 
 def _is_interactive_display_context() -> bool:
@@ -37,9 +73,7 @@ def _is_interactive_display_context() -> bool:
     has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     if sys.platform.startswith("linux") and not has_display:
         return False
-    if os.environ.get("SSH_CONNECTION") and not has_display:
-        return False
-    return True
+    return not (os.environ.get("SSH_CONNECTION") and not has_display)
 
 
 def _open_file_quietly(filepath: str, *, announce_headless: bool = False) -> bool:
@@ -83,43 +117,138 @@ def _open_file_quietly(filepath: str, *, announce_headless: bool = False) -> boo
     try:
         if sys.platform == "win32":
             os.startfile(filepath)  # type: ignore[attr-defined]
-        elif sys.platform == "darwin":
-            subprocess.Popen(
-                ["open", filepath],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
         else:
-            subprocess.Popen(
-                ["xdg-open", filepath],
+            opener = "open" if sys.platform == "darwin" else "xdg-open"
+            # r-b6 R40-1/3a: retain the handle and reap prior viewer children
+            # (the discarded Popen left one persistent zombie per process),
+            # and detach the viewer into its own session so a later render
+            # timeout kill cannot orphan its grandchildren onto us.
+            _reap_finished_viewers()
+            viewer = subprocess.Popen(
+                [opener, filepath],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
+            _VIEWER_PROCS.append(viewer)
+            # Asynchronous wait so the FINAL viewer of a process is reaped
+            # too, not only viewers followed by another launch (r3 R40).
+            threading.Thread(
+                target=_wait_and_release_viewer,
+                args=(viewer,),
+                name="torchlens-viewer-reaper",
+                daemon=True,
+            ).start()
         return True
     except (FileNotFoundError, OSError):
         return False  # no viewer available; silently skip
 
 
-if TYPE_CHECKING:  # pragma: no cover - typing-only
+if TYPE_CHECKING:
     pass
 
 
 # Recognised file extensions that callers may include on ``vis_outpath``.
-# Mirrors the legacy list in ``rendering.draw`` (kept as a tuple
+# Mirrors the legacy list in ``_render_dot.draw`` (kept as a tuple
 # so it stays cheap and immutable).
 _KNOWN_EXTS = ("pdf", "png", "jpg", "svg", "jpeg", "bmp", "pic", "tif", "tiff", "dot")
 
 # Default subprocess timeout for Graphviz render calls. Mirrors the
-# legacy literal that lived inside ``rendering.draw``.
+# legacy literal that lived inside ``_render_dot.draw``.
 RENDER_TIMEOUT_SECONDS = 120
+
+# The bounded-subprocess spawn discipline (process-group teardown, Linux
+# PR_SET_PDEATHSIG parent-death binding, kill-grace escalation) lives in
+# ``utils/_subprocess`` so non-visualization callers (the doctor ``dot``
+# probe, the bundle git-provenance stamp) can share it without this module's
+# hard ``graphviz`` import (R40). Render call sites and tests monkeypatch
+# ``_render_utils.run_bounded_subprocess``, so the viz-facing wrapper lives
+# here and adds the ONE viz-specific behavior on top of the shared seam.
+from ..utils._subprocess import (  # noqa: E402
+    _HAS_PROCESS_GROUPS,  # noqa: F401  (re-export: tests pin the spawn contract)
+    run_bounded_subprocess as _run_bounded_subprocess_shared,
+)
+
+
+def run_bounded_subprocess(
+    cmd: list[str],
+    *,
+    timeout: float,
+    check: bool = True,
+    capture_output: bool = True,
+    input: bytes | str | None = None,
+    cwd: str | None = None,
+    text: bool = False,
+) -> subprocess.CompletedProcess[Any]:
+    """Run ``cmd`` through the shared bounded spawn seam, refusing typed.
+
+    Delegates to :func:`torchlens.utils._subprocess.run_bounded_subprocess`
+    (the ONE spawn discipline) and adds the viz-specific door: a missing
+    Graphviz binary raises the typed install-remedy refusal instead of a raw
+    ``FileNotFoundError: 'dot'`` naming neither Graphviz nor the remedy
+    (b8 R65). The doctor ``dot`` probe, by contrast, wants the raw signal
+    and calls the shared seam directly. Tests monkeypatch this function to
+    simulate Graphviz outcomes.
+    """
+
+    try:
+        return _run_bounded_subprocess_shared(
+            cmd,
+            timeout=timeout,
+            check=check,
+            capture_output=capture_output,
+            input=input,
+            cwd=cwd,
+            text=text,
+        )
+    except FileNotFoundError as exc:
+        # Lazy import: _render_common top-imports this module, so the typed
+        # class cannot be imported at module level without minting a cycle.
+        # The single most common cold-user viz failure: the Graphviz BINARY
+        # is not installed (the python 'graphviz' package alone does not
+        # ship it); the class carries the install remedy.
+        from ._render_common import GraphvizUnavailableError
+
+        raise GraphvizUnavailableError(
+            f"TorchLens could not render this graph: the Graphviz executable "
+            f"{cmd[0]!r} was not found on PATH",
+            executable=cmd[0],
+        ) from exc
+
 
 # -- Module subgraph border widths (shared between Trace and bundle paths)
 # Outermost modules get the thickest border; deeper modules thin out by depth
 # fraction so visual hierarchy reads at a glance.  These constants are the
-# canonical source for both ``rendering.py`` and the bundle renderer.
+# canonical source for both ``_render_dot.py`` and the bundle renderer.
 MAX_MODULE_PENWIDTH = 5
 MIN_MODULE_PENWIDTH = 2
 PENWIDTH_RANGE = MAX_MODULE_PENWIDTH - MIN_MODULE_PENWIDTH
+
+
+_VISUALIZER_DIR_MARKER = "torchlens_visualizers_"
+
+
+def relativize_visualizer_image(path: str) -> str:
+    """Return an image path relative to the trace visualizer scratch root.
+
+    r-b6 R19-6: node ``image=`` attributes used to embed the absolute
+    ``tempfile.mkdtemp`` visualizer path, so every run's DOT differed in
+    every image node and byte-comparison/golden hashing was impossible for
+    those features. Emitting the path RELATIVE to the scratch root keeps
+    per-run bytes out of the source entirely; T9 (grind-p3) supplies the
+    root to Graphviz as the render subprocess working directory (the dot
+    engine) instead of an in-source ``imagepath`` graph attribute, so
+    user-saved DOT stays free of the per-run temp path. Paths outside a
+    visualizer scratch dir (user-supplied images) pass through unchanged.
+    """
+
+    marker_index = path.find(_VISUALIZER_DIR_MARKER)
+    if marker_index == -1:
+        return path
+    separator_index = path.find(os.sep, marker_index)
+    if separator_index == -1:
+        return path
+    return path[separator_index + 1 :]
 
 
 def strip_known_extension(outpath: str) -> str:
@@ -151,8 +280,11 @@ def direction_to_rankdir(direction: str) -> str:
         return "LR"
     if direction == "topdown":
         return "TB"
-    raise ValueError(
-        f"direction must be one of 'bottomup', 'topdown', or 'leftright'; got {direction!r}"
+    raise InvalidArgumentError(
+        f"direction must be one of 'bottomup', 'topdown', or 'leftright'; got {direction!r}",
+        code="visualization_direction_invalid",
+        remedy="pass direction='bottomup', 'topdown', or 'leftright'",
+        argument="direction",
     )
 
 
@@ -185,17 +317,6 @@ def html_escape(value: str) -> str:
     return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def format_node_html(lines: Iterable[str]) -> str:
-    """Wrap pre-escaped label lines into a Graphviz HTML-like label string.
-
-    The caller is responsible for escaping content (use :func:`html_escape`)
-    -- a deliberate choice so callers can embed ``<B>``/``<I>``/``<FONT>``
-    tags where they want emphasis without us double-escaping them.
-    """
-
-    return "<" + "<BR/>".join(lines) + ">"
-
-
 def make_module_cluster_label(
     title: str,
     module_type: str | None = None,
@@ -204,7 +325,7 @@ def make_module_cluster_label(
 ) -> str:
     """Return the HTML-style label string for a module cluster.
 
-    Mirrors the legacy format used by ``rendering._setup_subgraphs_recurse``:
+    Mirrors the legacy format used by ``_render_flow._setup_subgraphs_recurse``:
     ``<<B>@title</B><br align='left'/>(type)<br align='left'/>>``.  The
     ``module_type`` line is omitted when no type information is available
     (which is the case for bundle clusters because the supergraph stores
@@ -349,7 +470,7 @@ def merge_edge_style(
 
 
 def render_dot_to_file(
-    dot: "graphviz.Digraph",
+    dot: graphviz.Digraph,
     outpath: str,
     file_format: str,
     save_only: bool,
@@ -360,7 +481,7 @@ def render_dot_to_file(
     """Render ``dot`` to ``outpath.<file_format>``, optionally previewing it.
 
     Mirrors the dot/save/subprocess/view flow used internally by
-    ``rendering.draw`` and ``rendering.render_backward_graph``,
+    ``_render_dot.draw`` and ``_render_entrypoints.render_backward_graph``,
     factored out so the multi-trace renderer can share the same plumbing.
 
     Returns the DOT source string (``dot.source``) regardless of whether
@@ -377,12 +498,7 @@ def render_dot_to_file(
     try:
         rendered_path = f"{outpath}.{file_format}"
         cmd = [dot.engine, f"-T{file_format}", "-o", rendered_path, source_path]
-        subprocess.run(
-            cmd,
-            timeout=timeout_seconds,
-            check=True,
-            capture_output=True,
-        )
+        run_bounded_subprocess(cmd, timeout=timeout_seconds)
         render_succeeded = True
         if not save_only:
             _open_file_quietly(rendered_path)
@@ -392,10 +508,14 @@ def render_dot_to_file(
             or (
                 f"Graphviz render timed out ({timeout_seconds}s). "
                 f"DOT source saved to '{source_path}'."
-            )
+            ),
+            stacklevel=user_stacklevel(),
         )
     except subprocess.CalledProcessError as exc:
-        warnings.warn(f"Graphviz render failed: {exc.stderr.decode()}")
+        warnings.warn(
+            f"Graphviz render failed: {exc.stderr.decode()}",
+            stacklevel=user_stacklevel(),
+        )
     finally:
         if render_succeeded and os.path.exists(source_path):
             os.remove(source_path)

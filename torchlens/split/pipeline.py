@@ -22,7 +22,6 @@ from .program import (
 )
 from .shape_program import ShapeProgram, _escape_pointer, compile_shape_program
 
-
 _MAX_EXHAUSTIVE_SHAPE_WITNESSES = 32
 
 
@@ -155,9 +154,7 @@ def _capture_shape_witnesses(
         return {}
     low, high = shape_program.dynamic_batch
     batches = tuple(
-        batch
-        for batch in range(low, high + 1)
-        if batch != shape_program.traced_batch_size
+        batch for batch in range(low, high + 1) if batch != shape_program.traced_batch_size
     )
     if not batches:
         return {}
@@ -347,7 +344,7 @@ def normalize_to_split_ir(
                 )
         if shape_program is not None:
             graph_hash = sha256(
-                f"{graph.graph_shape_hash or ''}:{shape_program.fingerprint}".encode("utf-8")
+                f"{graph.graph_shape_hash or ''}:{shape_program.fingerprint}".encode()
             ).hexdigest()
             graph = replace(
                 graph,

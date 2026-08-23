@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
+from .._io import FieldPolicy
 from .container import ContainerSpec
 
 if TYPE_CHECKING:
@@ -13,7 +15,11 @@ if TYPE_CHECKING:
     from .refs import ParamRef, TensorRef
     from .semantics import BackendSemantics, CapturePolicy
 
-OpEventKind = Literal["op", "source", "synthetic_output", "intervention_replacement"]
+# "intervention_replacement" is deliberately NOT an operation kind: an
+# intervention is an EDIT (an InterventionAppliedEvent referencing its target),
+# never a synthetic operation, so a functionless op can no longer be expressed
+# as a legal kind. (No producer ever constructed the retired literal.)
+OpEventKind = Literal["op", "source", "synthetic_output"]
 EdgeUseKind = Literal["arg", "kwarg", "container", "module", "buffer", "output", "control"]
 JaxEquationKind = Literal[
     "primitive",
@@ -31,6 +37,118 @@ BackwardTrigger = Literal[
     "replay",
 ]
 BackwardStatus = Literal["ok", "error"]
+
+
+@dataclass(frozen=True, slots=True)
+class _AtenTensorFact:
+    """Value-free tensor metadata observed at one dispatcher boundary."""
+
+    container_path: tuple[object, ...]
+    tensor_impl_capability: str
+    logical_version: int | None
+    storage_alias_group: int | None
+    shape: tuple[int, ...]
+    stride: tuple[int, ...]
+    dtype: str
+    device: str
+    layout: str
+    requires_grad: bool
+
+    PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
+        "container_path": FieldPolicy.KEEP,
+        "tensor_impl_capability": FieldPolicy.KEEP,
+        "logical_version": FieldPolicy.KEEP,
+        "storage_alias_group": FieldPolicy.KEEP,
+        "shape": FieldPolicy.KEEP,
+        "stride": FieldPolicy.KEEP,
+        "dtype": FieldPolicy.KEEP,
+        "device": FieldPolicy.KEEP,
+        "layout": FieldPolicy.KEEP,
+        "requires_grad": FieldPolicy.KEEP,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class _AtenExecutionContext:
+    """Immutable execution-environment stamp for one dispatcher call."""
+
+    pytorch_version: str
+    backend: str
+    device_model: str | None
+    device_capability: tuple[int, int] | None
+    grad_mode: bool
+    inference_mode: bool
+    module_training_summary: tuple[tuple[str, bool], ...]
+    autocast: tuple[tuple[str, bool, str], ...]
+    deterministic_algorithms: bool
+    tf32_matmul_policy: bool | None
+    sdpa_policy: tuple[tuple[str, bool], ...]
+    compile_stance: str
+    owner_thread_coverage: tuple[int, ...]
+    completeness_witness_mode: str
+
+    PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
+        "pytorch_version": FieldPolicy.KEEP,
+        "backend": FieldPolicy.KEEP,
+        "device_model": FieldPolicy.KEEP,
+        "device_capability": FieldPolicy.KEEP,
+        "grad_mode": FieldPolicy.KEEP,
+        "inference_mode": FieldPolicy.KEEP,
+        "module_training_summary": FieldPolicy.KEEP,
+        "autocast": FieldPolicy.KEEP,
+        "deterministic_algorithms": FieldPolicy.KEEP,
+        "tf32_matmul_policy": FieldPolicy.KEEP,
+        "sdpa_policy": FieldPolicy.KEEP,
+        "compile_stance": FieldPolicy.KEEP,
+        "owner_thread_coverage": FieldPolicy.KEEP,
+        "completeness_witness_mode": FieldPolicy.KEEP,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class _AtenCallEvent:
+    """Value-free facts for one observed ATen dispatcher call."""
+
+    capture_phase: str
+    forward_pass_index: int | None
+    backward_epoch_index: int | None
+    owner_func_call_id: int | None
+    parent_grad_fn_call_ref: tuple[int, int, int] | None
+    namespace: str
+    operator: str
+    overload: str
+    schema: str | None
+    schema_fingerprint: str | None
+    module_call_stack: tuple[tuple[str, int], ...]
+    input_tensor_facts: tuple[_AtenTensorFact, ...]
+    output_tensor_facts: tuple[_AtenTensorFact, ...]
+    mutation_kind: str
+    view_copy_kind: str
+    autocast_context: tuple[tuple[str, bool, str], ...]
+    dispatch_key_context: str | None
+    grad_fn_ref: str | None
+    grad_fn_link_status: str
+    grad_fn_link_provenance: str | None
+    algorithmic_flops: int | None
+    flop_status: str
+    flop_formula_source: str | None
+    flop_formula_version: str | None
+    outcome: str
+    exception_type: str | None
+    execution_context: _AtenExecutionContext
+    seq: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _ModePausedInteriorEvent:
+    """Boundary-only disclosure for a strict constructor's unobserved interior."""
+
+    capture_phase: str
+    sequence_before: int
+    sequence_after: int
+    owner_func_call_id: int | None
+    reason: str = "strict_subclass_constructor"
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +181,7 @@ class BackwardPassStart:
     engine_flags: dict[str, object] | None
     forward_op_count_at_trigger: int | None
     timestamp: float
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,23 +196,54 @@ class OpGradObserved:
     dtype: str | None
     memory: int | None
     timestamp: float
-    seq: int
+    seq: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ParamGradObserved:
+    """Core event emitted when an AccumulateGrad hook observes a parameter gradient."""
+
+    param_address: str
+    pass_index: int
+    payload_ref: object | None
+    shape: tuple[int, ...] | None
+    dtype: str | None
+    memory: int | None
+    timestamp: float
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class BackwardPassEnd:
-    """Core event marking completion of one autograd engine invocation."""
+    """Core event marking completion of one autograd engine invocation.
+
+    ``close_path`` is the implicit-pass close-path disclosure (L9 memo 1.2;
+    provisional spelling, DOCUMENTED-UNSTABLE pending naming-session/S2
+    routing): ``"engine_drain"`` when the queued engine final callback
+    journaled the close, ``"sync_point"`` for every backstop path, ``None``
+    for explicit (non-implicit) passes. Sidecar-event-only in wave 2 -- the
+    projected ``BackwardPass`` record field waits for the wave-3 bump.
+    """
 
     pass_index: int
     duration: float | None
     peak_memory: int | None
     status: BackwardStatus
     order_attribution_coverage: float | None
+    close_path: str | None = None
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class GradFnDiscovered:
-    """Torch enrichment event for a discovered autograd node object."""
+    """Torch enrichment event for a discovered autograd node object.
+
+    ``source`` is deep-frozen by the stream writer
+    (:meth:`~torchlens.ir.capture_events.CaptureEvents.append_backward`
+    snapshots it into a read-only mapping): the backward projection copies it
+    by value at materialize time, so it must be immutable on the event or an
+    in-place mutation could bypass ``backward_revision``.
+    """
 
     object_id: int
     class_name: str
@@ -103,13 +253,54 @@ class GradFnDiscovered:
     param_ref: object | None
     created_in_pass: int | None
     creator_object_id: int | None
-    source: dict[str, object | None]
+    source: Mapping[str, object | None]
     topology: tuple[int, ...]
+    seq: int = 0
+
+
+BackwardCoverageGapReason = Literal[
+    "registration_error",
+    "framework_unhookable",
+    "dead_node",
+    "unsupported_kind",
+    "capture_exception",
+    "suppressed",
+    "unknown",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class BackwardCoverageGap:
+    """Core event recording one autograd node the walk could not observe.
+
+    A hook-registration or discovery skip is a typed journal fact, never a
+    silent ``continue``: only proven framework-contract exclusions preserve a
+    complete-coverage claim, and validation fails closed on every other
+    reason.
+    """
+
+    pass_index: int
+    object_id: int | None
+    class_qualname: str | None
+    reason: BackwardCoverageGapReason
+    detail: str | None
+    timestamp: float
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class GradFnFired:
-    """Torch enrichment event emitted from an autograd node hook."""
+    """Torch enrichment event emitted from an autograd node hook.
+
+    ``fire_started_monotonic`` / ``fire_finished_monotonic`` are the L9
+    per-fire timing pair (provisional spellings, DOCUMENTED-UNSTABLE): BOTH
+    stamps come from ``time.perf_counter()`` in the same process, paired at
+    capture time by the per-node keyed LIFO, and enter this ONE event
+    together -- projection never re-pairs them. An untimed fire (empty LIFO,
+    key mismatch, timing-registration failure) carries ``(None, None)``,
+    never a cross-fire or cross-clock pair. The wall-clock ``timestamp``
+    stays the event-ordering stamp and is NEVER a duration operand.
+    """
 
     object_id: int
     pass_index: int
@@ -117,7 +308,27 @@ class GradFnFired:
     grad_output_refs: object | None
     intervention_fire_ref: object | None
     timestamp: float
-    seq: int
+    fire_started_monotonic: float | None = None
+    fire_finished_monotonic: float | None = None
+    seq: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointInvocationObserved:
+    """Torch enrichment event minted for one classified checkpoint invocation.
+
+    L9 memo 2.3 (provisional spelling, DOCUMENTED-UNSTABLE): the token is a
+    per-trace monotonic ordinal minted ONLY in the patched
+    ``saved_tensors_hooks.__enter__`` for ``_checkpoint_hook`` instances on
+    the armed owner thread outside any engine invocation. Pack counts and
+    unpack window evidence accumulate in runtime token state, not on this
+    frozen event; the projected summary lands on the DROP-gated Trace
+    checkpoint-invocation witness field.
+    """
+
+    token: int
+    timestamp: float
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +359,7 @@ class OutputVersionEvent:
     payload: object
     transform_state: object | None
     detach_grad_policy: bool
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,19 +479,45 @@ class ModuleFrame:
     entry_argnames: tuple[str, ...]
 
 
-@dataclass(frozen=True, slots=True)
-class BufferEvent:
-    """Captured module buffer metadata event."""
+InterventionEditKind = Literal["replaced", "fired"]
+InterventionEditOrigin = Literal["raw_forward_hook", "live_fire", "push"]
 
-    address: str
-    name: str
-    module_address: str
-    buffer_pass: int
-    parent_label_raw: str | None
-    shape: tuple[int, ...] | None
-    dtype: str | None
-    memory: int | None
-    module_stack: tuple[ModuleFrame, ...]
+
+@dataclass(frozen=True, slots=True)
+class InterventionAppliedEvent:
+    """Journal edit record for one observed intervention on a captured value.
+
+    Interventions are EDITS referencing an existing identity, never op kinds:
+    the record is appended only by the capture sites that directly observed
+    the edit (a raw ``register_forward_hook`` returning a new object, or a
+    live-fire hook reporting ``replaced=True`` while intervention machinery
+    is armed for this capture), so it is the trace-level ground truth the
+    functionless-op validation carve-out requires. A placeholder minted
+    during PLAIN capture can never mint one of these and must still fail
+    validation (2026-06-02 lesson).
+
+    Causal binding: the observing site stamps ``run_token`` (the owning
+    stream's run nonce), ``target_seq`` (the journal seq of the edited op's
+    event at observation time), and ``target_func_call_id``. Validation
+    accepts an edit only when the token matches the validated stream's nonce
+    AND the journal really contains the bound target event, so a bare record
+    appended through the ordinary writer (a forged edit) and a genuine record
+    replayed into a DIFFERENT run's journal both stay refused. The sanctioned
+    merge path (``CaptureEvents.concat``) re-binds tokens and target seqs for
+    events that were genuinely bound to their source run. An in-process
+    forger who also copies a live stream's nonce and a real target binding is
+    outside this record's threat model (coherent reauthoring), the same
+    documented boundary the runnable contract draws.
+    """
+
+    label_raw: str
+    kind: InterventionEditKind
+    origin: InterventionEditOrigin
+    timestamp: float
+    seq: int = 0
+    run_token: int | None = None
+    target_seq: int = 0
+    target_func_call_id: int | None = None
 
 
 BufferWriteKind = Literal["reassign", "inplace", "fused", "data_reassign"]
@@ -299,25 +537,7 @@ class BufferWriteEvent:
     storage_key: tuple[Any, ...] | None
     buffer_version: int | None
     source_func_name: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class ModuleEvent:
-    """Captured module-call event consumed by postprocessing."""
-
-    address: str
-    all_addresses: tuple[str, ...]
-    call_index: int
-    call_label: str
-    layers_raw: tuple[str, ...]
-    input_layers_raw: tuple[str, ...]
-    output_layers_raw: tuple[str, ...]
-    forward_args_summary: object
-    forward_kwargs_summary: object
-    forward_args: object | None
-    forward_kwargs: object | None
-    call_parent: str | None
-    call_children: tuple[str, ...]
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,6 +570,7 @@ class ModulePrepEvent:
     training_at_prep: bool
     custom_attributes: tuple[tuple[str, object], ...]
     custom_methods: tuple[str, ...]
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,6 +590,7 @@ class ModuleEnterEvent:
     forward_kwargs_template: object | None
     layer_argnames: tuple[tuple[str, object], ...]
     input_labels: tuple[str, ...] = ()
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -382,6 +604,7 @@ class PreHookProvenanceEvent:
     effects: tuple[object, ...]
     capture_complete: bool
     incomplete_reasons: tuple[str, ...]
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,6 +623,14 @@ class ModuleExitEvent:
     # an empty-tuple default so the field stays trailing (defaulted) and all
     # consumers guard on a falsy value; absent == "no paths captured".
     output_paths: tuple[tuple[object, ...], ...] = ()
+    # TRUE tensor-leaf count of the module's real output object, recorded from
+    # the output walk BEFORE labeling/boundary minting can fail. This is the
+    # proof the gradient-coverage classifier uses to distinguish "the module
+    # genuinely produced no tensor output" (a legitimate exclusion) from
+    # "capture failed to attach the output" (a fail-closed gap). ``-1`` means
+    # unrecorded (unknown), which consumers treat as unproven.
+    output_tensor_leaf_count: int = -1
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,7 +688,9 @@ class OpEvent:
     record_context: object | None = None
     capture_spec: object | None = None
     unattributed_tensor_args: tuple[str, ...] = ()
+    dropped_edge_tensor_args: tuple[str, ...] = ()
     input_was_parameter: bool = False
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -502,8 +735,4 @@ def __getattr__(name: str) -> object:
         If ``name`` is not a compatibility export.
     """
 
-    if name == "TraceBuildState":
-        from .trace_build_state import TraceBuildState
-
-        return TraceBuildState
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

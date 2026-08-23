@@ -13,8 +13,8 @@ import torch.nn.modules.module as torch_module
 from torch import nn
 
 import torchlens as tl
-from torchlens.backends.torch import prehook_provenance as provenance
 from torchlens._io import BlobRef
+from torchlens.backends.torch import prehook_provenance as provenance
 from torchlens.fastlog import PredicateError
 from torchlens.validation.core import validate_saved_outs
 
@@ -172,6 +172,68 @@ def test_in_place_mutation_and_replacement_record_both_effects() -> None:
     effect = _call(trace).forward_pre_hook_effects[0]
 
     assert effect.change_kinds == ("identity", "in_place_tensor")
+
+
+def test_opaque_object_tensor_mutation_downgrades_provenance_fail_closed() -> None:
+    """Opaque objects carrying tensors must downgrade provenance completeness."""
+
+    class _Box:
+        """Container with a tensor hidden behind an attribute."""
+
+        def __init__(self, x: torch.Tensor) -> None:
+            """Store the hidden tensor."""
+
+            self.x = x
+
+    class _OpaqueChild(nn.Module):
+        """Consume a tensor stored on an opaque input object."""
+
+        def forward(self, box: _Box) -> torch.Tensor:
+            """Apply relu to the hidden tensor."""
+
+            return torch.relu(box.x)
+
+    class _OpaqueRoot(nn.Module):
+        """Expose the child module through one named submodule call."""
+
+        def __init__(self) -> None:
+            """Initialize the child module."""
+
+            super().__init__()
+            self.child = _OpaqueChild()
+
+        def forward(self, box: _Box) -> torch.Tensor:
+            """Delegate to the child module."""
+
+            return self.child(box)
+
+    model = _OpaqueRoot()
+
+    def mutate(_module: nn.Module, args: tuple[Any, ...]) -> None:
+        """Mutate the tensor hidden inside the opaque object."""
+
+        box = args[0]
+        assert isinstance(box, _Box)
+        box.x.add_(1)
+
+    model.child.register_forward_pre_hook(mutate)
+    trace = tl.trace(
+        model,
+        _Box(torch.tensor([-2.0, 1.0])),
+        save_arg_values=True,
+        layers_to_save="all",
+    )
+    call = _call(trace)
+    effect = call.forward_pre_hook_effects[0]
+
+    assert effect.changed is None
+    assert effect.change_kinds == ()
+    assert effect.incomplete_reasons == ("opaque_object_untraversed",)
+    assert call.inputs_before_pre_hooks is not None
+    assert call.inputs_before_pre_hooks.capture_complete is False
+    assert call.inputs_before_pre_hooks.incomplete_reasons == ("opaque_object_untraversed",)
+    assert call.inputs_after_pre_hooks.capture_complete is False
+    assert call.inputs_after_pre_hooks.incomplete_reasons == ("opaque_object_untraversed",)
 
 
 def test_kwargs_transition_paths_and_invalid_return_are_canonical() -> None:
@@ -783,3 +845,5 @@ def test_registration_bypass_downgrades_but_keeps_after_snapshot_truthful() -> N
     assert torch.equal(call.inputs_after_pre_hooks.args[0], torch.tensor([8.0]))
     assert call.inputs_after_pre_hooks.capture_complete is False
     assert "registration_interposition_bypassed" in (call.inputs_after_pre_hooks.incomplete_reasons)
+    assert call.forward_pre_hook_effects == ()
+    assert call.had_pre_hook_input_change is None

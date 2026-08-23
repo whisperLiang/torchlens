@@ -18,9 +18,9 @@ closed to tainted.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 import torch
@@ -34,7 +34,7 @@ from torchlens._runnable_execution import (
 
 pytestmark = pytest.mark.smoke
 
-_CAPTURE = dict(intervention_ready=True)
+_CAPTURE = {"intervention_ready": True}
 
 
 @contextmanager
@@ -58,7 +58,7 @@ def _realistic_nondeterministic_fill() -> Iterator[None]:
 
 def _output_taint_reaches(bundle: Path) -> bool:
     loaded = tl.load(str(bundle))
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     taint = _nondeterministic_value_sources(descriptor)
     output_slots = [
         slot.slot_id

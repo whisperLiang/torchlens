@@ -10,6 +10,7 @@ Tests that take >5 minutes are marked @pytest.mark.slow. To skip them:
     pytest tests/test_real_world_models.py -m "not slow"
 """
 
+import os
 from os.path import join as opj
 from typing import Any
 
@@ -22,11 +23,39 @@ import torch
 # file SKIPPED rather than ERROR.
 torchvision = pytest.importorskip("torchvision")
 
-from conftest import VIS_OUTPUT_DIR  # noqa: E402
-
 import example_models  # noqa: E402
+
 from torchlens.validation import validate_forward_pass  # noqa: E402
 from torchlens.visualization import show_model_graph  # noqa: E402
+
+VIS_OUTPUT_DIR = opj(os.environ["TORCHLENS_TEST_OUTPUTS_DIR"], "visualizations")
+
+
+def _clear_render_pdf(*path_parts: str) -> None:
+    """Remove any stale PDF artifact before a render so it cannot mask a no-op."""
+    import os
+
+    path = opj(VIS_OUTPUT_DIR, *path_parts) + ".pdf"
+    if os.path.exists(path):
+        os.remove(path)
+
+
+def _assert_render_pdf(*path_parts: str) -> None:
+    """Assert a ``show_model_graph`` run wrote a fresh non-empty PDF artifact.
+
+    Cheap render-output check for tests that render but otherwise assert nothing
+    (or skip forward-pass validation). A no-op renderer leaves no file (or an
+    empty one), which this catches. ``path_parts`` are the ``vis_outpath`` parts
+    (without extension); the default ``vis_fileformat`` is ``pdf``. Pair with
+    :func:`_clear_render_pdf` before the render so a stale file cannot mask a no-op.
+    """
+    import os
+
+    path = opj(VIS_OUTPUT_DIR, *path_parts) + ".pdf"
+    assert os.path.exists(path), f"expected visualization artifact at {path}"
+    with open(path, "rb") as fh:
+        head = fh.read(4)
+    assert head == b"%PDF", f"expected {path} to be a non-empty PDF artifact"
 
 
 # =============================================================================
@@ -1538,6 +1567,7 @@ def _instantiate_transformers_model_or_skip(
         pytest.skip(f"transformers optional backend unavailable: {exc}")
 
 
+@pytest.mark.slow
 def test_mamba() -> None:
     """Mamba SSM via HuggingFace transformers (small config, no pretrained)."""
     transformers = pytest.importorskip("transformers")
@@ -1562,6 +1592,7 @@ def test_mamba() -> None:
     assert validate_forward_pass(model, [], model_kwargs)
 
 
+@pytest.mark.slow
 def test_mamba2() -> None:
     """Mamba-2 SSM via HuggingFace transformers (small config, no pretrained)."""
     transformers = pytest.importorskip("transformers")
@@ -1612,6 +1643,7 @@ def test_rwkv():
     assert validate_forward_pass(model, [], model_kwargs)
 
 
+@pytest.mark.slow
 def test_falcon_mamba() -> None:
     """Falcon-Mamba hybrid SSM via HuggingFace transformers (small config)."""
     transformers = pytest.importorskip("transformers")
@@ -1990,6 +2022,7 @@ def test_video_mc3_18():
 def test_video_mvit_v2_s():
     model = torchvision.models.video.mvit_v2_s()
     model_input = torch.randn(16, 3, 448, 896)
+    _clear_render_pdf("torchvision-video", "video_mvit_v2_s")
     show_model_graph(
         model,
         model_input,
@@ -1997,6 +2030,7 @@ def test_video_mvit_v2_s():
         vis_mode="unrolled",
         vis_outpath=opj(VIS_OUTPUT_DIR, "torchvision-video", "video_mvit_v2_s"),
     )
+    _assert_render_pdf("torchvision-video", "video_mvit_v2_s")
 
 
 @pytest.mark.slow
@@ -3273,6 +3307,7 @@ def test_longformer():
     model = transformers.LongformerModel(config).eval()
     x = torch.randint(0, 100, (1, 16))
     model_kwargs = {"input_ids": x}
+    _clear_render_pdf("efficient-transformers", "longformer")
     show_model_graph(
         model,
         [],
@@ -3281,6 +3316,7 @@ def test_longformer():
         vis_mode="unrolled",
         vis_outpath=opj(VIS_OUTPUT_DIR, "efficient-transformers", "longformer"),
     )
+    _assert_render_pdf("efficient-transformers", "longformer")
 
 
 @pytest.mark.slow
@@ -3502,8 +3538,8 @@ def test_audio_speecht5():
         num_mel_bins=20,
     )
     from transformers.models.speecht5.modeling_speecht5 import (
-        SpeechT5EncoderWithTextPrenet,
         SpeechT5DecoderWithSpeechPrenet,
+        SpeechT5EncoderWithTextPrenet,
     )
 
     encoder = SpeechT5EncoderWithTextPrenet(config)
@@ -3817,12 +3853,25 @@ def test_gptj():
 
 
 @pytest.mark.slow
-@pytest.mark.skip(
-    reason="GPTBigCode JIT-compiles attention internally, incompatible with TorchLens wrappers"
-)
 def test_gpt_bigcode():
-    """GPTBigCode (StarCoder arch): multi-query attention for code."""
+    """GPTBigCode (StarCoder arch): multi-query attention for code.
+
+    Compatibility canary: this was skipped for years as "JIT-compiles attention
+    internally, incompatible with TorchLens wrappers", but the CAPTURE
+    incompatibility has closed — the forward pass traces and replay-validates
+    cleanly. Kept executing so any return of an internal-compilation regime FAILS
+    here instead of hiding behind an unconditional skip (disputed-r2 b10/R79).
+
+    Disclosed residual: the transformers gpt_bigcode MODULE still
+    ``torch.jit.script``s a helper at import time, and TorchLens wrappers are not
+    TorchScript-scriptable, so importing it while wrappers are installed (any
+    earlier capture this session) raises. The import below therefore runs under
+    ``unwrap_torch()``; the capture itself re-wraps lazily.
+    """
     pytest.importorskip("transformers")
+    from torchlens.backends.torch.wrappers import unwrap_torch
+
+    unwrap_torch()
     from transformers import GPTBigCodeConfig, GPTBigCodeModel
 
     config = GPTBigCodeConfig(
@@ -4708,7 +4757,17 @@ def test_tag_pyg():
 
 @pytest.mark.slow
 def test_recurrent_gemma():
-    """RecurrentGemma: Griffin architecture — linear recurrence + local attention hybrid."""
+    """RecurrentGemma: Griffin architecture — linear recurrence + local attention hybrid.
+
+    ``num_hidden_layers`` must complete the Griffin block cycle. RecurrentGemma tiles
+    ``block_types == ('recurrent', 'recurrent', 'attention')``, so the config's derived
+    ``layers_block_type`` truncates: 2 layers yields ``['recurrent', 'recurrent']`` with
+    NO attention layer, and transformers' own forward then unconditionally evaluates
+    ``layers_block_type.index("attention")`` and raises
+    ``ValueError: 'attention' is not in list``. That reproduces with no TorchLens
+    involvement, and a 2-layer config also cannot cover the recurrence plus
+    local-attention hybrid this test names. Use one full cycle.
+    """
     pytest.importorskip("transformers")
     from transformers import RecurrentGemmaConfig, RecurrentGemmaModel
 
@@ -4716,7 +4775,7 @@ def test_recurrent_gemma():
         vocab_size=256,
         hidden_size=64,
         intermediate_size=128,
-        num_hidden_layers=2,
+        num_hidden_layers=3,
         num_attention_heads=2,
         num_key_value_heads=2,
         lru_width=64,
@@ -4724,6 +4783,16 @@ def test_recurrent_gemma():
     )
     model = RecurrentGemmaModel(config).eval()
     input_ids = torch.randint(0, 256, (2, 16))
+    # Validate BEFORE rendering. RecurrentGemma caches recurrent state on itself as
+    # NON-LEAF tensors (`RecurrentGemmaRecurrentBlock.conv1d_state`,
+    # `RecurrentGemmaRglru.recurrent_states`), so after any forward -- with no
+    # TorchLens involvement -- `copy.deepcopy(model)` raises "Only Tensors created
+    # explicitly by the user (graph leaves) support the deepcopy protocol", and
+    # `release_model` does not clear it. Validating an already-run instance therefore
+    # forces the deepcopy-failed fallback, which cannot prove restoration of the
+    # opaque HuggingFace `config` plain attributes and correctly returns False rather
+    # than reporting unverified success. Order the run so the proof is obtainable.
+    assert validate_forward_pass(model, [], input_kwargs={"input_ids": input_ids})
     show_model_graph(
         model,
         [],
@@ -4732,7 +4801,6 @@ def test_recurrent_gemma():
         vis_mode="unrolled",
         vis_outpath=opj(VIS_OUTPUT_DIR, "linear-recurrence", "recurrent_gemma"),
     )
-    assert validate_forward_pass(model, [], input_kwargs={"input_ids": input_ids})
 
 
 # =============================================================================

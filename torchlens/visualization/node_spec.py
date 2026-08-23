@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace as dataclass_replace
 from html import escape
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import TYPE_CHECKING, Any, cast
 
-if TYPE_CHECKING:  # pragma: no cover - typing only
+from ..utils._multipass_access import get_multipass_attr
+
+if TYPE_CHECKING:
+    from ..data_classes.grad_fn import GradFn
     from ..data_classes.layer import Layer
+    from ..data_classes.module import Module
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace
 
@@ -56,6 +61,17 @@ class NodeSpec:
         Optional node tooltip.
     image:
         Optional image path to embed in the node.
+    width:
+        Optional node width minimum in inches (size encoding channel). With
+        ``fixedsize="false"`` the box can only GROW from the label's natural
+        size, so a label can never be truncated by an encoding. Dropped by
+        the spec funnel when ``image`` is set: an image node's size is
+        pixel-derived, and a width minimum would become a live scaling
+        floor (``extra_attrs`` remains the power-valve override).
+    height:
+        Optional node height minimum in inches (see ``width``).
+    fixedsize:
+        Optional Graphviz ``fixedsize`` value emitted with the size fields.
     extra_attrs:
         Additional Graphviz node attributes.
     """
@@ -69,9 +85,12 @@ class NodeSpec:
     penwidth: float | None = None
     tooltip: str | None = None
     image: str | None = None
+    width: float | None = None
+    height: float | None = None
+    fixedsize: str | None = None
     extra_attrs: dict[str, str] = field(default_factory=dict)
 
-    def replace(self, **kwargs: Any) -> "NodeSpec":
+    def replace(self, **kwargs: Any) -> NodeSpec:
         """Return a copy of this spec with selected fields replaced.
 
         Parameters
@@ -88,7 +107,46 @@ class NodeSpec:
         return dataclass_replace(self, **kwargs)
 
 
+def _annotation_image_path_for_node(trace: Trace, node: Any) -> str | None:
+    """Return a user annotation image path for a rendered node.
+
+    One of the three record-derived image mechanisms in the closed 2.4(i)
+    image-origin predicate (``_encoding.is_record_derived_image_node``).
+    Moved here from ``_render_nodes`` (S5 territory; ratchet offload).
+
+    Returns
+    -------
+    str | None
+        Image path stored in ``annotations["user"]["image"]``, if present.
+    """
+
+    from ._render_nodes import BoundaryNode, _layer_log_for_node
+
+    if isinstance(node, BoundaryNode):
+        return None
+    candidates: list[Any] = [node]
+    try:
+        candidates.append(_layer_log_for_node(trace, node))
+    except ValueError:
+        pass
+    for candidate in candidates:
+        annotations = getattr(candidate, "annotations", None)
+        if not isinstance(annotations, dict):
+            continue
+        user_annotations = annotations.get("user")
+        if not isinstance(user_annotations, dict):
+            continue
+        image = user_annotations.get("image")
+        if isinstance(image, str) and image:
+            return image
+    return None
+
+
+# S5 contract (C4): the three node-callback aliases have ONE declaration home
+# (this module); ``_render_common`` re-exports them for internal consumers.
 NodeSpecFn = Callable[["Layer", NodeSpec], NodeSpec | None]
+BackwardNodeSpecFn = Callable[["GradFn", NodeSpec], NodeSpec | None]
+CollapsedNodeSpecFn = Callable[["Module", NodeSpec], NodeSpec | None]
 
 
 def render_lines_to_html(lines: list[str]) -> str:
@@ -170,7 +228,7 @@ def graphviz_graph_overrides(graph_overrides: dict[str, Any] | None) -> dict[str
     }
 
 
-def intervention_sites_for_log(trace: "Trace") -> list["Op"]:
+def intervention_sites_for_log(trace: Trace) -> list[Op]:
     """Resolve intervention spec targets to layer-pass records.
 
     Parameters
@@ -203,17 +261,32 @@ def intervention_sites_for_log(trace: "Trace") -> list["Op"]:
         table = resolve_sites(trace, target, max_fanout=max(1, len(trace.layer_list)))
         for site in table:
             forward_site = getattr(site, "op", site)
-            layer_label = getattr(forward_site, "layer_label", None)
-            if layer_label is not None:
-                by_label.setdefault(layer_label, cast("Op", forward_site))
+            # Key by the pass-qualified label (op.label, e.g. relu_1_1:2) so
+            # recurrent passes stay DISTINCT sites. The old aggregate layer_label
+            # collapsed :1/:2/:3 into one site, so resolving pass 2 later colored
+            # every pass. Fall back to layer_label only when no pass label exists.
+            site_label = get_multipass_attr(forward_site, "label", None, multipass=None)
+            if not isinstance(site_label, str):
+                site_label = getattr(forward_site, "layer_label", None)
+            if isinstance(site_label, str):
+                by_label.setdefault(site_label, cast("Op", forward_site))
     execution_order = {
-        layer.layer_label: index for index, layer in enumerate(getattr(trace, "layer_list", ()))
+        _site_sort_key(op): index for index, op in enumerate(getattr(trace, "layer_list", ()))
     }
-    return sorted(by_label.values(), key=lambda site: execution_order.get(site.layer_label, 0))
+    return sorted(by_label.values(), key=lambda site: execution_order.get(_site_sort_key(site), 0))
+
+
+def _site_sort_key(op: Any) -> str:
+    """Return an op's pass-qualified label for stable per-pass site ordering."""
+
+    label = get_multipass_attr(op, "label", None, multipass=None)
+    if isinstance(label, str):
+        return label
+    return str(getattr(op, "layer_label", ""))
 
 
 def intervention_site_and_cone_labels(
-    trace: "Trace",
+    trace: Trace,
     *,
     show_cone: bool,
 ) -> tuple[set[str], set[str]]:
@@ -245,7 +318,7 @@ def intervention_site_and_cone_labels(
 
 
 def make_intervention_node_spec_fn(
-    trace: "Trace",
+    trace: Trace,
     *,
     show_cone: bool,
     graph_overrides: dict[str, Any] | None,
@@ -271,8 +344,23 @@ def make_intervention_node_spec_fn(
         intervention overlay to apply.
     """
 
-    site_labels, cone_labels = intervention_site_and_cone_labels(trace, show_cone=show_cone)
-    if not site_labels and not cone_labels:
+    # Build BOTH a pass-qualified site set (for unrolled per-pass Op nodes) and an
+    # aggregate site set (for rolled multi-pass Layer nodes). cone_of_effect
+    # traverses pass-qualified, but this overlay deliberately AGGREGATES the
+    # cone to layer_label (rolled nodes are layer-level), reusing the stable
+    # public helper's layer-label sets.
+    site_ops = intervention_sites_for_log(trace)
+    site_pass_labels: set[str] = set()
+    site_agg_labels: set[str] = set()
+    for site_op in site_ops:
+        pass_label = get_multipass_attr(site_op, "label", None, multipass=None)
+        if isinstance(pass_label, str):
+            site_pass_labels.add(pass_label)
+        agg_label = getattr(site_op, "layer_label", None)
+        if isinstance(agg_label, str):
+            site_agg_labels.add(agg_label)
+    _, cone_labels = intervention_site_and_cone_labels(trace, show_cone=show_cone)
+    if not site_pass_labels and not site_agg_labels and not cone_labels:
         return user_node_spec_fn
 
     site_color = str(
@@ -292,20 +380,34 @@ def make_intervention_node_spec_fn(
         intervention_graph_override(graph_overrides, "intervention_cone_penwidth", 1.75)
     )
 
-    def intervention_node_spec_fn(layer_log: "Layer", default_spec: NodeSpec) -> NodeSpec:
+    def intervention_node_spec_fn(layer_log: Layer, default_spec: NodeSpec) -> NodeSpec:
         """Apply intervention styling before any user node-spec callback."""
 
-        matching_labels = {
-            str(getattr(layer_log, "layer_label", "")),
+        # A per-pass Op resolves a pass-qualified ``label`` -> match the
+        # pass-qualified site set so a single-pass intervention colors ONLY its own
+        # pass in unrolled mode. A rolled aggregate Layer has no single pass
+        # (``label`` would trip the multi-pass tripwire, so get_multipass_attr
+        # returns None) -> match its layer_label against the aggregate set, coloring
+        # the one rolled node when any of its passes is a site.
+        pass_label = get_multipass_attr(layer_log, "label", None, multipass=None)
+        node_agg_label = str(getattr(layer_log, "layer_label", ""))
+        if isinstance(pass_label, str):
+            is_site = pass_label in site_pass_labels
+        else:
+            is_site = node_agg_label in site_agg_labels
+
+        cone_match_labels = {
+            node_agg_label,
             str(getattr(layer_log, "layer_label_short", "")),
-            str(getattr(layer_log, "label", "")),
         }
-        matching_labels.update(str(label) for label in getattr(layer_log, "call_labels", ()) or ())
+        cone_match_labels.update(
+            str(label) for label in getattr(layer_log, "call_labels", ()) or ()
+        )
 
         spec = default_spec
-        if matching_labels & site_labels:
+        if is_site:
             spec = spec.replace(color=site_color, penwidth=site_penwidth)
-        elif matching_labels & cone_labels:
+        elif cone_match_labels & cone_labels:
             spec = spec.replace(color=cone_color, penwidth=cone_penwidth)
 
         if user_node_spec_fn is None:

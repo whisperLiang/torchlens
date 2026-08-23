@@ -38,8 +38,8 @@ import io
 import operator
 import pickle
 import sys
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 import torch

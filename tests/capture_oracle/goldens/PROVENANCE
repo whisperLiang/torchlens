@@ -1,0 +1,255 @@
+generator: tests/capture_oracle (tiny_transformer__record)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:23:30.474659+00:00
+---
+generator: tests/capture_oracle (plain_cnn__halt_trace)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:23:36.875275+00:00
+---
+generator: tests/capture_oracle (recurrent__exhaustive)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:23:43.289033+00:00
+---
+generator: tests/capture_oracle (mutating_pre_hook__two_pass_negative)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:23:50.076659+00:00
+---
+generator: tests/capture_oracle (train_batchnorm__exhaustive)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:23:56.860296+00:00
+---
+generator: tests/capture_oracle (plain_cnn__record)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:24:02.536344+00:00
+---
+generator: tests/capture_oracle (plain_cnn__predicate_live)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:24:08.871678+00:00
+---
+generator: tests/capture_oracle (conditional__predicate_live)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:24:15.147509+00:00
+---
+generator: tests/capture_oracle (plain_cnn__lookback)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:24:21.521215+00:00
+---
+generator: tests/capture_oracle (train_batchnorm__two_pass_negative)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:24:28.333548+00:00
+---
+generator: tests/capture_oracle (plain_cnn__two_pass_negative)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:24:34.707497+00:00
+---
+generator: tests/capture_oracle (tiny_transformer__exhaustive)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:24:42.372366+00:00
+---
+generator: tests/capture_oracle (plain_cnn__exhaustive)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:24:48.965374+00:00
+---
+generator: tests/capture_oracle (conditional__exhaustive)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:24:55.418838+00:00
+---
+generator: tests/capture_oracle (in_place__predicate_live)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:25:01.898756+00:00
+---
+generator: tests/capture_oracle (plain_cnn__mixed_selector)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:25:08.161254+00:00
+---
+generator: tests/capture_oracle (plain_cnn__disk_exhaustive)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:25:14.868630+00:00
+---
+generator: tests/capture_oracle (plain_cnn__backward_trace)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:25:21.451742+00:00
+---
+generator: tests/capture_oracle (failing_conditional__record)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:25:27.994836+00:00
+---
+generator: tests/capture_oracle (recurrent__two_pass_negative)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:25:35.572167+00:00
+---
+generator: tests/capture_oracle (plain_cnn__backward_record)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:25:42.383932+00:00
+---
+generator: tests/capture_oracle (recurrent__record)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:25:51.639566+00:00
+---
+generator: tests/capture_oracle (plain_cnn__disk_record)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:26:04.057930+00:00
+---
+generator: tests/capture_oracle (plain_cnn__disk_predicate)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:26:15.856905+00:00
+---
+generator: tests/capture_oracle (plain_cnn__halt_record)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:26:21.570130+00:00
+---
+generator: tests/capture_oracle (mutating_pre_hook__exhaustive)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:26:28.191646+00:00
+---
+generator: tests/capture_oracle (plain_cnn__intervene_record)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:26:33.834963+00:00
+---
+generator: tests/capture_oracle (plain_cnn__intervene_trace)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:26:40.297246+00:00
+---
+generator: tests/capture_oracle (in_place__exhaustive)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:26:46.676613+00:00
+---
+generator: tests/capture_oracle (failing_conditional__trace)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:26:52.530067+00:00
+---
+generator: tests/capture_oracle (train_batchnorm__predicate_live)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: fixwave-7 R53 reds-on-main: extend the 813f139a R57 RNG-neutrality rebaseline to the capture-oracle family; capture-entry reseeding (6c47dc32/a51e9b65) changed rng_state_after and RNG-derived digests; root cause closed in fixwave-6
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 60e5624749f1ae8ac4ba2ed6392394e985486864 (dirty)
+recorded: 2026-08-16T09:26:58.883190+00:00
+---
+generator: tests/capture_oracle (plain_cnn__intervene_trace)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: wave-3 golden repair (plain_cnn__intervene_trace): accept the intended L6 intervention fire-record edge_address field now exposed in the captured event projection
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 9fb0dac87004c577c24a6803dd6faf0c89067069 (dirty)
+recorded: 2026-08-17T10:55:51.644719+00:00

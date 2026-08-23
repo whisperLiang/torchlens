@@ -42,8 +42,7 @@ def _stable_context_fields(ctx: RecordContext) -> dict[str, object]:
         "module_type": ctx.module_type,
         "module_pass_index": ctx.module_pass_index,
         "module_stack": tuple(
-            (frame.address, frame.module_type, frame.pass_index)
-            for frame in ctx.module_stack
+            (frame.address, frame.module_type, frame.pass_index) for frame in ctx.module_stack
         ),
         "parent_labels": ctx.parent_labels,
         "input_output_address": ctx.input_output_address,
@@ -60,18 +59,11 @@ def test_preview_and_dry_run_contexts_match_stable_fields() -> None:
     model = StaticGraph()
     x = torch.randn(1, 4)
     full_trace = tl.trace(model, x)
-    dry_trace = tl.fastlog.dry_run(
-        model,
-        x,
-        keep_op=lambda ctx: True,
-        include_source_events=True,
-    )
+    dry = tl.fastlog.dry_run(model, x, save=lambda ctx: True, include_source_events=True)
     preview_nodes = _build_preview_nodes(full_trace, lambda ctx: True)
     preview_contexts = [node.ctx for node in dict.fromkeys(preview_nodes.values())]
     real_contexts = [
-        ctx
-        for ctx in dry_trace.contexts
-        if ctx.kind in {"input", "op"} and ctx.layer_type != "output"
+        ctx for ctx in dry.contexts if ctx.kind in {"input", "op"} and ctx.layer_type != "output"
     ]
 
     assert [_stable_context_fields(ctx) for ctx in preview_contexts] == [
@@ -95,7 +87,7 @@ def test_missing_record_context_field_errors_in_preview_and_dry_run() -> None:
 
     assert "exception" in dot
     with pytest.raises(RecordContextFieldError):
-        tl.fastlog.dry_run(model, x, keep_op=bad_predicate)
+        tl.fastlog.dry_run(model, x, save=bad_predicate)
 
 
 def test_preview_nodes_include_short_label_keys() -> None:

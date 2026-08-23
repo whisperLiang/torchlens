@@ -130,6 +130,39 @@ def test_partial_trace_constructible_from_failed_capture() -> None:
     assert "__truediv__" in partial.first_nonfinite()
 
 
+def test_partial_trace_recoverable_when_exception_rejects_attachment() -> None:
+    """A bounded identity registry preserves partials for frozen exceptions."""
+
+    class RejectingPartialLogError(Exception):
+        """Exception that refuses TorchLens' normal recovery attribute."""
+
+        def __setattr__(self, name: str, value: object) -> None:
+            """Reject ``partial_log`` while allowing ordinary exception state."""
+
+            if name == "partial_log":
+                raise AttributeError("partial_log is frozen")
+            super().__setattr__(name, value)
+
+    class FailingModel(nn.Module):
+        """Capture one operation before raising the frozen exception."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Raise after creating a recoverable captured prefix."""
+
+            _ = x + 1
+            raise RejectingPartialLogError("boom")
+
+    with pytest.warns(RuntimeWarning, match="rejected TorchLens partial_log attachment"):
+        with pytest.raises(RejectingPartialLogError) as exc_info:
+            tl.trace(FailingModel(), torch.ones(1))
+
+    assert not hasattr(exc_info.value, "partial_log")
+    partial = tl.partial.from_failed_capture(exc_info.value)
+    assert isinstance(partial, PartialTrace)
+    assert partial.original_exception is exc_info.value
+    assert len(partial.raw_layers) >= 1
+
+
 def test_partial_trace_attached_to_generic_forward_exception() -> None:
     """Failed non-NaN captures also attach a PartialTrace."""
 
@@ -153,3 +186,54 @@ def test_find_nan_accepts_explicit_capture_options() -> None:
 
     assert result.found is True
     assert result.scope == "first non-finite tensor"
+
+
+def test_first_nonfinite_scan_is_memoized_per_trace() -> None:
+    """A repeated non-finite question must not re-read every saved activation.
+
+    ``print(trace)``, ``_repr_html_``, and ``report.explain`` each ask this
+    question, so a scan per call meant re-running ``torch.isfinite`` over the
+    whole forward's payload on every repr. Lock the memo in: the second answer
+    costs zero element reads.
+    """
+
+    trace = tl.trace(nn.Sequential(nn.Linear(2, 2)), _input_tensor())
+    real_isfinite = torch.isfinite
+    calls = 0
+
+    def counting_isfinite(tensor: torch.Tensor) -> torch.Tensor:
+        """Count element-scanning checks issued by the non-finite scan."""
+
+        nonlocal calls
+        calls += 1
+        return real_isfinite(tensor)
+
+    torch.isfinite = counting_isfinite  # type: ignore[assignment]
+    try:
+        first = trace.first_nonfinite()
+        cold_calls = calls
+        calls = 0
+        assert trace.first_nonfinite() == first
+        assert calls == 0
+    finally:
+        torch.isfinite = real_isfinite  # type: ignore[assignment]
+    assert cold_calls > 0
+
+
+def test_first_nonfinite_rescans_after_saved_activation_changes() -> None:
+    """The memoized scan must never serve a stale clean verdict."""
+
+    trace = tl.trace(nn.Sequential(nn.Linear(2, 2)), _input_tensor())
+    assert trace.first_nonfinite().startswith("No non-finite")
+
+    with torch.no_grad():
+        trace.layer_list[-1].out.mul_(float("nan"))
+    in_place_answer = trace.first_nonfinite()
+    assert "First non-finite" in in_place_answer
+    assert "No NaN or Inf" not in tl.report.explain(trace)
+
+    replaced = trace.layer_list[0]
+    replaced.out = torch.full_like(replaced.out, float("inf"))
+    replaced_answer = trace.first_nonfinite()
+    assert "First non-finite" in replaced_answer
+    assert str(replaced.layer_label) in replaced_answer

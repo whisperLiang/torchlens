@@ -1,15 +1,14 @@
-from pathlib import Path
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
+import example_models
 import pytest
 import torch
 
 from torchlens import trace as trace_fn
 from torchlens.experimental import dagua
-
-import example_models
 
 
 def test_dagua_renderer_requires_experimental_opt_in() -> None:

@@ -8,10 +8,11 @@ portable representation.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from hashlib import sha256
-from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from .graph import SplitTraceGraph, SplitTraceNode
@@ -337,11 +338,11 @@ class SplitGraphIR:
     @classmethod
     def from_trace_graph(
         cls,
-        graph: "SplitTraceGraph",
+        graph: SplitTraceGraph,
         *,
-        plan: "SplitPlan | None" = None,
+        plan: SplitPlan | None = None,
         profile_hash: str | None = None,
-    ) -> "SplitGraphIR":
+    ) -> SplitGraphIR:
         """Normalize an existing backend capture projection into Split IR.
 
         The current capture layer already records the backend-specific handle
@@ -605,7 +606,7 @@ class SplitRequest:
 
     point: SplitPoint
     backend: str | None = None
-    model_profile: str | "SplitModelProfile" | None = None
+    model_profile: str | SplitModelProfile | None = None
     features: SplitFeatures = field(default_factory=SplitFeatures)
     validation: Literal["strict", "permissive"] = "strict"
     device_policy: Literal["runtime"] = "runtime"
@@ -702,7 +703,7 @@ class SplitModelProfile:
 ModelProfile = SplitModelProfile
 
 
-def _value_id(node: "SplitTraceNode") -> str:
+def _value_id(node: SplitTraceNode) -> str:
     """Return a stable value ID for a trace node."""
 
     return _value_id_for_node_id(node.canonical_id)
@@ -714,7 +715,7 @@ def _value_id_for_node_id(node_id: str) -> str:
     return f"value:{node_id}"
 
 
-def _value_id_for_parent(graph: "SplitTraceGraph", parent: str) -> str:
+def _value_id_for_parent(graph: SplitTraceGraph, parent: str) -> str:
     """Resolve a parent alias to a stable value ID."""
 
     node = graph.node_for_label(parent)
@@ -722,7 +723,7 @@ def _value_id_for_parent(graph: "SplitTraceGraph", parent: str) -> str:
 
 
 def _value_kind(
-    node: "SplitTraceNode",
+    node: SplitTraceNode,
 ) -> Literal["input", "output", "parameter", "buffer", "constant", "boundary", "intermediate"]:
     """Classify a trace node value."""
 
@@ -739,7 +740,7 @@ def _value_kind(
     return "intermediate"
 
 
-def _state_source_id(node: "SplitTraceNode") -> str | None:
+def _state_source_id(node: SplitTraceNode) -> str | None:
     """Build a stable state source ID without using object identity."""
 
     if not (node.is_param_source or node.is_buffer or node.param_refs):
@@ -748,14 +749,13 @@ def _state_source_id(node: "SplitTraceNode") -> str | None:
     return f"state:{sha256(path.encode('utf-8')).hexdigest()[:16]}"
 
 
-
-def _is_region_node(node: "SplitTraceNode") -> bool:
+def _is_region_node(node: SplitTraceNode) -> bool:
     """Return whether a node is represented by an opaque backend region."""
 
     return type(node.target).__name__ == "JaxRegionCapture"
 
 
-def _verification_for_node(node: "SplitTraceNode") -> SplitVerificationStatus:
+def _verification_for_node(node: SplitTraceNode) -> SplitVerificationStatus:
     """Assign a conservative verification level to a trace node."""
 
     if node.target is None and not (node.is_input or node.is_output or node.is_buffer):
@@ -766,7 +766,7 @@ def _verification_for_node(node: "SplitTraceNode") -> SplitVerificationStatus:
 
 
 def _shape_constraint_kind(
-    node: "SplitTraceNode",
+    node: SplitTraceNode,
 ) -> Literal[
     "batch_axis",
     "broadcast",
@@ -796,7 +796,6 @@ def _shape_constraint_kind(
     if "shape" in text or "size" in text:
         return "shape_producing"
     return "batch_axis"
-
 
 
 def _shape_tuple(shape: Any) -> tuple[Any, ...] | None:

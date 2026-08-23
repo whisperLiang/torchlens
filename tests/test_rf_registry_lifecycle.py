@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import importlib
-from pathlib import Path
 import subprocess
 import sys
+from collections.abc import Mapping
+from pathlib import Path
 
+import pytest
 import torch
 from torch import nn
 
@@ -99,9 +100,10 @@ def test_builtin_rule_pack_reimport_is_idempotent() -> None:
     importlib.reload(pack)
 
     assert dict(_rules._RF_RULES) == before_rules
-    assert _rules._RF_RULES_EPOCH == before_epoch
+    assert before_epoch == _rules._RF_RULES_EPOCH
 
 
+@pytest.mark.heavy
 def test_core_then_extension_rf_files_share_one_deterministic_registry() -> None:
     """Run the adversarial core-then-extension RF order in one fresh process."""
 

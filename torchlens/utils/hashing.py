@@ -35,10 +35,10 @@ across intentional schema/policy changes.
 
 import hashlib
 import json
-import re
 import random
+import re
 import string
-from typing import Any, List
+from typing import Any
 
 _BARCODE_ALPHABET = string.ascii_letters + string.digits
 
@@ -81,26 +81,39 @@ def make_random_barcode(barcode_len: int = 8) -> str:
     return "".join(_BARCODE_RNG.choices(_BARCODE_ALPHABET, k=barcode_len))
 
 
-def make_short_barcode_from_input(things_to_hash: List[Any], barcode_len: int = 16) -> str:
+def make_short_barcode_from_input(things_to_hash: list[Any], barcode_len: int = 16) -> str:
     """Produce a deterministic short hash from a list of values.
 
     Used to create content-based barcodes for parameters and buffers so
     that loop detection can identify operations that share the same weights.
-    The inputs are stringified, joined with a null-byte separator (to avoid
-    accidental collisions from concatenation), and hashed with SHA-256.  This
-    avoids Python's process-randomized ``hash()`` and the collision-prone decimal
-    truncation used by older TorchLens releases.
+    Each value is encoded as a ``[type_name, repr]`` pair inside a JSON list and
+    hashed with SHA-256.  The type tag distinguishes values whose ``str()``
+    coincides (``1`` vs ``"1"``), and the JSON list structure -- with its escaped
+    string quoting -- prevents both concatenation collisions and adversarial
+    forging of the element separator (a value containing the raw separator byte
+    can no longer masquerade as two elements, e.g. ``["a\\x00b"]`` vs
+    ``["a", "b"]``).  This avoids Python's process-randomized ``hash()`` and the
+    collision-prone decimal truncation used by older TorchLens releases.
 
     Args:
-        things_to_hash: Values to hash (must be stringifiable).
+        things_to_hash: Values to hash. Each must be ``repr``-able (the common
+            case: shape/dtype/scalar tokens; Parameters and tensor values are
+            excluded upstream).
         barcode_len: Maximum length of the returned barcode.
 
     Returns:
         A deterministic hexadecimal SHA-256 prefix of ``barcode_len`` characters.
     """
-    # Null-byte separator prevents "ab" + "c" from colliding with "a" + "bc".
-    joined = "\x00".join([str(x) for x in things_to_hash])
-    digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()
+    # Type-tagged, structurally-delimited encoding: the enclosing JSON list makes
+    # element boundaries unforgeable and the type name disambiguates values whose
+    # ``str()`` collides. ``ensure_ascii`` keeps the digest byte-stable regardless
+    # of locale/encoding.
+    payload = json.dumps(
+        [[type(x).__name__, repr(x)] for x in things_to_hash],
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     return digest[:barcode_len]
 
 
@@ -149,11 +162,12 @@ def _hashable_path_component(component: Any) -> Any:
         JSON-serializable representation.
     """
 
-    if hasattr(component, "index"):
+    component_type = type(component).__name__
+    if component_type == "TupleIndex" and hasattr(component, "index"):
         return {"type": type(component).__name__, "index": component.index}
-    if hasattr(component, "key"):
+    if component_type in {"DictKey", "HFKey"} and hasattr(component, "key"):
         return {"type": type(component).__name__, "key": repr(component.key)}
-    if hasattr(component, "name"):
+    if component_type in {"NamedField", "DataclassField"} and hasattr(component, "name"):
         return {"type": type(component).__name__, "name": component.name}
     return {"type": type(component).__name__, "value": repr(component)}
 
@@ -223,16 +237,41 @@ def compute_graph_shape_hash(trace: Any, *, include_module_address: bool = True)
         SHA-256 hex digest over the canonical graph-shape payload.
     """
 
-    order_by_label = {layer.layer_label: index for index, layer in enumerate(trace.layer_list)}
+    # ``layer.parents`` references each parent by its FINAL lookup label: the
+    # non-pass-qualified ``layer_label`` for single-pass parents but the
+    # pass-qualified ``label`` (e.g. ``linear_1_1:2``) for multi-pass/recurrent
+    # parents (see ``postprocess/labeling.py`` ``final_lookup_label``). The
+    # ordering map must be keyed by that same injective label space: keying by
+    # ``layer_label`` alone silently dropped every multi-pass parent edge (the
+    # pass-qualified reference never matched) and collapsed all passes of a
+    # recurrent layer onto one index, letting structurally different recurrent
+    # graphs hash identically and defeating ``tl.hash.assert_unchanged``.
+    order_by_label = {}
+    for index, layer in enumerate(trace.layer_list):
+        reference_label = (
+            layer.layer_label
+            if getattr(layer, "num_passes", 1) == 1
+            else getattr(layer, "label", None) or layer.layer_label
+        )
+        order_by_label[reference_label] = index
     records = []
     for index, layer in enumerate(trace.layer_list):
         address = normalize_address_for_hash(getattr(layer, "module", None))
         hash_address = address if include_module_address else None
-        parent_indices = sorted(
-            order_by_label[parent_label]
-            for parent_label in getattr(layer, "parents", ())
-            if parent_label in order_by_label
-        )
+        # Preserve parent EDGE ORDER: ``layer.parents`` is an ordered list whose
+        # position encodes operand routing. Sorting would make a noncommutative
+        # op's ``(a, b)`` and ``(b, a)`` parents hash identically, silently
+        # accepting operand-order drift. This mirrors the operand-order-sensitive
+        # refresh graph signature (commit 74898ada); the shape hash must not be
+        # blind to a distinction the refresh tripwire enforces.
+        #
+        # EVERY parent edge contributes to the hash input: an unresolvable
+        # reference maps to a position-preserving ``None`` sentinel instead of
+        # being skipped, so any future label-scheme drift changes the digest
+        # loudly rather than silently reintroducing dropped-edge false matches.
+        parent_indices = [
+            order_by_label.get(parent_label) for parent_label in getattr(layer, "parents", ())
+        ]
         records.append(
             {
                 "index": index,
@@ -271,19 +310,29 @@ def compute_raw_event_shape_hash(capture_events: Any) -> str:
         normalized parent-edge order indices, and normalized module addresses.
     """
 
-    order_by_raw_label = {
-        event.label_raw: index for index, event in enumerate(capture_events.op_events)
-    }
+    # Read through the canonical reducer view, never the raw list: the hash is
+    # a persisted change-detection key and must keep seeing AMENDED parents
+    # (register_tensor_connection) when the raw list becomes append-only (P4).
+    # Today the reducer is a no-op passthrough, so this is byte-identical.
+    folded_events = (
+        capture_events.amended_op_records()
+        if hasattr(capture_events, "amended_op_records")
+        else capture_events.op_events
+    )
+    order_by_raw_label = {event.label_raw: index for index, event in enumerate(folded_events)}
     records = []
-    for index, event in enumerate(capture_events.op_events):
+    for index, event in enumerate(folded_events):
         function = event.function
         output = event.output
         tensor = output.tensor
-        parent_indices = sorted(
+        # Preserve parent EDGE ORDER (see ``compute_graph_shape_hash``):
+        # ``event.parents`` is ordered by operand position, so sorting would
+        # discard the very order this hash claims to include.
+        parent_indices = [
             order_by_raw_label[parent.parent_label_raw]
             for parent in event.parents
             if parent.parent_label_raw in order_by_raw_label
-        )
+        ]
         module_addresses = [
             normalize_address_for_hash(address)
             for address, _call_index in getattr(event, "modules", ()) or ()

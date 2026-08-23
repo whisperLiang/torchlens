@@ -3,41 +3,22 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-import importlib
 
 import pytest
 import torch
+from support.rf_isolation import preserved_rf_registry
 from torch import nn
 
 import torchlens as tl
-from torchlens.receptive_field import ReceptiveFieldDirection, ReceptiveFieldView, _rules
-
-
-_PACK: dict[str, object] | None = None
+from torchlens.receptive_field import ReceptiveFieldDirection, ReceptiveFieldView
 
 
 @pytest.fixture(autouse=True)
 def built_in_rule_pack() -> Iterator[None]:
     """Install the built-in RF rules while preserving registry isolation."""
 
-    global _PACK
-    original = dict(_rules._RF_RULES)
-    original_epoch = _rules._RF_RULES_EPOCH
-    _rules._RF_RULES.clear()
-    if _PACK is None:
-        module = importlib.import_module("torchlens.receptive_field.rules")
-        if not _rules._RF_RULES:
-            for name in module.__all__:
-                importlib.reload(getattr(module, name))
-        _PACK = dict(_rules._RF_RULES)
-    else:
-        _rules._RF_RULES.update(_PACK)
-    try:
+    with preserved_rf_registry(install_builtin=True):
         yield
-    finally:
-        _rules._RF_RULES.clear()
-        _rules._RF_RULES.update(original)
-        _rules._RF_RULES_EPOCH = original_epoch
 
 
 def _trace() -> tuple[object, object]:
@@ -84,3 +65,35 @@ def test_projective_table_keeps_receptive_default_schema() -> None:
     assert list(receptive.columns) == list(projective.columns[: len(receptive.columns)])
     assert "projective_target" in projective.columns
     assert projective.attrs["direction"] is ReceptiveFieldDirection.PROJECTIVE
+
+
+def test_configuration_errors_are_typed() -> None:
+    """SF-07: user-facing misconfiguration raises the typed RF stratum.
+
+    ``ReceptiveFieldConfigurationError`` subclasses both ``ReceptiveFieldError``
+    and ``ValueError``, so callers branching on the historical raw errors keep
+    working while typed handling becomes possible.
+    """
+
+    from torchlens.receptive_field import (
+        ReceptiveFieldConfigurationError,
+        ReceptiveFieldError,
+        verify,
+    )
+    from torchlens.receptive_field._rules import register_rf_rule
+
+    assert issubclass(ReceptiveFieldConfigurationError, ReceptiveFieldError)
+    assert issubclass(ReceptiveFieldConfigurationError, ValueError)
+
+    trace, _ = _trace()
+
+    with pytest.raises(ReceptiveFieldConfigurationError, match="must be non-negative"):
+        verify(trace, empirical_adjoint_atol=-1.0)
+    with pytest.raises(ReceptiveFieldConfigurationError, match="level must be"):
+        trace.receptive_fields(level="bogus")
+    with pytest.raises(ReceptiveFieldConfigurationError, match="at least one function name"):
+        register_rf_rule()
+    from torchlens.receptive_field._engine_forward import solve_projective
+
+    with pytest.raises(ReceptiveFieldConfigurationError, match="at least one target operation"):
+        solve_projective(trace, ())

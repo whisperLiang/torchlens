@@ -7,9 +7,10 @@ from typing import Any
 
 import torch
 
+from ... import _state
 from ...ir.intervention import FunctionEventInput
 from ...ir.semantics import BackendSemantics
-from ...utils.collections import ensure_iterable, index_nested
+from ...utils.collections import index_nested
 from ...utils.tensor_utils import tensor_nanequal
 
 
@@ -312,13 +313,8 @@ def _iter_output_tensors(raw_output: object) -> Iterable[torch.Tensor]:
         Tensor outputs.
     """
 
-    for value in ensure_iterable(raw_output):
-        if isinstance(value, torch.Tensor):
-            yield value
-        elif isinstance(value, (tuple, list)):
-            for item in value:
-                if isinstance(item, torch.Tensor):
-                    yield item
+    for _, tensor in _iter_tensor_positions((), raw_output):
+        yield tensor
 
 
 def _tensors_alias(left: torch.Tensor, right: torch.Tensor) -> bool:
@@ -339,8 +335,24 @@ def _tensors_alias(left: torch.Tensor, right: torch.Tensor) -> bool:
 
     if id(left) == id(right):
         return True
+    # W8C internal-caller dispatch bypass: ``untyped_storage`` is a wrapped tensor
+    # method, so an unpaused read here pays the full per-op logging dispatch
+    # (barcode/autocast/container+intervention snapshots) yet emits no op. Every
+    # caller holds ``internal_scalar_read``, so the storage-bridge belt already
+    # excludes these reads; pausing only skips the op-capture dispatch. Each
+    # bypassed wrapped call still consumes its ``next_func_call_id()`` so the
+    # session id sequence stamped on real ops stays identical to the unbypassed
+    # path (``op.func_call_id`` persists into runnable descriptors).
+    logging_enabled = _state._logging_enabled
     try:
-        return left.untyped_storage().data_ptr() == right.untyped_storage().data_ptr()
+        with _state.pause_logging():
+            if logging_enabled:
+                _state.next_func_call_id()
+            left_ptr = left.untyped_storage().data_ptr()
+            if logging_enabled:
+                _state.next_func_call_id()
+            right_ptr = right.untyped_storage().data_ptr()
+        return left_ptr == right_ptr
     except RuntimeError:
         return False
 
@@ -367,12 +379,18 @@ def parent_label_has_alias_contract(
         True when ``parent_label`` appears at a contract-covered position.
     """
 
-    contract_set = set(contract_positions)
-    for position, label in parent_arg_positions["args"].items():
-        if label == parent_label and position in contract_set:
-            return True
-    for position, label in parent_arg_positions["kwargs"].items():
-        if label == parent_label and position in contract_set:
+    # Iterate the (few) contract positions, not the (possibly huge) argument
+    # map: the old full scan cost O(fan_in) per parent — O(fan_in^2) per op
+    # for variadic ops like a 4k-arg ``stack``, with an empty contract.
+    if not contract_positions:
+        return False
+    args_positions = parent_arg_positions["args"]
+    kwargs_positions = parent_arg_positions["kwargs"]
+    for position in contract_positions:
+        if (
+            args_positions.get(position) == parent_label
+            or kwargs_positions.get(position) == parent_label
+        ):
             return True
     return False
 

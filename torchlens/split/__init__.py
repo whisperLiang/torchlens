@@ -23,8 +23,13 @@ from .ir import (
     before,
     percent,
 )
-from .shape_program import DimExpr, ShapeBinding, ShapeProgram, ShapeRecipe, TensorShapeIR
-from .program import CapabilityStatus, ReplayOp, ReplayProgram, SplitCapabilityReport
+from .pipeline import (
+    analyze_split_capabilities,
+    capture_model,
+    execute_split_runtime,
+    lower_split_program,
+    normalize_to_split_ir,
+)
 from .profiles import (
     checkpoint_cache_path,
     get_model_profile,
@@ -34,14 +39,9 @@ from .profiles import (
     register_model_profile,
     resolve_model_profile,
 )
-from .pipeline import (
-    analyze_split_capabilities,
-    capture_model,
-    execute_split_runtime,
-    lower_split_program,
-    normalize_to_split_ir,
-)
+from .program import CapabilityStatus, ReplayOp, ReplayProgram, SplitCapabilityReport
 from .runtime import SplitRuntime
+from .shape_program import DimExpr, ShapeBinding, ShapeProgram, ShapeRecipe, TensorShapeIR
 
 __all__ = [
     "BoundarySchema",

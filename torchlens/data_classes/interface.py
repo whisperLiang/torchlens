@@ -18,19 +18,19 @@ For integer keys: direct index into ``layer_list`` (supports negative indexing).
 For slice keys: returns a list slice of ``layer_list``.
 """
 
-from typing import TYPE_CHECKING, Any, List, Tuple, cast
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    from .trace import Trace
     from ..capture.projections import LiveOpView
+    from .trace import Trace
 
-from ._lookup_keys import _give_user_feedback_about_lookup_key
-from .op import Op
-from .._errors import AmbiguousOpLookupError
+from .._errors import AmbiguousOpLookupError, InvalidArgumentError
 from ..capture.projections import LiveOpView
 from ..intervention.errors import SiteAmbiguityError
 from ..intervention.selectors import BaseSelector
 from ..intervention.types import FrozenTargetSpec, TargetSpec
+from ._lookup_keys import _give_user_feedback_about_lookup_key
+from .op import Op
 
 
 def _ambiguous_lookup_match_labels(self: "Trace", key: str) -> list[str]:
@@ -92,11 +92,14 @@ def _getitem_during_pass(self: "Trace", ix: Any) -> Op | LiveOpView:
     if capture_events is not None and ix in capture_events.live_index.by_raw_label:
         return LiveOpView(self, capture_events.live_index.require_event(ix))
     if (capture_events is None or not getattr(capture_events, "op_events", ())) and (
-        ix in self._raw_layer_dict
+        ix in self._raw_graph_ws.raw_layer_dict
     ):
-        return self._raw_layer_dict[ix]
-    raise ValueError(
-        f"{ix!r} is not a known raw label during this forward pass; final labels are not yet built."
+        return self._raw_graph_ws.raw_layer_dict[ix]
+    raise InvalidArgumentError(
+        f"{ix!r} is not a known raw label during this forward pass; final labels are not yet built",
+        code="op_lookup_not_found",
+        remedy="use a raw label seen this forward pass, or look up after trace() returns",
+        key=repr(ix),
     )
 
 
@@ -322,7 +325,7 @@ def _str_during_pass(self: "Trace") -> str:
     labels = (
         [event.label_raw for event in capture_events.op_events]
         if capture_events is not None
-        else self._raw_layer_labels_list
+        else self._raw_graph_ws.raw_layer_labels_list
     )
     for layer in labels:
         s += f"\n\t\t{layer}"
@@ -366,21 +369,48 @@ def _module_hierarchy_str(self: "Trace") -> str:
     return s
 
 
-def _module_hierarchy_str_recursive(self: "Trace", module_pass: str, level: int) -> str:
+def _module_hierarchy_str_recursive(
+    self: "Trace",
+    module_pass: str,
+    level: int,
+    _in_progress: set[str] | None = None,
+) -> str:
     """Recursively format child modules at the given indentation level.
 
     If any child has grandchildren (deeper nesting), each child gets its
     own line with recursive expansion.  Otherwise, all children are
     printed compactly on one line with ``_format_list_with_line_breaks``.
+
+    Bounded display walk (r-b4 R27-5): a malformed/cyclic rehydrated
+    ``call_children`` relationship renders a ``<cycle>`` marker, and nesting
+    past 200 levels renders ``<max-depth>``, instead of crashing the display
+    path with a raw ``RecursionError``.
     """
+    if _in_progress is None:
+        _in_progress = set()
+    if level > 200:
+        return f"\n\t\t{'    ' * level}<max-depth>"
+    if module_pass in _in_progress:
+        return f"\n\t\t{'    ' * level}<cycle>"
+    _in_progress.add(module_pass)
+    try:
+        return _module_hierarchy_str_children(self, module_pass, level, _in_progress)
+    finally:
+        _in_progress.discard(module_pass)
+
+
+def _module_hierarchy_str_children(
+    self: "Trace",
+    module_pass: str,
+    level: int,
+    _in_progress: set[str],
+) -> str:
+    """Format one guarded module call's children (body of the above)."""
     s = ""
     module_call_log = self.module_calls[module_pass]
     children = module_call_log.call_children
     any_grandchild_modules = any(
-        [
-            len(self.module_calls[child_call_label].call_children) > 0
-            for child_call_label in children
-        ]
+        len(self.module_calls[child_call_label].call_children) > 0 for child_call_label in children
     )
     if any_grandchild_modules or len(children) == 0:
         for submodule_pass in children:
@@ -388,7 +418,7 @@ def _module_hierarchy_str_recursive(self: "Trace", module_pass: str, level: int)
             s += f"\n\t\t{'    ' * level}{submodule}"
             if cast(Any, self.modules[submodule]).num_calls > 1:
                 s += f":{call_index}"
-            s += _module_hierarchy_str_recursive(self, submodule_pass, level + 1)
+            s += _module_hierarchy_str_recursive(self, submodule_pass, level + 1, _in_progress)
     else:
         submodule_list = []
         for submodule_pass in children:
@@ -403,7 +433,7 @@ def _module_hierarchy_str_recursive(self: "Trace", module_pass: str, level: int)
     return s
 
 
-def _format_conditional_branch_stack(conditional_branch_stack: List[Tuple[int, str]]) -> str:
+def _format_conditional_branch_stack(conditional_branch_stack: list[tuple[int, str]]) -> str:
     """Render a compact string form for a conditional branch stack.
 
     Args:

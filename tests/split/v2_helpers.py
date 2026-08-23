@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -10,7 +9,7 @@ if TYPE_CHECKING:
 
 
 def split_request(
-    boundary: str | "SplitPoint",
+    boundary: str | SplitPoint,
     *,
     backend: str | None = None,
     dynamic_batch: tuple[int, int] | None = None,
@@ -18,7 +17,7 @@ def split_request(
     boundary_cache: bool = False,
     validation: str = "strict",
     live_param_sources: bool | None = None,
-) -> "SplitRequest":
+) -> SplitRequest:
     """Construct a v2 request from the test matrix's compact boundary spelling."""
 
     from torchlens.split import SplitFeatures, SplitPoint, SplitRequest
@@ -37,7 +36,7 @@ def split_request(
     )
 
 
-def _point_from_text(boundary: str) -> "SplitPoint":
+def _point_from_text(boundary: str) -> SplitPoint:
     """Parse compact fixture syntax without exposing a production shim."""
 
     from torchlens.split import after, before, percent

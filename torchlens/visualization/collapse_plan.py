@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from .._errors import InvalidArgumentError
 from .request import RenderContext
 
 if TYPE_CHECKING:
@@ -14,6 +15,7 @@ if TYPE_CHECKING:
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace
     from .auto_collapse import ModuleRepeatFold
+    from .source_graph import SourceGraph
 
 
 @dataclass(frozen=True)
@@ -39,7 +41,7 @@ class RawOp:
         Operation represented by the rendered node.
     """
 
-    op: "Op | str"
+    op: Op | str
 
 
 @dataclass(frozen=True)
@@ -217,7 +219,9 @@ class CollapseScheduleStep:
     visible_count:
         Renderer-faithful visible-node count for ``plan``.
     collapsed_addresses:
-        Module addresses that remain collapsed at this and all later steps.
+        Hidden-unit witnesses that remain collapsed at this and all later
+        steps: module addresses for boxes, run folds, and child segments,
+        plus pass-qualified op labels for ops hidden by operation segments.
     plan:
         Renderer-faithful collapse plan for this step.
     """
@@ -252,7 +256,10 @@ class CollapseSchedule:
         Returns
         -------
         CollapseScheduleStep
-            The deterministic schedule step selected for ``t``.
+            The deterministic schedule step selected for ``t``. ``t == 0.0``
+            always selects the first, fully expanded step, matching the
+            public contract that ``0.0`` preserves the full graph even when
+            later steps share ``t == 0.0`` after rounding.
 
         Raises
         ------
@@ -261,7 +268,14 @@ class CollapseSchedule:
         """
 
         if not 0.0 <= t <= 1.0:
-            raise ValueError("collapse float level must be in [0.0, 1.0].")
+            raise InvalidArgumentError(
+                f"collapse float level must be in [0.0, 1.0]; received {t!r}",
+                code="collapse_level_invalid",
+                remedy="pass a collapse level between 0.0 and 1.0",
+                argument="t",
+            )
+        if t == 0.0:
+            return self.steps[0]
         for step in reversed(self.steps):
             if t >= step.t:
                 return step
@@ -317,9 +331,9 @@ def count(plan: CollapsePlan) -> int:
 
 
 def collapse_plan_for_trace(
-    trace: "Trace",
-    collapse_fn: Callable[["Module"], bool] | None,
-    repeat_folds: Mapping[str, "ModuleRepeatFold"] | None,
+    trace: Trace,
+    collapse_fn: Callable[[Module], bool] | None,
+    repeat_folds: Mapping[str, ModuleRepeatFold] | None,
     context: RenderContext | None = None,
 ) -> CollapsePlan:
     """Build a collapse plan through the shared node-universe entry point.
@@ -341,23 +355,57 @@ def collapse_plan_for_trace(
         Renderer-faithful structural plan.
     """
 
-    from .node_universe import build_node_universe
     from .source_graph import build_source_graph
 
     resolved_context = RenderContext() if context is None else context
-    universe = build_node_universe(
+    return collapse_plan_for_source_graph(
         build_source_graph(trace, resolved_context), collapse_fn, repeat_folds
     )
-    return collapse_plan_from_universe(universe)
 
 
-def collapse_plan_from_universe(universe: Any) -> CollapsePlan:
+def collapse_plan_for_source_graph(
+    source_graph: SourceGraph,
+    collapse_fn: Callable[[Module], bool] | None,
+    repeat_folds: Mapping[str, ModuleRepeatFold] | None,
+    node_pool: dict[PlanNode, PlanNode] | None = None,
+) -> CollapsePlan:
+    """Build a collapse plan from one normalized source graph.
+
+    Parameters
+    ----------
+    source_graph:
+        Normalized source graph shared by one or more plan projections.
+    collapse_fn:
+        Active collapse predicate.
+    repeat_folds:
+        Active repeat-fold mapping.
+    node_pool:
+        Optional schedule-local value interner for immutable plan nodes.
+
+    Returns
+    -------
+    CollapsePlan
+        Renderer-faithful structural plan.
+    """
+
+    from .node_universe import build_node_universe
+
+    universe = build_node_universe(source_graph, collapse_fn, repeat_folds)
+    return collapse_plan_from_universe(universe, node_pool=node_pool)
+
+
+def collapse_plan_from_universe(
+    universe: Any,
+    node_pool: dict[PlanNode, PlanNode] | None = None,
+) -> CollapsePlan:
     """Convert visible structural units into the stable collapse-plan AST.
 
     Parameters
     ----------
     universe:
         Presentation-free node universe.
+    node_pool:
+        Optional schedule-local value interner for immutable plan nodes.
 
     Returns
     -------
@@ -397,4 +445,6 @@ def collapse_plan_from_universe(universe: Any) -> CollapsePlan:
     for emission in emissions:
         if emission.kind == "run_fold_ellipsis" and emission.name not in consumed_ellipsis:
             nodes.append(Boundary("run_fold_ellipsis"))
+    if node_pool is not None:
+        nodes = [node_pool.setdefault(node, node) for node in nodes]
     return CollapsePlan(nodes=tuple(nodes), context=universe.source_graph.request)

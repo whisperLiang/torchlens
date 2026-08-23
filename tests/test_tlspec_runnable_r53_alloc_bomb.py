@@ -22,15 +22,17 @@ import dataclasses
 import json
 import resource
 import typing
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import pytest
 import torch
 import torch.nn as nn
 
 import torchlens as tl
+from torchlens import _runnable_state as runnable_state
 from torchlens._runnable_state import _preflight_random_init_allocation
 from torchlens.errors import RunCapabilityUnavailableError
 from torchlens.runnable import (
@@ -204,7 +206,7 @@ def test_num_positional_args_bomb_refused_at_load(tmp_path: Path) -> None:
     _tamper(bundle, lambda m: m["run"]["calls"][0].__setitem__("num_positional_args", 10**10))
     with _rlimit_cap():
         loaded = tl.load(str(bundle))
-    readiness = loaded.__dict__["_runnable_readiness"]
+    readiness = loaded._runnable.readiness
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     diags = readiness.diagnostics
     assert RunnableErrorCode.CALL_ARITY_MISMATCH in {d.code for d in diags}
@@ -220,7 +222,7 @@ def test_num_keyword_args_bomb_refused_at_load(tmp_path: Path) -> None:
     _tamper(bundle, lambda m: m["run"]["calls"][0].__setitem__("num_keyword_args", 10**10))
     with _rlimit_cap():
         loaded = tl.load(str(bundle))
-    readiness = loaded.__dict__["_runnable_readiness"]
+    readiness = loaded._runnable.readiness
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     assert RunnableErrorCode.CALL_ARITY_MISMATCH in {d.code for d in readiness.diagnostics}
 
@@ -240,7 +242,7 @@ def test_sparse_positional_root_bomb_refused_at_load(tmp_path: Path) -> None:
     _tamper(bundle, _bomb)
     with _rlimit_cap():
         loaded = tl.load(str(bundle))
-    readiness = loaded.__dict__["_runnable_readiness"]
+    readiness = loaded._runnable.readiness
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     assert RunnableErrorCode.CALL_ARITY_MISMATCH in {d.code for d in readiness.diagnostics}
 
@@ -281,7 +283,7 @@ def test_int64_overflow_shape_refused_at_load(tmp_path: Path) -> None:
     _tamper(bundle, _bomb)
     with _rlimit_cap():
         loaded = tl.load(str(bundle))
-    readiness = loaded.__dict__["_runnable_readiness"]
+    readiness = loaded._runnable.readiness
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     assert RunnableErrorCode.STATE_SHAPE_MISMATCH in {d.code for d in readiness.diagnostics}
 
@@ -300,7 +302,7 @@ def test_rank_shape_mismatch_refused_at_load(tmp_path: Path) -> None:
     _tamper(bundle, _bomb)
     with _rlimit_cap():
         loaded = tl.load(str(bundle))
-    readiness = loaded.__dict__["_runnable_readiness"]
+    readiness = loaded._runnable.readiness
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     assert RunnableErrorCode.STATE_SHAPE_MISMATCH in {d.code for d in readiness.diagnostics}
 
@@ -367,3 +369,26 @@ def test_preflight_refuses_only_truly_infeasible_totals() -> None:
         _preflight_random_init_allocation([infeasible])
     assert caught.value.fields.get("detection_stage") == "state_allocation_preflight"
     assert int(caught.value.fields["required_bytes"]) > int(caught.value.fields["available_bytes"])
+
+
+def test_host_memory_budget_is_probed_once_per_preparation_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One atomic run preparation reuses one dynamic host-memory observation."""
+
+    calls = 0
+
+    def probe() -> int:
+        """Return a changing budget so stale cross-run reuse is observable."""
+
+        nonlocal calls
+        calls += 1
+        return calls * 1024
+
+    monkeypatch.setattr(runnable_state, "_probe_host_memory_budget_bytes", probe)
+    with runnable_state._host_memory_budget_scope():
+        assert runnable_state._host_memory_budget_bytes() == 1024
+        assert runnable_state._host_memory_budget_bytes() == 1024
+    with runnable_state._host_memory_budget_scope():
+        assert runnable_state._host_memory_budget_bytes() == 2048
+    assert calls == 2

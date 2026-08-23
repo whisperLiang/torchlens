@@ -48,7 +48,7 @@ from torchlens.utils._callable_safety import (
     private_c_forward_op_module_names,
 )
 
-_CAP = dict(intervention_ready=True, capture_container_structure=True, cache=False)
+_CAP = {"intervention_ready": True, "capture_container_structure": True, "cache": False}
 _EXPECTED_MODULES = {
     "torch._C._nn",
     "torch._C._special",
@@ -118,8 +118,8 @@ class _PreexistingWorker:
     def __init__(self) -> None:
         import queue
 
-        self._jobs: "queue.Queue[Any]" = queue.Queue()
-        self._results: "queue.Queue[Any]" = queue.Queue()
+        self._jobs: queue.Queue[Any] = queue.Queue()
+        self._results: queue.Queue[Any] = queue.Queue()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 

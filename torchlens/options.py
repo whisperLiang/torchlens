@@ -3,13 +3,25 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Final, Literal, Mapping, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
 
 import torch
 
-from ._deprecations import MISSING, MissingType, warn_deprecated_alias
+from ._deprecations import (
+    MISSING,
+    MissingType,
+    TorchLensDeprecationWarning,
+    warn_deprecated_alias,
+)
+from ._errors import (
+    ArgumentConflictError,
+    ArgumentTypeError,
+    InvalidArgumentError,
+    KeywordConflictError,
+)
 from ._literals import (
     BufferVisibilityLiteral,
     CollapseLiteral,
@@ -22,6 +34,7 @@ from ._literals import (
     VisNodePlacementLiteral,
     VisRendererLiteral,
 )
+from ._save_budget import SaveBudgetOption
 from .visualization.node_spec import NodeSpec
 
 if TYPE_CHECKING:
@@ -31,6 +44,30 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 ActivationPostfunc = Callable[[torch.Tensor], torch.Tensor]
 GradientPostfunc = Callable[[torch.Tensor], torch.Tensor]
+
+
+def _warn_inert_option_field(class_name: str, field_name: str) -> None:
+    """Warn that a removed never-implemented option kwarg was supplied.
+
+    These spellings were declared as reserved "future" fields, accepted,
+    validated, and then read by nothing (grind b7 R47-1). Keeping them as
+    stored fields let callers configure behavior that does not exist, so the
+    fields are gone; the keyword survives one deprecation window as an
+    explicit no-op so setting it is at least VISIBLE instead of silent.
+    Registered in ``tests/test_deprecation_inventory.py`` under the
+    ``inert_option_fields`` family.
+    """
+
+    from ._deprecations import REMOVED_IN
+    from .utils.display import user_stacklevel
+
+    warnings.warn(
+        f"{class_name}.{field_name} never had any effect and no longer exists "
+        f"as a field; the keyword is ignored and will be removed in {REMOVED_IN}.",
+        TorchLensDeprecationWarning,
+        stacklevel=user_stacklevel(),
+    )
+
 
 _CAPTURE_FIELDS: Final[tuple[str, ...]] = (
     "layers_to_save",
@@ -74,17 +111,18 @@ _CAPTURE_FIELDS: Final[tuple[str, ...]] = (
     "payload_policy",
     "save_preview",
     "emit_nvtx",
+    "measure_python_peak_memory",
+    "save_budget",
+    "distributed_witness",
     "raise_on_nan",
-    "_module_containment_engine",
+    "track_nonfinite",
+    "structure_only",
 )
 _SAVE_FIELDS: Final[tuple[str, ...]] = (
-    "output_dir",
     "activation_transform",
     "grad_transform",
     "save_raw_activations",
     "save_raw_gradients",
-    "save_level",
-    "bundle_format",
 )
 _VISUALIZATION_FIELDS: Final[tuple[str, ...]] = (
     "view",
@@ -113,6 +151,11 @@ _VISUALIZATION_FIELDS: Final[tuple[str, ...]] = (
     "node_overlay",
     "node_label_fields",
     "show_legend",
+    "color_by",
+    "size_by",
+    "scale",
+    "stack_by",
+    "show_redundant_args",
     "font_size",
     "dpi",
     "for_paper",
@@ -125,22 +168,20 @@ _REPLAY_FIELDS: Final[tuple[str, ...]] = (
     "differentiable",
     "append",
     "chunk_size",
-    "is_appended",
-    "device_override",
 )
 _INTERVENTION_FIELDS: Final[tuple[str, ...]] = (
     "engine",
     "confirm_mutation",
     "strict",
-    "helper_validation",
-    "auto_promote",
-    "cohort_migration",
-    "error_severity_threshold",
 )
 _STREAMING_FIELDS: Final[tuple[str, ...]] = (
     "bundle_path",
     "retain_in_memory",
     "out_callback",
+    "include_custom_attributes",
+    "include_buffer_values",
+    "async_writes",
+    "max_pending_bytes",
 )
 
 _CAPTURE_FLAT_TO_GROUP: Final[dict[str, str]] = {
@@ -188,6 +229,7 @@ _CAPTURE_FLAT_TO_GROUP: Final[dict[str, str]] = {
     "payload_policy": "payload_policy",
     "save_preview": "save_preview",
     "raise_on_nan": "raise_on_nan",
+    "structure_only": "structure_only",
 }
 _SAVE_FLAT_TO_GROUP: Final[dict[str, str]] = {
     "activation_transform": "activation_transform",
@@ -270,10 +312,20 @@ class _MutateWarningSuppression:
         """Initialize the suppression flag."""
 
         self._suppress = False
-        self._prior = False
+        # Stack of states to restore on ``__exit__``; supports nested ``with``.
+        self._restore_stack: list[bool] = []
+        # Pre-call state captured by ``__call__`` so ``with suppress(on):``
+        # restores the state that existed *before* the call instead of leaking
+        # the in-block value. ``None`` means no call-form entry is pending.
+        self._pending_prior: bool | None = None
 
-    def __call__(self, on: bool = True) -> "_MutateWarningSuppression":
+    def __call__(self, on: bool = True) -> _MutateWarningSuppression:
         """Set suppression state and return this context-capable object.
+
+        Toggling immediately keeps the bare ``suppress_mutate_warnings(True)``
+        session-level form working, while snapshotting the pre-call state lets a
+        ``with suppress_mutate_warnings(on):`` restore it on exit rather than
+        leaking the in-block value.
 
         Parameters
         ----------
@@ -286,10 +338,11 @@ class _MutateWarningSuppression:
             This suppression controller.
         """
 
+        self._pending_prior = self._suppress
         self._suppress = bool(on)
         return self
 
-    def __enter__(self) -> "_MutateWarningSuppression":
+    def __enter__(self) -> _MutateWarningSuppression:
         """Temporarily suppress mutate-in-place warnings.
 
         Returns
@@ -298,7 +351,12 @@ class _MutateWarningSuppression:
             This suppression controller.
         """
 
-        self._prior = self._suppress
+        if self._pending_prior is not None:
+            prior = self._pending_prior
+            self._pending_prior = None
+        else:
+            prior = self._suppress
+        self._restore_stack.append(prior)
         self._suppress = True
         return self
 
@@ -311,7 +369,8 @@ class _MutateWarningSuppression:
             Exception triple supplied by the context manager protocol.
         """
 
-        self._suppress = self._prior
+        self._pending_prior = None
+        self._suppress = self._restore_stack.pop() if self._restore_stack else False
 
     @property
     def is_suppressed(self) -> bool:
@@ -354,6 +413,33 @@ def _resolve_option_value(
     return supplied_value
 
 
+def _deprecated_argument_conflict(
+    old_name: str,
+    replacement_name: str,
+) -> KeywordConflictError:
+    """Build a typed refusal for old and replacement arguments supplied together.
+
+    Parameters
+    ----------
+    old_name:
+        Deprecated argument supplied by the caller.
+    replacement_name:
+        Current replacement argument supplied by the caller.
+
+    Returns
+    -------
+    KeywordConflictError
+        Actionable conflict with the shared stable code.
+    """
+
+    return KeywordConflictError(
+        f"kwarg {old_name} deprecated, use {replacement_name}; do not pass both",
+        code="deprecated_argument_conflict",
+        remedy=f"remove {old_name!r} and pass only {replacement_name!r}",
+        arguments=(old_name, replacement_name),
+    )
+
+
 def _validate_node_style(node_style: VisNodeModeLiteral) -> None:
     """Validate a visualization node-style preset name.
 
@@ -369,17 +455,26 @@ def _validate_node_style(node_style: VisNodeModeLiteral) -> None:
     """
 
     if node_style not in {"default", "profiling", "vision", "attention"}:
-        raise ValueError(
-            "Visualization node_style/node_mode must be one of 'default', "
-            "'profiling', 'vision', or 'attention'."
+        raise InvalidArgumentError(
+            f"Visualization node_style={node_style!r} is not a supported preset",
+            code="visualization_node_style_invalid",
+            remedy="set node_style to 'default', 'profiling', 'vision', or 'attention'",
+            argument="node_style",
         )
     if node_style in {"vision", "attention"}:
+        # The advice used to name examples/recipes/<style>.py and a
+        # torchlens.<style> plugin. NEITHER exists (grind b4, R48-6): the
+        # recipes directory ships five notebooks and no such file, and no
+        # plugin was ever published. torchlens.experimental.node_styles is the
+        # destination that actually resolves today.
+        from .utils.display import user_stacklevel as _user_stacklevel
+
         warnings.warn(
-            f"node_style={node_style!r} is moving out of core; use the equivalent "
-            f"recipe at examples/recipes/{node_style}.py or wait for the "
-            f"torchlens.{node_style} plugin",
-            DeprecationWarning,
-            stacklevel=3,
+            f"node_style={node_style!r} is moving out of core; use "
+            f"torchlens.experimental.node_styles.{node_style}_node_mode "
+            f"(exported today) via node_spec_fn instead",
+            TorchLensDeprecationWarning,
+            stacklevel=_user_stacklevel(),
         )
 
 
@@ -403,7 +498,12 @@ def _normalize_layout(layout: VisNodePlacementLiteral) -> VisNodePlacementLitera
     """
 
     if layout not in {"auto", "dot", "rank"}:
-        raise ValueError("Visualization layout must be one of 'auto', 'dot', or 'rank'.")
+        raise InvalidArgumentError(
+            f"Visualization layout={layout!r} is not supported",
+            code="visualization_layout_invalid",
+            remedy="set layout to 'auto', 'dot', or 'rank'",
+            argument="layout",
+        )
     return layout
 
 
@@ -422,7 +522,12 @@ def _validate_intervention_mode(intervention_mode: VisInterventionModeLiteral) -
     """
 
     if intervention_mode not in {"node_mark", "as_node"}:
-        raise ValueError("vis_intervention_mode must be either 'node_mark' or 'as_node'.")
+        raise InvalidArgumentError(
+            f"Visualization intervention_mode={intervention_mode!r} is not supported",
+            code="visualization_intervention_mode_invalid",
+            remedy="set intervention_mode to 'node_mark' or 'as_node'",
+            argument="intervention_mode",
+        )
 
 
 def _validate_buffer_visibility(value: BufferVisibilityLiteral | bool) -> None:
@@ -440,13 +545,25 @@ def _validate_buffer_visibility(value: BufferVisibilityLiteral | bool) -> None:
         If ``value`` is not a supported tri-state mode.
     """
 
-    if value is True:
-        return
-    if value is False:
+    if value is True or value is False:
+        # A deprecated VALUE, not a deprecated name. The docstring has called
+        # these "legacy" since the tri-state landed, but nothing warned, so the
+        # bools were on a silent removal path (grind b4, R48-1). No caller
+        # inside torchlens passes a bool, so announcing it originates no
+        # internal self-deprecation.
+        warn_deprecated_alias(
+            f"show_buffers={value!r}",
+            "show_buffers='always'" if value else "show_buffers='never'",
+        )
         return
     if value in {"never", "meaningful", "always"}:
         return
-    raise ValueError("Buffer visibility must be 'never', 'meaningful', 'always', or a bool.")
+    raise InvalidArgumentError(
+        f"Visualization show_buffers={value!r} is not a supported visibility policy",
+        code="buffer_visibility_invalid",
+        remedy="set show_buffers to 'never', 'meaningful', 'always', True, or False",
+        argument="show_buffers",
+    )
 
 
 def _validate_collapse(value: CollapseLiteral) -> None:
@@ -466,9 +583,19 @@ def _validate_collapse(value: CollapseLiteral) -> None:
     if isinstance(value, float):
         if 0.0 <= value <= 1.0:
             return
-        raise ValueError("collapse float level must be in [0.0, 1.0].")
+        raise InvalidArgumentError(
+            f"Visualization collapse={value!r} is outside the supported float range",
+            code="collapse_level_invalid",
+            remedy="set collapse to a float from 0.0 through 1.0 inclusive",
+            argument="collapse",
+        )
     if value not in {"none", "auto", "max"}:
-        raise ValueError("collapse must be 'none', 'auto', 'max', or a float in [0.0, 1.0].")
+        raise InvalidArgumentError(
+            f"Visualization collapse={value!r} is not a supported collapse mode",
+            code="collapse_mode_invalid",
+            remedy="set collapse to 'none', 'auto', 'max', or a float in [0.0, 1.0]",
+            argument="collapse",
+        )
 
 
 def _validate_fold_repeats(value: FoldRepeatsLiteral) -> None:
@@ -486,7 +613,139 @@ def _validate_fold_repeats(value: FoldRepeatsLiteral) -> None:
     """
 
     if value not in {None, True, False}:
-        raise ValueError("fold_repeats must be None, True, or False.")
+        raise InvalidArgumentError(
+            f"Visualization fold_repeats={value!r} is not a supported policy",
+            code="fold_repeats_invalid",
+            remedy="set fold_repeats to None, True, or False",
+            argument="fold_repeats",
+        )
+
+
+# Visualization option fields that accept ONLY real bools. Strings such as
+# ``'yes'`` or ``'no'`` used to be accepted silently, and ``'no'``/``'false'``
+# truthily meant ON (R64-F3).
+_VISUALIZATION_BOOL_FIELDS = (
+    "save_only",
+    "show_cone",
+    "for_paper",
+    "return_graph",
+    "order_siblings",
+)
+
+# Tri-state (bool | None) flags: show_legend=None = AUTO (L5 channel core).
+_VISUALIZATION_TRI_STATE_BOOL_FIELDS = ("show_legend",)
+
+
+def _validate_visualization_flag_fields(values: Mapping[str, Any]) -> None:
+    """Validate the bool-only and tri-state visualization flag fields."""
+
+    for bool_field in _VISUALIZATION_BOOL_FIELDS:
+        _validate_bool_option(bool_field, values[bool_field])
+    for tri_state_field in _VISUALIZATION_TRI_STATE_BOOL_FIELDS:
+        value = values[tri_state_field]
+        if value is None or isinstance(value, bool):
+            continue
+        raise InvalidArgumentError(
+            f"{tri_state_field} must be True, False, or None (auto); received {value!r}",
+            code="visualization_bool_option_invalid",
+            remedy=f"pass {tri_state_field}=True, False, or None",
+            argument=tri_state_field,
+        )
+
+
+def _validate_bool_option(name: str, value: Any) -> None:
+    """Validate a bool-only visualization option value.
+
+    Parameters
+    ----------
+    name:
+        Public option field name for the diagnostic.
+    value:
+        Candidate option value.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is not a real ``bool``.
+    """
+
+    if not isinstance(value, bool):
+        raise InvalidArgumentError(
+            f"Visualization {name}={value!r} is not a bool",
+            code="visualization_bool_option_invalid",
+            remedy=f"set {name} to True or False",
+            argument=name,
+        )
+
+
+def _validate_capture_values(values: Mapping[str, Any]) -> None:
+    """Validate resolved capture field values.
+
+    Single source of truth for the invariants enforced on
+    :class:`CaptureOptions`, shared by ``__init__`` and ``from_values`` so the
+    flat-kwarg / ``from_values`` construction path can never accept values the
+    grouped constructor rejects (the asymmetry that let bad ``jax_control_flow``
+    and non-positive ``jax_max_control_flow_unroll`` slip through).
+
+    Parameters
+    ----------
+    values:
+        Resolved capture field values keyed by canonical field name.
+
+    Raises
+    ------
+    ValueError
+        If ``jax_control_flow`` or ``jax_max_control_flow_unroll`` holds an
+        unsupported value.
+    TypeError
+        If ``jax_max_control_flow_unroll`` is not an integer.
+    """
+
+    if values["jax_control_flow"] not in {"reject", "unroll", "region"}:
+        raise InvalidArgumentError(
+            f"Capture option jax_control_flow={values['jax_control_flow']!r} is unsupported",
+            code="jax_control_flow_invalid",
+            remedy="set jax_control_flow to 'reject', 'unroll', or 'region'",
+            argument="jax_control_flow",
+        )
+    if not isinstance(values["jax_max_control_flow_unroll"], int):
+        raise ArgumentTypeError(
+            "Capture option jax_max_control_flow_unroll is not an integer",
+            code="jax_unroll_type_invalid",
+            remedy="pass an integer greater than or equal to 1",
+            argument="jax_max_control_flow_unroll",
+            received_type=type(values["jax_max_control_flow_unroll"]).__name__,
+        )
+    if values["jax_max_control_flow_unroll"] < 1:
+        raise InvalidArgumentError(
+            "Capture option jax_max_control_flow_unroll is less than 1",
+            code="jax_unroll_range_invalid",
+            remedy="set jax_max_control_flow_unroll to an integer greater than or equal to 1",
+            argument="jax_max_control_flow_unroll",
+        )
+    if values["distributed_witness"] not in {"none", "digest", "payload"}:
+        raise InvalidArgumentError(
+            f"Capture option distributed_witness={values['distributed_witness']!r} is unsupported",
+            code="distributed_witness_invalid",
+            remedy="set distributed_witness to 'none' or 'digest'",
+            argument="distributed_witness",
+        )
+    if values["distributed_witness"] == "payload":
+        raise InvalidArgumentError(
+            "Capture option distributed_witness='payload' is reserved because payload "
+            "witness blobs are not implemented",
+            code="distributed_payload_witness_unsupported",
+            remedy="set distributed_witness to 'digest' for byte-exact witness digests",
+            argument="distributed_witness",
+        )
+    if not isinstance(values["structure_only"], bool):
+        raise ArgumentTypeError(
+            "Capture option structure_only is not a bool",
+            code="structure_only_type_invalid",
+            remedy="pass structure_only=True or structure_only=False",
+            argument="structure_only",
+            received_type=type(values["structure_only"]).__name__,
+        )
 
 
 def _set_frozen_fields(
@@ -548,11 +807,10 @@ def _merge_grouped_options(
     *,
     option: Any | None,
     option_factory: Callable[[], Any],
-    fields: tuple[str, ...],
     flat_to_group: Mapping[str, str],
     flat_values: Mapping[str, Any],
     group_name: str,
-    conflict_message: str | None,
+    conflict_message: str,
     deprecated_flat_names: set[str] | None = None,
     warn_individual_kwargs: bool = True,
 ) -> Any:
@@ -564,8 +822,6 @@ def _merge_grouped_options(
         Caller-supplied grouped options, if any.
     option_factory:
         Zero-argument constructor for defaults.
-    fields:
-        Canonical fields to preserve.
     flat_to_group:
         Mapping from flat kwarg names to canonical option field names.
     flat_values:
@@ -573,7 +829,7 @@ def _merge_grouped_options(
     group_name:
         Public grouped option parameter name.
     conflict_message:
-        Optional message for same-field grouped/flat conflicts.
+        Message for same-field grouped/flat conflicts.
     deprecated_flat_names:
         Flat names that should warn as renamed aliases. If ``None``, every flat
         name warns when supplied.
@@ -594,9 +850,13 @@ def _merge_grouped_options(
     default_option = option_factory()
     option_type = type(default_option)
     if option is not None and not isinstance(option, option_type):
-        raise TypeError(
-            f"{group_name} must be a {option_type.__name__} instance or None; "
-            f"got {type(option).__name__}."
+        raise ArgumentTypeError(
+            f"Grouped option {group_name!r} received {type(option).__name__}, not "
+            f"{option_type.__name__}",
+            code="option_group_type_invalid",
+            remedy=f"pass a {option_type.__name__} instance or None as {group_name}",
+            argument=group_name,
+            received_type=type(option).__name__,
         )
 
     if option is None:
@@ -611,9 +871,16 @@ def _merge_grouped_options(
         if flat_value is MISSING:
             continue
         if option is not None and group_field in specified_fields:
-            if conflict_message is not None:
-                raise ValueError(conflict_message)
-            raise TypeError(f"Do not pass both `{flat_name}` and `{group_name}.{group_field}`.")
+            # ValueError lineage: these five merge doors historically raised
+            # `raise ValueError(conflict_message)`. The TypeError-lineage
+            # grouped/flat door is merge_visualization_options
+            # (`option_group_keyword_conflict`), split per site history.
+            raise ArgumentConflictError(
+                conflict_message,
+                code="option_group_conflict",
+                remedy=f"pass either {group_name} or its individual keyword arguments",
+                arguments=(flat_name, f"{group_name}.{group_field}"),
+            )
         should_warn = warn_individual_kwargs
         if deprecated_flat_names is not None:
             should_warn = flat_name in deprecated_flat_names
@@ -673,7 +940,17 @@ class CaptureOptions:
     save_rng_states:
         Whether operation-level RNG states are captured.
     random_seed:
-        Fixed seed used for deterministic capture.
+        Fixed seed used for deterministic capture. PROCESS-GLOBAL side
+        effect: every capture reseeds all four global RNG engines (Python
+        ``random``, NumPy, torch CPU, and every CUDA device) with this seed
+        at entry and does NOT restore their prior states afterwards, so a
+        pipeline that seeds, captures, then samples draws different numbers
+        than the same pipeline without the capture. When ``None`` (the
+        default) the seed itself is drawn from the entropy-seeded global
+        ``random`` stream, so ``torch.manual_seed(k)`` before an unseeded
+        capture does NOT make the capture reproducible — pass ``random_seed=``
+        explicitly for that. The seed used is recorded on
+        ``trace.random_seed``.
     source_context_lines:
         Number of source-context lines to store.
     optimizer:
@@ -681,7 +958,12 @@ class CaptureOptions:
     compute_input_output_distances:
         Whether input/output graph distances are computed.
     detach_saved_activations:
-        Whether saved tensors are detached from autograd.
+        Whether saved tensors are detached from autograd. The default
+        ``False`` keeps saved activations graph-connected, which retains the
+        captured autograd graph alongside the payloads: measured ~1.48x the
+        saved-payload bytes live on a resnet18 capture, vs ~1.01x with
+        ``True``. Pass ``True`` for forward-only analysis when that
+        multiplier matters (R33).
     recurrence_detection:
         Whether repeated graph patterns are detected during postprocess.
     intervention_ready:
@@ -702,7 +984,14 @@ class CaptureOptions:
     name:
         Optional user-facing name for the returned log.
     cache:
-        Whether to use the content-hash capture cache.
+        Whether to use the content-hash capture cache. The key covers model
+        tensor content (including per-tensor device and ``requires_grad``),
+        training flags, non-persistent buffers, module tree and ``forward``
+        code, plain instance attributes (bounded digest), user-registered
+        module hooks, inputs, and the capture configuration; closure cells,
+        globals referenced by ``forward``, and the interior state of opaque
+        attribute objects remain outside the key (documented boundary).
+        ``torchlens.clear_capture_cache()`` empties the cache.
     cache_dir:
         Optional directory for content-hash cache entries.
     module_filter:
@@ -720,7 +1009,8 @@ class CaptureOptions:
     payload_policy:
         Declared payload materialization/codec policy passthrough.
     save_preview:
-        Declared preview flag for future ``save=`` semantics.
+        Non-torch preview backends' declared flag reserving extended ``save=``
+        semantics; the shipped torch ``save=`` kwarg is independent of it.
     emit_nvtx:
         Whether torch capture emits NVIDIA Tools Extension (NVTX) CUDA profiling
         ranges around each logged operation. NVTX markers are visible in NVIDIA
@@ -729,8 +1019,63 @@ class CaptureOptions:
         ``tl.trace`` capture and is preserved through ``tl.record``-style
         options, although sparse recording may only expose ranges for operations
         it actually logs.
+    measure_python_peak_memory:
+        Whether the host-side forward-pass peak recorded in
+        ``Trace.forward_peak_memory`` additionally includes a ``tracemalloc``
+        Python-allocation peak. The default is ``False``: the CPU/MPS
+        measurement is then the cheap host resident-set-size (or MPS allocator)
+        delta alone, which reads ``0`` for models too small to move that
+        coarse-grained counter. Enabling it installs CPython's allocator hook
+        for the duration of the forward pass, which is precise for small models
+        but taxes every traced operation (measured at 1.7x-2.5x total capture
+        time on torchvision CNNs and ViTs), so it is opt-in. CUDA captures
+        report the true device peak and ignore this option.
+    distributed_witness:
+        Session-time witness level for collective boundary records captured
+        under the distributed opt-in. ``"none"`` (the default) records
+        structure and correlation only; ``"digest"`` additionally stores
+        byte-exact SHA-256 digests of each contribution at issue and each
+        destination at observed completion (redundant evidence that can only
+        DEMOTE a merge verdict, never rescue one -- and a synchronization cost
+        on accelerator captures). ``"payload"`` is reserved for the merge
+        artifact story and currently refuses. Like
+        ``measure_python_peak_memory`` this is a session-time knob: it changes
+        what capture pays for, not what a trace means, and load restores the
+        default. The per-boundary ``witness.policy_resolved`` field IS
+        portable evidence of what was captured.
+    save_budget:
+        Ceiling on the bytes of activation payload a single capture may retain,
+        enforced per device. ``"auto"`` (the default)
+        allows half of each device's *available* memory measured at that device's
+        first save; a float in ``(0, 1]`` sets a different fraction; an int sets
+        an absolute per-device byte cap; ``None`` disables budgeting. Crossing the
+        budget stops capture with
+        :class:`torchlens.errors.SaveBudgetExceededError`. The primary retained copy
+        is admitted before allocation from source-tensor bytes and retained storage
+        is alias-aware. This is not a general OOM guarantee: the model forward,
+        transform-only deltas, and cross-device temporaries can allocate before they
+        are knowable. Predicate-selected disk-only saves are exempt, while exhaustive
+        ``save="all"`` plus disk streaming remains budgeted until postprocess eviction.
+        Devices whose headroom cannot be measured are left unbudgeted and
+        emit a ``UserWarning`` on their first non-empty charge; use an absolute byte
+        cap to enforce those devices.
     raise_on_nan:
         Whether capture should stop at the first NaN or Inf tensor.
+    track_nonfinite:
+        Whether torch capture records a per-op finiteness verdict
+        (DOCUMENTED-UNSTABLE), served by ``Trace.nonfinite_ops`` /
+        ``Trace.nonfinite_coverage``; covers unsaved ops, never changes
+        control flow, reads device flags in one post-forward batch. A
+        session-time knob. Doc: ``docs/reference/capture_outcomes.md``.
+    structure_only:
+        Whether this capture runs under the structure-only contract
+        (DOCUMENTED-UNSTABLE surface, pending naming-session/S2 ratification;
+        no deprecation shim owed on rename). Structure-only capture records
+        the op graph, module hierarchy, parameter geometry, and per-op
+        shape/dtype as HYPOTHESES while every value-bearing claim is refused
+        typed or gated; value-dependent branches refuse with the user's
+        source line. Torch-only; the capability contract lives in
+        ``docs/reference/structure_only_capabilities.md``.
 
     Examples
     --------
@@ -780,8 +1125,12 @@ class CaptureOptions:
     payload_policy: str | None = None
     save_preview: bool = False
     emit_nvtx: bool = False
+    measure_python_peak_memory: bool = False
+    save_budget: SaveBudgetOption = "auto"
+    distributed_witness: str = "none"
     raise_on_nan: bool = False
-    _module_containment_engine: Literal["thread_replay", "hook_stack", "both"] = "hook_stack"
+    track_nonfinite: bool = False
+    structure_only: bool = False
     _specified_fields: frozenset[str] = field(default_factory=frozenset, init=False, repr=False)
 
     def __init__(
@@ -827,11 +1176,13 @@ class CaptureOptions:
         payload_policy: str | None | MissingType = MISSING,
         save_preview: bool | MissingType = MISSING,
         emit_nvtx: bool | MissingType = MISSING,
+        measure_python_peak_memory: bool | MissingType = MISSING,
+        save_budget: SaveBudgetOption | MissingType = MISSING,
+        distributed_witness: str | MissingType = MISSING,
         raise_on_nan: bool | MissingType = MISSING,
-        _module_containment_engine: (
-            Literal["thread_replay", "hook_stack", "both"] | MissingType
-        ) = MISSING,
         *,
+        track_nonfinite: bool | MissingType = MISSING,
+        structure_only: bool | MissingType = MISSING,
         mark_layer_depths: bool | MissingType = MISSING,
         num_context_lines: int | MissingType = MISSING,
         capture_output_structure: bool | MissingType = MISSING,
@@ -840,24 +1191,25 @@ class CaptureOptions:
 
         if mark_layer_depths is not MISSING:
             if compute_input_output_distances is not MISSING:
-                raise TypeError(
-                    "kwarg mark_layer_depths deprecated, use "
-                    "compute_input_output_distances; do not pass both"
+                raise _deprecated_argument_conflict(
+                    "mark_layer_depths",
+                    "compute_input_output_distances",
                 )
             warn_deprecated_alias("mark_layer_depths", "capture.compute_input_output_distances")
             compute_input_output_distances = mark_layer_depths
         if num_context_lines is not MISSING:
             if source_context_lines is not MISSING:
-                raise TypeError(
-                    "kwarg num_context_lines deprecated, use source_context_lines; do not pass both"
+                raise _deprecated_argument_conflict(
+                    "num_context_lines",
+                    "source_context_lines",
                 )
             warn_deprecated_alias("num_context_lines", "capture.source_context_lines")
             source_context_lines = num_context_lines
         if capture_output_structure is not MISSING:
             if capture_container_structure is not MISSING:
-                raise TypeError(
-                    "kwarg capture_output_structure deprecated, use "
-                    "capture_container_structure; do not pass both"
+                raise _deprecated_argument_conflict(
+                    "capture_output_structure",
+                    "capture_container_structure",
                 )
             warn_deprecated_alias(
                 "capture_output_structure",
@@ -981,26 +1333,35 @@ class CaptureOptions:
                 "save_preview", save_preview, False, specified_fields
             ),
             "emit_nvtx": _resolve_option_value("emit_nvtx", emit_nvtx, False, specified_fields),
+            "measure_python_peak_memory": _resolve_option_value(
+                "measure_python_peak_memory",
+                measure_python_peak_memory,
+                False,
+                specified_fields,
+            ),
+            "save_budget": _resolve_option_value(
+                "save_budget",
+                save_budget,
+                "auto",
+                specified_fields,
+            ),
+            "distributed_witness": _resolve_option_value(
+                "distributed_witness",
+                distributed_witness,
+                "none",
+                specified_fields,
+            ),
             "raise_on_nan": _resolve_option_value(
                 "raise_on_nan", raise_on_nan, False, specified_fields
             ),
-            "_module_containment_engine": _resolve_option_value(
-                "_module_containment_engine",
-                _module_containment_engine,
-                "hook_stack",
-                specified_fields,
+            "track_nonfinite": _resolve_option_value(
+                "track_nonfinite", track_nonfinite, False, specified_fields
+            ),
+            "structure_only": _resolve_option_value(
+                "structure_only", structure_only, False, specified_fields
             ),
         }
-        if values["_module_containment_engine"] not in {"thread_replay", "hook_stack", "both"}:
-            raise ValueError(
-                "_module_containment_engine must be 'thread_replay', 'hook_stack', or 'both'"
-            )
-        if values["jax_control_flow"] not in {"reject", "unroll", "region"}:
-            raise ValueError("jax_control_flow must be 'reject', 'unroll', or 'region'")
-        if not isinstance(values["jax_max_control_flow_unroll"], int):
-            raise TypeError("jax_max_control_flow_unroll must be an integer")
-        if values["jax_max_control_flow_unroll"] < 1:
-            raise ValueError("jax_max_control_flow_unroll must be >= 1")
+        _validate_capture_values(values)
         _set_frozen_fields(self, _CAPTURE_FIELDS, values)
         object.__setattr__(self, "_specified_fields", frozenset(specified_fields))
 
@@ -1017,9 +1378,16 @@ class CaptureOptions:
     @classmethod
     def from_values(
         cls, values: Mapping[str, Any], specified_fields: frozenset[str]
-    ) -> "CaptureOptions":
-        """Build an instance from already-resolved field values."""
+    ) -> CaptureOptions:
+        """Build an instance from already-resolved field values.
 
+        Applies the same invariants as ``__init__`` (via
+        :func:`_validate_capture_values`) so this construction path -- used by
+        the flat-kwarg merge -- cannot accept values the grouped constructor
+        rejects, matching the sibling :meth:`VisualizationOptions.from_values`.
+        """
+
+        _validate_capture_values(values)
         instance = object.__new__(cls)
         _set_frozen_fields(instance, _CAPTURE_FIELDS, values)
         object.__setattr__(instance, "_specified_fields", specified_fields)
@@ -1032,8 +1400,6 @@ class SaveOptions:
 
     Parameters
     ----------
-    output_dir:
-        Future save target directory; currently inert during capture.
     activation_transform:
         Optional transform applied to each out before storage.
     grad_transform:
@@ -1042,10 +1408,12 @@ class SaveOptions:
         Whether raw outs remain available when transformed.
     save_raw_gradients:
         Whether raw grads remain available when transformed.
+    output_dir:
+        Deprecated no-op keyword; the field never had any effect (R47-1).
     save_level:
-        Future portable-save level; currently inert during capture.
+        Deprecated no-op keyword; the field never had any effect (R47-1).
     bundle_format:
-        Future save bundle format selector; currently inert during capture.
+        Deprecated no-op keyword; the field never had any effect (R47-1).
 
     Examples
     --------
@@ -1054,13 +1422,10 @@ class SaveOptions:
     True
     """
 
-    output_dir: str | Path | None = None
     activation_transform: ActivationPostfunc | None = None
     grad_transform: GradientPostfunc | None = None
     save_raw_activations: bool = True
     save_raw_gradients: bool = True
-    save_level: str | None = None
-    bundle_format: str | None = None
     _specified_fields: frozenset[str] = field(default_factory=frozenset, init=False, repr=False)
 
     def __init__(
@@ -1075,9 +1440,15 @@ class SaveOptions:
     ) -> None:
         """Initialize a frozen save option bundle."""
 
+        for inert_name, inert_value in (
+            ("output_dir", output_dir),
+            ("save_level", save_level),
+            ("bundle_format", bundle_format),
+        ):
+            if inert_value is not MISSING:
+                _warn_inert_option_field("SaveOptions", inert_name)
         specified_fields: set[str] = set()
         values: dict[str, Any] = {
-            "output_dir": _resolve_option_value("output_dir", output_dir, None, specified_fields),
             "activation_transform": _resolve_option_value(
                 "activation_transform", activation_transform, None, specified_fields
             ),
@@ -1089,10 +1460,6 @@ class SaveOptions:
             ),
             "save_raw_gradients": _resolve_option_value(
                 "save_raw_gradients", save_raw_gradients, True, specified_fields
-            ),
-            "save_level": _resolve_option_value("save_level", save_level, None, specified_fields),
-            "bundle_format": _resolve_option_value(
-                "bundle_format", bundle_format, None, specified_fields
             ),
         }
         _set_frozen_fields(self, _SAVE_FIELDS, values)
@@ -1111,7 +1478,7 @@ class SaveOptions:
     @classmethod
     def from_values(
         cls, values: Mapping[str, Any], specified_fields: frozenset[str]
-    ) -> "SaveOptions":
+    ) -> SaveOptions:
         """Build an instance from already-resolved field values."""
 
         instance = object.__new__(cls)
@@ -1180,7 +1547,22 @@ class VisualizationOptions:
     node_label_fields:
         Optional explicit label row fields.
     show_legend:
-        Whether to render the theme legend with the graph.
+        Tri-state legend visibility (``None`` = auto: legend only when an
+        encoding channel is active); see ``Trace.draw``.
+    color_by:
+        UNSTABLE encoding-channel value source; see ``Trace.draw``.
+    size_by:
+        UNSTABLE size-channel value source (field, ``"dims"``, or callable);
+        see ``Trace.draw``.
+    scale:
+        UNSTABLE size-channel scale transform (``"sqrt"``/``"linear"``);
+        see ``Trace.draw``.
+    stack_by:
+        UNSTABLE rank-channel annotation source (``True``/``"auto"``,
+        field, or callable); see ``Trace.draw``.
+    show_redundant_args:
+        UNSTABLE: show constructor args the checked-suppression equality
+        check proved redundant (default ``False``); see ``Trace.draw``.
     font_size:
         Optional Graphviz font size.
     dpi:
@@ -1209,12 +1591,12 @@ class VisualizationOptions:
     direction: VisDirectionLiteral = "bottomup"
     graph_overrides: dict[str, Any] | None = None
     node_style: VisNodeModeLiteral = "default"
-    node_spec_fn: Callable[["Layer", NodeSpec], NodeSpec | None] | None = None
-    collapsed_node_spec_fn: Callable[["Module", NodeSpec], NodeSpec | None] | None = None
-    collapse_fn: Callable[["Module"], bool] | None = None
+    node_spec_fn: Callable[[Layer, NodeSpec], NodeSpec | None] | None = None
+    collapsed_node_spec_fn: Callable[[Module, NodeSpec], NodeSpec | None] | None = None
+    collapse_fn: Callable[[Module], bool] | None = None
     collapse: CollapseLiteral = "none"
     fold_repeats: FoldRepeatsLiteral = None
-    skip_fn: Callable[["Layer"], bool] | None = None
+    skip_fn: Callable[[Layer], bool] | None = None
     edge_overrides: dict[str, Any] | None = None
     grad_edge_overrides: dict[str, Any] | None = None
     module_overrides: dict[str, Any] | None = None
@@ -1225,7 +1607,12 @@ class VisualizationOptions:
     show_cone: bool = True
     node_overlay: str | Mapping[str, Any] | Callable[[Any], Any] | None = None
     node_label_fields: list[str] | None = None
-    show_legend: bool = False
+    show_legend: bool | None = None
+    color_by: str | Callable[[Any], Any] | None = None
+    size_by: str | Callable[[Any], Any] | None = None
+    scale: str | None = None
+    stack_by: str | bool | Callable[[Any], Any] | None = None
+    show_redundant_args: bool = False
     font_size: int | None = None
     dpi: int | None = None
     for_paper: bool = False
@@ -1244,16 +1631,14 @@ class VisualizationOptions:
         direction: VisDirectionLiteral | MissingType = MISSING,
         graph_overrides: dict[str, Any] | None | MissingType = MISSING,
         node_style: VisNodeModeLiteral | MissingType = MISSING,
-        node_spec_fn: (
-            Callable[["Layer", NodeSpec], NodeSpec | None] | None | MissingType
-        ) = MISSING,
+        node_spec_fn: (Callable[[Layer, NodeSpec], NodeSpec | None] | None | MissingType) = MISSING,
         collapsed_node_spec_fn: (
-            Callable[["Module", NodeSpec], NodeSpec | None] | None | MissingType
+            Callable[[Module, NodeSpec], NodeSpec | None] | None | MissingType
         ) = MISSING,
-        collapse_fn: Callable[["Module"], bool] | None | MissingType = MISSING,
+        collapse_fn: Callable[[Module], bool] | None | MissingType = MISSING,
         collapse: CollapseLiteral | MissingType = MISSING,
         fold_repeats: FoldRepeatsLiteral | MissingType = MISSING,
-        skip_fn: Callable[["Layer"], bool] | None | MissingType = MISSING,
+        skip_fn: Callable[[Layer], bool] | None | MissingType = MISSING,
         edge_overrides: dict[str, Any] | None | MissingType = MISSING,
         grad_edge_overrides: dict[str, Any] | None | MissingType = MISSING,
         module_overrides: dict[str, Any] | None | MissingType = MISSING,
@@ -1264,7 +1649,12 @@ class VisualizationOptions:
         show_cone: bool | MissingType = MISSING,
         node_overlay: str | Mapping[str, Any] | Callable[[Any], Any] | None | MissingType = MISSING,
         node_label_fields: list[str] | None | MissingType = MISSING,
-        show_legend: bool | MissingType = MISSING,
+        show_legend: bool | None | MissingType = MISSING,
+        color_by: str | Callable[[Any], Any] | None | MissingType = MISSING,
+        size_by: str | Callable[[Any], Any] | None | MissingType = MISSING,
+        scale: str | None | MissingType = MISSING,
+        stack_by: str | bool | Callable[[Any], Any] | None | MissingType = MISSING,
+        show_redundant_args: bool | MissingType = MISSING,
         font_size: int | None | MissingType = MISSING,
         dpi: int | None | MissingType = MISSING,
         for_paper: bool | MissingType = MISSING,
@@ -1280,22 +1670,22 @@ class VisualizationOptions:
 
         if mode is not MISSING:
             if view is not MISSING:
-                raise TypeError("kwarg mode deprecated, use view; do not pass both")
+                raise _deprecated_argument_conflict("mode", "view")
             warn_deprecated_alias("mode", "visualization.view")
             view = mode
         if max_module_depth is not MISSING:
             if depth is not MISSING:
-                raise TypeError("kwarg max_module_depth deprecated, use depth; do not pass both")
+                raise _deprecated_argument_conflict("max_module_depth", "depth")
             warn_deprecated_alias("max_module_depth", "visualization.depth")
             depth = max_module_depth
         if layout_engine is not MISSING:
             if layout is not MISSING:
-                raise TypeError("kwarg layout_engine deprecated, use layout; do not pass both")
+                raise _deprecated_argument_conflict("layout_engine", "layout")
             warn_deprecated_alias("layout_engine", "visualization.layout")
             layout = layout_engine
         if node_mode is not MISSING:
             if node_style is not MISSING:
-                raise TypeError("kwarg node_mode deprecated, use node_style; do not pass both")
+                raise _deprecated_argument_conflict("node_mode", "node_style")
             warn_deprecated_alias("node_mode", "visualization.node_style")
             node_style = node_mode
 
@@ -1361,7 +1751,14 @@ class VisualizationOptions:
                 "node_label_fields", node_label_fields, None, specified_fields
             ),
             "show_legend": _resolve_option_value(
-                "show_legend", show_legend, False, specified_fields
+                "show_legend", show_legend, None, specified_fields
+            ),
+            "color_by": _resolve_option_value("color_by", color_by, None, specified_fields),
+            "size_by": _resolve_option_value("size_by", size_by, None, specified_fields),
+            "scale": _resolve_option_value("scale", scale, None, specified_fields),
+            "stack_by": _resolve_option_value("stack_by", stack_by, None, specified_fields),
+            "show_redundant_args": _resolve_option_value(
+                "show_redundant_args", show_redundant_args, False, specified_fields
             ),
             "font_size": _resolve_option_value("font_size", font_size, None, specified_fields),
             "dpi": _resolve_option_value("dpi", dpi, None, specified_fields),
@@ -1378,12 +1775,26 @@ class VisualizationOptions:
         _validate_intervention_mode(cast(VisInterventionModeLiteral, values["intervention_mode"]))
         _validate_collapse(cast(CollapseLiteral, values["collapse"]))
         _validate_fold_repeats(cast(FoldRepeatsLiteral, values["fold_repeats"]))
+        _validate_visualization_flag_fields(values)
         _set_frozen_fields(self, _VISUALIZATION_FIELDS, values)
         object.__setattr__(self, "_specified_fields", frozenset(specified_fields))
 
     @property
     def mode(self) -> VisModeLiteral:
-        """Deprecated alias for ``view``."""
+        """Deprecated alias for ``view``.
+
+        Notes
+        -----
+        Documented as deprecated but deliberately still SILENT on read, unlike
+        its three sibling aliases below (grind b4, R48-1). ``user_funcs.py``
+        reads ``visualization.mode`` internally when validating the MLX
+        visualization mode; warning here would make TorchLens deprecate itself
+        on that path, which is the very defect R48-3 is about. The read site is
+        outside this lane's territory, so this property stays silent and is
+        recorded in the silent-deprecation ledger
+        (``tests/test_deprecation_inventory.py``) rather than being quietly
+        forgotten.
+        """
 
         return self.view
 
@@ -1391,18 +1802,21 @@ class VisualizationOptions:
     def max_module_depth(self) -> int:
         """Deprecated alias for ``depth``."""
 
+        warn_deprecated_alias("visualization.max_module_depth", "visualization.depth")
         return self.depth
 
     @property
     def layout_engine(self) -> VisNodePlacementLiteral:
         """Deprecated alias for ``layout``."""
 
+        warn_deprecated_alias("visualization.layout_engine", "visualization.layout")
         return self.layout
 
     @property
     def node_mode(self) -> VisNodeModeLiteral:
         """Deprecated alias for ``node_style``."""
 
+        warn_deprecated_alias("visualization.node_mode", "visualization.node_style")
         return self.node_style
 
     def as_dict(self) -> dict[str, Any]:
@@ -1420,7 +1834,7 @@ class VisualizationOptions:
         cls,
         values: Mapping[str, Any],
         specified_fields: frozenset[str],
-    ) -> "VisualizationOptions":
+    ) -> VisualizationOptions:
         """Build an instance from already-resolved field values."""
 
         instance = object.__new__(cls)
@@ -1431,6 +1845,7 @@ class VisualizationOptions:
         _validate_buffer_visibility(values["show_buffers"])
         _validate_collapse(cast(CollapseLiteral, values["collapse"]))
         _validate_fold_repeats(cast(FoldRepeatsLiteral, values["fold_repeats"]))
+        _validate_visualization_flag_fields(values)
         _set_frozen_fields(instance, _VISUALIZATION_FIELDS, values)
         object.__setattr__(instance, "_specified_fields", specified_fields)
         return instance
@@ -1455,9 +1870,9 @@ class ReplayOptions:
         Forward chunk size for rerun chunking sugar. Splits positional input
         along dimension 0 and appends compatible chunks.
     is_appended:
-        Future append-state override; currently inert.
+        Deprecated no-op keyword; the field never had any effect (R47-1).
     device_override:
-        Future replay device override; currently inert.
+        Deprecated no-op keyword; the field never had any effect (R47-1).
 
     Examples
     --------
@@ -1471,8 +1886,6 @@ class ReplayOptions:
     differentiable: bool = False
     append: bool = False
     chunk_size: int | None = None
-    is_appended: bool | None = None
-    device_override: str | torch.device | None = None
     _specified_fields: frozenset[str] = field(default_factory=frozenset, init=False, repr=False)
 
     def __init__(
@@ -1487,6 +1900,12 @@ class ReplayOptions:
     ) -> None:
         """Initialize a frozen replay option bundle."""
 
+        for inert_name, inert_value in (
+            ("is_appended", is_appended),
+            ("device_override", device_override),
+        ):
+            if inert_value is not MISSING:
+                _warn_inert_option_field("ReplayOptions", inert_name)
         specified_fields: set[str] = set()
         values: dict[str, Any] = {
             "strict": _resolve_option_value("strict", strict, False, specified_fields),
@@ -1496,12 +1915,6 @@ class ReplayOptions:
             ),
             "append": _resolve_option_value("append", append, False, specified_fields),
             "chunk_size": _resolve_option_value("chunk_size", chunk_size, None, specified_fields),
-            "is_appended": _resolve_option_value(
-                "is_appended", is_appended, None, specified_fields
-            ),
-            "device_override": _resolve_option_value(
-                "device_override", device_override, None, specified_fields
-            ),
         }
         _set_frozen_fields(self, _REPLAY_FIELDS, values)
         object.__setattr__(self, "_specified_fields", frozenset(specified_fields))
@@ -1519,7 +1932,7 @@ class ReplayOptions:
     @classmethod
     def from_values(
         cls, values: Mapping[str, Any], specified_fields: frozenset[str]
-    ) -> "ReplayOptions":
+    ) -> ReplayOptions:
         """Build an instance from already-resolved field values."""
 
         instance = object.__new__(cls)
@@ -1541,13 +1954,13 @@ class InterventionOptions:
     strict:
         Whether selector and propagation checks raise instead of warning.
     helper_validation:
-        Future helper-validation mode; currently inert.
+        Deprecated no-op keyword; the field never had any effect (R47-1).
     auto_promote:
-        Future capture auto-promotion toggle; currently inert.
+        Deprecated no-op keyword; the field never had any effect (R47-1).
     cohort_migration:
-        Future cohort migration toggle; currently inert.
+        Deprecated no-op keyword; the field never had any effect (R47-1).
     error_severity_threshold:
-        Future severity threshold for intervention errors; currently inert.
+        Deprecated no-op keyword; the field never had any effect (R47-1).
 
     Examples
     --------
@@ -1559,10 +1972,6 @@ class InterventionOptions:
     engine: str = "auto"
     confirm_mutation: bool = False
     strict: bool = False
-    helper_validation: str = "default"
-    auto_promote: bool = False
-    cohort_migration: bool = True
-    error_severity_threshold: str = "recoverable"
     _specified_fields: frozenset[str] = field(default_factory=frozenset, init=False, repr=False)
 
     def __init__(
@@ -1577,6 +1986,14 @@ class InterventionOptions:
     ) -> None:
         """Initialize a frozen intervention option bundle."""
 
+        for inert_name, inert_value in (
+            ("helper_validation", helper_validation),
+            ("auto_promote", auto_promote),
+            ("cohort_migration", cohort_migration),
+            ("error_severity_threshold", error_severity_threshold),
+        ):
+            if inert_value is not MISSING:
+                _warn_inert_option_field("InterventionOptions", inert_name)
         specified_fields: set[str] = set()
         values: dict[str, Any] = {
             "engine": _resolve_option_value("engine", engine, "auto", specified_fields),
@@ -1584,21 +2001,6 @@ class InterventionOptions:
                 "confirm_mutation", confirm_mutation, False, specified_fields
             ),
             "strict": _resolve_option_value("strict", strict, False, specified_fields),
-            "helper_validation": _resolve_option_value(
-                "helper_validation", helper_validation, "default", specified_fields
-            ),
-            "auto_promote": _resolve_option_value(
-                "auto_promote", auto_promote, False, specified_fields
-            ),
-            "cohort_migration": _resolve_option_value(
-                "cohort_migration", cohort_migration, True, specified_fields
-            ),
-            "error_severity_threshold": _resolve_option_value(
-                "error_severity_threshold",
-                error_severity_threshold,
-                "recoverable",
-                specified_fields,
-            ),
         }
         _set_frozen_fields(self, _INTERVENTION_FIELDS, values)
         object.__setattr__(self, "_specified_fields", frozenset(specified_fields))
@@ -1618,7 +2020,7 @@ class InterventionOptions:
         cls,
         values: Mapping[str, Any],
         specified_fields: frozenset[str],
-    ) -> "InterventionOptions":
+    ) -> InterventionOptions:
         """Build an instance from already-resolved field values."""
 
         instance = object.__new__(cls)
@@ -1639,6 +2041,33 @@ class StreamingOptions:
         Whether streamed outs remain in memory.
     out_callback:
         Callback invoked with ``(label, tensor)`` for each saved out.
+    include_custom_attributes:
+        Whether harvested module attributes (``Module.custom_attributes``)
+        are persisted verbatim in the streamed bundle. The streamed-bundle
+        counterpart of ``tl.save(..., include_custom_attributes=)`` (R62:
+        the streaming path had no opt-out and reopened the token-leak class
+        the save-path fix closed).
+    include_buffer_values:
+        Whether captured pre-forward buffer values
+        (``Trace._buffer_initial_values``) are persisted in the streamed
+        bundle. The streamed-bundle counterpart of
+        ``tl.save(..., include_buffer_values=)`` (R62 buffer extension).
+    async_writes:
+        Whether ``trace(..., storage=...)`` blob writes overlap forward
+        capture through a bounded single-worker pipeline instead of pausing
+        capture for each write (DOCUMENTED-UNSTABLE spelling, naming deferred
+        to the UI sprint). Tri-state: ``None`` (default) means the consumer
+        default — async for ``trace`` captures, synchronous for
+        ``tl.record`` streaming; ``False`` forces synchronous writes;
+        ``True`` requires the async pipeline and refuses typed on consumers
+        that cannot honor it (``tl.record``). Ordering, backpressure,
+        failure latching, and the finalize drain barrier are documented on
+        ``BundleStreamWriter``.
+    max_pending_bytes:
+        Pending snapshot byte budget for the async pipeline (``None`` uses
+        the 256 MiB default). Once pending writes hold this many bytes,
+        capture blocks until the disk catches up, so a slow disk slows
+        capture instead of accumulating unbounded RAM.
 
     Examples
     --------
@@ -1650,6 +2079,10 @@ class StreamingOptions:
     bundle_path: str | Path | None = None
     retain_in_memory: bool = True
     out_callback: Callable[[str, torch.Tensor], None] | None = None
+    include_custom_attributes: bool = True
+    include_buffer_values: bool = True
+    async_writes: bool | None = None
+    max_pending_bytes: int | None = None
     _specified_fields: frozenset[str] = field(default_factory=frozenset, init=False, repr=False)
 
     def __init__(
@@ -1658,6 +2091,10 @@ class StreamingOptions:
         retain_in_memory: bool | MissingType = MISSING,
         out_callback: Callable[[str, torch.Tensor], None] | None | MissingType = MISSING,
         *,
+        include_custom_attributes: bool | MissingType = MISSING,
+        include_buffer_values: bool | MissingType = MISSING,
+        async_writes: bool | None | MissingType = MISSING,
+        max_pending_bytes: int | None | MissingType = MISSING,
         save_outs_to: str | Path | None | MissingType = MISSING,
         keep_outs_in_memory: bool | MissingType = MISSING,
         out_sink: Callable[[str, torch.Tensor], None] | None | MissingType = MISSING,
@@ -1666,19 +2103,20 @@ class StreamingOptions:
 
         if save_outs_to is not MISSING:
             if bundle_path is not MISSING:
-                raise TypeError("kwarg save_outs_to deprecated, use bundle_path; do not pass both")
+                raise _deprecated_argument_conflict("save_outs_to", "bundle_path")
             warn_deprecated_alias("save_outs_to", "streaming.bundle_path")
             bundle_path = save_outs_to
         if keep_outs_in_memory is not MISSING:
             if retain_in_memory is not MISSING:
-                raise TypeError(
-                    "kwarg keep_outs_in_memory deprecated, use retain_in_memory; do not pass both"
+                raise _deprecated_argument_conflict(
+                    "keep_outs_in_memory",
+                    "retain_in_memory",
                 )
             warn_deprecated_alias("keep_outs_in_memory", "streaming.retain_in_memory")
             retain_in_memory = keep_outs_in_memory
         if out_sink is not MISSING:
             if out_callback is not MISSING:
-                raise TypeError("kwarg out_sink deprecated, use out_callback; do not pass both")
+                raise _deprecated_argument_conflict("out_sink", "out_callback")
             warn_deprecated_alias("out_sink", "streaming.out_callback")
             out_callback = out_sink
 
@@ -1692,6 +2130,18 @@ class StreamingOptions:
             ),
             "out_callback": _resolve_option_value(
                 "out_callback", out_callback, None, specified_fields
+            ),
+            "include_custom_attributes": _resolve_option_value(
+                "include_custom_attributes", include_custom_attributes, True, specified_fields
+            ),
+            "include_buffer_values": _resolve_option_value(
+                "include_buffer_values", include_buffer_values, True, specified_fields
+            ),
+            "async_writes": _resolve_option_value(
+                "async_writes", async_writes, None, specified_fields
+            ),
+            "max_pending_bytes": _resolve_option_value(
+                "max_pending_bytes", max_pending_bytes, None, specified_fields
             ),
         }
         _set_frozen_fields(self, _STREAMING_FIELDS, values)
@@ -1712,7 +2162,7 @@ class StreamingOptions:
         cls,
         values: Mapping[str, Any],
         specified_fields: frozenset[str],
-    ) -> "StreamingOptions":
+    ) -> StreamingOptions:
         """Build an instance from already-resolved field values."""
 
         instance = object.__new__(cls)
@@ -1721,7 +2171,15 @@ class StreamingOptions:
         return instance
 
 
-def to_disk(path: str | Path, *, retain_in_memory: bool = False) -> StreamingOptions:
+def to_disk(
+    path: str | Path,
+    *,
+    retain_in_memory: bool = False,
+    include_custom_attributes: bool = True,
+    include_buffer_values: bool = True,
+    async_writes: bool | None = None,
+    max_pending_bytes: int | None = None,
+) -> StreamingOptions:
     """Return storage options that stream selected payloads to a bundle.
 
     Parameters
@@ -1730,6 +2188,28 @@ def to_disk(path: str | Path, *, retain_in_memory: bool = False) -> StreamingOpt
         Destination bundle directory. The path must not already exist.
     retain_in_memory:
         Whether streamed payloads should also remain as RAM copies.
+    include_custom_attributes:
+        Whether harvested module attributes are persisted verbatim in the
+        streamed bundle (the ``tl.save`` opt-out, mirrored for streaming).
+    include_buffer_values:
+        Whether captured pre-forward buffer values are persisted in the
+        streamed bundle (the ``tl.save`` opt-out, mirrored for streaming).
+    async_writes:
+        Whether ``trace(..., storage=...)`` blob writes overlap capture on a
+        bounded single-worker pipeline instead of pausing the forward for
+        each write (DOCUMENTED-UNSTABLE spelling, naming deferred to the UI
+        sprint). Tri-state: ``None`` (default) means async for ``trace``
+        captures and synchronous for ``tl.record`` streaming; ``False``
+        forces synchronous writes; ``True`` requires the async pipeline and
+        refuses typed where it cannot be honored (``tl.record``). Writes
+        land in submission order, a failed write raises
+        ``TorchLensIOError`` and marks the bundle PARTIAL, and finalization
+        waits for every pending write before the bundle publishes.
+    max_pending_bytes:
+        Pending snapshot byte budget for the async pipeline (``None`` uses
+        the 256 MiB default). Once pending writes hold this many bytes,
+        capture blocks until the disk catches up, bounding the RAM the
+        deferred writes may occupy.
 
     Returns
     -------
@@ -1738,7 +2218,14 @@ def to_disk(path: str | Path, *, retain_in_memory: bool = False) -> StreamingOpt
         ``record(..., streaming=...)``.
     """
 
-    return StreamingOptions(bundle_path=path, retain_in_memory=retain_in_memory)
+    return StreamingOptions(
+        bundle_path=path,
+        retain_in_memory=retain_in_memory,
+        include_custom_attributes=include_custom_attributes,
+        include_buffer_values=include_buffer_values,
+        async_writes=async_writes,
+        max_pending_bytes=max_pending_bytes,
+    )
 
 
 def merge_capture_options(
@@ -1757,14 +2244,13 @@ def merge_capture_options(
             flat_values.get(old_name, MISSING) is not MISSING
             and flat_values.get(new_name, MISSING) is not MISSING
         ):
-            raise TypeError(f"kwarg {old_name} deprecated, use {new_name}; do not pass both")
+            raise _deprecated_argument_conflict(old_name, new_name)
 
     return cast(
         CaptureOptions,
         _merge_grouped_options(
             option=capture,
             option_factory=CaptureOptions,
-            fields=_CAPTURE_FIELDS,
             flat_to_group=_CAPTURE_FLAT_TO_GROUP,
             flat_values=flat_values,
             group_name="capture",
@@ -1783,7 +2269,6 @@ def merge_save_options(*, save: SaveOptions | None, **flat_values: Any) -> SaveO
         _merge_grouped_options(
             option=save,
             option_factory=SaveOptions,
-            fields=_SAVE_FIELDS,
             flat_to_group=_SAVE_FLAT_TO_GROUP,
             flat_values=flat_values,
             group_name="save",
@@ -1867,7 +2352,12 @@ def merge_visualization_options(
         if flat_value is MISSING:
             continue
         if visualization is not None and group_name in specified_fields:
-            raise TypeError(f"Do not pass both `{flat_name}` and `visualization.{group_name}`.")
+            raise KeywordConflictError(
+                f"Do not pass both `{flat_name}` and `visualization.{group_name}`",
+                code="option_group_keyword_conflict",
+                remedy=f"remove either {flat_name!r} or {f'visualization.{group_name}'!r}",
+                arguments=(flat_name, f"visualization.{group_name}"),
+            )
         if flat_name in _VISUALIZATION_DEPRECATED_FLAT:
             warn_deprecated_alias(flat_name, f"visualization.{group_name}")
         values[group_name] = flat_value
@@ -1883,7 +2373,6 @@ def merge_replay_options(*, replay: ReplayOptions | None, **flat_values: Any) ->
         _merge_grouped_options(
             option=replay,
             option_factory=ReplayOptions,
-            fields=_REPLAY_FIELDS,
             flat_to_group=_REPLAY_FLAT_TO_GROUP,
             flat_values=flat_values,
             group_name="replay",
@@ -1906,7 +2395,6 @@ def merge_intervention_options(
         _merge_grouped_options(
             option=intervention,
             option_factory=InterventionOptions,
-            fields=_INTERVENTION_FIELDS,
             flat_to_group=_INTERVENTION_FLAT_TO_GROUP,
             flat_values=flat_values,
             group_name="intervention",
@@ -1930,7 +2418,6 @@ def merge_streaming_options(
         _merge_grouped_options(
             option=streaming,
             option_factory=StreamingOptions,
-            fields=_STREAMING_FIELDS,
             flat_to_group=_STREAMING_FLAT_TO_GROUP,
             flat_values=flat_values,
             group_name="streaming",
@@ -1986,6 +2473,11 @@ def visualization_to_render_kwargs(visualization: VisualizationOptions) -> dict[
         "node_overlay": visualization.node_overlay,
         "node_label_fields": visualization.node_label_fields,
         "show_legend": visualization.show_legend,
+        "color_by": visualization.color_by,
+        "size_by": visualization.size_by,
+        "scale": visualization.scale,
+        "stack_by": visualization.stack_by,
+        "show_redundant_args": visualization.show_redundant_args,
         "font_size": visualization.font_size,
         "dpi": visualization.dpi,
         "for_paper": visualization.for_paper,
@@ -2004,8 +2496,91 @@ def visualization_to_render_kwargs(visualization: VisualizationOptions) -> dict[
     return kwargs
 
 
+@dataclass(frozen=True)
+class EpisodeSpec:
+    """Episode declaration for ``tl.trace(..., episode=EpisodeSpec(...))``.
+
+    Declaring an episode makes ONE wrapped session capture the episode
+    product (``capture_kind=episode``): the episode root's ``forward`` steps
+    ``stepped_module`` N times, and the per-step status ledger lands ON the
+    product at ``trace.annotations["episode"]``.
+
+    Every spelling here is DOCUMENTED-UNSTABLE pending the rolling naming
+    session (no deprecation shim owed); semantics are pinned by the ratified
+    S2/S6/S7 contracts.
+
+    DIAGNOSTIC-TIER COST WARNING: the wrapped episode tier is the
+    verification oracle / deep-dive product for TENS of steps, not hundreds.
+    Measured on gpt2-124M (CPU): N=20 costs 79 s / 146 MB artifact / 1.9 GB
+    peak RSS; N=100 costs 657 s (323x native) / 947 MB / 5.4 GB. Cost is
+    SUPERLINEAR in step count. The guarded-fast tier remains the default
+    engine for episode-scale work.
+
+    Parameters
+    ----------
+    stepped_module:
+        The stepped model: the ``nn.Module`` whose successive top-level calls
+        define step boundaries (call 1 is the prefill, ledger row 0). Must be
+        a submodule of the traced episode root; refused typed
+        (``episode_declaration_invalid``) otherwise. Step tallying is FLAT:
+        each top-level call of this module is one step regardless of any
+        loop nesting inside the episode root's ``forward``.
+    n_steps:
+        Optional declared step count, recorded on the ledger header and
+        validated against the observed call count on COMPLETE captures.
+    token_axis:
+        Axis of the episode root's output tensor along which per-step
+        emitted tokens lie (row ``k``'s token is ``output[..., k]`` along
+        this axis). Value-mode episodes read the ledger token column from
+        the product's own retained output payload.
+    forced_tokens:
+        Optional teacher-forced feed declaration: the token sequence the
+        driver feeds instead of model emissions. Declaring it stamps
+        ``token_feed="forced"`` and ``fidelity_basis="forced"`` on the
+        ledger header — an explicitly NON-VERIFYING disclosed mode; token
+        fidelity obligations (E-A3) never verify a forced episode.
+    state:
+        Declared episode-carried state items beyond the built-in scope
+        (token prefix, KV cache, RNG streams). EVERY declared item is
+        preflighted at DECLARATION time, unconditionally: an item without
+        snapshot/restore support refuses typed
+        (``episode_state_unsnapshotable``) before execution (E-A4).
+    rng:
+        Seeding discipline. Only ``"managed"`` ships: the capture's
+        effective ``random_seed`` is drawn-or-passed as today and recorded
+        as the ledger header's ``entry_seed``.
+    escalated_from:
+        Producer digest of the cheap-tier product this capture escalates
+        (present iff escalation; travels with ``reason`` — E-A2). Build the
+        whole escalation declaration with
+        ``torchlens.capture._episode_ledger.escalation_spec(producer, ...)``.
+    reason:
+        Escalation reason, closed vocabulary
+        ``{"step_failed", "divergence", "requested"}``.
+    expected_tokens:
+        The cheap-tier product's per-step token column (one tuple per step),
+        carried so the escalated capture can discharge the E-A3 fidelity
+        obligation at write time: prefix-equal columns record
+        ``fidelity_basis="tokens"``; a mismatch records ``"diverged"`` — the
+        escalated product is still a valid capture of what it ran, it just
+        is not an escalation of the original episode, and says so. Never a
+        settlement input.
+    """
+
+    stepped_module: Any
+    n_steps: int | None = None
+    token_axis: int = -1
+    forced_tokens: tuple[int, ...] | None = None
+    state: tuple[Any, ...] = ()
+    rng: Literal["managed"] = "managed"
+    escalated_from: str | None = None
+    reason: str | None = None
+    expected_tokens: tuple[tuple[int, ...], ...] | None = None
+
+
 __all__ = [
     "CaptureOptions",
+    "EpisodeSpec",
     "InterventionOptions",
     "ReplayOptions",
     "SaveOptions",

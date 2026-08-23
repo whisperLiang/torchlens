@@ -232,7 +232,8 @@ def test_tensor_passthrough() -> None:
 def test_numpy_array_to_tensor() -> None:
     """NumPy arrays are converted with dtype and values preserved."""
 
-    np = pytest.importorskip("numpy")
+    import numpy as np
+
     array = np.array([[1, 2], [3, 4]], dtype=np.int64)
     result = _coerce_input(object(), array)
     assert isinstance(result, torch.Tensor)
@@ -270,7 +271,8 @@ def test_hf_text_batch_tokenizer_input_ids() -> None:
 def test_pil_image_processor() -> None:
     """PIL image input uses an attached image processor."""
 
-    pil_image = pytest.importorskip("PIL.Image")
+    from PIL import Image as pil_image
+
     image = pil_image.new("RGB", (8, 8))
     model = ImageModel()
     result = _coerce_input(model, image)
@@ -281,7 +283,8 @@ def test_pil_image_processor() -> None:
 def test_pil_image_batch_processor() -> None:
     """Batched PIL image input uses an attached image processor once."""
 
-    pil_image = pytest.importorskip("PIL.Image")
+    from PIL import Image as pil_image
+
     images = [pil_image.new("RGB", (8, 8)), pil_image.new("RGB", (8, 8))]
     model = ImageModel()
     result = _coerce_input(model, images)
@@ -292,7 +295,8 @@ def test_pil_image_batch_processor() -> None:
 def test_audio_feature_extractor_with_sampling_rate() -> None:
     """Raw audio input uses an explicit feature extractor and sampling rate."""
 
-    np = pytest.importorskip("numpy")
+    import numpy as np
+
     waveform = np.array([0.1, 0.2, 0.3], dtype=np.float32)
     model = AudioModel()
     result = _coerce_input(model, waveform)
@@ -326,7 +330,8 @@ def test_trace_with_attached_tokenizer_string() -> None:
 def test_trace_with_numpy_array_preserves_raw_input() -> None:
     """End-to-end auto-coercion should retain the original NumPy input."""
 
-    np = pytest.importorskip("numpy")
+    import numpy as np
+
     array = np.ones((1, 3), dtype=np.float32)
     model = nn.Linear(3, 2)
 
@@ -382,7 +387,7 @@ def test_trace_with_transformerlens_gpt2_string_if_available() -> None:
 def test_trace_with_pil_image_and_attached_processor() -> None:
     """End-to-end capture accepts a PIL image when an image processor is attached."""
 
-    pil_image = pytest.importorskip("PIL.Image")
+    from PIL import Image as pil_image
 
     class TinyVisionModel(nn.Module):
         """Tiny image model with an attached image processor."""

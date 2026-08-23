@@ -2,22 +2,23 @@
 
 from __future__ import annotations
 
+import math
+import sys
+import warnings
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from hashlib import sha256
-import math
 from types import MappingProxyType
 from typing import Any
-import warnings
 
 import torch
 
 from . import _state
+from ._transport import digest_byte_view
 from .errors import RunCapabilityUnavailableError, RunPreconditionError, StateBindingError
-from .utils._torch_compat import tensor_has_named_dims
-from .utils._torch_symbols import torch_attr
 from .runnable import (
     CANONICAL_INITIALIZER_BY_ROLE,
     RUNNABLE_INITIALIZER_POLICY_VERSION,
@@ -31,6 +32,14 @@ from .runnable import (
     TensorSlotDescriptor,
     TensorSlotRole,
 )
+from .utils._torch_compat import tensor_has_named_dims
+from .utils._torch_symbols import torch_attr
+
+_INPUT_STRUCTURE_SITE_PREFIX = "input_structure:"
+"""Canonical site-label prefix for persisted input-boundary structure facts."""
+
+_STATE_METADATA_FACT_SITE_PREFIX = "state_metadata:"
+"""Canonical site-label prefix for persisted declared-state metadata facts."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -729,7 +738,7 @@ def snapshot_state_alias_topology(model: object) -> Mapping[str, Any] | None:
     model exposes no named state accessors.
     """
 
-    from .utils.tensor_utils import tensor_byte_footprint, touched_bytes_relation
+    from .utils.alias_footprint import tensor_byte_footprint, touched_bytes_relation
 
     named_parameters = getattr(model, "named_parameters", None)
     named_buffers = getattr(model, "named_buffers", None)
@@ -799,6 +808,156 @@ def snapshot_state_alias_topology(model: object) -> Mapping[str, Any] | None:
     return {"groups": groups, "refusals": tuple(refusals)}
 
 
+@dataclass(frozen=True, slots=True)
+class LiveDeclaredStateSnapshot:
+    """One live-model declared-state snapshot for the run() restore bracket (L4 5.2).
+
+    ``bindings`` maps every registered slot to its live tensor object; ``clones``
+    holds ONE value clone per distinct live object identity (alias groups -- tied
+    weights, double-registered buffers -- snapshot once and restore once, so
+    ``a is b`` is preserved). ``owners`` records the owning module and registry
+    dict per binding so a forward that REASSIGNED a slot to a new object is
+    restored by re-binding the ORIGINAL object with its restored value.
+    """
+
+    #: (module, registry_attr, local_name, canonical_name, original_object)
+    bindings: tuple[tuple[Any, str, str, str, torch.Tensor], ...]
+    #: id(original_object) -> value clone
+    clones: dict[int, torch.Tensor]
+
+
+def _snapshot_refusal(reason: str, **payload: Any) -> Exception:
+    """Build the typed fail-before-execute snapshot preflight refusal (L4 5.4)."""
+
+    return StateBindingError(
+        "run() could not snapshot the live model's declared state before "
+        f"execution: {reason}. No forward was run (fail-before-execute). "
+        "Remedy: pass carry_state=True to run without the restore bracket if "
+        "you accept declared-state mutation persisting on the live model",
+        code="run_state_snapshot_unsupported",
+        detection_stage="state_snapshot_preflight",
+        **payload,
+    )
+
+
+def _enumerate_declared_state_bindings(
+    named_modules: Any,
+) -> list[tuple[Any, str, str, str, torch.Tensor]]:
+    """Enumerate every registered parameter/buffer binding, refusing typed.
+
+    ``remove_duplicate=False`` keeps every registration site so alias
+    topology is preserved (one clone per live object identity downstream).
+    """
+
+    bindings: list[tuple[Any, str, str, str, torch.Tensor]] = []
+    try:
+        modules = list(named_modules(remove_duplicate=False))
+    except Exception as exc:
+        raise _snapshot_refusal(f"named_modules() enumeration failed ({exc!r})") from exc
+    for module_path, module in modules:
+        for registry_attr in ("_parameters", "_buffers"):
+            registry = getattr(module, registry_attr, None)
+            if not isinstance(registry, dict):
+                continue
+            for local_name, value in registry.items():
+                if not isinstance(value, torch.Tensor):
+                    continue
+                canonical = f"{module_path}.{local_name}" if module_path else local_name
+                bindings.append((module, registry_attr, local_name, canonical, value))
+    return bindings
+
+
+def snapshot_live_declared_state(model: object) -> LiveDeclaredStateSnapshot:
+    """Snapshot a live model's declared state before a default run() executes.
+
+    Covers the full declared state model boundary: named parameters plus every
+    registered buffer (``remove_duplicate=False``), value-level clones through
+    the byte-guard chokepoint, alias topology preserved (one clone per live
+    object identity). Enumeration failure, an unprovable alias topology, and a
+    clone/allocation failure each refuse TYPED before any forward runs; no
+    partial snapshot ever proceeds to execution.
+    """
+
+    named_modules = getattr(model, "named_modules", None)
+    if not callable(named_modules):
+        raise _snapshot_refusal("the model exposes no named_modules() enumeration")
+    topology = snapshot_state_alias_topology(model)
+    if topology is None:
+        raise _snapshot_refusal("the model exposes no named parameter/buffer accessors")
+    refusals = tuple(topology.get("refusals", ()))
+    if refusals:
+        first = refusals[0]
+        raise _snapshot_refusal(
+            "the declared-state alias topology is unprovable or overlapping "
+            f"(state entries {first[0]!r} and {first[1]!r} relate as {first[2]!r}; "
+            "unprovable refuses, never guesses)",
+            alias_refusals=refusals,
+        )
+    bindings = _enumerate_declared_state_bindings(named_modules)
+    clones: dict[int, torch.Tensor] = {}
+    with _state.pause_logging(), _guarded_defensive_materialize():
+        for _module, _registry_attr, _local_name, canonical, value in bindings:
+            if id(value) in clones:
+                continue
+            try:
+                clones[id(value)] = _byte_guarded_clone(value, state_dict_name=canonical)
+            except Exception as exc:
+                raise _snapshot_refusal(
+                    f"cloning state entry {canonical!r} failed ({exc!r})",
+                    state_dict_name=canonical,
+                ) from exc
+    return LiveDeclaredStateSnapshot(bindings=tuple(bindings), clones=clones)
+
+
+class LiveStateRestoreFailure(RuntimeError):
+    """Internal carrier for a declared-state restore that failed mid-bracket.
+
+    The transaction converts this into the typed ``run_state_restore_failed``
+    refusal with the structured fields the contract promises; the failing
+    restore exception is chained as ``__cause__``.
+    """
+
+    def __init__(self, state_dict_name: str, groups_restored: int) -> None:
+        super().__init__(
+            f"declared-state restore failed at {state_dict_name!r} after "
+            f"{groups_restored} alias group(s) were restored"
+        )
+        self.state_dict_name = state_dict_name
+        self.groups_restored = groups_restored
+
+
+def restore_live_declared_state(snapshot: LiveDeclaredStateSnapshot) -> None:
+    """Restore a declared-state snapshot onto the live model (finally bracket).
+
+    Runs under ``no_grad`` and ``pause_logging``, one value restore per alias
+    group (distinct live object), then re-binds any slot the forward reassigned
+    to a different object back to its ORIGINAL object -- so repeated run()
+    calls leave the model bit-identical with ``a is b`` alias semantics intact.
+    Raises :class:`LiveStateRestoreFailure` (original exception chained) on the
+    first failed restore; the caller owns the state-compromised consequence
+    (L4 5.4).
+    """
+
+    restored: set[int] = set()
+    with _state.pause_logging(), torch.no_grad():
+        for _module, _registry_attr, _local_name, canonical, original in snapshot.bindings:
+            key = id(original)
+            if key in restored:
+                continue
+            try:
+                original.copy_(snapshot.clones[key])
+            except Exception as exc:
+                raise LiveStateRestoreFailure(canonical, len(restored)) from exc
+            restored.add(key)
+        for module, registry_attr, local_name, canonical, original in snapshot.bindings:
+            try:
+                registry = getattr(module, registry_attr, None)
+                if isinstance(registry, dict) and registry.get(local_name) is not original:
+                    registry[local_name] = original
+            except Exception as exc:
+                raise LiveStateRestoreFailure(canonical, len(restored)) from exc
+
+
 def load_trace_state_dict(trace: Any, sd: Mapping[str, Any]) -> None:
     """Validate and atomically stage a user state mapping on a sparse Trace.
 
@@ -819,8 +978,11 @@ def load_trace_state_dict(trace: Any, sd: Mapping[str, Any]) -> None:
         allocates, like the staging device failures this stage already types.
     """
 
+    from ._fast_run import close_fast_run_session
+
+    close_fast_run_session(trace)
     staged = _validate_state_mapping(trace, sd)
-    readiness = trace.__dict__.get("_runnable_readiness")
+    readiness = trace._runnable.readiness
     updated_readiness = readiness
     if readiness is not None and hasattr(readiness, "state_sources_available"):
         sources = tuple(
@@ -832,9 +994,9 @@ def load_trace_state_dict(trace: Any, sd: Mapping[str, Any]) -> None:
             readiness,
             state_sources_available=(StateSource.USER_STATE_DICT, *sources),
         )
-    trace.__dict__["_runnable_staged_user_state"] = staged
+    trace._runnable.staged_user_state = staged
     if updated_readiness is not readiness:
-        trace.__dict__["_runnable_readiness"] = updated_readiness
+        trace._runnable.readiness = updated_readiness
 
 
 def bind_embedded_trace_state(trace: Any, sd: Mapping[str, Any]) -> None:
@@ -859,7 +1021,7 @@ def bind_embedded_trace_state(trace: Any, sd: Mapping[str, Any]) -> None:
     """
 
     _validate_state_mapping(trace, sd)
-    trace.__dict__["_runnable_embedded_state"] = MappingProxyType(
+    trace._runnable.embedded_state = MappingProxyType(
         {
             name: _staged_state_clone(value, state_dict_name=name)
             for name, value in sd.items()
@@ -886,15 +1048,12 @@ def bind_embedded_nonpersistent_buffers(trace: Any, buffers: Mapping[str, Any]) 
 
     descriptor = _require_descriptor(trace)
     validate_nonpersistent_buffer_mapping_for_descriptor(descriptor, buffers)
-    trace.__dict__["_runnable_embedded_nonpersistent_buffers"] = {
+    trace._runnable.embedded_nonpersistent_buffers = {
         name: _staged_state_clone(value, state_dict_name=name)
         for name, value in buffers.items()
         if isinstance(name, str) and isinstance(value, torch.Tensor)
     }
 
-
-_STATE_METADATA_FACT_SITE_PREFIX = "state_metadata:"
-"""``site_label`` prefix of a persisted DECLARED-STATE metadata fact witness (r65 F-1)."""
 
 _STATE_METADATA_FACT_KEY = "state_metadata"
 """Discriminator key present in every declared state-metadata fact."""
@@ -1002,6 +1161,13 @@ def _apply_state_metadata_facts(
     for slot in descriptor.tensor_slots:
         if slot.state_binding is not None:
             name_by_slot[slot.slot_id] = slot.state_binding.state_dict_name
+    # Staged slot values can BE the trace-persisted clones (same-device slots are
+    # returned unwrapped), so the in-place ``requires_grad_`` flips below mutate
+    # state that outlives this call. A mid-loop refusal must publish NOTHING:
+    # every already-flipped bit is rolled back before the typed raise, or a
+    # slot-7 failure would leave slots 1-6 mutated on ``embedded_state`` /
+    # ``staged_user_state`` across future runs.
+    applied: list[tuple[torch.Tensor, bool]] = []
     for slot_id, value in prepared.slot_values.items():
         name = name_by_slot.get(slot_id)
         recorded = binding_facts.get(name, {}).get("requires_grad") if name is not None else None
@@ -1009,7 +1175,16 @@ def _apply_state_metadata_facts(
             continue
         try:
             value.requires_grad_(recorded)
+            applied.append((value, not recorded))
         except RuntimeError as exc:
+            for flipped, original_bit in applied:
+                try:
+                    flipped.requires_grad_(original_bit)
+                except RuntimeError:
+                    # Best-effort unwind: restoring a bit the tensor held moments
+                    # ago cannot realistically fail; a torn restore must not mask
+                    # the typed refusal below.
+                    continue
             # Unreachable for producer-validated artifacts (a ``requires_grad=True`` fact on
             # a non-differentiable slot refuses at save); a tampered artifact fails typed
             # here rather than running with an unreproduced declared fact.
@@ -1054,6 +1229,26 @@ def prepare_runnable_state(trace: Any, seed: int | None = None) -> PreparedRunna
         If the descriptor or selected state source violates a slot contract.
     """
 
+    with _host_memory_budget_scope():
+        return _prepare_runnable_state(trace, seed)
+
+
+def _prepare_runnable_state(trace: Any, seed: int | None = None) -> PreparedRunnableState:
+    """Implement one runnable-state preparation inside its host-budget scope.
+
+    Parameters
+    ----------
+    trace:
+        Loaded sparse Trace whose descriptor supplies state-slot contracts.
+    seed:
+        Optional isolated initializer seed. ``None`` uses normal runtime RNG.
+
+    Returns
+    -------
+    PreparedRunnableState
+        Run-local slot values and honest source/initializer reporting.
+    """
+
     descriptor = _require_descriptor(trace)
     # r55 free_1: bound every recorded op-output allocation BEFORE the DAG runs, on
     # every state source (staged/embedded/random-init), so a tampered self-consistent
@@ -1068,6 +1263,8 @@ def prepare_runnable_state(trace: Any, seed: int | None = None) -> PreparedRunna
     nonpersistent_buffers = _prepared_nonpersistent_buffers(trace, descriptor)
 
     def _staged(prepared: PreparedRunnableState) -> PreparedRunnableState:
+        """Move one prepared state bundle to its recorded per-slot devices."""
+
         staged = replace(
             prepared,
             slot_values=stage_state_to_slot_devices(descriptor, prepared.slot_values),
@@ -1077,7 +1274,7 @@ def prepare_runnable_state(trace: Any, seed: int | None = None) -> PreparedRunna
         # recorded declared fact always wins over the source tensor's transport-lost bit.
         return _apply_state_metadata_facts(descriptor, staged)
 
-    user_state = trace.__dict__.get("_runnable_staged_user_state")
+    user_state = trace._runnable.staged_user_state
     if isinstance(user_state, Mapping):
         return _staged(
             _with_nonpersistent_buffers(
@@ -1086,7 +1283,7 @@ def prepare_runnable_state(trace: Any, seed: int | None = None) -> PreparedRunna
             )
         )
 
-    embedded_state = trace.__dict__.get("_runnable_embedded_state")
+    embedded_state = trace._runnable.embedded_state
     if embedded_state is not None:
         if not isinstance(embedded_state, Mapping):
             raise _binding_error(
@@ -1166,7 +1363,7 @@ def _prepared_nonpersistent_buffers(
 
     slots = _nonpersistent_buffer_slots(descriptor)
     declared = descriptor.payload_layers.nonpersistent_buffers
-    embedded = trace.__dict__.get("_runnable_embedded_nonpersistent_buffers")
+    embedded = trace._runnable.embedded_nonpersistent_buffers
     if not slots:
         return MappingProxyType({})
     if (
@@ -1492,6 +1689,37 @@ def _alias_value_diagnostics(
             slots_by_alias[binding.alias_group].append(slot)
     diagnostics: list[RunnableDiagnostic] = []
     for alias_group, members in sorted(slots_by_alias.items()):
+        # R10-16: an alias group declares ONE live allocation, so its members'
+        # declared devices must agree. A forged split-device group previously
+        # passed the shape/dtype/byte checks (comparing transported values)
+        # and staged into DISTINCT storages, silently breaking the tied-state
+        # contract the group exists to declare.
+        first_member = members[0]
+        for member in members[1:]:
+            if (
+                member.device_type != first_member.device_type
+                or member.device_index != first_member.device_index
+            ):
+                diagnostics.append(
+                    _diagnostic(
+                        RunnableErrorCode.STATE_ALIAS_CONFLICT,
+                        f"Alias group {alias_group!r} declares members on different "
+                        "devices; one alias group is one allocation.",
+                        detection_stage="state_alias_validation",
+                        details=(
+                            ("alias_group", alias_group),
+                            (
+                                "first_device",
+                                f"{first_member.device_type}:{first_member.device_index}",
+                            ),
+                            (
+                                "conflicting_device",
+                                f"{member.device_type}:{member.device_index}",
+                            ),
+                        ),
+                    )
+                )
+                break
         named_values = [
             (slot.state_binding.state_dict_name, values_by_name[slot.state_binding.state_dict_name])
             for slot in members
@@ -1530,11 +1758,19 @@ def _initialize_state_slots(
     """Allocate every state slot using the frozen role initializer table."""
 
     state_slots = _persistent_state_slots(descriptor)
-    groups: dict[str, list[TensorSlotDescriptor]] = defaultdict(list)
+    # Tuple-tagged keys keep declared alias groups and per-name fallbacks in
+    # DISJOINT namespaces: no string an artifact can carry in ``alias_group``
+    # (parse additionally refuses the reserved ``name:`` prefix) can collide an
+    # aliased slot with an unrelated named slot into one shared allocation.
+    groups: dict[tuple[str, str], list[TensorSlotDescriptor]] = defaultdict(list)
     for slot in state_slots:
         binding = slot.state_binding
         assert binding is not None
-        group = binding.alias_group or f"name:{binding.state_dict_name}"
+        group = (
+            ("alias", binding.alias_group)
+            if binding.alias_group is not None
+            else ("name", binding.state_dict_name)
+        )
         groups[group].append(slot)
 
     ordered_groups = [
@@ -1568,14 +1804,61 @@ largest legitimate single random-init state slot on record (a 70B-class
 embedding) is three orders of magnitude below it.
 """
 
+_HOST_MEMORY_BUDGET_CACHE: ContextVar[dict[str, int | None] | None] = ContextVar(
+    "torchlens_host_memory_budget_cache",
+    default=None,
+)
+
+
+@contextmanager
+def _host_memory_budget_scope() -> Iterator[None]:
+    """Cache the dynamic host-memory probe for one atomic state preparation."""
+
+    token = _HOST_MEMORY_BUDGET_CACHE.set({})
+    try:
+        yield
+    finally:
+        _HOST_MEMORY_BUDGET_CACHE.reset(token)
+
 
 def _host_memory_budget_bytes() -> int | None:
     """Return available host memory plus free swap, or ``None`` when unprobeable."""
 
+    cache = _HOST_MEMORY_BUDGET_CACHE.get()
+    if cache is not None and "host" in cache:
+        return cache["host"]
+    budget = _probe_host_memory_budget_bytes()
+    if cache is not None:
+        cache["host"] = budget
+    return budget
+
+
+def _probe_host_memory_budget_bytes() -> int | None:
+    """Probe available host memory plus free swap without memoization."""
+
+    if sys.platform.startswith("linux"):
+        try:
+            proc_fields: dict[str, int] = {}
+            with open("/proc/meminfo", encoding="ascii") as handle:
+                for line in handle:
+                    name, separator, rest = line.partition(":")
+                    if name not in {"MemAvailable", "SwapFree"}:
+                        continue
+                    parts = rest.split()
+                    if separator != ":" or len(parts) != 2 or not parts[0].isdigit():
+                        break
+                    if parts[1] != "kB":
+                        break
+                    proc_fields[name] = int(parts[0]) * 1024
+                    if len(proc_fields) == 2:
+                        return proc_fields["MemAvailable"] + proc_fields["SwapFree"]
+        except (OSError, UnicodeError):  # pragma: no cover - missing/malformed Linux procfs
+            pass
+
     try:
         import psutil
     except ImportError:
-        psutil = None  # type: ignore[assignment]
+        psutil = None
     if psutil is not None:
         try:
             return int(psutil.virtual_memory().available) + int(psutil.swap_memory().free)
@@ -1999,6 +2282,8 @@ def _preflight_retention_floor(descriptor: SparseRunDescriptor) -> None:
     devices: dict[str, torch.device] = {}
 
     def _charge(slot: TensorSlotDescriptor) -> None:
+        """Add one slot's guaranteed-retained clone bytes to its device's floor."""
+
         device = _slot_device(slot)
         key = str(device)
         devices[key] = device
@@ -2324,6 +2609,11 @@ def stage_state_to_slot_devices(
                 with _state.pause_logging(), _guarded_defensive_materialize():
                     cached = value.to(_slot_device(slot))
             except (RuntimeError, AssertionError) as exc:
+                # R36-7a: this frame rides the refusal's traceback; drop the
+                # already-transferred device copies in place so a caller
+                # retaining the exception cannot pin those GPU allocations.
+                staged.clear()
+                moved_by_identity.clear()
                 raise RunCapabilityUnavailableError(
                     f"State slot {slot_id!r} requires device "
                     f"{slot.device_type}"
@@ -2402,7 +2692,7 @@ def _nonpersistent_buffer_slots(
 def _require_descriptor(trace: Any) -> SparseRunDescriptor:
     """Return a sparse descriptor or raise a structured binding error."""
 
-    descriptor = trace.__dict__.get("_runnable_descriptor")
+    descriptor = trace._runnable.descriptor
     if not isinstance(descriptor, SparseRunDescriptor):
         raise _binding_error(
             (
@@ -2420,8 +2710,19 @@ def _binding_error(diagnostics: tuple[RunnableDiagnostic, ...]) -> StateBindingE
     """Build one structured strict state-binding exception."""
 
     codes = tuple(diagnostic.code.value for diagnostic in diagnostics)
+    # Surface the per-diagnostic detail in the message (R65: the aggregate used
+    # to name only the codes, hiding the slot names / shapes the diagnostics
+    # already carry). Bounded to the first few so a mass mismatch stays legible.
+    shown = diagnostics[:5]
+    detail_lines = "".join(
+        f"\n  - {diagnostic.code.value}: {diagnostic.message}" for diagnostic in shown
+    )
+    if len(diagnostics) > len(shown):
+        detail_lines += (
+            f"\n  ... and {len(diagnostics) - len(shown)} more (see .fields['diagnostics'])."
+        )
     return StateBindingError(
-        f"Strict state binding failed with {len(diagnostics)} diagnostic(s): {', '.join(codes)}.",
+        f"Strict state binding failed with {len(diagnostics)} diagnostic(s):{detail_lines}",
         diagnostics=diagnostics,
         codes=codes,
     )
@@ -2489,10 +2790,18 @@ def runnable_tensor_byte_digest(value: torch.Tensor) -> str:
             code=RunnableErrorCode.INPUT_TREE_MISMATCH.value,
         )
     with _state.pause_logging():
-        cpu_value = value.detach().cpu().contiguous()
-        payload = cpu_value.reshape(-1).view(torch.uint8).numpy().tobytes()
-        logical_prefix = f"{cpu_value.dtype}|{tuple(cpu_value.shape)}|".encode("utf-8")
-    return sha256(logical_prefix + payload).hexdigest()
+        # Buffer-protocol digest (r7 R35-3): streaming the prefix and the
+        # uint8 view into one hasher is byte-identical to the old
+        # ``sha256(prefix + payload.tobytes())`` while skipping the
+        # whole-payload bytes copy (per parameter/buffer staged). r8 R35:
+        # the transport + uint8 reinterpret live in ONE authority
+        # (``_transport.digest_byte_view``), which also resolves lazy
+        # conj/neg bits -- the hand-rolled view here crashed on conj state.
+        payload_view = digest_byte_view(value)
+        logical_prefix = f"{value.dtype}|{tuple(value.shape)}|".encode()
+        hasher = sha256(logical_prefix)
+        hasher.update(payload_view)
+    return hasher.hexdigest()
 
 
 __all__ = [

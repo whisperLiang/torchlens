@@ -10,8 +10,10 @@ from dataclasses import dataclass, replace
 from typing import Any, cast
 
 from ... import _state
-from ..._deprecations import MISSING
-from ...backends import BackendName, BackendUnsupportedError
+from ..._deprecations import MISSING, MissingType
+from ..._trace_core.relation_views import freeze_trace_relation_views
+from ...backends import BackendName, BackendUnsupportedError, get_backend_spec
+from ...capture.outcome import StopRequest, stamp_backend_finalized
 from ...data_classes.derived_grad import (
     DerivedGradAccessor,
     DerivedGradRecord,
@@ -20,29 +22,46 @@ from ...data_classes.derived_grad import (
 )
 from ...data_classes.param import Param, ParamAccessor
 from ...data_classes.trace import Trace
+from ...fastlog._halt import HaltSignal
 from ...fastlog.types import CaptureSpec
 from ...ir.capture_events import CaptureEvents
 from ...ir.events import (
     ArgTemplateRef,
     FunctionCallRef,
+    InterventionAppliedEvent,
     ModuleFrame,
     OpEvent,
     OutputRef,
     ParentEdge,
 )
 from ...ir.intervention import FireResult, FunctionEventInput
-from ...ir.predicate import RecordContext, _DEFERRED_VALUE
+from ...ir.predicate import RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
 from ...postprocess._materialize import materialize_from_events
 from ...quantities import Duration
-from ...validation.status import ValidationReplayStatus, ValidationReplaySource
-from .._finalize import attach_function_root_module, attach_object_module_logs
-from .._finalize import finalize_single_pass_trace
-from .._options import PADDLE_EXTRA_KWARG_POLICY, PADDLE_PREVIEW_TRACE_OPTION_POLICY
-from .._options import reject_extra_trace_kwargs, reject_unsupported_trace_options
-from .._selective_save import apply_static_label_save_policy
-from .._selective_save import pop_static_label_save_predicate
+from ...validation.status import ValidationReplaySource, ValidationReplayStatus
+from .._finalize import (
+    attach_function_root_module,
+    attach_module_owned_op_params,
+    attach_object_module_logs,
+    finalize_single_pass_trace,
+    mark_output_label,
+    mirror_param_derived_grads,
+    nearest_metadata_parent,
+    normalize_op_module_calls,
+    numel_from_shape as _numel,
+    stable_callable_name as _callable_identity,
+    value_nbytes as _nbytes,
+)
+from .._options import (
+    PADDLE_EXTRA_KWARG_POLICY,
+    PADDLE_PREVIEW_TRACE_OPTION_POLICY,
+    reject_extra_trace_kwargs,
+    reject_unsupported_trace_options,
+)
+from .._selective_save import apply_static_label_save_policy, pop_static_label_save_predicate
+from .interventions import PaddleInterventionCapture, PaddleInterventionRuntime
 from .model_prep import (
     PaddleModuleTree,
     cleanup_model_session,
@@ -222,6 +241,10 @@ class PaddleOpCapture:
         Same-object alias annotations.
     capture_gap_markers
         Non-fatal capture-gap markers for later validation.
+    intervention
+        Sidecar facts for a genuinely intervened call, or ``None`` for plain
+        captures. The validation oracle only honors it when trace-level
+        evidence corroborates the fire.
     """
 
     func: object
@@ -234,6 +257,7 @@ class PaddleOpCapture:
     producer_labels: frozenset[str]
     alias_annotations: tuple[dict[str, Any], ...] = ()
     capture_gap_markers: tuple[str, ...] = ()
+    intervention: PaddleInterventionCapture | None = None
 
 
 class PaddleBackend:
@@ -283,6 +307,7 @@ class PaddleBackend:
         save_visualizations: bool = False,
         module_identity_mode: str | None = None,
         grad_options: GradOptions | None = None,
+        compute_input_output_distances: bool | MissingType = MISSING,
         **extra_kwargs: Any,
     ) -> Trace:
         """Capture a Paddle forward pass into a structural Trace."""
@@ -315,7 +340,25 @@ class PaddleBackend:
         save_visualizations = _default_if_missing(save_visualizations, False)
         module_identity_mode = _default_if_missing(module_identity_mode, None)
         grad_options = _default_if_missing(grad_options, None)
+        # Torch-parity default: the depth flood runs unless explicitly disabled.
+        compute_input_output_distances = _default_if_missing(compute_input_output_distances, True)
         save_predicate = pop_static_label_save_predicate(extra_kwargs, backend_name="paddle")
+        intervene = _default_if_missing(extra_kwargs.pop("intervene", None), None)
+        halt = _default_if_missing(extra_kwargs.pop("halt", None), None)
+        facet_recipes = _default_if_missing(extra_kwargs.pop("recipes", None), None)
+        if grad_options is not None and (intervene is not None or halt is not None):
+            raise BackendUnsupportedError(
+                "paddle backend preview cannot combine grad_options with "
+                "trace(intervene=...) or trace(halt=...): derived-gradient "
+                "replay re-executes the forward without interventions, so the "
+                "matched intermediates would misrepresent the intervened "
+                "capture. Capture derived gradients in a separate plain trace."
+            )
+        intervention_runtime = (
+            PaddleInterventionRuntime(self, intervene=intervene, halt=halt)
+            if intervene is not None or halt is not None
+            else None
+        )
         _reject_extra_kwargs(extra_kwargs)
         if random_seed is not None:
             raise BackendUnsupportedError(
@@ -342,6 +385,7 @@ class PaddleBackend:
                 "lookback_payload_policy": "metadata_only",
             },
             PADDLE_PREVIEW_TRACE_OPTION_POLICY,
+            spec=get_backend_spec("paddle"),
         )
         module_tree = discover_paddle_module_tree(model)
         use_object_module = _resolve_paddle_module_identity_mode(module_identity_mode, module_tree)
@@ -356,7 +400,7 @@ class PaddleBackend:
             save_arg_values=save_arg_values,
             save_grads=None,
             detach_saved_activations=detach_saved_activations,
-            mark_layer_depths=False,
+            mark_layer_depths=cast(bool, compute_input_output_distances),
             num_context_lines=num_context_lines,
             optimizer=None,
             save_code_context=save_code_context,
@@ -383,6 +427,23 @@ class PaddleBackend:
         trace._paddle_op_captures = []
         trace._paddle_alias_annotations = []
         trace._paddle_capture_gap_markers = []
+        trace._paddle_intervention_runtime = intervention_runtime
+        if facet_recipes is not None:
+            if callable(facet_recipes):
+                facet_recipes = (facet_recipes,)
+            try:
+                recipe_tuple = tuple(facet_recipes)
+            except TypeError as exc:
+                raise BackendUnsupportedError(
+                    "paddle backend trace(recipes=...) requires an iterable of recipe callables."
+                ) from exc
+            if not all(callable(recipe) for recipe in recipe_tuple):
+                raise BackendUnsupportedError(
+                    "paddle backend trace(recipes=...) requires recipe callables."
+                )
+            from ...semantic import facets as facets_mod
+
+            trace.facet_registry_snapshot = facets_mod.snapshot(recipe_tuple)
         trace.backend_runtime_version = str(getattr(self.paddle, "__version__", ""))
         trace.backend_runtime_config = {"version": trace.backend_runtime_version}
         trace.backend_runtime_device_summary = {}
@@ -397,14 +458,33 @@ class PaddleBackend:
         kwargs = {} if input_kwargs is None else dict(input_kwargs)
         prepared_model = prepare_model_once(model)
         prepare_model_session(trace, prepared_model, module_tree if use_object_module else None)
-        wrap_paddle(self)
-        self._label_source_tensors(trace, args, kwargs)
-        trace.capture_start_time = time.time()
+        # R07: the try owns the wrap call itself -- a raise anywhere between
+        # wrapper install and the forward (source labeling) used to strand the
+        # process-global Paddle wrappers because the unwrap-owning finally had
+        # not been entered yet. ``unwrap_paddle`` on a partially-installed (or
+        # empty) registry is safe, and the hook cleanup follows a completed
+        # ``prepare_model_session``.
         try:
-            with _state.active_logging(trace):
-                output = cast(Any, prepared_model)(*args, **kwargs)
+            wrap_paddle(self)
+            self._label_source_tensors(trace, args, kwargs)
+            trace.capture_start_time = time.time()
+            halt_signal: HaltSignal | None = None
+            try:
+                with _state.active_logging(trace):
+                    output = cast(Any, prepared_model)(*args, **kwargs)
+            except HaltSignal as exc:
+                halt_signal = exc
+                output = exc.frontier_output
             trace.forward_duration = Duration(time.time() - trace.capture_start_time)
-            trace.raw_output = output_transform(output) if callable(output_transform) else None
+            if halt_signal is not None:
+                trace.halted = True
+                trace.halt_reason = halt_signal.reason
+                trace.halt_frontier = halt_signal.reason
+                trace.raw_output = None
+            elif intervention_runtime is not None:
+                intervention_runtime.warn_if_zero_matches()
+            if halt_signal is None:
+                trace.raw_output = output_transform(output) if callable(output_transform) else None
             self._mark_outputs(trace, output)
             materialize_from_events(trace, trace.capture_events)
             delattr(trace, "capture_events")
@@ -438,10 +518,23 @@ class PaddleBackend:
                 )
             if hasattr(trace, "_paddle_module_stack"):
                 delattr(trace, "_paddle_module_stack")
-            return trace
+            if hasattr(trace, "_paddle_intervention_runtime"):
+                delattr(trace, "_paddle_intervention_runtime")
+            freeze_trace_relation_views(trace)
         finally:
-            cleanup_model_session(trace, prepared_model, module_tree if use_object_module else None)
-            unwrap_paddle()
+            # Independently-owned resources: a raising hook cleanup must not
+            # leave the process-global Paddle wrappers installed.
+            try:
+                cleanup_model_session(
+                    trace, prepared_model, module_tree if use_object_module else None
+                )
+            finally:
+                unwrap_paddle()
+        # Settlement is the LAST act, after ALL teardown (the path-20 stamp
+        # contract): a teardown raise escapes productless -- the object
+        # derives UNATTESTED, never carrying a COMPLETE/HALTED stamp.
+        stamp_backend_finalized(trace)
+        return trace
 
     def validate_entry(self, *args: Any, **kwargs: Any) -> bool:
         """Capture then validate a Paddle forward pass.
@@ -520,7 +613,6 @@ class PaddleBackend:
             if grad_options.intermediate_grads
             else None
         )
-        previous_active_trace = _state._active_trace
         previous_module_stack = list(getattr(trace, "_paddle_module_stack", ()))
         previous_call_counts = dict(module_tree.call_counts) if module_tree is not None else None
         previous_forward_args = (
@@ -533,8 +625,10 @@ class PaddleBackend:
                 module_tree.call_counts.clear()
                 module_tree.forward_args_by_call.clear()
             trace._paddle_module_stack = []
-            _state._active_trace = trace
-            with _state.pause_logging():
+            # Admission-locked publication (was a raw save/restore swap that
+            # could clobber a concurrent capture's _active_trace and republish
+            # a stale trace on restore); concurrent capture refuses typed.
+            with _state.publish_active_trace(trace), _state.pause_logging():
                 if observer is not None:
                     with paddle_tap_observer(observer):
                         replay_output = model(*args, **dict(kwargs))
@@ -585,7 +679,6 @@ class PaddleBackend:
             )
         finally:
             _restore_paddle_tensor_states(snapshots)
-            _state._active_trace = previous_active_trace
             trace._paddle_module_stack = previous_module_stack
             if module_tree is not None and previous_call_counts is not None:
                 module_tree.call_counts.clear()
@@ -596,14 +689,14 @@ class PaddleBackend:
         trace.derived_grads = DerivedGradAccessor(records)
         if grad_options.intermediate_grads:
             trace.intermediate_derived_grads = intermediate_accessor
-        self._mirror_param_derived_grads(trace, records)
+        mirror_param_derived_grads(trace, records)
 
     def _records_for_intermediate_paddle_grads(
         self,
         *,
         trace: Trace,
         loss: Any,
-        observer: "_PaddleIntermediateTapObserver",
+        observer: _PaddleIntermediateTapObserver,
         grad_options: GradOptions,
     ) -> IntermediateDerivedGradAccessor:
         """Build exact Paddle op-level derived-gradient records.
@@ -641,7 +734,7 @@ class PaddleBackend:
             replay_grads_by_id.update(
                 {
                     id(candidate.value): grad
-                    for candidate, grad in zip(non_loss_candidates, replay_grads)
+                    for candidate, grad in zip(non_loss_candidates, replay_grads, strict=True)
                 }
             )
         if self.is_tensor(loss):
@@ -704,35 +797,6 @@ class PaddleBackend:
             )
         return IntermediateDerivedGradAccessor(records)
 
-    def _mirror_param_derived_grads(
-        self,
-        trace: Trace,
-        records: Mapping[str, DerivedGradRecord],
-    ) -> None:
-        """Mirror unambiguous param derived gradients onto param records.
-
-        Parameters
-        ----------
-        trace
-            Trace containing Paddle module-derived params.
-        records
-            Derived gradient records keyed by leaf path.
-
-        Returns
-        -------
-        None
-            Matching ``trace.params`` entries receive the same gradient payload.
-        """
-
-        for address, param in trace.params.items():
-            record = records.get(f"params.{address}")
-            if record is None:
-                continue
-            param._derived_grad_payload = record.grad
-            param._derived_grad_record_path = record.path
-            param.has_grad = True
-            param.grad_shape = tuple(getattr(record.grad, "shape", ()))
-
     def validate_trace(
         self,
         trace: Trace,
@@ -773,9 +837,11 @@ class PaddleBackend:
             from ...validation.status import count_importer_region_annotations
             from .validation import _coverage_oracle
 
-            if not _coverage_oracle(trace):
-                failed_count = 1
-            elif kwargs.get("validate_metadata", True) and not check_metadata_invariants(trace):
+            if (
+                not _coverage_oracle(trace)
+                or kwargs.get("validate_metadata", True)
+                and not check_metadata_invariants(trace)
+            ):
                 failed_count = 1
             else:
                 replayed_count, failed_count = self._validate_paddle_captures(trace)
@@ -818,10 +884,10 @@ class PaddleBackend:
         """
 
         from .validation import (
+            _coverage_oracle,
             _parent_perturbations_change_output,
             _payloads_close,
             _rebuild_inputs,
-            _coverage_oracle,
         )
 
         if not _coverage_oracle(trace):
@@ -837,6 +903,19 @@ class PaddleBackend:
                 failed_count += 1
                 continue
             try:
+                expected_output = op.out
+                intervention = getattr(capture, "intervention", None)
+                if intervention is not None:
+                    # Narrow user-intervention carve-out (tripwire doctrine):
+                    # the replay target switches to the pre-hook value ONLY
+                    # when trace-level evidence corroborates a genuine live
+                    # fire. A capture-side record without corroboration is a
+                    # forged/mispresented stamp and fails outright.
+                    if not _paddle_intervention_corroborated(trace, capture, op):
+                        failed_count += 1
+                        continue
+                    if intervention.raw_first_output is not None:
+                        expected_output = intervention.raw_first_output
                 rebuilt = _rebuild_inputs(capture, ops_by_label)
                 if not rebuilt.ok:
                     failed_count += 1
@@ -847,11 +926,12 @@ class PaddleBackend:
                     replayed,
                     _first_output_path(capture),
                 )
-                saved_output = op.out
-                if saved_output is None or not _payloads_close(replayed_output, saved_output):
+                if expected_output is None or not _payloads_close(replayed_output, expected_output):
                     failed_count += 1
                     continue
-                if not _parent_perturbations_change_output(self, capture, ops_by_label):
+                if not _parent_perturbations_change_output(
+                    self, capture, ops_by_label, baseline_output=expected_output
+                ):
                     failed_count += 1
                     continue
                 replayed_count += 1
@@ -869,12 +949,20 @@ class PaddleBackend:
         output: object,
         *,
         module_stack: tuple[ModuleFrame, ...] | None = None,
-    ) -> None:
-        """Append one Paddle operation event and coverage capture to ``trace``."""
+    ) -> object:
+        """Append one Paddle operation event and coverage capture to ``trace``.
+
+        Returns
+        -------
+        object
+            Output object the wrapper must return to the caller: the original
+            output, or a rebuilt container carrying live-intervention
+            replacement tensors.
+        """
 
         outputs = tuple(self._iter_tensors_with_paths(output))
         if not outputs:
-            return
+            return output
         events = getattr(trace, "capture_events", None)
         if events is None:
             events = CaptureEvents()
@@ -891,11 +979,73 @@ class PaddleBackend:
             outputs,
             reserved[0].label_raw,
         )
+        func_event_input = FunctionEventInput(
+            func=func,
+            func_name=op_name,
+            func_qualname=getattr(func, "__qualname__", None),
+            args=args,
+            kwargs=kwargs,
+            raw_output=output,
+            arg_copies=None,
+            kwarg_copies=None,
+            module_stack=module_stack or tuple(getattr(trace, "_paddle_module_stack", ())),
+            is_bottom_level_func=True,
+            func_call_id=func_call_id,
+            expected_output_count=len(outputs),
+        )
+        runtime = cast(
+            "PaddleInterventionRuntime | None",
+            getattr(trace, "_paddle_intervention_runtime", None),
+        )
+        final_output = output
+        final_outputs = outputs
+        fire_results_by_index: dict[int, FireResult] = {}
+        if runtime is not None and runtime.intervene is not None:
+            replacements: dict[tuple[Any, ...], Any] = {}
+            raw_by_path: dict[tuple[Any, ...], Any] = {}
+            helper_name: str | None = None
+            for output_index, (path, tensor) in enumerate(outputs):
+                if output_index in alias_indices:
+                    continue
+                site = reserved[output_index]
+                ctx = self.build_record_context(trace, site, func_event_input, tensor)
+                decision = runtime.evaluate_intervene(ctx)
+                if decision is None:
+                    continue
+                replacement, fire_result = runtime.apply(ctx, tensor, decision, path)
+                fire_results_by_index[output_index] = fire_result
+                runtime.record_fired_spec(trace, site.label_raw, decision)
+                if fire_result.replaced:
+                    replacements[path] = replacement
+                    raw_by_path[path] = tensor
+                    record = fire_result.fire_record
+                    if helper_name is None and record is not None:
+                        helper_name = cast(Any, record).helper_name
+            if replacements:
+                final_output = _replace_paddle_tensors_at_paths(output, replacements)
+                final_outputs = tuple(
+                    (path, replacements.get(path, tensor)) for path, tensor in outputs
+                )
+                first_path = outputs[0][0]
+                capture = replace(
+                    capture,
+                    intervention=PaddleInterventionCapture(
+                        intervened_paths=tuple(replacements),
+                        raw_first_output=raw_by_path.get(first_path),
+                        helper_name=helper_name,
+                        func_call_id=func_call_id,
+                        site_labels=tuple(
+                            reserved[index].label_raw
+                            for index, fire in sorted(fire_results_by_index.items())
+                            if fire.replaced
+                        ),
+                    ),
+                )
         trace._paddle_op_captures.append(capture)
         trace._paddle_alias_annotations.extend(capture.alias_annotations)
         trace._paddle_capture_gap_markers.extend(capture.capture_gap_markers)
         emitted: list[OpEvent] = []
-        for output_index, (path, tensor) in enumerate(outputs):
+        for output_index, (path, tensor) in enumerate(final_outputs):
             if output_index in alias_indices:
                 continue
             site = reserved[output_index]
@@ -904,20 +1054,7 @@ class PaddleBackend:
                 session=trace,
                 kind="op",
                 reserved=site,
-                func_event_input=FunctionEventInput(
-                    func=func,
-                    func_name=op_name,
-                    func_qualname=getattr(func, "__qualname__", None),
-                    args=args,
-                    kwargs=kwargs,
-                    raw_output=output,
-                    arg_copies=None,
-                    kwarg_copies=None,
-                    module_stack=module_stack or tuple(getattr(trace, "_paddle_module_stack", ())),
-                    is_bottom_level_func=True,
-                    func_call_id=func_call_id,
-                    expected_output_count=len(outputs),
-                ),
+                func_event_input=func_event_input,
                 output=tensor,
                 parents=parents,
                 parent_arg_positions=parent_positions,
@@ -926,9 +1063,49 @@ class PaddleBackend:
                 is_input=False,
                 container_path=path,
             )
+            site_fire = fire_results_by_index.get(output_index)
+            if site_fire is not None:
+                event = replace(
+                    event,
+                    intervention_fired=True,
+                    intervention_replaced=site_fire.replaced,
+                    fire_results=(site_fire,),
+                )
             emitted.append(event)
             self.tensor_store.set_label_if_unlabeled(tensor, site.label_raw)
         events.extend(tuple(emitted))
+        for event in emitted:
+            if event.intervention_replaced:
+                events.append_intervention(
+                    InterventionAppliedEvent(
+                        label_raw=event.label_raw,
+                        kind="replaced",
+                        origin="live_fire",
+                        timestamp=time.time(),
+                        run_token=events.run_nonce,
+                        target_seq=event.seq,
+                        target_func_call_id=func_call_id,
+                    )
+                )
+        if runtime is not None and runtime.halt is not None:
+            for output_index, (path, tensor) in enumerate(final_outputs):
+                if output_index in alias_indices:
+                    continue
+                site = reserved[output_index]
+                ctx = self.build_record_context(trace, site, func_event_input, tensor)
+                if runtime.evaluate_halt(ctx):
+                    # F6 latch parity with torch's evaluate_halt: latch the
+                    # stop request on the trace BEFORE raising, so a user
+                    # broad-except that swallows the HaltSignal can never
+                    # settle COMPLETE at the one preview stamp.
+                    trace.__dict__["_stop_requested"] = StopRequest(
+                        kind="halt",
+                        reason=site.label_raw,
+                        boundary_kind=getattr(ctx, "kind", None),
+                        boundary_label=site.label_raw,
+                    )
+                    raise HaltSignal(site.label_raw, frontier_output=final_output)
+        return final_output
 
     def build_record_context(
         self,
@@ -937,8 +1114,23 @@ class PaddleBackend:
         func_event_input: FunctionEventInput,
         output: object,
     ) -> RecordContext:
-        """Build the selector predicate context for one Paddle output."""
+        """Build the selector predicate context for one Paddle output.
 
+        Paddle dygraph is eager, so the value-dependent context fields
+        (``tensor_requires_grad``, ``is_scalar_bool``, ``bool_value``) carry
+        real values instead of the lazy-backend deferred sentinel.
+        """
+
+        requires_grad: bool | None = None
+        is_scalar_bool = False
+        bool_value: bool | None = None
+        if self.is_tensor(output):
+            requires_grad = not bool(getattr(output, "stop_gradient", True))
+            dtype_text = str(self._dtype(output)).lower()
+            if int(getattr(output, "ndim", 1) or 0) == 0 and dtype_text.endswith("bool"):
+                is_scalar_bool = True
+                with _state.pause_logging():
+                    bool_value = bool(cast(Any, output).item())
         return RecordContext(
             kind="op",
             label=reserved.label,
@@ -960,8 +1152,8 @@ class PaddleBackend:
             input_output_address=None,
             shape=self._shape(output),
             dtype=DtypeRef(backend="paddle", name=str(self._dtype(output))),
-            tensor_device=DeviceRef(backend="paddle", name=str(self._device(output))),
-            tensor_requires_grad=_DEFERRED_VALUE,
+            tensor_device=_device_ref_from_paddle_place(self._device(output)),
+            tensor_requires_grad=requires_grad,
             output_index=None,
             is_bottom_level_func=func_event_input.is_bottom_level_func,
             time_since_pass_start=0.0,
@@ -972,8 +1164,8 @@ class PaddleBackend:
             parent_labels_raw=(),
             is_output_parent=False,
             backend_requires_isolation=False,
-            is_scalar_bool=_DEFERRED_VALUE,
-            bool_value=_DEFERRED_VALUE,
+            is_scalar_bool=is_scalar_bool,
+            bool_value=bool_value,
         )
 
     def tensor_ref(
@@ -1023,7 +1215,8 @@ class PaddleBackend:
         value: object,
         site: ReservedLabel,
     ) -> tuple[object, tuple[FireResult, ...]]:
-        """Return Paddle values unchanged because live intervention is out of scope."""
+        """Return values unchanged; Paddle applies live interventions in
+        ``emit_paddle_operation``, not through the shared-orchestration hook."""
 
         del session, site
         return value, ()
@@ -1077,14 +1270,12 @@ class PaddleBackend:
         """Return the Paddle capture policy for one event."""
 
         return CapturePolicy(
-            must_keep_topology=True,
-            save_payload=bool(getattr(session, "save_raw_activations", True)),
-            requires_isolation=False,
-            save_args=False,
-            save_code=bool(getattr(session, "save_code_context", False)),
-            save_rng=False,
+            # Paddle preview is full-save only: entry policy refuses
+            # save_raw_activations=False, so payload saving is unconditional
+            # here (a dynamic read would be dead code implying a capability
+            # the entry gate denies).
+            save_payload=True,
             save_grad=False,
-            stream=False,
         )
 
     def _build_source_event(
@@ -1251,6 +1442,7 @@ class PaddleBackend:
             transform_fn_qualname=None,
             transform_fn_source=None,
             unattributed_tensor_args=(),
+            dropped_edge_tensor_args=(),
             is_output_parent=False,
             has_internal_source_ancestor=not is_input and not parents,
             internal_source_ancestors=frozenset(),
@@ -1402,29 +1594,25 @@ class PaddleBackend:
             label = self.tensor_store.get_label(value)
             if label is None:
                 continue
-            trace.output_layers.append(label)
-            event = trace.capture_events.op_event_by_label_raw.get(label)
-            if event is None:
-                continue
-            updated = replace(event, is_output_parent=True)
-            trace.capture_events.op_event_by_label_raw[label] = updated
-            for index, candidate in enumerate(trace.capture_events.op_events):
-                if candidate.label_raw == label:
-                    trace.capture_events.op_events[index] = updated
-                    trace.capture_events.live_index.replace(updated)
-                    break
+            mark_output_label(trace, label)
 
     def _finish_trace(self, trace: Trace, module_tree: PaddleModuleTree | None = None) -> None:
         """Finalize a manually captured Paddle Trace."""
 
+        # The Paddle validation sidecar (``trace._paddle_op_captures``) is keyed
+        # by RAW capture labels, which recurrence grouping never rewrites: raw
+        # labels stay resolvable through ``_label_raw``/``lookup_keys`` and the
+        # coverage oracle compares graph parents in raw-label space, so no
+        # relabel hook is needed here.
         finalize_single_pass_trace(
             trace,
             backend_name=self.name,
             module_tree=module_tree,
             attach_function_root_module=attach_function_root_module,
             attach_object_module_logs=self._attach_object_module_logs,
-            attach_op_params=_attach_paddle_op_params_for_finalize,
+            attach_op_params=attach_module_owned_op_params,
             count_layers_with_attached_params=True,
+            recurrence_detection=bool(getattr(trace, "recurrence_detection", False)),
         )
 
     def _attach_object_module_logs(self, trace: Trace, tree: PaddleModuleTree) -> None:
@@ -1433,7 +1621,7 @@ class PaddleBackend:
         attach_object_module_logs(
             trace,
             tree,
-            normalize_module_calls=_paddle_op_module_calls,
+            normalize_module_calls=normalize_op_module_calls,
             metadata_top_level=_paddle_metadata_top_level,
             op_top_level=_paddle_op_top_level,
             training_mode=_paddle_training_mode,
@@ -1547,7 +1735,7 @@ def paddle_param_logs(tree: PaddleModuleTree, trace: Trace) -> dict[str, Param]:
             has_optimizer=None,
         )
         param.dtype_ref = DtypeRef(backend="paddle", name=dtype)
-        param.device_ref = DeviceRef(backend="paddle", name=str(getattr(value, "place", None)))
+        param.device_ref = _device_ref_from_paddle_place(getattr(value, "place", None))
         param.backend_address = f"object:{existing_address}"
         param.resolver_status = "resolved"
         param._param_ref = cast(Any, value)
@@ -1557,75 +1745,6 @@ def paddle_param_logs(tree: PaddleModuleTree, trace: Trace) -> dict[str, Param]:
         )
         param_logs[existing_address] = param
     return param_logs
-
-
-def _attach_paddle_op_params(
-    op_log: Any,
-    param_logs: ParamAccessor,
-    seen_param_barcodes: set[str],
-) -> None:
-    """Attach Paddle module-owned parameters to a finalized op log."""
-
-    module_calls = _paddle_op_module_calls(getattr(op_log, "modules", ()))
-    if not module_calls:
-        return
-    owner = module_calls[-1][0]
-    params = [
-        param
-        for param in param_logs
-        if param.module_address == owner and param.barcode not in seen_param_barcodes
-    ]
-    if not params:
-        return
-    op_log._param_logs = params
-    op_log._param_barcodes = [param.barcode for param in params]
-    op_log.param_shapes = [param.shape for param in params]
-    op_log.num_params = sum(param.num_params for param in params)
-    op_log.num_params_trainable = sum(param.num_params for param in params if param.is_trainable)
-    op_log.num_params_frozen = sum(param.num_params for param in params if not param.is_trainable)
-    op_log.param_memory = sum(int(param.param_memory) for param in params)
-    seen_param_barcodes.update(param.barcode for param in params)
-
-
-def _attach_paddle_op_params_for_finalize(
-    op_log: Any,
-    trace: Trace,
-    seen_param_barcodes: set[str],
-) -> None:
-    """Attach Paddle params through the shared finalization hook.
-
-    Parameters
-    ----------
-    op_log:
-        Operation log being finalized.
-    trace:
-        Trace whose parameter accessor owns Paddle param logs.
-    seen_param_barcodes:
-        Param barcodes already attached to earlier ops.
-
-    Returns
-    -------
-    None
-        Mutates ``op_log`` in place when new params are attached.
-    """
-
-    _attach_paddle_op_params(op_log, trace.param_logs, seen_param_barcodes)
-
-
-def _paddle_op_module_calls(value: Any) -> tuple[tuple[str, int], ...]:
-    """Normalize an op's raw module tuple list."""
-
-    calls: list[tuple[str, int]] = []
-    for item in value:
-        if isinstance(item, tuple) and len(item) == 2:
-            address, call_index = item
-            calls.append((str(address), int(call_index)))
-            continue
-        text = str(item)
-        address, separator, index_text = text.rpartition(":")
-        if separator and index_text.isdigit():
-            calls.append((address, int(index_text)))
-    return tuple(calls)
 
 
 def _paddle_metadata_top_level(
@@ -1651,7 +1770,7 @@ def _paddle_metadata_top_level(
     """
 
     del metadata
-    return address != "self" and _nearest_metadata_parent(address, metadata_by_address) == "self"
+    return address != "self" and nearest_metadata_parent(address, metadata_by_address) == "self"
 
 
 def _paddle_op_top_level(address: str) -> bool:
@@ -1708,18 +1827,34 @@ def _resolve_paddle_module_identity_mode(
     return module_tree is not None
 
 
-def _nearest_metadata_parent(address: str, metadata: dict[str, dict[str, Any]]) -> str | None:
-    """Return the closest existing parent address for ``address``."""
+def _device_ref_from_paddle_place(place: object) -> DeviceRef | None:
+    """Build a vocabulary-honest ``DeviceRef`` from a Paddle place.
 
-    if address == "self":
+    ``DeviceRef.backend`` is the HARDWARE device class (``"cpu"``, ``"gpu"``),
+    never the framework namespace. Paddle spells placement as ``Place(cpu)``
+    or ``Place(gpu:0)``; the canonical device string is the interior, routed
+    through :meth:`DeviceRef.from_value` like every other preview backend.
+
+    Parameters
+    ----------
+    place
+        Paddle place object, its string form, or ``None`` when unknown.
+
+    Returns
+    -------
+    DeviceRef | None
+        Neutral device reference, or ``None`` when placement is unknown.
+    """
+
+    if place is None:
         return None
-    parts = address.split(".")
-    while len(parts) > 1:
-        parts.pop()
-        candidate = ".".join(parts)
-        if candidate in metadata:
-            return candidate
-    return "self" if "self" in metadata else None
+    text = str(place)
+    if text.startswith("Place(") and text.endswith(")"):
+        text = text[len("Place(") : -1]
+    text = text.strip().lower()
+    if not text:
+        return None
+    return DeviceRef.from_value(text)
 
 
 def _alias_to_primary(tree: PaddleModuleTree) -> dict[str, str]:
@@ -1732,22 +1867,49 @@ def _alias_to_primary(tree: PaddleModuleTree) -> dict[str, str]:
     return aliases
 
 
-def _numel(shape: tuple[int, ...]) -> int:
-    """Return number of elements for ``shape``."""
+def _paddle_intervention_corroborated(trace: Trace, capture: Any, op: Any) -> bool:
+    """Return whether trace-level evidence corroborates an intervened capture.
 
-    result = 1
-    for dim in shape:
-        result *= int(dim)
-    return result
+    The capture-side ``intervention`` sidecar alone is never authority: the
+    trace must own an ARMED intervention spec (populated only by a real
+    ``trace(intervene=...)`` fire) and the materialized op must carry a
+    hook-minted ``FireRecord`` with ``replaced=True`` for every replaced
+    first-output site. Stripping any leg makes the oracle FAIL the op rather
+    than bless a replacement value presented as captured-native.
 
+    Parameters
+    ----------
+    trace
+        Paddle trace under validation.
+    capture
+        ``PaddleOpCapture`` carrying an ``intervention`` record.
+    op
+        Materialized op for ``capture.label_raw``.
 
-def _nbytes(value: object) -> int | None:
-    """Return Paddle tensor memory in bytes."""
+    Returns
+    -------
+    bool
+        True when every evidence leg is present and consistent.
+    """
 
-    try:
-        return int(value.numel()) * int(value.element_size())  # type: ignore[attr-defined]
-    except (AttributeError, TypeError, ValueError):
-        return None
+    from ...validation.invariants import _intervention_spec_is_armed
+
+    if not _intervention_spec_is_armed(getattr(trace, "_intervention_spec", None)):
+        return False
+    intervention = capture.intervention
+    if intervention is None:
+        return False
+    if intervention.raw_first_output is None:
+        return True
+    if not bool(getattr(op, "intervention_replaced", False)):
+        return False
+    for record in getattr(op, "interventions", ()) or ():
+        if not bool(getattr(record, "replaced", False)):
+            continue
+        record_call_id = getattr(record, "func_call_id", None)
+        if record_call_id is None or record_call_id == intervention.func_call_id:
+            return True
+    return False
 
 
 def _paddle_loaded_replay_unavailable(trace: Trace) -> bool:
@@ -1799,19 +1961,13 @@ def _ops_by_label(trace: Trace) -> dict[str, Any]:
     Returns
     -------
     dict[str, Any]
-        Operations keyed by known labels.
+        Operations keyed by known labels, with the recurrence-safe key
+        precedence documented on the validation-module implementation.
     """
 
-    result: dict[str, Any] = {}
-    for op in getattr(trace, "layer_list", ()):
-        for label in (
-            getattr(op, "_label_raw", None),
-            getattr(op, "layer_label", None),
-            getattr(op, "label", None),
-        ):
-            if isinstance(label, str):
-                result[label] = op
-    return result
+    from .validation import _ops_by_label as _validation_ops_by_label
+
+    return _validation_ops_by_label(trace)
 
 
 def _paddle_capture_is_factory_or_source(capture: Any) -> bool:
@@ -1891,10 +2047,57 @@ def _default_if_missing(value: Any, default: Any) -> Any:
     return default if value is MISSING else value
 
 
+def _replace_paddle_tensors_at_paths(
+    output: Any,
+    replacements: Mapping[tuple[Any, ...], Any],
+    path: tuple[Any, ...] = (),
+) -> Any:
+    """Rebuild an output container with replacement tensors at leaf paths.
+
+    Parameters
+    ----------
+    output
+        Original wrapped-call output object.
+    replacements
+        Replacement tensors keyed by ``_iter_tensors_with_paths`` paths.
+    path
+        Current container path during recursion.
+
+    Returns
+    -------
+    Any
+        Output object with replacements substituted; untouched subtrees are
+        returned by reference.
+    """
+
+    if path in replacements:
+        return replacements[path]
+    if isinstance(output, tuple):
+        return tuple(
+            _replace_paddle_tensors_at_paths(item, replacements, (*path, index))
+            for index, item in enumerate(output)
+        )
+    if isinstance(output, list):
+        return [
+            _replace_paddle_tensors_at_paths(item, replacements, (*path, index))
+            for index, item in enumerate(output)
+        ]
+    if isinstance(output, dict):
+        return {
+            key: _replace_paddle_tensors_at_paths(item, replacements, (*path, key))
+            for key, item in output.items()
+        }
+    return output
+
+
 def _reject_extra_kwargs(extra_kwargs: dict[str, Any]) -> None:
     """Reject explicit unsupported public kwargs that reach Paddle capture."""
 
-    reject_extra_trace_kwargs(extra_kwargs, PADDLE_EXTRA_KWARG_POLICY)
+    reject_extra_trace_kwargs(
+        extra_kwargs,
+        PADDLE_EXTRA_KWARG_POLICY,
+        spec=get_backend_spec("paddle"),
+    )
 
 
 class _PaddleIntermediateTapObserver:
@@ -2185,7 +2388,7 @@ def _records_for_paddle_leaf_grads(
     """
 
     records: dict[str, DerivedGradRecord] = {}
-    for leaf, grad in zip(leaves, grads):
+    for leaf, grad in zip(leaves, grads, strict=True):
         if grad is None:
             continue
         records[leaf.path] = DerivedGradRecord(
@@ -2222,6 +2425,17 @@ def _paddle_trace_intermediate_signatures(
     """
 
     groups: dict[PaddleIntermediateSignature, list[Any]] = defaultdict(list)
+    # Replay-side signatures speak RAW label space (the tap observer labels
+    # values with ``_label_raw``). Recurrence grouping rewrites ``op.parents``
+    # to final pass-qualified labels, so parents are resolved back to raw
+    # space before signature construction; an unresolvable parent keeps its
+    # literal label and simply never matches.
+    final_to_raw = {
+        str(getattr(op, "label", "")): str(getattr(op, "_label_raw", ""))
+        for op in getattr(trace, "layer_list", ())
+        if isinstance(getattr(op, "label", None), str)
+        and isinstance(getattr(op, "_label_raw", None), str)
+    }
     for op in getattr(trace, "layer_list", ()):
         if bool(getattr(op, "is_input", False)) or not bool(
             getattr(op, "has_saved_activation", False)
@@ -2232,7 +2446,9 @@ def _paddle_trace_intermediate_signatures(
         signature = PaddleIntermediateSignature(
             func_call_id=int(getattr(op, "func_call_id", 0)),
             op_name=str(getattr(op, "func_name", "")),
-            parent_labels=tuple(str(parent) for parent in getattr(op, "parents", ())),
+            parent_labels=tuple(
+                final_to_raw.get(str(parent), str(parent)) for parent in getattr(op, "parents", ())
+            ),
             module_stack=tuple(str(module) for module in getattr(op, "modules", ())),
         )
         groups[signature].append(op)
@@ -2423,11 +2639,13 @@ def _paddle_trees_close(backend: PaddleBackend, left: Any, right: Any) -> bool:
         )
     if isinstance(left, tuple) and isinstance(right, tuple) and len(left) == len(right):
         return all(
-            _paddle_trees_close(backend, l_item, r_item) for l_item, r_item in zip(left, right)
+            _paddle_trees_close(backend, l_item, r_item)
+            for l_item, r_item in zip(left, right, strict=True)
         )
     if isinstance(left, list) and isinstance(right, list) and len(left) == len(right):
         return all(
-            _paddle_trees_close(backend, l_item, r_item) for l_item, r_item in zip(left, right)
+            _paddle_trees_close(backend, l_item, r_item)
+            for l_item, r_item in zip(left, right, strict=True)
         )
     if isinstance(left, dict) and isinstance(right, dict) and set(left) == set(right):
         return all(_paddle_trees_close(backend, left[key], right[key]) for key in left)
@@ -2452,38 +2670,19 @@ def _paddle_values_close(left: Any, right: Any) -> bool:
 
     import numpy as np
 
+    from .validation import _arrays_close
+
     if tuple(getattr(left, "shape", ())) != tuple(getattr(right, "shape", ())):
         return False
     if str(getattr(left, "dtype", "")) != str(getattr(right, "dtype", "")):
         return False
-    left_array = left.numpy()
-    right_array = right.numpy()
-    if _is_float_dtype_text(str(getattr(left, "dtype", ""))):
-        return bool(np.allclose(left_array, right_array, rtol=1e-5, atol=1e-6, equal_nan=True))
-    return bool(np.array_equal(left_array, right_array))
-
-
-def _callable_identity(func: Callable[..., Any] | None) -> str | None:
-    """Return a stable best-effort callable identity string.
-
-    Parameters
-    ----------
-    func
-        Callable or ``None``.
-
-    Returns
-    -------
-    str | None
-        Human-readable callable identity.
-    """
-
-    if func is None:
-        return None
-    module = getattr(func, "__module__", None)
-    qualname = getattr(func, "__qualname__", None)
-    if module and qualname:
-        return f"{module}.{qualname}"
-    return repr(func)
+    # Delegate to this backend's replay-validation oracle core: per-dtype
+    # ULP-derived bands with ``atol = rtol * finfo.tiny`` and the equal_nan
+    # doctrine, plus exact comparison for the bf16-as-uint16 NumPy transport.
+    # The former dtype-blind fp32 pair (rtol 1e-5 / atol 1e-6) blessed fp64
+    # corruption ~4.5e9 of its own ULPs and TOTAL corruption of every element
+    # below 1e-6, while false-failing one-ULP fp16 storage rounding.
+    return _arrays_close(np.asarray(left.numpy()), np.asarray(right.numpy()))
 
 
 __all__ = ["GradOptions", "PaddleBackend", "PaddleOpCapture", "TensorLeafCapture"]

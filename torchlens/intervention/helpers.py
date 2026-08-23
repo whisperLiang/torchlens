@@ -8,6 +8,7 @@ from typing import Any, cast
 import torch
 from torch import nn
 
+from .._errors import InvalidArgumentError
 from .errors import (
     AxisAmbiguityError,
     HookValueError,
@@ -678,34 +679,6 @@ def splice_module(
     )
 
 
-def _first_tensor_input(
-    args: tuple[Any, ...],
-    kwargs: Mapping[str, Any],
-) -> torch.Tensor | None:
-    """Return the first tensor from captured call inputs.
-
-    Parameters
-    ----------
-    args:
-        Captured positional inputs.
-    kwargs:
-        Captured keyword inputs.
-
-    Returns
-    -------
-    torch.Tensor | None
-        First tensor input, or ``None`` when no tensor was captured.
-    """
-
-    for value in args:
-        if isinstance(value, torch.Tensor):
-            return value
-    for value in kwargs.values():
-        if isinstance(value, torch.Tensor):
-            return value
-    return None
-
-
 def bwd_hook(fn: Callable[..., torch.Tensor]) -> HelperSpec:
     """Create a live/rerun-only backward hook helper.
 
@@ -1067,7 +1040,6 @@ def _helper_spec(
 def helper_from_serialized(
     data: dict[str, Any],
     *,
-    tensor_loader: Callable[[str], torch.Tensor],
     import_resolver: Callable[[str], Callable[..., Any]],
     value_decoder: Callable[[Any], Any],
 ) -> HelperSpec | Callable[..., Any]:
@@ -1077,8 +1049,6 @@ def helper_from_serialized(
     ----------
     data:
         JSON-decoded helper payload.
-    tensor_loader:
-        Callable mapping tensor reference IDs to loaded tensors.
     import_resolver:
         Callable resolving ``module:qualname`` import references.
     value_decoder:
@@ -1091,11 +1061,7 @@ def helper_from_serialized(
         only understands ``__tensor_ref__`` would silently return every other
         wrapper as a raw dict, corrupting callable/opaque helper arguments until the
         corrupted helper crashes several frames downstream at fire time -- the exact
-        failure mode this parameter has no default for. See ``_decode_jsonish``
-        (retained only as the fixture pinning that gap for
-        ``test_decode_gap_would_have_returned_raw_dict``; it is never called from
-        production code) for the narrow decoder this parameter must never fall back
-        to.
+        failure mode this parameter has no default for.
 
     Returns
     -------
@@ -1145,7 +1111,50 @@ def helper_from_serialized(
     opaque_arg = _first_non_executable_arg(args, kwargs)
     if opaque_arg is not None:
         return _non_executable_builtin_placeholder(name, opaque_arg, data)
+    return rebuild_builtin_helper(name, args, kwargs)
+
+
+def rebuild_builtin_helper(
+    name: str, args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> HelperSpec:
+    """Rebuild one builtin helper spec through its public constructor.
+
+    The single builtin-name registry shared by ``.tlspec`` intervention-spec
+    loads and ``HelperSpec`` pickle restore: a builtin helper's runtime hook
+    factory is a local closure (never serialized), so both restore paths
+    re-derive the whole spec from its stable ``(name, args, kwargs)``
+    identity by re-invoking the constructor.
+
+    Parameters
+    ----------
+    name:
+        Builtin helper name.
+    args:
+        Positional constructor arguments.
+    kwargs:
+        Keyword constructor arguments.
+
+    Returns
+    -------
+    HelperSpec
+        Freshly constructed builtin helper spec.
+
+    Raises
+    ------
+    InvalidArgumentError
+        If ``name`` is not a known builtin helper.
+    """
+
+    # Local import: ``add``/``replace_with`` live in ``predicates`` (which
+    # imports this module), so a module-level import would cycle. They mint
+    # portability="builtin" specs like every entry below, and their absence
+    # here made a saved/pickled spec a dead artifact (R10-1: save succeeded,
+    # load raised intervention_helper_unknown).
+    from .predicates import add, replace_with
+
     constructors: dict[str, Callable[..., HelperSpec]] = {
+        "add": add,
+        "replace_with": replace_with,
         "zero_ablate": zero_ablate,
         "mean_ablate": mean_ablate,
         "resample_ablate": resample_ablate,
@@ -1165,7 +1174,12 @@ def helper_from_serialized(
         "grad_scale": grad_scale,
     }
     if name not in constructors:
-        raise ValueError(f"Unknown builtin helper {name!r}")
+        raise InvalidArgumentError(
+            f"Builtin intervention helper {name!r} is unknown",
+            code="intervention_helper_unknown",
+            remedy=f"choose one of {', '.join(sorted(constructors))}",
+            argument="name",
+        )
     return constructors[name](*args, **kwargs)
 
 
@@ -1207,6 +1221,8 @@ def _first_non_executable_arg(args: tuple[Any, ...], kwargs: Mapping[str, Any]) 
     """
 
     def _scan(value: Any) -> Any | None:
+        """Depth-first search for the first non-executable placeholder in one value."""
+
         if _is_non_executable_placeholder(value):
             return value
         if isinstance(value, (list, tuple)):
@@ -1284,43 +1300,6 @@ def _non_executable_builtin_placeholder(
         batch_independent=bool(data.get("batch_independent", False)),
         compatible_with_append=bool(data.get("compatible_with_append", False)),
     )
-
-
-def _decode_jsonish(value: Any, tensor_loader: Callable[[str], torch.Tensor]) -> Any:
-    """QUARANTINED -- narrow legacy decoder, dead on every maintained code path.
-
-    This only understands the ``__tensor_ref__`` wrapper tag; every other wrapper
-    ``_serialize_value``/``save.py`` can emit (``__callable__``, ``__helper__``,
-    ``__opaque_audit__``, ``__output_path_component__``, ``__dict_items__``) passes
-    through unchanged as a raw dict -- silently corrupting callable/opaque helper
-    arguments. ``helper_from_serialized`` used to fall back to this decoder when
-    its ``value_decoder`` parameter was omitted; that default was removed (cert9)
-    because it re-triggered the exact BLOCKER-2 corruption class the maintained
-    ``save.py`` load path closed. Nothing in production calls this function anymore
-    -- it is retained ONLY so ``test_decode_gap_would_have_returned_raw_dict`` can
-    keep pinning the failure mode ``value_decoder`` exists to prevent. Do not wire
-    this back in as a fallback for any decoder parameter.
-
-    Parameters
-    ----------
-    value:
-        JSON-decoded value.
-    tensor_loader:
-        Callable resolving tensor refs.
-
-    Returns
-    -------
-    Any
-        Runtime value.
-    """
-
-    if isinstance(value, dict) and "__tensor_ref__" in value:
-        return tensor_loader(str(value["__tensor_ref__"]))
-    if isinstance(value, list):
-        return [_decode_jsonish(item, tensor_loader) for item in value]
-    if isinstance(value, dict):
-        return {key: _decode_jsonish(item, tensor_loader) for key, item in value.items()}
-    return value
 
 
 def _make_generator(seed: int | None) -> torch.Generator | None:
@@ -1481,3 +1460,65 @@ __all__ = [
     "swap_with",
     "zero_ablate",
 ]
+
+
+def patch_from(source: Any) -> HelperSpec:
+    """Create a helper that patches site values from another trace's capture.
+
+    For each targeted site, the replacement value is the SOURCE trace's
+    recorded post-capture value at that same site (same-trace alignment is
+    exact by construction: same index spaces). Combined with a Selection
+    target, only the selected elements are patched (the engine's
+    edit-then-scatter contract).
+
+    PORTABILITY: ``opaque_audit`` (the shipped rule) — the spec's persisted
+    args carry the source-trace IDENTITY (label + class + a stable id), never
+    the ``Trace`` object and never tensor payloads; the values themselves are
+    bound at ``do()`` time session-side, with the resolved-intervention audit
+    record as the artifact carrier. Saving a patch-intervened trace persists
+    an audit-only spec; no executable-save path exists for it in v1.
+
+    DOCUMENTED-UNSTABLE spelling pending its naming-session ratification.
+    """
+
+    identity = {
+        "source_trace_label": str(getattr(source, "trace_label", "") or ""),
+        "source_model_class": str(getattr(source, "model_class_qualname", "") or ""),
+        "source_object_id": str(id(source)),
+    }
+
+    def factory() -> Callable[..., torch.Tensor]:
+        """Return the runtime hook binding source values at fire time."""
+
+        def _hook(out: torch.Tensor, *, hook: HookContext) -> torch.Tensor:
+            """Return the source trace's recorded value for this site."""
+
+            site_label = hook.layer_log.get("layer_label") if hook.layer_log else None
+            source_site = None
+            if site_label is not None:
+                source_site = source.layer_dict_all_keys.get(site_label)
+            if source_site is None:
+                from .errors import HookValueError
+
+                raise HookValueError(
+                    f"patch_from source trace has no site {site_label!r}; "
+                    "patch selections must resolve on sites the source captured."
+                )
+            value = source_site.out
+            if not isinstance(value, torch.Tensor):
+                from .errors import HookValueError
+
+                raise HookValueError(f"patch_from source value at {site_label!r} is not a tensor.")
+            # Never hand the source trace's stored tensor itself downstream —
+            # the engine writes hook outputs into this trace's records.
+            return value.detach().clone()
+
+        return _hook
+
+    return _helper_spec(
+        "patch_from",
+        kwargs=identity,
+        factory=factory,
+        portability="opaque_audit",
+        batch_independent=True,
+    )

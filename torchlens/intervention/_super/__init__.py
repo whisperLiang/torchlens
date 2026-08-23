@@ -29,10 +29,17 @@ from .super_logs import (
     SuperParam,
     SuperParamAccessor,
 )
-from .super_op import SuperLayer, SuperLayerAccessor, SuperOp, SuperOpAccessor, TraceAccessor
-
+from .super_op import (
+    SuperAtenOp,
+    SuperLayer,
+    SuperLayerAccessor,
+    SuperOp,
+    SuperOpAccessor,
+    TraceAccessor,
+)
 
 __all__ = [
+    "SuperAtenOp",
     "SuperBuffer",
     "SuperBufferAccessor",
     "SuperGradFn",

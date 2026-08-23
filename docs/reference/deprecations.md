@@ -64,9 +64,9 @@ unless a narrower policy is later set.
 | `log_forward_pass` | `trace` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `validate_model_activations` | `validate(scope="forward")` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `validate_saved_activations` | `validate(scope="saved")` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
-| `render_graph` | `Trace.draw()` or `show_model_graph()` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
-| `render_model_graph` | `Trace.draw()` or `show_model_graph()` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
-| `draw_model_graph` | `Trace.draw()` or `show_model_graph()` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
+| `render_graph` | `Trace.draw()` (or `torchlens.visualization.show_model_graph`, itself a moved top-level alias below) | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
+| `render_model_graph` | `Trace.draw()` (or `torchlens.visualization.show_model_graph`, itself a moved top-level alias below) | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
+| `draw_model_graph` | `Trace.draw()` (or `torchlens.visualization.show_model_graph`, itself a moved top-level alias below) | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `ModelHistory` | `Trace` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `get_model_structure` | structure trace accessors | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `show_model_structure` | structure trace accessors | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
@@ -85,6 +85,9 @@ unless a narrower policy is later set.
 | `draw_backward` | `torchlens.visualization.draw_backward` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `draw_combined` | `torchlens.visualization.draw_combined` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `load_intervention_spec` | `torchlens.io.load_intervention_spec` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
+| `ModuleInputSnapshot` | `torchlens.types.ModuleInputSnapshot` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
+| `PreHookEffect` | `torchlens.types.PreHookEffect` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
+| `TensorInputObservation` | `torchlens.types.TensorInputObservation` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 
 ## Capture And Option Keyword Aliases
 
@@ -95,7 +98,7 @@ unless a narrower policy is later set.
 | `random_seed` | grouped capture options | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `save_grads` | backward capture options | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `vis_node_mode` | `node_style` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
-| `vis_opt` | `vis_mode` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
+| `vis_opt` | `view` (full alias chain `vis_opt` -> `vis_mode` -> `view`; the warning names `view`) | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | flat `CaptureOptions` fields | grouped option fields | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `mark_layer_depths` | `capture.compute_input_output_distances` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
 | `num_context_lines` | `capture.source_context_lines` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
@@ -116,10 +119,27 @@ unless a narrower policy is later set.
 
 | Old name | New name | Since-version | Planned removal |
 | --- | --- | --- | --- |
-| `record(keep_op=...)` | `record(save=...)` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
-| `record(keep_module=...)` | `record(save=...)` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
-| `Recorder(keep_op=...)` | `Recorder(save=...)` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
-| `Recorder(keep_module=...)` | `Recorder(save=...)` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
+| `record(keep_op=...)` | `record(save=...)` | REMOVED (predicate consolidation) | removed; raises TypeError |
+| `record(keep_module=...)` | no equivalent; see note below | REMOVED (predicate consolidation) | removed; raises TypeError |
+| `Recorder(keep_op=...)` | `Recorder(save=...)` | REMOVED (predicate consolidation) | removed; raises TypeError |
+| `Recorder(keep_module=...)` | no equivalent; see note below | REMOVED (predicate consolidation) | removed; raises TypeError |
+| `dry_run(keep_op=...)` | `dry_run(save=...)` | RENAMED (predicate consolidation; was never deprecation-warned) | removed; raises TypeError |
+| `dry_run(keep_module=...)` | no equivalent; see note below | REMOVED (predicate consolidation) | removed; raises TypeError |
+
+**`keep_module` note (honest capability statement).** Predicate-gated
+module-event selection was REMOVED, not migrated: `save=` routes to the op
+predicate only, and `default_module=` records ALL module enter/exit boundary
+events uniformly — it is not a per-module predicate. A module predicate passed
+via `save=` selects zero module events. The internal `keep_module` options
+slot and its two public simulators were deleted with it
+(`Trace.preview_fastlog(keep_module=...)` and
+`RecordingTrace.repredicate(other_keep_module=...)` no longer accept module
+predicates; both raise `TypeError`), so no surface simulates a configuration
+that capture cannot produce.
+
+`record(save=...)` and `dry_run(save=...)` now default to `None` (previously an
+internal `MISSING` sentinel that existed only to arbitrate against the removed
+`keep_op=` alias); omitted and `save=None` are equivalent.
 
 ## Trace And Conditional Aliases
 

@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import pathlib
 import textwrap
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any
 
 import matplotlib.pyplot as plt
 from PIL import Image
@@ -43,9 +44,9 @@ class Panel:
     method: str = "draw"  # 'draw' | 'draw_backward' | 'draw_combined'
     kwargs: dict = field(default_factory=dict)
     trace_variant: str = "plain"  # 'plain' | 'backward' | custom key
-    trace_builder: Optional[Callable[[], Any]] = None  # overrides default trace
-    kwargs_fn: Optional[Callable[[Any], dict]] = None  # trace -> extra kwargs
-    subtitle_fn: Optional[Callable[[Any], str]] = None  # trace -> subtitle
+    trace_builder: Callable[[], Any] | None = None  # overrides default trace
+    kwargs_fn: Callable[[Any], dict] | None = None  # trace -> extra kwargs
+    subtitle_fn: Callable[[Any], str] | None = None  # trace -> subtitle
 
 
 @dataclass
@@ -58,7 +59,7 @@ class Page:
     panels: list[Panel] = field(default_factory=list)
     covers: list[str] = field(default_factory=list)  # coverage-axis tags
     ncols: int = 0  # 0 = auto (1->1, 2->2, else 3)
-    text_fn: Optional[Callable[[], str]] = None  # text-only page body
+    text_fn: Callable[[], str] | None = None  # text-only page body
     notes: str = ""  # extra coverage-matrix notes
 
 
@@ -91,7 +92,7 @@ def compose_page(
     header_right: str,
     title: str,
     caption: str,
-    panel_items: list[tuple[str, Optional[pathlib.Path], str]],
+    panel_items: list[tuple[str, pathlib.Path | None, str]],
     ncols: int = 0,
 ) -> None:
     """Compose one page PDF.
@@ -111,7 +112,7 @@ def compose_page(
     ncols = min(ncols, max(n, 1))
 
     # --- measure images ---
-    images: list[Optional[Image.Image]] = []
+    images: list[Image.Image | None] = []
     for _sub, path, _err in panel_items:
         img = None
         if path is not None and path.exists():
@@ -127,7 +128,7 @@ def compose_page(
     # Row packing: an image whose natural size (~100 dpi) is much wider than a
     # grid cell gets its own FULL-WIDTH row -- squeezing wide graphs into a
     # grid cell renders them illegible, which defeats the page.
-    def _is_wide(img: Optional[Image.Image]) -> bool:
+    def _is_wide(img: Image.Image | None) -> bool:
         return ncols > 1 and img is not None and (img.width / 100.0) > panel_w_in * 1.55
 
     rows: list[list[int]] = []

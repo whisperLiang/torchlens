@@ -13,8 +13,11 @@ from .frontier import (
     classify_boundary_role,
     make_boundary_schema,
 )
-from .graph import SplitTraceGraph, SplitTraceNode
-from .graph import iter_replay_value_refs as _walk_replay_value_refs
+from .graph import (
+    SplitTraceGraph,
+    SplitTraceNode,
+    iter_replay_value_refs as _walk_replay_value_refs,
+)
 from .ir import BoundarySchema, SplitRequest
 
 BoundaryKind = Literal["after", "before"]

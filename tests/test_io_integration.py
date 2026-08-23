@@ -7,17 +7,17 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import safetensors  # noqa: F401
 import torch
 from torch import nn
 
 pd = pytest.importorskip("pandas")
-pytest.importorskip("safetensors")
 
 import torchlens as tl  # noqa: E402
-from torchlens import load, trace as trace_fn, save  # noqa: E402
-from torchlens.io import rehydrate_nested  # noqa: E402
+from torchlens import load, save, trace as trace_fn  # noqa: E402
 from torchlens._io import BlobRef  # noqa: E402
 from torchlens.data_classes.trace import Trace  # noqa: E402
+from torchlens.io import rehydrate_nested  # noqa: E402
 
 PYARROW_AVAILABLE = importlib.util.find_spec("pyarrow") is not None
 
@@ -267,9 +267,11 @@ def test_streaming_keep_outs_in_memory_true_keeps_tensor_and_ref(tmp_path: Path)
         assert layer.out_ref is not None
 
 
+@pytest.mark.rare
+@pytest.mark.skip(
+    reason="[2026-08-15] deliberate placeholder: torchlens is single-process by design, "
+    "so no DataParallel/DDP streaming capture exists to test; this entry documents the "
+    "absent coverage and is ledgered in tests/test_skip_audit.py (UNCONDITIONAL_SKIP_LEDGER)"
+)
 def test_data_parallel_and_ddp_streaming_case_is_explicitly_skipped() -> None:
-    """TorchLens streaming coverage intentionally skips parallel-process wrappers."""
-
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
-    pytest.skip("torchlens is single-process; DataParallel/DDP streaming coverage is skipped")
+    """Placeholder documenting that parallel-process streaming coverage is absent."""

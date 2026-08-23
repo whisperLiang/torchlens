@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from v2_helpers import split_request
-
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
 from torch import nn
+from v2_helpers import split_request
 
 import torchlens as tl
 from torchlens.split.adapters.torch import TorchSplitAdapter

@@ -18,6 +18,7 @@ from ..ir.container import (
     TupleIndex,
     rebuild_container_from_spec,
 )
+from ..selection import _SelectionOperand
 
 GraphShapeHash: TypeAlias = str
 InterventionAction: TypeAlias = Literal["replace", "add_hook", "scale", "transform"]
@@ -65,6 +66,29 @@ def _freeze_value(value: Any) -> Any:
     return value
 
 
+def _freeze_stable(value: Any) -> bool:
+    """Return whether ``_freeze_value(value)`` is invariant while ``value`` is held.
+
+    Parameters
+    ----------
+    value:
+        Candidate selector value.
+
+    Returns
+    -------
+    bool
+        False when the value reaches a built-in dict/list/set whose contents
+        ``_freeze_value`` snapshots (in-place mutation would stale a cached
+        freeze), True for pass-through and tuple-of-stable values.
+    """
+
+    if isinstance(value, dict | list | set | frozenset):
+        return False
+    if isinstance(value, tuple):
+        return all(_freeze_stable(item) for item in value)
+    return True
+
+
 @dataclass
 class TargetSpec:
     """Mutable internal selector target specification."""
@@ -75,7 +99,7 @@ class TargetSpec:
     slice_spec: TensorSliceSpec | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def freeze(self) -> "FrozenTargetSpec":
+    def freeze(self) -> FrozenTargetSpec:
         """Return an immutable view of this target spec.
 
         Returns
@@ -84,7 +108,23 @@ class TargetSpec:
             Frozen target spec with shallow-frozen metadata.
         """
 
-        return FrozenTargetSpec(
+        # Dedup scans over spec.targets refreeze both sides per pair, which is
+        # quadratic in unique targets. The cache is only stored for specs whose
+        # freeze output cannot drift under in-place mutation (empty metadata,
+        # snapshot-free selector_value) and is only returned while every field
+        # still holds the exact cached value, so a hit is byte-identical to a
+        # fresh freeze.
+        cached = self.__dict__.get("_tl_frozen_cache")
+        if (
+            cached is not None
+            and not self.metadata
+            and cached[0] is self.selector_value
+            and cached[1] == self.selector_kind
+            and cached[2] is self.strict
+            and cached[3] is self.slice_spec
+        ):
+            return cached[4]
+        frozen = FrozenTargetSpec(
             selector_kind=self.selector_kind,
             selector_value=_freeze_value(self.selector_value),
             strict=self.strict,
@@ -94,6 +134,22 @@ class TargetSpec:
                 for key, value in sorted(self.metadata.items(), key=lambda pair: repr(pair[0]))
             ),
         )
+        if not self.metadata and _freeze_stable(self.selector_value):
+            self.__dict__["_tl_frozen_cache"] = (
+                self.selector_value,
+                self.selector_kind,
+                self.strict,
+                self.slice_spec,
+                frozen,
+            )
+        return frozen
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Return picklable state without the transient freeze cache."""
+
+        state = dict(self.__dict__)
+        state.pop("_tl_frozen_cache", None)
+        return state
 
 
 @dataclass(frozen=True)
@@ -127,6 +183,11 @@ class HelperSpec:
         "direction": FieldPolicy.KEEP,
         "batch_independent": FieldPolicy.KEEP,
         "compatible_with_append": FieldPolicy.KEEP,
+        # L6 Query-Selection recipe family: persists as of tlspec v8 as
+        # BLOB_RECURSIVE (recipe ASTs may embed unit-term masks), with the
+        # audit digest relation validated at load. NEVER smuggled through
+        # the KEEP args/kwargs fields.
+        "selection_recipe": FieldPolicy.BLOB_RECURSIVE,
     }
 
     helper_name: str
@@ -141,6 +202,7 @@ class HelperSpec:
     direction: HelperDirection | None = None
     batch_independent: bool = False
     compatible_with_append: bool = False
+    selection_recipe: Any = field(default=None, compare=False)
 
     @property
     def name(self) -> str:
@@ -171,6 +233,62 @@ class HelperSpec:
         if self.factory is None:
             raise TypeError(f"HelperSpec {self.helper_name!r} has no hook factory")
         return self.factory()
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Return pickle state, dropping factories pickle cannot carry.
+
+        Builtin factories are local closures derived entirely from the
+        stable ``(helper_name, args, kwargs)`` identity; ``__setstate__``
+        rebuilds them through the same builtin registry ``tl.load`` uses,
+        so plain ``pickle`` and ``tl.save`` agree on helper-carrying specs.
+        ``opaque_audit`` factories (load-time raising placeholders) drop to
+        the canonical factory-less audit-only form.
+        """
+
+        state = dict(self.__dict__)
+        if self.portability in ("builtin", "opaque_audit"):
+            state["factory"] = None
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore pickle state, rebuilding a dropped builtin factory.
+
+        Raises
+        ------
+        InvalidArgumentError
+            If a builtin helper name is unknown to this torchlens (same
+            typed refusal as an intervention-spec load).
+        """
+
+        if state.get("factory") is None and state.get("portability") == "builtin":
+            from .helpers import rebuild_builtin_helper
+
+            rebuilt = rebuild_builtin_helper(
+                state["helper_name"],
+                tuple(state.get("args", ())),
+                dict(state.get("kwargs", ())),
+            )
+            state = {**state, "factory": rebuilt.factory}
+        for key, value in state.items():
+            object.__setattr__(self, key, value)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> HelperSpec:
+        """Field-wise deepcopy preserving factory identity.
+
+        Explicit so ``copy.deepcopy`` keeps its pre-pickle-hook semantics
+        (functions are deepcopy-atomic, so the factory closure is shared by
+        identity) instead of routing through ``__getstate__``'s
+        factory-dropping pickle path.
+        """
+
+        import copy as _copy
+
+        cls = type(self)
+        clone = cls.__new__(cls)
+        memo[id(self)] = clone
+        for key, value in self.__dict__.items():
+            object.__setattr__(clone, key, _copy.deepcopy(value, memo))
+        return clone
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,7 +359,7 @@ class LiteralTensor:
     """
 
     value: Any
-    param_barcode: "str | None" = None
+    param_barcode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -295,6 +413,9 @@ class FireRecord:
         "grad_kind": FieldPolicy.KEEP,
         "tuple_index": FieldPolicy.KEEP,
         "replaced": FieldPolicy.KEEP,
+        # L6 stage 3: (child_func_call_id, arg_kind, arg_path) occurrence
+        # address on edge-substitution FireRecords; persists as of tlspec v8.
+        "edge_address": FieldPolicy.KEEP,
     }
 
     target_label: str = ""
@@ -314,12 +435,20 @@ class FireRecord:
     call_index: int | None = None
     grad_kind: Literal["grad_input", "grad_output"] | None = None
     tuple_index: int | None = None
+    edge_address: tuple | None = None
     replaced: bool | None = None
 
 
 @dataclass(frozen=True)
-class EdgeUseRecord:
-    """Provenance for one parent tensor use by a child operation."""
+class EdgeUseRecord(_SelectionOperand):
+    """Provenance for one parent tensor use by a child operation.
+
+    The canonical occurrence address is ``(child_func_call_id, arg_kind,
+    arg_path)`` — stable within a trace and across its save/load. Records are
+    region-shaped producers: ``__selection__`` lifts one edge occurrence as
+    an EDGE-kind selection (whole-edge granularity), so edge sets compose
+    with the ``| & - ~`` algebra.
+    """
 
     parent_label: str
     child_label: str
@@ -330,6 +459,13 @@ class EdgeUseRecord:
     child_func_call_id: int
     edge_use: str = "arg"
 
+    def __selection__(self) -> Any:
+        """Lift this edge occurrence as an EDGE selection term."""
+
+        from ..selection import _selection_from_edge
+
+        return _selection_from_edge(self)
+
 
 @dataclass
 class TargetValueSpec:
@@ -339,7 +475,7 @@ class TargetValueSpec:
     value: Any
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def freeze(self) -> "FrozenTargetValueSpec":
+    def freeze(self) -> FrozenTargetValueSpec:
         """Return an immutable view of this value replacement.
 
         Returns
@@ -374,7 +510,7 @@ class HookSpec:
     handle: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def freeze(self) -> "FrozenHookSpec":
+    def freeze(self) -> FrozenHookSpec:
         """Return an immutable view of this sticky hook spec.
 
         Returns
@@ -532,7 +668,7 @@ class InterventionSpec:
 
         self.hook_specs.clear()
 
-    def freeze(self) -> "FrozenInterventionSpec":
+    def freeze(self) -> FrozenInterventionSpec:
         """Return an immutable public view of this intervention spec.
 
         Returns
@@ -675,7 +811,7 @@ def _build_trace_fork_policy() -> dict[str, ForkFieldPolicy]:
 
     from ..constants import MODEL_LOG_FIELD_ORDER
 
-    return _fork_policy_table(
+    table = _fork_policy_table(
         MODEL_LOG_FIELD_ORDER,
         share={
             "activation_transform",
@@ -685,8 +821,20 @@ def _build_trace_fork_policy() -> dict[str, ForkFieldPolicy]:
             "_source_model_ref",
             "_optimizer",
         },
-        reconstruct={"parent_run"},
+        # A fork never inherits the parent's settled capture outcome: the
+        # fork is the sanctioned MUTATION surface, so carrying the parent's
+        # blessed attestation by identity would let a hand-edited fork save
+        # as a bit-identical attested COMPLETE. ``build_fork`` settles a
+        # DERIVED outcome via ``capture.outcome.stamp_forked`` instead.
+        reconstruct={"parent_run", "_capture_outcome"},
     )
+    # `_trace_core` (the columnar op row store) is not in MODEL_LOG_FIELD_ORDER
+    # (private runtime storage, FieldPolicy.DROP). The generic field pass
+    # reconstructs (drops) it; the M11 COW fork builder installs the forked
+    # core (per-fork store views over the shared sealed base) explicitly
+    # after the field pass.
+    table["_trace_core"] = ForkFieldPolicy.FORK_RECONSTRUCT
+    return table
 
 
 def _build_op_log_fork_policy() -> dict[str, ForkFieldPolicy]:
@@ -727,7 +875,16 @@ def _build_op_log_fork_policy() -> dict[str, ForkFieldPolicy]:
 MODEL_LOG_FIELD_FORK_POLICY = _build_trace_fork_policy()
 LAYER_PASS_LOG_FIELD_FORK_POLICY = _build_op_log_fork_policy()
 
+#: Public edit-object type (slate 5.5, ratified subject to D7 default-keep):
+#: ``tl.Edit`` is the public spelling; ``HelperSpec`` is its deprecated alias
+#: (stable surface, no removal scheduled).
+Edit = HelperSpec
+
+# The tlspec v8 coordinated bump retired this module's S3 pre-release
+# registrations (HelperSpec.selection_recipe, FireRecord.edge_address).
+
 __all__ = [
+    "Edit",
     "CapturedArgTemplate",
     "ArgComponent",
     "ContainerSpec",

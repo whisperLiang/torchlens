@@ -7,6 +7,7 @@ from typing import Any, TypeAlias, cast
 
 import torch
 
+from .._errors import ArgumentTypeError
 from .types import HelperDirection, HelperSpec, InterventionDecision
 
 InterventionPredicateDecision: TypeAlias = (
@@ -54,14 +55,28 @@ def as_intervention_decision(
     if callable(action):
         callable_direction = direction or getattr(action, "direction", "forward")
         if callable_direction not in {"forward", "backward", "both"}:
-            raise TypeError("intervention direction must be 'forward', 'backward', or 'both'")
+            # TypeError lineage since the 2.16 intervention era: the live
+            # capture-path callers catch TypeError to convert a bad predicate
+            # result into PredicateError with op context. Distinct code from
+            # the ValueError-lineage trace-side `intervention_direction_invalid`
+            # doors so the code determines the catchable builtin.
+            raise ArgumentTypeError(
+                f"Intervention direction={callable_direction!r} is not supported",
+                code="intervention_action_direction_invalid",
+                remedy="set direction to 'forward', 'backward', or 'both'",
+                argument="direction",
+            )
         return InterventionDecision(
             action="transform",
             hook=action,
             direction=cast(HelperDirection, callable_direction),
         )
-    raise TypeError(
-        "intervention action must be InterventionDecision, HelperSpec, callable, or None"
+    raise ArgumentTypeError(
+        f"Intervention action has unsupported type {type(action).__name__}",
+        code="intervention_action_type_invalid",
+        remedy="pass an InterventionDecision, HelperSpec, callable, or None",
+        argument="action",
+        received_type=type(action).__name__,
     )
 
 
@@ -169,7 +184,17 @@ def replace_with(
 
             del hook
             replacement = value() if callable(value) else value
-            return replacement.to(device=out.device, dtype=out.dtype)
+            converted = replacement.to(device=out.device, dtype=out.dtype)
+            if converted is replacement:
+                # ``.to()`` no-ops to the SAME object when device/dtype already
+                # match, so 2+ matched sites would inject ONE shared live
+                # tensor: each fire stamps its raw label on that object and the
+                # LAST fire steals it -- downstream consumers then hang every
+                # child off the last site (wrong parents that validate clean),
+                # and chained edits at the orphaned site become silent no-ops.
+                # Mint a distinct per-fire object carrying the same value.
+                converted = replacement.clone()
+            return converted
 
         return _hook
 

@@ -129,30 +129,6 @@ def find_sdpa_op(module: Any) -> Any | None:
     return None
 
 
-def reconstructed_sdpa_value(
-    module: Any, facet: ReconstructionFacet
-) -> torch.Tensor | MissingFacet:
-    """Reconstruct and validate one SDPA-derived value.
-
-    Parameters
-    ----------
-    module:
-        TorchLens attention module record.
-    facet:
-        Facet name to reconstruct.
-
-    Returns
-    -------
-    torch.Tensor | MissingFacet
-        Reconstructed value or a missing sentinel naming the failed prerequisite.
-    """
-
-    sdpa_op = find_sdpa_op(module)
-    if sdpa_op is None:
-        return MissingFacet(f"{facet} reconstruction missing prerequisite: SDPA op.")
-    return _reconstruct_checked(module, sdpa_op, facet)
-
-
 def _as_reconstructed_spec(spec: FacetSpec) -> FacetSpec:
     """Return a computed spec marked as reconstructed.
 
@@ -262,7 +238,7 @@ def _sdpa_record(op: Any) -> SDPAReconstruction | MissingFacet:
     attn_mask = kwargs.get("attn_mask", _positional_or_default(args, 3, None))
     dropout_p = float(kwargs.get("dropout_p", _positional_or_default(args, 4, 0.0)) or 0.0)
     is_causal = bool(kwargs.get("is_causal", _positional_or_default(args, 5, False)))
-    scale = kwargs.get("scale", None)
+    scale = kwargs.get("scale")
     enable_gqa = bool(kwargs.get("enable_gqa", False))
     if scale is not None:
         scale = float(scale)
@@ -453,6 +429,21 @@ def _apply_causal_mask(scores: torch.Tensor) -> torch.Tensor:
 def _allclose_sdpa(reconstructed: torch.Tensor, target: torch.Tensor) -> bool:
     """Return whether a reconstructed tensor matches an SDPA output.
 
+    This gate decides whether a reconstructed facet (``scores`` / ``pattern``
+    / ``z`` / ``result``) is served to the user as REAL or refused as
+    ``MissingFacet``, so its tolerances are verification tolerances, not
+    formatting slack. The former hand-picked absolute floors (atol 2e-2 for
+    fp16/bf16, 1e-5 for fp32) blessed an ALL-ZERO and a SIGN-FLIPPED
+    reconstruction of any payload living below the floor -- post-softmax
+    attention values do exactly that (b4-opus F13-1, probe-proven). The pair
+    now derives from the payload dtype's replay error model
+    (``_tolerances_for_dtype``): a few storage ULPs for fp16/bf16 (fused
+    kernels accumulate wide and round once to storage) and the accumulating
+    512-ULP row for fp32/fp64 (fused-vs-unfused reduction-order drift),
+    with the absolute term at denormal scale -- it absorbs
+    bottom-of-representable-range jitter only and can never bless
+    small-normal corruption.
+
     Parameters
     ----------
     reconstructed:
@@ -463,16 +454,12 @@ def _allclose_sdpa(reconstructed: torch.Tensor, target: torch.Tensor) -> bool:
     Returns
     -------
     bool
-        Whether values match within dtype-aware tolerances.
+        Whether values match within the dtype-derived tolerances.
     """
 
-    dtype = target.dtype
-    if dtype in {torch.float16, torch.bfloat16}:
-        atol, rtol = 2e-2, 2e-2
-    elif dtype == torch.float32:
-        atol, rtol = 1e-5, 1e-4
-    else:
-        atol, rtol = 1e-6, 1e-5
+    from ..utils.tensor_utils import _tolerances_for_dtype
+
+    rtol, atol = _tolerances_for_dtype(target.dtype)
     return bool(torch.allclose(reconstructed.to(target.dtype), target, atol=atol, rtol=rtol))
 
 

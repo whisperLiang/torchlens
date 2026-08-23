@@ -14,20 +14,21 @@ research.
 
 ## Capturing Gradients
 
-Use `save_grads=` to choose which operation gradients are retained:
+Use `capture=tl.options.CaptureOptions(save_grads=...)` to choose which operation gradients
+are retained (the bare `save_grads=` kwarg is a deprecated alias that warns):
 
 ```python
-trace = tl.trace(model, x, save_grads=True)
+trace = tl.trace(model, x, capture=tl.options.CaptureOptions(save_grads=True))
 trace.log_backward(trace[trace.output_layers[0]].out.sum())
 
-relu_trace = tl.trace(model, x, save_grads=tl.func("relu"))
+relu_trace = tl.trace(model, x, capture=tl.options.CaptureOptions(save_grads=tl.func("relu")))
 relu_trace.log_backward(relu_trace[relu_trace.output_layers[0]].out.sum())
 ```
 
 `save_grads=True` saves all observed op gradients. `False` or `None` observes backward structure
 without retaining gradient tensors. Predicate expressions use the same forward selector language,
 plus backward selectors such as `tl.grad_fn(...)`, `tl.grad_fn_label(...)`,
-`tl.intervening()`, `tl.grad_input()`, `tl.grad_output()`, and `tl.in_backward_pass(k)`.
+`tl.without_op()` (formerly `tl.intervening()`, now a deprecated alias), `tl.grad_input()`, `tl.grad_output()`, and `tl.in_backward_pass(k)`.
 
 `storage=tl.to_disk(path)` streams retained gradient payloads into a `.tlspec` bundle. The
 standing trace policy can be widened or narrowed per trigger:
@@ -49,7 +50,7 @@ be either a plain leaf tensor or an `nn.Parameter` owned by an outer optimizer:
 
 ```python
 z = torch.nn.Parameter(torch.randn(1, latent_dim))
-trace = tl.trace(generator, z, save_grads=True)
+trace = tl.trace(generator, z, capture=tl.options.CaptureOptions(save_grads=True))
 
 loss = score(trace[trace.output_layers[0]].out)
 trace.log_backward(loss)
@@ -144,6 +145,28 @@ op-anchored nodes when possible. Post-forward loss-construction nodes before the
 node carry no module membership. `module_membership_source` is `"paired"`, `"inferred"`, or
 `None`.
 
+## Checkpoint Invocation Witness
+
+Non-reentrant `torch.utils.checkpoint` invocations are witnessed by capture-time TOKENS
+(DOCUMENTED-UNSTABLE surface): the patched `saved_tensors_hooks.__enter__` mints one per-trace
+ordinal token per classified `_checkpoint_hook` enter on the armed owner thread outside any
+engine invocation, and installs per-instance token-bearing pack/unpack wrappers. Pack evidence
+is count-only — the forward-side slot-to-op binding is deliberately NOT claimed (pack hooks run
+before TorchLens logs the producing op). Unpack evidence points are backward-derived: the
+grad-fn fire brackets containing them resolve through the shipped user-op pairing to L1 site-key
+candidates. The projected summary lives on `trace.checkpoint_invocation_witness` (persisted
+as of the tlspec v8 coordinated bump): token count, per-token pack counts / unpack window evidence /
+site-key candidates, degrade flags, and an evidence-scoped completeness verdict. Degrade flags
+cover: classifier unavailable, patch unavailable, exotic subclass, the unmatched-backward warn,
+the reentrant node sentinel (`CheckpointFunctionBackward` in the discovery stream — reentrant
+checkpointing is definitionally token-free), and unwitnessed checkpoint enters (paused logging,
+non-owner thread, inside an engine invocation). Any flag withdraws the affirmative
+"no checkpoint invocation observed" verdict. The private `_checkpoint_hook` class resolves
+through the compat chokepoint behind the named `HAS_CHECKPOINT_HOOK_CLASS` capability flag
+(visible in `tl.utils.doctor()` / `tl.compat.report()`); a torch without it degrades
+fail-closed — the classifier mints NO tokens, never a false one. The typed checkpoint-ambiguity refusal is an S2
+amendment (R-L9-1) and lands with the identity-read accessors once the amendment is ratified.
+
 ## Validation
 
 Backward validation checks parameter-gradient parity, module-output gradient parity through a
@@ -200,6 +223,25 @@ TF traces are forward eager-capture records only. `trace.log_backward(...)`,
 `trace.backward_passes`, `trace.saved_grad_ops`, and `op.grads` raise on JAX, MLX, tinygrad,
 Paddle, and TensorFlow traces.
 
-Future follow-ups are filed for real per-fire timing via prehooks and better implicit-boundary
-detection. Current `GradFnCall` timing is a single hook timestamp, and implicit passes are closed
-at synchronization points rather than at an engine boundary that TorchLens did not observe.
+Real per-fire timing is measured on every hooked node (universal path): a lightweight timing
+prehook and the hook entry stamp pair one `time.perf_counter()` span per fire, served LIVE by
+`trace.grad_fn_fire_timings` (DOCUMENTED-UNSTABLE spelling; keys match `trace.grad_fn_calls`,
+untimed fires read `None`, and loaded traces refuse typed with
+`grad_fn_fire_timing_unavailable` because the runtime event stream never persists). The
+persisted `GradFnCall` timing fields keep their shipped single wall-stamp values until the
+coordinated tlspec bump activates the paired monotonic semantics together with the
+`grad_fn_timing_provenance` discriminator; `backward_duration`'s nullable contract change rides
+that same bump. Implicit passes journal their close at the engine-drain boundary when torch's
+final-callback queue is available (the queued callback identity-checks its captured pass index
+and graph-task id, so a stale callback can never close a newer pass), with the
+synchronization-point backstop always armed — final callbacks skip the engine's error path, so
+the drain is opportunistic, never presumed. The close routine is a journal/scavenge/finalize
+split with the finalize guard IN-ROUTINE: the R36-1 D2H fence and the full projection never run
+inside an engine invocation; a deferred finalize runs at the next qualifying sync point or
+non-engine read, and a read from inside an engine invocation journals without materializing.
+The `BackwardPassEnd` sidecar event discloses which close path fired (`engine_drain` /
+`sync_point`, DOCUMENTED-UNSTABLE values, runtime-only in wave 2; the projected `BackwardPass`
+field was deliberately deferred at the tlspec v8 bump and waits for a future one). The engine's final-callback handle resolves through the
+compat chokepoint behind the named `HAS_AUTOGRAD_ENGINE_QUEUE_CALLBACK` capability flag
+(visible in `tl.utils.doctor()` / `tl.compat.report()`); without it every implicit close takes
+the sync-point backstop.

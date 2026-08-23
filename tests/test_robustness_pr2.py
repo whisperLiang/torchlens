@@ -25,14 +25,17 @@ from torch import nn
 
 import torchlens as tl
 from torchlens._robustness import (
+    _ITER_TENSORS_MAX_DEPTH,
+    _ITER_TENSORS_MAX_NODES,
     UnsupportedTensorVariantError,
+    VariantScanTruncationWarning,
     _is_meta_tensor,
     _is_sparse_tensor,
     _iter_tensors,
     check_model_and_input_variants,
 )
-from torchlens.options import CaptureOptions
 from torchlens.backends.torch.wrappers import unwrap_torch
+from torchlens.options import CaptureOptions
 from torchlens.utils.tensor_utils import safe_copy
 
 
@@ -250,7 +253,16 @@ def test_quantized_model_emits_warning_but_still_logs() -> None:
     # Run a tiny calibration pass so quantize() has observer stats.
     with torch.no_grad():
         model(torch.randn(8, 4))
-    torch.ao.quantization.convert(model, inplace=True)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=(
+                r"torch\.quantize_per_tensor, torch\.quantize_per_channel and other "
+                r"quantized tensor creation functions.*"
+            ),
+            category=UserWarning,
+        )
+        torch.ao.quantization.convert(model, inplace=True)
 
     x = torch.randn(2, 4)
     with warnings.catch_warnings(record=True) as caught:
@@ -271,6 +283,23 @@ def test_quantized_model_emits_warning_but_still_logs() -> None:
     quantized_ops = [op for op in log.ops if op.func_name.startswith("quantized_")]
     assert quantized_ops
     assert sum(op.flops_forward or 0 for op in quantized_ops) > 0
+
+
+def test_quantized_factory_warning_filter_does_not_exempt_torchlens_warning() -> None:
+    """Keep a same-message warning from a TorchLens module promoted to an error."""
+
+    message = (
+        "torch.quantize_per_tensor, torch.quantize_per_channel and other quantized tensor "
+        "creation functions are deprecated"
+    )
+    with pytest.raises(UserWarning, match="quantized tensor creation functions"):
+        warnings.warn_explicit(
+            message,
+            UserWarning,
+            filename="torchlens/fake.py",
+            lineno=1,
+            module="torchlens.fake",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +382,113 @@ def test_shared_tensor_tree_walker_dedupes_and_handles_cycles() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Structured refusal fields + bounded-scan honesty (fixwave-2 B8-31 / R16-8)
+# ---------------------------------------------------------------------------
+
+
+def test_variant_refusal_carries_structured_offense_fields() -> None:
+    """Callers branch on ``fields`` instead of parsing the prose bullets."""
+
+    model = _Tiny()
+    meta_x = torch.zeros(2, 4, device="meta")
+
+    with pytest.raises(UnsupportedTensorVariantError) as exc_info:
+        check_model_and_input_variants(model, meta_x, {})
+
+    fields = exc_info.value.fields
+    assert fields["code"] == "unsupported_tensor_variant"
+    assert isinstance(fields["remedy"], str) and fields["remedy"]
+    offenses = fields["offenses"]
+    assert isinstance(offenses, tuple) and offenses
+    assert all(set(offense) == {"name", "reason", "path", "shape", "dtype"} for offense in offenses)
+    assert any("meta tensor" in offense["name"] for offense in offenses)
+    assert all(offense["path"] for offense in offenses)
+
+
+def _nest(value: object, levels: int) -> object:
+    """Wrap ``value`` in ``levels`` single-element lists.
+
+    Parameters
+    ----------
+    value:
+        Innermost payload.
+    levels:
+        Number of nesting levels to add.
+
+    Returns
+    -------
+    object
+        Nested container.
+    """
+
+    for _ in range(levels):
+        value = [value]
+    return value
+
+
+def test_deeply_nested_unsupported_variant_gets_the_typed_refusal() -> None:
+    """A variant nested past the OLD 12-level bound is still refused typed.
+
+    Before the iterative rewrite the recursive walk silently stopped at 12
+    levels, so a FakeTensor at level 13+ evaded the entry guard and died RAW
+    mid-capture. The raised bound must catch it without any truncation
+    disclosure.
+    """
+
+    fake_tensor = pytest.importorskip("torch._subclasses.fake_tensor")
+    with fake_tensor.FakeTensorMode():
+        fake = torch.randn(2, 4)
+
+    nested = _nest(fake, 40)
+    assert 40 > 12
+    assert _ITER_TENSORS_MAX_DEPTH > 40
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(UnsupportedTensorVariantError) as exc_info:
+            check_model_and_input_variants(_Tiny(), nested, {})
+
+    assert exc_info.value.fields["code"] == "unsupported_tensor_variant"
+    assert any("FakeTensor" in offense["name"] for offense in exc_info.value.fields["offenses"])
+    assert not [w for w in caught if issubclass(w.category, VariantScanTruncationWarning)]
+
+
+def test_depth_truncated_scan_discloses_instead_of_silently_narrowing() -> None:
+    """Crossing the depth bound emits the one-shot truncation disclosure."""
+
+    nested = _nest(torch.randn(1), _ITER_TENSORS_MAX_DEPTH + 5)
+
+    with pytest.warns(VariantScanTruncationWarning, match="depth bound"):
+        assert list(_iter_tensors(nested)) == []
+
+
+def test_node_cap_truncated_scan_discloses_instead_of_silently_narrowing() -> None:
+    """Crossing the total-node bound emits the one-shot truncation disclosure."""
+
+    wide = [[float(i)] for i in range(_ITER_TENSORS_MAX_NODES + 10)]
+
+    with pytest.warns(VariantScanTruncationWarning, match="node bound") as record:
+        list(_iter_tensors(wide))
+
+    disclosures = [w for w in record if issubclass(w.category, VariantScanTruncationWarning)]
+    assert len(disclosures) == 1
+
+
+def test_bounded_scan_within_limits_is_silent_and_complete() -> None:
+    """A scan inside both bounds yields every tensor with no disclosure."""
+
+    tensors = [torch.randn(1) for _ in range(3)]
+    payload = {"a": tensors[0], "b": _nest(tensors[1], 30), "c": (tensors[2],)}
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        found = list(_iter_tensors(payload))
+
+    assert found == tensors
+    assert not [w for w in caught if issubclass(w.category, VariantScanTruncationWarning)]
+
+
+# ---------------------------------------------------------------------------
 # CUDA variants (skipped without GPU)
 # ---------------------------------------------------------------------------
 
@@ -374,3 +510,39 @@ def test_cuda_forward_pass_still_logs() -> None:
     x = torch.randn(2, 4, device="cuda")
     log = tl.trace(model, x, capture=CaptureOptions(layers_to_save="all"))
     assert len(log.layer_logs) > 0
+
+
+def test_offense_path_names_the_input_tree_location() -> None:
+    """Refusals disclose WHERE the offending tensor sits (R67)."""
+
+    model = _Tiny()
+    kwargs = {"extras": {"deep": {"inner": torch.ones(2, 2, device="meta")}}}
+    with pytest.raises(UnsupportedTensorVariantError) as exc_info:
+        check_model_and_input_variants(model, torch.ones(1, 3), kwargs)
+    offense = exc_info.value.fields["offenses"][0]
+    assert offense["path"] == "kwargs['extras']['deep']['inner']"
+    assert offense["shape"] == (2, 2)
+    assert offense["dtype"] == "torch.float32"
+
+
+def test_mid_forward_nested_refusal_carries_the_fields_contract() -> None:
+    """The _ops_activations raises honor code/remedy/offenses (R65)."""
+
+    import torchlens as tl
+
+    class _NestedInsideForward(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                return torch.nested.as_nested_tensor([x[0], x[1]])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(UnsupportedTensorVariantError) as exc_info:
+            tl.trace(_NestedInsideForward(), torch.ones(2, 3))
+    fields = exc_info.value.fields
+    assert fields["code"] == "unsupported_tensor_variant"
+    assert fields["remedy"]
+    (offense,) = fields["offenses"]
+    assert offense["shape"] is None
+    assert offense["path"].endswith("_raw")  # the op label being recorded

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
 import warnings
+from dataclasses import FrozenInstanceError
 
 import pytest
 import torch

@@ -4,32 +4,31 @@ This module creates input and buffer Op entries, updates fast-capture source
 payloads, and preserves source equivalence metadata for postprocessing.
 """
 
-from collections import defaultdict
 import time
+from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
 import torch
 
 from ..._errors import TorchLensPostfuncError
-from ...fastlog.exceptions import PredicateError
-from ...fastlog._halt import HaltSignal
-from ...ir.predicate import RetroactiveCaptureDecision
-from ._tl import get_tensor_meta, set_tensor_label
-from .completeness_witness import internal_scalar_read
 from ..._training_validation import TrainingModeConfigError
-from . import module_stack as _mstack
 from ...capture.predicates import _evaluate_halt, _evaluate_keep_op, _is_halt_only_capture
 from ...capture.projections import (
     _build_record_context,
     append_projected_event,
     get_active_recording_state,
 )
+from ...fastlog._halt import HaltSignal
+from ...fastlog.exceptions import PredicateError
 from ...fastlog.types import ActivationRecord, CaptureSpec
+from ...ir.predicate import RetroactiveCaptureDecision
 from ...utils.arg_handling import INPUT_WAS_PARAMETER_ATTR
 from ...utils.introspection import _get_code_context
 from ...utils.rng import log_current_rng_states
 from ...utils.tensor_utils import get_memory_amount_from_metadata
-
+from . import module_stack as _mstack
+from ._tl import get_tensor_meta, set_tensor_label
+from .completeness_witness import internal_scalar_read
 from .tensor_tracking import _add_tensor_backward_hook, _append_module_suffix_to_equivalence_class
 
 if TYPE_CHECKING:
@@ -52,8 +51,31 @@ def _snapshot_exhaustive_module_stack(self: "Trace") -> list[tuple[str, int]]:
 
     return [
         (frame.address, frame.pass_index)
-        for frame in _mstack.snapshot(self._exhaustive_module_stack)
+        for frame in _mstack.snapshot(self._module_capture_ws.exhaustive_module_stack)
     ]
+
+
+def _predicate_event_was_appended(trace: "Trace", label_raw: str) -> bool:
+    """Return whether predicate capture already appended ``label_raw``.
+
+    Parameters
+    ----------
+    trace:
+        Active trace whose capture-event index may already contain the source
+        event.
+    label_raw:
+        Raw label used for the source input or buffer event.
+
+    Returns
+    -------
+    bool
+        True when the projected source event is already present.
+    """
+
+    capture_events = getattr(trace, "capture_events", None)
+    if capture_events is None:
+        return False
+    return label_raw in capture_events.op_event_by_label_raw
 
 
 def log_source_tensor(
@@ -87,11 +109,11 @@ def log_source_tensor_predicate(
     if source not in {"input", "buffer"}:
         raise ValueError("source must be either 'input' or 'buffer'")
     state = get_active_recording_state()
-    self._layer_counter += 1
-    self._raw_layer_type_counter[source] += 1
+    self._raw_graph_ws.layer_counter += 1
+    self._raw_graph_ws.raw_layer_type_counter[source] += 1
     state.event_index += 1
-    raw_index = self._layer_counter
-    type_index = self._raw_layer_type_counter[source]
+    raw_index = self._raw_graph_ws.layer_counter
+    type_index = self._raw_graph_ws.raw_layer_type_counter[source]
     tensor_label = f"{source}_{type_index}_raw"
     set_tensor_label(t, tensor_label)
     if source == "input":
@@ -137,7 +159,9 @@ def log_source_tensor_predicate(
             decision = _evaluate_keep_op(ctx, state.options)
             if isinstance(decision, RetroactiveCaptureDecision):
                 raise PredicateError(
-                    "tl.followed_by(...) retroactive save is only supported by trace"
+                    "tl.followed_by(...) retroactive save is only supported by trace. "
+                    "Remedy: use tl.trace(save=...) for followed_by retroactive capture.",
+                    code="followed_by_unsupported",
                 )
             spec = decision
             if spec.save_out or spec.save_metadata:
@@ -183,10 +207,7 @@ def log_source_tensor_predicate(
     except Exception as exc:
         state.handle_predicate_exception(ctx, exc)
     finally:
-        if not halt_only and not any(
-            event.raw_index == raw_index
-            for event in getattr(getattr(self, "capture_events", None), "op_events", ())
-        ):
+        if not halt_only and not _predicate_event_was_appended(self, ctx.raw_label or ctx.label):
             append_projected_event(
                 self,
                 ctx,
@@ -195,6 +216,19 @@ def log_source_tensor_predicate(
                 predicate_matched=False,
             )
         state.append_context(ctx)
+
+
+def _source_code_context_cache(self: "Trace") -> dict[Any, tuple[Any, ...]]:
+    """Return the per-capture code-context cache, creating it on first use.
+
+    Source records share the same cache the per-op path uses (a source logged
+    from an op call site reuses that op's filtered-stack entry).
+    """
+    code_context_cache = getattr(self, "_code_context_cache", None)
+    if code_context_cache is None:
+        code_context_cache = {}
+        self._code_context_cache = code_context_cache
+    return code_context_cache
 
 
 def log_source_tensor_exhaustive(
@@ -215,10 +249,10 @@ def log_source_tensor_exhaustive(
     with internal_scalar_read():
         _grad_fn_handle = t.grad_fn
     # Fetch counters and increment to be ready for next tensor to be logged
-    self._layer_counter += 1
-    self._raw_layer_type_counter[layer_type] += 1
-    raw_index = self._layer_counter
-    type_index = self._raw_layer_type_counter[layer_type]
+    self._raw_graph_ws.layer_counter += 1
+    self._raw_graph_ws.raw_layer_type_counter[layer_type] += 1
+    raw_index = self._raw_graph_ws.layer_counter
+    type_index = self._raw_graph_ws.raw_layer_type_counter[layer_type]
 
     tensor_label = f"{layer_type}_{type_index}_raw"
 
@@ -336,6 +370,7 @@ def log_source_tensor_exhaustive(
             self.num_context_lines,
             source_loading_enabled=self.save_code_context,
             disable_col_offset=False,
+            context_cache=_source_code_context_cache(self),
         ),
         "func_duration": 0,
         "flops_forward": 0,
@@ -366,7 +401,7 @@ def log_source_tensor_exhaustive(
         "parent_param_ops": {},
         "_param_logs": [],
         "param_shapes": [],
-        "num_params": int(0),
+        "num_params": 0,
         "num_params_trainable": 0,
         "num_params_frozen": 0,
         "param_memory": 0,
@@ -480,7 +515,7 @@ def log_source_tensor_exhaustive(
             },
             module_stack=[],
             history=(),
-            op_counts=self._raw_layer_type_counter,
+            op_counts=self._raw_graph_ws.raw_layer_type_counter,
             pass_index=1,
             event_index=raw_index,
             step_index=None,

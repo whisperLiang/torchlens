@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import copy
+import itertools
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
 from typing import Any
 
 import torch
@@ -14,6 +17,141 @@ from ..user_funcs import trace
 from .facets import Facet, MissingGradient
 
 Metric = Callable[[Any], torch.Tensor]
+
+
+class _CounterfactualStateGuard:
+    """Snapshot and restore model state and global RNG around patching runs.
+
+    Activation and attribution patching run several forward passes (a clean
+    baseline, a corrupted baseline, and one per patched cell) on the SAME live
+    model. Without resetting state between runs, mutable buffers (e.g.
+    BatchNorm running statistics or any buffer written during forward) and the
+    global RNG drift: every counterfactual after the first starts from a
+    different model/RNG state than the clean baseline, so the reported effect is
+    a silently wrong comparison, and the caller's model + global RNG are left
+    mutated when the helper returns.
+
+    Call :meth:`open` before the first run and :meth:`close` in a ``finally``.
+    ``open`` snapshots the model's parameters/buffers and enters
+    ``torch.random.fork_rng`` so the caller's global RNG is restored robustly on
+    ``close`` no matter what the traced forwards do. Call :meth:`reset` before
+    each counterfactual run to return the model and RNG to the captured baseline
+    so every counterfactual is a true comparison. ``close`` restores the model
+    state and releases the forked RNG.
+    """
+
+    def __init__(self, model: nn.Module) -> None:
+        """Snapshot the model's parameters/buffers and the global RNG state."""
+
+        self._tensors: list[tuple[torch.Tensor, torch.Tensor]] = [
+            (tensor, tensor.detach().clone()) for tensor in _stateful_tensors(model)
+        ]
+        self._rng: dict[str, Any] = _snapshot_rng()
+        self._fork: Any = None
+
+    def open(self) -> None:
+        """Enter a forked-RNG scope so the caller's global RNG is preserved."""
+
+        self._fork = torch.random.fork_rng(devices=_fork_rng_devices())
+        self._fork.__enter__()
+
+    def close(self) -> None:
+        """Restore the model state and release the forked RNG scope."""
+
+        try:
+            self._restore_model()
+        finally:
+            fork, self._fork = self._fork, None
+            if fork is not None:
+                fork.__exit__(None, None, None)
+
+    def reset(self) -> None:
+        """Reset model state and global RNG to the captured baseline."""
+
+        self._restore_model()
+        _restore_rng(self._rng)
+
+    def _restore_model(self) -> None:
+        """Copy every captured parameter/buffer value back in place."""
+
+        with torch.no_grad():
+            for tensor, saved in self._tensors:
+                tensor.copy_(saved)
+
+
+def _teardown(guard: _CounterfactualStateGuard, *logs: Any) -> None:
+    """Run every teardown step even when an earlier one raises.
+
+    The entry points used to tear down as bare sequential statements, so a
+    raising ``Trace.cleanup()`` skipped ``guard.close()`` and left the USER's
+    model parameters unrestored and the global RNG permanently advanced.
+    ``ExitStack`` callbacks run last-registered-first, so the guard is
+    registered first (closes LAST, after every log cleanup) and each
+    ``logs``-order cleanup still runs even if an earlier one raises.
+    """
+
+    with ExitStack() as stack:
+        stack.callback(guard.close)
+        for log in reversed(logs):
+            if log is not None:
+                stack.callback(log.cleanup)
+
+
+def _stateful_tensors(model: nn.Module) -> list[torch.Tensor]:
+    """Return every distinct parameter and buffer tensor of a model.
+
+    Uses object identity to include non-persistent buffers and to stage tied /
+    double-registered tensors exactly once.
+    """
+
+    seen: set[int] = set()
+    tensors: list[torch.Tensor] = []
+    for _, tensor in itertools.chain(model.named_parameters(), model.named_buffers()):
+        if id(tensor) in seen:
+            continue
+        seen.add(id(tensor))
+        tensors.append(tensor)
+    return tensors
+
+
+def _fork_rng_devices() -> list[int]:
+    """Return the CUDA device ordinals to fork RNG for (empty when CPU-only).
+
+    Gated on ``is_initialized()``, not ``is_available()`` (R36-4): if this
+    process never initialized CUDA, no CUDA generator fed any captured op,
+    and forking RNG for every visible device would allocate the very CUDA
+    contexts (~300-600 MB each) this path does not need -- the exact stale
+    pre-fix gate ``utils/rng.py`` documents.
+    """
+
+    from ..utils.tensor_utils import _is_cuda_initialized
+
+    if _is_cuda_initialized() and torch.cuda.is_available():
+        return list(range(torch.cuda.device_count()))
+    return []
+
+
+def _snapshot_rng() -> dict[str, Any]:
+    """Capture the global CPU (and CUDA, when live) RNG state."""
+
+    from ..utils.rng import _snapshot_cuda_rng_states
+
+    snapshot: dict[str, Any] = {"cpu": torch.get_rng_state()}
+    # Initialized-CUDA-only, latch-guarded (R36-4): returns [] on a
+    # CUDA-less or never-initialized process without touching the driver.
+    cuda_states = _snapshot_cuda_rng_states()
+    if cuda_states:
+        snapshot["cuda"] = cuda_states
+    return snapshot
+
+
+def _restore_rng(snapshot: Mapping[str, Any]) -> None:
+    """Restore the global CPU (and CUDA, when available) RNG state."""
+
+    torch.set_rng_state(snapshot["cpu"])
+    cuda_states = snapshot.get("cuda")
+    if cuda_states is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(cuda_states)
 
 
 def activation_patch_residual_stream(
@@ -60,10 +198,13 @@ def activation_patch_residual_stream(
         Metric values shaped ``[layer, pos]`` or ``[layer]``.
     """
 
-    clean_log, corrupted_log = _baseline_traces(
-        model, clean_input, corrupted_input, trace_kwargs=trace_kwargs
-    )
+    guard = _CounterfactualStateGuard(model)
+    guard.open()
+    clean_log = corrupted_log = None
     try:
+        clean_log, corrupted_log = _baseline_traces(
+            model, clean_input, corrupted_input, trace_kwargs=trace_kwargs, guard=guard
+        )
         metric_template = _baseline_metric_template(clean_log, corrupted_log, metric)
         modules = _modules_with_facet(clean_log, facet_name)
         _ensure_matching_modules(corrupted_log, modules, facet_name=facet_name)
@@ -77,6 +218,7 @@ def activation_patch_residual_stream(
                 facet_name=facet_name,
                 metric=metric,
                 metric_template=metric_template,
+                guard=guard,
             )
 
         if not modules:
@@ -100,7 +242,13 @@ def activation_patch_residual_stream(
             selector = facet(facet_name).in_module(address)
             for pos_index, position in enumerate(patch_positions_list):
 
-                def _patch_position(out: torch.Tensor, *, hook: Any) -> torch.Tensor:
+                def _patch_position(
+                    out: torch.Tensor,
+                    *,
+                    hook: Any,
+                    position: Any = position,
+                    clean_value: torch.Tensor = clean_value,
+                ) -> torch.Tensor:
                     """Return ``out`` with one position replaced by the clean activation."""
 
                     del hook
@@ -117,6 +265,9 @@ def activation_patch_residual_stream(
                     selector,
                     _patch_position,
                     name=f"patch_{facet_name}_{layer_index}_{position}",
+                    guard=guard,
+                    facet_name=facet_name,
+                    address=address,
                 )
                 try:
                     result[layer_index, pos_index] = _metric_scalar(
@@ -126,8 +277,7 @@ def activation_patch_residual_stream(
                     patched_log.cleanup()
         return result
     finally:
-        clean_log.cleanup()
-        corrupted_log.cleanup()
+        _teardown(guard, clean_log, corrupted_log)
 
 
 def activation_patch_attention_output(
@@ -162,10 +312,13 @@ def activation_patch_attention_output(
         Metric values shaped ``[layer]``.
     """
 
-    clean_log, corrupted_log = _baseline_traces(
-        model, clean_input, corrupted_input, trace_kwargs=trace_kwargs
-    )
+    guard = _CounterfactualStateGuard(model)
+    guard.open()
+    clean_log = corrupted_log = None
     try:
+        clean_log, corrupted_log = _baseline_traces(
+            model, clean_input, corrupted_input, trace_kwargs=trace_kwargs, guard=guard
+        )
         metric_template = _baseline_metric_template(clean_log, corrupted_log, metric)
         modules = _modules_with_facet(clean_log, facet_name)
         _ensure_matching_modules(corrupted_log, modules, facet_name=facet_name)
@@ -178,10 +331,10 @@ def activation_patch_attention_output(
             facet_name=facet_name,
             metric=metric,
             metric_template=metric_template,
+            guard=guard,
         )
     finally:
-        clean_log.cleanup()
-        corrupted_log.cleanup()
+        _teardown(guard, clean_log, corrupted_log)
 
 
 def activation_patch_attention_heads(
@@ -217,10 +370,13 @@ def activation_patch_attention_heads(
         Metric values shaped ``[layer, head]``.
     """
 
-    clean_log, corrupted_log = _baseline_traces(
-        model, clean_input, corrupted_input, trace_kwargs=trace_kwargs
-    )
+    guard = _CounterfactualStateGuard(model)
+    guard.open()
+    clean_log = corrupted_log = None
     try:
+        clean_log, corrupted_log = _baseline_traces(
+            model, clean_input, corrupted_input, trace_kwargs=trace_kwargs, guard=guard
+        )
         metric_template = _baseline_metric_template(clean_log, corrupted_log, metric)
         return _activation_patch_heads(
             model,
@@ -230,10 +386,10 @@ def activation_patch_attention_heads(
             facet_name=facet_name,
             metric=metric,
             metric_template=metric_template,
+            guard=guard,
         )
     finally:
-        clean_log.cleanup()
-        corrupted_log.cleanup()
+        _teardown(guard, clean_log, corrupted_log)
 
 
 def activation_patch_mlp_output(
@@ -268,10 +424,13 @@ def activation_patch_mlp_output(
         Metric values shaped ``[layer]``.
     """
 
-    clean_log, corrupted_log = _baseline_traces(
-        model, clean_input, corrupted_input, trace_kwargs=trace_kwargs
-    )
+    guard = _CounterfactualStateGuard(model)
+    guard.open()
+    clean_log = corrupted_log = None
     try:
+        clean_log, corrupted_log = _baseline_traces(
+            model, clean_input, corrupted_input, trace_kwargs=trace_kwargs, guard=guard
+        )
         metric_template = _baseline_metric_template(clean_log, corrupted_log, metric)
         modules = [
             address
@@ -288,10 +447,10 @@ def activation_patch_mlp_output(
             facet_name=facet_name,
             metric=metric,
             metric_template=metric_template,
+            guard=guard,
         )
     finally:
-        clean_log.cleanup()
-        corrupted_log.cleanup()
+        _teardown(guard, clean_log, corrupted_log)
 
 
 def attribution_patch_attention_heads(
@@ -329,10 +488,18 @@ def attribution_patch_attention_heads(
         Approximate metric effects shaped ``[layer, head]``.
     """
 
-    clean_log, corrupted_log = _baseline_traces(
-        model, clean_input, corrupted_input, trace_kwargs=trace_kwargs, save_grads=True
-    )
+    guard = _CounterfactualStateGuard(model)
+    guard.open()
+    clean_log = corrupted_log = None
     try:
+        clean_log, corrupted_log = _baseline_traces(
+            model,
+            clean_input,
+            corrupted_input,
+            trace_kwargs=trace_kwargs,
+            save_grads=True,
+            guard=guard,
+        )
         clean_metric = _require_scalar_metric(metric(clean_log))
         corrupted_metric = _require_scalar_metric(metric(corrupted_log))
         clean_log.log_backward(clean_metric)
@@ -356,8 +523,7 @@ def attribution_patch_attention_heads(
                 result[layer_index, head_index] = (grad * (clean_value - corrupted_value)).sum()
         return result
     finally:
-        clean_log.cleanup()
-        corrupted_log.cleanup()
+        _teardown(guard, clean_log, corrupted_log)
 
 
 def _baseline_traces(
@@ -367,11 +533,19 @@ def _baseline_traces(
     *,
     trace_kwargs: Mapping[str, Any] | None,
     save_grads: bool | None = None,
+    guard: _CounterfactualStateGuard,
 ) -> tuple[Any, Any]:
-    """Return clean and corrupted traces with all layer activations saved."""
+    """Return clean and corrupted traces with all layer activations saved.
+
+    Both baselines start from the guard's pristine model/RNG snapshot so the
+    corrupted run is a true counterfactual of the clean run rather than a run on
+    a model already mutated by the clean forward.
+    """
 
     kwargs = _trace_kwargs(trace_kwargs, save_grads=save_grads)
+    guard.reset()
     clean_log = trace(model, clean_input, **kwargs)
+    guard.reset()
     corrupted_log = trace(model, corrupted_input, **kwargs)
     return clean_log, corrupted_log
 
@@ -414,6 +588,7 @@ def _activation_patch_by_module(
     facet_name: str,
     metric: Metric,
     metric_template: torch.Tensor,
+    guard: _CounterfactualStateGuard,
 ) -> torch.Tensor:
     """Patch one whole facet per module and return metric values."""
 
@@ -427,7 +602,9 @@ def _activation_patch_by_module(
     for layer_index, address in enumerate(modules):
         clean_value = _facet_tensor(clean_log.modules[address].facets[facet_name]).detach().clone()
 
-        def _patch_whole(out: torch.Tensor, *, hook: Any) -> torch.Tensor:
+        def _patch_whole(
+            out: torch.Tensor, *, hook: Any, clean_value: torch.Tensor = clean_value
+        ) -> torch.Tensor:
             """Return the clean activation for this facet slice."""
 
             del out, hook
@@ -440,6 +617,9 @@ def _activation_patch_by_module(
             facet(facet_name).in_module(address),
             _patch_whole,
             name=f"patch_{facet_name}_{layer_index}",
+            guard=guard,
+            facet_name=facet_name,
+            address=address,
         )
         try:
             result[layer_index] = _metric_scalar(metric(patched_log), like=result)
@@ -457,6 +637,7 @@ def _activation_patch_heads(
     facet_name: str,
     metric: Metric,
     metric_template: torch.Tensor,
+    guard: _CounterfactualStateGuard,
 ) -> torch.Tensor:
     """Patch one clean head per attention module and return metric values."""
 
@@ -476,7 +657,9 @@ def _activation_patch_heads(
                 .clone()
             )
 
-            def _patch_head(out: torch.Tensor, *, hook: Any) -> torch.Tensor:
+            def _patch_head(
+                out: torch.Tensor, *, hook: Any, clean_value: torch.Tensor = clean_value
+            ) -> torch.Tensor:
                 """Return the clean activation for this head facet slice."""
 
                 del out, hook
@@ -489,6 +672,7 @@ def _activation_patch_heads(
                 facet(facet_name).head(head_index).in_module(address),
                 _patch_head,
                 name=f"patch_{facet_name}_{layer_index}_{head_index}",
+                guard=guard,
             )
             try:
                 result[layer_index, head_index] = _metric_scalar(metric(patched_log), like=result)
@@ -505,13 +689,223 @@ def _run_patch(
     hook: Callable[..., torch.Tensor],
     *,
     name: str,
+    guard: _CounterfactualStateGuard,
+    facet_name: str | None = None,
+    address: str | None = None,
 ) -> Any:
-    """Fork the corrupted trace, attach one facet hook, and rerun."""
+    """Fork the corrupted trace, attach one facet hook, and rerun.
+
+    The model/RNG state is reset to the pristine snapshot before the rerun so
+    the only difference between the corrupted baseline and this patched run is
+    the injected clean activation.
+
+    Live hooks fire at wrapped-function and module-boundary sites only, so a
+    facet homed on a MODEL INPUT op (e.g. ``resid_pre`` of a first block) has
+    no site where a hook could ever fire. When the caller identifies the facet
+    (``facet_name`` + ``address``) and its home is a model input, the patch is
+    applied to the input tensor itself and the rerun proceeds without a hook —
+    semantically identical to a hook fire at the home site.
+    """
+
+    input_role = None
+    if facet_name is not None and address is not None:
+        input_role = _model_input_home_role(corrupted_log, facet_name, address)
+    if input_role is not None:
+        patched_input = _patch_input_leaf(
+            corrupted_input,
+            model,
+            input_role,
+            lambda leaf: hook(leaf.detach().clone(), hook=None),
+        )
+        patched_log = corrupted_log.fork(name)
+        guard.reset()
+        patched_log.run(model, patched_input)
+        return patched_log
 
     patched_log = corrupted_log.fork(name)
     patched_log.attach_hooks(selector, hook)
+    guard.reset()
     patched_log.run(model, corrupted_input)
     return patched_log
+
+
+def _model_input_home_role(log: Any, facet_name: str, address: str) -> str | None:
+    """Return the recorded input address when a whole-tensor facet homes on a model input.
+
+    Parameters
+    ----------
+    log:
+        Trace holding the facet.
+    facet_name:
+        Facet to inspect.
+    address:
+        Module address exposing the facet.
+
+    Returns
+    -------
+    str | None
+        The home input op's hierarchical ``io_role`` address (for example
+        ``"input.x.0.nested"``), or ``None`` when the home is a regular op
+        (live hooks handle it) or no facet spec is reachable.
+
+    Raises
+    ------
+    ValueError
+        If a facet homed on a model input is not the identity view of the home
+        tensor (patching the raw input would silently write outside the facet),
+        or if the home input op cannot be bound to a recorded input address --
+        falling back to the hook path would silently run an UNPATCHED
+        counterfactual, because live hooks never fire at input sites.
+    """
+
+    try:
+        spec = log.modules[address].facets[facet_name].spec
+    except (AttributeError, KeyError, RuntimeError, ValueError):
+        return None
+    home = getattr(spec, "home", None)
+    if home is None or getattr(home, "layer_type", None) != "input":
+        return None
+    home_label = str(getattr(home, "label", ""))
+    home_op = next(
+        (op for op in getattr(log, "input_ops", ()) if str(op.label) == home_label),
+        None,
+    )
+    if home_op is None:
+        raise ValueError(
+            f"Facet {facet_name!r} on module {address!r} homes on model input "
+            f"{home_label!r}, which is not among this trace's input ops; the input "
+            "patch cannot be bound and live hooks never fire at input sites."
+        )
+    if tuple(getattr(spec, "transforms", ()) or ()) or not bool(spec.write_mask().all()):
+        raise ValueError(
+            f"Facet {facet_name!r} on module {address!r} is a transformed or sliced view of "
+            f"model input {home_label!r}. Sliced input facets cannot be patched: live hooks "
+            "never fire at input sites, and whole-input replacement would write outside the "
+            "facet."
+        )
+    io_role = getattr(home_op, "io_role", None)
+    if not io_role:
+        raise ValueError(
+            f"Facet {facet_name!r} on module {address!r} homes on model input "
+            f"{home_label!r}, but that op records no io_role input address; the input "
+            "patch cannot be bound and live hooks never fire at input sites."
+        )
+    return str(io_role)
+
+
+def _resolve_input_leaf_by_role(
+    x: Any, model: nn.Module, io_role: str
+) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    """Return the leaf of ``x`` recorded at input address ``io_role``, plus all leaves.
+
+    Mirrors capture-time input flattening exactly (see
+    ``TorchBackend.fetch_label_move_input_tensors``): positional args are
+    normalized against the model's forward signature, each arg's tensors are
+    discovered with the same bounded traversal, addresses are
+    ``input.<argname>[.<path>]``, and a repeated tensor object keeps only its
+    first address -- so the recorded ``io_role`` binds by ADDRESS, never by
+    ordinal position in some other walk order.
+
+    Returns
+    -------
+    tuple[torch.Tensor, list[torch.Tensor]]
+        The target leaf and every distinct tensor leaf of the tree.
+
+    Raises
+    ------
+    ValueError
+        If no leaf of ``x`` sits at the recorded address (fail closed: a
+        silent fallback would rerun an unpatched counterfactual).
+    """
+
+    from ..backends.torch.backend import _get_input_arg_names
+    from ..utils.arg_handling import normalize_input_args
+    from ..utils.introspection import INPUT_SEARCH_DEPTH_LIMIT, get_vars_of_type_from_obj
+
+    args = normalize_input_args(x, model)
+    arg_names = _get_input_arg_names(model, args)
+    target: torch.Tensor | None = None
+    leaves: list[torch.Tensor] = []
+    seen: set[int] = set()
+    for arg, arg_name in zip(args, arg_names):
+        for tensor, addr, _addr_full in get_vars_of_type_from_obj(
+            arg,
+            torch.Tensor,
+            search_depth=INPUT_SEARCH_DEPTH_LIMIT,
+            return_addresses=True,
+        ):
+            if id(tensor) in seen:
+                continue
+            seen.add(id(tensor))
+            leaves.append(tensor)
+            tensor_addr = f"input.{arg_name}" + (f".{addr}" if addr else "")
+            if tensor_addr == io_role:
+                target = tensor
+    if target is None:
+        raise ValueError(
+            f"Input tree has no tensor leaf at recorded input address {io_role!r}; "
+            "the input-homed facet patch cannot be bound to a rerun leaf."
+        )
+    return target, leaves
+
+
+def _patch_input_leaf(
+    x: Any,
+    model: nn.Module,
+    io_role: str,
+    patch: Callable[[torch.Tensor], torch.Tensor],
+) -> Any:
+    """Return the input tree with the leaf at address ``io_role`` patched everywhere.
+
+    The leaf is resolved by the capture-recorded hierarchical input address
+    (``Op.io_role``), never by ordinal position: capture flattens inputs in
+    BFS container order while a naive tree walk visits leaves in DFS order, so
+    ordinal indexing silently patched the WRONG leaf on mixed-nesting inputs.
+    Because capture dedupes a repeated tensor object into ONE input op,
+    patching that op replaces the tensor at EVERY site it appears. Container
+    types (Mapping subclasses, namedtuples, nested objects) are preserved by
+    rebuilding through ``copy.deepcopy`` with every unpatched tensor leaf
+    passed through by identity.
+
+    Parameters
+    ----------
+    x:
+        Model input tree exactly as passed to the baseline trace.
+    model:
+        Model whose forward signature determines positional-arg naming.
+    io_role:
+        Recorded hierarchical input address of the leaf to patch.
+    patch:
+        Callable producing the replacement tensor for the selected leaf.
+
+    Returns
+    -------
+    Any
+        Rebuilt input tree with the addressed leaf replaced at every site.
+
+    Raises
+    ------
+    ValueError
+        If no leaf sits at the recorded address, the patched tensor changes
+        shape, or the tree cannot be rebuilt.
+    """
+
+    target, leaves = _resolve_input_leaf_by_role(x, model, io_role)
+    patched = patch(target)
+    if tuple(patched.shape) != tuple(target.shape):
+        raise ValueError(
+            f"Input patch changed the leaf shape from {tuple(target.shape)} to "
+            f"{tuple(patched.shape)}; input patching must preserve shape."
+        )
+    memo: dict[int, Any] = {id(leaf): leaf for leaf in leaves}
+    memo[id(target)] = patched
+    try:
+        return copy.deepcopy(x, memo)
+    except Exception as exc:
+        raise ValueError(
+            f"Could not rebuild the input tree around patched leaf {io_role!r}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def _modules_with_facet(log: Any, facet_name: str) -> list[str]:

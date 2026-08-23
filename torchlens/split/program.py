@@ -7,11 +7,9 @@ from typing import Any, Literal
 
 from .errors import SplitErrorContext, SplitUnsupportedError
 from .graph import SplitTraceGraph, SplitTraceNode
-from .ir import SplitGraphIR, SplitModelProfile, SplitVerificationStatus
+from .ir import SplitGraphIR, SplitModelProfile, SplitRequest, SplitVerificationStatus
 from .planner import SplitPlan
 from .shape import is_dynamic_batch_shape_sensitive_op
-from .ir import SplitRequest
-
 
 ReplaySegment = Literal["prefix", "suffix"]
 

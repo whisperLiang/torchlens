@@ -2,7 +2,6 @@
 
 import os
 from types import FrameType
-from typing import List, Optional
 
 import pytest
 import torch
@@ -25,7 +24,7 @@ class RecursiveStackModel(nn.Module):
         super().__init__()
         self.depth = depth
 
-    def forward(self, x: torch.Tensor) -> List[FuncCallLocation]:
+    def forward(self, x: torch.Tensor) -> list[FuncCallLocation]:
         """Return the filtered function call stack from a recursive call.
 
         Args:
@@ -36,7 +35,7 @@ class RecursiveStackModel(nn.Module):
         """
         return self._recurse(x, self.depth)
 
-    def _recurse(self, x: torch.Tensor, depth: int) -> List[FuncCallLocation]:
+    def _recurse(self, x: torch.Tensor, depth: int) -> list[FuncCallLocation]:
         """Recurse until the stack is deep enough, then capture it.
 
         Args:
@@ -62,7 +61,7 @@ def test_stack_metadata_helpers_run_only_for_surviving_frames(
     col_offset_calls = []
     code_qualname_calls = []
 
-    def fake_get_col_offset(frame: FrameType) -> Optional[int]:
+    def fake_get_col_offset(frame: FrameType) -> int | None:
         """Record column-offset calls without walking bytecode.
 
         Args:
@@ -74,7 +73,7 @@ def test_stack_metadata_helpers_run_only_for_surviving_frames(
         col_offset_calls.append((frame.f_code.co_filename, frame.f_code.co_name))
         return 0
 
-    def fake_get_code_qualname(frame: FrameType) -> Optional[str]:
+    def fake_get_code_qualname(frame: FrameType) -> str | None:
         """Record qualname calls without inspecting code metadata.
 
         Args:
@@ -112,7 +111,7 @@ def test_disable_col_offset_skips_col_offset_helper(monkeypatch: pytest.MonkeyPa
     col_offset_calls = []
     code_qualname_calls = []
 
-    def fake_get_col_offset(frame: FrameType) -> Optional[int]:
+    def fake_get_col_offset(frame: FrameType) -> int | None:
         """Record unexpected column-offset calls.
 
         Args:
@@ -124,7 +123,7 @@ def test_disable_col_offset_skips_col_offset_helper(monkeypatch: pytest.MonkeyPa
         col_offset_calls.append(frame)
         return 0
 
-    def fake_get_code_qualname(frame: FrameType) -> Optional[str]:
+    def fake_get_code_qualname(frame: FrameType) -> str | None:
         """Record qualname calls that should still occur.
 
         Args:
@@ -144,7 +143,7 @@ def test_disable_col_offset_skips_col_offset_helper(monkeypatch: pytest.MonkeyPa
     class DisableOffsetModel(RecursiveStackModel):
         """Recursive model variant that disables column-offset extraction."""
 
-        def _recurse(self, x: torch.Tensor, depth: int) -> List[FuncCallLocation]:
+        def _recurse(self, x: torch.Tensor, depth: int) -> list[FuncCallLocation]:
             """Recurse until the stack is deep enough, then capture it.
 
             Args:
@@ -177,7 +176,7 @@ def test_code_context_cache_reuses_filtered_frame_locations(
 
     col_offset_calls = []
 
-    def fake_get_col_offset(frame: FrameType) -> Optional[int]:
+    def fake_get_col_offset(frame: FrameType) -> int | None:
         """Record column-offset calls without walking bytecode.
 
         Args:
@@ -203,7 +202,7 @@ def test_code_context_cache_reuses_filtered_frame_locations(
             super().__init__()
             self.depth = depth
 
-        def forward(self, x: torch.Tensor) -> List[List[FuncCallLocation]]:
+        def forward(self, x: torch.Tensor) -> list[list[FuncCallLocation]]:
             """Return two filtered stacks captured from one recursive call site.
 
             Args:
@@ -219,7 +218,7 @@ def test_code_context_cache_reuses_filtered_frame_locations(
             self,
             x: torch.Tensor,
             depth: int,
-        ) -> List[List[FuncCallLocation]]:
+        ) -> list[list[FuncCallLocation]]:
             """Recurse until the stack is deep enough, then capture it twice.
 
             Args:
@@ -256,7 +255,7 @@ def test_trace_module_code_context_uses_capture_cache(monkeypatch: pytest.Monkey
 
     col_offset_calls = []
 
-    def fake_get_col_offset(frame: FrameType) -> Optional[int]:
+    def fake_get_col_offset(frame: FrameType) -> int | None:
         """Record column-offset calls without walking bytecode.
 
         Args:

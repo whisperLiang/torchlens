@@ -191,26 +191,29 @@ def test_r35_matmul_carveout_unchanged_no_conv_sdpa_extension() -> None:
 
     from torchlens._runnable_execution import _LAYOUT_SENSITIVE_BLAS_QUALNAMES
 
-    assert _LAYOUT_SENSITIVE_BLAS_QUALNAMES == frozenset(
-        {
-            "linear",
-            "matmul",
-            "mm",
-            "bmm",
-            "mv",
-            "dot",
-            "vdot",
-            "inner",
-            "outer",
-            "ger",
-            "addmm",
-            "addbmm",
-            "baddbmm",
-            "addmv",
-            "addr",
-            "einsum",
-            "tensordot",
-        }
+    assert (
+        frozenset(
+            {
+                "linear",
+                "matmul",
+                "mm",
+                "bmm",
+                "mv",
+                "dot",
+                "vdot",
+                "inner",
+                "outer",
+                "ger",
+                "addmm",
+                "addbmm",
+                "baddbmm",
+                "addmv",
+                "addr",
+                "einsum",
+                "tensordot",
+            }
+        )
+        == _LAYOUT_SENSITIVE_BLAS_QUALNAMES
     )
     assert not any(
         "conv" in name or "attention" in name for name in _LAYOUT_SENSITIVE_BLAS_QUALNAMES
@@ -286,7 +289,7 @@ def test_r35_recorded_ambient_context_is_applied_during_run(tmp_path: Path) -> N
     finally:
         torch.set_float32_matmul_precision(caller_precision)
     loaded = tl.load(str(path))
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     assert descriptor.ambient_context.float32_matmul_precision == "high"
     # Run under a DIFFERENT caller precision; the run must restore the caller's
     # value afterwards while the recorded one governed execution.

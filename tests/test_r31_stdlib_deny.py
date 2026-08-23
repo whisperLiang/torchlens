@@ -229,3 +229,24 @@ def test_torch_module_is_not_stdlib() -> None:
     """Sanity: torch's real top-level package is not in the stdlib detector set."""
 
     assert is_denied_stdlib_or_builtin_module(str(torch.relu.__module__)) is False
+
+
+@pytest.mark.smoke
+def test_custom_key_missing_import_path_refuses_typed() -> None:
+    """A custom key without ``import_path`` refuses through the typed door.
+
+    SF-07: the raw ``AttributeError("custom key is missing import_path")`` was
+    laundered through the resolution wrapper into a generic precondition error.
+    The malformed spec now refuses with the typed configuration family and a
+    stable code, matching its ``import_path_invalid`` sibling.
+    """
+
+    from torchlens._errors import InvalidArgumentError
+
+    key = FunctionRegistryKey(namespace="custom", qualname="foo", dispatch_kind="function")
+
+    with pytest.raises(InvalidArgumentError) as exc_info:
+        resolve_function_registry_key(key, trust_custom_callables=True)
+
+    assert exc_info.value.fields["code"] == "custom_callable_import_path_missing"
+    assert "module:qualname" in str(exc_info.value.fields["remedy"])

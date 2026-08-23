@@ -15,7 +15,6 @@ import torchlens._state as torchlens_state
 from torchlens.data_classes.trace import Trace
 from torchlens.intervention.types import DictKey, TupleIndex
 
-
 pytestmark = pytest.mark.backend_parity
 
 
@@ -166,7 +165,7 @@ class _BufferDeviceModel(nn.Module):
 
 
 class _ParamlessDeviceModel(nn.Module):
-    """Model whose input setup falls back to the CPU device string."""
+    """Model that pins no device: no parameters, no buffers."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run a parameterless tensor op."""
@@ -327,7 +326,7 @@ def test_buffer_mutation_reconciliation_orders_initial_and_written_versions() ->
     assert buffer_versions[0].buffer_source is None
     assert buffer_versions[1].buffer_write_kind == "inplace"
     assert str(buffer_versions[1].buffer_source).startswith("add_2_")
-    assert buffer_versions[1].parents == ["add_2_2"]
+    assert buffer_versions[1].parents == ("add_2_2",)
     assert torch.equal(model.offset, torch.ones(2, 2))
 
 
@@ -383,13 +382,20 @@ def test_top_level_tuple_input_type_is_preserved_after_internal_device_move() ->
 def test_model_device_selection_params_buffers_and_paramless_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Input setup selects param, buffer, then string CPU fallback devices."""
+    """Input setup selects param, buffer, then device-less ``None``.
+
+    ``None`` (no parameters or buffers anywhere) means the inputs are never
+    moved: eager execution runs each op on its operands' devices. The
+    historical ``"cpu"`` fallback silently dragged CUDA inputs to the CPU
+    and computed the whole forward there (H200 finding, 2026-08-18).
+    """
 
     capture_trace = importlib.import_module("torchlens.capture.trace")
     original = capture_trace._fetch_label_move_input_tensors
     seen_devices: list[Any] = []
 
     def spy_fetch_label_move_input_tensors(
+        session: object,
         input_args: list[Any],
         input_arg_names: list[str],
         input_kwargs: dict[Any, Any],
@@ -400,7 +406,7 @@ def test_model_device_selection_params_buffers_and_paramless_fallback(
         seen_devices.append(model_device)
         return cast(
             tuple[list[torch.Tensor], list[str]],
-            original(input_args, input_arg_names, input_kwargs, model_device),
+            original(session, input_args, input_arg_names, input_kwargs, model_device),
         )
 
     monkeypatch.setattr(
@@ -413,4 +419,28 @@ def test_model_device_selection_params_buffers_and_paramless_fallback(
     tl.trace(_BufferDeviceModel(), torch.ones(2, 2))
     tl.trace(_ParamlessDeviceModel(), torch.ones(2, 2))
 
-    assert seen_devices == [torch.device("cpu"), torch.device("cpu"), "cpu"]
+    assert seen_devices == [torch.device("cpu"), torch.device("cpu"), None]
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA-only device-preservation pin; skipped without a real CUDA device.",
+)
+def test_paramless_model_cuda_inputs_stay_on_cuda() -> None:
+    """A device-less model's CUDA inputs are computed on CUDA, not the CPU.
+
+    The pre-fix ``"cpu"`` fallback moved every input of a parameter- and
+    buffer-free model to the CPU and ran the whole forward there -- silently
+    diverging from eager (``model(x)`` computes on ``x``'s device) and, on
+    the first real-GPU run, leaving the CUPTI correlation matrix empty
+    because the "CUDA" capture launched zero kernels.
+    """
+
+    trace = tl.trace(_ParamlessDeviceModel(), torch.ones(2, 2, device="cuda"))
+
+    ops = list(trace)
+    assert ops
+    for op in ops:
+        out = op.out
+        if isinstance(out, torch.Tensor):
+            assert out.device.type == "cuda", f"{op.layer_label} ran on {out.device}"

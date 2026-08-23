@@ -51,7 +51,8 @@ def main() -> None:
     relu_sites = log.find_sites(tl.func("relu"), max_fanout=3)
 
     edited = log.fork("generation_patch")
-    edited.attach_hooks(tl.func("relu"), tl.zero_ablate()).rerun(model, x)
+    edited.attach_hooks(tl.func("relu"), tl.zero_ablate())
+    edited.rerun(model, x)
 
     assert edited.layer_list[-1].out.shape == (2, 3, 4)
     assert len(relu_sites) == 3

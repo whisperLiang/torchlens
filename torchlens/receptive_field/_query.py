@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
+from itertools import islice
 from math import ceil, floor, gcd, ulp
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
@@ -14,11 +15,11 @@ from ._errors import AmbiguousInputError, ReceptiveFieldError
 from ._rules import _RuleResult
 from ._types import (
     ReceptiveField,
+    ReceptiveFieldAxis,
     ReceptiveFieldBox,
     ReceptiveFieldBoxAxis,
     ReceptiveFieldStatus,
 )
-
 
 if TYPE_CHECKING:
     from ..data_classes.op import Op
@@ -52,7 +53,18 @@ class _Progression:
 
 @dataclass(frozen=True)
 class _IndexSet:
-    """Bounded union of arithmetic progressions with honest collapse metadata."""
+    """Bounded union of arithmetic progressions with honest collapse metadata.
+
+    CANONICAL FORM INVARIANT. Every instance is produced either by
+    :meth:`empty`, :meth:`singleton`, :meth:`interval`, :meth:`from_values`, or
+    by re-wrapping another instance's ``progressions`` with a weaker ``exact``
+    flag. All of those yield exactly the greedy run decomposition that
+    :meth:`from_values` derives from the sorted, de-duplicated value list, so
+    ``progressions`` is always ascending, disjoint, maximal, and no longer than
+    ``_PROGRESSION_BUDGET``. The fast paths below rely on that invariant: they
+    are shortcuts for results the general algorithm would reproduce, never a
+    different answer.
+    """
 
     progressions: tuple[_Progression, ...]
     exact: bool = True
@@ -77,15 +89,25 @@ class _IndexSet:
     @classmethod
     def from_values(cls, values: Iterable[int], *, exact: bool = True) -> _IndexSet:
         """Compress values into at most sixteen runs, else an inexact dense hull."""
-        ordered = sorted(set(values))
+        return cls._from_sorted_unique(sorted(set(values)), exact=exact)
+
+    @classmethod
+    def _from_sorted_unique(cls, ordered: Sequence[int], *, exact: bool = True) -> _IndexSet:
+        """Compress an already sorted, de-duplicated value list into runs.
+
+        This is the body of :meth:`from_values`; callers that already hold
+        ascending distinct values skip the redundant ``sorted(set(...))``.
+        """
         if not ordered:
             return cls.empty(exact=exact)
         runs: list[_Progression] = []
         run_start = ordered[0]
         run_step = 1
         run_count = 1
-        for index, value in enumerate(ordered[1:], start=1):
-            difference = value - ordered[index - 1]
+        previous = run_start
+        for value in islice(ordered, 1, None):
+            difference = value - previous
+            previous = value
             if run_count == 1:
                 run_step = difference
                 run_count = 2
@@ -118,18 +140,37 @@ class _IndexSet:
 
     def values(self) -> tuple[int, ...]:
         """Materialize represented indices in sorted order."""
-        return tuple(sorted({value for item in self.progressions for value in item.values()}))
+        progressions = self.progressions
+        if len(progressions) == 1:
+            item = progressions[0]
+            return tuple(range(item.start, item.stop + 1, item.step))
+        # Canonical progressions are ascending and disjoint, so chaining them
+        # already yields the sorted distinct order the contract promises.
+        return tuple(value for item in progressions for value in item.values())
 
     def clipped(self, extent: int) -> _IndexSet:
         """Intersect this set with ``[0, extent)`` without changing exactness."""
-        return _IndexSet.from_values(
-            (value for value in self.values() if 0 <= value < extent), exact=self.exact
+        progressions = self.progressions
+        if not progressions:
+            return self
+        if progressions[0].start >= 0 and progressions[-1].stop < extent:
+            # Nothing is dropped, so recompressing would rebuild this exact
+            # canonical decomposition with this exact ``exact`` flag.
+            return self
+        return _IndexSet._from_sorted_unique(
+            [value for value in self.values() if 0 <= value < extent], exact=self.exact
         )
 
     @classmethod
     def union(cls, sets: Iterable[_IndexSet]) -> _IndexSet:
         """Union progression sets and enforce the global progression budget."""
-        materialized = tuple(sets)
+        # Path enumeration hands the same set in many times. Union is idempotent
+        # and ``all(...)`` over exactness ignores repeats, so collapsing equal
+        # operands leaves both the value set and the exactness flag unchanged.
+        materialized = tuple(dict.fromkeys(sets))
+        if len(materialized) == 1:
+            # Recompressing one canonical set with its own exactness is identity.
+            return materialized[0]
         return cls.from_values(
             (value for index_set in materialized for value in index_set.values()),
             exact=all(index_set.exact for index_set in materialized),
@@ -167,7 +208,8 @@ def box_for_unit(
     op:
         Target operation.
     unit:
-        Coordinates over the target's derived windowed output axes.
+        Coordinates over the target's derived windowed output axes, ordered
+        by ascending output axis (the target's own grid order).
     input:
         Optional input operation or exact IO role/operation label.
     source:
@@ -199,14 +241,19 @@ def box_for_unit(
         for reference in (item.label, item.layer_label, item._layer_label_raw)
     }
     ancestry = _ancestor_labels(descriptor.input_op_label, operations, by_reference)
-    terminals = _walk_to_input(
-        op,
-        initial,
-        descriptor.input_op_label,
-        ancestry,
-        by_reference,
-        True,
-    )
+    # The walk enumerates paths, so it revisits each operation once per path
+    # through it, re-deriving per-operation facts that are linear in that
+    # operation's parents. Memoize them for this one query.
+    with _engine._geometry_memo():
+        terminals = _walk_to_input(
+            op,
+            initial,
+            descriptor.input_op_label,
+            ancestry,
+            by_reference,
+            True,
+            {},
+        )
     if not terminals:
         raise ReceptiveFieldError(
             f"The target {op.label} has no live path to {descriptor.input_op_label}."
@@ -244,11 +291,38 @@ def _validate_descriptor_for_query(descriptor: ReceptiveField) -> None:
         raise ReceptiveFieldError("The derived layout is ambiguous; use .gradient() instead.")
 
 
+def _windowed_axes_in_unit_order(descriptor: ReceptiveField) -> tuple[ReceptiveFieldAxis, ...]:
+    """Return windowed descriptor axes in the unit's coordinate order.
+
+    A ``unit`` tuple addresses the seed operation's OWN output grid, so its
+    coordinates are ordered by ascending ``output_axis`` — the order the
+    windowed axes appear in that operation's shape. Descriptor axes are stored
+    by ascending ``input_axis`` instead, and any axis permutation between the
+    two endpoints (transpose/permute/movedim) makes those orders differ, so
+    every producer and consumer of a windowed unit tuple must route through
+    this one ordering (R20-1: zipping coordinates in descriptor order silently
+    transposed exact boxes).
+    """
+    assert descriptor.axes is not None
+    windowed = tuple(axis for axis in descriptor.axes if axis.kind == "windowed")
+    return tuple(sorted(windowed, key=lambda axis: cast(int, axis.output_axis)))
+
+
 def _normalize_unit(op: Op, descriptor: ReceptiveField, unit: Sequence[int]) -> tuple[int, ...]:
-    """Validate or resolve target windowed-axis coordinates."""
+    """Validate or resolve target windowed-axis coordinates.
+
+    Coordinates are ordered by ascending output axis (the seed operation's own
+    grid order; see :func:`_windowed_axes_in_unit_order`).
+
+    Geometric queries (``.at()``) require in-range non-negative coordinates:
+    a coordinate ``< 0`` is rejected as out of bounds, it is NOT Python-wrapped.
+    This differs deliberately from the gradient/validation path
+    (``_gradient._normalize_unit``), which wraps negative complete-index
+    coordinates. The two contracts are distinct and are not unified here.
+    """
     assert descriptor.axes is not None
     output_axes = tuple(
-        cast(int, axis.output_axis) for axis in descriptor.axes if axis.kind == "windowed"
+        cast(int, axis.output_axis) for axis in _windowed_axes_in_unit_order(descriptor)
     )
     coordinates = tuple(unit)
     if len(coordinates) != len(output_axes):
@@ -279,9 +353,7 @@ def _initial_axis_sets(
         if len(complete_unit) != len(op.shape):
             raise ReceptiveFieldError("complete_unit rank does not match the target operation.")
         result = [_IndexSet.singleton(int(coordinate)) for coordinate in complete_unit]
-    for axis, coordinate in zip(
-        (item for item in descriptor.axes if item.kind == "windowed"), coordinates, strict=True
-    ):
+    for axis, coordinate in zip(_windowed_axes_in_unit_order(descriptor), coordinates, strict=True):
         assert axis.output_axis is not None
         existing = result[axis.output_axis]
         singleton = _IndexSet.singleton(coordinate)
@@ -310,6 +382,19 @@ def _ancestor_labels(
     return frozenset(reachable)
 
 
+def _distinct_terminals(terminals: Iterable[_TerminalState]) -> tuple[_TerminalState, ...]:
+    """Collapse repeated terminal states produced by distinct paths.
+
+    Path enumeration reaches the same terminal state once per path, so a
+    merge-heavy graph grows the terminal tuple exponentially while adding no
+    information. Every consumer -- the emptiness test in the two query entry
+    points and all four aggregations in :func:`_build_box` (two unions, one
+    ``any``, one ``all``) -- is insensitive to both multiplicity and order, and
+    first-occurrence order is preserved here, so the resolved box is unchanged.
+    """
+    return tuple(dict.fromkeys(terminals))
+
+
 def _walk_to_input(
     op: Op,
     output_sets: _AxisSets,
@@ -317,8 +402,38 @@ def _walk_to_input(
     ancestry: frozenset[str],
     by_reference: Mapping[str, Op],
     exact: bool,
+    memo: dict[tuple[str, _AxisSets, bool], tuple[_TerminalState, ...]],
 ) -> tuple[_TerminalState, ...]:
-    """Recursively map a joint axis-set state to one requested model input."""
+    """Recursively map a joint axis-set state to one requested model input.
+
+    The walk enumerates paths, so a merge-heavy graph re-derives the same
+    ``(operation, axis-set state)`` subwalk once per path that reaches it --
+    exponential in the number of merges. ``memo`` caches that pure subresult
+    for the duration of one query. It is plain memoization of a pure function:
+    the cached tuple is exactly what the recursion would rebuild. Terminal
+    de-duplication is a separate step; see :func:`_distinct_terminals`.
+    """
+    key = (op.label, output_sets, exact)
+    cached = memo.get(key)
+    if cached is not None:
+        return cached
+    terminals_for_key = _walk_body(
+        op, output_sets, input_label, ancestry, by_reference, exact, memo
+    )
+    memo[key] = terminals_for_key
+    return terminals_for_key
+
+
+def _walk_body(
+    op: Op,
+    output_sets: _AxisSets,
+    input_label: str,
+    ancestry: frozenset[str],
+    by_reference: Mapping[str, Op],
+    exact: bool,
+    memo: dict[tuple[str, _AxisSets, bool], tuple[_TerminalState, ...]],
+) -> tuple[_TerminalState, ...]:
+    """Map one joint axis-set state across a single reverse hop."""
     if op.label == input_label:
         clipped = tuple(
             None if item is None else item.clipped(int(op.shape[axis]))
@@ -355,9 +470,10 @@ def _walk_to_input(
                 ancestry,
                 by_reference,
                 exact and hop_exact and all(item is None or item.exact for item in parent_sets),
+                memo,
             )
         )
-    return tuple(terminals)
+    return _distinct_terminals(terminals)
 
 
 def _map_to_parent(
@@ -374,7 +490,7 @@ def _map_to_parent(
             mapped[axis] = _IndexSet.interval(0, int(parent.shape[axis]) - 1)
         return tuple(mapped), bool(result.values.get("exact", True))
     if result.kind == "axis_map":
-        return _map_axis_mapping(parent, output_sets, result), True
+        return _map_axis_mapping(parent, output_sets, result)
     if result.kind == "passthrough":
         return _map_passthrough(op, parent, output_sets, result), True
     return _map_composed_envelope(op, parent, output_sets), False
@@ -505,17 +621,59 @@ def _map_passthrough(
     return tuple(result)
 
 
-def _map_axis_mapping(parent: Op, output_sets: _AxisSets, result: _RuleResult) -> _AxisSets:
-    """Apply an explicit output-axis to parent-axis mapping."""
+def _map_axis_mapping(
+    parent: Op, output_sets: _AxisSets, result: _RuleResult
+) -> tuple[_AxisSets, bool]:
+    """Apply an explicit output-axis to parent-axis mapping.
+
+    Surviving sliced axes apply their recorded exact affine
+    (``parent = step * out + start``; the historical path copied index sets
+    through unshifted, dropping every slice offset — disputed-r2 b6/R20-2).
+    Scalar-selected parent axes narrow to their recorded singleton index;
+    a selected axis with no recorded index and extent > 1 falls back to its
+    conservative full extent and makes the hop non-exact (R20-3: the
+    conservative bound must be visible in the box's exactness claim).
+    """
     raw = result.values.get("out_to_parent_axis", {})
     if not isinstance(raw, Mapping):
-        return (None,) * len(parent.shape)
+        return (None,) * len(parent.shape), True
+    raw_edges = result.values.get("out_axis_edges", {})
+    edges = raw_edges if isinstance(raw_edges, Mapping) else {}
+    raw_indices = result.values.get("selected_parent_indices", {})
+    selected_indices = raw_indices if isinstance(raw_indices, Mapping) else {}
+    raw_selected = result.values.get("selected_parent_axes", ())
+    selected_axes = (
+        tuple(int(axis) for axis in raw_selected)
+        if isinstance(raw_selected, Sequence) and not isinstance(raw_selected, (str, bytes))
+        else ()
+    )
     mapped: list[_IndexSet | None] = [None] * len(parent.shape)
+    exact = True
     for output_axis, parent_axis in raw.items():
         if isinstance(output_axis, int) and isinstance(parent_axis, int):
             if 0 <= output_axis < len(output_sets) and 0 <= parent_axis < len(mapped):
-                mapped[parent_axis] = output_sets[output_axis]
-    return tuple(mapped)
+                output_set = output_sets[output_axis]
+                edge = edges.get(output_axis)
+                if output_set is not None and edge is not None:
+                    step, start = int(edge[0]), int(edge[1])
+                    output_set = _IndexSet.from_values(
+                        (step * value + start for value in output_set.values()),
+                        exact=output_set.exact,
+                    )
+                mapped[parent_axis] = output_set
+    for parent_axis in selected_axes:
+        if not 0 <= parent_axis < len(mapped):
+            continue
+        index = selected_indices.get(parent_axis)
+        extent = int(parent.shape[parent_axis])
+        if isinstance(index, int) and 0 <= index < extent:
+            mapped[parent_axis] = _IndexSet.singleton(index)
+        elif extent == 1:
+            mapped[parent_axis] = _IndexSet.singleton(0)
+        else:
+            mapped[parent_axis] = _IndexSet.interval(0, extent - 1, exact=False)
+            exact = False
+    return tuple(mapped), exact
 
 
 def _map_window_edges(
@@ -808,11 +966,72 @@ def _build_box(
         zip(descriptor.axes, descriptor.input_shape, strict=True)
     ):
         if axis_descriptor.kind == "pointwise":
+            # A surviving pointwise axis is identity-geometry by construction
+            # (non-identity composed geometry degrades to a "full" envelope in
+            # _engine_descriptor, disputed-r3 F1/F2, and the full case below
+            # folds its inexactness), so the same-index claim is sound and the
+            # box's exactness stays the query-time derivation from windowed
+            # terminals — the static descriptor ``exact`` flag is a
+            # conservative composition artifact shared with windowed axes and
+            # deliberately NOT folded here.
             box_axes.append(
-                ReceptiveFieldBoxAxis(axis, "pointwise", None, None, None, None, None, None)
+                ReceptiveFieldBoxAxis(
+                    axis,
+                    "pointwise",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    sparse_possible=axis_descriptor.sparse_possible,
+                )
             )
         elif axis_descriptor.kind == "full":
-            box_axes.append(ReceptiveFieldBoxAxis(axis, "full", None, None, 0, extent, 0, extent))
+            narrowed = theoretical_sets[axis]
+            if narrowed is not None and not narrowed.is_empty:
+                # The query walk produced a real per-axis index set (for
+                # example a scalar-selected getitem axis narrowed to its
+                # recorded singleton). Serve the walk's tight bounds instead
+                # of the descriptor's conservative whole extent.
+                narrowed_minimum = narrowed.minimum
+                narrowed_maximum = narrowed.maximum
+                assert narrowed_minimum is not None and narrowed_maximum is not None
+                box_axes.append(
+                    ReceptiveFieldBoxAxis(
+                        axis,
+                        "full",
+                        None,
+                        None,
+                        narrowed_minimum,
+                        narrowed_maximum + 1,
+                        max(narrowed_minimum, 0),
+                        min(narrowed_maximum + 1, extent),
+                        sparse_possible=axis_descriptor.sparse_possible,
+                    )
+                )
+            else:
+                # No walk narrowing: the whole-extent claim is only as exact
+                # as the descriptor's own axis evidence. A conservative full
+                # axis (for example an unresolved scalar selection over
+                # extent > 1) must be visible in the box's exactness claim —
+                # the historical box derived `exact` from windowed terminals
+                # alone, so this dishonest-exact class was tripwire-BLIND
+                # (disputed-r2 b6/R20-3).
+                exact = exact and axis_descriptor.exact
+                box_axes.append(
+                    ReceptiveFieldBoxAxis(
+                        axis,
+                        "full",
+                        None,
+                        None,
+                        0,
+                        extent,
+                        0,
+                        extent,
+                        sparse_possible=axis_descriptor.sparse_possible,
+                    )
+                )
         elif axis_descriptor.kind == "windowed":
             theoretical = theoretical_sets[axis]
             actual = clipped_sets[axis]
@@ -837,11 +1056,22 @@ def _build_box(
                     index_stop,
                     actual_start,
                     actual_stop,
+                    sparse_possible=axis_descriptor.sparse_possible,
                 )
             )
         else:
             box_axes.append(
-                ReceptiveFieldBoxAxis(axis, "unknown", None, None, None, None, None, None)
+                ReceptiveFieldBoxAxis(
+                    axis,
+                    "unknown",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    sparse_possible=axis_descriptor.sparse_possible,
+                )
             )
     empty = not path_nonempty
     covers_input = not empty and all(

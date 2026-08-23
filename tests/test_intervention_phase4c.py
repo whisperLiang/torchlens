@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import namedtuple
+
 import pytest
 import torch
 
@@ -111,6 +113,111 @@ class _ChunkModel(torch.nn.Module):
         return torch.chunk(torch.relu(x), 2, dim=1)
 
 
+class _NamedTupleModule(torch.nn.Module):
+    """Module returning a namedtuple of tensor leaves."""
+
+    def __init__(self) -> None:
+        """Initialize the stable namedtuple type."""
+
+        super().__init__()
+        self._pair_type = namedtuple("Pair", ["left", "right"])
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return a namedtuple carrying two tensor leaves.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            Namedtuple pair of transformed tensors.
+        """
+
+        return self._pair_type(x + 1, x + 2)
+
+
+class _NamedTupleBoundaryModel(torch.nn.Module):
+    """Model whose submodule boundary returns a namedtuple."""
+
+    def __init__(self) -> None:
+        """Initialize the namedtuple-returning submodule."""
+
+        super().__init__()
+        self.sub = _NamedTupleModule()
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the submodule's namedtuple payload.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            Namedtuple payload.
+        """
+
+        return self.sub(x)
+
+
+class _MultiOpBlock(torch.nn.Module):
+    """Block whose containment and output boundary are observably different."""
+
+    def __init__(self) -> None:
+        """Initialize the block's learned operation."""
+
+        super().__init__()
+        self.linear = torch.nn.Linear(3, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply three captured operations before returning.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Scaled rectified projection.
+        """
+
+        return torch.relu(self.linear(x)) * 2.0
+
+
+class _MultiOpModuleModel(torch.nn.Module):
+    """Model exposing a multi-operation block followed by another module."""
+
+    def __init__(self) -> None:
+        """Initialize the selected block and unselected tail."""
+
+        super().__init__()
+        self.block = _MultiOpBlock()
+        self.tail = torch.nn.Linear(3, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the selected block and unselected tail.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Tail projection of the block output.
+        """
+
+        return self.tail(self.block(x))
+
+
 def _zero_hook(out: torch.Tensor, *, hook: tl.HookContext) -> torch.Tensor:
     """Return a zeroed out.
 
@@ -198,8 +305,129 @@ def test_module_selector_does_not_overmatch_other_live_modules() -> None:
 
     hooked_labels = {layer.layer_label for layer in log.layer_list if layer.interventions}
 
-    assert "sigmoid_1_2" in hooked_labels
-    assert "relu_1_1" not in hooked_labels
+    assert hooked_labels == {"interventionreplacement_1_3"}
+
+
+def test_module_selector_matches_exact_multi_op_boundary() -> None:
+    """A module selector intervenes only on a multi-op module's output boundary."""
+
+    log = tl.trace(
+        _MultiOpModuleModel(),
+        torch.randn(2, 3),
+        intervene=tl.when(tl.module("block"), tl.zero_ablate()),
+    )
+
+    intervened = {op.layer_label for op in log.ops if op.interventions}
+    resolved_boundary = {
+        op.layer_label for op in log.resolve_sites(tl.module("block"), max_fanout=len(log.ops))
+    }
+
+    assert len(intervened) == 1
+    assert intervened == resolved_boundary
+
+
+def test_module_selector_namedtuple_output_rebuilds_without_crashing() -> None:
+    """Module-boundary hooks rebuild namedtuple outputs after tensor replacement."""
+
+    x = torch.randn(2, 3)
+    trace = tl.trace(
+        _NamedTupleBoundaryModel(),
+        x,
+        intervene=tl.when(tl.module("sub"), tl.zero_ablate()),
+    )
+    outputs = [trace[label].out for label in trace.output_layers]
+
+    assert len(outputs) == 2
+    assert all(torch.equal(out, torch.zeros_like(x)) for out in outputs)
+
+
+def test_module_selector_save_is_exact_for_trace_and_record() -> None:
+    """Trace and sparse save retain only the selected module output op."""
+
+    model = _MultiOpModuleModel()
+    inputs = torch.randn(2, 3)
+
+    log = tl.trace(model, inputs, save=tl.module("block"))
+    recording = tl.record(model, inputs, save=tl.module("block"))
+    recording_trace = recording.to_trace()
+
+    saved = {op.layer_label for op in log.ops if op.has_saved_activation}
+    resolved_boundary = {
+        op.layer_label for op in log.resolve_sites(tl.module("block"), max_fanout=len(log.ops))
+    }
+    assert saved == resolved_boundary
+    assert len(recording.records) == 1
+    assert recording.records[0].ctx.output_of_module_calls == ("block:1",)
+    recording_saved = {op.layer_label for op in recording_trace.ops if op.has_saved_activation}
+    recording_boundary = {
+        op.layer_label
+        for op in recording_trace.resolve_sites(
+            tl.module("block"), max_fanout=len(recording_trace.ops)
+        )
+    }
+    assert recording_saved == recording_boundary
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        tl.label("relu_1_2"),
+        tl.contains("relu_1_2"),
+        tl.regex("relu_1_2"),
+    ],
+)
+def test_predicate_intervention_rejects_finalized_label_styles(selector: object) -> None:
+    """All label-oriented predicate selectors share the live-label guard."""
+
+    with pytest.raises(LiveModeLabelError, match="tl.where"):
+        tl.trace(
+            _ReluReturnModel(),
+            torch.randn(2, 3),
+            intervene=tl.when(selector, tl.zero_ablate()),  # type: ignore[arg-type]
+        )
+
+
+def test_zero_match_capture_selectors_warn() -> None:
+    """Successful capture warns when save or intervention selectors match nothing."""
+
+    with pytest.warns(UserWarning, match="save selector .* matched zero sites"):
+        tl.trace(_ReluReturnModel(), torch.randn(2, 3), save=tl.func("missing"))
+    with pytest.warns(UserWarning, match="intervention selector .* matched zero sites"):
+        tl.trace(
+            _ReluReturnModel(),
+            torch.randn(2, 3),
+            intervene=tl.when(tl.func("missing"), tl.zero_ablate()),
+        )
+    with pytest.warns(UserWarning, match="save selector .* matched zero sites"):
+        tl.record(_ReluReturnModel(), torch.randn(2, 3), save=tl.func("missing"))
+
+
+def test_unsupported_capture_selector_kind_fails_loudly() -> None:
+    """Unsupported selector kinds raise instead of silently matching nothing."""
+
+    with pytest.raises(SiteResolutionError, match="resolve through intervention mutators"):
+        tl.trace(
+            _ReluReturnModel(),
+            torch.randn(2, 3),
+            intervene=tl.when(tl.facet("resid"), tl.zero_ablate()),
+        )
+
+
+def test_hook_body_type_error_is_not_reclassified() -> None:
+    """A TypeError raised by user hook code propagates unchanged."""
+
+    def broken_hook(out: torch.Tensor, *, hook: tl.HookContext) -> torch.Tensor:
+        """Raise a user-authored TypeError after successful argument binding."""
+
+        del out, hook
+        raise TypeError("body bug")
+
+    with pytest.raises(TypeError, match="body bug"):
+        tl.trace(
+            _ReluReturnModel(),
+            torch.randn(2, 3),
+            intervene=tl.when(tl.func("relu"), broken_hook),
+        )
 
 
 def test_live_regex_and_output_at_selectors_execute() -> None:

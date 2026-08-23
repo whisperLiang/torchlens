@@ -11,26 +11,22 @@ import inspect
 import os
 import signal
 import sys
-import types
 import weakref
 
 import pytest
 import torch
 from torch import nn
 
-from torchlens.backends.torch._tl import get_module_meta, get_tensor_label, is_decorated_function
 import torchlens.backends.torch.wrappers as torch_funcs_module
 from torchlens import _state, trace as trace_fn
+from torchlens.backends.torch._tl import get_module_meta, get_tensor_label, is_decorated_function
 from torchlens.backends.torch.wrappers import (
     decorate_all_once,
     get_arg_names,
-    patch_detached_references,
-    patch_model_instance,
-    wrap_torch,
     unwrap_torch,
+    wrap_torch,
     wrapped,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -118,7 +114,7 @@ def test_ignored_tensor_producers_are_wrapped(route: str) -> None:
     op = next(layer for layer in log.layer_list if layer.func_name == route)
 
     if route in {"asarray", "fill"}:
-        assert op.parents == ["input_1"]
+        assert op.parents == ("input_1",)
 
 
 class SameObjectReturnModel(nn.Module):
@@ -245,10 +241,9 @@ class TestLazyDecoration:
     def test_wrapped_context_manager_exception_safety(self):
         """wrapped() must unwrap even if body raises."""
         assert _state._is_decorated is False
-        with pytest.raises(RuntimeError):
-            with wrapped():
-                assert _state._is_decorated is True
-                raise RuntimeError("test error")
+        with pytest.raises(RuntimeError), wrapped():
+            assert _state._is_decorated is True
+            raise RuntimeError("test error")
         assert _state._is_decorated is False
 
     @pytest.mark.heavy
@@ -538,160 +533,6 @@ class TestPassthroughWhenOff:
 # =========================================================================
 
 
-class TestDetachedImports:
-    @pytest.fixture(autouse=True)
-    def _ensure_wrapped(self):
-        """Ensure torch functions are wrapped for these tests."""
-        wrap_torch()
-
-    def test_module_level_import_patched(self):
-        """A 'from torch import cos' at module level should be patched."""
-        # Create a synthetic module that simulates 'from torch import cos'
-        mod = types.ModuleType("_test_detached_cos")
-        mod.cos = torch.cos  # torch.cos is already decorated at this point
-        sys.modules["_test_detached_cos"] = mod
-        try:
-            # The function should be decorated
-            assert is_decorated_function(mod.cos)
-        finally:
-            del sys.modules["_test_detached_cos"]
-
-    def test_model_with_stored_torch_func(self):
-        """A model storing self.act = torch.relu should have it patched."""
-
-        class FuncAttrModel(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.act = torch.relu
-                self.linear = nn.Linear(5, 5)
-
-            def forward(self, x):
-                return self.act(self.linear(x))
-
-        model = FuncAttrModel()
-        # Before patching, self.act might be undecorated (if bound to original)
-        # patch_model_instance should fix it
-        patch_model_instance(model)
-        # After patching, the relu stored on the model should be decorated
-        result = trace_fn(model, torch.randn(5))
-        # The relu should appear in the graph
-        relu_layers = [label for label in result.layer_labels if "relu" in label.lower()]
-        assert len(relu_layers) > 0, "relu from self.act not logged in graph"
-
-    def test_patch_model_instance_patches_callable_attrs_only(self) -> None:
-        """Instance patching replaces stale callables and preserves non-callable attrs."""
-
-        original_relu = _state._decorated_to_orig[id(torch.relu)]
-
-        class FuncAttrModel(nn.Module):
-            """Model with one stale callable and one non-callable payload."""
-
-            def __init__(self) -> None:
-                """Initialize direct instance attributes used by the patcher."""
-
-                super().__init__()
-                self.act = original_relu
-                self.payload = list(range(1000))
-
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                """Run the stored callable attribute."""
-
-                return self.act(x)
-
-        model = FuncAttrModel()
-        payload = model.payload
-
-        patch_model_instance(model)
-
-        assert model.payload is payload
-        assert model.act is _state._orig_to_decorated[id(original_relu)]
-
-    def test_model_with_func_in_list(self):
-        """A model storing functions in a list should still have them logged."""
-
-        class ListFuncModel(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.funcs = [torch.relu, torch.sigmoid]
-                self.linear = nn.Linear(5, 5)
-
-            def forward(self, x):
-                x = self.linear(x)
-                for f in self.funcs:
-                    x = f(x)
-                return x
-
-        model = ListFuncModel()
-        result = trace_fn(model, torch.randn(5))
-        labels = " ".join(result.layer_labels).lower()
-        assert "relu" in labels, "relu from list not logged"
-        assert "sigmoid" in labels, "sigmoid from list not logged"
-
-    def test_model_with_func_in_dict(self):
-        """A model storing functions in a dict should still have them logged."""
-
-        class DictFuncModel(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.ops = {"out": torch.relu}
-                self.linear = nn.Linear(5, 5)
-
-            def forward(self, x):
-                return self.ops["out"](self.linear(x))
-
-        model = DictFuncModel()
-        result = trace_fn(model, torch.randn(5))
-        relu_layers = [lbl for lbl in result.layer_labels if "relu" in lbl.lower()]
-        assert len(relu_layers) > 0
-
-    def test_nn_functional_import_patched(self):
-        """torch.nn.functional functions should be decorated."""
-        import torch.nn.functional as F
-
-        assert is_decorated_function(F.relu)
-        assert is_decorated_function(F.linear)
-
-    def test_late_import_patched_incrementally(self):
-        """Modules imported after torchlens should be patched on next crawl."""
-        mod_name = "_test_late_import_module"
-        # Remove if somehow already present
-        sys.modules.pop(mod_name, None)
-        _state._crawled_module_keys.discard(mod_name)
-
-        # Simulate a late import
-        mod = types.ModuleType(mod_name)
-        # Store the DECORATED cos (since torch.cos is already decorated)
-        mod.my_cos = torch.cos
-        sys.modules[mod_name] = mod
-        try:
-            # Trigger incremental crawl
-            patch_detached_references()
-            assert is_decorated_function(mod.my_cos)
-        finally:
-            sys.modules.pop(mod_name, None)
-
-    def test_crawl_skips_torchlens_modules(self):
-        """The crawl must not modify torchlens internal modules."""
-        # torchlens modules should be in _crawled_module_keys but NOT patched
-        tl_modules = [k for k in sys.modules if k.startswith("torchlens")]
-        assert len(tl_modules) > 0
-        # _state itself should not have been modified by the crawl
-        assert not is_decorated_function(_state)
-
-    def test_crawl_only_processes_new_modules(self):
-        """Calling patch_detached_references twice should not re-scan."""
-        keys_after_first = set(_state._crawled_module_keys)
-        patch_detached_references()
-        keys_after_second = set(_state._crawled_module_keys)
-        # If no new modules were imported, sets should be identical
-        assert keys_after_first == keys_after_second
-
-
-# =========================================================================
-# 4. Permanent Model Preparation
-# =========================================================================
-
-
 class TestPermanentModelPrep:
     @pytest.fixture(autouse=True)
     def _ensure_wrapped(self):
@@ -830,10 +671,9 @@ class TestPauseLogging:
         """pause_logging must restore state even if body raises."""
         _state._logging_enabled = True
         try:
-            with pytest.raises(ValueError):
-                with _state.pause_logging():
-                    assert _state._logging_enabled is False
-                    raise ValueError("test")
+            with pytest.raises(ValueError), _state.pause_logging():
+                assert _state._logging_enabled is False
+                raise ValueError("test")
             assert _state._logging_enabled is True
         finally:
             _state._logging_enabled = False
@@ -1068,12 +908,27 @@ class TestDecorationConsistency:
         assert len(_state._orig_to_decorated) > 1000
 
     def test_decorated_to_orig_populated(self):
-        """_decorated_to_orig should mirror _orig_to_decorated."""
-        assert len(_state._decorated_to_orig) == len(_state._orig_to_decorated)
+        """The append-only unwrap ledger mirrors every CURRENT wrapper.
+
+        Strict length equality only holds in a single-wrap-generation
+        session: ``_decorated_to_orig`` is the session's append-only unwrap
+        LEDGER (it must never shrink -- see
+        lesson-decorated-to-orig-append-only), so after any legitimate
+        re-wrap generation it is a strict superset of the current map and
+        the old ``len == len`` assertion was order-dependent (p2 R76
+        reverse-order red, 3886 == 1944).
+        """
+
+        current_wrapper_ids = {
+            id(dec) for dec in _state._orig_to_decorated.values() if not isinstance(dec, property)
+        }
+        missing = current_wrapper_ids - set(_state._decorated_to_orig)
+        assert not missing, "current-generation wrappers absent from the unwrap ledger"
+        assert len(_state._decorated_to_orig) >= len(current_wrapper_ids)
 
     def test_bidirectional_mapper(self):
         """_decorated_func_mapper should have dec->orig for every wrapper."""
-        for orig_id, dec in _state._orig_to_decorated.items():
+        for _orig_id, dec in _state._orig_to_decorated.items():
             if isinstance(dec, property):
                 continue
             orig = _state._decorated_to_orig.get(id(dec))

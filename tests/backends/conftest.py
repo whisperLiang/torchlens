@@ -3,17 +3,10 @@
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
-from os.path import join as opj
-from pathlib import Path
 from typing import Any
 
 import pytest
 from packaging.version import InvalidVersion, Version
-
-TESTS_DIR = str(Path(__file__).resolve().parents[1])
-TEST_OUTPUTS_DIR = opj(TESTS_DIR, "generated_outputs")
-REPORTS_DIR = opj(TEST_OUTPUTS_DIR, "reports")
-VIS_OUTPUT_DIR = opj(TEST_OUTPUTS_DIR, "visualizations")
 
 _MIN_TENSORFLOW_VERSION = Version("2.16")
 _MIN_KERAS_MAJOR = 3
@@ -51,7 +44,14 @@ def _unsupported_tensorflow_reason() -> str | None:
         Skip reason for unsupported stacks, or ``None`` when the stack is supported.
     """
 
-    tensorflow_version = _installed_version("tensorflow")
+    tensorflow_version = next(
+        (
+            found
+            for dist_name in ("tensorflow", "tensorflow-cpu", "tensorflow-aarch64")
+            if (found := _installed_version(dist_name)) is not None
+        ),
+        None,
+    )
     keras_version = _installed_version("keras")
 
     if tensorflow_version is None:

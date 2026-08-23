@@ -8,13 +8,13 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from ..boundary import ReplayBoundary
     from ..graph import SplitTraceGraph
+    from ..ir import SplitRequest
     from ..planner import SplitPlan
     from ..program import ReplayProgram, ReplaySegment
-    from ..ir import SplitRequest
     from ..training import BoundaryGradients, TrainingStepResult
 
 
-def boundary_overlay(boundary: "ReplayBoundary", plan: "SplitPlan") -> dict[str, Any]:
+def boundary_overlay(boundary: ReplayBoundary, plan: SplitPlan) -> dict[str, Any]:
     """Return replay values keyed only by canonical graph value IDs."""
 
     if not plan.boundary_bindings:
@@ -150,12 +150,12 @@ class ReplayLowerer(Protocol):
 
     def lower_program(
         self,
-        graph: "SplitTraceGraph",
-        plan: "SplitPlan",
-        spec: "SplitRequest",
+        graph: SplitTraceGraph,
+        plan: SplitPlan,
+        spec: SplitRequest,
         *,
-        segment: "ReplaySegment",
-    ) -> "ReplayProgram":
+        segment: ReplaySegment,
+    ) -> ReplayProgram:
         """Lower one split segment to replay IR."""
         ...
 
@@ -165,9 +165,9 @@ class ReplayExecutor(Protocol):
 
     def build_segments(
         self,
-        graph: "SplitTraceGraph",
-        plan: "SplitPlan",
-        spec: "SplitRequest",
+        graph: SplitTraceGraph,
+        plan: SplitPlan,
+        spec: SplitRequest,
     ) -> SegmentBundle:
         """Build backend-specific split replay segments."""
         ...
@@ -181,19 +181,19 @@ class TrainingEngine(Protocol):
     def train_suffix(
         self,
         runtime: Any,
-        boundary: "ReplayBoundary",
+        boundary: ReplayBoundary,
         targets: Any,
         loss_fn: Any = None,
         optimizer: Any = None,
-    ) -> "TrainingStepResult":
+    ) -> TrainingStepResult:
         """Differentiate or train a split suffix."""
         ...
 
     def backward_prefix(
         self,
         runtime: Any,
-        boundary: "ReplayBoundary",
-        boundary_grads: "BoundaryGradients",
+        boundary: ReplayBoundary,
+        boundary_grads: BoundaryGradients,
         optimizer: Any = None,
     ) -> Any:
         """Propagate suffix boundary gradients through a split prefix."""

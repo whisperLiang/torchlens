@@ -615,8 +615,7 @@ def test_r69_key_codec_is_injective_and_round_trips() -> None:
 def test_r69_classifier_choke_points_source_scan() -> None:
     """Snapshot, literal encode, literal compare, and key codec share the classifier."""
 
-    from torchlens import _runnable_execution
-    from torchlens import _input_walk
+    from torchlens import _input_walk, _runnable_execution
     from torchlens._io import runnable as io_runnable
 
     for func in (
@@ -697,7 +696,7 @@ def test_r69_multi_slot_escape_witnesses_stay_runnable(tmp_path: Path) -> None:
     x = torch.tensor([3.0, 5.0])
     path = _save(_trace(_BufferNumpyWriteback(), x.clone()), tmp_path / "wb.tlspec")
     loaded = tl.load(path)
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     assert descriptor is not None, "artifact must stay RUNNABLE, never analysis-only"
     members = required_witness_family_members(descriptor.control_witnesses)["unbound_state_escape"]
     assert len(members) == len(set(members)), members
@@ -728,7 +727,7 @@ def test_r69_multi_slot_escape_witnesses_stay_runnable(tmp_path: Path) -> None:
     from torchlens.runnable import ReadinessStatus
 
     reloaded = tl.load(path)
-    readiness = reloaded.__dict__.get("_runnable_readiness")
+    readiness = reloaded._runnable.readiness
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     assert "context_field_invalid" in {d.code.value for d in readiness.diagnostics}
 

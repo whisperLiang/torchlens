@@ -1,13 +1,13 @@
 """Core data structures for representing a logged forward pass."""
 
-from .buffer import BufferAccessor, Buffer
 from .backward_pass import BackwardPass, BackwardPassAccessor
+from .buffer import Buffer, BufferAccessor
 from .func_call_location import FuncCallLocation
-from .grad_fn import GradFnAccessor, GradFn
+from .grad_fn import GradFn, GradFnAccessor
 from .grad_fn_call import GradFnCall
 from .internal_types import FuncExecutionContext, VisualizationOverrides
-from .module import ModuleAccessor, Module, ModuleCall
-from .param import ParamAccessor, Param
+from .module import Module, ModuleAccessor, ModuleCall
+from .param import Param, ParamAccessor
 from .prehook import ModuleInputSnapshot, PreHookEffect, TensorInputObservation
 
 __all__ = [

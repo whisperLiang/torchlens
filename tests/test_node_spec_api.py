@@ -10,8 +10,8 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.experimental.dagua import NodeSpec
 from torchlens.data_classes.layer import Layer
+from torchlens.experimental.dagua import NodeSpec
 from torchlens.visualization import node_spec as node_spec_mod
 from torchlens.visualization.overlays import external_overlay_value
 
@@ -41,16 +41,27 @@ def test_default_nodespec_for_conv2d_includes_args(tmp_path: Any) -> None:
     assert "padding=(1, 1)" in dot
 
 
-def test_default_nodespec_for_linear_includes_in_out(tmp_path: Any) -> None:
-    """Linear default labels should include full feature-count names."""
+def test_default_nodespec_for_linear_suppresses_proven_redundant_args(tmp_path: Any) -> None:
+    """Checked suppression (L5 M4, default-on): in/out_features provably equal
+    the captured shape dims, so the default label omits them; the
+    ``show_redundant_args=True`` opt-out restores the full feature-count
+    names. (Historical default pinned the names unconditionally.)"""
 
     model = nn.Linear(in_features=16, out_features=32)
     log = tl.trace(model, torch.randn(1, 16))
 
     dot = _render_dot(log, tmp_path)
+    assert "in_features" not in dot
+    assert "out_features" not in dot
 
-    assert "in_features=16" in dot
-    assert "out_features=32" in dot
+    dot_all = log.draw(
+        vis_save_only=True,
+        vis_fileformat="svg",
+        vis_outpath=str(tmp_path / "graph_all"),
+        show_redundant_args=True,
+    )
+    assert "in_features=16" in dot_all
+    assert "out_features=32" in dot_all
 
 
 def test_node_spec_fn_receives_layer_log_and_default(tmp_path: Any) -> None:
@@ -114,18 +125,26 @@ def test_node_spec_fn_returning_none_uses_default(tmp_path: Any) -> None:
     assert callback_dot == default_dot
 
 
-def test_intervention_node_spec_matches_short_label(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Intervention styling accepts short layer labels."""
+# ``intervention_site_and_cone_labels`` supplies the CONE labels only; site labels
+# come from ``intervention_sites_for_log`` and match by exact pass-qualified label
+# (unrolled Op nodes) or exact aggregate ``layer_label`` (rolled Layer nodes), which
+# ``test_r18j_recurrent_render.py::test_h9_intervention_colors_only_intervened_pass``
+# covers end to end. Short labels and per-pass call labels are cone-matching keys, so
+# these two tests exercise them there.
+def test_intervention_node_spec_cone_matches_short_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cone styling accepts short layer labels."""
 
     def fake_labels(trace: Any, *, show_cone: bool) -> tuple[set[str], set[str]]:
-        """Return a short-label intervention site."""
+        """Return a short-label cone member and no sites."""
 
-        return {"relu"}, set()
+        return set(), {"relu"}
 
     monkeypatch.setattr(node_spec_mod, "intervention_site_and_cone_labels", fake_labels)
     node_spec_fn = node_spec_mod.make_intervention_node_spec_fn(
         object(),
-        show_cone=False,
+        show_cone=True,
         graph_overrides=None,
         user_node_spec_fn=None,
     )
@@ -135,22 +154,24 @@ def test_intervention_node_spec_matches_short_label(monkeypatch: pytest.MonkeyPa
     assert node_spec_fn is not None
     styled = node_spec_fn(layer, default)
 
-    assert styled.color == node_spec_mod.INTERVENTION_SITE_COLOR
-    assert styled.penwidth == 3.0
+    assert styled.color == node_spec_mod.INTERVENTION_CONE_COLOR
+    assert styled.penwidth == 1.75
 
 
-def test_intervention_node_spec_matches_call_labels(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Intervention styling accepts real per-pass call labels on rolled layers."""
+def test_intervention_node_spec_cone_matches_call_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cone styling accepts real per-pass call labels on rolled layers."""
 
     def fake_labels(trace: Any, *, show_cone: bool) -> tuple[set[str], set[str]]:
-        """Return a per-pass intervention site label."""
+        """Return a per-pass cone label that matches no aggregate label."""
 
-        return {"relu_1_2"}, set()
+        return set(), {"relu_1_2"}
 
     monkeypatch.setattr(node_spec_mod, "intervention_site_and_cone_labels", fake_labels)
     node_spec_fn = node_spec_mod.make_intervention_node_spec_fn(
         object(),
-        show_cone=False,
+        show_cone=True,
         graph_overrides=None,
         user_node_spec_fn=None,
     )
@@ -164,8 +185,15 @@ def test_intervention_node_spec_matches_call_labels(monkeypatch: pytest.MonkeyPa
     assert node_spec_fn is not None
     styled = node_spec_fn(layer, default)
 
-    assert styled.color == node_spec_mod.INTERVENTION_SITE_COLOR
-    assert styled.penwidth == 3.0
+    assert styled.color == node_spec_mod.INTERVENTION_CONE_COLOR
+    assert styled.penwidth == 1.75
+
+    unrelated = SimpleNamespace(
+        layer_label="linear_1",
+        layer_label_short="linear",
+        call_labels=["linear_1_1"],
+    )
+    assert node_spec_fn(unrelated, default).color == "black"
 
 
 def test_external_overlay_value_matches_short_label() -> None:

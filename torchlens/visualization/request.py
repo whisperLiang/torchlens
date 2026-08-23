@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Literal, Mapping
+from typing import Any, Literal
 
 from .._literals import (
     BufferVisibilityLiteral,
@@ -99,7 +100,30 @@ class ResolvedRenderRequest:
     code_panel: Any = False
     node_overlay: Any = None
     node_label_fields: tuple[str, ...] | None = None
-    show_legend: bool = False
+    # Tri-state (L5 channel core): None = AUTO -- no legend unless an
+    # encoding channel is active, then a channel-only disclosure legend.
+    # True/False keep their historical meanings; explicit False is honored
+    # even with channels active (a deliberate act).
+    show_legend: bool | None = None
+    # Encoding channel core (L5, DOCUMENTED-UNSTABLE until ratified):
+    # ``color_by``/``size_by``/``scale`` are the raw user sources;
+    # ``encoding`` carries the resolved per-draw EncodingState (all active
+    # channels). Presentation-only: NONE joins __hash__ (the
+    # collapse-planning subset is unchanged -- channels must never affect the
+    # collapse plan).
+    color_by: Any = None
+    size_by: Any = None
+    scale: Any = None
+    stack_by: Any = None
+    encoding: Any = None
+    # Checked suppression (L5 M4, DOCUMENTED-UNSTABLE spelling): True shows
+    # every constructor arg; False (default) suppresses args the equality
+    # check proves redundant against this trace's captured shapes.
+    show_redundant_args: bool = False
+    # Saved-for-backward annotation (DOCUMENTED-UNSTABLE spelling): True adds
+    # a label row on every op whose grad_fn retained tensors for backward,
+    # from the captured autograd_memory/num_autograd_tensors measurements.
+    show_saved_for_backward: bool = False
     font_size: int | None = None
     dpi: int | None = None
     for_paper: bool = False
@@ -113,7 +137,7 @@ class ResolvedRenderRequest:
     def with_resolved_collapse(
         self,
         collapse_fn: Callable[[Any], bool] | None,
-    ) -> "ResolvedRenderRequest":
+    ) -> ResolvedRenderRequest:
         """Return this request with its resolved collapse predicate.
 
         Parameters

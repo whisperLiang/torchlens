@@ -6,7 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
-from .events import ModuleFrame, OpEvent
+from .events import ModuleFrame
 
 
 class LiveIndexWindowError(KeyError):
@@ -17,18 +17,28 @@ class LiveIndexWindowError(KeyError):
 class LiveIndex:
     """Shared-engine-owned index over emitted operation events.
 
-    The index is populated only from ``OpEvent`` objects and small sibling-event
-    counters. It intentionally does not expose mutable ``Op`` field dictionaries.
+    The index is populated only from journal op records (compat ``OpEvent``
+    or decomposed ``OpRecord``, read through the shared flat-name protocol)
+    and small sibling-event counters. It intentionally does not expose
+    mutable ``Op`` field dictionaries.
     """
 
-    by_raw_label: dict[str, OpEvent] = field(default_factory=dict)
+    by_raw_label: dict[str, Any] = field(default_factory=dict)
     labels: list[str] = field(default_factory=list)
     children_by_parent: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
     module_entry_counts: dict[int, int] = field(default_factory=lambda: defaultdict(int))
     module_entries_by_label: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
 
-    def append(self, event: OpEvent) -> None:
+    def append(self, event: Any) -> None:
         """Index one emitted operation event.
+
+        A raw label re-seen at this boundary (for example when a failed-partial
+        fastlog recording concatenates op-event streams) is treated as an atomic
+        in-place replacement rather than a second insertion: the label is not
+        double-listed and parent edges are recomputed so no stale
+        parent->child edge from the prior event survives. This keeps the index
+        self-consistent without requiring an unrelated ``rebuild_edges()`` and is
+        identical to :meth:`replace` for a re-seen label.
 
         Parameters
         ----------
@@ -41,6 +51,12 @@ class LiveIndex:
             Mutates the live index in place.
         """
 
+        if event.label_raw in self.by_raw_label:
+            # Re-seen label: replace last-wins and drop any now-stale edges.
+            self.by_raw_label[event.label_raw] = event
+            self.rebuild_edges()
+            return
+
         self.by_raw_label[event.label_raw] = event
         self.labels.append(event.label_raw)
         for edge in event.parents:
@@ -48,7 +64,7 @@ class LiveIndex:
             if event.label_raw not in children:
                 children.append(event.label_raw)
 
-    def replace(self, event: OpEvent) -> None:
+    def replace(self, event: Any) -> None:
         """Replace a previously indexed event.
 
         Parameters
@@ -82,7 +98,7 @@ class LiveIndex:
                 if event.label_raw not in children:
                     children.append(event.label_raw)
 
-    def require_event(self, label_raw: str) -> OpEvent:
+    def require_event(self, label_raw: str) -> Any:
         """Return an event or raise an explicit out-of-window error.
 
         Parameters
@@ -241,7 +257,7 @@ class LiveIndex:
 
         return tuple(self.module_entries_by_label.get(label_raw, ()))
 
-    def copy(self) -> "LiveIndex":
+    def copy(self) -> LiveIndex:
         """Return a structural copy holding the same event references.
 
         All container fields are duplicated into fresh objects (nested lists

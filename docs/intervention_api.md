@@ -10,11 +10,38 @@ Selectors resolve against completed `Trace.layers` records.
 | Selector | Signature | Use |
 | --- | --- | --- |
 | `tl.label` | `label(name: str)` | Exact final, raw, short, or pass-qualified label. |
-| `tl.func` | `func(name: str)` | Match captured function name such as `"relu"` or `"linear"`. |
+| `tl.func` | `func(name: str)` | Match captured function name OR normalized layer type such as `"relu"` or `"add"`. |
 | `tl.module` | `module(address: str)` | Match a module output boundary. |
 | `tl.contains` | `contains(substring: str)` | Case-insensitive label substring search. |
+| `tl.regex` | `regex(pattern: str)` | Case-sensitive `re.search` over labels. |
 | `tl.where` | `where(predicate, *, name_hint=None)` | Predicate over layer pass records; non-portable. |
 | `tl.in_module` | `in_module(address: str)` | Match sites contained in a module address. |
+| `tl.grad_fn_label` | `grad_fn_label(name: str)` | Exact backward grad_fn label (backward sites only). |
+
+One interpreter evaluates every selector in every lifecycle (capture-time
+`save=`, post-hoc `find_sites`, live hooks); `contains` is case-insensitive and
+`regex` case-sensitive everywhere. Post-hoc `contains`/`regex` search the
+final `layer_label` only; exact `tl.label` additionally matches raw, short,
+and pass-qualified spellings. Capture-only selectors (`tl.followed_by`,
+`tl.preceded_by`) and mutator-only selectors (`tl.facet`, `tl.head`) refuse
+unsupported lifecycles with the typed `SelectorCapabilityError` (a
+`SiteResolutionError` subclass) instead of a generic message — upfront, before
+any per-site evaluation, for post-hoc resolution and live hook attachment
+alike.
+
+Composites (`&`, `|`, `~`) SHORT-CIRCUIT per site in every lifecycle: a
+`tl.where` predicate is only invoked for sites its siblings have not already
+decided, so predicates must not rely on side effects from seeing every site.
+`&`/`|` build nested binary composites, and deserialized target specs may
+carry flat n-ary child tuples; both shapes evaluate identically. Conjunctions
+are association-insensitive for the temporal sugar — `a & tl.followed_by(x) & b`
+behaves exactly like `a & b & tl.followed_by(x)` and the flat three-child
+spec — and degenerate arities keep identity semantics in evaluation and spec
+round-trips alike: an empty `and` matches everything, an empty `or` matches
+nothing, and a unary composite matches like its child.
+`tl.followed_by`/`tl.preceded_by` target specs serialize a selector inner
+structurally at every save level; an opaque-callable inner remains audit-only
+and refuses typed at rebuild rather than being reconstructed lossily.
 
 Selectors compose with `&` and `|` for in-memory discovery:
 
@@ -70,6 +97,15 @@ Forward helpers return `HelperSpec` objects that can be passed to `set`,
 | `tl.project_off` | `project_off(direction, *, feature_axis=None, force_shape_change=False)` | Portable when `direction` is tensor data. |
 | `tl.swap_with` | `swap_with(other_label, *, force_shape_change=False)` | Tensor and Op-like (`.out`) sources work in memory; **string labels are not supported and raise `HookValueError` immediately** -- no execution path resolves a bare label to another site's tensor today. |
 | `tl.splice_module` | `splice_module(module, *, input="in", output="out", force_shape_change=False)` | Executable in the same environment; not portable and not append-compatible. |
+
+The packaged SAE splice experiment, `torchlens.bridge.sae.splice(...)`
+(documented-unstable), composes `splice_module` with fork + push: it swaps a
+duck-typed SAE's reconstruction (`encode`/`decode` pair; no SAE package
+required) back into the model at one site, replays downstream, and reports
+reconstruction fidelity plus output-level causal effect. The optional
+`latents_edit=` callable transforms the encoded latents before decoding --
+the feature-level causal-testing knob. See
+`notebooks/sae_splice_tutorial.ipynb` for the end-to-end experiment.
 
 ## Backward Helpers
 
@@ -130,8 +166,12 @@ trace = recording.to_trace()
 streamed = tl.trace(model, x, save=tl.in_module("encoder"), storage=tl.to_disk("run.tlspec"))
 ```
 
-`record(keep_op=...)` and `record(keep_module=...)` are deprecated aliases for
-`record(save=...)`.
+`record(save=...)` is the only predicate spelling; the old `keep_op=` /
+`keep_module=` alias kwargs are removed and raise `TypeError`. Module-boundary
+event recording is gated by `default_module=`, which records ALL module
+enter/exit events uniformly — predicate-gated module-event selection has no
+public spelling (see `docs/reference/deprecations.md` for the honest
+capability statement).
 
 Forward exceptions keep the historical behavior unless you opt in. With
 `on_forward_error="attach_partial"`, TorchLens attaches `exc.partial_recording` and re-raises
@@ -152,11 +192,22 @@ For full `tl.trace(...)` failures, inspect `exc.partial_log` directly or call
 | --- | --- |
 | `log.set(site, value)` | Record a one-shot tensor or callable replacement and mark the recipe stale. |
 | `log.attach_hooks(site, hook)` | Add sticky helper/callable hooks to the recipe. |
-| `log.do(...)` / `tl.do(log, ...)` | Apply an intervention and dispatch to `replay`, `rerun`, or `set_only`. |
+| `log.do(...)` / `tl.do(log, ...)` | Apply an intervention and dispatch to `push`, `run`, or `set_only`. |
 | `log.fork(name=None)` | Create an isolated branch for experiments. |
-| `log.replay(hooks=None)` | Propagate over the saved DAG without calling `model.forward`. |
-| `log.rerun(model, x, append=False)` | Re-execute the model under the active spec. |
+| `log.push(hooks=None)` | Propagate over the saved DAG without calling `model.forward` (`replay` is a deprecated alias that warns). |
+| `log.run(model, x, append=False)` | Re-execute the model under the active spec (`rerun` is a deprecated alias that warns). |
 | `log.save_intervention(path, level=...)` | Write a `.tlspec/` intervention recipe. |
+
+There are two distinct intervention paths, and they do not mix implicitly:
+(1) edit a SAVED value and push the effect downstream on the captured DAG
+(`do()` on a resolved selection, `push_from`, direct writes), and (2)
+intervene on a FRESH execution (`do(..., engine="rerun", model=..., x=...)`
+or a new capture with `intervene=...`). A new-input `run(inputs=...)` on a
+trace carrying path-1 value-edits is a fresh execution — the edits do NOT
+apply to it, and TorchLens discloses that at the run door with
+`PendingValueEditsWarning` (documented-unstable spelling) rather than
+silently returning an un-edited verified run. The run itself proceeds:
+this is a disclosure, never a refusal.
 
 `Trace.draw(vis_intervention_mode=...)` visualizes the planned intervention
 recipe stored on an intervention-ready trace, such as sites registered with
@@ -178,11 +229,10 @@ Common operations:
 | --- | --- |
 | `bundle.names` | Member names in order. |
 | `bundle["clean"]` | Access one `Trace`. |
-| `bundle.node(site)` | Return a `NodeView` across members after relationship checks. |
+| `bundle.node(site)` | Return a `SuperOp` across members after relationship checks. |
 | `bundle.compare_at(site)` | Pairwise comparison matrix at a shared site. |
-| `bundle.metric(fn)` | Apply a per-member metric. |
 | `bundle.joint_metric(fn)` | Apply a metric to the whole bundle. |
-| `bundle.do(...)`, `bundle.attach_hooks(...)`, `bundle.replay()`, `bundle.rerun(model, x)` | Apply mutator/propagation calls to each member. |
+| `bundle.do(...)`, `bundle.attach_hooks(...)`, `bundle.push()`, `bundle.run(model, x)` | Apply mutator/propagation calls to each member (`replay`/`rerun` are deprecated aliases that warn). |
 | `bundle.fork(name=None)` | Fork all members into a new bundle. |
 
 Relationship gates are intentional. Operations that require shared topology or
@@ -192,4 +242,4 @@ same-input evidence fail when TorchLens cannot prove enough compatibility.
 
 | TransformerLens pattern | TorchLens pattern |
 | --- | --- |
-| `act_patch` attribution patching | Attach a `tl.bwd_hook(...)` gradient observer at the site, then `log.rerun(model, x)` under the active spec and score from the captured gradients/outs. |
+| `act_patch` attribution patching | Attach a `tl.bwd_hook(...)` gradient observer at the site, then `log.run(model, x)` under the active spec and score from the captured gradients/outs. |

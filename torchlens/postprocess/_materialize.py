@@ -2,28 +2,28 @@
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping
 import importlib
+import time
+from collections import Counter, defaultdict, deque
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from math import prod
 from typing import TYPE_CHECKING, Any, cast
 
-from torch import nn
 import torch
+from torch import nn
+
 from torchlens._io import BlobRef as PortableBlobRef
+from torchlens.intervention.types import EdgeUseRecord
 from torchlens.ir import CaptureEvents
 from torchlens.ir.events import (
     ModuleEnterEvent,
     ModuleExitEvent,
-    ModuleFrame,
     ModulePrepEvent,
     OpEvent,
 )
-from torchlens.intervention.types import EdgeUseRecord
 
 from ..backends.torch._tl import get_buffer_address, get_tensor_label, get_tensor_meta
-from ..capture.ledgers import DecisionRecord, EventId, PayloadRecord
-from ..capture.session import capture_session_for
 from ..constants import LAYER_PASS_LOG_FIELD_ORDER
 from ..data_classes._module_role_hints import (
     multi_output_role_from_path,
@@ -32,20 +32,32 @@ from ..data_classes._module_role_hints import (
 from ..data_classes.trace import _init_module_hierarchy_data
 from ..utils import get_vars_of_type_from_obj, safe_copy
 from ..utils._torch_symbols import torch_attr
-from ..utils.display import _timed_phase
+from ..utils.display import _record_phase_timing
+from ._ingest_contract import IngestInputs, JournalView, Step0Result
+from ._primitive_profile import _materialize_forward_primitive_profile
 
 if TYPE_CHECKING:
-    from torchlens.data_classes.trace import Trace
     from torchlens.data_classes.op import Op
+    from torchlens.data_classes.trace import Trace
 
 
-def materialize_log_from_fields(fields_dict: dict[str, object]) -> "Op":
+from torchlens.ir.op_record import IngestExtras as _IngestExtras
+from torchlens.ir.op_record_scatter import CELL_SOURCES
+
+_EMPTY_INGEST_EXTRAS = _IngestExtras()
+
+
+def materialize_log_from_fields(fields_dict: dict[str, object], store: object | None = None) -> Op:
     """Construct the live log object for one captured operation.
 
     Parameters
     ----------
     fields_dict
         Raw field mapping populated by the backend hot path.
+    store
+        The owning trace's ``OpRowStore`` (the M5 builder ingress): the op is
+        appended as a shared columnar row. ``None`` constructs a detached
+        single-row op (legacy/preview callers).
 
     Returns
     -------
@@ -69,7 +81,7 @@ def materialize_log_from_fields(fields_dict: dict[str, object]) -> "Op":
     # (forcing op nodes to None) was FALSE and is corrected there.
     has_backend_override = "_materialized_backend_address" in fields_dict
     backend_address_override = fields_dict.pop("_materialized_backend_address", None)
-    op_log = Op(fields_dict)  # type: ignore[arg-type]
+    op_log = Op(fields_dict, _store=store)
     for field_name, blob_id in pending_blob_ids.items():
         setattr(op_log, field_name, blob_id)
     if has_backend_override:
@@ -104,44 +116,112 @@ def _pop_pending_blob_ids(fields_dict: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _annotations_from_event(event: OpEvent) -> dict[str, object]:
-    """Return annotations preserved on a materialized event."""
+def _journal_buffer_write_events(trace: Trace) -> tuple[Any, ...]:
+    """Return the journal's buffer-write lane for one trace.
 
-    raw_annotations = event.transform_config.get("_tl_annotations")
-    return dict(raw_annotations) if isinstance(raw_annotations, Mapping) else {}
-
-
-def register_materialized_event(
-    trace: "Trace",
-    event: OpEvent,
-    op_log: "Op",
-) -> None:
-    """Append an event and expose its live log to in-flight hooks.
-
-    Parameters
-    ----------
-    trace
-        Active trace receiving the event.
-    event
-        Operation event emitted for the new log.
-    op_log
-        Ignored legacy parameter retained for call-site compatibility.
-
-    Returns
-    -------
-    None
-        Mutates ``trace.capture_events`` and the raw capture indexes.
+    Buffer writes live in the capture journal (``CaptureEvents.buffer_write_events``),
+    not in a Trace-side list. During Step 0 the live stream is still attached as
+    ``trace.capture_events``; afterwards the trace owns the released stream via
+    ``_capture_events``.
     """
 
-    events = getattr(trace, "capture_events", None)
-    if events is None:
-        events = CaptureEvents()
-        trace.capture_events = events
-    events.append(event)
+    stream = getattr(trace, "capture_events", None)
+    if stream is None:
+        stream = getattr(trace, "_capture_events", None)
+    return tuple(getattr(stream, "buffer_write_events", ()) or ())
 
 
-def materialize_from_events(trace: "Trace", events: CaptureEvents) -> None:
+@dataclass(slots=True)
+class _ModuleSideChannel:
+    """Module side-channel rebuild output (``Step0Result.module_side_channel``).
+
+    Built LOCALLY by ingest from journal lanes; the orchestrator applies it
+    onto the trace's ``ModuleCaptureWorkspace`` after ingest returns.
+    """
+
+    module_build_data: dict[str, Any]
+    module_metadata: dict[str, Any]
+    module_forward_args: dict[Any, Any]
+
+
+def build_ingest_inputs(trace: Trace, events: CaptureEvents) -> IngestInputs:
+    """Orchestrator-side construction of the frozen step-0 input bundle.
+
+    Owns the lazy ``TraceCore``/``OpRowStore`` creation (ppdag v3 section 9.1
+    orchestrator row) and the trace-backed ``timing_sink``; ingest itself
+    reads nothing off the trace beyond this bundle (contract I7).
+    """
+
+    core = trace.__dict__.get("_trace_core")
+    if core is None:
+        from torchlens._trace_core import OpRowStore, TraceCore
+        from torchlens.data_classes.op import _OP_STORE_LAYOUT
+
+        core = TraceCore()
+        core.ops = OpRowStore(_OP_STORE_LAYOUT)
+        trace._trace_core = core
+
+    def timing_sink(bucket: str, elapsed: float) -> None:
+        """Record one ingest phase's elapsed time on the trace."""
+
+        _record_phase_timing(trace, bucket, elapsed)
+
+    return IngestInputs(
+        journal=JournalView(
+            # The folded reducer view IS the op lane step 0 consumes; the
+            # amendment lane rides along as read-only provenance facts
+            # (already folded into op_events — consumers must never re-apply).
+            op_events=tuple(events.amended_op_records()),
+            op_amendments=tuple(getattr(events, "op_amendments", ()) or ()),
+            module_prep_events=tuple(events.module_prep_events),
+            module_enter_events=tuple(events.module_enter_events),
+            module_exit_events=tuple(events.module_exit_events),
+            pre_hook_events=tuple(events.pre_hook_events),
+            buffer_write_events=_journal_buffer_write_events(trace),
+            output_version_events=tuple(events.output_version_events),
+            grad_fn_handles_by_label_raw=events.grad_fn_handles_by_label_raw,
+            aten_events=tuple(events.aten_events),
+        ),
+        module_workspace=trace._module_capture_ws,
+        raw_graph_workspace=trace._raw_graph_ws,
+        buffer_initial_values=dict(getattr(trace, "_buffer_initial_values", {}) or {}),
+        op_equivalence_classes=trace.op_equivalence_classes,
+        source_model_ref=getattr(trace, "_source_model_ref", None),
+        param_logs=trace.param_logs,
+        owning_trace=trace,
+        op_row_store=core.ops,
+        trace_core=core,
+        input_layers_initial=tuple(trace.input_layers),
+        timing_sink=timing_sink,
+    )
+
+
+def apply_step0_result(trace: Trace, result: Step0Result) -> None:
+    """Orchestrator-side application of ingest's restaged mutation payloads."""
+
+    for label_raw, op_log in result.raw_log_registrations:
+        trace._raw_graph_ws.raw_layer_dict[label_raw] = op_log
+        trace._raw_graph_ws.raw_layer_labels_list.append(label_raw)
+    for label_raw in result.input_layer_labels:
+        if label_raw not in trace.input_layers:
+            trace.input_layers.append(label_raw)
+    trace.op_equivalence_classes.clear()
+    trace.op_equivalence_classes.update(result.equivalence_class_map)
+    side_channel = result.module_side_channel
+    trace._module_capture_ws.module_build_data = side_channel.module_build_data
+    trace._module_capture_ws.module_metadata = side_channel.module_metadata
+    trace._module_capture_ws.module_forward_args = side_channel.module_forward_args
+
+
+def materialize_from_events(trace: Trace, events: CaptureEvents) -> None:
     """Materialize capture events into raw build-state logs.
+
+    Compatibility composition of the frozen step-0 seam: build the
+    ``IngestInputs`` bundle, run ``ingest_op_records`` (late-bound through
+    this module's namespace so the oracle interception seams stay
+    monkeypatchable), and apply the returned ``Step0Result``. Preview
+    backends and partial-capture recovery call this wrapper; the torch
+    orchestrator reaches it through ``torchlens.postprocess``.
 
     Parameters
     ----------
@@ -155,36 +235,72 @@ def materialize_from_events(trace: "Trace", events: CaptureEvents) -> None:
         Populates raw trace lookup structures without consuming the sealed source lanes.
     """
 
-    capture_session = capture_session_for(trace)
-    decisions = None if capture_session is None else capture_session.decision_ledger.records
-    payloads = None if capture_session is None else capture_session.payload_ledger.records
-    live_module_forward_args = dict(getattr(trace, "_module_forward_args", {}))
-    _rebuild_module_side_channels(trace, events)
-    module_enter_addresses = _module_enter_addresses(
-        events.module_prep_events,
-        events.module_enter_events,
-        events.module_exit_events,
-    )
-    op_events = _op_events_in_raw_order(events.op_events)
-    for event in op_events:
-        if event.layer_type == "input" and event.label_raw not in trace.input_layers:
-            trace.input_layers.append(event.label_raw)
-    op_event_labels = {event.label_raw for event in op_events}
-    children_by_parent = _children_by_parent(trace, op_events, op_event_labels)
-    buffer_addresses_by_label = _buffer_addresses_by_label(trace, op_events)
-    equivalent_ops_by_label = _equivalent_ops_by_label(
+    import torchlens.postprocess._materialize as _materialize_module
+
+    inputs = build_ingest_inputs(trace, events)
+    result = _materialize_module.ingest_op_records(inputs, CELL_SOURCES)
+    apply_step0_result(trace, result)
+    _materialize_forward_primitive_profile(
         trace,
-        op_events,
-        buffer_addresses_by_label,
+        inputs.journal.aten_events,
+        recording_enabled=bool(events.aten_recording_enabled),
     )
-    buffer_alias_snapshots = _buffer_alias_snapshots_by_address(trace)
+
+
+def ingest_op_records(inputs: IngestInputs, manifest: Mapping[str, str]) -> Step0Result:
+    """Step 0 ingest: journal records -> raw op store rows (frozen seam v1).
+
+    One record loop over the folded journal view: each entry adapts to the
+    decomposed shape at the ONE ingest boundary (compat ``OpEvent`` through
+    ``op_record_from_event``; a decomposed ``OpRecord`` passes through with
+    empty extras), the generated scatter produces every record-sourced cell,
+    and the JOIN cells are computed from the declared input lanes. Mutations
+    are restaged as ``Step0Result`` payloads (X2: the raw-log registration
+    map is LOCAL and the payload derives from it).
+    """
+
+    from torchlens.ir.op_record import OpRecord, op_record_from_event
+    from torchlens.ir.op_record_scatter import scatter_record_to_cells
+
+    journal = inputs.journal
+    op_store = inputs.op_row_store
+    module_workspace_forward_args = dict(inputs.module_workspace.module_forward_args)
+    side_channel = _rebuild_module_side_channels(journal)
+    module_enter_addresses = _module_enter_addresses(
+        list(journal.module_prep_events),
+        list(journal.module_enter_events),
+        list(journal.module_exit_events),
+    )
+    op_events = _op_events_in_raw_order(list(journal.op_events))
+    output_version_lane = journal.output_version_events
+    input_layer_labels: list[str] = []
+    for event in op_events:
+        if (
+            event.layer_type == "input"
+            and event.label_raw not in inputs.input_layers_initial
+            and event.label_raw not in input_layer_labels
+        ):
+            input_layer_labels.append(event.label_raw)
+    op_event_labels = {event.label_raw for event in op_events}
+    children_by_parent = _children_by_parent(
+        journal.buffer_write_events, op_events, op_event_labels
+    )
+    buffer_addresses_by_label = _buffer_addresses_by_label(
+        inputs.buffer_initial_values, journal.buffer_write_events, op_events
+    )
+    equivalence_class_map, equivalent_ops_by_label = _equivalent_ops_by_label(
+        journal.buffer_write_events, op_events, buffer_addresses_by_label
+    )
+    buffer_alias_snapshots = _buffer_alias_snapshots_by_address(
+        journal.buffer_write_events, inputs.source_model_ref
+    )
     module_input_fields = _module_input_fields(
-        events.module_enter_events,
+        list(journal.module_enter_events),
         module_enter_addresses,
-        live_module_forward_args,
+        module_workspace_forward_args,
     )
     op_events_by_label = {event.label_raw: event for event in op_events}
-    input_io_roles = _input_io_roles(trace, op_events)
+    input_io_roles = _input_io_roles(inputs.raw_graph_workspace, op_events)
     # Count ops per innermost module call so a single-op (atomic) leaf module can
     # be told apart from a multi-op one. The innermost module of an op is the last
     # frame of its capture-time module stack.
@@ -194,19 +310,28 @@ def materialize_from_events(trace: "Trace", events: CaptureEvents) -> None:
         if event.module_stack
     )
     module_output_fields = _module_output_fields(
-        events.module_exit_events,
+        list(journal.module_exit_events),
         op_events_by_label,
-        _module_role_hints_by_address(events.module_prep_events),
+        _module_role_hints_by_address(list(journal.module_prep_events)),
         innermost_module_op_counts,
     )
-    buffer_write_fields = _buffer_write_fields(trace, op_event_labels)
-    output_versions = _output_versions_by_parent(events)
+    buffer_write_fields = _buffer_write_fields(journal.buffer_write_events, op_event_labels)
+    output_versions = _output_versions_by_parent(output_version_lane)
+    registered_buffer_names = set(inputs.buffer_initial_values or {})
 
+    local_registrations: dict[str, Any] = {}
     for event in op_events:
-        event_id = EventId.from_event(event)
-        fields_dict = _fields_from_event(
-            trace,
-            event,
+        if isinstance(event, OpRecord):
+            record, extras = event, _EMPTY_INGEST_EXTRAS
+        else:
+            record, extras = op_record_from_event(event)
+        fields_dict: dict[str, object] = dict.fromkeys(LAYER_PASS_LOG_FIELD_ORDER)
+        fields_dict.update(scatter_record_to_cells(record, extras, inputs.owning_trace))
+        _apply_join_cells(
+            fields_dict,
+            record,
+            extras,
+            journal,
             op_event_labels,
             children_by_parent.get(event.label_raw, []),
             equivalent_ops_by_label.get(event.label_raw, {event.label_raw}),
@@ -215,17 +340,23 @@ def materialize_from_events(trace: "Trace", events: CaptureEvents) -> None:
             module_input_fields.get(event.label_raw, _empty_module_input_fields()),
             module_output_fields.get(event.label_raw, _empty_module_output_fields()),
             buffer_write_fields.get(event.label_raw, {}),
-            events.grad_fn_handles_by_label_raw.get(event.label_raw),
             input_io_roles.get(event.label_raw),
             output_versions.get(event.label_raw, {}),
             op_events_by_label,
-            None if decisions is None else decisions.get(event_id),
-            None if payloads is None else payloads.get(event_id),
+            inputs.param_logs,
+            registered_buffer_names,
         )
-        with _timed_phase(trace, "object_construction:op"):
-            op_log = materialize_log_from_fields(fields_dict)
-        _register_raw_log(trace, event, op_log)
-    _drop_missing_buffer_sources(trace)
+        start = time.perf_counter()
+        op_log = materialize_log_from_fields(fields_dict, op_store)
+        inputs.timing_sink("object_construction:op", time.perf_counter() - start)
+        local_registrations[event.label_raw] = op_log
+    _drop_missing_buffer_sources(local_registrations)
+    return Step0Result(
+        raw_log_registrations=tuple(local_registrations.items()),
+        input_layer_labels=tuple(input_layer_labels),
+        equivalence_class_map=equivalence_class_map,
+        module_side_channel=side_channel,
+    )
 
 
 def _op_events_in_raw_order(op_events: list[OpEvent]) -> list[OpEvent]:
@@ -245,13 +376,16 @@ def _op_events_in_raw_order(op_events: list[OpEvent]) -> list[OpEvent]:
     return sorted(op_events, key=lambda event: event.raw_index)
 
 
-def _drop_missing_buffer_sources(trace: "Trace") -> None:
+def _drop_missing_buffer_sources(local_registrations: dict[str, Any]) -> None:
     """Clear buffer source labels that are absent from raw materialized logs.
+
+    X2 resolution: consumes ingest's LOCAL registration map, never a
+    workspace read-back of state ingest itself created mid-loop.
 
     Parameters
     ----------
-    trace
-        Trace with Step-0 raw logs populated.
+    local_registrations
+        Ingest's local (label_raw -> op_log) registration map.
 
     Returns
     -------
@@ -259,20 +393,22 @@ def _drop_missing_buffer_sources(trace: "Trace") -> None:
         Mutates buffer logs in place.
     """
 
-    raw_labels = set(trace._raw_layer_dict)
-    for op_log in trace._raw_layer_dict.values():
+    raw_labels = set(local_registrations)
+    for op_log in local_registrations.values():
         buffer_source = getattr(op_log, "buffer_source", None)
         if buffer_source is not None and buffer_source not in raw_labels:
             op_log.buffer_source = None
 
 
-def _output_versions_by_parent(events: CaptureEvents) -> dict[str, dict[str, object]]:
+def _output_versions_by_parent(
+    output_version_events: tuple[Any, ...],
+) -> dict[str, dict[str, object]]:
     """Return output-version payloads grouped by parent raw label.
 
     Parameters
     ----------
-    events
-        Capture event buffer containing sibling output-version events.
+    output_version_events
+        The journal's output-version lane.
 
     Returns
     -------
@@ -281,14 +417,16 @@ def _output_versions_by_parent(events: CaptureEvents) -> dict[str, dict[str, obj
     """
 
     grouped: dict[str, dict[str, object]] = defaultdict(dict)
-    for event in events.output_version_events:
+    for event in output_version_events:
         grouped[event.parent_raw_label][event.child_raw_label] = event.payload
     return grouped
 
 
-def _fields_from_event(
-    trace: "Trace",
-    event: OpEvent,
+def _apply_join_cells(
+    fields_dict: dict[str, object],
+    event: Any,
+    extras: Any,
+    journal: JournalView,
     op_event_labels: set[str],
     children: list[str],
     equivalent_ops: set[str],
@@ -297,21 +435,30 @@ def _fields_from_event(
     module_input_fields: dict[str, object],
     module_output_fields: dict[str, object],
     buffer_write_fields: dict[str, object],
-    grad_fn_handle: object | None,
     input_io_role: str | None,
     output_versions_by_child: dict[str, object],
-    op_events_by_label: Mapping[str, OpEvent],
-    decision: DecisionRecord | None,
-    payload: PayloadRecord | None,
-) -> dict[str, object]:
-    """Build a complete raw ``Op`` field dictionary from one operation event.
+    op_events_by_label: Mapping[str, Any],
+    param_logs_registry: Any,
+    registered_buffer_names: set[str],
+) -> None:
+    """Apply the JOIN-class cells for one record onto its scatter output.
+
+    The record-sourced cells (CORE/FACET/EXTRAS/DEFAULT classes) come from
+    the generated scatter; everything here joins a non-record input lane
+    (children edges, grad-fn index, param registry, buffer address pool,
+    module and buffer-write siblings, output versions, io roles, payload
+    disposition) exactly as the deleted ``_fields_from_event`` literal did.
 
     Parameters
     ----------
-    trace
-        Trace being postprocessed.
+    fields_dict
+        Field mapping pre-seeded with the scatter's record-sourced cells.
     event
-        Operation event to materialize.
+        Journal op record (either shape; read through the strict protocol).
+    extras
+        ``IngestExtras`` for the record (adapter-carried compat channels).
+    journal
+        The enumerated read-only journal lane view.
     op_event_labels
         Raw labels present in the materialized event stream.
     children
@@ -328,39 +475,35 @@ def _fields_from_event(
         Per-op module-exit sibling fields.
     buffer_write_fields
         Per-op buffer-write sibling fields.
-    grad_fn_handle
-        Live autograd handle side-table entry, when present.
     input_io_role
         Reconstructed input role for source input events.
     output_versions_by_child
         Child-specific output snapshots keyed by child label.
     op_events_by_label
         Operation events keyed by raw label.
-    decision
-        Stable-id decision sidecar when the event belongs to an active session.
-    payload
-        Stable-id payload sidecar when the event belongs to an active session.
+    param_logs_registry
+        The trace's ``param_logs`` registry (declared input).
+    registered_buffer_names
+        Names of the model's declared registered-buffer universe.
 
     Returns
     -------
-    dict[str, object]
-        Complete pre-postprocess field mapping accepted by ``Op``.
+    None
+        Mutates ``fields_dict`` in place.
     """
 
-    output = event.output if payload is None else cast(Any, payload.output)
+    output = event.output
     tensor = output.tensor
     transformed = output.transformed_tensor
-    function = event.function
     semantics = event.backend_semantics
-    if semantics.unknown_aliasing:
+    if semantics is not None and semantics.unknown_aliasing:
         raise ValueError(
             "Cannot materialize capture events for "
             f"{event.label_raw}: backend aliasing semantics are unknown. "
             "Replay and validation require an explicit alias contract."
         )
-    templates = event.templates
     params = tuple(event.params)
-    param_logs = _param_logs_for_event(trace, params)
+    param_logs = _param_logs_for_event(param_logs_registry, params)
     resolved_param_addresses = {log.address for log in param_logs}
     resolved_params = tuple(
         param for param in params if getattr(param, "address", None) in resolved_param_addresses
@@ -386,8 +529,10 @@ def _fields_from_event(
         if param.shape is not None and not param.trainable
     )
     parent_params = resolved_parent_params
-    grad_handle = grad_fn_handle if grad_fn_handle is not None else event.grad_fn_handle
-    module = event.modules[-1] if event.modules else None
+    grad_fn_handle = journal.grad_fn_handles_by_label_raw.get(event.label_raw)
+    # Index-first single ownership; the adapter-carried compat channel keeps
+    # detached legacy streams whole until the OpEvent field dies in S15.
+    grad_handle = grad_fn_handle if grad_fn_handle is not None else extras.grad_fn_handle
     # r83 C2: resolve the DISPLAY address and the backend-native address
     # SEPARATELY.
     #
@@ -407,199 +552,37 @@ def _fields_from_event(
     # tensor outside the declared state universe should have).
     resolved_address = buffer_address or _recorded_buffer_address(event) or _event_address(event)
     tensor_payload = _event_tensor_payload(event, resolved_address, buffer_alias_snapshots)
-    fields_dict: dict[str, object] = {field_name: None for field_name in LAYER_PASS_LOG_FIELD_ORDER}
     fields_dict.update(
         {
-            "_label_raw": event.label_raw,
-            "_layer_label_raw": event.layer_label_raw,
-            "step_index": event.step_index,
-            "raw_index": event.raw_index,
-            "ordinal_index": -1,
-            "source_trace": event.source_trace or trace,
-            "_tracing_finished": event.tracing_finished,
-            "_construction_done": event.construction_done,
-            "label": None,
-            "label_short": None,
-            "layer_label": None,
-            "layer_label_short": None,
-            "type": event.layer_type,
-            "type_index": event.type_index,
-            "pass_index": event.pass_index,
-            "num_passes": 1,
-            "lookup_keys": [],
             "out": tensor_payload,
-            "has_saved_activation": output.has_saved_activation,
-            "output_device": output.output_device,
-            "activation_transform": output.activation_transform,
-            "annotations": _annotations_from_event(event),
-            "interventions": [
-                result.fire_record
-                for result in (event.fire_results if decision is None else decision.fire_results)
-                if result.fire_record is not None
-            ],
-            "intervention_replaced": (
-                event.intervention_replaced if decision is None else decision.intervention_replaced
-            ),
-            "detach_saved_activations": output.detach_saved_activations,
-            "has_saved_args": False if templates is None else templates.has_saved_args,
-            "saved_args": None if templates is None else templates.saved_args,
-            "saved_kwargs": None if templates is None else templates.saved_kwargs,
-            "args_template": None if templates is None else templates.args_template,
-            "kwargs_template": None if templates is None else templates.kwargs_template,
-            "input_ops": None,
-            "input_activations": None,
-            "input_shapes": None,
-            "input_dtypes": None,
-            "input_memory": None,
-            "num_inputs": None,
             "shape": _shape_from_payload(tensor_payload, tensor.shape),
-            "transformed_out_shape": None if transformed is None else transformed.shape,
             "dtype": _dtype_from_payload(tensor_payload, tensor.dtype),
-            "transformed_out_dtype": None
-            if transformed is None
-            else _resolve_dtype(transformed.dtype),
             "activation_memory": _memory_from_payload(tensor_payload, tensor.memory),
-            "transformed_activation_memory": None if transformed is None else transformed.memory,
-            "visualizer_path": output.visualizer_path,
-            "bytes_delta_at_call": semantics.bytes_delta_at_call,
-            "bytes_peak_at_call": semantics.bytes_peak_at_call,
-            "transformed_out": None if transformed is None else transformed.payload,
-            "autograd_memory": semantics.autograd_memory,
-            "num_autograd_tensors": semantics.num_autograd_tensors,
             "has_out_variations": bool(output_versions_by_child or output.child_versions),
             "out_versions_by_child": {
                 **dict(output.child_versions),
                 **output_versions_by_child,
             },
-            "grad": None,
-            "transformed_grad": None,
-            "save_grads": event.policy.save_grad,
-            "has_grad": False,
-            "grad_shape": None,
-            "transformed_grad_shape": None,
-            "grad_dtype": None,
-            "transformed_grad_dtype": None,
-            "gradient_memory": 0,
-            "transformed_gradient_memory": None,
-            "func": function.func,
-            "func_id": function.func_id,
-            "func_call_id": function.func_call_id,
-            "func_name": function.func_name,
-            "func_qualname": function.func_qualname,
-            "code_context": list(function.code_context),
-            "var_names": [],
-            "func_duration": function.func_duration or 0,
-            "flops_forward": function.flops_forward or 0,
-            "flops_backward": function.flops_backward or 0,
-            "func_rng_states": function.func_rng_states,
-            "func_autocast_state": function.func_autocast_state,
-            "arg_names": tuple(function.arg_names),
-            "num_args_total": function.num_args_total,
-            "num_pos_args": function.num_pos_args,
-            "num_kwargs": function.num_kwargs,
-            "non_tensor_pos_args": list(function.non_tensor_pos_args),
-            "non_tensor_kwargs": dict(function.non_tensor_kwargs),
-            "func_non_tensor_args": list(function.func_non_tensor_args),
-            "is_inplace": function.is_inplace,
-            "grad_fn_class_name": semantics.grad_fn_class_name,
-            "grad_fn_class_qualname": event.grad_fn_class_qualname,
             "grad_fn_object_id": None if grad_handle is None else id(grad_handle),
             "grad_fn_handle": grad_handle,
-            "grad_fn": None,
-            "in_multi_output": output.in_multi_output,
-            "multi_output_index": output.multi_output_index,
-            "multi_output_name": None,
-            "container_path": tuple(output.container_path),
-            "container_spec": output.container_spec,
-            "is_transform": event.is_transform,
-            "transform_kind": event.transform_kind,
-            "transform_chain": tuple(event.transform_chain),
-            "transform_config": dict(event.transform_config),
-            "transform_fn_name": event.transform_fn_name,
-            "transform_fn_qualname": event.transform_fn_qualname,
-            "transform_fn_source": event.transform_fn_source,
-            "unattributed_tensor_args": tuple(event.unattributed_tensor_args),
             "parent_params": parent_params,
             "_param_barcodes": [param.barcode for param in resolved_params],
             "parent_param_ops": parent_param_ops,
             "_param_logs": param_logs,
             "param_shapes": param_shapes,
             "num_params": sum(prod(shape) for shape in param_shapes if shape is not None),
-            "num_params_trainable": sum(
-                log.num_params for log in param_logs if log.is_trainable
-            )
+            "num_params_trainable": sum(log.num_params for log in param_logs if log.is_trainable)
             + unresolved_trainable_params,
             "num_params_frozen": sum(log.num_params for log in param_logs if not log.is_trainable)
             + unresolved_frozen_params,
             "param_memory": sum(int(log.param_memory) for log in param_logs),
-            "equivalence_class": event.equivalence_class,
             "equivalent_ops": equivalent_ops,
-            "recurrent_ops": [],
-            "parents": [edge.parent_label_raw for edge in event.parents],
-            "parent_arg_positions": event.parent_arg_positions,
-            "_edge_uses": _edge_use_records_from_event(event, op_events_by_label),
-            "root_ancestors": set(event.root_ancestors),
             "children": children,
             "has_children": bool(children),
-            "is_input": event.layer_type == "input",
-            "input_was_parameter": event.input_was_parameter,
-            "has_input_ancestor": bool(event.input_ancestors),
-            "input_ancestors": set(event.input_ancestors),
-            "min_distance_from_input": None,
-            "max_distance_from_input": None,
-            "is_output": False,
-            "is_output_parent": event.is_output_parent,
-            "is_final_output": False,
-            "has_output_descendant": False,
-            "output_descendants": set(),
-            "is_orphan": False,
+            "_edge_uses": _edge_use_records_from_event(event, op_events_by_label),
             "io_role": _event_io_role(event, input_io_role),
-            "min_distance_to_output": None,
-            "max_distance_to_output": None,
-            "is_buffer": event.kind == "source" and event.layer_type == "buffer",
             "address": resolved_address,
-            "buffer_pass": None,
             "buffer_source": _event_buffer_source(event, op_event_labels),
-            "buffer_write_kind": None,
-            "buffer_value_changed": None,
-            "buffer_replay_validated": None,
-            "buffer_source_func_name": None,
-            "is_internal_source": event.layer_type != "input" and not event.parents,
-            "has_internal_source_ancestor": event.has_internal_source_ancestor,
-            "internal_source_parents": [],
-            "internal_source_ancestors": set(event.internal_source_ancestors),
-            "is_internal_sink": False,
-            "is_terminal_bool": False,
-            "is_terminal_conditional_bool": False,
-            "conditional_context_kind": None,
-            "conditional_wrapper_kind": None,
-            "terminal_conditional_id": None,
-            "is_scalar_bool": bool(event.is_scalar_bool),
-            "bool_value": event.bool_value,
-            "in_conditionals": [],
-            "terminal_bool_for": None,
-            "is_in_conditional_body": False,
-            "conditional_branch_stack": [],
-            "conditional_branch_depth": 0,
-            "conditional_entry_children": [],
-            "conditional_then_children": [],
-            "conditional_elif_children": {},
-            "conditional_else_children": [],
-            "conditional_arm_children": {},
-            "module": module,
-            "_address_normalized": None,
-            "modules": list(event.modules),
-            "fx_qualpath": None,
-            "fx_call_index": 0,
-            "module_call_stack": [],
-            "input_to_module_calls": [],
-            "module_entry_arg_keys": defaultdict(list),
-            "output_of_modules": [],
-            "output_of_module_calls": [],
-            "is_module_output": False,
-            "is_atomic_module": False,
-            "atomic_module_call": None,
-            "func_config": dict(function.func_config),
         }
     )
     if isinstance(tensor.blob_ref, PortableBlobRef):
@@ -670,15 +653,14 @@ def _fields_from_event(
         # metadata invariant does), this clause moves no verdict and no replay
         # fingerprint. The display ``address`` and the save binding that DRIVE the
         # C2 refusal are resolved above and are untouched here.
-        if recorded_buffer_address in _registered_buffer_names(trace):
+        if recorded_buffer_address in registered_buffer_names:
             fields_dict["_materialized_backend_address"] = recorded_buffer_address
         else:
             fields_dict["_materialized_backend_address"] = None
-    return fields_dict
 
 
 def _children_by_parent(
-    trace: "Trace",
+    buffer_write_events: tuple[Any, ...],
     op_events: list[OpEvent],
     op_event_labels: set[str],
 ) -> dict[str, list[str]]:
@@ -686,8 +668,8 @@ def _children_by_parent(
 
     Parameters
     ----------
-    trace
-        Trace holding buffer-write events captured by the torch backend.
+    buffer_write_events
+        The journal's buffer-write lane.
     op_events
         Ordered operation events for the capture.
     op_event_labels
@@ -704,7 +686,7 @@ def _children_by_parent(
         for edge in event.parents:
             if event.label_raw not in children[edge.parent_label_raw]:
                 children[edge.parent_label_raw].append(event.label_raw)
-    for event in getattr(trace, "_buffer_write_events", []):
+    for event in buffer_write_events:
         producer_label_raw = getattr(event, "producer_label_raw", None)
         version_label_raw = getattr(event, "version_label_raw", None)
         if producer_label_raw not in op_event_labels or version_label_raw not in op_event_labels:
@@ -809,16 +791,16 @@ def _edge_arg_position_to_path(arg_position: object) -> tuple[object, ...]:
 
 
 def _equivalent_ops_by_label(
-    trace: "Trace",
+    buffer_write_events: tuple[Any, ...],
     op_events: list[OpEvent],
     buffer_addresses_by_label: dict[str, str],
-) -> dict[str, set[str]]:
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     """Group raw labels by event equivalence class.
 
     Parameters
     ----------
-    trace
-        Trace whose equivalence-class index is restored for postprocess.
+    buffer_write_events
+        The journal's buffer-write lane.
     op_events
         Ordered operation events for the capture.
     buffer_addresses_by_label
@@ -826,13 +808,15 @@ def _equivalent_ops_by_label(
 
     Returns
     -------
-    dict[str, set[str]]
-        Equivalent raw labels keyed by each member raw label.
+    tuple[dict[str, set[str]], dict[str, set[str]]]
+        The populated equivalence-class map (``Step0Result`` payload; shares
+        its set objects with the membership view) and the per-label
+        membership view.
     """
 
     groups: dict[str, set[str]] = defaultdict(set)
     buffer_address_by_label = dict(buffer_addresses_by_label)
-    for event in getattr(trace, "_buffer_write_events", []):
+    for event in buffer_write_events:
         label_raw = getattr(event, "version_label_raw", None)
         address = getattr(event, "address", None)
         if isinstance(label_raw, str) and isinstance(address, str):
@@ -845,9 +829,7 @@ def _equivalent_ops_by_label(
             else _base_equivalence_class(event) or event.label_raw
         )
         groups[key].add(event.label_raw)
-    trace.op_equivalence_classes.clear()
-    trace.op_equivalence_classes.update(groups)
-    return {label_raw: group for group in groups.values() for label_raw in group}
+    return dict(groups), {label_raw: group for group in groups.values() for label_raw in group}
 
 
 def _base_equivalence_class(event: OpEvent) -> str | None:
@@ -866,7 +848,12 @@ def _base_equivalence_class(event: OpEvent) -> str | None:
 
     equivalence_class = event.equivalence_class
     if event.is_transform and event.transform_kind is not None:
+        # Legacy events smuggle fn_code_location inside transform_config;
+        # decomposed records carry it as a first-class transform-facet field.
         code_location = event.transform_config.get("fn_code_location")
+        if code_location is None:
+            transform_facet = getattr(event, "transform", None)
+            code_location = getattr(transform_facet, "fn_code_location", None)
         fingerprint = code_location if code_location is not None else event.transform_fn_qualname
         return f"{event.transform_kind}:{fingerprint}"
     if equivalence_class is None or not event.modules:
@@ -877,13 +864,19 @@ def _base_equivalence_class(event: OpEvent) -> str | None:
     return equivalence_class
 
 
-def _buffer_addresses_by_label(trace: "Trace", op_events: list[OpEvent]) -> dict[str, str]:
+def _buffer_addresses_by_label(
+    buffer_initial_values: Mapping[str, Any],
+    buffer_write_events: tuple[Any, ...],
+    op_events: list[OpEvent],
+) -> dict[str, str]:
     """Join initial registered-buffer addresses to source buffer events.
 
     Parameters
     ----------
-    trace
-        Trace carrying initial registered-buffer value snapshots.
+    buffer_initial_values
+        The model's declared registered-buffer state universe.
+    buffer_write_events
+        The journal's buffer-write lane.
     op_events
         Ordered operation events for the capture.
 
@@ -893,11 +886,12 @@ def _buffer_addresses_by_label(trace: "Trace", op_events: list[OpEvent]) -> dict
         Buffer addresses keyed by raw buffer source label.
     """
 
-    unmatched_addresses = list(getattr(trace, "_buffer_initial_values", {}).items())
+    unmatched_addresses = list((buffer_initial_values or {}).items())
     by_label: dict[str, str] = {}
     source_buffer_events = [
         event for event in op_events if event.kind == "source" and event.layer_type == "buffer"
     ]
+    source_buffer_labels = {event.label_raw for event in source_buffer_events}
     op_events_by_label = {event.label_raw: event for event in op_events}
     for event in op_events:
         if event.function.func_name not in {"batch_norm", "batchnorm"}:
@@ -908,10 +902,10 @@ def _buffer_addresses_by_label(trace: "Trace", op_events: list[OpEvent]) -> dict
         args_positions = event.parent_arg_positions.get("args", {})
         for arg_position, buffer_name in ((3, "running_mean"), (4, "running_var")):
             label_raw = args_positions.get(arg_position)
-            if isinstance(label_raw, str):
+            if isinstance(label_raw, str) and label_raw in source_buffer_labels:
                 by_label[label_raw] = f"{module_address}.{buffer_name}"
 
-    for write_event in getattr(trace, "_buffer_write_events", []):
+    for write_event in buffer_write_events:
         producer_label_raw = getattr(write_event, "producer_label_raw", None)
         if not isinstance(producer_label_raw, str):
             continue
@@ -983,32 +977,6 @@ def _buffer_addresses_by_label(trace: "Trace", op_events: list[OpEvent]) -> dict
     return by_label
 
 
-def _registered_buffer_names(trace: "Trace") -> set[str]:
-    """Return the names of the model's declared registered-buffer universe.
-
-    These are the keys of ``trace._buffer_initial_values`` -- the persistent
-    registered buffers captured at forward time -- which is precisely the set the
-    runnable preflight refuses an address against (``_io/runnable.py``). Using it
-    as the ``backend_address`` discriminator (r87) makes "is this recorded address
-    a genuine registered buffer?" mean exactly what it means everywhere else in
-    the runnable system, so a registered buffer's write-side node keeps its
-    address while a non-registered plain-attribute / list-element tensor stays
-    ``None`` (r83 C2), with no heuristic borrow.
-
-    Parameters
-    ----------
-    trace
-        Trace carrying the capture-time registered-buffer value snapshots.
-
-    Returns
-    -------
-    set[str]
-        The registered-buffer address names, empty when none were captured.
-    """
-
-    return set(getattr(trace, "_buffer_initial_values", {}) or {})
-
-
 def _recorded_buffer_address(event: OpEvent) -> str | None:
     """Return the buffer address the CAPTURE recorded for a source event (r83 C2).
 
@@ -1052,13 +1020,18 @@ def _recorded_buffer_address(event: OpEvent) -> str | None:
     return candidate
 
 
-def _buffer_alias_snapshots_by_address(trace: "Trace") -> dict[str, torch.Tensor]:
+def _buffer_alias_snapshots_by_address(
+    buffer_write_events: tuple[Any, ...],
+    source_model_ref: Any,
+) -> dict[str, torch.Tensor]:
     """Return refreshed snapshots for indirectly updated aliased buffers.
 
     Parameters
     ----------
-    trace
-        Trace with an active buffer-write tracker.
+    buffer_write_events
+        The journal's buffer-write lane.
+    source_model_ref
+        Weakref to the source model (declared input).
 
     Returns
     -------
@@ -1066,11 +1039,8 @@ def _buffer_alias_snapshots_by_address(trace: "Trace") -> dict[str, torch.Tensor
         Final snapshots for buffer addresses that were updated only through an alias.
     """
 
-    directly_written = {
-        getattr(event, "address", None) for event in getattr(trace, "_buffer_write_events", [])
-    }
-    model_ref = getattr(trace, "_source_model_ref", None)
-    model = None if model_ref is None else model_ref()
+    directly_written = {getattr(event, "address", None) for event in buffer_write_events}
+    model = None if source_model_ref is None else source_model_ref()
     if model is None or not hasattr(model, "named_buffers"):
         return {}
     snapshots: dict[str, torch.Tensor] = {}
@@ -1250,39 +1220,43 @@ def _tensor_values_match(left: object, right: object) -> bool:
     )
 
 
-def _rebuild_module_side_channels(trace: "Trace", events: CaptureEvents) -> None:
-    """Rebuild module postprocess side channels from module events.
+def _rebuild_module_side_channels(journal: JournalView) -> _ModuleSideChannel:
+    """Rebuild module postprocess side channels from journal module lanes.
+
+    Builds into a LOCAL bundle; the orchestrator applies it onto the trace's
+    ``ModuleCaptureWorkspace`` via ``Step0Result.module_side_channel``.
 
     Parameters
     ----------
-    trace
-        Trace whose transient module state will be reset.
-    events
-        Capture events containing prep, enter, and exit module records.
+    journal
+        Journal lane view containing prep, enter, exit, and pre-hook records.
 
     Returns
     -------
-    None
-        Mutates ``trace._module_build_data``, ``trace._module_metadata``, and
-        ``trace._module_forward_args``.
+    _ModuleSideChannel
+        Freshly rebuilt module side-channel state.
     """
 
-    trace._module_build_data = _init_module_hierarchy_data()
-    trace._module_metadata = {}
-    trace._module_forward_args = {}
-    for prep_event in events.module_prep_events:
-        _apply_module_prep_event(trace, prep_event)
-    module_enter_addresses = _module_enter_addresses(
-        events.module_prep_events,
-        events.module_enter_events,
-        events.module_exit_events,
+    side_channel = _ModuleSideChannel(
+        module_build_data=_init_module_hierarchy_data(),
+        module_metadata={},
+        module_forward_args={},
     )
-    for enter_event in events.module_enter_events:
-        _apply_module_enter_event(trace, enter_event, module_enter_addresses[id(enter_event)])
-    for exit_event in events.module_exit_events:
-        _apply_module_exit_event(trace, exit_event)
-    provenance = trace._module_build_data.setdefault("module_pre_hook_provenance", {})
-    for pre_hook_event in events.pre_hook_events:
+    for prep_event in journal.module_prep_events:
+        _apply_module_prep_event(side_channel, prep_event)
+    module_enter_addresses = _module_enter_addresses(
+        list(journal.module_prep_events),
+        list(journal.module_enter_events),
+        list(journal.module_exit_events),
+    )
+    for enter_event in journal.module_enter_events:
+        _apply_module_enter_event(
+            side_channel, enter_event, module_enter_addresses[id(enter_event)]
+        )
+    for exit_event in journal.module_exit_events:
+        _apply_module_exit_event(side_channel, exit_event)
+    provenance = side_channel.module_build_data.setdefault("module_pre_hook_provenance", {})
+    for pre_hook_event in journal.pre_hook_events:
         if pre_hook_event.call_index is None:
             continue
         call_label = f"{pre_hook_event.address}:{pre_hook_event.call_index}"
@@ -1291,11 +1265,14 @@ def _rebuild_module_side_channels(trace: "Trace", events: CaptureEvents) -> None
             pre_hook_event.inputs_after_pre_hooks,
             pre_hook_event.effects,
         )
-    if not events.module_enter_events:
-        _fill_module_call_stacks_from_op_events(trace, events.op_events)
+    if not journal.module_enter_events:
+        _fill_module_call_stacks_from_op_events(side_channel, list(journal.op_events))
+    return side_channel
 
 
-def _fill_module_call_stacks_from_op_events(trace: "Trace", op_events: list[OpEvent]) -> None:
+def _fill_module_call_stacks_from_op_events(
+    side_channel: _ModuleSideChannel, op_events: list[OpEvent]
+) -> None:
     """Rebuild ``module_call_stacks`` from op module stacks (predicate path).
 
     The exhaustive torch capture records each module call's ancestor chain into
@@ -1317,7 +1294,7 @@ def _fill_module_call_stacks_from_op_events(trace: "Trace", op_events: list[OpEv
     reconstruction, never an override of any authoritative enter-event value.
     """
 
-    stacks = trace._module_build_data["module_call_stacks"]
+    stacks = side_channel.module_build_data["module_call_stacks"]
     for event in op_events:
         module_stack = event.module_stack
         for index, frame in enumerate(module_stack):
@@ -1333,13 +1310,13 @@ def _fill_module_call_stacks_from_op_events(trace: "Trace", op_events: list[OpEv
             ]
 
 
-def _apply_module_prep_event(trace: "Trace", event: ModulePrepEvent) -> None:
+def _apply_module_prep_event(side_channel: _ModuleSideChannel, event: ModulePrepEvent) -> None:
     """Apply one module prep event to transient module metadata.
 
     Parameters
     ----------
-    trace
-        Trace whose side-channel state is being rebuilt.
+    side_channel
+        Local module side-channel bundle being rebuilt.
     event
         Prep-time module metadata event.
 
@@ -1349,7 +1326,7 @@ def _apply_module_prep_event(trace: "Trace", event: ModulePrepEvent) -> None:
         Mutates module metadata and module type maps.
     """
 
-    trace._module_metadata[event.address] = {
+    side_channel.module_metadata[event.address] = {
         "cls": None,
         "class_name": event.class_name,
         "class_qualname": event.cls_qualname,
@@ -1377,7 +1354,7 @@ def _apply_module_prep_event(trace: "Trace", event: ModulePrepEvent) -> None:
         "custom_methods": list(event.custom_methods),
     }
     if event.address != "self":
-        trace._module_build_data["module_types"][event.address] = event.module_type_str
+        side_channel.module_build_data["module_types"][event.address] = event.module_type_str
 
 
 def _list_or_empty(value: object | None) -> list[Any]:
@@ -1403,13 +1380,15 @@ def _list_or_empty(value: object | None) -> list[Any]:
     return [value]
 
 
-def _apply_module_enter_event(trace: "Trace", event: ModuleEnterEvent, address: str) -> None:
+def _apply_module_enter_event(
+    side_channel: _ModuleSideChannel, event: ModuleEnterEvent, address: str
+) -> None:
     """Apply one module-enter event to transient module side channels.
 
     Parameters
     ----------
-    trace
-        Trace whose side-channel state is being rebuilt.
+    side_channel
+        Local module side-channel bundle being rebuilt.
     event
         Module-enter event.
     address
@@ -1421,7 +1400,7 @@ def _apply_module_enter_event(trace: "Trace", event: ModuleEnterEvent, address: 
         Mutates module build data and forward-argument maps.
     """
 
-    mbd = trace._module_build_data
+    mbd = side_channel.module_build_data
     call_label = f"{address}:{event.call_index}"
     mbd["module_training_modes"][address] = event.training
     mbd["module_forward_start_times"][call_label] = event.forward_start_time
@@ -1432,19 +1411,19 @@ def _apply_module_enter_event(trace: "Trace", event: ModuleEnterEvent, address: 
         event.forward_kwargs_template,
     )
     mbd["module_layer_argnames"][call_label].extend(list(event.layer_argnames))
-    trace._module_forward_args[(address, event.call_index)] = (
+    side_channel.module_forward_args[(address, event.call_index)] = (
         event.forward_args,
         event.forward_kwargs,
     )
 
 
-def _apply_module_exit_event(trace: "Trace", event: ModuleExitEvent) -> None:
+def _apply_module_exit_event(side_channel: _ModuleSideChannel, event: ModuleExitEvent) -> None:
     """Apply one module-exit event to transient module side channels.
 
     Parameters
     ----------
-    trace
-        Trace whose side-channel state is being rebuilt.
+    side_channel
+        Local module side-channel bundle being rebuilt.
     event
         Module-exit event.
 
@@ -1454,7 +1433,7 @@ def _apply_module_exit_event(trace: "Trace", event: ModuleExitEvent) -> None:
         Mutates module build data.
     """
 
-    mbd = trace._module_build_data
+    mbd = side_channel.module_build_data
     mbd["module_forward_durations"][event.call_label] = event.forward_duration
     if event.output_structure is not None:
         mbd["module_output_structures"][event.call_label] = event.output_structure
@@ -1490,7 +1469,7 @@ def _module_enter_addresses(
         for enter_event in enter_events
         if enter_event.address in valid_addresses
     }
-    unmatched_exit_by_index: dict[int, list[ModuleExitEvent]] = defaultdict(list)
+    unmatched_exit_by_index: dict[int, deque[ModuleExitEvent]] = defaultdict(deque)
     for exit_event in exit_events:
         if (exit_event.address, exit_event.call_index) not in explicit_enter_keys:
             unmatched_exit_by_index[exit_event.call_index].append(exit_event)
@@ -1504,9 +1483,9 @@ def _module_enter_addresses(
         if enter_event.address in valid_addresses:
             resolved[id(enter_event)] = enter_event.address
             continue
-        candidates = unmatched_exit_by_index.get(enter_event.call_index, [])
+        candidates = unmatched_exit_by_index.get(enter_event.call_index)
         if candidates:
-            resolved[id(enter_event)] = candidates.pop(0).address
+            resolved[id(enter_event)] = candidates.popleft().address
         else:
             resolved[id(enter_event)] = str(enter_event.address)
     return resolved
@@ -1556,9 +1535,13 @@ def _module_input_fields(
                 for tensor in input_tensors
                 if (label_raw := get_tensor_label(tensor)) is not None
             ]
+        # B3R7-R05-1: this enter lane must NOT touch ``module_call_stack``.
+        # It used to append the entered call's address here, which stamped the
+        # FED call's stack onto ops that never ran inside it (the model input,
+        # top-level producers) -- the fed-call fact is ``input_to_module_calls``;
+        # containment comes from the op's own modules facet at ingest.
         for label_raw in input_labels:
             fields = by_label.setdefault(label_raw, _empty_module_input_fields())
-            cast(list[Any], fields["module_call_stack"]).append(address)
             cast(list[Any], fields["input_to_module_calls"]).append(call_tuple)
         for label_raw, arg_key in event.layer_argnames:
             fields = by_label.setdefault(label_raw, _empty_module_input_fields())
@@ -1572,7 +1555,7 @@ def _module_output_fields(
     exit_events: list[ModuleExitEvent],
     op_events_by_label: dict[str, OpEvent],
     role_hints_by_address: dict[str, object],
-    innermost_module_op_counts: "Counter[tuple[str, int]]",
+    innermost_module_op_counts: Counter[tuple[str, int]],
 ) -> dict[str, dict[str, object]]:
     """Fold module-exit events into per-op sibling fields.
 
@@ -1624,9 +1607,11 @@ def _module_output_fields(
                     role_hints,
                     output_index,
                 )
+        # B3R7-R05-1: the exit lane no longer overwrites ``module_call_stack``
+        # (its containment value now comes uniformly from the op's own modules
+        # facet at ingest); this loop keeps only the atomic-leaf detection.
         for label_raw, stack, _is_atomic, _atomic_call in event.per_output_atomic:
             fields = by_label.setdefault(label_raw, _empty_module_output_fields())
-            fields["module_call_stack"] = _module_stack_addresses(stack)
             # A module output op is an atomic (single-op leaf) module exit when its
             # innermost module call contains exactly one op. This is computed from
             # the finalized op-to-module map rather than at capture time so that
@@ -1643,15 +1628,15 @@ def _module_output_fields(
 
 
 def _buffer_write_fields(
-    trace: "Trace",
+    buffer_write_events: tuple[Any, ...],
     op_event_labels: set[str],
 ) -> dict[str, dict[str, object]]:
     """Fold buffer write events into per-op sibling fields.
 
     Parameters
     ----------
-    trace
-        Trace holding buffer-write events captured by the torch backend.
+    buffer_write_events
+        The journal's buffer-write lane.
     op_event_labels
         Raw labels present in the materialized event stream.
 
@@ -1662,7 +1647,7 @@ def _buffer_write_fields(
     """
 
     by_label: dict[str, dict[str, object]] = {}
-    for event in getattr(trace, "_buffer_write_events", []):
+    for event in buffer_write_events:
         label_raw = getattr(event, "version_label_raw", None)
         if label_raw is None:
             continue
@@ -1702,7 +1687,6 @@ def _empty_module_input_fields() -> dict[str, object]:
     """
 
     return {
-        "module_call_stack": [],
         "input_to_module_calls": [],
         "module_entry_arg_keys": defaultdict(list),
     }
@@ -1831,30 +1815,13 @@ def _multi_output_name_from_event(
     )
 
 
-def _module_stack_addresses(stack: tuple[ModuleFrame, ...]) -> list[str]:
-    """Convert module frames to the raw module-call-stack field format.
-
-    Parameters
-    ----------
-    stack
-        Module frames carried by a module-exit event.
-
-    Returns
-    -------
-    list[str]
-        Module addresses in stack order.
-    """
-
-    return [frame.address for frame in stack]
-
-
-def _input_io_roles(trace: "Trace", op_events: list[OpEvent]) -> dict[str, str]:
+def _input_io_roles(raw_graph_workspace: Any, op_events: list[OpEvent]) -> dict[str, str]:
     """Reconstruct legacy input role strings by source-input event order.
 
     Parameters
     ----------
-    trace
-        Trace carrying capture-time input tensor addresses when available.
+    raw_graph_workspace
+        The raw-graph workspace read handle (X1: ``input_tensor_addresses``).
     op_events
         Ordered operation events from the capture.
 
@@ -1865,7 +1832,7 @@ def _input_io_roles(trace: "Trace", op_events: list[OpEvent]) -> dict[str, str]:
     """
 
     input_events = [event for event in op_events if event.layer_type == "input"]
-    input_addresses = getattr(trace, "_input_tensor_addresses", None)
+    input_addresses = raw_graph_workspace.input_tensor_addresses
     if isinstance(input_addresses, list) and len(input_addresses) == len(input_events):
         return {
             event.label_raw: address
@@ -1877,13 +1844,13 @@ def _input_io_roles(trace: "Trace", op_events: list[OpEvent]) -> dict[str, str]:
     return {event.label_raw: f"input.{index}" for index, event in enumerate(input_events)}
 
 
-def _param_logs_for_event(trace: "Trace", params: tuple[object, ...]) -> list[Any]:
+def _param_logs_for_event(param_logs_registry: Any, params: tuple[object, ...]) -> list[Any]:
     """Resolve event parameter refs to existing Trace ``Param`` logs.
 
     Parameters
     ----------
-    trace
-        Trace with populated ``param_logs``.
+    param_logs_registry
+        The trace's ``param_logs`` registry (declared input).
     params
         Parameter refs carried by an operation event.
 
@@ -1896,8 +1863,8 @@ def _param_logs_for_event(trace: "Trace", params: tuple[object, ...]) -> list[An
     param_logs: list[Any] = []
     for param in params:
         address = getattr(param, "address", None)
-        if address is not None and address in trace.param_logs:
-            param_logs.append(trace.param_logs[address])
+        if address is not None and address in param_logs_registry:
+            param_logs.append(param_logs_registry[address])
     return param_logs
 
 
@@ -1992,25 +1959,3 @@ def _resolve_dtype(dtype: object | None) -> object | None:
         # fall back to the original string when the name is not a real top-level torch symbol.
         return torch_attr(dtype_name) or dtype
     return dtype
-
-
-def _register_raw_log(trace: "Trace", event: OpEvent, op_log: "Op") -> None:
-    """Register one live log in transient raw lookup structures.
-
-    Parameters
-    ----------
-    trace
-        Trace receiving the raw log.
-    event
-        Operation event corresponding to ``op_log``.
-    op_log
-        Live operation log to register.
-
-    Returns
-    -------
-    None
-        Mutates ``trace._raw_layer_dict`` and ``trace._raw_layer_labels_list``.
-    """
-
-    trace._raw_layer_dict[event.label_raw] = op_log
-    trace._raw_layer_labels_list.append(event.label_raw)

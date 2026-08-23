@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from v2_helpers import split_request
-
 import pytest
+from v2_helpers import split_request
 
 from torchlens.split.errors import SplitRequestError
 from torchlens.split.graph import SplitTraceGraph, SplitTraceNode

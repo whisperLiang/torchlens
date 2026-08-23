@@ -22,15 +22,15 @@ materialized ``LazyImportRef`` so the deferred resolution enforces the gate.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 import importlib
-from pathlib import Path
 import sys
 import textwrap
+from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 import torch
-from torch import nn
+from example_models import TinyReluAdd as _ReluModel
 
 import torchlens as tl
 from torchlens.intervention.errors import UntrustedCallableError
@@ -39,15 +39,6 @@ from torchlens.intervention.save import (
     _resolve_import_ref,
     load_intervention_spec,
 )
-
-
-class _ReluModel(nn.Module):
-    """Tiny model with a single ``relu`` op to attach a hook to."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Return ``relu(x) + 1``."""
-
-        return torch.relu(x) + 1
 
 
 def _write_evil_module(tmp_path: Path, sentinel: Path) -> str:
@@ -261,3 +252,25 @@ def test_no_ungated_import_module_remains_in_bundle_resolvers() -> None:
 
     save_src = Path(save_mod.__file__).read_text()
     assert "importlib.import_module" not in save_src
+
+
+def test_lazy_import_ref_resaves_as_import_ref() -> None:
+    """R10-12: load->resave keeps an import-ref callable executable.
+
+    Fail-before: ``_serialize_callable`` had no ``LazyImportRef`` branch, read
+    ``__module__``/``__qualname__`` the instance does not expose, got ``None``,
+    and raised ``OpaqueCallableInExecutableSaveError`` on a spec that
+    legitimately saved executable -- without ever needing to import anything.
+    """
+
+    from torchlens.intervention.errors import OpaqueCallableInExecutableSaveError
+    from torchlens.intervention.save import SaveLevel, _serialize_callable
+
+    ref = LazyImportRef("my_trusted_module:my_fn")
+    payload = _serialize_callable(ref, SaveLevel.EXECUTABLE_WITH_CALLABLES)
+    assert payload["portability"] == "import_ref"
+    assert payload["import_path"] == "my_trusted_module:my_fn"
+    assert "my_trusted_module" not in __import__("sys").modules  # no import happened
+
+    with pytest.raises(OpaqueCallableInExecutableSaveError):
+        _serialize_callable(ref, SaveLevel.PORTABLE)

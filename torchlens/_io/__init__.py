@@ -13,7 +13,6 @@ verify, and close blob files per materialization instead of sharing handles.
 from __future__ import annotations
 
 import copy
-import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -21,43 +20,133 @@ from typing import Any, NamedTuple
 
 import torch
 
-from ..errors._base import CompatibilityError
+from ..errors._base import CompatibilityError, TorchLensWarning
+from .prerelease import validate_prerelease_state
 
 # v6 adds persisted ModuleCall forward-pre-hook provenance value objects.
-TLSPEC_VERSION = 6
+# v7 adds the persisted capture outcome (`_capture_outcome`, string-only payload).
+# v8 is the coordinated feature-sprint activation: every S3 pre-release-gated
+# family flips to its persisting policy together (Op.site_key, the L6 edge/
+# audit families, L1 grouping + grouping_policy, L8 distributed_scope, L9
+# grad_fn_timing_provenance + checkpoint_invocation_witness, the L7a
+# structure_only marker, the L3 primitive-op profile + kernel telemetry, the
+# S6 Bundle member_relations key, and the S7 episode annotations ledger),
+# with their load-validation rows live on real artifacts.
+TLSPEC_VERSION = 8
 _LEGACY_THREAD_WARNING_EMITTED: dict[str, bool] = {"flag": False}
 
-
-def _warn_legacy_thread_fields_dropped() -> None:
-    """Emit one deprecation warning for legacy thread-replay fields.
-
-    Older TorchLens portable bundles with ``tlspec_version <= 2`` carried
-    private fields removed by the module-containment-refactor sprint. Current
-    load code drops those fields and uses the stored ``modules`` field
-    directly.
-    """
-
-    if not _LEGACY_THREAD_WARNING_EMITTED["flag"]:
-        warnings.warn(
-            "Loaded a TorchLens bundle from tlspec_version<=2; "
-            "legacy thread-replay fields were dropped. "
-            "Module containment is reconstructed from hook-stack "
-            "snapshots in current capture; this load uses the stored "
-            "modules field directly.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-        _LEGACY_THREAD_WARNING_EMITTED["flag"] = True
-
-
-def reset_legacy_thread_warning() -> None:
-    """Reset the once-per-process legacy-thread warning flag for tests."""
-
-    _LEGACY_THREAD_WARNING_EMITTED["flag"] = False
+# Rehydration floor: artifacts older than tlspec_version 6 (first shipped in
+# torchlens 2.33) refuse to load instead of being resurrected through legacy
+# field-alias ladders. ``MIN_TORCHLENS_VERSION_TEXT`` is the release named in
+# refusal messages and matched against parsed manifest ``torchlens_version``.
+MIN_TLSPEC_VERSION = 6
+MIN_TORCHLENS_VERSION_TEXT = "2.33"
 
 
 class TorchLensIOError(CompatibilityError, RuntimeError):
     """Raised when TorchLens portable bundle state is invalid or unsupported."""
+
+
+class ArtifactVersionBelowFloorError(TorchLensIOError):
+    """Raised when an artifact predates the supported rehydration floor.
+
+    TorchLens loads artifacts written by torchlens ``2.33`` or newer
+    (``tlspec_version >= 6``). Older artifacts refuse with this error rather
+    than being partially reconstructed; re-save them with a torchlens release
+    in the ``2.33``-to-``2.34`` range that can still read them.
+    """
+
+
+class PreReleaseArtifactError(TorchLensIOError):
+    """Raised when a pre-release-marked artifact loads without the switch.
+
+    Sprint-gated fields persist only under the test-only activation switch
+    (:mod:`torchlens._io.prerelease`), and every state written under the
+    switch carries the pre-release marker. Loading such an artifact as a real
+    current-version artifact refuses with this error so switched and real
+    writes are never indistinguishable.
+    """
+
+
+class ArtifactSchemaAgeWarning(TorchLensWarning):
+    """Warning emitted when a loaded artifact predates the runtime schema.
+
+    The artifact is between the rehydration floor and the current
+    ``tlspec_version``: it loads at its own recorded schema, and fields
+    introduced by later schema versions are absent rather than default-filled.
+
+    This is deliberately a ``UserWarning`` subclass, not a
+    ``DeprecationWarning``. It deprecates no API -- it reports the AGE of one
+    artifact -- and ``DeprecationWarning`` is hidden from end users by default,
+    which made the advisory effectively invisible at the one moment it matters.
+    """
+
+
+_BELOW_FLOOR_REMEDY = (
+    "Load and re-save the artifact with a torchlens release "
+    f">= {MIN_TORCHLENS_VERSION_TEXT} that still reads it."
+)
+
+
+def below_floor_error(
+    *,
+    observed: str,
+    subject: str = "Artifact",
+    path: str | None = None,
+) -> ArtifactVersionBelowFloorError:
+    """Build the typed rehydration-floor refusal with structured fields.
+
+    Every below-floor refusal was hand-copied at its raise site with an empty
+    ``fields`` payload, and four of the six omitted the artifact path they held
+    in scope (R65). This one constructor gives all of them a stable
+    ``fields["code"]``, the ``observed`` version, the floor, a ``remedy``, and
+    the ``path`` when the caller has one.
+
+    Parameters
+    ----------
+    observed:
+        Rendered source version (``"tlspec_version=N"`` or a description of an
+        unversioned state).
+    subject:
+        Human-readable subject named in the message (e.g. ``"Bundle manifest"``).
+    path:
+        Artifact path, when the caller has it in scope.
+
+    Returns
+    -------
+    ArtifactVersionBelowFloorError
+        The typed refusal, ready to raise.
+    """
+
+    message = (
+        f"{subject} has {observed}, below the supported rehydration floor "
+        f"tlspec_version={MIN_TLSPEC_VERSION} (torchlens "
+        f"{MIN_TORCHLENS_VERSION_TEXT}). {_BELOW_FLOOR_REMEDY}"
+    )
+    return ArtifactVersionBelowFloorError(
+        message,
+        code="artifact_version_below_floor",
+        observed=observed,
+        floor_tlspec_version=MIN_TLSPEC_VERSION,
+        floor_torchlens_version=MIN_TORCHLENS_VERSION_TEXT,
+        path=path,
+        remedy=_BELOW_FLOOR_REMEDY,
+    )
+
+
+def _raise_below_floor(cls_name: str, version_text: str) -> None:
+    """Raise the typed rehydration-floor refusal for one object state.
+
+    Parameters
+    ----------
+    cls_name:
+        Human-readable class name used in the error message.
+    version_text:
+        Rendered source version (``"tlspec_version=N"`` or a description of
+        an unversioned state).
+    """
+
+    raise below_floor_error(observed=version_text, subject=f"{cls_name} state")
 
 
 @dataclass(frozen=True)
@@ -129,29 +218,27 @@ def read_tlspec_version(state: dict[str, Any], *, cls_name: str) -> int:
     state:
         Serialized state dict for the object being restored.
     cls_name:
-        Human-readable class name used in warnings and errors.
+        Human-readable class name used in errors.
 
     Returns
     -------
     int
-        The decoded version. Pre-sprint states return ``0``.
+        The decoded version, always ``MIN_TLSPEC_VERSION`` or newer.
 
     Raises
     ------
+    ArtifactVersionBelowFloorError
+        If the state predates the ``tlspec_version >= MIN_TLSPEC_VERSION``
+        rehydration floor (including unversioned pre-sprint states).
     TorchLensIOError
         If the serialized version is newer than this runtime understands or
         is not an integer.
     """
 
+    validate_prerelease_state(state, cls_name=cls_name)
     version = state.pop("tlspec_version", None)
     if version is None:
-        warnings.warn(
-            f"{cls_name} pickle state predates TorchLens portable I/O versioning; "
-            "compat mode is deprecated.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-        return 0
+        _raise_below_floor(cls_name, "no tlspec_version (predates portable I/O versioning)")
     if not isinstance(version, int):
         raise TorchLensIOError(f"{cls_name} pickle state has invalid tlspec_version={version!r}.")
     if version > TLSPEC_VERSION:
@@ -159,6 +246,8 @@ def read_tlspec_version(state: dict[str, Any], *, cls_name: str) -> int:
             f"{cls_name} pickle state uses tlspec_version={version}, "
             f"but this runtime only supports up to {TLSPEC_VERSION}."
         )
+    if version < MIN_TLSPEC_VERSION:
+        _raise_below_floor(cls_name, f"tlspec_version={version}")
     return version
 
 
@@ -179,7 +268,7 @@ def default_fill_state(state: dict[str, Any], *, defaults: dict[str, Any]) -> No
             state[field_name] = copy.deepcopy(default_value)
 
 
-_COERCIBLE_CONTAINER_TYPES = (list, dict, tuple, set)
+_COERCIBLE_CONTAINER_TYPES = (list, dict, tuple, set, frozenset)
 
 
 def coerce_container_typed_state(

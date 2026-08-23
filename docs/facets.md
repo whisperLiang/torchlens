@@ -102,7 +102,11 @@ log = tl.trace(model, x)
 missing = log.modules["attn"].facets["q"].grad
 print(missing.reason)
 
-log = tl.trace(model, x, backward_ready=True, save_grads=True)
+log = tl.trace(
+    model,
+    x,
+    capture=tl.options.CaptureOptions(backward_ready=True, save_grads=True),
+)
 log.log_backward(log[log.output_layers[0]].out.sum())
 q_grad = log.modules["attn"].facets["q"].grad
 ```
@@ -197,7 +201,11 @@ Use `tl.facet(name)` for a named facet and `tl.head(index, name)` or
 # Facet recipes often need internal child activations, so this example
 # intentionally saves all payloads. For ordinary selective capture, prefer
 # save=tl.func(...) or save=tl.in_module(...).
-log = tl.trace(model, x, layers_to_save="all", save_arg_values=True)
+log = tl.trace(
+    model,
+    x,
+    capture=tl.options.CaptureOptions(layers_to_save="all", save_arg_values=True),
+)
 edited = log.fork("ablated")
 edited.attach_hooks(tl.head(3, "q"), tl.zero_ablate())
 edited.rerun(model, x)
@@ -347,6 +355,54 @@ find an output projection. `result[..., head, :]` is that head's contribution to
 the projected residual stream; summing heads and adding projection bias matches
 the captured output-projection tensor.
 
+## Unembedding Head and Logit Lens
+
+Every spelling in this section is DOCUMENTED-UNSTABLE pending the naming
+session.
+
+The `language_model_head` recipe matches a module with a conventional
+unembedding child (`lm_head`, `embed_out`, or `output_projection`) and anchors
+the facts a logit-lens projection needs:
+
+```text
+logits            head output op (the model's real output logits)
+unembed_weight    head weight parameter, shape (vocab, d_model)
+unembed_bias      head bias parameter, or structurally absent
+final_norm_kind   "layer_norm" | "rms_norm" for the norm feeding the head
+final_norm_eps    that norm's epsilon
+final_norm_gamma  that norm's weight parameter
+final_norm_beta   that norm's bias parameter (absent for RMSNorm)
+final_norm_input  op-anchored norm input, when the anchor is unambiguous
+```
+
+The final norm is derived structurally from the traced dataflow (the innermost
+classified norm module containing the head's input op), never by a name search
+over the module tree.
+
+`torchlens.semantic.logit_lens` projects each block's residual-stream facet
+through the model's own final norm + unembedding:
+
+```python
+from torchlens.semantic import logit_lens
+
+result = logit_lens(log)                      # resid_post through the model's head
+print(result.summary(tokenizer=tokenizer))    # per-layer top-1 table
+result.entries[3].logits                      # one layer's projected logits
+result.stacked()                              # (n_layers, *logits_shape)
+result.top_tokens(5, tokenizer=tokenizer)     # per-layer top-k (token, prob)
+```
+
+The reconstructed lens is validated before use: applying it to the LAST
+block's captured `resid_post` must reproduce the model's captured logits, so a
+head the reconstruction cannot represent (nonstandard norm scaling such as a
+`(1 + weight)` RMSNorm, an extra projection, dropout before the head) refuses
+with `LogitLensError` instead of silently mislabeling layers. Pass
+`validate=False` to trust the reconstruction explicitly, `lens=` to supply
+your own callable (or per-address mapping, e.g. a tuned lens), and `layers=` /
+`facet=` to control what is projected. Architecture coverage extends through
+facet recipes producing the same facet names -- the appliance never special
+cases architectures.
+
 ## Fallback
 
 Every module has structural facets even with no semantic recipe. This gives a
@@ -371,6 +427,8 @@ tl.facets.enable_transformerlens_aliases()
 When enabled, aliases such as `hook_pattern`, `hook_z`, `hook_result`,
 `hook_resid_pre`, `hook_resid_mid`, and `hook_resid_post` resolve to native
 TorchLens facets when those native facets exist.
+`torchlens.semantic.transformer_lens_aliases_enabled()` reports the current
+process-wide state.
 
 ## Migration Cheat Sheet
 
@@ -387,11 +445,27 @@ TransformerLens hook_resid_post  -> facets.resid_post
 nnsight module.path.output       -> log.modules["module.path"].facets["out"]
 ```
 
+## Coverage and Recipe Maintenance
+
+`torchlens.semantic.facet_coverage(log)` (DOCUMENTED-UNSTABLE spelling) reports
+per-module recipe coverage for a completed trace: which recipes matched, which
+declared facets are readable, typed absence reasons, an inventory of
+structural-only module classes (recipe candidates), and disclosed rows for
+modules whose facet view refuses (e.g. multi-call reuse). It is the
+machine-readable input to the facet-maintenance pipeline in
+`tools/facet_maintenance/` (`DISCOVER_FACETS.md` is the durable sweep prompt;
+`run_facet_audit.py` is the repeatable runner). The pipeline produces
+PROPOSALS FOR REVIEW only -- facet recipes are never auto-merged, because a
+wrong facet label is a confidently mislabelled part of someone's model.
+
 ## Recipe Plugins
 
-At import, TorchLens loads installed setuptools entry points in the
-`torchlens.recipes` group. A broken entry point warns and is skipped; TorchLens
-does not scan or execute local directories.
+On FIRST USE of the facet-recipe subsystem (not at `import torchlens` --
+the loader is module-level in `torchlens/semantic/recipes/__init__.py`, and
+`torchlens.semantic` is lazy), TorchLens loads installed setuptools entry
+points in the `torchlens.recipes` group. A broken entry point therefore warns
+when facets are first touched, not at import. Entry points are never scanned
+from local directories.
 
 ## Built-In Inventory
 
@@ -403,9 +477,7 @@ are:
 op_structural
 parameter
 module_input
-module_output
 computed_read_only
-missing
 ```
 
 Only `op_structural` built-in facets may claim facet-gradient capability in P1.

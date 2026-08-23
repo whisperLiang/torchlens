@@ -208,8 +208,9 @@ def test_old_vs_new_scheduling_run_yields_byte_identical_validation_result(
     a single bit. If a scheduling change ever perturbed the trace, this fails.
     """
 
-    torch = pytest.importorskip("torch")
-    pytest.importorskip("torchlens")
+    import torch
+
+    import torchlens  # noqa: F401  # required package under test; a broken install must fail, not skip
 
     # Keep this real-trace test hermetic: forbid CUDA so the trace cannot
     # initialize a process-wide CUDA context that would pollute the orchestrator

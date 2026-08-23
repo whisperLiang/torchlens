@@ -2,6 +2,7 @@
 
 from typing import Literal
 
+from .._errors import KeywordConflictError
 from ..errors._base import (
     CaptureError,
     CompatibilityError,
@@ -10,7 +11,7 @@ from ..errors._base import (
     TorchLensWarning,
     ValidationError,
 )
-
+from ..selection import SelectionError
 
 Severity = Literal["recoverable", "informational", "fatal"]
 """Public severity tag values for the intervention error catalog."""
@@ -53,7 +54,11 @@ class TorchLensInterventionError(InterventionError, RuntimeError):
         """
 
         if args and fields:
-            raise TypeError("Use either positional message args or named error fields, not both.")
+            raise KeywordConflictError(
+                "Use either positional message args or named error fields, not both",
+                code="error_constructor_args_conflict",
+                remedy="pass a message OR named fields when constructing this error",
+            )
         self.fields = dict(fields)
         if fields:
             super().__init__(_message_from_fields(type(self).__name__, self.fields))
@@ -82,7 +87,11 @@ class TorchLensInterventionWarning(TorchLensWarning):
         """
 
         if args and fields:
-            raise TypeError("Use either positional message args or named warning fields, not both.")
+            raise KeywordConflictError(
+                "Use either positional message args or named warning fields, not both",
+                code="error_constructor_args_conflict",
+                remedy="pass a message OR named fields when constructing this warning",
+            )
         self.fields = dict(fields)
         if fields:
             super().__init__(_message_from_fields(type(self).__name__, self.fields))
@@ -118,12 +127,63 @@ class MultiMatchWarning(TorchLensInterventionWarning):
     """Informational warning for selector queries that resolve multiple sites."""
 
 
+class PendingValueEditsWarning(TorchLensInterventionWarning):
+    """A new-input run was requested on a trace carrying value-edits.
+
+    ``do()``-style edits rewrite SAVED values and push them downstream on the
+    captured DAG (path 1); ``run(inputs=...)`` is a FRESH execution of the
+    live model, so those edits say nothing about the new inputs and are not
+    applied. Emitted at the run door so the coherent-but-surprising
+    combination is disclosed instead of silently returning an un-edited
+    verified run. DOCUMENTED-UNSTABLE spelling pending the naming session.
+    """
+
+
+class BufferThreadGapWarning(TorchLensInterventionWarning):
+    """A replayed buffer version could not be threaded from its writing op.
+
+    Emitted when a buffer record inside a replay cone keeps its CAPTURED value
+    because the engine cannot prove the recomputed writing op's output equals
+    the post-write buffer state (unsupported write kind, multi-parent record,
+    or failed capture-time corroboration). Downstream consumers of that buffer
+    version read the captured value, so the edit does not propagate through it.
+    DOCUMENTED-UNSTABLE spelling pending the naming session.
+    """
+
+
 class ReplayPreconditionError(TorchLensInterventionError):
     """Raised when replay cannot satisfy its future execution preconditions."""
 
 
 class UntrustedCallableError(ReplayPreconditionError):
-    """Raised when a loaded spec requests an untrusted custom callable import."""
+    """Raised when a loaded spec requests an untrusted custom callable import.
+
+    Unlike catalog errors that derive their message from fields, this security
+    refusal carries BOTH long-form prose and structured ``fields`` (stable
+    ``code`` plus the denied ``module`` / ``import_path`` subject), so callers
+    on this boundary can build the recommended
+    ``allowed_custom_callable_modules`` allowlist without parsing message
+    text (R65).
+    """
+
+    def __init__(self, *args: object, **fields: object) -> None:
+        """Initialize with prose, named fields, or both.
+
+        Parameters
+        ----------
+        *args:
+            Positional message arguments.
+        **fields:
+            Structured payload retained on ``fields``.
+        """
+
+        if args and fields:
+            # The root TorchLensError constructor natively supports prose plus
+            # payload; bypass the catalog XOR narrowing for this boundary.
+            message = ", ".join(str(arg) for arg in args)
+            InterventionError.__init__(self, message, **fields)  # type: ignore[arg-type]
+            return
+        super().__init__(*args, **fields)
 
 
 class OpaqueCallableInExecutableSaveError(ConfigurationError, ValueError):
@@ -238,6 +298,16 @@ class SelectorCompositionError(SiteResolutionError):
     """Raised when selectors from incompatible graph directions are composed."""
 
 
+class SelectorCapabilityError(SiteResolutionError):
+    """Raised when a selector kind cannot be evaluated in a lifecycle.
+
+    The one typed refusal for unsupported ``(kind, lifecycle)`` pairs: for
+    example ``tl.followed_by(...)`` in post-hoc ``find_sites`` (no retroactive
+    window exists on a finished trace) or ``tl.input_at(...)`` as a live hook
+    application site.
+    """
+
+
 class UnclassifiedSelectorError(SiteResolutionError):
     """Raised when a selector is missing an explicit direction taxonomy bucket."""
 
@@ -349,7 +419,9 @@ __all__ = [
     "ReplayPreconditionError",
     "Severity",
     "SiteAmbiguityError",
+    "SelectionError",
     "SiteResolutionError",
+    "SelectorCapabilityError",
     "SelectorCompositionError",
     "SpecMutationError",
     "SpecPortabilityError",

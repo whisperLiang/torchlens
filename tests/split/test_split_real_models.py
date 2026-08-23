@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from v2_helpers import split_request
-
 import gc
 import os
 import site
@@ -16,6 +14,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from v2_helpers import split_request
 
 import torchlens as tl
 

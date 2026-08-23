@@ -2,9 +2,11 @@
 
 # ruff: noqa: F403, F405
 
+from ._edge_multiplicity import _bump_deduped_edge_multiplicity, _register_deduped_edge
 from ._render_common import *
 from ._render_leaf import *
 from ._render_utils import html_escape
+from .collapse_plan import OpSegment
 
 
 def _buffer_name_segment(address: str | None) -> str:
@@ -29,6 +31,46 @@ def _buffer_name_segment(address: str | None) -> str:
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
     from .auto_collapse import ModuleRepeatFold
+
+
+@dataclass(frozen=True)
+class _SegmentLookup:
+    """Precomputed first-match indexes for render segment membership."""
+
+    qualified_labels: Mapping[str, SegmentDescriptor]
+    base_labels: Mapping[str, SegmentDescriptor]
+    member_addresses: Mapping[str, tuple[int, SegmentDescriptor]]
+
+
+def _build_segment_lookup(
+    segments: Mapping[str, SegmentDescriptor] | None,
+) -> _SegmentLookup:
+    """Build first-match segment indexes in descriptor iteration order.
+
+    Parameters
+    ----------
+    segments:
+        Segment descriptors keyed by node name.
+
+    Returns
+    -------
+    _SegmentLookup
+        Constant-time indexes preserving the renderer's original first-match
+        ordering.
+    """
+
+    qualified_labels: dict[str, SegmentDescriptor] = {}
+    base_labels: dict[str, SegmentDescriptor] = {}
+    member_addresses: dict[str, tuple[int, SegmentDescriptor]] = {}
+    for position, segment in enumerate((segments or {}).values()):
+        for op in segment.ops:
+            qualified_label = str(op)
+            qualified_labels.setdefault(qualified_label, segment)
+            base_labels.setdefault(qualified_label, segment)
+            base_labels.setdefault(qualified_label.rsplit(":", 1)[0], segment)
+        for member in segment.members:
+            member_addresses.setdefault(str(member), (position, segment))
+    return _SegmentLookup(qualified_labels, base_labels, member_addresses)
 
 
 def _is_noise_buffer(node: GraphNode) -> bool:
@@ -175,7 +217,7 @@ def _get_node_by_label(trace: "Trace", label: str, vis_mode: str) -> GraphNode:
 
 def _segment_for_node(
     node: GraphNode,
-    segments: Mapping[str, SegmentDescriptor] | None,
+    segment_lookup: _SegmentLookup | None,
 ) -> SegmentDescriptor | None:
     """Return the segment descriptor that absorbs ``node`` if any.
 
@@ -183,8 +225,8 @@ def _segment_for_node(
     ----------
     node:
         Render node being emitted.
-    segments:
-        Segment descriptors keyed by node name.
+    segment_lookup:
+        Precomputed segment membership indexes.
 
     Returns
     -------
@@ -192,17 +234,34 @@ def _segment_for_node(
         Matching descriptor, or ``None``.
     """
 
-    if not segments or isinstance(node, BoundaryNode):
+    if segment_lookup is None or isinstance(node, BoundaryNode):
         return None
     label = str(getattr(node, "layer_label", ""))
-    for segment in segments.values():
-        if label in segment.ops:
+    if isinstance(node, Op):
+        # Unrolled nodes carry pass-qualified labels; match those against
+        # concrete descriptor ops first so per-pass segments of a reused
+        # module absorb exactly their own pass.
+        qualified = str(node.label)
+        segment = segment_lookup.qualified_labels.get(qualified)
+        if segment is not None:
             return segment
-        member_set = set(segment.members)
-        for address_w_pass in getattr(node, "modules", ()) or ():
-            if str(address_w_pass).rsplit(":", 1)[0] in member_set:
-                return segment
-    return None
+        segment = segment_lookup.qualified_labels.get(label)
+        if segment is not None:
+            return segment
+    else:
+        # Rolled aggregates have no pass identity; match the base label
+        # against concrete or legacy pass-free descriptor ops.
+        segment = segment_lookup.base_labels.get(label)
+        if segment is not None:
+            return segment
+    first_member_match: tuple[int, SegmentDescriptor] | None = None
+    for address_w_pass in getattr(node, "modules", ()) or ():
+        candidate = segment_lookup.member_addresses.get(str(address_w_pass).rsplit(":", 1)[0])
+        if candidate is not None and (
+            first_member_match is None or candidate[0] < first_member_match[0]
+        ):
+            first_member_match = candidate
+    return None if first_member_match is None else first_member_match[1]
 
 
 def _is_run_fold_representative(
@@ -284,10 +343,18 @@ def _run_fold_ellipsis_label(fold: "ModuleRepeatFold") -> str:
     Returns
     -------
     str
-        Plaintext label describing the number of elided siblings.
+        Plaintext label describing the number of elided siblings. When the
+        hidden members run more forward calls than there are hidden
+        addresses, the exact hidden call count is disclosed as well, so the
+        ellipsis never understates the hidden execution mass.
     """
 
-    return f"... +{fold.multiplicity - 1} more {fold.class_name}"
+    hidden_members = fold.multiplicity - 1
+    label = f"... +{hidden_members} more {fold.class_name}"
+    hidden_calls = getattr(fold, "hidden_calls", None)
+    if hidden_calls is not None and hidden_calls != hidden_members:
+        label += f" ({hidden_calls} calls)"
+    return label
 
 
 def _run_fold_hidden_endpoint(
@@ -494,6 +561,9 @@ def _collapsed_module_should_show_remainder(
     address: str,
     op_labels: Sequence[str],
     collapse_fn: CollapseFn | None,
+    *,
+    vis_mode: str = "unrolled",
+    max_module_depth: int = 1000,
 ) -> bool:
     """Return whether a collapsed box has own-output ops surfaced by the plan.
 
@@ -507,6 +577,11 @@ def _collapsed_module_should_show_remainder(
         Pass-qualified operation labels in this module call.
     collapse_fn:
         Active collapse predicate, optionally carrying v2 plan metadata.
+    vis_mode:
+        ``"unrolled"`` or ``"rolled"``; must match the active render so the
+        plan-less separate-render check mirrors the real node emission.
+    max_module_depth:
+        Depth threshold in effect for the active render.
 
     Returns
     -------
@@ -520,9 +595,57 @@ def _collapsed_module_should_show_remainder(
         return False
     plan = getattr(collapse_fn, "_torchlens_v2_plan", None)
     if isinstance(plan, CollapsePlan):
-        visible_raw_ops = {_raw_op_label(node) for node in plan.nodes if isinstance(node, RawOp)}
-        return any(op.layer_label in visible_raw_ops for op in surfaced)
-    return getattr(collapse_fn, "_torchlens_v2_mode", None) == "max"
+        visible_ops = _plan_separately_rendered_op_labels(plan)
+        return any(op.layer_label in visible_ops for op in surfaced)
+    if getattr(collapse_fn, "_torchlens_v2_mode", None) == "max":
+        return True
+    # Plain user collapse_fn (no v2 plan): a surfaced exit op renders as a
+    # separate visible node exactly when no ancestor module absorbs it --
+    # the same _collapse_address_for_node decision the node emitter makes.
+    # Requiring v2 "max" here let every plain-collapse box double-represent
+    # its recurrence-surfaced exits (counted inside AND drawn beside it).
+    return any(
+        _collapse_address_for_node(
+            trace,
+            op,
+            vis_mode=vis_mode,
+            collapse_fn=collapse_fn,
+            max_module_depth=max_module_depth,
+        )
+        is None
+        for op in surfaced
+    )
+
+
+def _plan_separately_rendered_op_labels(plan: CollapsePlan) -> frozenset[str]:
+    """Return pass-free labels of every op the plan renders outside module boxes.
+
+    Standalone raw nodes and condensed operation-segment members both render
+    (and are counted) separately from any collapsed module box, so the
+    remainder accounting must treat them identically. Checking only ``RawOp``
+    membership double-represented a surfaced atomic-exit op absorbed into an
+    adjacent operation segment: the box content label kept counting it while
+    the segment range label claimed it too (round-25).
+
+    Parameters
+    ----------
+    plan:
+        Resolved renderer-faithful collapse plan.
+
+    Returns
+    -------
+    frozenset[str]
+        Pass-free operation labels rendered as raw nodes or claimed by
+        operation-segment range labels.
+    """
+
+    labels: set[str] = set()
+    for node in plan.nodes:
+        if isinstance(node, RawOp):
+            labels.add(_raw_op_label(node))
+        elif isinstance(node, OpSegment):
+            labels.update(str(label).rsplit(":", 1)[0] for label in node.ops)
+    return frozenset(labels)
 
 
 def _raw_op_label(node: RawOp) -> str:
@@ -603,7 +726,11 @@ def _surfaced_own_output_ops(
     address:
         Pass-free owner module address.
     op_labels:
-        Pass-qualified operation labels in this module call.
+        Pass-qualified operation labels in this module call, or pass-free
+        layer labels for a rolled box (each resolved to its first pass; the
+        surfaced-exit predicate fields are per-layer invariants, and rolled
+        remainder accounting is in layer currency, so one op per layer base
+        is exactly right).
 
     Returns
     -------
@@ -614,7 +741,15 @@ def _surfaced_own_output_ops(
 
     surfaced: list[Op] = []
     for label in op_labels:
-        op = trace.ops[label]
+        # A bare multi-pass layer label is ambiguous for the op accessor;
+        # qualify pass-free labels to their first pass explicitly.
+        if ":" not in label:
+            try:
+                op = trace.ops[f"{label}:1"]
+            except (KeyError, IndexError):
+                op = trace.ops[label]
+        else:
+            op = trace.ops[label]
         if getattr(op, "is_buffer", False):
             continue
         if not getattr(op, "is_atomic_module", False):
@@ -690,6 +825,37 @@ def _run_fold_ellipsis_owner_key(
     return _collapsed_module_owner_key(trace, fold.representative, "1", vis_mode)
 
 
+def _segment_owner_for_mode(owner: str | None, vis_mode: str) -> str | None:
+    """Project a segment descriptor owner into the active cluster keyspace.
+
+    Rolled clusters are keyed by pass-free module address while unrolled
+    clusters are keyed per call, exactly as ``_raw_render_node_owner_key``
+    projects raw node owners. Segment owners must go through the same
+    projection at every render boundary (node queueing and edge endpoint
+    ownership): a pass-qualified owner in rolled mode names a bucket the
+    rolled cluster flush never drains, so its queued content is silently
+    dropped and Graphviz materializes an unlabeled default node instead
+    (round-27 fail-soft belt; the descriptor builders emit pass-free rolled
+    owners at the source).
+
+    Parameters
+    ----------
+    owner:
+        Segment descriptor owner cluster key, or ``None`` for top level.
+    vis_mode:
+        ``"unrolled"`` or ``"rolled"`` visualization mode.
+
+    Returns
+    -------
+    str | None
+        Owner key valid in the active cluster keyspace.
+    """
+
+    if owner is None or vis_mode != "rolled":
+        return owner
+    return owner.rsplit(":", 1)[0]
+
+
 def _raw_render_node_owner_key(node: GraphNode, vis_mode: str) -> str | None:
     """Return the innermost cluster that owns an unprojected render node.
 
@@ -748,7 +914,7 @@ def _rendered_endpoint_owner_key(
     """
 
     if segment is not None:
-        return segment.owner
+        return _segment_owner_for_mode(segment.owner, vis_mode)
     if hidden_fold is not None:
         return _run_fold_ellipsis_owner_key(trace, hidden_fold, vis_mode)
     if collapsed_address is not None:
@@ -876,9 +1042,11 @@ def _add_edges_for_node(
     collapsed_container_nodes: Mapping[str, str] | None = None,
     repeat_folds: Mapping[str, "ModuleRepeatFold"] | None = None,
     run_fold_ellipsis_nodes: set[str] | None = None,
-    segments: Mapping[str, SegmentDescriptor] | None = None,
+    segment_lookup: _SegmentLookup | None = None,
     parent_segment: SegmentDescriptor | None = None,
     antiparallel_projected_edges: frozenset[tuple[str, str]] = frozenset(),
+    rolled_maps: "_RolledEdgeMaps | None" = None,
+    deduped_edge_registry: dict[tuple[Any, ...], dict[str, Any]] | None = None,
 ) -> None:
     """Add forward (and optionally grad) edges from a parent node to all its children.
 
@@ -972,7 +1140,7 @@ def _add_edges_for_node(
         child_fold_ancestor = _run_fold_ancestor_for_node(child_node, repeat_folds)
         if child_fold_ancestor is not None:
             child_module_name_w_pass = child_fold_ancestor
-        child_segment = _segment_for_node(child_node, segments)
+        child_segment = _segment_for_node(child_node, segment_lookup)
         child_is_collapsed_module = child_module_name_w_pass is not None
 
         if child_segment is not None:
@@ -1127,6 +1295,7 @@ def _add_edges_for_node(
                 parent_node,
                 child_node,
                 vis_mode,
+                rolled_maps,
             )
         ):
             continue
@@ -1198,7 +1367,9 @@ def _add_edges_for_node(
                 # and the argument labeler below (which adds headlabel/xlabel)
                 # cannot fire for this edge; otherwise it keeps head/tail labels.
                 arg_labeler_may_fire = not child_is_collapsed_module and bool(
-                    _should_mark_arguments_on_edge(self, metadata_base_for_pass, show_buffer_layers)
+                    _should_mark_arguments_on_edge(
+                        self, metadata_base_for_pass, show_buffer_layers, rolled_maps
+                    )
                 )
                 _label_rolled_call_indexs(
                     metadata_base_for_pass,
@@ -1207,6 +1378,7 @@ def _add_edges_for_node(
                     is_self_loop=edge_is_self_loop,
                     rankdir=rankdir,
                     allow_midpoint_merge="label" not in edge_dict and not arg_labeler_may_fire,
+                    rolled_maps=rolled_maps,
                 )
 
         # Label the arguments to the next node if multiple inputs
@@ -1223,6 +1395,7 @@ def _add_edges_for_node(
                 edge_dict,
                 show_buffer_layers,
                 render_edge.argument_label,
+                rolled_maps,
             )
 
         for arg_name, arg_val in overrides.edge.items():  # type: ignore[union-attr]
@@ -1242,27 +1415,49 @@ def _add_edges_for_node(
             ),
         )
         visual_dedupe_key = (tail_name, head_name, visual_signature)
+        raw_edge_identity = (parent_node.layer_label, child_node.layer_label)
         if visual_dedupe_key in edges_used:
+            _bump_deduped_edge_multiplicity(
+                deduped_edge_registry,
+                visual_dedupe_key,
+                raw_edge_identity,
+                graphviz_graph,
+            )
             continue
         edges_used.add(visual_dedupe_key)
 
         if module != -1:
             module_key = cast(str, module)
             module_edge_dict[module_key]["edges"].append(edge_dict)
-            if parent_node.has_input_ancestor or child_node.has_input_ancestor:
-                module_edge_dict[module_key]["has_input_ancestor"] = True
-                for module in parent_node.modules:
-                    module_key = module.split(":")[0] if vis_mode == "rolled" else module
-                    module_edge_dict[module_key]["has_input_ancestor"] = True
-                    if module_key == module:
-                        break
-                for module in child_node.modules:
-                    module_key = module.split(":")[0] if vis_mode == "rolled" else module
-                    module_edge_dict[module_key]["has_input_ancestor"] = True
-                    if module_key == module:
-                        break
+            _register_deduped_edge(
+                deduped_edge_registry, visual_dedupe_key, raw_edge_identity, edge_dict, None
+            )
         else:
             graphviz_graph.edge(**edge_dict)
+            emitted_calls = getattr(graphviz_graph, "calls", None)
+            _register_deduped_edge(
+                deduped_edge_registry,
+                visual_dedupe_key,
+                raw_edge_identity,
+                edge_dict,
+                len(emitted_calls if emitted_calls is not None else graphviz_graph.body) - 1,
+            )
+        # r-b6 R19-4: input-connectivity marks EVERY module containing a
+        # connected endpoint, for every edge. The historical loop broke after
+        # the first entry (its guard compared a name to itself, so it was
+        # tautologically true in unrolled mode) and only ran when the edge
+        # had an in-module LCA — a nested module whose only edges crossed its
+        # boundary rendered DASHED ("no input ancestor") while every op
+        # inside had ``has_input_ancestor=True``, contradicting the rolled
+        # render of the same trace.
+        for endpoint_node in (parent_node, child_node):
+            if not endpoint_node.has_input_ancestor:
+                continue
+            for containing_module in endpoint_node.modules:
+                containing_key = (
+                    containing_module.split(":")[0] if vis_mode == "rolled" else containing_module
+                )
+                module_edge_dict[containing_key]["has_input_ancestor"] = True
 
         if captured_forward_edges is not None:
             captured_forward_edges.append(
@@ -1313,10 +1508,65 @@ def _projected_antiparallel_edge_attrs() -> dict[str, str]:
     }
 
 
+class _RolledEdgeMaps:
+    """Per-draw memo of the ``Layer`` rolled-edge map properties.
+
+    ``child_ops_per_layer``, ``parent_ops_per_layer``, ``edges_vary_across_ops``,
+    and ``parents_per_pass`` are computed properties that rebuild their dicts
+    from every pass's op record on each access, and one rolled draw reads them
+    O(edges) times.  Layer graph fields do not change during a draw, so a draw
+    shares one computation per layer.  Every cached value comes from the
+    existing property itself, so cached and uncached reads cannot diverge.
+    The cache must not outlive its draw: ``Trace._remove_log_entry`` may scrub
+    op children/parents between draws.
+    """
+
+    __slots__ = ("_child_ops", "_parent_ops", "_edges_vary", "_parents_per_pass")
+
+    def __init__(self) -> None:
+        self._child_ops: dict[str, dict[str, list[int]]] = {}
+        self._parent_ops: dict[str, dict[str, list[int]]] = {}
+        self._edges_vary: dict[str, bool] = {}
+        self._parents_per_pass: dict[str, dict[int, list[str]]] = {}
+
+    def child_ops_per_layer(self, layer: "Layer") -> dict[str, list[int]]:
+        """Per-draw memo of ``Layer.child_ops_per_layer``."""
+
+        found = self._child_ops.get(layer.layer_label)
+        if found is None:
+            found = self._child_ops[layer.layer_label] = layer.child_ops_per_layer
+        return found
+
+    def parent_ops_per_layer(self, layer: "Layer") -> dict[str, list[int]]:
+        """Per-draw memo of ``Layer.parent_ops_per_layer``."""
+
+        found = self._parent_ops.get(layer.layer_label)
+        if found is None:
+            found = self._parent_ops[layer.layer_label] = layer.parent_ops_per_layer
+        return found
+
+    def edges_vary_across_ops(self, layer: "Layer") -> bool:
+        """Per-draw memo of ``Layer.edges_vary_across_ops``."""
+
+        found = self._edges_vary.get(layer.layer_label)
+        if found is None:
+            found = self._edges_vary[layer.layer_label] = layer.edges_vary_across_ops
+        return found
+
+    def parents_per_pass(self, layer: "Layer") -> dict[int, list[str]]:
+        """Per-draw memo of ``Layer.parents_per_pass``."""
+
+        found = self._parents_per_pass.get(layer.layer_label)
+        if found is None:
+            found = self._parents_per_pass[layer.layer_label] = layer.parents_per_pass
+        return found
+
+
 def _is_rolled_loop_carried_self_edge(
     parent_node: GraphNode,
     child_node: GraphNode,
     vis_mode: str,
+    rolled_maps: "_RolledEdgeMaps | None" = None,
 ) -> bool:
     """Return whether a same-endpoint edge represents rolled loop-carried flow.
 
@@ -1341,8 +1591,9 @@ def _is_rolled_loop_carried_self_edge(
     child_base = _base_node_for_metadata(child_node)
     if not isinstance(parent_base, Layer) or not isinstance(child_base, Layer):
         return False
-    parent_passes = parent_base.child_ops_per_layer.get(child_base.layer_label, [])
-    child_passes = child_base.parent_ops_per_layer.get(parent_base.layer_label, [])
+    maps = rolled_maps if rolled_maps is not None else _RolledEdgeMaps()
+    parent_passes = maps.child_ops_per_layer(parent_base).get(child_base.layer_label, [])
+    child_passes = maps.parent_ops_per_layer(child_base).get(parent_base.layer_label, [])
     return any(
         child_pass > parent_pass
         for parent_pass, child_pass in zip(parent_passes, child_passes, strict=False)
@@ -1381,6 +1632,7 @@ def _label_node_arguments_if_needed(
     edge_dict: Dict[str, Any],
     show_buffer_layers: BufferVisibilityLiteral = "meaningful",
     occurrence_argument_label: str | None = None,
+    rolled_maps: "_RolledEdgeMaps | None" = None,
 ) -> None:
     """Add argument position labels to an edge when the child has multiple non-commutative parents.
 
@@ -1402,8 +1654,9 @@ def _label_node_arguments_if_needed(
         show_buffer_layers: Buffer visibility mode (affects parent count).
         occurrence_argument_label: Optional single argument label for one repeated
             edge-use occurrence.
+        rolled_maps: Optional per-draw memo of the rolled-edge map properties.
     """
-    if not _should_mark_arguments_on_edge(self, child_node, show_buffer_layers):
+    if not _should_mark_arguments_on_edge(self, child_node, show_buffer_layers, rolled_maps):
         return
 
     if occurrence_argument_label is not None:
@@ -1446,6 +1699,7 @@ def _should_mark_arguments_on_edge(
     self: "Trace",
     child_node: Union["Op", "Layer"],
     show_buffer_layers: BufferVisibilityLiteral = "meaningful",
+    rolled_maps: "_RolledEdgeMaps | None" = None,
 ) -> bool:
     """Returns True if argument position labels should be shown on the edge to child_node.
 
@@ -1457,6 +1711,7 @@ def _should_mark_arguments_on_edge(
     Args:
         child_node: The child node whose incoming edge is being considered.
         show_buffer_layers: Buffer visibility mode.
+        rolled_maps: Optional per-draw memo of the rolled-edge map properties.
     """
     # Commutative ops: argument order doesn't matter, skip labels.
     if child_node.layer_type in COMMUTE_FUNCS:
@@ -1465,7 +1720,9 @@ def _should_mark_arguments_on_edge(
     if isinstance(child_node, Op):
         return _should_mark_arguments_on_unrolled_edge(self, child_node, show_buffer_layers)
     elif isinstance(child_node, Layer):
-        return _should_mark_arguments_on_rolled_edge(self, child_node, show_buffer_layers)
+        return _should_mark_arguments_on_rolled_edge(
+            self, child_node, show_buffer_layers, rolled_maps
+        )
 
 
 def _should_mark_arguments_on_unrolled_edge(
@@ -1492,24 +1749,24 @@ def _should_mark_arguments_on_unrolled_edge(
             ]
         )
 
-    if num_parents_shown > 1:
-        return True
-    else:
-        return False
+    return num_parents_shown > 1
 
 
 def _should_mark_arguments_on_rolled_edge(
     self: "Trace",
     child_node: "Layer",
     show_buffer_layers: BufferVisibilityLiteral = "meaningful",
+    rolled_maps: "_RolledEdgeMaps | None" = None,
 ) -> bool:
     """Returns True if argument labels should be shown on a rolled graph edge.
 
     Args:
         child_node: The child Layer node whose incoming edge is being considered.
         show_buffer_layers: Buffer visibility mode.
+        rolled_maps: Optional per-draw memo of the rolled-edge map properties.
     """
-    for call_index, pass_parents in child_node.parents_per_pass.items():
+    maps = rolled_maps if rolled_maps is not None else _RolledEdgeMaps()
+    for _call_index, pass_parents in maps.parents_per_pass(child_node).items():
         num_parents_shown = len(pass_parents)
         if show_buffer_layers != "always":
             num_parents_shown -= sum(
@@ -1695,16 +1952,24 @@ def _is_rolled_recurrence_back_edge(child_node: "Layer", parent_node: "Layer") -
     return 0 < child_step < parent_step
 
 
-def _layer_has_rolled_self_loop(node: "Layer") -> bool:
+def _layer_has_rolled_self_loop(
+    node: "Layer", rolled_maps: "_RolledEdgeMaps | None" = None
+) -> bool:
     """Returns True if a Layer feeds itself across passes (rolled self-loop edge).
 
     Args:
         node: The Layer to check.
+        rolled_maps: Optional per-draw memo of the rolled-edge map properties.
     """
-    return node.layer_label in node.child_ops_per_layer
+    maps = rolled_maps if rolled_maps is not None else _RolledEdgeMaps()
+    return node.layer_label in maps.child_ops_per_layer(node)
 
 
-def _is_rolled_congested_recurrence_forward_edge(child_node: "Layer", parent_node: "Layer") -> bool:
+def _is_rolled_congested_recurrence_forward_edge(
+    child_node: "Layer",
+    parent_node: "Layer",
+    rolled_maps: "_RolledEdgeMaps | None" = None,
+) -> bool:
     """Returns True for the forward partner of a recurrence back-edge whose band
     is congested by a self-loop.
 
@@ -1720,11 +1985,88 @@ def _is_rolled_congested_recurrence_forward_edge(child_node: "Layer", parent_nod
     Args:
         child_node: The destination Layer of the edge.
         parent_node: The source Layer of the edge.
+        rolled_maps: Optional per-draw memo of the rolled-edge map properties.
     """
+    maps = rolled_maps if rolled_maps is not None else _RolledEdgeMaps()
     return (
         _is_rolled_recurrence_back_edge(parent_node, child_node)
-        and parent_node.layer_label in child_node.child_ops_per_layer
-        and (_layer_has_rolled_self_loop(parent_node) or _layer_has_rolled_self_loop(child_node))
+        and parent_node.layer_label in maps.child_ops_per_layer(child_node)
+        and (
+            _layer_has_rolled_self_loop(parent_node, maps)
+            or _layer_has_rolled_self_loop(child_node, maps)
+        )
+    )
+
+
+def _is_rolled_cycle_body_edge(
+    child_node: "Layer",
+    parent_node: "Layer",
+    maps: "_RolledEdgeMaps",
+) -> bool:
+    """Returns True for a forward body edge of a >=3-op rolled cycle.
+
+    Both endpoints are recurrent and there is no direct reverse edge: a
+    direct reverse edge means a two-op cycle, which lays out straight and is
+    handled by the back-edge midpoint merge.  The cycle's merged back-edge
+    midpoint label bows the whole forward chain, so these edges carry tuned
+    tangent-relative placement attrs (``_ROLLED_CYCLE_HEAD_LABEL_PLACEMENT``
+    / ``_ROLLED_CYCLE_TAIL_LABEL_PLACEMENT``).
+
+    Args:
+        child_node: The destination Layer of the edge.
+        parent_node: The source Layer of the edge.
+        maps: Per-draw memo of the rolled-edge map properties.
+    """
+    p_step = parent_node.step_index
+    c_step = child_node.step_index
+    if not isinstance(p_step, int) or not isinstance(c_step, int):
+        return False
+    return (
+        0 < p_step < c_step
+        and parent_node.num_passes > 1
+        and child_node.num_passes > 1
+        and parent_node.layer_label not in maps.child_ops_per_layer(child_node)
+    )
+
+
+def _is_rolled_multistep_skip_edge(
+    child_node: "Layer",
+    parent_node: "Layer",
+    maps: "_RolledEdgeMaps",
+) -> bool:
+    """Returns True for a multi-step skip edge touching a self-loop layer.
+
+    These long skip edges (e.g. input -> loop op) bow around the ranks they
+    skip, so an endpoint head/tail label -- which Graphviz reserves no layout
+    space for -- has no safe spot: audit sweeps found no
+    ``labeldistance``/``labelangle`` pair that clears the node, spline, and
+    arrowhead on all engines without orphaning the label past the 9pt band,
+    and the winning pairs differed between macOS/Times and Linux/Liberation
+    font metrics.  Single-annotation skip edges therefore midpoint-merge
+    (like buffer edges) instead of taking placement attrs.  Cycle body edges
+    take precedence: those keep their tuned endpoint placement.  Edges into
+    output layers run straight to the top rank and stay default.
+
+    Args:
+        child_node: The destination Layer of the edge.
+        parent_node: The source Layer of the edge.
+        maps: Per-draw memo of the rolled-edge map properties.
+    """
+    p_step = parent_node.step_index
+    c_step = child_node.step_index
+    if not isinstance(p_step, int) or not isinstance(c_step, int):
+        return False
+    if _is_rolled_cycle_body_edge(child_node, parent_node, maps):
+        return False
+    span = c_step - p_step
+    return (
+        0 <= p_step < c_step
+        and 2 <= span <= 4
+        and (
+            _layer_has_rolled_self_loop(parent_node, maps)
+            or _layer_has_rolled_self_loop(child_node, maps)
+        )
+        and child_node.layer_type != "output"
     )
 
 
@@ -1750,6 +2092,7 @@ def _rolled_pass_label_placement(
     parent_node: "Layer",
     out_label: Optional[str],
     in_label: Optional[str],
+    rolled_maps: "_RolledEdgeMaps | None" = None,
 ) -> Optional[Tuple[str, str]]:
     """Pick explicit (labeldistance, labelangle) for an at-risk head/tail label.
 
@@ -1766,6 +2109,7 @@ def _rolled_pass_label_placement(
         parent_node: The source Layer of the edge.
         out_label: The ``Out ...`` annotation, if the edge carries one.
         in_label: The ``In ...`` annotation, if the edge carries one.
+        rolled_maps: Optional per-draw memo of the rolled-edge map properties.
     """
     has_head = in_label is not None
     has_tail = out_label is not None
@@ -1775,30 +2119,20 @@ def _rolled_pass_label_placement(
     c_step = child_node.step_index
     if not isinstance(p_step, int) or not isinstance(c_step, int):
         return None
+    maps = rolled_maps if rolled_maps is not None else _RolledEdgeMaps()
     span = c_step - p_step
     forward = 0 < p_step < c_step
-    # Body edge of a >=3-op cycle: both endpoints recurrent, no direct
-    # reverse edge (a direct reverse edge means a two-op cycle, which lays
-    # out straight and is handled by the back-edge midpoint merge).
-    if (
-        forward
-        and parent_node.num_passes > 1
-        and child_node.num_passes > 1
-        and parent_node.layer_label not in child_node.child_ops_per_layer
-    ):
-        return _ROLLED_CYCLE_HEAD_LABEL_PLACEMENT if has_head else _ROLLED_OBLIQUE_LABEL_PLACEMENT
-    # Multi-step skip edge attached to a self-loop layer (bowed long curve);
-    # edges into output layers run straight to the top rank and stay default.
-    if (
-        0 <= p_step < c_step
-        and 2 <= span <= 4
-        and (_layer_has_rolled_self_loop(parent_node) or _layer_has_rolled_self_loop(child_node))
-        and child_node.layer_type != "output"
-    ):
-        return _ROLLED_OBLIQUE_LABEL_PLACEMENT
+    # Body edge of a >=3-op cycle (multi-step skip edges never reach here:
+    # single-annotation skip edges midpoint-merge upstream in
+    # ``_label_rolled_call_indexs`` because no placement pair is safe for
+    # them across engines and font stacks).
+    if _is_rolled_cycle_body_edge(child_node, parent_node, maps):
+        return (
+            _ROLLED_CYCLE_HEAD_LABEL_PLACEMENT if has_head else _ROLLED_CYCLE_TAIL_LABEL_PLACEMENT
+        )
     # Adjacent forward edge into a self-loop layer: the self-loop arc sits
     # where the default head label would go.
-    if has_head and forward and span == 1 and _layer_has_rolled_self_loop(child_node):
+    if has_head and forward and span == 1 and _layer_has_rolled_self_loop(child_node, maps):
         return _ROLLED_SELF_LOOP_HEAD_LABEL_PLACEMENT
     return None
 
@@ -1811,6 +2145,7 @@ def _label_rolled_call_indexs(
     is_self_loop: bool = False,
     rankdir: str = "BT",
     allow_midpoint_merge: bool = False,
+    rolled_maps: "_RolledEdgeMaps | None" = None,
 ) -> None:
     """Add pass-number annotations to edges in rolled mode.
 
@@ -1866,17 +2201,19 @@ def _label_rolled_call_indexs(
         allow_midpoint_merge: Whether a non-self-loop edge may safely take a
             midpoint ``label`` (no conditional label present, no argument label
             coming); only such recurrence back-edges merge their annotations.
+        rolled_maps: Optional per-draw memo of the rolled-edge map properties.
     """
-    parent_call_indexs = parent_node.child_ops_per_layer[child_node.layer_label]
-    child_call_indexs = child_node.parent_ops_per_layer[parent_node.layer_label]
+    maps = rolled_maps if rolled_maps is not None else _RolledEdgeMaps()
+    parent_call_indexs = maps.child_ops_per_layer(parent_node)[child_node.layer_label]
+    child_call_indexs = maps.parent_ops_per_layer(child_node)[parent_node.layer_label]
     out_label = (
         f"Out {int_list_to_compact_str(parent_call_indexs)}"
-        if parent_node.edges_vary_across_ops
+        if maps.edges_vary_across_ops(parent_node)
         else None
     )
     in_label = (
         f"In {int_list_to_compact_str(child_call_indexs)}"
-        if child_node.edges_vary_across_ops
+        if maps.edges_vary_across_ops(child_node)
         else None
     )
 
@@ -1886,7 +2223,7 @@ def _label_rolled_call_indexs(
         and (
             is_buffer_edge
             or _is_rolled_recurrence_back_edge(child_node, parent_node)
-            or _is_rolled_congested_recurrence_forward_edge(child_node, parent_node)
+            or _is_rolled_congested_recurrence_forward_edge(child_node, parent_node, maps)
         )
     )
     if merge_into_midpoint and out_label is not None and in_label is not None:
@@ -1894,10 +2231,17 @@ def _label_rolled_call_indexs(
         edge_dict["label"] = _html_combined_recurrence_label(top, bottom)
         return
     single_label = out_label if out_label is not None else in_label
-    if is_buffer_edge and allow_midpoint_merge and single_label is not None:
+    is_single_merge_edge = is_buffer_edge or (
+        not is_self_loop and _is_rolled_multistep_skip_edge(child_node, parent_node, maps)
+    )
+    if is_single_merge_edge and allow_midpoint_merge and single_label is not None:
         # A buffer edge with a single annotation still merges: its read and
         # write edges run anti-parallel in a narrow band, where a head/tail
         # label collides with the opposing edge's spline and arrowhead.
+        # Single-annotation multi-step skip edges merge for the same reason a
+        # midpoint label is the structural fix: the bowed long curve leaves
+        # no endpoint spot that clears node, spline, and arrowhead on every
+        # engine and font stack (see ``_is_rolled_multistep_skip_edge``).
         edge_dict["label"] = _html_combined_recurrence_label(single_label)
         return
 
@@ -1909,7 +2253,7 @@ def _label_rolled_call_indexs(
         # ``allow_midpoint_merge`` doubles as the caller's promise that the
         # argument labeler cannot add a headlabel later, so the per-edge
         # placement attrs below can only ever move OUR pass labels.
-        placement = _rolled_pass_label_placement(child_node, parent_node, out_label, in_label)
+        placement = _rolled_pass_label_placement(child_node, parent_node, out_label, in_label, maps)
         if placement is not None:
             edge_dict["labeldistance"], edge_dict["labelangle"] = placement
 
@@ -2010,10 +2354,13 @@ def _get_lowest_module_for_two_nodes(
 
 
 __all__ = [
+    "_RolledEdgeMaps",
+    "_SegmentLookup",
     "_add_edges_for_node",
     "_add_intervention_hook_nodes",
     "_add_legend_to_graphviz",
     "_buffer_name_segment",
+    "_build_segment_lookup",
     "_collapsed_module_owner_key",
     "_collapsed_module_remainder_stats",
     "_collapsed_module_should_show_remainder",
@@ -2030,7 +2377,9 @@ __all__ = [
     "_is_noise_buffer",
     "_is_rolled_buffer_edge",
     "_is_rolled_congested_recurrence_forward_edge",
+    "_is_rolled_cycle_body_edge",
     "_is_rolled_loop_carried_self_edge",
+    "_is_rolled_multistep_skip_edge",
     "_is_rolled_recurrence_back_edge",
     "_is_run_fold_representative",
     "_label_node_arguments_if_needed",
@@ -2039,6 +2388,7 @@ __all__ = [
     "_occurrence_matches_op",
     "_op_is_model_input_container_leaf",
     "_op_is_model_output_container_leaf",
+    "_plan_separately_rendered_op_labels",
     "_projected_antiparallel_edge_attrs",
     "_queue_run_fold_ellipsis_node",
     "_raw_op_label",
@@ -2051,6 +2401,7 @@ __all__ = [
     "_run_fold_ellipsis_owner_key",
     "_run_fold_hidden_endpoint",
     "_segment_for_node",
+    "_segment_owner_for_mode",
     "_self_loop_is_single_op_module",
     "_set_argument_edge_label",
     "_should_mark_arguments_on_edge",

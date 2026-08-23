@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from .capture_events import (
     CaptureEvents,
-    LiveOpRecord,
-    live_record_for_label,
     register_live_event,
-    replace_op_event,
 )
 from .container import ContainerSpec
 from .container_registry import (
@@ -26,19 +23,20 @@ from .container_registry import (
 )
 from .events import (
     ArgTemplateRef,
+    BackwardCoverageGap,
     BackwardPassEnd,
     BackwardPassStart,
     BlobRef,
-    BufferEvent,
     BufferWriteEvent,
+    CheckpointInvocationObserved,
     ConditionalEvent,
     EdgeUseKind,
     FunctionCallRef,
     GradFnDiscovered,
     GradFnFired,
+    InterventionAppliedEvent,
     InterventionState,
     ModuleEnterEvent,
-    ModuleEvent,
     ModuleExitEvent,
     ModuleFrame,
     ModulePrepEvent,
@@ -47,6 +45,7 @@ from .events import (
     OpGradObserved,
     OutputRef,
     OutputVersionEvent,
+    ParamGradObserved,
     ParentEdge,
     PreHookProvenanceEvent,
     edge_use_kind,
@@ -56,15 +55,20 @@ from .events import (
 from .intervention import FireResult, FunctionEventInput, InterventionTemplateRef
 from .live_index import LiveIndex, LiveIndexWindowError
 from .predicate import (
+    _DEFERRED_VALUE,
     MLXValueUnavailableError,
     RecordContext,
-    _DEFERRED_VALUE,
     coerce_deferred_value,
     is_deferred_value,
 )
 from .refs import DeferredRef, DeviceRef, DtypeRef, ParamRef, ReservedLabel, TensorRef
 from .semantics import BackendSemantics, CapturePolicy
-from .trace_build_state import TraceBuildState
+from .workspaces import (
+    LEGACY_TRACE_BUILD_STATE_KEYS,
+    ModuleCaptureWorkspace,
+    RawGraphWorkspace,
+    WrapperRuntimeWorkspace,
+)
 
 __all__ = [
     "ArgTemplateRef",
@@ -72,7 +76,6 @@ __all__ = [
     "BackwardPassEnd",
     "BackwardPassStart",
     "BlobRef",
-    "BufferEvent",
     "BufferWriteEvent",
     "CaptureEvents",
     "CapturePolicy",
@@ -96,14 +99,13 @@ __all__ = [
     "InterventionTemplateRef",
     "is_control_edge_use",
     "is_value_edge_use",
+    "CheckpointInvocationObserved",
     "GradFnDiscovered",
     "GradFnFired",
-    "LiveOpRecord",
     "LiveIndex",
     "LiveIndexWindowError",
     "MLXValueUnavailableError",
     "ModuleEnterEvent",
-    "ModuleEvent",
     "ModuleExitEvent",
     "ModuleFrame",
     "ModulePrepEvent",
@@ -114,6 +116,9 @@ __all__ = [
     "OpGradObserved",
     "OutputRef",
     "OutputVersionEvent",
+    "ParamGradObserved",
+    "BackwardCoverageGap",
+    "InterventionAppliedEvent",
     "ParamRef",
     "ParentEdge",
     "PreHookProvenanceEvent",
@@ -124,11 +129,12 @@ __all__ = [
     "WalkResult",
     "walk_container",
     "TensorRef",
-    "TraceBuildState",
+    "LEGACY_TRACE_BUILD_STATE_KEYS",
+    "ModuleCaptureWorkspace",
+    "RawGraphWorkspace",
+    "WrapperRuntimeWorkspace",
     "_DEFERRED_VALUE",
     "coerce_deferred_value",
     "is_deferred_value",
-    "live_record_for_label",
     "register_live_event",
-    "replace_op_event",
 ]

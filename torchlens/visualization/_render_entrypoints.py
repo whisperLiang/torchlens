@@ -4,12 +4,13 @@
 
 from dataclasses import replace
 
+from .._errors import InvalidArgumentError, PayloadUnavailableError
 from ._render_common import *
-from ._render_leaf import *
-from ._render_edges import *
-from ._render_nodes import *
-from ._render_flow import *
 from ._render_dot import *
+from ._render_edges import *
+from ._render_flow import *
+from ._render_leaf import *
+from ._render_nodes import *
 from ._render_utils import html_escape
 from .render_ir import build_backward_render_ir, build_combined_render_ir
 from .renderers.graphviz import GraphvizRenderer
@@ -81,10 +82,19 @@ def render_backward_graph(
     """
 
     if not self.has_backward_pass or not self.grad_fn_logs:
-        raise ValueError("No backward graph is available; call log_backward(loss) first.")
+        raise PayloadUnavailableError(
+            "No backward graph is available",
+            code="backward_graph_unavailable",
+            remedy="call log_backward(loss) first",
+        )
     _ = collapsed_node_spec_fn, vis_node_mode
     if vis_mode not in {"rolled", "unrolled"}:
-        raise ValueError("vis_mode must be either 'rolled' or 'unrolled'")
+        raise InvalidArgumentError(
+            f"vis_mode must be either 'rolled' or 'unrolled'; received {vis_mode!r}",
+            code="visualization_mode_invalid",
+            remedy="pass vis_mode='rolled' or 'unrolled'",
+            argument="vis_mode",
+        )
     pass_filter = _normalize_backward_pass_filter(bwd)
 
     rankdir = direction_to_rankdir(direction)
@@ -236,6 +246,7 @@ if TYPE_CHECKING:
     from ..data_classes.trace import Trace
 
 
+@_with_per_draw_collapse_cache
 def render_combined_graph(
     self: "Trace",
     vis_outpath: str = "combined_modelgraph",
@@ -296,14 +307,31 @@ def render_combined_graph(
     """
 
     if vis_mode == "rolled":
-        raise NotImplementedError("draw_combined does not support vis_mode='rolled' yet.")
+        # Deliberate not-yet gate. The NotImplementedError type is pinned public
+        # behavior; at least name the supported spelling so the user knows the
+        # way out (R65 -- retyping with a code is a public API decision).
+        raise NotImplementedError(
+            "draw_combined does not support vis_mode='rolled' yet; pass "
+            "vis_mode='unrolled' (the supported combined layout)."
+        )
     if vis_mode != "unrolled":
-        raise ValueError("vis_mode must be either 'unrolled' or 'rolled'")
+        raise InvalidArgumentError(
+            f"vis_mode must be either 'unrolled' or 'rolled'; received {vis_mode!r}",
+            code="visualization_mode_invalid",
+            remedy="pass vis_mode='unrolled' or 'rolled'",
+            argument="vis_mode",
+        )
     if not self.has_backward_pass or not self.grad_fn_logs:
-        raise ValueError("No backward graph is available; call log_backward(loss) first.")
+        raise PayloadUnavailableError(
+            "No backward graph is available",
+            code="backward_graph_unavailable",
+            remedy="call log_backward(loss) first",
+        )
     if not self._layers_logged:
-        raise ValueError(
-            "Must have all layers logged in order to render the graph; use show_model_graph."
+        raise PayloadUnavailableError(
+            "Must have all layers logged in order to render the graph",
+            code="layers_not_logged",
+            remedy="re-capture with tl.trace(model, x) (default exhaustive capture) before drawing",
         )
     pass_filter = _normalize_backward_pass_filter(bwd)
 
@@ -360,6 +388,7 @@ def render_combined_graph(
     )
     edge_map = source_graph.edge_map
     edges_used: Set[tuple[str, str, tuple[Any, ...]]] = set()
+    deduped_edge_registry: dict[tuple[Any, ...], dict[str, Any]] = {}
     collapsed_modules: Set[str] = set()
     captured_forward_edges: list[CapturedForwardEdge] = []
     decisions_by_name = {node.name: node for node in forward_ir.nodes}
@@ -384,6 +413,7 @@ def render_combined_graph(
                     if source_index == 0
                     else replace(node_record, node_calls=(), owned_node_args=())
                 ),
+                deduped_edge_registry=deduped_edge_registry,
             )
 
     _add_combined_backward_nodes(

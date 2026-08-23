@@ -36,11 +36,9 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-import pytest
+import safetensors  # noqa: F401
 import torch
 from torch import nn
-
-pytest.importorskip("safetensors")
 
 import torchlens as tl  # noqa: E402
 from torchlens._io import BlobRef  # noqa: E402

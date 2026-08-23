@@ -1,7 +1,7 @@
 """Lifecycle coverage for conditional-label rename, cleanup, and export wiring."""
 
+from collections.abc import Iterator
 from types import SimpleNamespace
-from typing import Dict, Iterator, List, Optional
 
 import pytest
 import torch
@@ -24,8 +24,8 @@ class _StubTrace:
 
     def __init__(
         self,
-        layer_list: Optional[List[SimpleNamespace]] = None,
-        layer_logs: Optional[Dict[str, SimpleNamespace]] = None,
+        layer_list: list[SimpleNamespace] | None = None,
+        layer_logs: dict[str, SimpleNamespace] | None = None,
     ) -> None:
         """Initialize the stub log.
 
@@ -40,18 +40,18 @@ class _StubTrace:
         self.layer_logs = layer_logs or {}
         self._tracing_finished = True
 
-        self.input_layers: List[str] = []
-        self.output_layers: List[str] = []
-        self.buffer_layers: List[str] = []
-        self.internal_source_ops: List[str] = []
-        self.internal_sink_ops: List[str] = []
-        self.internally_terminated_bool_ops: List[str] = []
-        self.saved_ops: List[str] = []
-        self.saved_grad_ops: List[str] = []
-        self._layers_where_internal_branches_merge_with_input: List[str] = []
+        self.input_layers: list[str] = []
+        self.output_layers: list[str] = []
+        self.buffer_layers: list[str] = []
+        self.internal_source_ops: list[str] = []
+        self.internal_sink_ops: list[str] = []
+        self.internally_terminated_bool_ops: list[str] = []
+        self.saved_ops: list[str] = []
+        self.saved_grad_ops: list[str] = []
+        self._layers_where_internal_branches_merge_with_input: list[str] = []
 
-        self.layers_with_params: Dict[str, List[str]] = {}
-        self.op_equivalence_classes: Dict[str, set] = {}
+        self.layers_with_params: dict[str, list[str]] = {}
+        self.op_equivalence_classes: dict[str, set] = {}
 
         self.conditional_branch_edges = []
         self.conditional_then_entry_edges = []
@@ -59,12 +59,22 @@ class _StubTrace:
         self.conditional_else_entry_edges = []
         self.conditional_arm_entry_edges = {}
         self.conditional_edge_call_indices = {}
-        self.conditional_records: List[ConditionalEvent] = []
+        self.conditional_records: list[ConditionalEvent] = []
 
-        self._raw_to_final_layer_labels: Dict[str, str] = {}
-        self._raw_to_final_parent_layer_labels: Dict[str, str] = {}
-        self._raw_to_final_op_labels: Dict[str, str] = {}
-        self._module_build_data = {"module_layer_argnames": {}}
+        self._raw_to_final_layer_labels: dict[str, str] = {}
+        self._raw_to_final_parent_layer_labels: dict[str, str] = {}
+        self._raw_to_final_op_labels: dict[str, str] = {}
+        from torchlens.ir.workspaces import (
+            ModuleCaptureWorkspace,
+            RawGraphWorkspace,
+            WrapperRuntimeWorkspace,
+        )
+
+        self._raw_graph_ws = RawGraphWorkspace()
+        self._module_capture_ws = ModuleCaptureWorkspace(
+            module_build_data={"module_layer_argnames": {}}
+        )
+        self._wrapper_runtime_ws = WrapperRuntimeWorkspace()
 
     def __iter__(self) -> Iterator[SimpleNamespace]:
         """Iterate over surviving pass-level entries."""
@@ -90,7 +100,27 @@ class _TinyModel(nn.Module):
         return torch.relu(x + 1)
 
 
-def _make_conditional_event(bool_layers: List[str]) -> ConditionalEvent:
+class _ReluThenAdd(nn.Module):
+    """Small model with a stable single-pass ``relu`` layer label."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run a relu followed by an add.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            ReLU out plus one.
+        """
+
+        return torch.relu(x) + 1
+
+
+def _make_conditional_event(bool_layers: list[str]) -> ConditionalEvent:
     """Build a small ``ConditionalEvent`` fixture.
 
     Parameters
@@ -120,7 +150,7 @@ def _make_conditional_event(bool_layers: List[str]) -> ConditionalEvent:
     )
 
 
-def _make_layer_stub(label: str, layer_label: Optional[str] = None) -> SimpleNamespace:
+def _make_layer_stub(label: str, layer_label: str | None = None) -> SimpleNamespace:
     """Create a minimal layer-like object for rename and cleanup tests.
 
     Parameters
@@ -294,12 +324,23 @@ def test_conditional_cleanup_scrubs_removed_labels() -> None:
     assert parent_pass.conditional_else_children == []
     assert parent_pass.conditional_arm_children == {0: {"then": ["kept_child:1"]}}
 
-    assert parent_layer.conditional_entry_children == ["kept_start"]
-    assert parent_layer.conditional_then_children == ["kept_child"]
+    assert parent_layer.conditional_entry_children == ("kept_start",)
+    assert parent_layer.conditional_then_children == ("kept_child",)
     assert parent_layer.conditional_elif_children == {}
-    assert parent_layer.conditional_else_children == []
+    assert parent_layer.conditional_else_children == ()
     assert parent_layer.conditional_arm_children == {0: {"then": ["kept_child"]}}
     assert parent_layer.conditional_branch_stack_ops == {((0, "then"),): [1, 2]}
+
+
+def test_batch_remove_log_entries_accepts_finished_layer_objects() -> None:
+    """Batch removal scrubs before clearing a finished trace's aggregate layer."""
+
+    trace = tl.trace(_ReluThenAdd(), torch.tensor([-1.0, 2.0]))
+    relu_layer = trace["relu_1_1"]
+
+    trace._batch_remove_log_entries([relu_layer], remove_references=True)
+
+    assert not hasattr(relu_layer, "conditional_entry_children")
 
 
 def test_to_pandas_exports_conditional_columns() -> None:
@@ -343,9 +384,9 @@ def test_to_pandas_exports_conditional_columns() -> None:
     assert int(target_row["terminal_conditional_id"]) == 7
     assert int(target_row["conditional_branch_depth"]) == 2
     assert target_row["conditional_branch_stack"] == "cond_0:then,cond_1:elif_1"
-    assert target_row["conditional_then_children"] == ["then_child"]
+    assert target_row["conditional_then_children"] == ("then_child",)
     assert target_row["conditional_elif_children"] == {1: ["elif_child"]}
-    assert target_row["conditional_else_children"] == ["else_child"]
+    assert target_row["conditional_else_children"] == ("else_child",)
     assert target_row["func_config"] == {"alpha": 1}
 
 

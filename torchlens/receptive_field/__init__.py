@@ -7,16 +7,24 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
+from ..utils.tensor_utils import layer_grad_tolerances_for_dtype
 from ._errors import (
     AmbiguousCallError,
     AmbiguousInputError,
-    AmbiguousTargetError,
     AmbiguousPassError,
+    AmbiguousTargetError,
     BackendUnsupportedError,
-    ReceptiveFieldError,
     NoInfluencePathError,
+    ReceptiveFieldConfigurationError,
+    ReceptiveFieldError,
     ReceptiveFieldUnavailableError,
     ReceptiveFieldValidationError,
+)
+from ._rules import (
+    ReceptiveFieldRule,
+    ReceptiveFieldRuleContext,
+    register_rf_rule,
+    rules as _registered_rules,
 )
 from ._types import (
     GradientReceptiveField,
@@ -33,20 +41,13 @@ from ._types import (
     ReceptiveFieldValidationStatus,
     ReceptiveFieldViolation,
 )
-from ._rules import (
-    ReceptiveFieldRule,
-    ReceptiveFieldRuleContext,
-    register_rf_rule,
-    rules as _registered_rules,
-)
-
-# Importing the package executes built-in rule decorators once, before any public
-# descriptor, projective, or validation path can reach the geometry engines.
-from .rules import __all__ as _builtin_rule_modules  # noqa: F401
 from ._validation import cross_validate
 from ._view import ReceptiveFieldView
 from ._viz import node_spec
 
+# Importing the package executes built-in rule decorators once, before any public
+# descriptor, projective, or validation path can reach the geometry engines.
+from .rules import __all__ as _builtin_rule_modules  # noqa: F401
 
 rules = _registered_rules
 
@@ -78,12 +79,41 @@ class ReceptiveFieldVerification:
     empirical_adjoint: tuple[EmpiricalAdjointCheck, ...]
 
     @property
-    def passed(self) -> bool:
-        """Return whether every definitive containment and adjoint check passed."""
+    def verdict(self) -> ReceptiveFieldValidationStatus:
+        """Return the tri-state verdict, never conflating unarmed with wrong.
 
-        containment_passed = all(result.passed for result in self.containment)
-        adjoint_passed = all(result.passed is not False for result in self.empirical_adjoint)
-        return containment_passed and adjoint_passed
+        ``FAIL`` reports a real violation: a containment ``FAIL`` or a
+        definitive empirical-adjoint mismatch. ``INDETERMINATE`` means at
+        least one containment check could not be evaluated (typically a trace
+        captured without ``requires_grad`` inputs, ``backward_ready=True``,
+        and ``save_mode="reference"``) and no check failed. ``PASS`` requires
+        every containment check to pass with no adjoint mismatch; adjoint
+        samples that were structurally unavailable (``passed is None``) never
+        substitute for a failed or unarmed containment check.
+        """
+
+        containment_failed = any(
+            result.status is ReceptiveFieldValidationStatus.FAIL for result in self.containment
+        )
+        adjoint_failed = any(check.passed is False for check in self.empirical_adjoint)
+        if containment_failed or adjoint_failed:
+            return ReceptiveFieldValidationStatus.FAIL
+        if not self.containment or any(
+            result.status is ReceptiveFieldValidationStatus.INDETERMINATE
+            for result in self.containment
+        ):
+            return ReceptiveFieldValidationStatus.INDETERMINATE
+        return ReceptiveFieldValidationStatus.PASS
+
+    @property
+    def passed(self) -> bool:
+        """Return whether the verdict is ``PASS``.
+
+        ``INDETERMINATE`` stays ``False`` — an unarmed tripwire never reads
+        as a pass — and is distinguishable from ``FAIL`` via ``verdict``.
+        """
+
+        return self.verdict is ReceptiveFieldValidationStatus.PASS
 
 
 def _op_by_label(trace: Trace, label: str) -> Op | None:
@@ -109,8 +139,8 @@ def _empirical_adjoint_checks(
     trace: Trace,
     containment: tuple[ReceptiveFieldValidation, ...],
     *,
-    atol: float,
-    rtol: float,
+    atol: float | None,
+    rtol: float | None,
 ) -> tuple[EmpiricalAdjointCheck, ...]:
     """Compare sampled saved-graph VJP rows and double-VJP columns.
 
@@ -123,6 +153,9 @@ def _empirical_adjoint_checks(
         the sampled Jacobian entries.
     atol, rtol:
         Floating-point comparison tolerances for this diagnostic only.
+        ``None`` derives per compared-gradient dtype via
+        ``layer_grad_tolerances_for_dtype`` (R13 consumer wiring); an
+        explicit float applies to every dtype unchanged.
 
     Returns
     -------
@@ -204,7 +237,7 @@ def _empirical_adjoint_checks(
                         source_label=source.label,
                         target_label=target.label,
                         source_unit=source_unit,
-                        target_unit=validation.unit,
+                        target_unit=target_unit,
                         passed=None,
                         receptive_value=None,
                         projective_value=None,
@@ -220,7 +253,7 @@ def _empirical_adjoint_checks(
                         source_label=source.label,
                         target_label=target.label,
                         source_unit=source_unit,
-                        target_unit=validation.unit,
+                        target_unit=target_unit,
                         passed=None,
                         receptive_value=None,
                         projective_value=None,
@@ -228,16 +261,44 @@ def _empirical_adjoint_checks(
                     )
                 )
                 continue
-            receptive_value = receptive_probe.grad[source_unit]
-            projective_value = projective.grad[target_unit]
+            # The adjoint identity is a SIGNED equality: dL/dx via the
+            # receptive probe must equal the same partial via the projective
+            # probe, sign included. ``grad`` stores magnitudes for
+            # influence-set semantics, so compare the retained signed values
+            # (falling back to magnitudes only for legacy results predating
+            # ``signed_grad``, where sign disagreements were invisible).
+            receptive_tensor = (
+                receptive_probe.signed_grad
+                if receptive_probe.signed_grad is not None
+                else receptive_probe.grad
+            )
+            projective_tensor = (
+                projective.signed_grad if projective.signed_grad is not None else projective.grad
+            )
+            receptive_value = receptive_tensor[source_unit]
+            projective_value = projective_tensor[target_unit]
             checks.append(
                 EmpiricalAdjointCheck(
                     source_label=source.label,
                     target_label=target.label,
                     source_unit=source_unit,
-                    target_unit=validation.unit,
+                    target_unit=target_unit,
                     passed=bool(
-                        torch.allclose(receptive_value, projective_value, atol=atol, rtol=rtol)
+                        torch.allclose(
+                            receptive_value,
+                            projective_value,
+                            atol=(
+                                atol
+                                if atol is not None
+                                else layer_grad_tolerances_for_dtype(receptive_value.dtype)[1]
+                            ),
+                            rtol=(
+                                rtol
+                                if rtol is not None
+                                else layer_grad_tolerances_for_dtype(receptive_value.dtype)[0]
+                            ),
+                            equal_nan=True,
+                        )
                     ),
                     receptive_value=float(receptive_value.item()),
                     projective_value=float(projective_value.item()),
@@ -249,11 +310,21 @@ def _empirical_adjoint_checks(
 def verify(
     trace: Trace,
     *,
-    empirical_adjoint_atol: float = 1e-6,
-    empirical_adjoint_rtol: float = 1e-5,
+    empirical_adjoint_atol: float | None = None,
+    empirical_adjoint_rtol: float | None = None,
     **kwargs: object,
 ) -> ReceptiveFieldVerification:
     """Run containment and sampled empirical-adjoint RF diagnostics.
+
+    Scope (R74/75-7): every empirical probe here — gradient containment and
+    both sides of the adjoint equality — backpropagates through the ONE
+    autograd graph built during the wrapped capture forward. The oracle is
+    therefore independent of the geometric DERIVATION (it catches TorchLens
+    indexing, sampling, and rule bugs) but shares its root with capture: a
+    hypothetical capture-time forward corruption would deceive geometry and
+    gradients alike, so PASS here does not re-attest capture fidelity. Capture
+    fidelity is owned by the ``torchlens.validation`` replay tripwire, which
+    re-executes ops against independently recomputed inputs.
 
     Parameters
     ----------
@@ -261,7 +332,10 @@ def verify(
         Backward-ready trace to inspect.
     empirical_adjoint_atol, empirical_adjoint_rtol:
         Non-negative floating-point comparison tolerances used only for the
-        reported equality of two empirical derivative probes.
+        reported equality of two empirical derivative probes. ``None``
+        (default) derives the pair per compared-gradient dtype via
+        ``layer_grad_tolerances_for_dtype`` (fp32 resolves to the legacy
+        layer-grad constants).
     **kwargs:
         Keyword arguments accepted by :func:`cross_validate`.
 
@@ -272,9 +346,20 @@ def verify(
         sampled receptive gradient.
     """
 
-    if empirical_adjoint_atol < 0 or empirical_adjoint_rtol < 0:
-        raise ValueError("empirical_adjoint_atol and empirical_adjoint_rtol must be non-negative.")
+    if (empirical_adjoint_atol is not None and empirical_adjoint_atol < 0) or (
+        empirical_adjoint_rtol is not None and empirical_adjoint_rtol < 0
+    ):
+        raise ReceptiveFieldConfigurationError(
+            "empirical_adjoint_atol and empirical_adjoint_rtol must be non-negative."
+        )
     containment = tuple(cross_validate(trace, **kwargs))  # type: ignore[arg-type]
+    if not any(key in kwargs for key in ("direction", "inputs", "source", "target")):
+        # Sweep the projective direction too: exact-box corner cross-checks
+        # there are what expose a spurious-nonempty forward claim, which
+        # receptive-only containment is structurally unable to see.
+        containment += tuple(
+            cross_validate(trace, direction="projective", **kwargs)  # type: ignore[arg-type]
+        )
     return ReceptiveFieldVerification(
         containment=containment,
         empirical_adjoint=_empirical_adjoint_checks(
@@ -289,8 +374,8 @@ def verify(
 def self_check(
     trace: Trace,
     *,
-    empirical_adjoint_atol: float = 1e-6,
-    empirical_adjoint_rtol: float = 1e-5,
+    empirical_adjoint_atol: float | None = None,
+    empirical_adjoint_rtol: float | None = None,
     **kwargs: object,
 ) -> ReceptiveFieldVerification:
     """Alias :func:`verify` for interactive RF self-consistency diagnostics."""
@@ -317,6 +402,7 @@ __all__ = [
     "ReceptiveFieldAxis",
     "ReceptiveFieldBox",
     "ReceptiveFieldBoxAxis",
+    "ReceptiveFieldConfigurationError",
     "ReceptiveFieldDirection",
     "ReceptiveFieldError",
     "NoInfluencePathError",

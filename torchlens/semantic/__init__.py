@@ -1,5 +1,7 @@
 """Semantic facet views for TorchLens records."""
 
+from . import patching as patching, recipes as recipes
+from .coverage import FacetCoverageReport, ModuleCoverageRow, facet_coverage
 from .facets import (
     AttentionHeadView,
     Facet,
@@ -9,8 +11,8 @@ from .facets import (
     FacetRegistrySnapshot,
     FacetSpec,
     FacetView,
-    MissingFacetError,
     MissingFacet,
+    MissingFacetError,
     MissingGradient,
     TransformPrimitive,
     enable_transformerlens_aliases,
@@ -22,8 +24,12 @@ from .facets import (
     transformer_lens_aliases_enabled,
     using,
 )
-from . import patching as patching
-from . import recipes as recipes
+from .logit_lens import (
+    LogitLensEntry,
+    LogitLensError,
+    LogitLensResult,
+    logit_lens,
+)
 
 __all__ = [
     "AttentionHeadView",
@@ -33,9 +39,16 @@ __all__ = [
     "FacetRecipe",
     "FacetRegistrySnapshot",
     "FacetSpec",
+    "FacetCoverageReport",
     "FacetView",
+    "LogitLensEntry",
+    "LogitLensError",
+    "LogitLensResult",
+    "logit_lens",
     "MissingFacetError",
     "MissingFacet",
+    "ModuleCoverageRow",
+    "facet_coverage",
     "MissingGradient",
     "TransformPrimitive",
     "enable_transformerlens_aliases",

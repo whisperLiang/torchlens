@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Callable
 import warnings
+from collections.abc import Callable
 
 import pytest
 import torch
 
 import torchlens as tl
 from torchlens._capture_state_helpers import reset_compiled_model_unwrap_warning_state
+
 from .conftest import TwoLayerMlp
 
 

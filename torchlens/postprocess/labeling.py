@@ -1,9 +1,9 @@
 """Steps 8-11: Label mapping, final info logging, renaming, cleanup, and lookup keys.
 
 Step 8 (_map_raw_labels_to_final_labels): Assigns human-readable labels to each
-    tensor. Label format: ``{layer_type}_{type_num}_{total_num}:{call_index}`` for
-    regular layers, or ``{layer_type}_{type_num}:{call_index}`` for input/output/buffer.
-    The ``:call_index`` suffix is omitted when num_calls == 1. For multi-pass
+    tensor. Label format: ``{layer_type}_{type_num}_{total_num}:{pass_index}`` for
+    regular layers, or ``{layer_type}_{type_num}:{pass_index}`` for input/output/buffer.
+    The ``:{pass_index}`` suffix is omitted when the layer has a single pass. For multi-pass
     layers (pass > 1), layer_type and type_index are INHERITED from the first
     pass to guarantee label consistency within recurrent_ops groups.
 
@@ -22,9 +22,10 @@ Step 11 (_build_lookup_keys_and_finalize_retained_layers): Builds lookup key map
 
 from collections import defaultdict
 from dataclasses import fields, is_dataclass, replace
-from typing import Any, Dict, List, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .._errors import AmbiguousOpLookupError
+from ..data_classes.cleanup import _project_conditional_child_views
 from ..data_classes.op import Op
 from ..intervention.types import ParentRef
 
@@ -75,7 +76,9 @@ def _map_raw_labels_to_final_labels(self: "Trace") -> None:
         else:
             # Pass > 1: INHERIT layer_type and numbers from the first pass.
             # This ensures all ops of the same layer share layer_label.
-            first_pass_tensor = self[tensor_log_entry.recurrent_ops[0]]
+            # Raw slot read: the public read is copy-on-read, and copying a
+            # 512-element group list just to index its head is pure waste.
+            first_pass_tensor = self[tensor_log_entry._slot("recurrent_ops")[0]]
             layer_type = first_pass_tensor.layer_type
             type_index = first_pass_tensor.type_index
             if layer_type in ["input", "buffer"]:
@@ -107,6 +110,8 @@ def _map_raw_labels_to_final_labels(self: "Trace") -> None:
     self._raw_to_final_parent_layer_labels = raw_to_final_parent_layer_labels
     self._raw_to_final_op_labels = raw_to_final_op_labels
     self._backward_projection_event_count = None
+    self._backward_projection_revision = None
+    self._backward_projection_fold_state = None
     self._final_to_raw_layer_labels = final_to_raw_layer_labels
 
 
@@ -129,7 +134,7 @@ def _log_final_info_for_layers(self: "Trace") -> None:
     """
     unique_layers_seen = set()  # to avoid double-counting params of recurrent layers
     step_index = 1
-    mbd = self._module_build_data
+    mbd = self._module_capture_ws.module_build_data
 
     # Shadow sets for O(1) membership checks in _log_module_hierarchy_info_for_layer.
     # Lists are kept as primary storage (insertion order matters for downstream consumers),
@@ -143,7 +148,13 @@ def _log_final_info_for_layers(self: "Trace") -> None:
         "module_ops": set(),
     }
 
-    for t, layer_entry in enumerate(self):
+    # One rename per equivalence class / recurrence group instead of one per
+    # pass; see ``_replace_layer_names_for_layer_entry`` for why the shared
+    # results are safe.
+    equivalent_ops_memo: dict[int, tuple[Any, Any]] = {}
+    recurrent_ops_memo: dict[str, list[str]] = {}
+
+    for _t, layer_entry in enumerate(self):
         _normalize_io_role_flags(layer_entry)
         if layer_entry.layer_type in ["input", "buffer"]:
             layer_entry.step_index = 0
@@ -155,7 +166,9 @@ def _log_final_info_for_layers(self: "Trace") -> None:
             step_index += 1
 
         # Replace any layer names with their final names:
-        _replace_layer_names_for_layer_entry(self, layer_entry)
+        _replace_layer_names_for_layer_entry(
+            self, layer_entry, equivalent_ops_memo, recurrent_ops_memo
+        )
 
         # Log the module hierarchy information:
         _log_module_hierarchy_info_for_layer(self, layer_entry, _shadow_sets)
@@ -263,7 +276,7 @@ def _finalize_output_compute_indexs(self: "Trace") -> None:
 
 def _build_module_hierarchy_dicts(self: "Trace") -> None:
     """Derive top_level_modules and module_children from their pass-level counterparts."""
-    mbd = self._module_build_data
+    mbd = self._module_capture_ws.module_build_data
     for module in mbd["top_level_module_ops"]:
         module_no_pass = module.rsplit(":", 1)[0]
         if module_no_pass == "self":
@@ -292,17 +305,20 @@ _LIST_FIELDS_TO_RENAME = [
     "internal_source_parents",
     "internal_source_ancestors",
     "conditional_entry_children",
-    "conditional_then_children",
-    "conditional_else_children",
-    "op_equivalence_classes",
+    "equivalent_ops",
     "recurrent_ops",
+]
+
+# SCALAR fields in Op that hold ONE raw label needing rename.
+_SCALAR_LABEL_FIELDS_TO_RENAME = [
+    "buffer_source",
 ]
 
 
 def _rename_elif_children(
-    conditional_elif_children: Dict[int, List[str]],
-    mapping: Dict[str, str],
-) -> Dict[int, List[str]]:
+    conditional_elif_children: dict[int, list[str]],
+    mapping: dict[str, str],
+) -> dict[int, list[str]]:
     """Rename labels inside ``conditional_elif_children``.
 
     Args:
@@ -319,9 +335,9 @@ def _rename_elif_children(
 
 
 def _rename_children_by_cond(
-    conditional_arm_children: Dict[int, Dict[str, List[str]]],
-    mapping: Dict[str, str],
-) -> Dict[int, Dict[str, List[str]]]:
+    conditional_arm_children: dict[int, dict[str, list[str]]],
+    mapping: dict[str, str],
+) -> dict[int, dict[str, list[str]]]:
     """Rename labels inside ``conditional_arm_children``.
 
     Args:
@@ -340,7 +356,12 @@ def _rename_children_by_cond(
     }
 
 
-def _replace_layer_names_for_layer_entry(self: "Trace", layer_entry: Op) -> None:
+def _replace_layer_names_for_layer_entry(
+    self: "Trace",
+    layer_entry: Op,
+    equivalent_ops_memo: dict[int, tuple[Any, Any]] | None = None,
+    recurrent_ops_memo: dict[str, list[str]] | None = None,
+) -> None:
     """Replace all raw labels in a Op's fields with final labels.
 
     Handles three categories of fields:
@@ -349,12 +370,44 @@ def _replace_layer_names_for_layer_entry(self: "Trace", layer_entry: Op) -> None
     2. parent_arg_positions dict: renames values in-place.
     3. out_versions_by_child dict: renames keys.
 
+    ``equivalent_ops`` is the one exception to "new object per Op". Capture hands
+    every member of an equivalence class the SAME trace-level set (see
+    ``backends/torch/ops.py``), so renaming per Op both re-did identical work and
+    turned one N-label group into N copies of itself: on a 512-step loop that was
+    524k rename lookups and 33.8 MB retained for FOUR distinct groups. The rename
+    is memoized on the identity of the incoming shared object, so each group is
+    renamed once and its members keep pointing at one canonical set. That is safe
+    only because ``Op.equivalent_ops`` reads hand back a private copy
+    (``_COPY_ON_READ_SET_FIELDS`` in ``data_classes/op.py``), so no holder of the
+    shared group can alias-corrupt a sibling Op.
+
+    ``recurrent_ops`` gets the same canonical-container treatment, indexed by
+    every raw member label during the first group visit. Loop detection hands
+    every member its own pre-rename list, so identity memoization would miss;
+    indexing all members makes later visits O(1) while group symmetry guarantees
+    they receive the same canonical renamed list. On a
+    512-step loop the per-op lists were 4.41 MB of spines for THREE distinct
+    group contents. Safe for the same reason as above: ``Op.recurrent_ops``
+    reads hand back a private copy (``_COPY_ON_READ_LIST_FIELDS``).
+
     Args:
         layer_entry: Op to rename labels for.
+        equivalent_ops_memo: Cross-Op ``id(raw group) -> (raw group, renamed
+            group)`` table for the current rename sweep. Keeping the raw group
+            alive in the value is what makes keying on ``id`` sound: the key
+            object cannot be freed, so its address cannot be reused. ``None``
+            builds a throwaway table (single-Op callers, test doubles).
+        recurrent_ops_memo: Cross-Op ``raw member label -> renamed list`` table
+            for the current rename sweep. ``None`` builds a throwaway table
+            (single-Op callers, test doubles).
     """
     mapping = self._raw_to_final_layer_labels
     layer_mapping = self._raw_to_final_parent_layer_labels
     op_mapping = self._raw_to_final_op_labels
+    if equivalent_ops_memo is None:
+        equivalent_ops_memo = {}
+    if recurrent_ops_memo is None:
+        recurrent_ops_memo = {}
 
     def set_entry_field(field_name: str, value: Any) -> None:
         """Set a renamed entry field on real Ops or lightweight test doubles."""
@@ -366,19 +419,61 @@ def _replace_layer_names_for_layer_entry(self: "Trace", layer_entry: Op) -> None
         setattr(layer_entry, field_name, value)
 
     for field in _LIST_FIELDS_TO_RENAME:
+        if field == "equivalent_ops":
+            # Read the RAW slot: the public read is copy-on-read, and a copy has
+            # a fresh identity that would defeat the memo on every Op.
+            slot_read = getattr(layer_entry, "_slot", None)
+            orig = slot_read(field) if slot_read is not None else getattr(layer_entry, field, None)
+            if not orig:
+                continue
+            cached = equivalent_ops_memo.get(id(orig))
+            if cached is None:
+                renamed = type(orig)(op_mapping[raw] for raw in orig)
+                equivalent_ops_memo[id(orig)] = (orig, renamed)
+            else:
+                renamed = cached[1]
+            set_entry_field(field, renamed)
+            continue
+        if field == "recurrent_ops":
+            # Read the RAW slot: the public read is copy-on-read, and a copy
+            # would defeat both sharing and the memo hit-rate.
+            slot_read = getattr(layer_entry, "_slot", None)
+            orig = slot_read(field) if slot_read is not None else getattr(layer_entry, field, None)
+            if not orig:
+                continue
+            if isinstance(orig, list):
+                renamed_list = recurrent_ops_memo.get(layer_entry._label_raw)
+                if renamed_list is None:
+                    renamed_list = [op_mapping[raw] for raw in orig]
+                    for raw_label in orig:
+                        recurrent_ops_memo[raw_label] = renamed_list
+                set_entry_field(field, renamed_list)
+            else:  # legacy non-list value: preserve type, no sharing
+                set_entry_field(field, type(orig)(op_mapping[raw] for raw in orig))
+            continue
         orig = getattr(layer_entry, field, None)
         if not orig:
             continue
         if field.startswith("conditional_"):
             field_mapping = layer_mapping
-        elif field in {"recurrent_ops", "op_equivalence_classes"}:
-            field_mapping = op_mapping
         else:
             field_mapping = mapping
         if isinstance(orig, list):
             set_entry_field(field, [field_mapping[raw] for raw in orig])
         else:  # set
             set_entry_field(field, type(orig)(field_mapping[raw] for raw in orig))
+
+    # Scalar label-bearing fields. ``buffer_source`` names the producer of a buffer's
+    # current value and is a portable ``FieldPolicy.KEEP`` field read by the public
+    # ``Buffer.buffer_source`` accessor -- but it was absent from every rename list, so
+    # it survived into FINISHED traces as a DANGLING RAW label (``add_1_4_raw`` while
+    # the producer's final label is ``add_1_2``), handed users an unresolvable lookup
+    # key, and persisted that dead label into ``.tlspec`` artifacts. The buffer-merge
+    # path only ever repointed it to ANOTHER raw label.
+    for scalar_field in _SCALAR_LABEL_FIELDS_TO_RENAME:
+        raw_value = getattr(layer_entry, scalar_field, None)
+        if isinstance(raw_value, str) and raw_value in mapping:
+            set_entry_field(scalar_field, mapping[raw_value])
 
     # Fix the arg locations field:
     arg_locs = getattr(layer_entry, "parent_arg_positions", None)
@@ -396,17 +491,37 @@ def _replace_layer_names_for_layer_entry(self: "Trace", layer_entry: Op) -> None
             {mapping[child_label]: tensor_version for child_label, tensor_version in ctv.items()},
         )
 
-    elif_children = getattr(layer_entry, "conditional_elif_children", None)
-    if elif_children:
-        set_entry_field(
-            "conditional_elif_children", _rename_elif_children(elif_children, layer_mapping)
-        )
-
     children_by_cond = getattr(layer_entry, "conditional_arm_children", None)
-    if children_by_cond:
-        set_entry_field(
-            "conditional_arm_children", _rename_children_by_cond(children_by_cond, layer_mapping)
-        )
+    if children_by_cond is not None:
+        renamed_children_by_cond = _rename_children_by_cond(children_by_cond, layer_mapping)
+        set_entry_field("conditional_arm_children", renamed_children_by_cond)
+        (
+            conditional_then_children,
+            conditional_elif_children,
+            conditional_else_children,
+        ) = _project_conditional_child_views(renamed_children_by_cond)
+        set_entry_field("conditional_then_children", conditional_then_children)
+        set_entry_field("conditional_elif_children", conditional_elif_children)
+        set_entry_field("conditional_else_children", conditional_else_children)
+    else:
+        elif_children = getattr(layer_entry, "conditional_elif_children", None)
+        if elif_children:
+            set_entry_field(
+                "conditional_elif_children",
+                _rename_elif_children(elif_children, layer_mapping),
+            )
+        conditional_then_children_value = getattr(layer_entry, "conditional_then_children", None)
+        if conditional_then_children_value:
+            set_entry_field(
+                "conditional_then_children",
+                [layer_mapping[layer_label] for layer_label in conditional_then_children_value],
+            )
+        conditional_else_children_value = getattr(layer_entry, "conditional_else_children", None)
+        if conditional_else_children_value:
+            set_entry_field(
+                "conditional_else_children",
+                [layer_mapping[layer_label] for layer_label in conditional_else_children_value],
+            )
 
     edge_uses = getattr(layer_entry, "_edge_uses", None)
     if edge_uses:
@@ -428,7 +543,7 @@ def _replace_layer_names_for_layer_entry(self: "Trace", layer_entry: Op) -> None
         )
 
 
-def _rename_template_parent_refs(value: Any, mapping: Dict[str, str]) -> Any:
+def _rename_template_parent_refs(value: Any, mapping: dict[str, str]) -> Any:
     """Rename ``ParentRef.parent_label`` leaves in replay templates.
 
     Args:
@@ -457,7 +572,7 @@ def _rename_template_parent_refs(value: Any, mapping: Dict[str, str]) -> Any:
     return value
 
 
-def _rename_label_dataclass(value: Any, mapping: Dict[str, str]) -> Any:
+def _rename_label_dataclass(value: Any, mapping: dict[str, str]) -> Any:
     """Rename known label fields on frozen intervention dataclasses.
 
     Args:
@@ -527,7 +642,7 @@ def _log_module_hierarchy_info_for_layer(
     _module_pass_children_seen = _shadow_sets["module_pass_children"]
     _addresses_seen = _shadow_sets["addresses"]
     _module_ops_seen = _shadow_sets["module_ops"]
-    mbd = self._module_build_data
+    mbd = self._module_capture_ws.module_build_data
 
     parent_call_label = None
     layer_label = layer_entry.layer_label
@@ -597,10 +712,11 @@ def _build_lookup_keys_and_finalize_retained_layers(self: "Trace") -> None:
     self.layer_labels = []
     self.op_labels = []
     self.layer_num_calls = {}
+    layer_labels_seen: set[str] = set()
 
     i = 0
-    for raw_tensor_label in self._raw_layer_labels_list:
-        layer_entry = self._raw_layer_dict[raw_tensor_label]
+    for raw_tensor_label in self._raw_graph_ws.raw_layer_labels_list:
+        layer_entry = self._raw_graph_ws.raw_layer_dict[raw_tensor_label]
         if getattr(layer_entry, "is_orphan", False):
             continue
         # Add the lookup keys for the layer, to itself and to Trace:
@@ -609,7 +725,8 @@ def _build_lookup_keys_and_finalize_retained_layers(self: "Trace") -> None:
         # Log all information:
         self.layer_list.append(layer_entry)
         self.layer_dict_main_keys[layer_entry.label] = layer_entry
-        if layer_entry.layer_label not in self.layer_labels:
+        if layer_entry.layer_label not in layer_labels_seen:
+            layer_labels_seen.add(layer_entry.layer_label)
             self.layer_labels.append(layer_entry.layer_label)
         self.op_labels.append(layer_entry.label)
         self.layer_num_calls[layer_entry.layer_label] = layer_entry.num_passes
@@ -623,25 +740,6 @@ def _build_lookup_keys_and_finalize_retained_layers(self: "Trace") -> None:
         self._layers_saved = True
     else:
         self._layers_saved = False
-
-
-def _replay_dependency_labels(layer_entry: Op) -> set[str]:
-    """Return final labels this entry's replay metadata depends on.
-
-    Args:
-        layer_entry: Layer entry to inspect.
-
-    Returns:
-        Parent labels referenced by templates, edge provenance, or graph edges.
-    """
-
-    dependency_labels = set(layer_entry.parents)
-    for edge in getattr(layer_entry, "_edge_uses", []):
-        dependency_labels.add(edge.parent_label)
-    for template in (layer_entry.args_template, layer_entry.kwargs_template):
-        for parent_ref in _collect_parent_refs(template):
-            dependency_labels.add(parent_ref.parent_label)
-    return dependency_labels
 
 
 def _collect_parent_refs(value: Any) -> list[ParentRef]:
@@ -736,6 +834,12 @@ def _add_lookup_keys_for_layer_entry(
         layer_entry.modules = [
             _module_call_label(module_call) for module_call in layer_entry.modules
         ]
+        # B3R7-R05-1: ``module_call_stack`` carries the same containment fact
+        # as ``modules`` (seeded from the modules facet at ingest), so it is
+        # relabeled to canonical ``address:N`` ModuleCall labels in lockstep.
+        layer_entry.module_call_stack = [
+            _module_call_label(module_call) for module_call in layer_entry.module_call_stack
+        ]
         if (layer_entry.module is None) and len(layer_entry.modules) > 0:
             layer_entry.module = layer_entry.modules[-1]
 
@@ -743,7 +847,7 @@ def _add_lookup_keys_for_layer_entry(
     for module_pass in layer_entry.output_of_module_calls:
         module_name, _ = module_pass.rsplit(":", 1)
         lookup_keys_for_tensor.append(f"{module_pass}")
-        if self._module_build_data["module_num_calls"][module_name] == 1:
+        if self._module_capture_ws.module_build_data["module_num_calls"][module_name] == 1:
             lookup_keys_for_tensor.append(f"{module_name}")
 
     # Allow using buffer/input/output address as key, too:
@@ -819,7 +923,10 @@ def _rename_model_history_layer_names(self: "Trace") -> None:
         setattr(
             self,
             field,
-            [self._raw_layer_dict[tensor_label].layer_label for tensor_label in tensor_labels],
+            [
+                self._raw_graph_ws.raw_layer_dict[tensor_label].layer_label
+                for tensor_label in tensor_labels
+            ],
         )
 
     # Remap halt provenance from raw to final labels, exactly as the special
@@ -838,8 +945,8 @@ def _rename_model_history_layer_names(self: "Trace") -> None:
     # strings) are left untouched.
     for halt_field in ("halt_reason", "halt_frontier"):
         raw_halt_label = getattr(self, halt_field, None)
-        if raw_halt_label is not None and raw_halt_label in self._raw_layer_dict:
-            setattr(self, halt_field, self._raw_layer_dict[raw_halt_label].layer_label)
+        if raw_halt_label is not None and raw_halt_label in self._raw_graph_ws.raw_layer_dict:
+            setattr(self, halt_field, self._raw_graph_ws.raw_layer_dict[raw_halt_label].layer_label)
 
     op_list_fields_to_rename = [
         "internal_source_ops",
@@ -862,19 +969,11 @@ def _rename_model_history_layer_names(self: "Trace") -> None:
         ]
     self.layers_with_params = new_param_tensors
 
-    saved_layers = [
-        layer_entry
-        for layer_entry in self.layer_list
-        if getattr(layer_entry, "has_saved_activation", False)
-        and not getattr(layer_entry, "is_orphan", False)
-    ]
-    self.num_saved_layers = len({layer_entry.layer_label for layer_entry in saved_layers})
-
     new_equiv_operations_tensors: dict[Any, set[str]] = {}
     for key, equiv_values in self.op_equivalence_classes.items():
-        new_equiv_operations_tensors[key] = set(
-            [self._raw_to_final_op_labels[tensor_label] for tensor_label in equiv_values]
-        )
+        new_equiv_operations_tensors[key] = {
+            self._raw_to_final_op_labels[tensor_label] for tensor_label in equiv_values
+        }
     self.op_equivalence_classes = new_equiv_operations_tensors
 
     for t, (child, parent) in enumerate(self.conditional_branch_edges):
@@ -927,7 +1026,7 @@ def _rename_model_history_layer_names(self: "Trace") -> None:
             self._intervention_spec, self._raw_to_final_layer_labels
         )
 
-    mla = self._module_build_data["module_layer_argnames"]
+    mla = self._module_capture_ws.module_build_data["module_layer_argnames"]
     for module_pass, arglist in mla.items():
         new_arglist = []
         for raw_name, argname in arglist:

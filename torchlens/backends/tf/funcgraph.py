@@ -20,7 +20,7 @@ from ...ir.events import (
     ParentEdge,
 )
 from ...ir.predicate import RecordContext
-from ...ir.refs import DeviceRef, DtypeRef, TensorRef
+from ...ir.refs import DtypeRef, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
 from ...validation.status import (
     REGION_REPLAY_CLASS,
@@ -29,14 +29,18 @@ from ...validation.status import (
     REGION_REPLAY_PROVENANCE_KEY,
 )
 from ..registry import BackendUnsupportedError
-from ._tf_compat import get_tf_device_name
-from .op_callback_capture import TFCaptureResult, TFInputCapture, TFOpCapture, TFSourceRecord
+from .op_callback_capture import (
+    _MAX_SNAPSHOT_BYTES,
+    TFCaptureResult,
+    TFInputCapture,
+    TFOpCapture,
+    TFSourceRecord,
+)
 
 _CONTROL_FLOW_OP_TYPES = frozenset(
     {"If", "StatelessIf", "While", "StatelessWhile", "Case", "Switch", "Merge"}
     | {"StatefulPartitionedCall"}
 )
-_MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -222,7 +226,7 @@ def _concrete_function_for_call(
     if call_attr is not None and hasattr(call_attr, "get_concrete_function"):
         concrete = call_attr.get_concrete_function(*args, **kwargs)
         return concrete, args, kwargs
-    call_dunder = getattr(model, "__call__", None)
+    call_dunder = getattr(model, "__call__", None)  # noqa: B004 - fetches the bound __call__ to inspect IT
     if call_dunder is not None and hasattr(call_dunder, "get_concrete_function"):
         concrete = call_dunder.get_concrete_function(*args, **kwargs)
         return concrete, args, kwargs
@@ -651,6 +655,7 @@ def _selected_fetch_names(
     """
 
     names: list[str] = []
+    predicate_matches = 0
     for op in graph.get_operations():
         for output_index, output in enumerate(op.outputs):
             if output.name in output_names or save_predicate is None:
@@ -668,7 +673,15 @@ def _selected_fetch_names(
                 modules=_module_frames_from_name(op.name),
             )
             if bool(save_predicate(context)):
+                predicate_matches += 1
                 names.append(output.name)
+    if save_predicate is not None and predicate_matches == 0:
+        # Graph outputs are always fetched, so a typo'd predicate still
+        # produced payloads for them -- but the SELECTOR matched nothing,
+        # exactly the silent-typo case the shared disclosure family warns on.
+        from .._selective_save import warn_zero_match_save_predicate
+
+        warn_zero_match_save_predicate("tf")
     return tuple(dict.fromkeys((*output_names, *names)))
 
 
@@ -1317,14 +1330,8 @@ def _base_event(
             bytes_peak_at_call=None,
         ),
         policy=CapturePolicy(
-            must_keep_topology=True,
             save_payload=save_payload,
-            requires_isolation=False,
-            save_args=False,
-            save_code=False,
-            save_rng=False,
             save_grad=False,
-            stream=False,
         ),
         predicate_matched=predicate_matched,
         pass_index=1,
@@ -1426,7 +1433,9 @@ def _record_context_for_symbolic(
         input_output_address=None,
         shape=_shape_tuple(output),
         dtype=DtypeRef(backend="tf", name=str(getattr(output, "dtype", ""))),
-        tensor_device=DeviceRef(backend="tf", name=get_tf_device_name(output)),
+        # Static FuncGraph import has no runtime placement; unknown stays None
+        # (an empty DeviceRef would be malformed under the metadata invariant).
+        tensor_device=None,
         tensor_requires_grad=None,
         output_index=output_index,
         is_bottom_level_func=True,

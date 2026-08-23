@@ -174,9 +174,18 @@ def test_bisect_nan_no_nonfinite_case() -> None:
 
 
 def test_bisect_nan_unsaved_region_message() -> None:
-    """Selective saves produce an actionable wider-save message."""
+    """Selective saves produce an actionable wider-save message.
 
-    trace = tl.trace(NanModel(), torch.randn(2, 3), save=tl.func("add"))
+    The selector must MATCH a real site: ``NanModel`` computes only ``sub`` and
+    ``div``, so ``tl.func("add")`` matched nothing, capture legitimately warned
+    that the save selector selected no activations, and the suite's
+    error-on-warning policy failed the test. ``tl.func("sub")`` saves the finite
+    ``x - x`` and leaves the non-finite ``y / y`` unsaved, which is the actual
+    scenario named here -- a genuine selective save whose saved region misses the
+    suspect op, not a save that selected nothing at all.
+    """
+
+    trace = tl.trace(NanModel(), torch.randn(2, 3), save=tl.func("sub"))
 
     result = tl.debug.bisect_nan(trace)
 

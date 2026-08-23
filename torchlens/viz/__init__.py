@@ -9,11 +9,11 @@ from typing import Any
 import torch
 from PIL import Image, ImageDraw
 
+from ..visualization.bundle_diff import bundle_diff
 from . import batch_summary as _batch_summary
 from .batch_summary import montage, text_table
-from .feature_maps import feature_map_evolution, feature_map_node_spec
+from .feature_maps import _draw_more_marker, feature_map_evolution, feature_map_node_spec
 from .node_plots import render_heatmap, render_image_scatter, render_lineplot
-from ..visualization.bundle_diff import bundle_diff
 
 __all__ = [
     "bundle_diff",
@@ -83,12 +83,24 @@ def heatmap(max_size: int = 200) -> Callable[[torch.Tensor], Image.Image | None]
 def channel_grid(n: int = 16, max_size: int = 300) -> Callable[[torch.Tensor], Image.Image | None]:
     """Create a grid visualizer for the first ``n`` activation channels.
 
+    For a batched ``(B, C, H, W)`` activation the grid shows the channels of the
+    FIRST batch element only (``tensor[0]``); the remaining batch items are not
+    rendered. A channel mosaic depicts a single feature map, so pass one sample
+    at a time to visualize other batch elements.
+
     Parameters
     ----------
     n:
-        Maximum number of channels to render.
+        Maximum number of channels to render. When the tensor has more
+        channels, the grid shows the FIRST ``n`` and draws a ``+K more``
+        marker for the hidden remainder.
     max_size:
         Maximum width or height of the rendered grid.
+
+    Notes
+    -----
+    Each tile is independently min-max normalized: tiles share no common
+    scale, and a constant channel renders as a uniform tile.
 
     Returns
     -------
@@ -105,7 +117,8 @@ def channel_grid(n: int = 16, max_size: int = 300) -> Callable[[torch.Tensor], I
         Parameters
         ----------
         tensor:
-            Tensor with shape ``(C, H, W)`` or ``(B, C, H, W)``.
+            Tensor with shape ``(C, H, W)`` or ``(B, C, H, W)``. For a batched
+            tensor only the first batch element (``tensor[0]``) is rendered.
         layer_label:
             Optional layer label, accepted for the visualizer contract.
 
@@ -119,7 +132,8 @@ def channel_grid(n: int = 16, max_size: int = 300) -> Callable[[torch.Tensor], I
         channels = _to_channel_stack(tensor)
         if channels is None:
             return None
-        count = min(n, int(channels.shape[0]))
+        total = int(channels.shape[0])
+        count = min(n, total)
         cols = int(math.ceil(math.sqrt(count)))
         rows = int(math.ceil(count / cols))
         cell_images = [_array_to_grayscale_image(channels[index]) for index in range(count)]
@@ -130,6 +144,15 @@ def channel_grid(n: int = 16, max_size: int = 300) -> Callable[[torch.Tensor], I
             x = (index % cols) * cell_size
             y = (index // cols) * cell_size
             grid.paste(tile, (x, y))
+        if total > count:
+            # Disclose the cap in the image itself: a 16-of-512 grid must
+            # never read as the complete channel set.
+            _draw_more_marker(
+                ImageDraw.Draw(grid),
+                width=grid.width,
+                height=grid.height,
+                text=f"+{total - count} more",
+            )
         return _resize_image(grid, max_size=max_size)
 
     return visualizer
@@ -251,7 +274,9 @@ def _to_channel_stack(tensor: torch.Tensor) -> torch.Tensor | None:
     Parameters
     ----------
     tensor:
-        Tensor to normalize.
+        Tensor to normalize. A batched ``(B, C, H, W)`` tensor is reduced to its
+        FIRST batch element (``tensor[0]``); other batch items are dropped, since
+        a channel stack represents a single feature map.
 
     Returns
     -------
@@ -262,7 +287,7 @@ def _to_channel_stack(tensor: torch.Tensor) -> torch.Tensor | None:
     with torch.no_grad():
         data = tensor.detach().to(device="cpu", dtype=torch.float32)
         if data.ndim == 4:
-            data = data[0]
+            data = data[0]  # first batch element only (documented)
         if data.ndim != 3:
             return None
         return torch.nan_to_num(data)

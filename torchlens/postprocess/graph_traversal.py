@@ -10,17 +10,24 @@ Step 4 (_mark_layer_depths): Optional forward/backward BFS recording
 """
 
 from collections import OrderedDict
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
+from ..data_classes.op import Op, _dtype_or_none, _memory_or_none, _shape_or_none
+from ..ir.op_record import amend_late_buffer_output_parent
 from ..quantities import Bytes, Duration
 from ..utils.display import identity
-from ..utils.rng import log_current_rng_states
-from ..utils.tensor_utils import safe_copy, safe_to, tensor_nanequal
 from ..utils.introspection import _get_code_context
-from ..data_classes.op import Op
-from ..ir import replace_op_event
+from ..utils.rng import log_current_rng_states
+from ..utils.tensor_utils import (
+    get_memory_amount_from_metadata,
+    safe_copy,
+    safe_to,
+    tensor_nanequal,
+)
+from ._materialize import _recorded_buffer_address
 
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
@@ -98,11 +105,26 @@ def _resolve_output_parent_labels(
             )
         buffer_address = buffer_addresses_by_id.get(id(output_tensor))
         if buffer_address is None:
-            raise RuntimeError(
+            from .._errors import OutputAttributionError
+
+            try:
+                shape_text = str(tuple(output_tensor.shape))
+            except RuntimeError:
+                # Shapeless variants (nested) raise from ``.shape``; the refusal
+                # must stay typed instead of crashing on its own message (R65 --
+                # same guard as the backend.py twin, which also discloses the
+                # output address this site does not hold).
+                shape_text = "<unavailable>"
+            raise OutputAttributionError(
                 "TorchLens could not attribute a model output tensor to any traced op "
-                f"(shape={tuple(output_tensor.shape)}, dtype={output_tensor.dtype}). "
+                f"(shape={shape_text}, dtype={output_tensor.dtype}). "
                 "This may indicate an opaque execution boundary or a pre-bound torch "
-                "function that escaped wrapping."
+                "function that escaped wrapping.",
+                code="output_attribution_failed",
+                remedy=(
+                    "use ordinary torch module attributes during forward, or "
+                    "bind/import torch functions after TorchLens has wrapped torch"
+                ),
             )
 
         # The tensor IS a registered buffer with no live label. Session
@@ -139,7 +161,9 @@ def _resolve_output_parent_labels(
         if parent_label is not None:
             event = capture_events.op_event_by_label_raw.get(parent_label)
             if event is not None:
-                replace_op_event(self, parent_label, is_output_parent=True)
+                capture_events.append_amendment(
+                    amend_late_buffer_output_parent(event.seq, parent_label, is_output_parent=True)
+                )
         parent_labels.append(parent_label)
     return parent_labels
 
@@ -166,13 +190,9 @@ def _event_buffer_address_matches(self: "Trace", label_raw: str, buffer_address:
     if capture_events is None:
         return False
     event = capture_events.op_event_by_label_raw.get(label_raw)
-    equivalence_class = getattr(event, "equivalence_class", None) if event is not None else None
-    if not equivalence_class or not equivalence_class.startswith("buffer_"):
+    if event is None or event.kind != "source" or event.layer_type != "buffer":
         return False
-    candidate = equivalence_class.removeprefix("buffer_")
-    # The equivalence class may carry a module-stack suffix appended directly
-    # after the address, so accept a prefix match as well as an exact one.
-    return candidate == buffer_address or candidate.startswith(buffer_address)
+    return _recorded_buffer_address(event) == buffer_address
 
 
 def _add_output_layers(
@@ -203,29 +223,46 @@ def _add_output_layers(
     if output_parent_labels is None:
         # Legacy alignment: callers that predate per-tensor parent resolution
         # paired ``self.output_layers`` positionally with the output tensors.
-        output_parent_labels = list(self.output_layers)
+        # That list may be SHORTER than the outputs (unattributed outputs have
+        # no entry), so normalize it to one slot per output tensor here. Padding
+        # with None is behavior-identical to the truncating zip this replaces:
+        # the padded slots are dropped by the ``is not None`` filter below, and
+        # surplus labels were already discarded. Normalizing lets the pairing be
+        # strict, which is what actually matters -- a labels/tensors/addresses
+        # length mismatch on the modern path must fail loud rather than yield a
+        # silently shorter, entirely plausible set of output nodes.
+        legacy_labels = list(self.output_layers)[: len(output_tensors)]
+        output_parent_labels = legacy_labels + [None] * (len(output_tensors) - len(legacy_labels))
 
     paired_outputs = [
         (parent_label, output_tensor, output_address)
         for parent_label, output_tensor, output_address in zip(
-            output_parent_labels, output_tensors, output_addresses
+            output_parent_labels, output_tensors, output_addresses, strict=True
         )
         if parent_label is not None
     ]
     new_output_layers = []
+    _core = self.__dict__.get("_trace_core")
+    _op_store = _core.ops if _core is not None else None
+    if _op_store is not None and _op_store.frozen:
+        _op_store = None
     for i, (output_layer_label, output_tensor, output_address_suffix) in enumerate(paired_outputs):
         output_node = self[output_layer_label]
-        new_output_node = cast(Op, output_node.copy())
+        # Internal output-node synthesis is a builder row append on the
+        # trace's own store (detached only for legacy/preview traces).
+        new_output_node = cast(Op, output_node._copy_for_output(_store=_op_store))
         new_output_node.layer_type = "output"
         new_output_node.is_output = True
         new_output_node.is_input = False
         new_output_node.is_buffer = False
+        new_output_node._internal_set("interventions", [])
+        new_output_node._internal_set("intervention_replaced", False)
         if i == len(paired_outputs) - 1:
             new_output_node.is_final_output = True
-        self._layer_counter += 1
+        self._raw_graph_ws.layer_counter += 1
         new_output_node._label_raw = f"output_{i + 1}_raw"
         new_output_node._layer_label_raw = new_output_node._label_raw
-        new_output_node.raw_index = self._layer_counter
+        new_output_node.raw_index = self._raw_graph_ws.layer_counter
         output_address = "output"
         if output_address_suffix != "":
             output_address += f".{output_address_suffix}"
@@ -236,6 +273,20 @@ def _add_output_layers(
         if container_path_meta is not None:
             new_output_node.container_path = container_path_meta[0]
             new_output_node.container_spec = container_path_meta[1]
+
+        # Tensor metadata must describe the tensor the model actually returned,
+        # not the parent op's recorded output: after an in-place mutation
+        # through a view (``y = x[...]; y.zero_(); return x``) the returned
+        # base tensor's label is advanced to the mutating op, whose recorded
+        # output is the VIEW — copying its shape would make the output node
+        # claim the view's shape for the full base tensor.
+        new_output_node.shape = tuple(output_tensor.shape)
+        new_output_node.dtype = output_tensor.dtype
+        new_output_node.activation_memory = Bytes(
+            get_memory_amount_from_metadata(
+                output_tensor, new_output_node.shape, new_output_node.dtype
+            )
+        )
 
         # Fix function information:
 
@@ -251,7 +302,7 @@ def _add_output_layers(
         new_output_node.func_rng_states = (
             log_current_rng_states(torch_only=True) if self.save_rng_states else {}
         )
-        new_output_node.arg_names = tuple([])
+        new_output_node.arg_names = ()
         new_output_node.num_args_total = 0
         new_output_node.num_pos_args = 0
         new_output_node.num_kwargs = 0
@@ -273,7 +324,7 @@ def _add_output_layers(
         new_output_node.parent_param_ops = {}
         new_output_node._param_logs = []
         new_output_node.param_shapes = []
-        new_output_node.num_params = int(0)
+        new_output_node.num_params = 0
         new_output_node.num_params_trainable = 0
         new_output_node.num_params_frozen = 0
         new_output_node.param_memory = Bytes(0)
@@ -302,7 +353,37 @@ def _add_output_layers(
             "args": {0: output_node._label_raw},
             "kwargs": {},
         }
+        # internal_source_parents is a DIRECT-PARENT relation ("the subset of MY parents
+        # whose producers carry internal-source ancestry"), so it must be re-derived like
+        # parents/parent_arg_positions above. It used to survive the wholesale clone
+        # verbatim, which was wrong in BOTH directions on every model with a buffer or
+        # factory-tensor ancestry (i.e. any BatchNorm net): it named labels that are not
+        # parents of the output node at all, and omitted the output node's ONE real
+        # parent, which does carry that ancestry.
+        new_output_node.internal_source_parents = (
+            [output_node._label_raw] if output_node.has_internal_source_ancestor else []
+        )
+        # root_ancestors must be re-derived the same way: the output node is NOT an
+        # internal source (set above), so the armed ancestry-closure convention
+        # requires root_ancestors == input_ancestors | internal_source_ancestors.
+        # The wholesale clone inherited the DIRECT parent's root_ancestors verbatim,
+        # which is the empty set when that parent is a parentless factory source
+        # (arange/zeros/... returned straight from forward) — the one source-minting
+        # convention that leaves root_ancestors empty on the exempt source row.
+        new_output_node.root_ancestors = set(output_node.input_ancestors) | set(
+            output_node.internal_source_ancestors
+        )
         new_output_node._edge_uses = []
+
+        # Synthetic output nodes start with an EMPTY annotations namespace: the
+        # wholesale clone otherwise inherits the terminal op's per-op payloads,
+        # and when the model returns a collective boundary's result directly
+        # that duplicated the portable collective_boundary_v1 payload INCLUDING
+        # its correlation key onto a second op record (N ops advertising N-1
+        # boundaries, breaking per-rank correlation-key uniqueness). The
+        # journal's op_labels_raw is the boundary->op mapping authority; a
+        # bookkeeping node is never a boundary carrier.
+        new_output_node.annotations = {}
 
         # Clear func_config on synthetic output nodes:
         new_output_node.func_config = {}
@@ -314,10 +395,12 @@ def _add_output_layers(
         new_output_node.transform_fn_qualname = None
         new_output_node.transform_fn_source = None
         new_output_node.unattributed_tensor_args = ()
+        new_output_node.dropped_edge_tensor_args = ()
 
         # Fix layer equivalence information:
         new_output_node.pass_index = 1
         new_output_node.num_passes = 1
+        new_output_node.equivalent_ops = {new_output_node._label_raw}
         new_output_node.recurrent_ops = []
         equiv_type = (
             f"output_{i + 1}_{'_'.join(tuple(str(s) for s in new_output_node.shape))}_"
@@ -330,41 +413,58 @@ def _add_output_layers(
         new_output_node.has_out_variations = False
         new_output_node.out_versions_by_child = {}
         if output_node.has_saved_activation:
-            actual_output = safe_copy(output_tensor)
-            if output_node.output_device not in [str(actual_output.device), "same"]:
-                actual_output = safe_to(actual_output, output_node.output_device)
-            actual_output_raw = actual_output
+            # The recomputed payload must inherit the PARENT payload's
+            # detachment state: cooked/sparse traces store detached payloads
+            # (a retained graph would poison later captures), while live
+            # traces keep the graph-attached output — it is the very handle
+            # log_backward() differentiates through.
+            _parent_payload = (
+                output_node.out if output_node.out is not None else output_node.transformed_out
+            )
+            _detach_payload = not (
+                torch.is_tensor(_parent_payload) and _parent_payload.grad_fn is not None
+            )
+            actual_output_raw = safe_copy(output_tensor, detach_tensor=_detach_payload)
+            if output_node.output_device not in [str(actual_output_raw.device), "same"]:
+                actual_output_raw = safe_to(actual_output_raw, output_node.output_device)
+            actual_output_transformed = None
             if self.activation_transform is not None:
-                actual_output = output_node._apply_transform(
-                    actual_output,
+                actual_output_transformed = output_node._apply_transform(
+                    actual_output_raw,
                     self.activation_transform,
                     transform_kind="out",
                     streaming_active=getattr(self, "_out_writer", None) is not None,
                 )
                 output_node._validate_streaming_transform_output(
-                    actual_output,
+                    actual_output_transformed,
                     transform_kind="out",
                     streaming_active=getattr(self, "_out_writer", None) is not None,
                 )
-            comparison_output = (
-                output_node.out if output_node.out is not None else output_node.transformed_out
+            raw_retained = output_node.out is not None
+            new_output_node._internal_set("out", actual_output_raw if raw_retained else None)
+            new_output_node._internal_set("transformed_out", actual_output_transformed)
+            new_output_node.transformed_out_shape = _shape_or_none(actual_output_transformed)
+            new_output_node.transformed_out_dtype = _dtype_or_none(actual_output_transformed)
+            new_output_node.transformed_activation_memory = _memory_or_none(
+                actual_output_transformed
             )
-            if comparison_output is not None and not tensor_nanequal(
-                actual_output, comparison_output
+
+            comparison_output = output_node.out if raw_retained else output_node.transformed_out
+            actual_comparison = actual_output_raw if raw_retained else actual_output_transformed
+            if (
+                comparison_output is not None
+                and actual_comparison is not None
+                and not tensor_nanequal(actual_comparison, comparison_output)
             ):
-                output_node.out_versions_by_child[new_output_node._label_raw] = actual_output
+                output_node.out_versions_by_child[new_output_node._label_raw] = actual_comparison
                 output_node.has_out_variations = True
-                if output_node.out is None:
-                    new_output_node._internal_set("transformed_out", actual_output)
-                else:
-                    new_output_node._internal_set("out", actual_output_raw)
 
         # Change original output node:
 
         output_node.children.append(new_output_node._label_raw)
 
-        self._raw_layer_dict[new_output_node._label_raw] = new_output_node
-        self._raw_layer_labels_list.append(new_output_node._label_raw)
+        self._raw_graph_ws.raw_layer_dict[new_output_node._label_raw] = new_output_node
+        self._raw_graph_ws.raw_layer_labels_list.append(new_output_node._label_raw)
 
         new_output_layers.append(new_output_node._label_raw)
 
@@ -374,33 +474,19 @@ def _add_output_layers(
 def _find_output_ancestors(self: "Trace") -> None:
     """Step 2: Mark every node that is an ancestor of an output node.
 
-    Uses a LIFO stack (DFS) starting from output nodes. For each node popped,
-    checks its children — if any child has_output_descendant, this node is too,
-    and it inherits the child's output_descendants. Then pushes all unseen parents
-    onto the stack.
-
-    Note: A node may be pushed onto the stack multiple times if it's shared by
-    sibling paths. The second pop is redundant (nodes_seen prevents re-pushing
-    parents) but harmless — it may beneficially propagate output_descendants
-    from newly-marked children on the second visit.
-
-    The boolean has_output_descendant is always correct after this function; the
-    output_descendants set may be incomplete for multi-output graphs, but Step 4's
-    flood corrects it if distance marking is enabled.
+    Walks the capture DAG in reverse topological order so every child's complete
+    descendant set is finalized before it is propagated to a parent. This keeps
+    ancestry metadata complete even when optional Step 4 distance computation is
+    disabled.
     """
-    node_stack = self.output_layers[:]
-    nodes_seen = set()
-    while len(node_stack) > 0:
-        node_label = node_stack.pop()
-        nodes_seen.add(node_label)
+
+    for node_label in reversed(self._raw_graph_ws.raw_layer_labels_list):
         node = self[node_label]
         for child_node_label in node.children:
-            if self[child_node_label].has_output_descendant:
+            child = self[child_node_label]
+            if child.has_output_descendant:
                 node.has_output_descendant = True
-                node.output_descendants.update(self[child_node_label].output_descendants)
-        for parent_node_label in node.parents:
-            if parent_node_label not in nodes_seen:
-                node_stack.append(parent_node_label)
+                node.output_descendants.update(child.output_descendants)
 
 
 def _remove_orphan_nodes(self: "Trace") -> None:
@@ -416,7 +502,7 @@ def _remove_orphan_nodes(self: "Trace") -> None:
     Any non-output node with no children is logged as an internally-terminated tensor
     (it produced a value that was never used by downstream computation reaching an output).
     """
-    orig_nodes = set(self._raw_layer_labels_list)
+    orig_nodes = set(self._raw_graph_ws.raw_layer_labels_list)
     nodes_seen = set()
     # Seed with inputs, outputs, and written buffer-version nodes. Written
     # buffers such as BatchNorm.num_batches_tracked are state transitions even
@@ -424,15 +510,25 @@ def _remove_orphan_nodes(self: "Trace") -> None:
     written_buffer_layers = [
         label
         for label in self.buffer_layers
-        if getattr(self._raw_layer_dict[label], "buffer_write_kind", None) is not None
+        if getattr(self._raw_graph_ws.raw_layer_dict[label], "buffer_write_kind", None) is not None
     ]
     node_stack = self.input_layers + self.output_layers + written_buffer_layers
+    # Shadow sets over the two trace-level list[str] sink ledgers: the former
+    # per-node `label not in <list>` scans were O(k^2) in sink count
+    # (hunt-6 R52-2). The lists stay the portable source of truth.
+    seen_sink_labels = set(self.internal_sink_ops)
+    seen_terminated_bool_labels = set(self.internally_terminated_bool_ops)
     while len(node_stack) > 0:
         tensor_label = node_stack.pop()
         nodes_seen.add(tensor_label)
-        layer_entry = self._raw_layer_dict[tensor_label]
+        layer_entry = self._raw_graph_ws.raw_layer_dict[tensor_label]
         if (len(layer_entry.children) == 0) and (not layer_entry.is_output):
-            _log_internally_terminated_tensor(self, tensor_label)
+            _log_internally_terminated_tensor(
+                self,
+                tensor_label,
+                seen_sink_labels=seen_sink_labels,
+                seen_terminated_bool_labels=seen_terminated_bool_labels,
+            )
         # Follow BOTH directions to ensure full bidirectional reachability.
         for next_label in layer_entry.children + layer_entry.parents:
             if next_label not in nodes_seen:
@@ -440,8 +536,12 @@ def _remove_orphan_nodes(self: "Trace") -> None:
 
     nodes_seen = _expand_seen_nodes_to_complete_func_call_groups(self, nodes_seen)
     orphan_nodes = orig_nodes - nodes_seen
-    self._orphan_labels = [label for label in self._raw_layer_labels_list if label in orphan_nodes]
-    self._orphan_logs = tuple(self._raw_layer_dict[label] for label in self._orphan_labels)
+    self._orphan_labels = [
+        label for label in self._raw_graph_ws.raw_layer_labels_list if label in orphan_nodes
+    ]
+    self._orphan_logs = tuple(
+        self._raw_graph_ws.raw_layer_dict[label] for label in self._orphan_labels
+    )
     self.orphan_records = [
         {
             "raw_label": orphan._label_raw,
@@ -465,7 +565,7 @@ def _remove_orphan_nodes(self: "Trace") -> None:
     _record_pruned_alias_mutation(self, orphan_nodes)
     if getattr(self, "keep_orphans", False):
         for orphan_label in orphan_nodes:
-            self._raw_layer_dict[orphan_label].is_orphan = True
+            self._raw_graph_ws.raw_layer_dict[orphan_label].is_orphan = True
         return
 
     # Record the ``func_call_id``s of the ops being INTENTIONALLY orphan-pruned
@@ -479,22 +579,24 @@ def _remove_orphan_nodes(self: "Trace") -> None:
     self._orphan_pruned_func_call_ids = {
         func_call_id
         for label in orphan_nodes
-        for func_call_id in (getattr(self._raw_layer_dict[label], "func_call_id", None),)
+        for func_call_id in (
+            getattr(self._raw_graph_ws.raw_layer_dict[label], "func_call_id", None),
+        )
         if isinstance(func_call_id, int)
     }
 
     # Batch-remove orphaned nodes and rebuild the ordered layer dict/list.
-    orphan_entries = [self._raw_layer_dict[label] for label in orphan_nodes]
+    orphan_entries = [self._raw_graph_ws.raw_layer_dict[label] for label in orphan_nodes]
     self._batch_remove_log_entries(orphan_entries, remove_references=True)
 
     new_layer_dict = OrderedDict()
     new_layer_list = []
-    for tensor_label in self._raw_layer_labels_list:
+    for tensor_label in self._raw_graph_ws.raw_layer_labels_list:
         if tensor_label not in orphan_nodes:
-            new_layer_dict[tensor_label] = self._raw_layer_dict[tensor_label]
+            new_layer_dict[tensor_label] = self._raw_graph_ws.raw_layer_dict[tensor_label]
             new_layer_list.append(tensor_label)
-    self._raw_layer_labels_list = new_layer_list
-    self._raw_layer_dict = new_layer_dict
+    self._raw_graph_ws.raw_layer_labels_list = new_layer_list
+    self._raw_graph_ws.raw_layer_dict = new_layer_dict
 
 
 def _child_edge_totally_overwrites(self: "Trace", walked_label: str, child_label: str) -> bool:
@@ -512,7 +614,7 @@ def _child_edge_totally_overwrites(self: "Trace", walked_label: str, child_label
 
     from ..utils.rng import qualname_is_uninit_total_writer
 
-    op = self._raw_layer_dict.get(child_label)
+    op = self._raw_graph_ws.raw_layer_dict.get(child_label)
     if op is None:
         return False
     func_id = getattr(op, "func_id", None)
@@ -554,7 +656,7 @@ def _rng_orphan_drove_control_or_output(
         if label in seen:
             continue
         seen.add(label)
-        op = self._raw_layer_dict.get(label)
+        op = self._raw_graph_ws.raw_layer_dict.get(label)
         if op is None:
             continue
         if label in escape_sources or getattr(op, "is_output", False):
@@ -592,7 +694,7 @@ def _orphan_is_uninit_alloc_source(self: "Trace", op: Any) -> bool:
     is_resize = qualname_is_uninit_growth_resize(namespace, qualname)
     if not is_factory and not is_resize:
         return False
-    snapshot = getattr(self, "_runnable_capture_ambient", None)
+    snapshot = self._runnable.capture_ambient
     if isinstance(snapshot, dict) and deterministic_fill_governs(
         snapshot.get("deterministic_algorithms"),
         snapshot.get("fill_uninitialized_memory"),
@@ -600,6 +702,8 @@ def _orphan_is_uninit_alloc_source(self: "Trace", op: Any) -> bool:
         return False
 
     def _numel(shape: Any) -> int | None:
+        """Element count for a fully-static integer shape tuple, else ``None``."""
+
         if not isinstance(shape, tuple):
             return None
         numel = 1
@@ -614,7 +718,7 @@ def _orphan_is_uninit_alloc_source(self: "Trace", op: Any) -> bool:
         return out_numel is None or out_numel > 0
     arg_locs = getattr(op, "parent_arg_positions", None)
     args_locs = arg_locs.get("args", {}) if isinstance(arg_locs, dict) else {}
-    receiver = self._raw_layer_dict.get(args_locs.get(0, ""))
+    receiver = self._raw_graph_ws.raw_layer_dict.get(args_locs.get(0, ""))
     pre_numel = _numel(getattr(receiver, "shape", None)) if receiver is not None else None
     return pre_numel is None or out_numel is None or out_numel > pre_numel
 
@@ -642,7 +746,7 @@ def _record_pruned_rng_control_flow(self: "Trace", orphan_nodes: set[str]) -> No
 
     escape_sources = host_escape_source_labels(self)
     for label in orphan_nodes:
-        op = self._raw_layer_dict.get(label)
+        op = self._raw_graph_ws.raw_layer_dict.get(label)
         if op is None:
             continue
         func_id = getattr(op, "func_id", None)
@@ -700,8 +804,8 @@ def _expand_seen_nodes_to_complete_func_call_groups(
     """
 
     func_groups: dict[int, set[str]] = {}
-    for raw_label in self._raw_layer_labels_list:
-        func_call_id = getattr(self._raw_layer_dict[raw_label], "func_call_id", None)
+    for raw_label in self._raw_graph_ws.raw_layer_labels_list:
+        func_call_id = getattr(self._raw_graph_ws.raw_layer_dict[raw_label], "func_call_id", None)
         if func_call_id is not None:
             func_groups.setdefault(func_call_id, set()).add(raw_label)
 
@@ -750,6 +854,7 @@ def _flood_graph_from_input_or_output_nodes(self: "Trace", mode: str) -> None:
     Args:
         mode: 'input' to flood forward from inputs, 'output' to flood backward from outputs.
     """
+    traversal_order: Iterable[str]
     if mode == "input":
         starting_nodes = self.input_layers[:]
         min_field = "min_distance_from_input"
@@ -757,7 +862,7 @@ def _flood_graph_from_input_or_output_nodes(self: "Trace", mode: str) -> None:
         marker_field = "has_input_ancestor"
         layer_logging_field = "input_ancestors"
         forward_field = "children"
-        traversal_order = self._raw_layer_labels_list
+        traversal_order = self._raw_graph_ws.raw_layer_labels_list
     elif mode == "output":
         starting_nodes = self.output_layers[:]
         min_field = "min_distance_to_output"
@@ -765,9 +870,9 @@ def _flood_graph_from_input_or_output_nodes(self: "Trace", mode: str) -> None:
         marker_field = "has_output_descendant"
         layer_logging_field = "output_descendants"
         forward_field = "parents"
-        traversal_order = reversed(self._raw_layer_labels_list)
+        traversal_order = reversed(self._raw_graph_ws.raw_layer_labels_list)
     else:
-        raise ValueError("Mode but be either 'input' or 'output'")
+        raise ValueError("Mode must be either 'input' or 'output'")
 
     for starting_node_label in starting_nodes:
         starting_node = self[starting_node_label]
@@ -817,12 +922,27 @@ def _update_node_distance_vals(
         )
 
 
-def _log_internally_terminated_tensor(self: "Trace", tensor_label: str) -> None:
-    """Mark a tensor as terminated inside the model (no children reaching an output node)."""
+def _log_internally_terminated_tensor(
+    self: "Trace",
+    tensor_label: str,
+    *,
+    seen_sink_labels: set[str],
+    seen_terminated_bool_labels: set[str],
+) -> None:
+    """Mark a tensor as terminated inside the model (no children reaching an output node).
+
+    ``seen_sink_labels`` / ``seen_terminated_bool_labels`` are the caller's
+    persistent shadow sets over ``internal_sink_ops`` /
+    ``internally_terminated_bool_ops``; the membership guards read them
+    instead of rescanning the growing lists once per visited node
+    (hunt-6 R52-2).
+    """
     layer_entry = self[tensor_label]
     layer_entry.is_internal_sink = True
-    if tensor_label not in self.internal_sink_ops:
+    if tensor_label not in seen_sink_labels:
+        seen_sink_labels.add(tensor_label)
         self.internal_sink_ops.append(tensor_label)
-        if layer_entry.is_scalar_bool and (tensor_label not in self.internally_terminated_bool_ops):
+        if layer_entry.is_scalar_bool and (tensor_label not in seen_terminated_bool_labels):
+            seen_terminated_bool_labels.add(tensor_label)
             self.internally_terminated_bool_ops.append(tensor_label)
             layer_entry.is_terminal_bool = True

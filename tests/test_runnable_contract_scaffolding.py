@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import fields
 
 from torchlens.errors import ReattachError, RunnableTLSPECError, StateBindingError
@@ -17,10 +18,11 @@ from torchlens.runnable import (
     CallExecutionContext,
     InitializerPolicy,
     InputAttestationFingerprint,
-    RunReport,
     ReadinessReport,
     RunnableCallDescriptor,
     RunnableErrorCode,
+    RunnableTraceProtocol,
+    RunReport,
     SparseRunDescriptor,
     StateSlotRole,
     WitnessCompleteness,
@@ -34,7 +36,7 @@ def test_frozen_runnable_schema_values() -> None:
     assert RUNNABLE_CALL_RECIPE_VERSION == "non_tensor_args_tensor_slots_context_and_obligations_v3"
     assert RUNNABLE_INITIALIZER_POLICY_VERSION == "torchlens_role_init_v2"
     assert RUNNABLE_ACTIVATION_PAYLOAD_SCHEMA_VERSION == "selected_activation_v2"
-    assert LEGACY_RUNNABLE_TLSPEC_SCHEMA_VERSIONS == frozenset({"sparse_recorded_taken_path_v1"})
+    assert frozenset({"sparse_recorded_taken_path_v1"}) == LEGACY_RUNNABLE_TLSPEC_SCHEMA_VERSIONS
     assert WitnessCompleteness.COMPLETE.value == "complete"
     assert RunnableErrorCode.UNSUPPORTED_BACKEND_REPLAY.value == "unsupported_backend_replay"
     assert RunnableErrorCode.NUMERIC_ATTESTATION_FAILED.value == "numeric_attestation_failed"
@@ -169,6 +171,10 @@ def test_authoritative_descriptor_and_report_field_names() -> None:
         "numeric_attestation",
         "poisoned",
         "nondeterministic_sources",
+        "state_carried",
+        "truncation",
+        "truncated",
+        "stopped_at",
     )
     assert tuple(field.name for field in fields(ReadinessReport)) == (
         "status",
@@ -180,3 +186,134 @@ def test_authoritative_descriptor_and_report_field_names() -> None:
         "witness_completeness",
         "diagnostics",
     )
+
+
+# The S1 seam contract (docs/reference/runnable_model.md "Extension points"):
+# every extension point resolves on its contract module, the protocol stays
+# the stable typed minimum the concrete door satisfies, and the run-door
+# conflict matrix is bound by CODE LIST, never by count.
+
+_S1_EXTENSION_POINTS: dict[str, tuple[str, ...]] = {
+    "torchlens.runnable": (
+        "WITNESS_FAMILY_REGISTRY",
+        "WITNESS_GAP_REGISTRY",
+        "CANONICAL_INITIALIZER_BY_ROLE",
+        "SparseRunDescriptor",
+        "RunnableErrorCode",
+        "RunProvider",
+        "RunnableTraceProtocol",
+        "RunResult",
+        "mark_trace_path_status",
+        "refuse_poisoned_trace",
+    ),
+    "torchlens._runnable_seam": (
+        "RUNNABLE_TRACE_PUBLIC_MEMBERS",
+        "RunnableCoordinator",
+        "RunnableTraceState",
+        "runnable_trace_state",
+    ),
+    "torchlens._runnable_execution": (
+        "run_loaded_sparse_trace",
+        "run_live_trace",
+        "_finalize_provider_run",
+    ),
+    "torchlens._runnable_state": ("load_trace_state_dict",),
+    # Coordinator verbs reached through the RunnableCoordinator boundary keep
+    # their transport-side homes (contract E2).
+    "torchlens._io.runnable": ("build_sparse_run_descriptor",),
+    "torchlens._io.runnable_load": (
+        "parse_sparse_run_descriptor",
+        "attach_sparse_run_readiness",
+    ),
+    "torchlens._fast_run": ("run_fast_loaded_trace", "run_fast_live_trace"),
+}
+
+# Trace.run keyword-conflict matrix, bound as the CODE LIST (S1 contract:
+# totality binds to codes, not counts). Every new run keyword lands with its
+# conflict-matrix row here in the same change.
+RUN_DOOR_CONFLICT_CODES: frozenset[str] = frozenset(
+    {
+        "run_legacy_arguments_conflict",
+        "run_legacy_options_conflict",
+        "run_fast_divergence_policy_invalid",
+        "run_fast_requires_inputs",
+        "run_source_model_collected",
+        "run_capability_unavailable",
+    }
+)
+
+
+def test_s1_extension_points_resolve_on_contract_modules() -> None:
+    """Every S1 extension point resolves on its declared contract module."""
+
+    import importlib
+
+    for module_name, names in _S1_EXTENSION_POINTS.items():
+        module = importlib.import_module(module_name)
+        for name in names:
+            assert hasattr(module, name), f"{module_name} lost S1 extension point {name}"
+
+
+def test_trace_run_satisfies_protocol_minimum() -> None:
+    """The concrete run door structurally satisfies the frozen protocol minimum.
+
+    ``RunnableTraceProtocol.run`` promises the stable typed minimum (``inputs``,
+    ``seed``, ``fast``, ``on_divergence``). The concrete ``Trace.run`` may add
+    keywords only as defaulted (keyword-only preferred) parameters, so every
+    existing typed consumer keeps compiling while unstable keywords incubate.
+    """
+
+    from torchlens.data_classes.trace import Trace
+
+    protocol_params = inspect.signature(RunnableTraceProtocol.run).parameters
+    concrete = inspect.signature(Trace.run)
+    for name in ("inputs", "seed", "fast", "on_divergence"):
+        assert name in concrete.parameters, f"Trace.run lost protocol parameter {name}"
+        proto_param = protocol_params[name]
+        conc_param = concrete.parameters[name]
+        if proto_param.default is not inspect.Parameter.empty:
+            assert conc_param.default == proto_param.default, (
+                f"Trace.run default for {name} drifted from the protocol minimum"
+            )
+    # Structural satisfiability: every concrete parameter beyond the protocol
+    # minimum must be optional (defaulted or VAR kinds), so a protocol-typed
+    # call never breaks.
+    for name, param in concrete.parameters.items():
+        if name in {"self", "inputs", "seed", "fast", "on_divergence"}:
+            continue
+        assert param.default is not inspect.Parameter.empty or param.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ), f"Trace.run parameter {name} must carry a default (protocol satisfaction)"
+
+
+def test_run_door_conflict_matrix_codes_present_in_door_source() -> None:
+    """The conflict-matrix code list stays raised on the run-door path.
+
+    Literal codes must appear in the door source itself; enum-spelled codes
+    (``run_capability_unavailable``) must stay declared as ``RunnableErrorCode``
+    members whose member name is referenced by runnable machinery the door
+    delegates to.
+    """
+
+    from pathlib import Path
+
+    package_root = Path(__file__).resolve().parent.parent / "torchlens"
+    door_source = (package_root / "data_classes" / "_trace_validation.py").read_text(
+        encoding="utf-8"
+    )
+    enum_values = {member.value for member in RunnableErrorCode}
+    for code in sorted(RUN_DOOR_CONFLICT_CODES):
+        if f'"{code}"' in door_source:
+            continue
+        assert code in enum_values, (
+            f"run-door conflict code {code} is neither a door literal nor an enum member"
+        )
+        member_name = RunnableErrorCode(code).name
+        referenced = any(
+            member_name in path.read_text(encoding="utf-8")
+            for path in package_root.glob("_runnable_*.py")
+        )
+        assert referenced, (
+            f"run-door conflict code {code} has no enum-member raise site in runnable machinery"
+        )

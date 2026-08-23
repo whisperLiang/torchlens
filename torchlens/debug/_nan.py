@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from ..constants import RAW_LABEL_SUFFIX
 from ..errors import CaptureError
 
 if TYPE_CHECKING:
@@ -166,7 +167,15 @@ def _op_by_any_label(trace: Trace) -> dict[str, Op]:
 
 
 def _op_label(op: Op) -> str:
-    """Return the best available final or raw label for an op.
+    """Return the best available public label for an op.
+
+    Completed traces expose a finalized public ``layer_label`` / ``label``. A
+    live partial capture (``find_nan``) has no finalized graph yet, only the
+    internal ``_label_raw`` (for example ``"log_1_4_raw"``). The trailing
+    ``RAW_LABEL_SUFFIX`` is an internal namespace marker and must not leak to
+    users, so it is stripped to a public-namespace label (``"log_1_4"``). The
+    live label is capture-ordered and may differ from the finalized label a
+    completed ``trace.find_nan()`` assigns.
 
     Parameters
     ----------
@@ -176,13 +185,17 @@ def _op_label(op: Op) -> str:
     Returns
     -------
     str
-        Final label for completed traces, otherwise the live raw label.
+        Finalized public label for completed traces, otherwise the live label
+        with its internal raw-namespace suffix stripped.
     """
 
-    for attribute in ("layer_label", "label", "_label_raw"):
+    for attribute in ("layer_label", "label"):
         value = getattr(op, attribute, None)
         if isinstance(value, str) and value:
             return value
+    raw = getattr(op, "_label_raw", None)
+    if isinstance(raw, str) and raw:
+        return raw.removesuffix(RAW_LABEL_SUFFIX)
     return "unknown"
 
 
@@ -398,7 +411,8 @@ def find_nan(model: Any, x: Any, **trace_kwargs: Any) -> FindNanResult:
             return FindNanResult(
                 True,
                 None,
-                str(fields["layer"]),
+                # Strip the internal raw-namespace suffix; expose a public label.
+                str(fields["layer"]).removesuffix(RAW_LABEL_SUFFIX),
                 None,
                 str(fields["op"]),
                 str(fields["dtype"]),

@@ -11,8 +11,9 @@ import torch
 from torch import Tensor
 from torch.nn import Module
 
-
-TargetSpec: TypeAlias = int | Callable[[Any], Tensor]
+# Kept private and deliberately distinct from the selector-serialization
+# ``torchlens.intervention.types.TargetSpec``.
+_AttributionTarget: TypeAlias = int | Callable[[Any], Tensor]
 AttributionValueTree: TypeAlias = Tensor | tuple[Any, ...] | list[Any] | dict[str, Any]
 InputKwargs: TypeAlias = dict[str, Any] | None
 
@@ -101,7 +102,23 @@ class _PreparedInputs:
 
 @contextmanager
 def _temporarily_eval(model: Module) -> Any:
-    """Run attribution with ``model`` in eval mode, then restore its prior mode.
+    """Run attribution with ``model`` in eval mode, then restore prior per-module modes.
+
+    The model is placed in eval mode for the duration of the context so that
+    attribution measures the deterministic inference computation. Every
+    submodule's training flag is snapshotted before the switch and restored
+    individually afterward. Restoring with ``module.train(flag)`` would recurse
+    and collapse an intentionally-mixed configuration (for example a frozen
+    ``BatchNorm`` deliberately left in eval while the rest of the model trains)
+    to the root module's single flag, so this restores each module's own flag
+    directly instead.
+
+    Gradient tracking is force-enabled for the context body because every
+    attribution method needs autograd through the forward pass. Without this,
+    a caller that invokes attribution inside an ambient ``torch.no_grad()``
+    would build a graph-free forward and attribution would falsely raise
+    ``AttributionError`` about non-differentiability. ``torch.enable_grad`` is a
+    no-op when grad is already enabled, so the ordinary path is unaffected.
 
     Parameters
     ----------
@@ -111,15 +128,17 @@ def _temporarily_eval(model: Module) -> Any:
     Yields
     ------
     None
-        Context body executes while the model is in eval mode.
+        Context body executes while the model is in eval mode with grad enabled.
     """
 
-    was_training = model.training
+    previous_modes = [(module, module.training) for module in model.modules()]
     model.eval()
     try:
-        yield
+        with torch.enable_grad():
+            yield
     finally:
-        model.train(was_training)
+        for module, was_training in previous_modes:
+            module.training = was_training
 
 
 def _is_attributed_tensor(value: Any) -> bool:
@@ -236,8 +255,50 @@ def _make_input_leaf(inputs: Tensor) -> Tensor:
     return inputs.detach().clone().requires_grad_(True)
 
 
+def _interned_by_identity(
+    originals: tuple[Tensor, ...],
+    make_leaf: Callable[[int], Tensor],
+) -> tuple[Tensor, ...]:
+    """Create one new tensor per unique original object identity, shared across repeats.
+
+    The user's forward pass sees exactly the object topology the user built: a
+    tensor passed to several input slots is ONE object there, so identity
+    checks (``a is b``) and autograd accumulation treat it as one value.
+    Cloning each occurrence independently would silently run a DIFFERENT
+    function than the one the user called, so every occurrence of the same
+    original tensor must receive the same substituted leaf.
+
+    Parameters
+    ----------
+    originals
+        Original attributed leaves in traversal order, possibly containing
+        repeated references to the same tensor object.
+    make_leaf
+        Constructor invoked with the slot index of the FIRST occurrence of each
+        unique original; its result is reused at every repeated occurrence.
+
+    Returns
+    -------
+    tuple[Tensor, ...]
+        New leaves in traversal order, with object identity mirroring
+        ``originals``.
+    """
+
+    leaf_by_original_id: dict[int, Tensor] = {}
+    leaves: list[Tensor] = []
+    for slot, original in enumerate(originals):
+        key = id(original)
+        if key not in leaf_by_original_id:
+            leaf_by_original_id[key] = make_leaf(slot)
+        leaves.append(leaf_by_original_id[key])
+    return tuple(leaves)
+
+
 def _make_input_leaves(inputs: _PreparedInputs) -> tuple[Tensor, ...]:
     """Create detached leaf tensors for all attributed input leaves.
+
+    Repeated references to the same tensor object receive the SAME new leaf at
+    every occurrence, preserving the identity topology of the user's call.
 
     Parameters
     ----------
@@ -250,7 +311,48 @@ def _make_input_leaves(inputs: _PreparedInputs) -> tuple[Tensor, ...]:
         Detached clones with gradient tracking enabled.
     """
 
-    return tuple(_make_input_leaf(leaf) for leaf in inputs.attributed_leaves)
+    return _interned_by_identity(
+        inputs.attributed_leaves,
+        lambda slot: _make_input_leaf(inputs.attributed_leaves[slot]),
+    )
+
+
+def _interned_path_leaves(
+    inputs: _PreparedInputs,
+    baseline_tensors: tuple[Tensor, ...],
+    deltas: tuple[Tensor, ...],
+    alpha: float,
+) -> tuple[Tensor, ...]:
+    """Create differentiable path leaves for one baseline-to-input path point.
+
+    Repeated references to the same original tensor share ONE path leaf so the
+    interpolated forward preserves the identity topology of the user's call.
+    ``_validate_baselines`` guarantees repeated references carry identical
+    baselines, so constructing from the first occurrence loses nothing.
+
+    Parameters
+    ----------
+    inputs
+        Normalized attribution inputs.
+    baseline_tensors
+        Baseline leaves in attributed-leaf traversal order.
+    deltas
+        Input-minus-baseline tensors in the same order.
+    alpha
+        Interpolation coefficient on ``[0, 1]``.
+
+    Returns
+    -------
+    tuple[Tensor, ...]
+        Detached differentiable path leaves.
+    """
+
+    return _interned_by_identity(
+        inputs.attributed_leaves,
+        lambda slot: (
+            (baseline_tensors[slot] + alpha * deltas[slot]).detach().clone().requires_grad_(True)
+        ),
+    )
 
 
 def _replace_attributed_tensors(tree: Any, replacements: list[Tensor]) -> Any:
@@ -406,7 +508,7 @@ def _replace_unattributed_with_none(tree: Any, replacements: list[Tensor]) -> An
     return None
 
 
-def _target_repr(target: TargetSpec) -> str:
+def _target_repr(target: _AttributionTarget) -> str:
     """Return a compact target representation for result metadata.
 
     Parameters
@@ -428,7 +530,7 @@ def _target_repr(target: TargetSpec) -> str:
     return repr(target)
 
 
-def _scalarize_output(output: Any, target: TargetSpec) -> Tensor:
+def _scalarize_output(output: Any, target: _AttributionTarget) -> Tensor:
     """Convert a model output to a scalar tensor using ``target``.
 
     Integer targets select ``output[..., target]`` and sum all selected values to
@@ -481,7 +583,7 @@ def _gradient_for_inputs(
     model: Module,
     inputs: _PreparedInputs,
     input_leaves: tuple[Tensor, ...],
-    target: TargetSpec,
+    target: _AttributionTarget,
 ) -> tuple[tuple[Tensor, ...], Tensor]:
     """Compute gradients of a scalarized model output with respect to input leaves.
 
@@ -509,19 +611,30 @@ def _gradient_for_inputs(
 
     output = _call_model(model, inputs, input_leaves)
     scalar = _scalarize_output(output, target)
+    unique_index_by_id: dict[int, int] = {}
+    unique_leaves: list[Tensor] = []
+    for leaf in input_leaves:
+        if id(leaf) not in unique_index_by_id:
+            unique_index_by_id[id(leaf)] = len(unique_leaves)
+            unique_leaves.append(leaf)
     try:
         raw_gradients = torch.autograd.grad(
             scalar,
-            input_leaves,
+            unique_leaves,
             allow_unused=True,
         )
     except RuntimeError as exc:
         raise AttributionError(
             "target scalar is not differentiable with respect to the attributed inputs"
         ) from exc
+    # A leaf shared across several input slots accumulates ONE gradient over
+    # every use; each public slot reports that full gradient rather than an
+    # arbitrary per-occurrence split.
     gradients = tuple(
-        torch.zeros_like(input_leaf) if gradient is None else gradient
-        for input_leaf, gradient in zip(input_leaves, raw_gradients, strict=True)
+        torch.zeros_like(input_leaf)
+        if raw_gradients[unique_index_by_id[id(input_leaf)]] is None
+        else raw_gradients[unique_index_by_id[id(input_leaf)]]
+        for input_leaf in input_leaves
     )
     return gradients, scalar.detach()
 
@@ -628,6 +741,42 @@ def _validate_baseline_tree(input_tree: Any, baseline_tree: Any) -> list[Tensor]
     return []
 
 
+def _validate_repeated_reference_baselines(
+    inputs: _PreparedInputs,
+    baseline_leaves: tuple[Tensor, ...],
+) -> None:
+    """Require identical baselines at every occurrence of a repeated-reference input.
+
+    A tensor object passed to several input slots is ONE value along the whole
+    baseline-to-input path; two different baselines for it would demand the
+    shared leaf hold two values at once. Rejecting the contradiction keeps the
+    interpolated forwards running the user's actual function.
+
+    Parameters
+    ----------
+    inputs
+        Normalized attribution inputs.
+    baseline_leaves
+        Baseline tensors in attributed-leaf traversal order.
+
+    Raises
+    ------
+    AttributionError
+        If two occurrences of the same input tensor carry different baselines.
+    """
+
+    baseline_by_original_id: dict[int, Tensor] = {}
+    for original, baseline_leaf in zip(inputs.attributed_leaves, baseline_leaves, strict=True):
+        key = id(original)
+        seen = baseline_by_original_id.get(key)
+        if seen is None:
+            baseline_by_original_id[key] = baseline_leaf
+        elif not torch.equal(seen, baseline_leaf):
+            raise AttributionError(
+                "baseline values for repeated references to the same input tensor must match"
+            )
+
+
 def _validate_baselines(inputs: _PreparedInputs, baseline: Any | None) -> tuple[Tensor, ...]:
     """Validate or create Integrated Gradients baselines for attributed leaves.
 
@@ -676,7 +825,9 @@ def _validate_baselines(inputs: _PreparedInputs, baseline: Any | None) -> tuple[
 
     if len(baseline_leaves) != len(inputs.attributed_leaves):
         raise AttributionError("baseline must mirror attributed input leaves")
-    return tuple(baseline_leaves)
+    validated = tuple(baseline_leaves)
+    _validate_repeated_reference_baselines(inputs, validated)
+    return validated
 
 
 def saliency(
@@ -684,7 +835,7 @@ def saliency(
     inputs: Any,
     input_kwargs: InputKwargs = None,
     *,
-    target: TargetSpec,
+    target: _AttributionTarget,
 ) -> AttributionResult:
     """Compute absolute input gradients for a scalar target.
 
@@ -726,7 +877,7 @@ def input_x_grad(
     inputs: Any,
     input_kwargs: InputKwargs = None,
     *,
-    target: TargetSpec,
+    target: _AttributionTarget,
 ) -> AttributionResult:
     """Compute gradient times input for a scalar target.
 
@@ -771,7 +922,7 @@ def integrated_gradients(
     inputs: Any,
     input_kwargs: InputKwargs = None,
     *,
-    target: TargetSpec,
+    target: _AttributionTarget,
     n_steps: int = 50,
     baseline: Any | None = None,
 ) -> AttributionResult:
@@ -818,12 +969,17 @@ def integrated_gradients(
     gradients_by_step: list[tuple[Tensor, ...]] = []
 
     with _temporarily_eval(model):
+        baseline_leaves = _interned_path_leaves(prepared_inputs, baseline_tensors, deltas, 0.0)
+        input_leaves = _interned_path_leaves(prepared_inputs, baseline_tensors, deltas, 1.0)
+        baseline_scalar = _scalarize_output(
+            _call_model(model, prepared_inputs, baseline_leaves), target
+        ).detach()
+        input_scalar = _scalarize_output(
+            _call_model(model, prepared_inputs, input_leaves), target
+        ).detach()
         for step in range(n_steps):
             alpha = (step + 0.5) / n_steps
-            path_leaves = tuple(
-                (baseline_tensor + alpha * delta).detach().clone().requires_grad_(True)
-                for baseline_tensor, delta in zip(baseline_tensors, deltas, strict=True)
-            )
+            path_leaves = _interned_path_leaves(prepared_inputs, baseline_tensors, deltas, alpha)
             gradients, _scalar = _gradient_for_inputs(
                 model,
                 prepared_inputs,
@@ -842,6 +998,9 @@ def integrated_gradients(
         (delta * mean_gradient).detach()
         for delta, mean_gradient in zip(deltas, mean_gradients, strict=True)
     )
+    attribution_sum = sum((value.sum() for value in values), start=torch.zeros_like(input_scalar))
+    target_delta = input_scalar - baseline_scalar
+    completeness_residual = attribution_sum - target_delta
     return AttributionResult(
         method="integrated_gradients",
         values=_value_tree_from_leaves(prepared_inputs, values),
@@ -849,6 +1008,9 @@ def integrated_gradients(
         extra={
             "n_steps": n_steps,
             "baseline": _value_tree_from_leaves(prepared_inputs, baseline_tensors),
+            "attribution_sum": attribution_sum.detach(),
+            "target_delta": target_delta.detach(),
+            "completeness_residual": completeness_residual.detach(),
         },
     )
 
@@ -858,7 +1020,7 @@ def smoothgrad(
     inputs: Any,
     input_kwargs: InputKwargs = None,
     *,
-    target: TargetSpec,
+    target: _AttributionTarget,
     n_samples: int = 25,
     noise_level: float = 0.1,
     seed: int | None = None,
@@ -901,9 +1063,11 @@ def smoothgrad(
     saliency_samples: list[tuple[Tensor, ...]] = []
     with _temporarily_eval(model):
         for _sample_idx in range(n_samples):
-            noised_leaves = tuple(
-                _make_noised_leaf(input_leaf, noise_level, seed, generators)
-                for input_leaf in prepared_inputs.attributed_leaves
+            noised_leaves = _interned_by_identity(
+                prepared_inputs.attributed_leaves,
+                lambda slot: _make_noised_leaf(
+                    prepared_inputs.attributed_leaves[slot], noise_level, seed, generators
+                ),
             )
             gradients, _scalar = _gradient_for_inputs(
                 model,

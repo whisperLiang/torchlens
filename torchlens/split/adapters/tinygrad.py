@@ -14,9 +14,9 @@ from ..boundary import ReplayBoundary
 from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
 from ..graph import SplitTraceGraph, SplitTraceNode
+from ..ir import SplitRequest
 from ..planner import SplitPlan
 from ..shape_program import ShapeBinding
-from ..ir import SplitRequest
 from .base import SegmentBundle, SplitPolicyMixin, boundary_overlay
 
 
@@ -298,7 +298,7 @@ class _TinygradGeneratedSegmentBase:
     ) -> Any:
         """Resolve a raw/display/canonical parent label from the replay overlay."""
 
-        parent_id = self._label_to_id.get(parent_label)
+        parent_id = self.graph.parent_id_for_alias(node, parent_label)
         if parent_id is None or parent_id not in overlay:
             raise SplitUnsupportedError(
                 f"{node.label!r} references unavailable tinygrad parent {parent_label!r}.",
@@ -610,9 +610,7 @@ class TinygradGeneratedPrefix(_TinygradGeneratedSegmentBase):
                     reason="input count mismatch",
                 ),
             )
-        overlay = {
-            node_id: value for node_id, value in zip(self.graph.input_node_ids, input_leaves)
-        }
+        overlay = dict(zip(self.graph.input_node_ids, input_leaves))
         if self.graph.shape_program is not None:
             self._shape_binding = self.graph.shape_program.bind_flat_values(
                 input_leaves,

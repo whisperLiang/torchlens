@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from ... import _state
+from .._validation_shared import float_replay_tolerances, ops_by_label as _ops_by_label
 
 _FACTORY_OR_SOURCE_OPS = {
     "arange",
@@ -175,12 +176,56 @@ def _payloads_close(a: Any, b: Any) -> bool:
     with _state.pause_logging(), paddle.no_grad():
         left = np.asarray(a.numpy())
         right = np.asarray(b.numpy())
+    return _arrays_close(left, right)
+
+
+def _arrays_close(left: np.ndarray, right: np.ndarray) -> bool:
+    """Return whether two NumPy payload arrays agree within dtype-aware bands.
+
+    Float tolerances are derived per dtype from its own machine epsilon
+    (the ``utils.tensor_utils`` replay error model), replacing the former
+    dtype-blind fp32 decimal pair (rtol 1e-5 / atol 1e-6) that was wrong in
+    both directions: fp64 corruption thousands of times above fp64 round-off
+    read as agreement, while a legitimate one-ULP fp16 storage-rounding
+    difference false-failed.
+
+    * Accumulating dtypes (eps <= fp32's): the legacy fp32 relative band
+      rescaled by the eps ratio, so every dtype gets the SAME strictness
+      measured in its own ULPs (fp32 keeps exactly the historical 1e-5).
+    * Storage-rounding dtypes (eps > fp32's, i.e. fp16 transported as such):
+      values compute in a wider dtype and round ONCE to storage, so the
+      replay difference is a few storage ULPs (4-ULP headroom).
+    * The absolute term only absorbs jitter at the bottom of the
+      representable range (the relative band applied to the smallest normal
+      value); the former 1e-6 floor blessed total corruption of every
+      element below it.
+
+    Parameters
+    ----------
+    left
+        Left payload array.
+    right
+        Right payload array.
+
+    Returns
+    -------
+    bool
+        True when shape, dtype, and values match within backend tolerances.
+    """
+
     if left.shape != right.shape or left.dtype != right.dtype:
         return False
     if np.issubdtype(left.dtype, np.bool_) or np.issubdtype(left.dtype, np.integer):
         return bool(np.array_equal(left, right))
-    if np.issubdtype(left.dtype, np.floating):
-        return bool(np.allclose(left, right, rtol=1e-5, atol=1e-6))
+    if np.issubdtype(left.dtype, np.floating) or np.issubdtype(left.dtype, np.complexfloating):
+        # The ONE shared eps-derived band (b5-opus R17-1 hoist); complex
+        # payloads take the same component-eps band as mlx/jax (bit-exact
+        # complex here false-failed legitimate replay jitter). equal_nan
+        # matches this backend's own replay oracle (paddle/backend.py) and
+        # every sibling: identical NaN patterns are agreement, NaN-vs-number
+        # still fails elementwise.
+        rtol, atol = float_replay_tolerances(np.finfo(left.dtype))
+        return bool(np.allclose(left, right, rtol=rtol, atol=atol, equal_nan=True))
     return bool(np.array_equal(left, right))
 
 
@@ -226,6 +271,8 @@ def _parent_perturbations_change_output(
     backend: Any,
     capture: Any,
     ops_by_label: Mapping[str, Any],
+    *,
+    baseline_output: Any | None = None,
 ) -> bool:
     """Return whether at least one value-parent perturbation changes output.
 
@@ -237,6 +284,11 @@ def _parent_perturbations_change_output(
         Paddle operation capture record.
     ops_by_label
         Materialized trace operations keyed by raw and public labels.
+    baseline_output
+        Optional replay baseline. For a corroborated user-intervened capture
+        the sensitivity check compares perturbed replays against the pre-hook
+        value: comparing against the recorded replacement payload would make
+        the check vacuously pass for constant replacements.
 
     Returns
     -------
@@ -250,7 +302,11 @@ def _parent_perturbations_change_output(
         return False
     if not rebuilt.parent_values:
         return _is_factory_or_source_capture(capture)
-    saved_output = _saved_payload(ops_by_label[getattr(capture, "label_raw")])
+    saved_output = (
+        baseline_output
+        if baseline_output is not None
+        else _saved_payload(ops_by_label[capture.label_raw])
+    )
     output_path = _capture_output_path(capture)
     attempted = False
     for parent_label, parent_value in rebuilt.parent_values.items():
@@ -262,7 +318,7 @@ def _parent_perturbations_change_output(
             args, kwargs = _replace_template_paths(
                 tuple(getattr(capture, "args_template", ())),
                 dict(getattr(capture, "kwargs_template", {})),
-                {path: candidate for path in paths},
+                dict.fromkeys(paths, candidate),
                 rebuilt,
             )
             try:
@@ -307,11 +363,19 @@ def _coverage_oracle(trace: Any) -> bool:
         op = ops_by_label.get(getattr(capture, "label_raw", ""))
         if op is None:
             continue
-        graph_parents = {
-            str(parent)
-            for parent in getattr(op, "parents", ())
-            if not str(parent).startswith("input.")
-        }
+        # Capture records speak RAW label space (their labels are immutable
+        # capture identities). Recurrence grouping rewrites graph edges to
+        # final pass-qualified labels, so parents are resolved back to raw
+        # space before comparison; an unresolvable parent keeps its literal
+        # label and fails closed.
+        graph_parents: set[str] = set()
+        for parent in getattr(op, "parents", ()):
+            parent_text = str(parent)
+            if parent_text.startswith("input."):
+                continue
+            parent_op = ops_by_label.get(parent_text)
+            parent_raw = getattr(parent_op, "_label_raw", None) if parent_op is not None else None
+            graph_parents.add(parent_raw if isinstance(parent_raw, str) else parent_text)
         for label in getattr(capture, "producer_labels", frozenset()):
             if not isinstance(label, str):
                 return False
@@ -320,32 +384,6 @@ def _coverage_oracle(trace: Any) -> bool:
             if not label.startswith("input.") and label not in graph_parents:
                 return False
     return True
-
-
-def _ops_by_label(trace: Any) -> dict[str, Any]:
-    """Return materialized trace operations keyed by all known labels.
-
-    Parameters
-    ----------
-    trace
-        Materialized TorchLens trace.
-
-    Returns
-    -------
-    dict[str, Any]
-        Operations keyed by raw, layer, and pass labels.
-    """
-
-    result: dict[str, Any] = {}
-    for op in getattr(trace, "layer_list", ()):
-        for label in (
-            getattr(op, "_label_raw", None),
-            getattr(op, "layer_label", None),
-            getattr(op, "label", None),
-        ):
-            if isinstance(label, str):
-                result[label] = op
-    return result
 
 
 def _is_tensor_marker(value: Any) -> bool:
@@ -463,6 +501,7 @@ def _replace_template_paths(
 
 __all__ = [
     "RebuiltPaddleInputs",
+    "_arrays_close",
     "_coverage_oracle",
     "_parent_perturbations_change_output",
     "_payloads_close",

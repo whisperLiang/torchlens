@@ -1,14 +1,13 @@
 """Tests for Module, ModuleCall, and ModuleAccessor."""
 
+import example_models
 import pytest
 import torch
 import torch.nn as nn
 
-import example_models
 from torchlens import trace as trace_fn
-from torchlens.types import Module, ModuleCall
 from torchlens.data_classes import ModuleAccessor, ParamAccessor
-
+from torchlens.types import Module, ModuleCall
 
 # ---------------------------------------------------------------------------
 # Helpers

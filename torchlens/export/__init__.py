@@ -7,6 +7,8 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
+from ..utils.display import atomic_write_text
+
 
 def svg(log: Any, path: str | Path, *, editable: bool = True) -> Path:
     """Export a Trace graph as a lightweight SVG file.
@@ -29,7 +31,7 @@ def svg(log: Any, path: str | Path, *, editable: bool = True) -> Path:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     data = _static_graph_data(log)
-    destination.write_text(_render_svg(data, editable=editable), encoding="utf-8")
+    atomic_write_text(destination, _render_svg(data, editable=editable))
     return destination
 
 
@@ -56,7 +58,7 @@ def html(log: Any, path: str | Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     data = _static_graph_data(log)
     payload = _json.dumps(data, separators=(",", ":"))
-    destination.write_text(_render_html(payload), encoding="utf-8")
+    atomic_write_text(destination, _render_html(payload))
     return destination
 
 
@@ -83,7 +85,7 @@ def chrome_trace(log: Any, path: str | Path) -> Path:
         "displayTimeUnit": "ms",
         "metadata": {"schema": "torchlens.chrome_trace.v1"},
     }
-    destination.write_text(_json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_text(destination, _json.dumps(payload, indent=2))
     return destination
 
 
@@ -113,7 +115,7 @@ def chrome_trace_diff(bundle: Any, path: str | Path) -> Path:
             "members": list(bundle.names),
         },
     }
-    destination.write_text(_json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_text(destination, _json.dumps(payload, indent=2))
     return destination
 
 
@@ -159,7 +161,7 @@ def speedscope(log: Any, path: str | Path) -> Path:
         ],
         "activeProfileIndex": 0,
     }
-    destination.write_text(_json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_text(destination, _json.dumps(payload, indent=2))
     return destination
 
 
@@ -189,7 +191,7 @@ def flamegraph(log: Any, path: str | Path) -> Path:
         stack.append(_layer_display_name(layer))
         folded_stack = ";".join(_sanitize_flamegraph_frame(frame) for frame in stack)
         lines.append(f"{folded_stack} {_duration_us(layer)}")
-    destination.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    atomic_write_text(destination, "\n".join(lines) + ("\n" if lines else ""))
     return destination
 
 
@@ -234,7 +236,7 @@ def memory_timeline(log: Any, path: str | Path) -> Path:
         "disclaimer": "Tensor scope only; not an allocator trace.",
         "events": events,
     }
-    destination.write_text(_json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_text(destination, _json.dumps(payload, indent=2))
     return destination
 
 
@@ -385,7 +387,7 @@ def wandb(log: Any, run: Any | None = None, name: str = "torchlens_trace") -> di
         ) from exc
 
     dataframe = _tracker_dataframe(log)
-    table = wandb_module.Table(dataframe=dataframe)  # type: ignore[no-untyped-call]
+    table = wandb_module.Table(dataframe=dataframe)
     target_run = run if run is not None else getattr(wandb_module, "run", None)
     if target_run is not None:
         target_run.log({name: table})
@@ -551,7 +553,7 @@ def json(
 
 
 def model_explorer(log: Any, path: str | Path) -> Path:
-    """Export a JSON graph compatible with static graph explorer tools.
+    """Export a JSON graph using Google Model Explorer's graph schema.
 
     Parameters
     ----------
@@ -569,8 +571,24 @@ def model_explorer(log: Any, path: str | Path) -> Path:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     data = _static_graph_data(log)
+    incoming_edges: dict[str, list[dict[str, str]]] = {
+        str(node["id"]): [] for node in data["nodes"]
+    }
+    for edge in data["edges"]:
+        incoming_edges[str(edge["target"])].append({"sourceNodeId": str(edge["source"])})
+    label = str(getattr(log, "trace_label", None) or getattr(log, "model_class_name", "model"))
     payload = {
-        "schema": "torchlens.model_explorer.v1",
+        "schema": "torchlens.model_explorer.v2",
+        "disclaimer": (
+            "TorchLens graph-collection JSON for Google Model Explorer; a data export of the "
+            "captured graph, not a runnable model. The top-level label/graphs shape matches "
+            "Model Explorer's file-ingest contract (pinned against ai-edge-model-explorer "
+            "0.1.32); acceptance by future external releases is not guaranteed."
+        ),
+        # Model Explorer's JSON ingest requires BOTH top-level keys label and
+        # graphs to treat the file as a graph collection; without label the
+        # app refuses with "Unsupported JSON format".
+        "label": label,
         "graphs": [
             {
                 "id": str(
@@ -581,25 +599,39 @@ def model_explorer(log: Any, path: str | Path) -> Path:
                         "id": node["id"],
                         "label": node["label"],
                         "namespace": node["type"],
-                        "attrs": {"shape": node["shape"], "memory": node["memory"]},
+                        "attrs": [
+                            {"key": "shape", "value": node["shape"]},
+                            {"key": "memory", "value": node["memory"]},
+                        ],
+                        "incomingEdges": incoming_edges[str(node["id"])],
                     }
                     for node in data["nodes"]
                 ],
-                "edges": data["edges"],
             }
         ],
     }
-    destination.write_text(_json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_text(destination, _json.dumps(payload, indent=2))
     return destination
 
 
-def netron(log: Any, path: str | Path) -> Path:
-    """Export a lossy ONNX-shaped graph description for Netron inspection.
+#: Disclaimer embedded in the Netron export's model and graph doc strings.
+NETRON_DISCLAIMER = (
+    "TorchLens lossy graph export: not a runnable ONNX model; graph inspection "
+    "only. Ops keep their captured TorchLens names under the ai.torchlens.lossy "
+    "domain and carry no standard-ONNX execution semantics."
+)
 
-    The output is intentionally not a runnable ONNX model. It preserves node
-    names, operation labels, simple tensor shapes, and edges so Netron-style
-    graph inspection tools have something static to inspect without implying
-    execution equivalence.
+
+def netron(log: Any, path: str | Path) -> Path:
+    """Export a lossy ONNX ``ModelProto`` JSON graph that Netron can open.
+
+    The payload is valid ONNX protobuf JSON (camelCase field names, parseable
+    into ``onnx.ModelProto``), which is the exact acceptance contract of
+    Netron's ONNX JSON reader. It is intentionally NOT a runnable model: ops
+    keep their captured TorchLens names under the custom
+    ``ai.torchlens.lossy`` operator domain, only names, edges, and output
+    shapes are preserved, and the disclaimer rides ``docString`` and
+    ``metadataProps``.
 
     Parameters
     ----------
@@ -618,31 +650,36 @@ def netron(log: Any, path: str | Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     entries = _iter_layers(log)
     repeated_labels = _repeated_layer_labels(entries)
+    nodes = []
+    for layer in entries:
+        node_id = _export_node_id(layer, repeated_labels)
+        shape = list(getattr(layer, "shape", ()) or ())
+        node: dict[str, Any] = {
+            "name": node_id,
+            "opType": str(getattr(layer, "layer_type", None) or getattr(layer, "func_name", "")),
+            "domain": "ai.torchlens.lossy",
+            "input": [str(parent) for parent in (getattr(layer, "parents", []) or [])],
+            "output": [node_id],
+        }
+        if shape and all(isinstance(dim, int) and not isinstance(dim, bool) for dim in shape):
+            node["attribute"] = [{"name": "shape", "type": "INTS", "ints": shape}]
+        nodes.append(node)
     payload = {
-        "ir_version": "torchlens-lossy-onnx-shaped-v1",
-        "producer_name": "torchlens",
-        "runnable": False,
-        "disclaimer": "Lossy ONNX-shaped inspection graph; not a real ONNX runtime model.",
+        "irVersion": 8,
+        "producerName": "torchlens",
+        "docString": NETRON_DISCLAIMER,
+        "opsetImport": [{"domain": "ai.torchlens.lossy", "version": 1}],
+        "metadataProps": [
+            {"key": "torchlens.lossy_export", "value": "true"},
+            {"key": "torchlens.runnable", "value": "false"},
+        ],
         "graph": {
             "name": str(getattr(log, "model_class_name", "TorchLens graph")),
-            "node": [
-                {
-                    "name": _export_node_id(layer, repeated_labels),
-                    "op_type": str(getattr(layer, "func_name", getattr(layer, "layer_type", ""))),
-                    "input": list(getattr(layer, "parents", []) or []),
-                    "output": [_export_node_id(layer, repeated_labels)],
-                    "attribute": [
-                        {
-                            "name": "shape",
-                            "value": list(getattr(layer, "shape", ()) or ()),
-                        }
-                    ],
-                }
-                for layer in entries
-            ],
+            "docString": NETRON_DISCLAIMER,
+            "node": nodes,
         },
     }
-    destination.write_text(_json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_text(destination, _json.dumps(payload, indent=2))
     return destination
 
 

@@ -20,8 +20,11 @@ Field categories (matching the LAYER_PASS_LOG_FIELD_ORDER in constants.py):
 4. **Child tensor variations** - tracks per-child input values for
    validation replay (``out_versions_by_child`` stores RAW values
    because validation compares against ``saved_args``).
-5. **Gradient info** - grad tensor and metadata (stored as a bare
-   reference via ``log_tensor_grad``, not deep-copied).
+5. **Gradient info** - grad tensor and metadata (always stored as a
+   detached SNAPSHOT via ``log_tensor_grad``, even under
+   ``save_mode="reference"``/``"view"`` -- autograd may accumulate into
+   the observed gradient in place, so an alias would silently rewrite
+   the recorded value).
 6. **Function call info** - the applied function, call stack, timing,
    FLOPs, RNG state, arg metadata, grad_fn_handle, inplace flag.
 7. **Param info** - which parameters were used, their shapes and sizes.
@@ -35,57 +38,83 @@ Field categories (matching the LAYER_PASS_LOG_FIELD_ORDER in constants.py):
 
 import copy
 import hashlib
-import weakref
 import warnings
+import weakref
+from collections import defaultdict
+from collections.abc import Callable
 from typing import (
-    Any,
-    Callable,
-    ClassVar,
-    Dict,
-    List,
-    Optional,
     TYPE_CHECKING,
-    Tuple,
-    Union,
-    cast,
+    Any,
+    ClassVar,
     Literal,
+    cast,
 )
 
 import torch
 
-from ..utils._torch_compat import tensor_version_or_none
-
 from .._deprecations import MISSING
+from .._errors import (
+    ArgumentTypeError,
+    InvalidArgumentError,
+    MutatedReferenceError,
+    PayloadUnavailableError,
+    RecordBindingError,
+    TorchLensPostfuncError,
+)
 from .._io import (
-    FieldPolicy,
     TLSPEC_VERSION,
+    FieldPolicy,
     TorchLensIOError,
     coerce_container_typed_state,
     default_fill_state,
     read_tlspec_version,
 )
-from .._errors import MutatedReferenceError, TorchLensPostfuncError
+from .._save_budget import SaveBudgetExceededError
+from .._state import pause_logging
+from .._trace_core.fact_blocks import OP_FACT_FIELDS
+from .._trace_core.groups import GroupRef
+from .._trace_core.op_store import (
+    _CSR,
+    _FACT,
+    _MISSING,
+    DetachedOpStore,
+    OpStoreLayout,
+    PooledCell,
+)
+from .._trace_core.relation_views import (
+    OP_BITSET_VIEW_FIELDS,
+    OP_DATAFLOW_FIELDS,
+    OP_FROZENSET_VIEW_FIELDS,
+    OP_GROUP_VIEW_FIELDS,
+    OP_TUPLE_VIEW_FIELDS,
+    materialize_dataflow_view,
+)
 from .._trace_state import TraceState
 from .._training_validation import _NON_GRAD_DTYPES, TrainingModeConfigError
+from .._transport import digest_byte_view
+from ..backends.torch._tl import mark_detached_saved_activation
 from ..constants import ARG_EXPRESSIONS_FIELD, LAYER_PASS_LOG_FIELD_ORDER, RAW_LABEL_SUFFIX
+from ..intervention.errors import DirectActivationWriteWarning
 from ..intervention.types import (
+    LAYER_PASS_LOG_FIELD_FORK_POLICY,
     EdgeUseRecord,
     FunctionRegistryKey,
-    LAYER_PASS_LOG_FIELD_FORK_POLICY,
 )
 from ..ir.refs import DeviceRef, DtypeRef
-from ..intervention.errors import DirectActivationWriteWarning
-from ..quantities import Bytes, Flops, Macs, as_bytes, as_duration, as_flops, as_macs
-from .._state import pause_logging
-from ._accessor_base import Accessor
-from .field_policy import (
-    build_record_field_policy_table,
-    default_fill_state_from_policy,
-    fork_policy_from_policy,
-    portable_state_spec_from_policy,
+from ..quantities import (
+    Bytes,
+    Duration,
+    Flops,
+    Macs,
+    as_bytes,
+    as_duration,
+    as_flops,
+    as_macs,
 )
-from ._repr import format_config_items, format_shape_list
-from ._state_adapter import state_items, state_restore
+from ..selection import _SelectionOperand
+from ..utils._torch_compat import tensor_version_or_none
+from ..utils.arg_handling import copy_arg_tree
+from ..utils.display import tensor_stats_summary
 from ..utils.tensor_utils import (
     SaveMode,
     concatenate_batch_tensors,
@@ -94,11 +123,18 @@ from ..utils.tensor_utils import (
     get_memory_amount_from_metadata,
     is_functorch_wrapped_tensor,
     print_override,
-    safe_copy,
     safe_to,
 )
-from ..utils.arg_handling import copy_arg_tree
-from ..utils.display import tensor_stats_summary
+from ._accessor_base import Accessor
+from ._backend_capability_guards import raise_if_no_backward_capture
+from ._repr import format_config_items, format_shape_list
+from ._state_adapter import state_items, state_restore
+from .field_policy import (
+    build_record_field_policy_table,
+    default_fill_state_from_policy,
+    fork_policy_from_policy,
+    portable_state_spec_from_policy,
+)
 
 _LAYER_PASS_LOG_FIELD_ORDER_SET = frozenset(LAYER_PASS_LOG_FIELD_ORDER)
 _DIRECT_WRITE_GUARDED_FIELDS = frozenset(
@@ -110,6 +146,22 @@ _DIRECT_WRITE_GUARDED_FIELDS = frozenset(
         "interventions",
     }
 )
+# ``Op.__getattribute__``/``__setattr__`` run on EVERY attribute touch during
+# capture, so the plain ``object.__getattribute__`` global lookup (globals miss
+# -> builtins hit -> type attribute resolution) was itself measurable. Bind the
+# unbound slot accessors once at import.
+_object_getattribute = object.__getattribute__
+_object_setattr = object.__setattr__
+# Fields whose reads go through the lazy-materialization path in
+# ``Op.__getattribute__``; every other name short-circuits straight to the slot.
+_LAZY_READ_FIELDS = frozenset({"grad", "out"})
+# ``equivalent_ops``/``recurrent_ops`` historically lived here too as
+# copy-on-read fields (a fresh mutable copy per read, protecting the ONE
+# canonical container shared by every group member from alias corruption).
+# The M7 live group views replace that barrier natively: cells hold a shared
+# ``GroupRef`` and reads resolve to the group's cached IMMUTABLE view
+# (``_GroupViewField``), so sharing is alias-safe without per-read copies.
+_INTERCEPTED_READ_FIELDS = _LAZY_READ_FIELDS
 _WARNED_REFERENCE_SAVE_MODE = False
 _LAYER_PASS_LOG_DEFAULT_FILL: dict[str, Any] = {
     "_source_trace_ref": None,
@@ -148,6 +200,8 @@ _LAYER_PASS_LOG_DEFAULT_FILL: dict[str, Any] = {
     "args_template": None,
     "kwargs_template": None,
     "_edge_uses": [],
+    "edge_substitutions": {},
+    "edge_replacement_stamps": {},
     "var_names": [],
     "is_orphan": False,
     "_address_normalized": None,
@@ -178,38 +232,43 @@ _LAYER_PASS_LOG_CONTAINER_DEFAULTS: dict[str, Any] = {
     "transform_chain": (),
     "transform_config": {},
     "unattributed_tensor_args": (),
-    "parent_params": [],
-    "_param_barcodes": [],
+    "dropped_edge_tensor_args": (),
+    # Relation view fields (M6, JMT-FORK-1): the declared restore type is the
+    # IMMUTABLE view — ``coerce_container_typed_state`` normalizes legacy
+    # list/set state to tuple/frozenset on load, so loaded traces present the
+    # same immutable relation surface as live finished captures.
+    "parent_params": (),
+    "_param_barcodes": (),
     "parent_param_ops": {},
-    "_param_logs": [],
+    "_param_logs": (),
     "param_shapes": [],
-    "equivalent_ops": set(),
-    "recurrent_ops": [],
-    "parents": [],
+    "equivalent_ops": frozenset(),
+    "recurrent_ops": (),
+    "parents": (),
     "parent_arg_positions": {},
-    "root_ancestors": set(),
-    "children": [],
-    "input_ancestors": set(),
-    "output_descendants": set(),
-    "internal_source_parents": [],
-    "internal_source_ancestors": set(),
-    "in_conditionals": [],
-    "conditional_branch_stack": [],
-    "conditional_entry_children": [],
-    "conditional_then_children": [],
+    "root_ancestors": frozenset(),
+    "children": (),
+    "input_ancestors": frozenset(),
+    "output_descendants": frozenset(),
+    "internal_source_parents": (),
+    "internal_source_ancestors": frozenset(),
+    "in_conditionals": (),
+    "conditional_branch_stack": (),
+    "conditional_entry_children": (),
+    "conditional_then_children": (),
     "conditional_elif_children": {},
-    "conditional_else_children": [],
+    "conditional_else_children": (),
     "conditional_arm_children": {},
-    "modules": [],
-    "module_call_stack": [],
-    "input_to_module_calls": [],
+    "modules": (),
+    "module_call_stack": (),
+    "input_to_module_calls": (),
     "module_entry_arg_keys": {},
-    "output_of_modules": [],
-    "output_of_module_calls": [],
+    "output_of_modules": (),
+    "output_of_module_calls": (),
     "func_config": {},
 }
 _LAYER_PASS_LOG_DEFAULT_FILL = {
-    **{field_name: None for field_name in LAYER_PASS_LOG_FIELD_ORDER},
+    **dict.fromkeys(LAYER_PASS_LOG_FIELD_ORDER),
     **_LAYER_PASS_LOG_CONTAINER_DEFAULTS,
     **_LAYER_PASS_LOG_DEFAULT_FILL,
 }
@@ -256,6 +315,691 @@ _OP_SLOT_NAMES = tuple(
         ]
     )
 )
+# The M5 seam: ``_OP_SLOT_NAMES`` is no longer a ``__slots__`` tuple but the
+# declared stored-field universe of the Op row store. One shared layout maps
+# each stored field to its column id; ``Op`` itself carries only
+# ``(_core, _row)`` and one generated data descriptor per stored field (see
+# ``_OpField`` / ``_install_op_field_descriptors`` at the bottom of this
+# module). All storage magic (``_slot``, ``_internal_set``, the ancestor
+# bitset overlays in ``backends/torch/ops.py``, ``state_items`` /
+# ``state_restore``) already speaks the descriptor protocol, so behavior is
+# unchanged while the physical cells live in per-trace columns.
+_OP_STORE_LAYOUT = OpStoreLayout(_OP_SLOT_NAMES)
+# Bulk-ingress seed constants: the converted-at-construction fields and the
+# layout ids of the cells `__init__` overrides after the one-pass dict seed.
+_INIT_BYTES_FIELDS = (
+    "activation_memory",
+    "transformed_activation_memory",
+    "autograd_memory",
+    "bytes_delta_at_call",
+    "bytes_peak_at_call",
+    "gradient_memory",
+    "transformed_gradient_memory",
+)
+_FID_SOURCE_TRACE_REF = _OP_STORE_LAYOUT.fid_by_name["_source_trace_ref"]
+_FID_IS_IN_CONDITIONAL_BODY = _OP_STORE_LAYOUT.fid_by_name["_is_in_conditional_body"]
+_FID_GRAD_RECORDS = _OP_STORE_LAYOUT.fid_by_name["_grad_records"]
+_FID_CONSTRUCTION_DONE = _OP_STORE_LAYOUT.fid_by_name["_construction_done"]
+_FIDS_INIT_NONE = tuple(
+    _OP_STORE_LAYOUT.fid_by_name[field_name]
+    for field_name in (
+        "out_ref",
+        "grad_ref",
+        "_pending_blob_id",
+        "_pending_transformed_out_blob_id",
+        "_pending_grad_blob_id",
+        "_pending_transformed_grad_blob_id",
+    )
+)
+
+# ---------------------------------------------------------------------------
+# Post-capture metadata pooling (RAM)
+#
+# A finished graph stores the SAME immutable metadata value over and over: one
+# ``"torch.float32"`` dtype name per op, one ``Bytes(0)`` per unused memory
+# counter, the same module address in every op of a module, the same ancestor
+# label in hundreds of ancestor sets.  Each of those is a separate Python
+# object, so per-node footprint grows with (#ops x #repeated facts) instead of
+# with the number of DISTINCT facts.
+#
+# ``_compaction.compact_op_metadata`` runs one pass at the freeze seam and
+# replaces each such value with a single pooled instance.  The pool is local to
+# that pass and dropped afterwards, so nothing leaks process-wide the way
+# ``sys.intern`` would.
+#
+# The pass is VALUE-PRESERVING by construction:
+#   * only exact-class IMMUTABLE values are pooled (str/bytes, the frozen
+#     DtypeRef/DeviceRef refs, the int/float quantity subclasses, and tuples /
+#     frozensets built purely out of those).  Sharing an immutable object can
+#     never alias-corrupt an owner.
+#   * mutable containers (list/set/dict) keep their own identity and
+#     mutability; only their ELEMENTS are swapped for pooled equals.
+#   * anything else -- tensors, Ops, arbitrary user objects -- is returned
+#     untouched and never enters the pool.
+# ---------------------------------------------------------------------------
+
+# Exact classes that are safe to share.  Exact-class (not isinstance) matching
+# keeps subclasses out, so a pooled value always has the original's type.
+# ``torch.dtype``/``torch.device`` are immutable value objects (process
+# singletons for dtypes), so sharing references is safe; they appear inside
+# per-op config dicts such as ``func_autocast_state``.
+_POOLED_CLASSES = frozenset(
+    {str, bytes, DtypeRef, DeviceRef, Bytes, Flops, Macs, Duration, torch.dtype, torch.device}
+)
+_NONE_POOL_KEY = (type(None), None)
+# Slots skipped by the pass: tensor payloads, replay/attestation raw values,
+# live handles, and lazily rebuilt caches.  Skipping is a cost/robustness
+# choice, not a correctness one -- the pooling helpers already refuse every
+# value in them.
+_UNPOOLED_SLOTS = frozenset(
+    {
+        "out",
+        "transformed_out",
+        "grad",
+        "transformed_grad",
+        "saved_args",
+        "saved_kwargs",
+        "args_template",
+        "kwargs_template",
+        "out_versions_by_child",
+        "func_rng_states",
+        "activation_transform",
+        "interventions",
+        "parent_params",
+        "_param_logs",
+        "_grad_records",
+        "func",
+        "grad_fn",
+        "grad_fn_handle",
+        "out_ref",
+        "grad_ref",
+        "_source_trace_ref",
+        "_facets_cache",
+        "_receptive_field_cache",
+        "_projective_field_cache",
+        "_arg_expressions_cache",
+        # One canonical set object is shared by every Op of an equivalence class,
+        # so walking it per Op would re-pool the SAME N labels N times (a 512-step
+        # loop: 524k member visits for 4 distinct groups) and would mutate one
+        # shared container from N owners.  Nothing is lost: a group's members are
+        # the very ``op.label`` strings the rename pass read out of
+        # ``_raw_to_final_op_labels``, and those slots ARE pooled, so no distinct
+        # duplicate of a label survives this skip.  Pooling is a cost choice, not
+        # a correctness one (see the pooling block above).
+        "equivalent_ops",
+        # Same sharing argument: one canonical list per recurrence group, whose
+        # members are final op labels already pooled through their own slots.
+        "recurrent_ops",
+    }
+)
+_POOLED_SLOTS = tuple(name for name in _OP_SLOT_NAMES if name not in _UNPOOLED_SLOTS)
+# Depth of container nesting the pass descends into.  Every field that carries
+# real repetition (ancestor sets, label lists, config dicts) is at depth 0-1.
+_POOL_MAX_DEPTH = 2
+
+# ---------------------------------------------------------------------------
+# Mutable-container CELL pooling (the M14 memory slice).
+#
+# The freeze-seam compaction additionally replaces whole mutable-container
+# CELLS -- exact ``dict``/``list``/``set`` (and top-level ``defaultdict``)
+# values whose full content is provably immutable AND either empty or
+# repeated across cells -- with one shared ``PooledCell`` per distinct
+# content. The facade descriptors hydrate a fresh exact-type container per
+# row on first read and cache it back (``_FACT`` semantics), so per-row
+# identity/mutation contracts are unchanged while an uninspected row retains
+# no per-row container. Op-store cells pool only through the explicit field
+# allowlist below (fields whose post-freeze lifecycle is read-or-reassign);
+# kind-table cells (Module/ModuleCall/Param/...) pool generically -- their
+# repetition (empty hook lists, identical ``custom_attributes``...) is the
+# census-dominant tail. An in-store alias census guards every replacement:
+# a container object reachable from more than one swept cell never pools.
+# ---------------------------------------------------------------------------
+
+#: Op-store fields sanctioned for whole-cell container pooling.
+_POOLED_CONTAINER_FIELDS = frozenset(
+    {
+        "annotations",
+        "interventions",
+        "var_names",
+        "_grad_records",
+        "out_versions_by_child",
+        "func_rng_states",
+        "conditional_elif_children",
+        "conditional_arm_children",
+        "func_autocast_state",
+        "transform_config",
+        "module_entry_arg_keys",
+        "parent_param_ops",
+        "parent_arg_positions",
+    }
+)
+
+#: Exact cell classes the container pooling considers.
+_MUTABLE_CELL_CLASSES = (dict, list, set)
+
+#: ``defaultdict.default_factory`` values safe to share and rebuild.
+_POOLABLE_DEFAULT_FACTORIES = frozenset({list, set, dict, int, tuple})
+
+#: Nesting cap for container pool keys (cycles and pathological nesting
+#: simply refuse to pool).
+_CONTAINER_KEY_MAX_DEPTH = 4
+_CONTAINER_KEY_MAX_MEMBERS = 1024
+
+_DEEPCOPY_IMMUTABLE_TYPES = (
+    str,
+    bytes,
+    int,
+    float,
+    bool,
+    type(None),
+    torch.dtype,
+    torch.device,
+    Bytes,
+    Duration,
+    Flops,
+)
+
+_OUTPUT_NODE_REPLACED_FIELDS = frozenset(
+    {
+        "_edge_uses",
+        "_label_raw",
+        "_layer_label_raw",
+        "_param_barcodes",
+        "_param_logs",
+        "activation_memory",
+        "annotations",
+        "arg_names",
+        "atomic_module_call",
+        "autograd_memory",
+        "bytes_delta_at_call",
+        "bytes_peak_at_call",
+        "children",
+        "code_context",
+        "container_path",
+        "container_spec",
+        "dropped_edge_tensor_args",
+        "dtype",
+        "equivalence_class",
+        "equivalent_ops",
+        "func",
+        "func_config",
+        "func_duration",
+        "func_name",
+        "func_non_tensor_args",
+        "func_rng_states",
+        "grad_fn_class_name",
+        "has_children",
+        "has_out_variations",
+        "has_output_descendant",
+        "input_to_module_calls",
+        "internal_source_parents",
+        "intervention_replaced",
+        "interventions",
+        "io_role",
+        "is_atomic_module",
+        "is_buffer",
+        "is_final_output",
+        "is_input",
+        "is_internal_source",
+        "is_module_output",
+        "is_output",
+        "is_transform",
+        "layer_type",
+        "module",
+        "module_call_stack",
+        "modules",
+        "non_tensor_kwargs",
+        "non_tensor_pos_args",
+        "num_args_total",
+        "num_autograd_tensors",
+        "num_kwargs",
+        "num_params",
+        "num_params_frozen",
+        "num_params_trainable",
+        "num_passes",
+        "num_pos_args",
+        "out",
+        "out_versions_by_child",
+        "output_descendants",
+        "output_of_module_calls",
+        "output_of_modules",
+        "param_memory",
+        "param_shapes",
+        "parent_arg_positions",
+        "parent_param_ops",
+        "parent_params",
+        "parents",
+        "pass_index",
+        "raw_index",
+        "recurrent_ops",
+        "saved_args",
+        "saved_kwargs",
+        "shape",
+        "transform_chain",
+        "transform_config",
+        "transform_fn_name",
+        "transform_fn_qualname",
+        "transform_fn_source",
+        "transform_kind",
+        "transformed_activation_memory",
+        "transformed_out",
+        "transformed_out_dtype",
+        "transformed_out_shape",
+        "unattributed_tensor_args",
+        "var_names",
+    }
+)
+
+
+def _copy_op_field_value(value: Any) -> Any:
+    """Copy one Op field without deep-copy dispatch for immutable values.
+
+    Parameters
+    ----------
+    value:
+        Stored field value.
+
+    Returns
+    -------
+    Any
+        The original immutable value or an independent deep copy.
+    """
+
+    if isinstance(value, _DEEPCOPY_IMMUTABLE_TYPES):
+        return value
+    if isinstance(value, tuple) and all(
+        isinstance(member, _DEEPCOPY_IMMUTABLE_TYPES) for member in value
+    ):
+        return value
+    return copy.deepcopy(value)
+
+
+def _container_pool_key(
+    value: Any,
+    depth: int,
+    visited_ids: list[int],
+    member_budget: list[int] | None = None,
+) -> Any:
+    """Return an injective hashable content key for one mutable container.
+
+    ``None`` means "do not pool": unknown member types, subclassed
+    containers, non-builtin factories, or nesting past the cap. Immutable
+    members key through :func:`_pool_key` (class-tagged, float-bit exact),
+    so the key is injective exactly like the immutable pool's. Every
+    visited mutable container's ``id`` lands in ``visited_ids`` for the
+    alias guard.
+    """
+
+    if member_budget is None:
+        member_budget = [_CONTAINER_KEY_MAX_MEMBERS]
+    if depth > _CONTAINER_KEY_MAX_DEPTH or member_budget[0] <= 0:
+        return None
+    cls = value.__class__
+    if cls is defaultdict:
+        if depth:
+            return None
+        factory = value.default_factory
+        if factory is not None and factory not in _POOLABLE_DEFAULT_FACTORIES:
+            return None
+        visited_ids.append(id(value))
+        items = _dict_member_keys(value, depth, visited_ids, member_budget)
+        return None if items is None else ("dd", factory, items)
+    if cls is dict:
+        visited_ids.append(id(value))
+        items = _dict_member_keys(value, depth, visited_ids, member_budget)
+        return None if items is None else ("d", items)
+    if cls is list:
+        visited_ids.append(id(value))
+        member_keys = []
+        for member in value:
+            member_budget[0] -= 1
+            if member_budget[0] < 0:
+                return None
+            member_key = _container_member_key(member, depth, visited_ids, member_budget)
+            if member_key is None:
+                return None
+            member_keys.append(member_key)
+        return ("l", tuple(member_keys))
+    if cls is set:
+        visited_ids.append(id(value))
+        member_keys = []
+        for member in value:
+            member_budget[0] -= 1
+            if member_budget[0] < 0:
+                return None
+            member_key = _pool_key(member)
+            if member_key is None:
+                return None
+            member_keys.append(member_key)
+        return ("s", frozenset(member_keys))
+    return None
+
+
+def _dict_member_keys(
+    value: Any,
+    depth: int,
+    visited_ids: list[int],
+    member_budget: list[int],
+) -> Any:
+    """Key the items of one dict-shaped container, or ``None`` to refuse."""
+
+    items = []
+    for key, member in value.items():
+        member_budget[0] -= 1
+        if member_budget[0] < 0:
+            return None
+        key_key = _pool_key(key)
+        if key_key is None:
+            return None
+        member_key = _container_member_key(member, depth, visited_ids, member_budget)
+        if member_key is None:
+            return None
+        items.append((key_key, member_key))
+    return tuple(items)
+
+
+def _container_member_key(
+    member: Any,
+    depth: int,
+    visited_ids: list[int],
+    member_budget: list[int],
+) -> Any:
+    """Key one container member: immutable leaf or nested exact container."""
+
+    immutable_key = _pool_key(member)
+    if immutable_key is not None:
+        return ("i", immutable_key)
+    if member.__class__ in _MUTABLE_CELL_CLASSES:
+        nested = _container_pool_key(member, depth + 1, visited_ids, member_budget)
+        return None if nested is None else ("m", nested)
+    return None
+
+
+def _count_container_ids(
+    value: Any,
+    id_counts: dict[int, int],
+    expanded_ids: set[int],
+    depth: int,
+) -> None:
+    """Count every exact builtin MUTABLE container id reachable from one cell.
+
+    The alias census behind the pooling guard: a container whose id is seen
+    more than once across ALL swept cells is aliased in-store, and replacing
+    any of its cell appearances would break the alias for later in-place
+    mutation, so such cells never pool.
+
+    Only ``dict``/``defaultdict``/``list``/``set`` ids matter (the pool key
+    visits exactly those). Hashability bounds the walk: dict KEYS and
+    ``set``/``frozenset`` members must be hashable, so no exact builtin
+    mutable container can hide below them — dict values, list members, and
+    tuple members are the only recursion edges.
+    """
+
+    cls = value.__class__
+    if cls is dict or cls is defaultdict:
+        oid = id(value)
+        id_counts[oid] = id_counts.get(oid, 0) + 1
+        if depth < 6 and oid not in expanded_ids:
+            expanded_ids.add(oid)
+            for member in value.values():
+                _count_container_ids(member, id_counts, expanded_ids, depth + 1)
+    elif cls is list:
+        oid = id(value)
+        id_counts[oid] = id_counts.get(oid, 0) + 1
+        if depth < 6 and oid not in expanded_ids:
+            expanded_ids.add(oid)
+            for member in value:
+                _count_container_ids(member, id_counts, expanded_ids, depth + 1)
+    elif cls is set:
+        oid = id(value)
+        id_counts[oid] = id_counts.get(oid, 0) + 1
+    elif cls is tuple and depth < 6 and id(value) not in expanded_ids:
+        expanded_ids.add(id(value))
+        for member in value:
+            _count_container_ids(member, id_counts, expanded_ids, depth + 1)
+
+
+def _pool_container_cells(
+    stores: list[tuple[Any, Any]], container_pool: dict[Any, PooledCell]
+) -> None:
+    """Pool duplicate/empty immutable-content container cells across stores.
+
+    Parameters
+    ----------
+    stores:
+        ``(store, fids)`` pairs; ``fids`` is an iterable of sanctioned field
+        ids or ``None`` for every field (kind tables). Only building-phase
+        row stores participate (``rows_building()`` returning ``None`` skips
+        the store) -- pooling always precedes the physical freeze.
+    container_pool:
+        Pass-local ``content key -> PooledCell`` table shared across stores,
+        so equal content pools trace-wide.
+    """
+
+    # ONE scan over every cell: the alias census recurses only into cells
+    # whose class can hold a container (everything else is skipped by an
+    # inline class test — the vast majority of cells are scalars/None), and
+    # the same scan collects the pool candidates (container-classed cells at
+    # sanctioned fids) and the singleton-compaction sites (kind-table list
+    # cells), so neither later pass re-walks rows x fields.
+    id_counts: dict[int, int] = {}
+    expanded_ids: set[int] = set()
+    cell_sites: list[tuple[Any, int, Any]] = []
+    singleton_sites: list[tuple[Any, int, int, Any, Any]] = []
+    any_swept = False
+    for store, fids in stores:
+        rows = store.rows_building()
+        if rows is None:
+            continue
+        any_swept = True
+        fid_set = None if fids is None else frozenset(fids)
+        for row_idx, row_cells in enumerate(rows):
+            for fid, value in enumerate(row_cells):
+                cls = value.__class__
+                if cls is tuple:
+                    _count_container_ids(value, id_counts, expanded_ids, 0)
+                    continue
+                if not (cls is dict or cls is list or cls is set or cls is defaultdict):
+                    continue
+                _count_container_ids(value, id_counts, expanded_ids, 0)
+                if fid_set is None or fid in fid_set:
+                    cell_sites.append((row_cells, fid, value))
+                if fid_set is None and cls is list:
+                    singleton_sites.append((store, row_idx, fid, row_cells, value))
+    if not any_swept:
+        return
+    candidates: list[tuple[Any, int, Any, Any]] = []
+    key_counts: dict[Any, int] = {}
+    for row_cells, fid, value in cell_sites:
+        visited_ids: list[int] = []
+        key = _container_pool_key(value, 0, visited_ids)
+        if key is None:
+            continue
+        if any(id_counts[oid] > 1 for oid in visited_ids):
+            continue
+        candidates.append((row_cells, fid, value, key))
+        key_counts[key] = key_counts.get(key, 0) + 1
+    for row_cells, fid, value, key in candidates:
+        # Empty containers always pool (all empties of a class share ONE
+        # cell+prototype). Non-empty content needs >= 3 occurrences: a pooled
+        # key retains 2 objects (cell + detached prototype), so pooling a
+        # pair is object-neutral before any read and negative after.
+        if value and key_counts[key] < 3:
+            continue
+        cell = container_pool.get(key)
+        if cell is None:
+            cell = container_pool[key] = PooledCell.from_value(value)
+        row_cells[fid] = cell
+    # Singleton-label compaction (M14 slice 2, kind tables only): a
+    # one-element list holding exactly one str (per-record label/address
+    # lists — distinct content per row, so PooledCell's >= 3 threshold never
+    # reaches them) stores the bare element, registered on the store so
+    # decode fires only for the exact registered object. Same alias census
+    # as pooling: a list reachable from more than one swept cell never
+    # compacts (breaking its mutation coupling is not sanctioned).
+    for store, row_idx, fid, row_cells, value in singleton_sites:
+        if (
+            row_cells[fid] is value  # not already pooled above
+            and len(value) == 1
+            and value[0].__class__ is str
+            and id_counts[id(value)] == 1
+        ):
+            element = value[0]
+            row_cells[fid] = element
+            store.register_compacted_singleton(row_idx, fid, element)
+
+
+def _pool_key(value: Any) -> Any:
+    """Return an injective hashable pool key for ``value``, or ``None``.
+
+    Injectivity is what keeps the pass value-preserving: two values share a key
+    if and only if they are indistinguishable. The class is always part of the
+    key (so ``True`` never collapses into ``1``, nor ``Bytes(0)`` into ``0``),
+    and floats key on their exact bit pattern (so ``-0.0`` never collapses into
+    ``0.0``).
+
+    Parameters
+    ----------
+    value:
+        Candidate immutable value.
+
+    Returns
+    -------
+    Any
+        A hashable key, or ``None`` when ``value`` is not a poolable immutable.
+    """
+
+    cls = value.__class__
+    if cls is str or cls is bytes or cls is int or cls is bool:
+        return (cls, value)
+    if cls is float:
+        return (cls, value.hex())
+    if cls in _POOLED_CLASSES:
+        return (cls, value.hex()) if cls is Duration else (cls, value)
+    if value is None:
+        return _NONE_POOL_KEY
+    if cls is tuple or cls is frozenset:
+        member_keys = []
+        for member in value:
+            member_key = _pool_key(member)
+            if member_key is None:
+                return None
+            member_keys.append(member_key)
+        return (cls, tuple(member_keys) if cls is tuple else frozenset(member_keys))
+    return None
+
+
+def _pool_value(value: Any, pool: dict[Any, Any]) -> Any:
+    """Return the pooled twin of an immutable ``value``, or ``value`` itself.
+
+    Parameters
+    ----------
+    value:
+        Candidate value from an Op slot or from inside one of its containers.
+    pool:
+        Pass-local ``pool key -> canonical instance`` table.
+
+    Returns
+    -------
+    Any
+        An object of the same exact class that is ``==`` to ``value``, or
+        ``value`` unchanged when it is not a poolable immutable.
+    """
+
+    cls = value.__class__
+    if cls in _POOLED_CLASSES:
+        key = (cls, value.hex()) if cls is Duration else (cls, value)
+    elif (cls is tuple or cls is frozenset) and value:
+        key = _pool_key(value)
+        if key is None:
+            return value
+    else:
+        return value
+    pooled = pool.get(key)
+    if pooled is not None:
+        return pooled
+    if cls is tuple or cls is frozenset:
+        # Rebuild so nested immutables are shared too; the rebuilt collection
+        # is the canonical one from here on.
+        value = cls(_pool_value(member, pool) for member in value)
+    pool[key] = value
+    return value
+
+
+def _pool_container_members(container: Any, pool: dict[Any, Any], depth: int) -> None:
+    """Swap poolable members of a mutable container for their pooled twins.
+
+    The container object itself is never replaced, so its identity, class,
+    mutability, and (for lists/dicts) ordering are preserved exactly.
+
+    Parameters
+    ----------
+    container:
+        A ``list``, ``set``, or mapping owned by one Op.
+    pool:
+        Pass-local pooling table.
+    depth:
+        Current nesting depth; recursion stops at ``_POOL_MAX_DEPTH``.
+    """
+
+    cls = container.__class__
+    recurse = depth < _POOL_MAX_DEPTH
+    pooled_classes = _POOLED_CLASSES
+    pool_get = pool.get
+    if cls is list:
+        for index, member in enumerate(container):
+            member_cls = member.__class__
+            # Inline the common case (a pooled string) so the vast majority of
+            # members never pay a Python call.
+            if member_cls is str:
+                key = (str, member)
+                pooled = pool_get(key)
+                if pooled is None:
+                    pool[key] = member
+                elif pooled is not member:
+                    container[index] = pooled
+            elif member_cls in pooled_classes or member_cls is tuple or member_cls is frozenset:
+                pooled = _pool_value(member, pool)
+                if pooled is not member:
+                    container[index] = pooled
+            elif recurse and (
+                member_cls is list
+                or member_cls is set
+                or member_cls is dict
+                or isinstance(member, dict)
+            ):
+                _pool_container_members(member, pool, depth + 1)
+    elif cls is set:
+        # Rebuilding through clear()/update() also drops the over-allocation
+        # left behind by the discard/remove calls postprocessing makes.
+        pooled_members = {_pool_value(member, pool) for member in container}
+        container.clear()
+        container.update(pooled_members)
+    elif isinstance(container, dict):
+        # Keys are dict-literal constants in the producers and are already
+        # shared by the compiler, so only values are pooled -- which also keeps
+        # insertion order untouched.  Rebinding an existing key never resizes a
+        # dict, so iterating ``items()`` directly is safe.
+        for key, member in container.items():
+            member_cls = member.__class__
+            if member_cls is str:
+                pool_key = (str, member)
+                pooled = pool_get(pool_key)
+                if pooled is None:
+                    pool[pool_key] = member
+                elif pooled is not member:
+                    container[key] = pooled
+            elif member_cls in pooled_classes or member_cls is tuple or member_cls is frozenset:
+                pooled = _pool_value(member, pool)
+                if pooled is not member:
+                    container[key] = pooled
+            elif recurse and (
+                member_cls is list
+                or member_cls is set
+                or member_cls is dict
+                or isinstance(member, dict)
+            ):
+                _pool_container_members(member, pool, depth + 1)
 
 
 def _clear_property_backed_state_fields(state: dict[str, Any]) -> None:
@@ -443,9 +1187,12 @@ class GradientRecordAccessor(Accessor[GradientRecord]):
         if len(matches) == 1:
             return matches[0]
         if matches:
-            raise ValueError(
+            raise InvalidArgumentError(
                 f"Multiple gradient records participated in pass {pass_index}; "
-                "use positional indexing on .grads."
+                "use positional indexing on .grads",
+                code="gradient_pass_ambiguous",
+                remedy="use positional indexing on .grads to pick one record",
+                pass_index=pass_index,
             )
         available = [record.backward_pass_index for record in self._list]
         raise KeyError(
@@ -540,6 +1287,12 @@ def apply_transform(
         Value returned by ``transform``.
     """
 
+    # R36: a cpu_async payload may still be an in-flight pinned buffer; a
+    # user transform is a host-side byte read and must never observe partial
+    # bytes. No-op unless async fence events are actually pending.
+    from ..utils.tensor_utils import synchronize_pending_cpu_async_copies
+
+    synchronize_pending_cpu_async_copies()
     try:
         with pause_logging():
             return transform(tensor)
@@ -630,12 +1383,16 @@ def validate_train_mode_transform_output(
     if not isinstance(transformed_tensor, torch.Tensor):
         raise TrainingModeConfigError(
             f"{transform_kind}_transform must return a torch.Tensor while backward_ready=True "
-            f"for layer {label}."
+            f"for layer {label}. "
+            "Remedy: return a differentiable torch.Tensor from the transform.",
+            code="transform_not_differentiable",
         )
     if transformed_tensor.dtype in _NON_GRAD_DTYPES:
         raise TrainingModeConfigError(
             f"backward_ready=True with non-grad dtype {transformed_tensor.dtype} on layer "
-            f"{label}. Integer and bool dtypes cannot propagate grads."
+            f"{label}. Integer and bool dtypes cannot propagate grads. "
+            "Remedy: return a floating-dtype tensor from the transform.",
+            code="transform_not_differentiable",
         )
     if not transformed_tensor.requires_grad or (
         transformed_tensor.grad_fn is None and transformed_tensor is not raw_tensor
@@ -643,7 +1400,9 @@ def validate_train_mode_transform_output(
         raise TrainingModeConfigError(
             f"{transform_kind}_transform returned a tensor disconnected from the autograd "
             "graph (grad_fn is None) while backward_ready=True. The transformed out "
-            "must remain differentiable."
+            "must remain differentiable. "
+            "Remedy: keep the transform on the autograd graph (no detach/no_grad).",
+            code="transform_not_differentiable",
         )
 
 
@@ -745,7 +1504,13 @@ def _effective_activation_save_mode(
 
     save_mode = cast(SaveMode, getattr(trace, "save_mode", "copy"))
     if save_mode not in {"copy", "reference", "view", "cpu_async"}:
-        raise ValueError("save_mode must be one of 'copy', 'reference', 'view', or 'cpu_async'")
+        raise InvalidArgumentError(
+            "save_mode must be one of 'copy', 'reference', 'view', or 'cpu_async'; "
+            f"received {save_mode!r}",
+            code="save_mode_invalid",
+            remedy="set save_mode to 'copy', 'reference', 'view', or 'cpu_async'",
+            argument="save_mode",
+        )
     if save_mode == "reference":
         _warn_reference_save_mode_once()
         if is_inplace or (func_name is not None and func_name.endswith("_")):
@@ -796,20 +1561,94 @@ def _tensor_content_hash(value: torch.Tensor) -> str:
     -------
     str
         SHA-256 digest.
+
+    Notes
+    -----
+    The digest frames the LOGICAL dtype so a bfloat16 tensor can never
+    collide with the float32 tensor of the same values (content-mode dedup
+    aliasing across dtypes). The payload is hashed through the buffer
+    protocol (no whole-payload ``tobytes`` copy), the transport is the
+    shared zero-copy-when-possible ``to_cpu_contiguous`` (r7 b5 R35-1: the
+    old ``safe_copy(...).cpu().contiguous()`` paid one unconditional full
+    clone for an already-contiguous CPU tensor and materialized twice for a
+    CUDA/permuted source), and bf16 hashes its OWN bytes -- the uint8
+    reinterpret view needs no numpy-transport upcast (R35 fable: the
+    bf16->f32 copy was pointless once the logical dtype was framed; this
+    digest is process-local, so the byte change is invisible).
     """
 
     if is_functorch_wrapped_tensor(value):
         return f"functorch_wrapped_tensor:{id(value)}"
 
     with pause_logging():
-        tensor = safe_copy(value, detach_tensor=True).cpu().contiguous()
-        if tensor.dtype is torch.bfloat16:
-            tensor = tensor.to(torch.float32)
-        payload = tensor.numpy().tobytes()
-    hasher = hashlib.sha256()
-    hasher.update(repr((tuple(tensor.shape), str(tensor.dtype))).encode("utf-8"))
-    hasher.update(payload)
+        # r8 R35: conj/neg resolution + the uint8 reinterpret live in the
+        # ONE transport authority (``_transport.digest_byte_view``); the
+        # local resolve guard this site pioneered moved there so the other
+        # digest sites cannot drift from it.
+        logical_dtype = str(value.dtype)
+        shape = tuple(value.shape)
+        payload = digest_byte_view(value)
+        hasher = hashlib.sha256()
+        hasher.update(repr((shape, logical_dtype)).encode("utf-8"))
+        hasher.update(payload)
     return hasher.hexdigest()
+
+
+def _dedup_cached_identity_out(
+    trace: "Trace | None",
+    source_tensor: torch.Tensor,
+    annotations: dict[str, Any],
+    save_arg_values: bool,
+) -> torch.Tensor | None:
+    """Return the already-saved payload for this live source, or ``None``.
+
+    Parameters
+    ----------
+    trace:
+        Trace that owns the per-pass dedup caches.
+    source_tensor:
+        Live output tensor about to be copied for retention.
+    annotations:
+        Mutable annotation dictionary for the saved output.
+    save_arg_values:
+        Whether argument values are being saved (disables activation dedup).
+
+    Notes
+    -----
+    Pre-copy identity probe: the historical order CLONED the payload first
+    and only consulted the identity cache afterwards, discarding the fresh
+    clone on every hit — a full wasted payload copy per repeated-source save
+    (dedup-after-copy ordering). Hit semantics, annotations, and the miss
+    path (which still inserts post-copy via
+    :func:`_dedup_saved_activation_out`) are unchanged.
+    """
+
+    if trace is None or save_arg_values or source_tensor.is_meta:
+        return None
+    if getattr(trace, "_out_dedup_mode", "identity") != "identity":
+        return None
+    identity_cache = getattr(trace, "_out_identity_cache", None)
+    if identity_cache is None:
+        return None
+    source_key = id(source_tensor)
+    from ..backends.torch.completeness_witness import internal_scalar_read
+
+    with internal_scalar_read():
+        source_version = tensor_version_or_none(source_tensor)
+    cached = identity_cache.get(source_key)
+    if cached is None:
+        return None
+    cached_source, cached_label, cached_out, cached_version, cached_ordinal = cached
+    if cached_source is source_tensor and cached_version == source_version:
+        # B3R4-R21-1: the annotation carries the trace-local dense dedup
+        # ordinal, never the raw ``id()`` bookkeeping key -- a memory address
+        # in a persisted field made same-program artifacts byte-differ per
+        # process and exposed a meaningless public value.
+        annotations["dedup_source_id"] = cached_ordinal
+        annotations["dedup_source_version"] = source_version
+        annotations["dedup_reference_label"] = cached_label
+        return cast(torch.Tensor, cached_out)
+    return None
 
 
 def _dedup_saved_activation_out(
@@ -857,6 +1696,12 @@ def _dedup_saved_activation_out(
         if hash_cache is None:
             hash_cache = {}
             setattr(trace, "_out_hash_cache", hash_cache)
+        # R36: the content digest is a host-side byte read; a cpu_async
+        # payload may still be an in-flight pinned buffer. No-op unless
+        # async fence events are pending.
+        from ..utils.tensor_utils import synchronize_pending_cpu_async_copies
+
+        synchronize_pending_cpu_async_copies()
         out_hash = _tensor_content_hash(raw_out)
         if out_hash in hash_cache:
             annotations["dedup_out_hash"] = out_hash
@@ -883,14 +1728,20 @@ def _dedup_saved_activation_out(
         source_version = tensor_version_or_none(source_tensor)
     cached = identity_cache.get(source_key)
     if cached is not None:
-        cached_source, cached_label, cached_out, cached_version = cached
+        cached_source, cached_label, cached_out, cached_version, cached_ordinal = cached
         if cached_source is source_tensor and cached_version == source_version:
-            annotations["dedup_source_id"] = source_key
+            # B3R4-R21-1: dense trace-local ordinal, never the raw ``id()``.
+            annotations["dedup_source_id"] = cached_ordinal
             annotations["dedup_source_version"] = source_version
             annotations["dedup_reference_label"] = cached_label
             return cached_out
 
-    identity_cache[source_key] = (source_tensor, label, raw_out, source_version)
+    # Dense ordinal in cache-insertion (execution) order: deterministic across
+    # processes for the same captured program, unlike the ``id()`` slot key. A
+    # replaced slot (id reuse after a mismatch) keeps its original ordinal so
+    # ordinals stay unique within the cache.
+    ordinal = cached[4] if cached is not None else len(identity_cache) + 1
+    identity_cache[source_key] = (source_tensor, label, raw_out, source_version, ordinal)
     return raw_out
 
 
@@ -900,14 +1751,13 @@ if TYPE_CHECKING:
     from .._io.lazy import LazyActivationRef
     from ..receptive_field._view import ReceptiveFieldView
     from .func_call_location import FuncCallLocation
-    from .layer import Layer
-    from .layer import OpAccessor
+    from .layer import Layer, OpAccessor
     from .module import Module
     from .param import Param
     from .trace import Trace
 
 
-class Op:
+class Op(_SelectionOperand):
     """Metadata for a single tensor operation (one pass of one layer).
 
     Constructed from a dict whose keys must exactly match
@@ -930,7 +1780,203 @@ class Op:
       FX-style name form is needed.
     """
 
-    __slots__ = _OP_SLOT_NAMES
+    __slots__ = ("_core", "_row")
+
+    if TYPE_CHECKING:
+        # Static field declarations for type checkers ONLY (invisible at
+        # runtime, so the frozen debugger/DX surface is unchanged). The
+        # explicitly typed names carry the annotations the former inline
+        # `self.x: T = ...` assignments declared; every other stored field
+        # was already inferred as Any from the untyped fields_dict.
+        annotations: dict[str, Any]
+        dtype_ref: DtypeRef | None
+        device_ref: DeviceRef | None
+        backend_address: str | None
+        resolver_status: str
+        activation_memory: Bytes | None
+        transformed_activation_memory: Bytes | None
+        visualizer_path: str | None
+        autograd_memory: Bytes | None
+        num_autograd_tensors: int | None
+        bytes_delta_at_call: Bytes | None
+        bytes_peak_at_call: Bytes | None
+        gradient_memory: Bytes | None
+        transformed_gradient_memory: Bytes | None
+        func_id: FunctionRegistryKey | None
+        code_context: list["FuncCallLocation"]
+        var_names: list[str]
+        func_duration: Duration | None
+        flops_forward: Flops | None
+        flops_backward: Flops | None
+        _param_barcodes: list[Any]
+        _param_logs: list["Param"]
+        param_memory: Bytes
+        is_orphan: bool
+        fx_qualpath: str | None
+        fx_call_index: int
+        out_ref: "LazyActivationRef" | None
+        grad_ref: "LazyActivationRef" | None
+        _pending_blob_id: str | None
+        _pending_transformed_out_blob_id: str | None
+        _pending_grad_blob_id: str | None
+        _pending_transformed_grad_blob_id: str | None
+        _grad_records: list[GradientRecord]
+
+        _label_raw: Any
+        _layer_label_raw: Any
+        step_index: Any
+        raw_index: Any
+        ordinal_index: Any
+        _tracing_finished: Any
+        _construction_done: Any
+        label: Any
+        label_short: Any
+        layer_label: Any
+        layer_label_short: Any
+        type: Any
+        type_index: Any
+        pass_index: Any
+        num_passes: Any
+        lookup_keys: Any
+        out: Any
+        has_saved_activation: Any
+        output_device: Any
+        activation_transform: Any
+        interventions: Any
+        intervention_replaced: Any
+        detach_saved_activations: Any
+        has_saved_args: Any
+        saved_args: Any
+        saved_kwargs: Any
+        args_template: Any
+        kwargs_template: Any
+        shape: Any
+        transformed_out_shape: Any
+        dtype: Any
+        transformed_out_dtype: Any
+        transformed_out: Any
+        has_out_variations: Any
+        out_versions_by_child: Any
+        grad: Any
+        transformed_grad: Any
+        save_grads: Any
+        has_grad: Any
+        grad_shape: Any
+        transformed_grad_shape: Any
+        grad_dtype: Any
+        transformed_grad_dtype: Any
+        func: Any
+        func_call_id: Any
+        func_name: Any
+        func_qualname: Any
+        func_rng_states: Any
+        func_autocast_state: Any
+        arg_names: Any
+        num_args_total: Any
+        num_pos_args: Any
+        num_kwargs: Any
+        non_tensor_pos_args: Any
+        non_tensor_kwargs: Any
+        func_non_tensor_args: Any
+        is_inplace: Any
+        grad_fn_class_name: Any
+        grad_fn_class_qualname: Any
+        grad_fn_object_id: Any
+        grad_fn_handle: Any
+        grad_fn: Any
+        in_multi_output: Any
+        multi_output_index: Any
+        multi_output_name: Any
+        container_path: Any
+        container_spec: Any
+        is_transform: Any
+        transform_kind: Any
+        transform_chain: Any
+        transform_config: Any
+        transform_fn_name: Any
+        transform_fn_qualname: Any
+        transform_fn_source: Any
+        unattributed_tensor_args: Any
+        dropped_edge_tensor_args: Any
+        parent_params: Any
+        parent_param_ops: Any
+        param_shapes: Any
+        num_params: Any
+        num_params_trainable: Any
+        num_params_frozen: Any
+        equivalence_class: Any
+        equivalent_ops: Any
+        recurrent_ops: Any
+        site_key: str | None
+        parents: Any
+        parent_arg_positions: Any
+        _edge_uses: Any
+        edge_substitutions: dict[Any, Any]
+        edge_replacement_stamps: dict[Any, Any]
+        root_ancestors: Any
+        children: Any
+        has_children: Any
+        is_input: Any
+        input_was_parameter: Any
+        has_input_ancestor: Any
+        input_ancestors: Any
+        min_distance_from_input: Any
+        max_distance_from_input: Any
+        is_output: Any
+        is_output_parent: Any
+        is_final_output: Any
+        has_output_descendant: Any
+        output_descendants: Any
+        io_role: Any
+        min_distance_to_output: Any
+        max_distance_to_output: Any
+        is_buffer: Any
+        address: Any
+        buffer_pass: Any
+        buffer_source: Any
+        buffer_write_kind: Any
+        buffer_value_changed: Any
+        buffer_replay_validated: Any
+        buffer_source_func_name: Any
+        is_internal_source: Any
+        has_internal_source_ancestor: Any
+        internal_source_parents: Any
+        internal_source_ancestors: Any
+        is_internal_sink: Any
+        is_terminal_bool: Any
+        is_terminal_conditional_bool: Any
+        conditional_context_kind: Any
+        conditional_wrapper_kind: Any
+        terminal_conditional_id: Any
+        is_scalar_bool: Any
+        bool_value: Any
+        in_conditionals: Any
+        terminal_bool_for: Any
+        conditional_branch_stack: Any
+        conditional_branch_depth: Any
+        conditional_entry_children: Any
+        conditional_then_children: Any
+        conditional_elif_children: Any
+        conditional_else_children: Any
+        conditional_arm_children: Any
+        module: Any
+        _address_normalized: Any
+        modules: Any
+        module_call_stack: Any
+        input_to_module_calls: Any
+        module_entry_arg_keys: Any
+        output_of_modules: Any
+        output_of_module_calls: Any
+        is_module_output: Any
+        is_atomic_module: Any
+        atomic_module_call: Any
+        func_config: Any
+        _source_trace_ref: Any
+        _facets_cache: Any
+        _receptive_field_cache: Any
+        _projective_field_cache: Any
+        _arg_expressions_cache: Any
+        _is_in_conditional_body: Any
 
     PORTABLE_STATE_SPEC: dict[str, FieldPolicy] = {
         "_label_raw": FieldPolicy.KEEP,
@@ -1039,6 +2085,7 @@ class Op:
         "transform_fn_qualname": FieldPolicy.KEEP,
         "transform_fn_source": FieldPolicy.KEEP,
         "unattributed_tensor_args": FieldPolicy.KEEP,
+        "dropped_edge_tensor_args": FieldPolicy.KEEP,
         "parent_params": FieldPolicy.KEEP,
         "_param_barcodes": FieldPolicy.KEEP,
         "parent_param_ops": FieldPolicy.KEEP,
@@ -1051,9 +2098,18 @@ class Op:
         "equivalence_class": FieldPolicy.KEEP,
         "equivalent_ops": FieldPolicy.KEEP,
         "recurrent_ops": FieldPolicy.KEEP,
+        # site_key_v1 structural-position identity: persists as of tlspec v8
+        # with byte-exact recomputation at load (_io/forgery_validation.py).
+        "site_key": FieldPolicy.KEEP,
         "parents": FieldPolicy.KEEP,
         "parent_arg_positions": FieldPolicy.KEEP,
         "_edge_uses": FieldPolicy.KEEP,
+        # L6 stage 3: occurrence-granular edge-substitution store + save-time
+        # corroboration stamps; persist as of tlspec v8 (BLOB_RECURSIVE may
+        # carry unit-term masks). Uncorroborated tier-(ii) entries FAIL
+        # validation; the audit digest relation validates at load.
+        "edge_substitutions": FieldPolicy.BLOB_RECURSIVE,
+        "edge_replacement_stamps": FieldPolicy.KEEP,
         "root_ancestors": FieldPolicy.KEEP,
         "children": FieldPolicy.KEEP,
         "has_children": FieldPolicy.KEEP,
@@ -1095,7 +2151,7 @@ class Op:
         "bool_value": FieldPolicy.KEEP,
         "in_conditionals": FieldPolicy.KEEP,
         "terminal_bool_for": FieldPolicy.KEEP,
-        "is_in_conditional_body": FieldPolicy.KEEP,
+        "is_in_conditional_body": FieldPolicy.DROP,
         "conditional_branch_stack": FieldPolicy.KEEP,
         "conditional_branch_depth": FieldPolicy.KEEP,
         "conditional_entry_children": FieldPolicy.KEEP,
@@ -1127,12 +2183,17 @@ class Op:
         "_pending_transformed_out_blob_id": FieldPolicy.DROP,
         "_pending_grad_blob_id": FieldPolicy.DROP,
         "_pending_transformed_grad_blob_id": FieldPolicy.DROP,
+        # Lazily-populated facet-view cache slot: popped by __getstate__,
+        # FORK_RECONSTRUCT on fork, disposable. Declared so the Op slot
+        # universe carries no shadow storage outside FIELD_POLICY.
+        "_facets_cache": FieldPolicy.DROP,
     }
     FIELD_POLICY = build_record_field_policy_table(
         LAYER_PASS_LOG_FIELD_ORDER,
         PORTABLE_STATE_SPEC,
         fork_policy=LAYER_PASS_LOG_FIELD_FORK_POLICY,
         default_fill_state=_LAYER_PASS_LOG_DEFAULT_FILL,
+        schema_key="op",
     )
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
     FIELD_FORK_POLICY = fork_policy_from_policy(FIELD_POLICY)
@@ -1142,15 +2203,25 @@ class Op:
         """Return one physical slot value, or ``default`` when it is unset."""
 
         try:
-            return object.__getattribute__(self, name)
+            return _object_getattribute(self, name)
         except AttributeError:
             return default
 
-    def __getattribute__(self, name: str) -> Any:
-        """Materialize lazy grads and reject finalized unsaved predicate outs."""
+    def __getattribute__(
+        self,
+        name: str,
+        # Bound once at definition time: this method runs on EVERY attribute
+        # read (150-200k per trace), so even the cached LOAD_GLOBAL for these
+        # two names was measurable; LOAD_FAST via default args is cheaper.
+        _getattribute: Callable[[Any, str], Any] = _object_getattribute,
+        _lazy_fields: frozenset = _INTERCEPTED_READ_FIELDS,
+    ) -> Any:
+        """Materialize lazy grads, copy shared groups, reject unsaved predicate outs."""
 
+        if name not in _lazy_fields:
+            return _getattribute(self, name)
         if name == "grad":
-            slot = object.__getattribute__(self, "_slot")
+            slot = _object_getattribute(self, "_slot")
             records = slot("_grad_records")
             if records:
                 saved = [record for record in records if record.grad is not None]
@@ -1162,16 +2233,19 @@ class Op:
                 if len(saved) > 1:
                     label = slot("label") or slot("layer_label") or slot("_label_raw")
                     passes = [record.backward_pass_index for record in saved]
-                    raise ValueError(
+                    raise InvalidArgumentError(
                         f"op {label} has gradients saved from multiple backward passes {passes}; "
-                        "use op.grads[...] / op.grad_for(bwd=k)."
+                        "use op.grads[...] / op.grad_for(bwd=k)",
+                        code="gradient_pass_ambiguous",
+                        remedy="use op.grads[...] or op.grad_for(bwd=k) to pick one pass",
+                        label=str(label),
                     )
             grad = slot("grad")
             if grad is None and slot("grad_ref") is not None:
                 return object.__getattribute__(self, "materialize_grad")()
             return grad
         if name == "out":
-            slot = object.__getattribute__(self, "_slot")
+            slot = _object_getattribute(self, "_slot")
             out = slot("out")
             source_ref = slot("_source_trace_ref")
             source_trace = None if source_ref is None else source_ref()
@@ -1187,9 +2261,11 @@ class Op:
                 and getattr(source_trace, "_predicate_save_options", None) is not None
             ):
                 label = slot("label") or slot("layer_label") or slot("_label_raw")
-                raise ValueError(
-                    f"op {label} was not saved; no saved payload is available. "
-                    "Re-run with save=... to retain this activation."
+                raise PayloadUnavailableError(
+                    f"op {label} was not saved; no saved payload is available",
+                    code="activation_not_saved",
+                    remedy="re-run with save=... to retain this activation",
+                    label=str(label),
                 )
             if not getattr(source_trace, "_postprocessing_active", False):
                 state = {
@@ -1202,9 +2278,18 @@ class Op:
                     "_label_raw": slot("_label_raw"),
                 }
                 _validate_reference_out_not_mutated(state)
-        return object.__getattribute__(self, name)
+        return _getattribute(self, name)
 
-    def __setattr__(self, name: str, value: Any) -> None:
+    def __setattr__(
+        self,
+        name: str,
+        value: Any,
+        # Same definition-time binding as ``__getattribute__``: capture writes
+        # every Op field through here, so the two globals are hoisted to
+        # LOAD_FAST default args.
+        _setattr: Callable[[Any, str, Any], None] = _object_setattr,
+        _guarded_fields: frozenset = _DIRECT_WRITE_GUARDED_FIELDS,
+    ) -> None:
         """Mark owning logs dirty when user code directly writes guarded fields.
 
         Parameters
@@ -1215,8 +2300,10 @@ class Op:
             New attribute value.
         """
 
-        construction_done = self._slot("_construction_done", False)
-        if construction_done and name in _DIRECT_WRITE_GUARDED_FIELDS:
+        # Guarded-name test first: it is a pure frozenset probe that is False for
+        # almost every write, so the (side-effect-free) construction-done slot
+        # read is skipped entirely on the hot path.
+        if name in _guarded_fields and self._slot("_construction_done", False):
             owner = self._slot("_source_trace_ref")
             trace = owner() if owner is not None else None
             if trace is not None:
@@ -1230,7 +2317,7 @@ class Op:
                         stacklevel=2,
                     )
                     object.__setattr__(trace, "_warned_direct_write", True)
-        object.__setattr__(self, name, value)
+        _setattr(self, name, value)
 
     def _internal_set(self, attr: str, value: Any) -> None:
         """Set an attribute without marking the owner dirty.
@@ -1243,7 +2330,51 @@ class Op:
             Value to assign.
         """
 
-        object.__setattr__(self, attr, value)
+        _object_setattr(self, attr, value)
+
+    def _compact_metadata(self, pool: dict[Any, Any]) -> None:
+        """Replace repeated immutable metadata with pooled shared instances.
+
+        Called once per Op by :func:`~torchlens.data_classes._compaction.compact_op_metadata`
+        at the freeze seam. Every field keeps a value that is ``==`` to, and of the
+        same exact class as, the one it had before; only the object identity of
+        immutable values is collapsed. See the pooling block near the top of
+        this module for the safety argument.
+
+        Parameters
+        ----------
+        pool:
+            Pass-local pooling table shared by every Op of one Trace.
+        """
+
+        getattribute = _object_getattribute
+        pooled_classes = _POOLED_CLASSES
+        pool_get = pool.get
+        for name in _POOLED_SLOTS:
+            try:
+                value = getattribute(self, name)
+            except AttributeError:
+                continue
+            # Most slots hold None or a plain scalar; the class ladder below is
+            # ordered so those fall through without a single Python call.
+            if value is None:
+                continue
+            cls = value.__class__
+            if cls in pooled_classes:
+                key = (cls, value.hex()) if cls is Duration else (cls, value)
+                pooled = pool_get(key)
+                if pooled is None:
+                    pool[key] = value
+                elif pooled is not value:
+                    _object_setattr(self, name, pooled)
+            elif cls is list or cls is set or cls is dict:
+                _pool_container_members(value, pool, 0)
+            elif cls is tuple or cls is frozenset:
+                pooled = _pool_value(value, pool)
+                if pooled is not value:
+                    _object_setattr(self, name, pooled)
+            elif isinstance(value, dict):
+                _pool_container_members(value, pool, 0)
 
     def _append_tensor_from(self, other: "Op", field_name: str) -> None:
         """Append one tensor field from another pass along batch dimension 0.
@@ -1261,18 +2392,19 @@ class Op:
         if isinstance(current_value, torch.Tensor) and isinstance(other_value, torch.Tensor):
             self._internal_set(field_name, concatenate_batch_tensors(current_value, other_value))
 
-    def __init__(self, fields_dict: Dict[str, Any]) -> None:
+    def __init__(self, fields_dict: dict[str, Any], *, _store: Any = None) -> None:
         """Initialise from a complete fields dictionary.
 
         Args:
             fields_dict: Dict with values for all fields defined in
                 ``LAYER_PASS_LOG_FIELD_ORDER``.  Missing or extra keys
                 raise ``ValueError``.
+            _store: Private ingress hook: the owning trace's ``OpRowStore``
+                when materialize step 0 constructs this op (a shared row is
+                appended). Every other construction path (``copy()``, direct
+                user construction, preview backends) gets a detached
+                single-row store.
         """
-        # Attributes are set explicitly (not via loop) for IDE autocompletion.
-        set_ = object.__setattr__
-        set_(self, "_construction_done", False)
-
         # Validate that fields_dict has exactly the expected keys:
         if "_address_normalized" not in fields_dict:
             fields_dict["_address_normalized"] = None
@@ -1294,8 +2426,6 @@ class Op:
             fields_dict["backend_address"] = fields_dict.get("address")
         if fields_dict.get("resolver_status") is None:
             fields_dict["resolver_status"] = "resolved"
-        if "save_gradients" in fields_dict and "save_grads" not in fields_dict:
-            fields_dict["save_grads"] = fields_dict.pop("save_gradients")
         for derived_field in (
             "input_ops",
             "input_activations",
@@ -1320,224 +2450,44 @@ class Op:
                 error_str += f"\n\t- Extra fields {', '.join(extra_fields)}"
             raise ValueError(error_str)
 
-        # General info:
-        self._label_raw = fields_dict["_label_raw"]
-        self._layer_label_raw = fields_dict["_layer_label_raw"]
-        self.step_index = fields_dict["step_index"]
-        self.raw_index = fields_dict["raw_index"]
-        self.ordinal_index = fields_dict["ordinal_index"]
-        # Store as weakref to break circular reference (Trace -> layer_list -> entry -> Trace).
-        _sml = fields_dict["source_trace"]
-        self._source_trace_ref = weakref.ref(_sml) if _sml is not None else None
-        self._tracing_finished = fields_dict["_tracing_finished"]
-
-        # Label info:
-        self.layer_label = fields_dict["layer_label"]
-        self.layer_label_short = fields_dict["layer_label_short"]
-        self.label = fields_dict["label"]
-        self.label_short = fields_dict["label_short"]
-        self.type = fields_dict["type"]
-        self.type_index = fields_dict["type_index"]
-        self.pass_index = fields_dict["pass_index"]
-        self.num_passes = fields_dict["num_passes"]
-        self.lookup_keys = fields_dict["lookup_keys"]
-
-        # Saved tensor info:
-        self.out = fields_dict["out"]
-        self.transformed_out = fields_dict["transformed_out"]
-        self.has_saved_activation = fields_dict["has_saved_activation"]
-        self.output_device = fields_dict["output_device"]
-        self.activation_transform = fields_dict["activation_transform"]
-        self.annotations: Dict[str, Any] = fields_dict["annotations"]
-        self.interventions = fields_dict["interventions"]
-        self.intervention_replaced = fields_dict["intervention_replaced"]
-        self.detach_saved_activations = fields_dict["detach_saved_activations"]
-        self.has_saved_args = fields_dict["has_saved_args"]
-        self.saved_args = fields_dict["saved_args"]
-        self.saved_kwargs = fields_dict["saved_kwargs"]
-        self.args_template = fields_dict["args_template"]
-        self.kwargs_template = fields_dict["kwargs_template"]
-        self.shape = fields_dict["shape"]
-        self.transformed_out_shape = fields_dict["transformed_out_shape"]
-        self.dtype = fields_dict["dtype"]
-        self.dtype_ref: DtypeRef | None = fields_dict["dtype_ref"]
-        self.transformed_out_dtype = fields_dict["transformed_out_dtype"]
-        self.device_ref: DeviceRef | None = fields_dict["device_ref"]
-        self.backend_address: str | None = fields_dict["backend_address"]
-        self.resolver_status: str = fields_dict["resolver_status"]
-        self.activation_memory: Bytes | None = as_bytes(fields_dict["activation_memory"])
-        self.transformed_activation_memory: Bytes | None = as_bytes(
-            fields_dict["transformed_activation_memory"]
+        # One-pass layout-ordered row seed. The former 185 explicit
+        # descriptor assignments were pure stores during construction (the
+        # __setattr__ guard is inert until _construction_done flips), so
+        # normalizing the converted fields into the dict and building the
+        # row cells directly is value-identical at ~40% of the cost. Static
+        # field types live in the TYPE_CHECKING declaration block on the
+        # class; runtime attribute surface comes from the generated field
+        # descriptors.
+        fd = fields_dict
+        for field_name in _INIT_BYTES_FIELDS:
+            fd[field_name] = as_bytes(fd[field_name])
+        fd["param_memory"] = Bytes(fd["param_memory"] or 0)
+        fd["func_duration"] = as_duration(fd["func_duration"])
+        fd["flops_forward"] = as_flops(fd["flops_forward"])
+        fd["flops_backward"] = as_flops(fd["flops_backward"])
+        get = fd.get
+        cells = [get(field_name, _MISSING) for field_name in _OP_STORE_LAYOUT.names]
+        # Store as weakref to break the circular reference
+        # (Trace -> layer_list -> entry -> Trace).
+        source_trace = fd["source_trace"]
+        cells[_FID_SOURCE_TRACE_REF] = (
+            weakref.ref(source_trace) if source_trace is not None else None
         )
-        self.visualizer_path: str | None = fields_dict["visualizer_path"]
-        self.autograd_memory: Bytes | None = as_bytes(fields_dict["autograd_memory"])
-        self.num_autograd_tensors: Optional[int] = fields_dict["num_autograd_tensors"]
-        self.bytes_delta_at_call: Bytes | None = as_bytes(fields_dict["bytes_delta_at_call"])
-        self.bytes_peak_at_call: Bytes | None = as_bytes(fields_dict["bytes_peak_at_call"])
-
-        # Child tensor variation tracking - stores the raw tensor values that
-        # each child operation received as input.  Must store RAW values (not
-        # postprocessed) because validation compares these against saved_args.
-        self.has_out_variations = fields_dict["has_out_variations"]
-        self.out_versions_by_child = fields_dict["out_versions_by_child"]
-
-        # Saved grad info - grad is stored as a bare clone (not deep-copied)
-        # via log_tensor_grad().  grad is populated by a backward hook.
-        self.grad = fields_dict["grad"]
-        self.transformed_grad = fields_dict["transformed_grad"]
-        self.save_grads = fields_dict["save_grads"]
-        self.has_grad = fields_dict["has_grad"]
-        self.grad_shape = fields_dict["grad_shape"]
-        self.transformed_grad_shape = fields_dict["transformed_grad_shape"]
-        self.grad_dtype = fields_dict["grad_dtype"]
-        self.transformed_grad_dtype = fields_dict["transformed_grad_dtype"]
-        self.gradient_memory: Bytes | None = as_bytes(fields_dict["gradient_memory"])
-        self.transformed_gradient_memory: Bytes | None = as_bytes(
-            fields_dict["transformed_gradient_memory"]
-        )
-
-        # Function call info:
-        self.func = fields_dict["func"]
-        self.func_id: FunctionRegistryKey | None = fields_dict["func_id"]
-        self.func_call_id = fields_dict["func_call_id"]
-        self.func_name = fields_dict["func_name"]
-        self.func_qualname = fields_dict["func_qualname"]
-        self.code_context: List["FuncCallLocation"] = fields_dict["code_context"]
-        self.var_names: list[str] = fields_dict["var_names"]
-        self.func_duration = as_duration(fields_dict["func_duration"])
-        self.flops_forward = as_flops(fields_dict["flops_forward"])
-        self.flops_backward = as_flops(fields_dict["flops_backward"])
-        self.func_rng_states = fields_dict["func_rng_states"]
-        self.func_autocast_state = fields_dict["func_autocast_state"]
-        self.arg_names = fields_dict["arg_names"]
-        self.num_args_total = fields_dict["num_args_total"]
-        self.num_pos_args = fields_dict["num_pos_args"]
-        self.num_kwargs = fields_dict["num_kwargs"]
-        self.non_tensor_pos_args = fields_dict["non_tensor_pos_args"]
-        self.non_tensor_kwargs = fields_dict["non_tensor_kwargs"]
-        self.func_non_tensor_args = fields_dict["func_non_tensor_args"]
-        self.is_inplace = fields_dict["is_inplace"]
-        self.grad_fn_class_name = fields_dict["grad_fn_class_name"]
-        self.grad_fn_class_qualname = fields_dict["grad_fn_class_qualname"]
-        self.grad_fn_object_id = fields_dict["grad_fn_object_id"]
-        self.grad_fn_handle = fields_dict["grad_fn_handle"]
-        self.grad_fn = fields_dict["grad_fn"]
-        self.in_multi_output = fields_dict["in_multi_output"]
-        self.multi_output_index = fields_dict["multi_output_index"]
-        self.multi_output_name = fields_dict["multi_output_name"]
-        self.container_path = fields_dict["container_path"]
-        self.container_spec = fields_dict["container_spec"]
-        self.is_transform = fields_dict["is_transform"]
-        self.transform_kind = fields_dict["transform_kind"]
-        self.transform_chain = fields_dict["transform_chain"]
-        self.transform_config = fields_dict["transform_config"]
-        self.transform_fn_name = fields_dict["transform_fn_name"]
-        self.transform_fn_qualname = fields_dict["transform_fn_qualname"]
-        self.transform_fn_source = fields_dict["transform_fn_source"]
-        self.unattributed_tensor_args = fields_dict["unattributed_tensor_args"]
-
-        # Param info:
-        self.parent_params = fields_dict["parent_params"]
-        self._param_barcodes = fields_dict["_param_barcodes"]
-        self.parent_param_ops = fields_dict["parent_param_ops"]
-        self._param_logs: List["Param"] = fields_dict["_param_logs"]
-        self.param_shapes = fields_dict["param_shapes"]
-        self.num_params = fields_dict["num_params"]
-        self.num_params_trainable = fields_dict["num_params_trainable"]
-        self.num_params_frozen = fields_dict["num_params_frozen"]
-        self.param_memory: Bytes = Bytes(fields_dict["param_memory"] or 0)
-
-        # Loop-detection equivalence info:
-        # equivalence_class groups structurally identical operations
-        # (same func + same param barcodes).  equivalent_ops holds a
-        # DIRECT reference to the Trace-level set for this type.
-        # recurrent_ops is populated by loop_detection.py for layers
-        # that are different ops of the same recurrent layer.
-        self.equivalence_class = fields_dict["equivalence_class"]
-        self.equivalent_ops = fields_dict["equivalent_ops"]
-        self.recurrent_ops = fields_dict["recurrent_ops"]
-
-        # Graph info:
-        self.parents = fields_dict["parents"]
-        self.parent_arg_positions = fields_dict["parent_arg_positions"]
-        self._edge_uses = fields_dict["_edge_uses"]
-        self.root_ancestors = fields_dict["root_ancestors"]
-        self.children = fields_dict["children"]
-        self.has_children = fields_dict["has_children"]
-        self.is_input = fields_dict["is_input"]
-        self.input_was_parameter = fields_dict["input_was_parameter"]
-        self.has_input_ancestor = fields_dict["has_input_ancestor"]
-        self.input_ancestors = fields_dict["input_ancestors"]
-        self.min_distance_from_input = fields_dict["min_distance_from_input"]
-        self.max_distance_from_input = fields_dict["max_distance_from_input"]
-        self.is_output = fields_dict["is_output"]
-        self.is_output_parent = fields_dict["is_output_parent"]
-        self.is_final_output = fields_dict["is_final_output"]
-        self.has_output_descendant = fields_dict["has_output_descendant"]
-        self.output_descendants = fields_dict["output_descendants"]
-        self.is_orphan: bool = fields_dict["is_orphan"]
-        self.min_distance_to_output = fields_dict["min_distance_to_output"]
-        self.max_distance_to_output = fields_dict["max_distance_to_output"]
-        self.io_role = fields_dict["io_role"]
-        self.is_buffer = fields_dict["is_buffer"]
-        self.address = fields_dict["address"]
-        self.buffer_pass = fields_dict["buffer_pass"]
-        self.buffer_source = fields_dict["buffer_source"]
-        self.buffer_write_kind = fields_dict["buffer_write_kind"]
-        self.buffer_value_changed = fields_dict["buffer_value_changed"]
-        self.buffer_replay_validated = fields_dict["buffer_replay_validated"]
-        self.buffer_source_func_name = fields_dict["buffer_source_func_name"]
-        self.is_internal_source = fields_dict["is_internal_source"]
-        self.has_internal_source_ancestor = fields_dict["has_internal_source_ancestor"]
-        self.internal_source_parents = fields_dict["internal_source_parents"]
-        self.internal_source_ancestors = fields_dict["internal_source_ancestors"]
-        self.is_internal_sink = fields_dict["is_internal_sink"]
-
-        # Conditional info
-        self.is_terminal_bool = fields_dict["is_terminal_bool"]
-        self.is_terminal_conditional_bool = fields_dict["is_terminal_conditional_bool"]
-        self.conditional_context_kind = fields_dict["conditional_context_kind"]
-        self.conditional_wrapper_kind = fields_dict["conditional_wrapper_kind"]
-        self.terminal_conditional_id = fields_dict["terminal_conditional_id"]
-        self.is_scalar_bool = fields_dict["is_scalar_bool"]
-        self.bool_value = fields_dict["bool_value"]
-        self.in_conditionals = fields_dict["in_conditionals"]
-        self.terminal_bool_for = fields_dict["terminal_bool_for"]
-        self.is_in_conditional_body = fields_dict["is_in_conditional_body"]
-        self.conditional_branch_stack = fields_dict["conditional_branch_stack"]
-        self.conditional_branch_depth = fields_dict["conditional_branch_depth"]
-        self.conditional_entry_children = fields_dict["conditional_entry_children"]
-        self.conditional_then_children = fields_dict["conditional_then_children"]
-        self.conditional_elif_children = fields_dict["conditional_elif_children"]
-        self.conditional_else_children = fields_dict["conditional_else_children"]
-        self.conditional_arm_children = fields_dict["conditional_arm_children"]
-
-        # Module info
-        self.module = fields_dict["module"]
-        self._address_normalized = fields_dict["_address_normalized"]
-        self.modules = fields_dict["modules"]
-        self.fx_qualpath: Optional[str] = fields_dict["fx_qualpath"]
-        self.fx_call_index: int = fields_dict["fx_call_index"]
-        self.module_call_stack = fields_dict["module_call_stack"]
-        self.module_entry_arg_keys = fields_dict["module_entry_arg_keys"]
-        self.input_to_module_calls = fields_dict["input_to_module_calls"]
-        self.output_of_modules = fields_dict["output_of_modules"]
-        self.output_of_module_calls = fields_dict["output_of_module_calls"]
-        self.is_module_output = fields_dict["is_module_output"]
-        self.is_atomic_module = fields_dict["is_atomic_module"]
-        self.atomic_module_call = fields_dict["atomic_module_call"]
-
-        # Function config - lightweight hyperparameters always captured.
-        self.func_config = fields_dict["func_config"]
-
-        self.out_ref: Optional["LazyActivationRef"] = None
-        self.grad_ref: Optional["LazyActivationRef"] = None
-        self._pending_blob_id: Optional[str] = None
-        self._pending_transformed_out_blob_id: Optional[str] = None
-        self._pending_grad_blob_id: Optional[str] = None
-        self._pending_transformed_grad_blob_id: Optional[str] = None
-        self._grad_records: list[GradientRecord] = []
-        set_(self, "_construction_done", True)
+        # The public alias value backs the `_is_in_conditional_body` cell
+        # (exactly what the compatibility property setter does).
+        cells[_FID_IS_IN_CONDITIONAL_BODY] = fd["is_in_conditional_body"]
+        for none_fid in _FIDS_INIT_NONE:
+            cells[none_fid] = None
+        cells[_FID_GRAD_RECORDS] = []
+        cells[_FID_CONSTRUCTION_DONE] = True
+        set_ = object.__setattr__
+        if _store is None:
+            store: Any = DetachedOpStore(_OP_STORE_LAYOUT)
+        else:
+            store = _store
+        row = store.adopt_row(cells)
+        set_(self, "_core", store)
+        set_(self, "_row", row)
 
     @property
     def layer_type(self) -> str:
@@ -1552,12 +2502,12 @@ class Op:
         self.type = value
 
     @property
-    def macs_forward(self) -> Optional[Macs]:
+    def macs_forward(self) -> Macs | None:
         """Forward MACs (multiply-accumulate ops). 1 MAC = 2 FLOPs."""
         return as_macs(self.flops_forward // 2 if self.flops_forward is not None else None)
 
     @property
-    def macs_backward(self) -> Optional[Macs]:
+    def macs_backward(self) -> Macs | None:
         """Backward MACs (multiply-accumulate ops). 1 MAC = 2 FLOPs."""
         return as_macs(self.flops_backward // 2 if self.flops_backward is not None else None)
 
@@ -1584,6 +2534,69 @@ class Op:
         """
 
         return Macs(self.flops_total // 2)
+
+    @property
+    def bytes_read(self) -> Bytes | None:
+        """Theoretical ideal read-once traffic for this operation.
+
+        This access-time model uses only recorded shape/dtype metadata. It is
+        not measured hardware traffic and can diverge under caching, kernel
+        fusion, or backend implementation details. Logical view/alias operations
+        report zero bytes moved; insufficient metadata returns ``None``.
+
+        Returns
+        -------
+        Bytes | None
+            Theoretical bytes read once from inputs and parameters.
+        """
+
+        from ..debug._cost import theoretical_op_bytes
+
+        return theoretical_op_bytes(self)[0]
+
+    @property
+    def bytes_written(self) -> Bytes | None:
+        """Theoretical ideal write-once traffic for this operation.
+
+        This access-time model uses only recorded shape/dtype metadata. It is
+        not measured hardware traffic and can diverge under caching, kernel
+        fusion, or backend implementation details. Logical view/alias operations
+        report zero bytes moved; insufficient metadata returns ``None``.
+
+        Returns
+        -------
+        Bytes | None
+            Theoretical bytes written once for the logical output.
+        """
+
+        from ..debug._cost import theoretical_op_bytes
+
+        return theoretical_op_bytes(self)[1]
+
+    @property
+    def arithmetic_intensity(self) -> float | None:
+        """Return theoretical forward FLOPs per ideal traffic byte.
+
+        The value is ``flops_forward / (bytes_read + bytes_written)`` using the
+        theoretical ideal read-once/write-once model. It is not measured roofline
+        intensity and can diverge under kernel fusion, caching, or real memory
+        transactions. Missing FLOPs/traffic and zero-traffic logical views return
+        ``None``.
+
+        Returns
+        -------
+        float | None
+            Theoretical forward arithmetic intensity in FLOPs per byte.
+        """
+
+        bytes_read = self.bytes_read
+        bytes_written = self.bytes_written
+        if self.flops_forward is None or bytes_read is None or bytes_written is None:
+            return None
+        total_bytes = int(bytes_read) + int(bytes_written)
+        if total_bytes == 0:
+            return None
+        return float(self.flops_forward) / total_bytes
 
     @property
     def param_names(self) -> list[str]:
@@ -1671,13 +2684,7 @@ class Op:
         """Per-pass gradient records saved for this Op."""
 
         trace = self.source_trace
-        if getattr(trace, "backend", "torch") in {"jax", "mlx", "tinygrad"}:
-            raise ValueError(
-                f"{getattr(trace, 'backend', 'backend')} traces do not expose op.grads or "
-                "saved_grad_ops because they do not capture true backward graphs. Use "
-                "trace.derived_grads for leaf-level derived gradients and "
-                "op.derived_grad for exact op-level derived gradients when available."
-            )
+        raise_if_no_backward_capture(trace, plural_subject="op.grads or saved_grad_ops")
         records = self._slot("_grad_records")
         if records is None:
             records = []
@@ -1695,7 +2702,7 @@ class Op:
             or ``None`` when this op has no exact intermediate-derived record.
         """
 
-        trace = self.source_trace
+        trace = self._source_trace
         records = getattr(trace, "intermediate_derived_grads", None)
         if records is None:
             return None
@@ -1722,8 +2729,12 @@ class Op:
 
         record = self.grads.for_pass(bwd)
         if record.grad is None:
-            raise ValueError(
-                f"op {self.label} has no saved gradient payload for backward pass {bwd}."
+            raise PayloadUnavailableError(
+                f"op {self.label} has no saved gradient payload for backward pass {bwd}",
+                code="gradient_not_saved",
+                remedy="capture with gradient saving enabled for this op and pass",
+                label=str(self.label),
+                backward_pass=bwd,
             )
         return record.grad
 
@@ -1804,7 +2815,7 @@ class Op:
         grad_fn = self.grad_fn
         if grad_fn is None:
             return None
-        return cast("Optional[str]", getattr(grad_fn, "label", None))
+        return cast("str | None", getattr(grad_fn, "label", None))
 
     @property
     def layer(self) -> "Layer":
@@ -1959,7 +2970,7 @@ class Op:
         the ModuleCall record.
         """
 
-        return cast("Optional[str]", self.atomic_module_call)
+        return cast("str | None", self.atomic_module_call)
 
     @property
     def atomic_module_address(self) -> str | None:
@@ -1985,7 +2996,7 @@ class Op:
         address = self.atomic_module_address
         if address is None:
             return None
-        trace = self.source_trace
+        trace = self._source_trace
         if trace is None:
             return None
         try:
@@ -2023,18 +3034,37 @@ class Op:
 
         return tuple(self._slot("_edge_uses") or ())
 
+    def _own_label_spellings(self) -> set[str]:
+        """Return every spelling a relation list may use for THIS op.
+
+        On a finished trace a parent's ``children`` (or a child's ``parents``)
+        may record this op under either its bare ``layer_label`` or -- on a
+        multi-pass layer -- its pass-qualified ``layer_label:pass`` spelling,
+        so self-exclusion in ``siblings``/``co_parents`` must cover BOTH
+        (excluding only the bare spelling appended the op itself on every
+        multi-pass layer). Unfinished traces still use raw labels.
+        """
+
+        _finished_trace = self._source_trace_or_none()
+        _finished = self._tracing_finished or (
+            _finished_trace is not None and _finished_trace._tracing_finished
+        )
+        if not _finished:
+            return {self._label_raw}
+        spellings = {self.layer_label}
+        pass_index = self.pass_index
+        if isinstance(pass_index, int):
+            spellings.add(f"{self.layer_label}:{pass_index}")
+        return spellings
+
     @property
     def siblings(self) -> list[str]:
-        """Layers sharing at least one parent (excluding output layers)."""
-        ml = self.source_trace
+        """Layers sharing at least one parent (excluding output layers and this op)."""
+        ml = self._source_trace
         if ml is None:
             return []
-        _finished = self._tracing_finished or (
-            self.source_trace is not None and self.source_trace._tracing_finished
-        )
-        my_label = self.layer_label if _finished else self._label_raw
         siblings = []
-        seen = {my_label}
+        seen = self._own_label_spellings()
         for parent_label in self.parents:
             try:
                 parent = ml[parent_label]
@@ -2064,16 +3094,12 @@ class Op:
 
     @property
     def co_parents(self) -> list[str]:
-        """Layers sharing at least one child (excluding output layers)."""
-        ml = self.source_trace
+        """Layers sharing at least one child (excluding output layers and this op)."""
+        ml = self._source_trace
         if ml is None:
             return []
-        _finished = self._tracing_finished or (
-            self.source_trace is not None and self.source_trace._tracing_finished
-        )
-        my_label = self.layer_label if _finished else self._label_raw
         spouses = []
-        seen = {my_label}
+        seen = self._own_label_spellings()
         for child_label in self.children:
             try:
                 child = ml[child_label]
@@ -2237,10 +3263,14 @@ class Op:
             self._label_raw,
             self._layer_label_raw,
         )
+        # ``Trace.ops`` is a cache-checking property, so resolving it per parent
+        # made a wide fan-in operation (concatenation) pay that check once per
+        # parent; the accessor cannot change while this loop runs.
+        ops = trace.ops
         for parent_label in self.parents:
             parent: Op | None
             try:
-                parent = trace.ops[parent_label]
+                parent = ops[parent_label]
             except KeyError:
                 parent = cast("Op | None", trace.layer_dict_all_keys.get(parent_label))
             if parent is None:
@@ -2320,7 +3350,12 @@ class Op:
 
     @property
     def module_call_depth(self) -> int:
-        """Depth of module nesting for this operation."""
+        """Depth of ``module_call_stack``, the op's active ModuleCall nesting.
+
+        ``module_call_stack`` holds the same containment fact as ``modules``
+        (root-first ModuleCall labels active for this op; B3R7-R05-1 tied the
+        two by invariant), so the length of either is this depth.
+        """
         return len(self.modules)
 
     @property
@@ -2347,10 +3382,10 @@ class Op:
         trace-level ``grad_transform`` that was applied to this Op's gradient.
         """
 
-        trace = self.source_trace
+        trace = self._source_trace
         if trace is None:
             return None
-        return cast("Optional[Callable[..., Any]]", getattr(trace, "grad_transform", None))
+        return cast("Callable[..., Any] | None", getattr(trace, "grad_transform", None))
 
     @property
     def is_buffer_source(self) -> bool:
@@ -2411,11 +3446,30 @@ class Op:
 
     @property
     def source_trace(self) -> "Trace":
-        """Back-reference to the owning Trace (stored as weakref)."""
+        """Back-reference to the owning Trace (stored as weakref).
+
+        Never returns ``None``: an Op detached from its Trace (standalone
+        pickle strips the weakref; cleanup clears it) refuses with the same
+        typed ``RecordBindingError`` family as the collected-Trace case, so
+        no ``None`` can escape behind the ``-> Trace`` signature and crash a
+        caller untyped -- the r4 ``Layer`` fix (1a2b715e) applied to the
+        sibling record class it never reached (r5 b7-opus R52-B).
+        """
         ref = self._slot("_source_trace_ref")
         if ref is None:
-            return None  # type: ignore[return-value]
+            raise RecordBindingError(
+                "This Op is not bound to a Trace (standalone pickle, "
+                "cleanup, or a record never attached to a Trace)",
+                code="record_not_bound",
+                remedy="read the op through a live Trace accessor",
+            )
         obj = ref()
+        if obj is None:
+            raise RecordBindingError(
+                "Trace has been garbage-collected",
+                code="trace_reference_collected",
+                remedy="keep the owning Trace alive while reading its records",
+            )
         return cast("Trace", obj)
 
     @source_trace.setter
@@ -2428,6 +3482,22 @@ class Op:
             Owning model log, or ``None`` to clear the reference.
         """
         self._source_trace_ref = weakref.ref(value) if value is not None else None
+
+    def _source_trace_or_none(self) -> "Trace | None":
+        """Owning Trace, or ``None`` when detached (internal quiet spelling)."""
+        ref = self._slot("_source_trace_ref")
+        obj = ref() if ref is not None else None
+        return cast("Trace | None", obj)
+
+    @property
+    def _source_trace(self) -> "Trace | None":
+        """Owning Trace, if bound and still alive (tolerant internal read).
+
+        Property alias of :meth:`_source_trace_or_none` so both landed
+        internal spellings stay valid.
+        """
+
+        return self._source_trace_or_none()
 
     def _source_trace_or_error(self) -> "Trace":
         """Return the owning Trace, or raise a detached-log error.
@@ -2659,7 +3729,41 @@ class Op:
         )
         return self.grad
 
-    def __getstate__(self) -> Dict[str, Any]:
+    def __tl_state_items__(self) -> Any:
+        """Yield live state ``(field_name, value)`` pairs in declared order.
+
+        The M2 state-protocol hook. Enumeration follows the declared
+        ``_OP_SLOT_NAMES`` order and reads through
+        ``object.__getattribute__`` -- exactly what the former per-slot walk
+        did -- so class-level compatibility overlays (the ancestor-bitset
+        properties installed by ``backends/torch/ops.py``) keep
+        materializing their public values into pickle/fork state instead of
+        leaking compact internal encodings. Unset cells are skipped; a bare
+        ``object.__new__`` shell with no bound store yields nothing.
+        """
+
+        getattribute = _object_getattribute
+        for name in _OP_SLOT_NAMES:
+            try:
+                yield name, getattribute(self, name)
+            except AttributeError:
+                continue
+
+    def __tl_state_restore__(self, mapping: dict[str, Any]) -> None:
+        """Install ``mapping`` onto this op through the descriptor protocol.
+
+        Binds a detached single-row store when this op is a bare shell
+        (``state_new`` fork/scrub shells), then assigns exactly like the
+        generic fallback did: one ``object.__setattr__`` per field, which
+        resolves the generated field descriptors and the compatibility
+        properties identically to the former slot layout.
+        """
+
+        _ensure_detached_store(self)
+        for field_name, field_value in mapping.items():
+            _object_setattr(self, field_name, field_value)
+
+    def __getstate__(self) -> dict[str, Any]:
         """Return pickle state with weakrefs stripped."""
         state = dict(state_items(self))
         state["_source_trace_ref"] = None
@@ -2668,66 +3772,21 @@ class Op:
         state.pop("_projective_field_cache", None)
         state["func"] = None
         state["grad_fn_handle"] = None
+        # R10-7: user transform callables (FieldPolicy.DROP) serialize to the
+        # loaded-artifact form (None) -- a lambda transform= made pickle.dumps
+        # crash on every op record while tl.save succeeded on the same trace.
+        if state.get("activation_transform") is not None:
+            state["activation_transform"] = None
+        if state.get("grad_transform") is not None:
+            state["grad_transform"] = None
         state["tlspec_version"] = TLSPEC_VERSION
         return state
 
-    def __setstate__(self, state: Dict[str, Any]) -> None:
+    def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore pickle state produced by ``__getstate__``."""
-        version = read_tlspec_version(state, cls_name=type(self).__name__)
-        legacy_thread_keys = (
-            "_module_boundary_thread_output",
-            "_module_boundary_threads_inputs",
-            "module_entry_exit_threads_inputs",
-        )
-        dropped = False
-        for key in legacy_thread_keys:
-            if key in state:
-                state.pop(key)
-                dropped = True
-        if dropped and version < 3:
-            from .._io import _warn_legacy_thread_fields_dropped
-
-            _warn_legacy_thread_fields_dropped()
-        old_key_map = {
-            "tensor_label_raw": "_label_raw",
-            "operation_num": "op_num",
-            "activation": "out",
-            "transformed_activation": "transformed_out",
-            "has_saved_activation": "has_saved_activation",
-            "activation_transform": "activation_transform",
-            "activation_shape": "shape",
-            "transformed_activation_shape": "transformed_out_shape",
-            "activation_dtype": "dtype",
-            "transformed_activation_dtype": "transformed_out_dtype",
-            "memory": "activation_memory",
-            "activation_memory": "activation_memory",
-            "transformed_activation_memory": "transformed_activation_memory",
-            "in_multi_output": "in_multi_output",
-            "iterable_output_index": "multi_output_index",
-            "grad_fn_object": "grad_fn_handle",
-            "corresponding_grad_fn": "grad_fn_handle",
-            "is_input_layer": "is_input",
-            "is_output_layer": "is_output",
-            "is_output_ancestor": "has_output_descendant",
-            "is_buffer_layer": "is_buffer",
-            "internally_initialized": "is_internal_source",
-            "internally_terminated": "is_internal_sink",
-            "parent_param_barcodes": "_param_barcodes",
-            "module_passes_entered": "input_to_module_calls",
-            "input_to_modules": "input_to_module_calls",
-            "modules_exited": "output_of_modules",
-            "module_passes_exited": "output_of_module_calls",
-            "is_leaf_module_output": "is_atomic_module",
-            "leaf_module_pass": "atomic_module_call",
-            "activation_ref": "out_ref",
-            "gradient_ref": "grad_ref",
-            "edge_uses": "_edge_uses",
-            "min_distance_from_output": "min_distance_to_output",
-            "max_distance_from_output": "max_distance_to_output",
-        }
-        for old_key, new_key in old_key_map.items():
-            if new_key not in state and old_key in state:
-                state[new_key] = state.pop(old_key)
+        _ensure_detached_store(self)
+        read_tlspec_version(state, cls_name=type(self).__name__)
+        resolver_status_was_present = "resolver_status" in state
         default_fill_state(
             state,
             defaults=self.DEFAULT_FILL_STATE,
@@ -2744,9 +3803,7 @@ class Op:
             state["device_ref"] = _device_ref_from_metadata(
                 state.get("out"), state.get("output_device")
             )
-        if version < 5 and state.get("backend_address") is None:
-            state["backend_address"] = state.get("address")
-        if state.get("resolver_status") is None:
+        if not resolver_status_was_present:
             state["resolver_status"] = "resolved"
         for field_name in (
             "activation_memory",
@@ -2793,6 +3850,13 @@ class Op:
             object.__delattr__(self, "_facets_cache")
         except AttributeError:
             pass
+
+    def __selection__(self) -> object:
+        """Lift this op's whole output as an ACT selection term (one pass)."""
+
+        from ..selection import _selection_from_op
+
+        return _selection_from_op(self)
 
     @property
     def receptive_field(self) -> "ReceptiveFieldView":
@@ -2869,8 +3933,11 @@ class Op:
         """Accept compatibility writes for the computed raw label."""
 
         if value not in {None, self.raw_label}:
-            raise ValueError(
-                f"raw_label is derived from _label_raw and cannot be set to {value!r}."
+            raise InvalidArgumentError(
+                f"raw_label is derived from _label_raw and cannot be set to {value!r}",
+                code="derived_field_assignment_invalid",
+                remedy="do not assign raw_label; it is derived from _label_raw",
+                field="raw_label",
             )
 
     @property
@@ -2931,17 +3998,25 @@ class Op:
         """Accept compatibility writes for the computed internal-source alias."""
 
         if value is not None and bool(value) != bool(self.is_internal_source):
-            raise ValueError(
+            raise InvalidArgumentError(
                 "is_internally_initialized is derived from is_internal_source and "
-                f"cannot be set to {value!r}."
+                f"cannot be set to {value!r}",
+                code="derived_field_assignment_invalid",
+                remedy="do not assign is_internally_initialized; it mirrors is_internal_source",
+                field="is_internally_initialized",
             )
 
     # ********************************************
     # ************* Logging Functions ************
     # ********************************************
 
-    def copy(self) -> "Op":
+    def copy(self, *, _store: Any = None) -> "Op":
         """Return a selective-depth copy of this entry.
+
+        ``_store`` is the private internal-synthesis hook: postprocess output
+        node synthesis passes the owning trace's row store so the clone is
+        appended as a shared columnar row. Public callers omit it and receive
+        a detached single-row copy.
 
         Most fields are ``copy.deepcopy``'d so the clone is fully independent.
         However, certain fields are shallow-copied (shared by reference) because:
@@ -2962,8 +4037,47 @@ class Op:
         Returns:
             A new Op (or subclass) with the same field values.
         """
+        return self._copy_with_shallow_fields(frozenset(), _store=_store)
+
+    def _copy_for_output(self, *, _store: Any = None) -> "Op":
+        """Clone this op for immediate conversion into a synthetic output node.
+
+        Parameters
+        ----------
+        _store:
+            Optional owning row store for the synthesized node.
+
+        Returns
+        -------
+        Op
+            Clone whose soon-to-be-replaced fields avoid unnecessary deep copies.
+        """
+
+        return self._copy_with_shallow_fields(_OUTPUT_NODE_REPLACED_FIELDS, _store=_store)
+
+    def _copy_with_shallow_fields(
+        self,
+        extra_shallow_fields: frozenset[str],
+        *,
+        _store: Any = None,
+    ) -> "Op":
+        """Clone this op while sharing fields the caller replaces immediately.
+
+        Parameters
+        ----------
+        extra_shallow_fields:
+            Additional fields safe to share for this construction path.
+        _store:
+            Optional owning row store for the clone.
+
+        Returns
+        -------
+        Op
+            Selective-depth clone.
+        """
+
         fields_dict = {}
-        fields_not_to_deepcopy = [
+        fields_not_to_deepcopy = {
             "func",
             "grad_fn_class_name",
             "grad_fn_handle",
@@ -2979,22 +4093,31 @@ class Op:
             "transformed_grad",
             "out_versions_by_child",
             "container_spec",
-        ]
-        for field in LAYER_PASS_LOG_FIELD_ORDER:
-            if field not in fields_not_to_deepcopy:
-                fields_dict[field] = copy.deepcopy(getattr(self, field, None))
-            else:
-                fields_dict[field] = getattr(self, field, None)
-        copied_entry = type(self)(fields_dict)
+        } | extra_shallow_fields
+        from .._trace_core.op_store import row_clone_scope
+
+        # The whole-schema getattr loop is a ROW-CLONE read, not a set of
+        # per-column dependencies: under a combined step audit these reads
+        # are tagged category (d) via the clone scope (design-ppdag-v3
+        # §2.4d) — legal on row-creating steps, a finding elsewhere. The
+        # scope is one dict lookup when no audit is armed; clone WRITES
+        # bypass interception entirely (adopt_row).
+        with row_clone_scope(object.__getattribute__(self, "_core")):
+            for field in LAYER_PASS_LOG_FIELD_ORDER:
+                if field not in fields_not_to_deepcopy:
+                    fields_dict[field] = _copy_op_field_value(getattr(self, field, None))
+                else:
+                    fields_dict[field] = getattr(self, field, None)
+        copied_entry = type(self)(fields_dict, _store=_store)
         return copied_entry
 
     def save_activation(
         self,
         t: torch.Tensor,
-        t_args: Union[List[Any], Tuple[Any, ...]],
-        t_kwargs: Dict[str, Any],
+        t_args: list[Any] | tuple[Any, ...],
+        t_kwargs: dict[str, Any],
         save_arg_values: bool,
-        activation_transform: Optional[Callable[..., Any]] = None,
+        activation_transform: Callable[..., Any] | None = None,
     ) -> None:
         """Save the output tensor (and optionally args) for this operation.
 
@@ -3014,7 +4137,7 @@ class Op:
             activation_transform: Optional transform applied to the tensor
                 before storing (e.g. detach, to-numpy, normalize).
         """
-        trace = self.source_trace
+        trace = self._source_trace
         writer = getattr(trace, "_out_writer", None) if trace is not None else None
         try:
             save_mode = _effective_activation_save_mode(
@@ -3022,16 +4145,45 @@ class Op:
                 func_name=self.func_name,
                 is_inplace=bool(self.is_inplace),
             )
-            # Clone the tensor, optionally detaching from autograd graph.
-            raw_out = copy_tensor_payload(
-                t,
-                detach_tensor=self.detach_saved_activations,
-                save_mode=save_mode,
+            budget = getattr(trace, "_save_budget_accountant", None)
+            target_device = t.device
+            if save_mode == "cpu_async":
+                target_device = torch.device("cpu")
+            elif self.output_device not in ("same", str(t.device)):
+                target_device = torch.device(self.output_device)
+            budget_reservation = (
+                None
+                if budget is None
+                else budget.admit(
+                    self._layer_label_raw,
+                    target_device,
+                    get_memory_amount_from_metadata(t, tuple(t.shape), t.dtype),
+                )
             )
-            # Move to the user-requested output device if needed.
-            if self.output_device not in [str(raw_out.device), "same"]:
-                raw_out = safe_to(raw_out, self.output_device)
-            _stamp_reference_out(self.annotations, raw_out, save_mode)
+            save_raw_activations = getattr(trace, "save_raw_activations", True)
+            store_raw = save_raw_activations or activation_transform is None
+            # Pre-copy identity probe (dedup-after-copy ordering): a hit
+            # reuses the already-saved payload and skips the clone entirely.
+            # Restricted to plain "copy" mode -- reference/view copies are
+            # free and cpu_async has fence side effects.
+            dedup_cached_out = (
+                _dedup_cached_identity_out(trace, t, self.annotations, save_arg_values)
+                if store_raw and save_mode == "copy"
+                else None
+            )
+            if dedup_cached_out is not None:
+                raw_out = dedup_cached_out
+            else:
+                # Clone the tensor, optionally detaching from autograd graph.
+                raw_out = copy_tensor_payload(
+                    t,
+                    detach_tensor=self.detach_saved_activations,
+                    save_mode=save_mode,
+                )
+                # Move to the user-requested output device if needed.
+                if self.output_device not in [str(raw_out.device), "same"]:
+                    raw_out = safe_to(raw_out, self.output_device)
+                _stamp_reference_out(self.annotations, raw_out, save_mode)
 
             self.shape = tuple(raw_out.shape)
             self.dtype = raw_out.dtype
@@ -3039,17 +4191,18 @@ class Op:
                 get_memory_amount_from_metadata(raw_out, self.shape, self.dtype)
             )
 
-            save_raw_activations = getattr(trace, "save_raw_activations", True)
-            store_raw = save_raw_activations or activation_transform is None
             if store_raw:
-                raw_out = _dedup_saved_activation_out(
-                    trace,
-                    t,
-                    raw_out,
-                    self._layer_label_raw,
-                    self.annotations,
-                    save_arg_values,
-                )
+                if dedup_cached_out is None:
+                    raw_out = _dedup_saved_activation_out(
+                        trace,
+                        t,
+                        raw_out,
+                        self._layer_label_raw,
+                        self.annotations,
+                        save_arg_values,
+                    )
+                if isinstance(raw_out, torch.Tensor):
+                    mark_detached_saved_activation(t, raw_out, self._layer_label_raw)
             self._internal_set("out", raw_out if store_raw else None)
 
             self._internal_set("transformed_out", None)
@@ -3079,10 +4232,12 @@ class Op:
                 self.transformed_out_shape = _shape_or_none(self.transformed_out)
                 self.transformed_out_dtype = _dtype_or_none(self.transformed_out)
                 self.transformed_activation_memory = _memory_or_none(self.transformed_out)
+            if budget is not None:
+                budget.commit(budget_reservation, (self.out, self.transformed_out))
         except Exception as exc:
             if writer is not None:
                 writer.abort(f"Failed while saving out for {self._streaming_label}: {exc}")
-                if isinstance(exc, TorchLensPostfuncError):
+                if isinstance(exc, (SaveBudgetExceededError, TorchLensPostfuncError)):
                     raise
                 raise TorchLensIOError(
                     f"Streaming out save failed for {self._streaming_label}."
@@ -3096,7 +4251,7 @@ class Op:
             if out_sink is not None and isinstance(self.out, torch.Tensor):
                 out_sink(self._streaming_label, self.out)
 
-            if writer is not None and getattr(trace, "_in_exhaustive_pass", False):
+            if writer is not None and trace._wrapper_runtime_ws.in_exhaustive_pass:
                 self._stream_tensor_blob(
                     writer,
                     tensor_field="out",
@@ -3122,7 +4277,11 @@ class Op:
             self._internal_set("saved_args", None)
             self._internal_set("saved_kwargs", None)
 
-    def log_tensor_grad(self, grad: torch.Tensor) -> None:
+    def log_tensor_grad(
+        self,
+        grad: torch.Tensor,
+        prebuilt: "tuple[torch.Tensor | None, Any | None] | None" = None,
+    ) -> None:
         """Save the grad tensor for this layer's output.
 
         Called by the backward hook registered during the forward pass.
@@ -3131,8 +4290,14 @@ class Op:
 
         Args:
             grad: The grad tensor flowing back through this operation.
+            prebuilt: Budget-charged ``(raw_payload, transformed_payload)``
+                pair already built (and transform-validated) by the
+                event-sidecar path for this exact grad. When given, the slot
+                REUSES those objects: no second clone, no second
+                ``grad_transform`` execution, no uncharged retention
+                (grind-r6 b5 R34-N1/R35-N1).
         """
-        trace = self.source_trace
+        trace = self._source_trace
         raw_grad = grad
         self.grad_shape = tuple(raw_grad.shape)
         self.grad_dtype = raw_grad.dtype
@@ -3143,6 +4308,44 @@ class Op:
         self.transformed_grad_dtype = None
         self.transformed_gradient_memory = None
         writer = getattr(trace, "_out_writer", None) if trace is not None else None
+        if prebuilt is not None:
+            raw_payload, transformed_payload = prebuilt
+            if grad_transform is not None:
+                self._internal_set("transformed_grad", transformed_payload)
+                self.transformed_grad_shape = _shape_or_none(self.transformed_grad)
+                self.transformed_grad_dtype = _dtype_or_none(self.transformed_grad)
+                self.transformed_gradient_memory = _memory_or_none(self.transformed_grad)
+            self._internal_set("grad", raw_payload)
+            self.has_grad = True
+            if writer is not None and getattr(trace, "_defer_streaming_bundle_finalization", False):
+                self._stream_tensor_blob(
+                    writer,
+                    tensor_field="grad",
+                    pending_field="_pending_grad_blob_id",
+                    kind="grad",
+                )
+                self._stream_tensor_blob(
+                    writer,
+                    tensor_field="transformed_grad",
+                    pending_field="_pending_transformed_grad_blob_id",
+                    kind="transformed_grad",
+                )
+            return
+        # Admit BEFORE the transform/clone allocate (r8 R34, fable F1): a
+        # policy-DENIED label reaching this legacy slot (callable/selector
+        # save_grads with _grad_op_nums_to_save == "all") used to retain a
+        # full uncharged grad clone -- invisible to a tight save_budget.
+        # Source-sized reservation, transform delta reconciled at commit,
+        # exactly the primary-site contract.
+        budget = getattr(trace, "_save_budget_accountant", None) if trace is not None else None
+        grad_reservation = None
+        if budget is not None:
+            grad_reservation = budget.admit(
+                str(getattr(self, "_layer_label_raw", "<grad>")),
+                raw_grad.device,
+                int(raw_grad.numel() * raw_grad.element_size()),
+                site="primary",
+            )
         if grad_transform is not None:
             self._internal_set(
                 "transformed_grad",
@@ -3169,12 +4372,22 @@ class Op:
 
         save_raw_gradients = getattr(trace, "save_raw_gradients", True)
         store_raw = save_raw_gradients or grad_transform is None
+        # Gradient payloads are ALWAYS genuine snapshots: under
+        # save_mode="reference"/"view" an aliased payload would be silently
+        # rewritten by later user mutation of the seed gradient or by
+        # AccumulateGrad accumulating in place on the next backward, and no
+        # wrapped in-place op exists on the grad path to disclose it. Route
+        # through the same chokepoint the event-sidecar path uses.
+        from ..backends.torch.tensor_tracking import _copy_grad_payload
+
         save_mode = cast(SaveMode, getattr(trace, "save_mode", "copy"))
         self._internal_set(
             "grad",
-            safe_copy(raw_grad, detach_tensor=True, save_mode=save_mode) if store_raw else None,
+            _copy_grad_payload(raw_grad, save_mode=save_mode) if store_raw else None,
         )
         self.has_grad = True
+        if budget is not None and grad_reservation is not None:
+            budget.commit(grad_reservation, (self.grad, self.transformed_grad))
         if writer is not None and getattr(trace, "_defer_streaming_bundle_finalization", False):
             self._stream_tensor_blob(
                 writer,
@@ -3236,7 +4449,7 @@ class Op:
     ) -> None:
         """Validate differentiability requirements for train-mode transform outputs."""
 
-        trace = self.source_trace
+        trace = self._source_trace
         validate_train_mode_transform_output(
             raw_tensor=raw_tensor,
             transformed_tensor=output,
@@ -3299,7 +4512,7 @@ class Op:
             Mutates the writer state if present.
         """
 
-        trace = self.source_trace
+        trace = self._source_trace
         writer = getattr(trace, "_out_writer", None) if trace is not None else None
         if writer is not None:
             writer.abort(message)
@@ -3338,7 +4551,7 @@ class Op:
             raise TorchLensIOError(message)
         blob_id = writer.next_blob_id()
         setattr(self, pending_field, blob_id)
-        writer.write_blob(
+        writer.submit_blob(
             blob_id,
             tensor,
             kind=kind,
@@ -3349,15 +4562,36 @@ class Op:
     # ************* Fetcher Functions ************
     # ********************************************
 
+    def _resolve_relation_record(self, label: str) -> "Op | None":
+        """Resolve one relation label through the mainline, then orphans.
+
+        The 62aba742 orphan tolerance stopped at the label aggregates: on a
+        ``keep_orphans=True`` trace the aggregates include an orphan's label
+        while the OBJECT-resolving surfaces crashed on the bare mainline
+        lookup (b3 R05-N2). Mirror the per-op ``siblings`` behavior: fold
+        the ``orphans`` fallback, skip what neither surface resolves.
+        """
+
+        trace = self.source_trace
+        try:
+            return cast("Op", trace[label])
+        except (KeyError, ValueError):
+            try:
+                return cast("Op", trace.orphans[label])
+            except KeyError:
+                return None
+
     def get_children(self) -> list["Op"]:
         """Return child Op objects for this pass.
 
         Returns
         -------
         list[Op]
-            Child ops resolved through the owning model log.
+            Child ops resolved through the owning model log; orphan-relation
+            labels resolve through ``trace.orphans`` (unresolvable skipped).
         """
-        return [self.source_trace[child_label] for child_label in self.children]
+        resolved = (self._resolve_relation_record(label) for label in self.children)
+        return [record for record in resolved if record is not None]
 
     def get_parents(self) -> list["Op"]:
         """Return parent Op objects for this pass.
@@ -3365,9 +4599,11 @@ class Op:
         Returns
         -------
         list[Op]
-            Parent ops resolved through the owning model log.
+            Parent ops resolved through the owning model log; orphan-relation
+            labels resolve through ``trace.orphans`` (unresolvable skipped).
         """
-        return [self.source_trace[parent_label] for parent_label in self.parents]
+        resolved = (self._resolve_relation_record(label) for label in self.parents)
+        return [record for record in resolved if record is not None]
 
     def show(
         self,
@@ -3435,11 +4671,24 @@ class Op:
     # ********************************************
 
     def __str__(self) -> str:
-        """Return a human-readable operation summary."""
+        """Return a human-readable operation summary.
 
-        trace_finished = self.source_trace is not None and self.source_trace._tracing_finished
+        Data-model contract: never raises. An Op detached from its Trace
+        (collected, standalone-pickled, or husked by cleanup) degrades to a
+        one-line placeholder instead of silently printing an unknown
+        denominator (``operation 1/?``) or propagating the typed relation
+        refusal out of ``repr()``/``print()`` (r5 b7-opus R52-B, matching
+        the Layer degradation).
+        """
+
+        trace = self._source_trace_or_none()
+        trace_finished = trace is not None and trace._tracing_finished
         if self._tracing_finished or trace_finished:
-            return self._str_after_pass()
+            try:
+                return self._str_after_pass()
+            except RecordBindingError:
+                label = self.layer_label or self._label_raw or "<unbound>"
+                return f"<Op {label}: detached from its Trace>"
         return self._str_during_pass()
 
     def _str_during_pass(self) -> str:
@@ -3479,8 +4728,9 @@ class Op:
             pass_str = f" (pass {self.pass_index}/{self.num_passes}), "
         else:
             pass_str = ", "
-        sml = self.source_trace
-        num_ops = sml.num_ops if sml is not None else "?"
+        # Raises RecordBindingError when detached; __str__ degrades it to the
+        # explicit placeholder instead of printing an unknown denominator.
+        num_ops = self.source_trace.num_ops
         s = f"Layer {self.layer_label}{pass_str}operation {self.step_index}/{num_ops}:"
         s += f"\n\tOutput tensor: shape={self.shape}, dtype={self.dtype}, size={self.activation_memory}"
         if not self.has_saved_activation:
@@ -3519,12 +4769,19 @@ class Op:
 
     def _tensor_contents_str_helper(self) -> str:
         """Returns short, readable string for the tensor contents."""
-        if self.out is None:
+        try:
+            out = self.out
+        except PayloadUnavailableError:
+            # A predicate save refuses payload reads for unselected ops; the
+            # repr must degrade (the "(not saved)" marker already prints),
+            # never propagate the refusal out of __repr__/__str__ (b1 R01).
+            return ""
+        if out is None:
             return ""
         else:
             s = ""
-            s += f"\n\t\t{tensor_stats_summary(self.out)}"
-            if not isinstance(self.out, torch.Tensor):
+            s += f"\n\t\t{tensor_stats_summary(out)}"
+            if not isinstance(out, torch.Tensor):
                 # Preview-backend (non-torch) saved activation, e.g. MLX/tinygrad/
                 # TF/JAX/Paddle. The slice-then-clone preview below relies on
                 # torch-only methods (.detach(), .requires_grad, .clone()); the
@@ -3534,19 +4791,19 @@ class Op:
                 return s
             tensor_size_shown = 8
             # Use logged shape, not live tensor shape (#45)
-            saved_shape = self.shape if self.shape is not None else self.out.shape
+            saved_shape = self.shape if self.shape is not None else out.shape
             # Slice first, then clone only the small slice (#73)
             if len(saved_shape) == 0:
-                tensor_slice = self.out.detach().clone()
+                tensor_slice = out.detach().clone()
             elif len(saved_shape) == 1:
                 num_dims = min(tensor_size_shown, saved_shape[0])
-                tensor_slice = self.out[0:num_dims].detach().clone()
+                tensor_slice = out[0:num_dims].detach().clone()
             elif len(saved_shape) == 2:
                 num_dims = min(tensor_size_shown, saved_shape[-2], saved_shape[-1])
-                tensor_slice = self.out[0:num_dims, 0:num_dims].detach().clone()
+                tensor_slice = out[0:num_dims, 0:num_dims].detach().clone()
             else:
                 num_dims = min(tensor_size_shown, saved_shape[-2], saved_shape[-1])
-                tensor_slice = self.out.data
+                tensor_slice = out.data
                 for _ in range(len(saved_shape) - 2):
                     tensor_slice = tensor_slice[0]
                 tensor_slice = tensor_slice[0:num_dims, 0:num_dims].detach().clone()
@@ -3597,6 +4854,360 @@ class Op:
         return self.__str__()
 
 
+# ---------------------------------------------------------------------------
+# The M5 facade: generated per-field data descriptors over (_core, _row)
+#
+# ``Op`` stores nothing per instance beyond the store handle and its row id.
+# Each declared stored field is a real data descriptor (visible to dir(),
+# debugger enumeration, and ``vars(Op)`` -- the ancestor-bitset overlay in
+# ``backends/torch/ops.py`` captures these exactly as it captured the former
+# slot member descriptors). ``_MISSING`` cells reproduce the exact unset-slot
+# ``AttributeError`` shapes (message + ``name``/``obj`` on reads; bare-name
+# args on deletes), so ``_slot()``, ``getattr`` defaults, and cleanup paths
+# behave byte-identically.
+# ---------------------------------------------------------------------------
+
+# Bound member-descriptor accessors: C-speed reads of the two real slots that
+# do NOT re-enter ``Op.__getattribute__`` (descriptor bodies run on every
+# field touch, so each avoided Python-level re-entry is measurable).
+_CORE_GET = Op.__dict__["_core"].__get__
+_ROW_GET = Op.__dict__["_row"].__get__
+
+
+def _ensure_detached_store(op: "Op") -> None:
+    """Bind a fresh detached single-row store when ``op`` is a bare shell."""
+
+    try:
+        _CORE_GET(op)
+    except AttributeError:
+        _object_setattr(op, "_core", DetachedOpStore(_OP_STORE_LAYOUT))
+        _object_setattr(op, "_row", 0)
+
+
+def _detach_op_husk(op: "Op") -> None:
+    """Rebind a cleared op to an empty detached row.
+
+    Cleanup / removal paths clear every field and historically left an empty
+    slotted husk; the facade equivalent also drops the reference to the
+    shared row store so a user-held husk cannot pin the whole trace core.
+    """
+
+    _object_setattr(op, "_core", DetachedOpStore(_OP_STORE_LAYOUT))
+    _object_setattr(op, "_row", 0)
+
+
+class _OpField:
+    """Data descriptor for one stored ``Op`` field backed by the row store."""
+
+    __slots__ = ("_name", "_fid")
+
+    def __init__(self, name: str, fid: int) -> None:
+        """Bind the descriptor to its declared field name and column id."""
+
+        self._name = name
+        self._fid = fid
+
+    def __repr__(self) -> str:
+        """Return a diagnostic representation naming the backed field."""
+
+        return f"<Op field descriptor {self._name!r}>"
+
+    def __get__(self, op: Any, owner: Any = None) -> Any:
+        """Read the backing cell; unset cells raise like an unset slot.
+
+        A ``PooledCell`` (the M14 duplicate/empty-container pooling) hydrates
+        a fresh exact-type container on first read and caches it back, so
+        identity is stable across reads and per-row in-place mutation stays
+        isolated — the ``_FACT`` semantics.
+        """
+
+        if op is None:
+            return self
+        store = _CORE_GET(op)
+        row = _ROW_GET(op)
+        value = store.cell_get(row, self._fid)
+        if value is _MISSING:
+            name = self._name
+            raise AttributeError(
+                f"{type(op).__name__!r} object has no attribute {name!r}",
+                name=name,
+                obj=op,
+            )
+        if value.__class__ is PooledCell:
+            value = value.hydrate()
+            store.cell_set(row, self._fid, value)
+        return value
+
+    def __set__(self, op: Any, value: Any) -> None:
+        """Write the backing cell (base while building, overlay after freeze)."""
+
+        _CORE_GET(op).cell_set(_ROW_GET(op), self._fid, value)
+
+    def __delete__(self, op: Any) -> None:
+        """Delete the backing cell; unset cells raise like an unset slot."""
+
+        if not _CORE_GET(op).cell_del(_ROW_GET(op), self._fid):
+            raise AttributeError(self._name)
+
+
+#: Internal storage encodings sanctioned to live in finished relation cells.
+#: Extended at import time by compat overlays whose reads materialize
+#: immutable views (the ancestor bitset in ``backends/torch/ops.py``); a
+#: refresh re-run can assign such an encoding onto a detached-backed op.
+_RELATION_CELL_ENCODINGS: tuple[type, ...] = ()
+
+
+def register_relation_cell_encoding(encoding_type: type) -> None:
+    """Sanction ``encoding_type`` as a finished relation-cell storage value."""
+
+    global _RELATION_CELL_ENCODINGS
+    if encoding_type not in _RELATION_CELL_ENCODINGS:
+        _RELATION_CELL_ENCODINGS = (*_RELATION_CELL_ENCODINGS, encoding_type)
+
+
+class _RelationViewField(_OpField):
+    """Descriptor for one immutable-view relation field (M6, JMT-FORK-1).
+
+    While a shared ``OpRowStore`` is BUILDING, writes stage raw mutable
+    containers (postprocess mutates them in place). Once the store is sealed
+    — and always on detached single-row stores (copy/pickle/fork/loaded) —
+    writes normalize ``list``/``set`` values to the field's immutable view
+    type, so a finished record can never re-expose a mutable relation
+    container regardless of which write path assigned it.
+    """
+
+    __slots__ = ("_view_type",)
+
+    def __init__(self, name: str, fid: int, view_type: type) -> None:
+        """Bind the descriptor with its immutable view type."""
+
+        super().__init__(name, fid)
+        self._view_type = view_type
+
+    def __set__(self, op: Any, value: Any) -> None:
+        """Write the cell, normalizing to the view type once finished.
+
+        "Finished" is any of: a sealed store, a store whose relation freeze
+        already ran (preview backends convert without sealing), or a detached
+        single-row store. Building-phase writes stay raw so postprocess can
+        keep mutating its staging containers in place.
+
+        Finished-store assignment is CLOSED over container types: any
+        ``list``/``set``/``tuple``/``frozenset`` INSTANCE (subclasses
+        included — an exact-type check let a mutable subclass bypass the
+        view) normalizes to the field's view type, ``None`` passes through,
+        and every other value raises ``TypeError`` so a finished record can
+        never re-expose a mutable relation container regardless of which
+        write path assigned it.
+        """
+
+        store = _CORE_GET(op)
+        if store.frozen or store.dataflow_edges is not None or store.__class__ is DetachedOpStore:
+            if isinstance(value, (list, set, frozenset, tuple)):
+                if value.__class__ is not self._view_type:
+                    value = self._view_type(value)
+            elif value is not None and not isinstance(value, _RELATION_CELL_ENCODINGS):
+                raise ArgumentTypeError(
+                    f"cannot assign {type(value).__name__!r} to finished relation "
+                    f"field {self._name!r}; expected list/set/tuple/frozenset "
+                    f"(normalized to {self._view_type.__name__}) or None",
+                    code="relation_assignment_type_invalid",
+                    remedy="assign a list/set/tuple/frozenset or None to relation fields",
+                    field=self._name,
+                )
+        store.cell_set(_ROW_GET(op), self._fid, value)
+
+
+class _GroupViewField(_RelationViewField):
+    """Descriptor for the two group-membership fields (M7, JMT-FORK-1).
+
+    A finished cell holds THE one shared ``GroupRef`` of its membership
+    group; reads resolve to the group's cached immutable view (``frozenset``
+    for ``equivalent_ops``, ``tuple`` for ``recurrent_ops``) — O(1) and LIVE
+    through removal scrub, which rebinds the group row once for every
+    member. This natively replaces the historical copy-on-read barrier
+    (a fresh mutable copy per read, O(group) each): immutable views cannot
+    alias-corrupt the group, so sharing is safe by construction.
+    """
+
+    __slots__ = ()
+
+    def __get__(self, op: Any, owner: Any = None) -> Any:
+        """Read the cell, resolving group refs to their live view."""
+
+        if op is None:
+            return self
+        value = _CORE_GET(op).cell_get(_ROW_GET(op), self._fid)
+        if value.__class__ is GroupRef:
+            return value.view()
+        if value is _MISSING:
+            name = self._name
+            raise AttributeError(
+                f"{type(op).__name__!r} object has no attribute {name!r}",
+                name=name,
+                obj=op,
+            )
+        return value
+
+
+class _DataflowField(_RelationViewField):
+    """Descriptor for the two CSR-backed dataflow fields.
+
+    A ``_CSR`` cell means the value lives in the store's edge-occurrence
+    table: the first read rematerializes the interned tuple view and caches
+    it back into the row (row cell on small sealed stores, sparse overlay on
+    transposed ones), so identity is stable across reads and uninspected
+    rows retain no per-row container.
+    """
+
+    __slots__ = ()
+
+    def __get__(self, op: Any, owner: Any = None) -> Any:
+        """Read the cell, rematerializing CSR-backed views on demand."""
+
+        if op is None:
+            return self
+        store = _CORE_GET(op)
+        row = _ROW_GET(op)
+        value = store.cell_get(row, self._fid)
+        if value is _CSR:
+            value = materialize_dataflow_view(store, row, self._name)
+            store.cell_set(row, self._fid, value)
+            return value
+        if value is _MISSING:
+            name = self._name
+            raise AttributeError(
+                f"{type(op).__name__!r} object has no attribute {name!r}",
+                name=name,
+                obj=op,
+            )
+        return value
+
+
+class _FactField(_OpField):
+    """Descriptor for one shared-fact field (M7 FunctionCall/ParamAlias blocks).
+
+    A ``_FACT`` cell means the value lives in the store's shared fact block:
+    the first read hydrates the field's exact public container type for THIS
+    row and caches it back, so identity is stable across reads, per-row
+    in-place mutation stays isolated (a fresh container per row, exactly the
+    pre-M7 semantics), and uninspected rows retain no per-row container. A
+    direct write replaces the sentinel with a per-row cell value and never
+    mutates the shared block.
+    """
+
+    __slots__ = ()
+
+    def __get__(self, op: Any, owner: Any = None) -> Any:
+        """Read the cell, hydrating shared-fact sentinels on demand."""
+
+        if op is None:
+            return self
+        store = _CORE_GET(op)
+        row = _ROW_GET(op)
+        value = store.cell_get(row, self._fid)
+        if value is _FACT:
+            value = store.fact_blocks.hydrate(row, self._name)
+            store.cell_set(row, self._fid, value)
+            return value
+        if value is _MISSING:
+            name = self._name
+            raise AttributeError(
+                f"{type(op).__name__!r} object has no attribute {name!r}",
+                name=name,
+                obj=op,
+            )
+        return value
+
+
+def _install_op_field_descriptors() -> None:
+    """Install the per-field data descriptors on the ``Op`` class.
+
+    Most stored fields get a plain ``_OpField``; the declared relation
+    families get view-normalizing descriptors (``_RelationViewField``), the
+    dataflow pair additionally rematerializes from the CSR
+    (``_DataflowField``), and the shared-fact fields hydrate from the M7
+    fact blocks (``_FactField``).
+    """
+
+    tuple_view_names = frozenset(OP_TUPLE_VIEW_FIELDS)
+    frozenset_view_names = frozenset(OP_FROZENSET_VIEW_FIELDS + OP_BITSET_VIEW_FIELDS)
+    dataflow_names = frozenset(OP_DATAFLOW_FIELDS)
+    existing = vars(Op)
+    for fid, name in enumerate(_OP_SLOT_NAMES):
+        if name in existing:
+            raise RuntimeError(f"Op facade collision: {name!r} is already defined on Op")
+        if name in dataflow_names:
+            descriptor: _OpField = _DataflowField(name, fid, tuple)
+        elif name in OP_GROUP_VIEW_FIELDS:
+            descriptor = _GroupViewField(name, fid, OP_GROUP_VIEW_FIELDS[name])
+        elif name in tuple_view_names:
+            descriptor = _RelationViewField(name, fid, tuple)
+        elif name in frozenset_view_names:
+            descriptor = _RelationViewField(name, fid, frozenset)
+        elif name in OP_FACT_FIELDS:
+            descriptor = _FactField(name, fid)
+        else:
+            descriptor = _OpField(name, fid)
+        setattr(Op, name, descriptor)
+
+
+_install_op_field_descriptors()
+
+
+def _compact_store_rows(store: Any, pool: dict[Any, Any]) -> None:
+    """Pool repeated immutable metadata across a whole building-phase store.
+
+    Column-major equivalent of ``Op._compact_metadata`` (same class ladder,
+    same ``_UNPOOLED_SLOTS`` skips, same container-member handling) operating
+    directly on the row cells, so a core-backed trace pools without paying
+    the per-attribute descriptor protocol.
+
+    Parameters
+    ----------
+    store:
+        Building-phase ``OpRowStore`` (frozen stores are left untouched --
+        pooling always precedes the physical freeze).
+    pool:
+        Pass-local ``pool key -> canonical instance`` table shared with any
+        remaining per-op walks of the same trace.
+    """
+
+    rows = store.rows_building()
+    if rows is None:
+        return
+    pooled_classes = _POOLED_CLASSES
+    pool_get = pool.get
+    for fid, name in enumerate(store.layout.names):
+        if name in _UNPOOLED_SLOTS:
+            continue
+        for row_cells in rows:
+            value = row_cells[fid]
+            if value is None or value is _MISSING:
+                continue
+            cls = value.__class__
+            if cls in pooled_classes:
+                key = (cls, value.hex()) if cls is Duration else (cls, value)
+                pooled = pool_get(key)
+                if pooled is None:
+                    pool[key] = value
+                elif pooled is not value:
+                    row_cells[fid] = pooled
+            elif cls is list or cls is set or cls is dict:
+                _pool_container_members(value, pool, 0)
+            elif cls is tuple or cls is frozenset:
+                pooled = _pool_value(value, pool)
+                if pooled is not value:
+                    row_cells[fid] = pooled
+            elif isinstance(value, dict):
+                _pool_container_members(value, pool, 0)
+
+
 # Backward-compatible alias: TensorLog was the original name for
 # Op before the Layer aggregate class was introduced in PR #92.
 TensorLog = Op
+
+
+# The tlspec v8 coordinated bump retired this class's S3 pre-release
+# registrations (site_key, edge_substitutions, edge_replacement_stamps);
+# their persisting policies are declared directly in FIELD_POLICY above.

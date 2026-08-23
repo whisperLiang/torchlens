@@ -367,7 +367,7 @@ def test_trace_to_pandas_covers_all_op_fields() -> None:
         assert not (_TO_PANDAS_EXCLUDED_OP_FIELDS & set(columns))
 
         # Excluded fields are real Op fields (no stale exclusion entries).
-        assert _TO_PANDAS_EXCLUDED_OP_FIELDS <= set(LAYER_PASS_LOG_FIELD_ORDER)
+        assert set(LAYER_PASS_LOG_FIELD_ORDER) >= _TO_PANDAS_EXCLUDED_OP_FIELDS
     finally:
         log.cleanup()
 
@@ -385,10 +385,10 @@ def test_trace_to_pandas_func_config_and_conditional_values() -> None:
         conv_row = model_df[model_df["layer_label"] == "conv2d_1_1"].iloc[0]
         assert conv_row["func_config"] == log["conv2d_1_1"].func_config
         assert conv_row["func_config"]["stride"] == (2, 2)
-        assert conv_row["conditional_then_children"] == ["relu_1_4"]
+        assert conv_row["conditional_then_children"] == ("relu_1_4",)
 
         relu_row = model_df[model_df["layer_label"] == "relu_1_4"].iloc[0]
         assert relu_row["func_config"] == {}
-        assert relu_row["conditional_then_children"] == []
+        assert relu_row["conditional_then_children"] == ()
     finally:
         log.cleanup()

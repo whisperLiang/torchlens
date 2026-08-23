@@ -55,13 +55,12 @@ def test_train_mode_inference_mode_wrapped_forward_errors() -> None:
     """Active inference mode is rejected before train-mode capture."""
 
     inference_mode = getattr(torch, "inference_mode")
-    with inference_mode():
-        with pytest.raises(tl.TrainingModeConfigError, match="inference tensors"):
-            tl.trace(
-                nn.Linear(4, 2),
-                torch.randn(3, 4, requires_grad=True),
-                backward_ready=True,
-            )
+    with inference_mode(), pytest.raises(tl.TrainingModeConfigError, match="inference tensors"):
+        tl.trace(
+            nn.Linear(4, 2),
+            torch.randn(3, 4, requires_grad=True),
+            backward_ready=True,
+        )
 
 
 def test_train_mode_detach_saved_activations_errors() -> None:

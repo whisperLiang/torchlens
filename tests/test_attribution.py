@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import torch
 import pytest
+import torch
 from torch import Tensor, nn
 
 import torchlens.attribution as attribution
@@ -284,6 +284,11 @@ def test_integrated_gradients_completeness_on_smooth_mlp() -> None:
     residual = (attribution_sum - target_delta).abs()
 
     assert result.values.shape == inputs.shape
+    torch.testing.assert_close(result.extra["attribution_sum"], attribution_sum)
+    torch.testing.assert_close(result.extra["target_delta"], target_delta)
+    torch.testing.assert_close(
+        result.extra["completeness_residual"], attribution_sum - target_delta
+    )
     assert residual <= 1e-4
     torch.testing.assert_close(attribution_sum, target_delta, rtol=1e-3, atol=1e-4)
 
@@ -372,6 +377,9 @@ def test_integrated_gradients_two_input_shapes_and_completeness() -> None:
     attribution_sum = _sum_attribution_values(result.values)
     residual = (attribution_sum - target_delta).abs()
 
+    torch.testing.assert_close(
+        result.extra["completeness_residual"], attribution_sum - target_delta
+    )
     assert residual <= 1e-4
     torch.testing.assert_close(attribution_sum, target_delta, rtol=1e-3, atol=1e-4)
 

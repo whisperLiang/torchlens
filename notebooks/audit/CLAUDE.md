@@ -67,7 +67,10 @@ strip. The HTML in `_exports/` keeps the executed outputs for review.
 
 Execution-time expectations: 00-06 and 08-10 run in ~20-30 s each; 07 (intervention),
 11 (visualization), 12 (debug), 13 (export sweep) run ~30-90 s; 14 (HF, guarded)
-~60-90 s when the tiny models are cached, seconds when skipped. A failing notebook
+~60-90 s when the tiny models are cached, seconds when skipped; 15 (attribution),
+16 (compat/bridges), and 17 (receptive/projective fields) are unmeasured — record a
+timing row here on their next full committed execution (r7 R88: rows stopped at 14
+while 15-17 already existed). A failing notebook
 stops `nbconvert`; add `--allow-errors` only when triaging, never for the committed run.
 
 ## Lockstep rule — MANDATORY
@@ -84,7 +87,7 @@ Concretely:
   `README.md` first (they are the rename targets), then the code cells; re-execute.
 - Removed a surface -> keep a GAP callout showing the removal so it stays visible.
 - New submodule family (a new `tl.xyz`) -> decide which USER WORKFLOW it belongs to;
-  only create a new notebook if it is genuinely a new workflow (15/16 are the pattern).
+  only create a new notebook if it is genuinely a new workflow (15-17 are the pattern).
 
 ## Coverage is derived, never asserted
 
@@ -141,9 +144,12 @@ maintenance pass:
 
 ## How to add a new visual page
 
-1. Add a row to `visual/coverage_matrix.md` with: model name, options dict, what to nit-check.
-2. `generate_visual_pack.py` reads the matrix and rebuilds `visual_audit.pdf` idempotently.
-3. Run: `python notebooks/audit/visual/generate_visual_pack.py`
+1. Add the page spec IN `visual/generate_visual_pack.py` (its spec list is the
+   input of record). NEVER hand-edit `visual/coverage_matrix.md`: it is a
+   GENERATED OUTPUT of the script (`_write_coverage_matrix`), nothing reads
+   it, and hand edits are lost on regeneration (see `visual/CLAUDE.md`).
+2. Run: `python notebooks/audit/visual/generate_visual_pack.py` — it rebuilds
+   `visual_audit.pdf` AND regenerates the matrix idempotently.
 
 ## Model zoo
 

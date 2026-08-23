@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
-
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -19,12 +19,12 @@ from ._common import (
     _compute_ops,
     _op_from_label,
     _op_label,
+    _require_pandas,
     _resolve_op,
     _safe_out,
     _shape_dtype,
     _source_line,
     _tensor_unavailable_reason,
-    _require_pandas,
 )
 
 LineageDirection = Literal["ancestors", "descendants", "both"]
@@ -105,11 +105,13 @@ def lineage(
         return tuple(getattr(op, "parents", ()) or ()) + tuple(getattr(op, "children", ()) or ())
 
     start_label = _op_label(start_op)
-    queue: list[tuple[Op, int]] = [(start_op, 0)]
+    # deque: list.pop(0) shifts the whole queue per visit, Theta(V^2) on
+    # wide graphs for a linear BFS (R52, 9.3x measured on the FIFO class).
+    queue: deque[tuple[Op, int]] = deque([(start_op, 0)])
     visited = {start_label}
     nodes: list[tuple[str, int, str | None, tuple[int, ...] | None, str | None]] = []
     while queue:
-        op, depth = queue.pop(0)
+        op, depth = queue.popleft()
         shape, dtype = _shape_dtype(op)
         nodes.append((_op_label(op), depth, _source_line(op), shape, dtype))
         if max_depth is not None and depth >= max_depth:
@@ -169,7 +171,7 @@ def compare(
     *,
     rtol: float = 1e-5,
     atol: float = 1e-8,
-) -> "pd.DataFrame":
+) -> pd.DataFrame:
     """Compare saved dense floating activations across two traces.
 
     Parameters
@@ -288,7 +290,7 @@ def compare(
     return frame
 
 
-def dead_neurons(trace: Trace, *, dim: int = 1, threshold: float = 0.0) -> "pd.DataFrame":
+def dead_neurons(trace: Trace, *, dim: int = 1, threshold: float = 0.0) -> pd.DataFrame:
     """Find units that are inactive or zero-variance in one completed trace.
 
     A single trace is a single example; zero-variance here is an insufficient-sample

@@ -12,7 +12,6 @@ from ..intervention.types import CapturedArgTemplate, LiteralTensor, LiteralValu
 from ..utils.tensor_utils import safe_copy
 from .shape import SymbolicShape, infer_traced_batch_size, symbolic_shape_from_tensor_ref
 
-
 ReplaySourcePolicy = Literal[
     "constant",
     "live_param",
@@ -132,6 +131,23 @@ class SplitTraceGraph:
         if node_id is None:
             return None
         return self.node_by_id[node_id]
+
+    def parent_id_for_alias(self, node: SplitTraceNode, label: str) -> str | None:
+        """Resolve a parent alias, using the child's edges to disambiguate repeats."""
+
+        node_id = self.node_id_by_alias.get(label)
+        if node_id is not None:
+            return node_id
+        matches: list[str] = []
+        for parent_ref in node.parents:
+            parent_id = self.node_id_by_alias.get(parent_ref, parent_ref)
+            parent = self.node_by_id.get(parent_id)
+            if parent is None:
+                continue
+            if label in {parent.canonical_id, parent.label, parent.raw_label}:
+                matches.append(parent.canonical_id)
+        unique_matches = tuple(dict.fromkeys(matches))
+        return unique_matches[0] if len(unique_matches) == 1 else None
 
     @cached_property
     def order_by_id(self) -> dict[str, int]:
@@ -602,7 +618,7 @@ def _unresolved_parent_refs(component: Any) -> tuple[str, ...]:
     return ()
 
 
-def iter_replay_value_refs(component: Any) -> tuple["ReplayValueRef", ...]:
+def iter_replay_value_refs(component: Any) -> tuple[ReplayValueRef, ...]:
     """Return replay value references from a template tree, preserving multiplicity."""
 
     if isinstance(component, ReplayValueRef):

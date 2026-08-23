@@ -27,13 +27,18 @@ import contextlib
 import random
 import sys
 import time
+import warnings
 from collections.abc import Callable, Iterator
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, cast
 
-from torch import nn
+from torch import get_default_dtype, nn
 
+from .. import _state
+from .._capture_state_helpers import CompiledCapturePrep, prepare_compiled_capture
+from .._runnable_seam import runnable_trace_state
 from ..backends import (
+    TORCH_BACKEND_NAME,
     BackendName,
     BackendUnsupportedError,
     CaptureBackend,
@@ -43,8 +48,17 @@ from ..backends import (
 from ..fastlog._halt import HaltSignal
 from ..ir.container_registry import ModelSite, Phase, Role, walk_container
 from ..quantities import Bytes, Duration
-from .._capture_state_helpers import unwrap_compiled_submodules
 from .config import InternalCaptureConfig
+from .outcome import (
+    CapturePhase,
+    count_committed_ops,
+    demote_outcome,
+    safe_exception_str,
+    set_capture_phase,
+    settle_completed,
+    settle_failed,
+    settle_halted,
+)
 from .session import (
     CaptureSession,
     attach_capture_events_session,
@@ -57,9 +71,26 @@ if TYPE_CHECKING:
     from ..data_classes.trace import Trace
 from ..data_classes._lookup_keys import _give_user_feedback_about_lookup_key
 from ..utils.display import _timed_phase, _vprint
-from ..utils.rng import host_rng_advanced, snapshot_host_rng
+from ..utils.rng import (
+    host_rng_advanced,
+    log_current_rng_states,
+    set_rng_from_saved_states,
+    snapshot_host_rng,
+)
 
 _ACTIVE_CAPTURE_BACKEND: CaptureBackend | None = None
+
+_AUTO_SEED_ENTROPY = random.Random()
+"""Private entropy stream for ``random_seed=None`` capture seed picks (R57).
+
+Seeded once from OS entropy at import. Drawing the auto seed from the user's
+global ``random`` engine either advanced that stream past the capture's
+restore bracket (breaking byte-exact RNG neutrality for a seeded host
+process) or, if the draw were bracketed too, made consecutive auto-seeded
+captures reuse one identical seed (silently correlating dropout patterns
+across runs). A private stream preserves both guarantees; the chosen seed is
+always disclosed on ``trace.random_seed``.
+"""
 
 
 def _cleanup_forward_memory_once(
@@ -104,24 +135,58 @@ def _process_rss_bytes() -> int:
     return int(psutil.Process().memory_info().rss)
 
 
+def _structure_only_forward_boundary(trace: "Trace") -> "contextlib.AbstractContextManager[None]":
+    """LAYER-2 backstop for structure-only captures (L7a memo sec 2.2).
+
+    Inert ``nullcontext`` on the default path; for ``structure_only=True``
+    sessions the torch-backend boundary classifies exceptions escaping the
+    user forward by raising-frame provenance (typed meta-kernel /
+    unenumerated-escape refusals; user exceptions propagate annotated). The
+    lazy import keeps this backend-neutral module torch-light.
+    """
+
+    if bool(getattr(trace, "structure_only", False)):
+        from ..backends.torch.structure_only_belt import structure_only_forward_boundary
+
+        return structure_only_forward_boundary(trace)
+    return contextlib.nullcontext()
+
+
 @contextlib.contextmanager
 def _forward_peak_memory_bracket(trace: "Trace", device: "object | None") -> "Iterator[None]":
     """Record forward-pass peak memory around the model forward call.
 
     Stores the peak on ``trace.forward_peak_memory`` and the backend label on
-    ``trace.forward_memory_backend``. CUDA reports the true device-side peak via
-    ``max_memory_allocated`` after ``reset_peak_memory_stats``. CPU/MPS use the
-    larger of (a) a process resident-set-size delta -- which captures torch's
-    C++-allocated tensor buffers for sizeable models -- and (b) the stdlib
-    ``tracemalloc`` Python-allocation peak, measured as a delta against a
-    baseline snapshot taken at bracket entry (after ``reset_peak()`` when
-    tracemalloc was already tracing). This keeps the value scoped to this
-    bracket even when tracemalloc was started earlier by external tooling: the
-    reset discards any unrelated historical high-water mark, and subtracting
-    the entry-time baseline discards memory that is legitimately still live
-    but unrelated to this forward pass (e.g. process-wide Python state already
-    resident when the bracket was entered). tracemalloc stays reliably
-    positive for small models where RSS granularity rounds the delta to zero.
+    ``trace.forward_memory_backend``. CUDA snapshots ``max_memory_allocated``
+    around the forward WITHOUT ``reset_peak_memory_stats`` (R36-2): resetting
+    clobbered the caller's process-wide high-water counter on every capture
+    (the CPU branch below explicitly refuses the analogous clobber). When the
+    forward pushes a new device peak the reported figure is that exact peak;
+    a forward that fits under the pre-existing high-water mark legitimately
+    reads ``0``, same contract as the CPU/MPS delta below. The figure covers
+    the MODEL device only (single-device heuristic, R36 doc line): a
+    model-parallel forward's peaks on other devices are not measured.
+
+    CPU/MPS measure a process resident-set-size (or MPS allocator) delta, which
+    captures torch's C++-allocated tensor buffers for sizeable models. That
+    counter is coarse: for models small enough that the forward fits in
+    already-resident heap headroom the delta legitimately rounds to ``0``.
+
+    ``CaptureOptions(measure_python_peak_memory=True)`` additionally folds in the
+    stdlib ``tracemalloc`` Python-allocation peak, which stays reliably positive
+    for those small models. It is OFF by default because starting tracemalloc
+    installs a CPython allocator hook that fires on every allocation made by
+    every traced operation, costing 1.7x-2.5x total capture time on real CNNs and
+    ViTs -- an unacceptable tax on the default path for one diagnostic scalar.
+
+    When enabled, the Python peak is measured as a delta against a baseline
+    snapshot taken at bracket entry (after ``reset_peak()`` when tracemalloc was
+    already tracing). This keeps the value scoped to this bracket even when
+    tracemalloc was started earlier by external tooling: the reset discards any
+    unrelated historical high-water mark, and subtracting the entry-time baseline
+    discards memory that is legitimately still live but unrelated to this forward
+    pass (e.g. process-wide Python state already resident when the bracket was
+    entered).
 
     Only the exhaustive and predicate primary passes record memory; the fast
     second pass re-runs the model and must not clobber the measured forward peak.
@@ -153,15 +218,18 @@ def _forward_peak_memory_bracket(trace: "Trace", device: "object | None") -> "It
     if device_type == "cuda" and torch_module is not None and torch_module.cuda.is_available():
         backend_label = "cuda"
         cuda_device = device
+        peak_before = 0
         with contextlib.suppress(Exception):
-            torch_module.cuda.reset_peak_memory_stats(cuda_device)
+            peak_before = int(torch_module.cuda.max_memory_allocated(cuda_device))
         try:
             yield
         finally:
             with contextlib.suppress(Exception):
-                trace.forward_peak_memory = Bytes(
-                    max(0, int(torch_module.cuda.max_memory_allocated(cuda_device)))
-                )
+                peak_after = int(torch_module.cuda.max_memory_allocated(cuda_device))
+                # New device peak -> the forward's exact peak. No new peak ->
+                # the forward stayed under the pre-existing high-water mark
+                # and the figure honestly reads 0 (see docstring, R36-2).
+                trace.forward_peak_memory = Bytes(peak_after if peak_after > peak_before else 0)
             trace.forward_memory_backend = backend_label
         return
 
@@ -172,48 +240,66 @@ def _forward_peak_memory_bracket(trace: "Trace", device: "object | None") -> "It
         backend_label = "cpu"
         before = _process_rss_bytes()
 
-    import tracemalloc
-
-    tracemalloc_started_here = not tracemalloc.is_tracing()
-    if tracemalloc_started_here:
-        with contextlib.suppress(Exception):
-            tracemalloc.start()
-    else:
-        # tracemalloc was already tracing when this bracket was entered (external
-        # tooling, a pytest memory-leak plugin, or a leftover start elsewhere in the
-        # process). Reset its high-water mark before yielding so the peak reported
-        # below is scoped to this forward pass instead of an arbitrary earlier,
-        # unrelated high-water mark from before this bracket ran.
-        with contextlib.suppress(Exception):
-            tracemalloc.reset_peak()
-    # Snapshot the currently-live traced size as a baseline. When tracemalloc was
-    # already running, this "current" size can itself be sizeable (e.g. process-wide
-    # Python-level state that happens to already be resident, such as this same
-    # trace() call's own one-time model-preparation work that ran moments earlier,
-    # just before this bracket). reset_peak() alone only discards *historical* peaks
-    # reached before the bracket; it cannot lower "current". Subtracting this
-    # baseline from the post-yield peak below isolates the delta genuinely
-    # introduced by the forward pass, mirroring the RSS-delta measurement used for
-    # the CPU/MPS path just below.
+    # Opt-in only: the tracemalloc allocator hook is the single most expensive
+    # thing in a default CPU capture, so the default path never touches
+    # tracemalloc at all -- not even `is_tracing()` / `reset_peak()`, which would
+    # also clobber an external profiler's own high-water mark.
+    tracemalloc_module: Any = None
+    tracemalloc_started_here = False
     traced_baseline = 0
-    if tracemalloc.is_tracing():
-        with contextlib.suppress(Exception):
-            traced_baseline, _peak_at_entry = tracemalloc.get_traced_memory()
+    if getattr(trace, "measure_python_peak_memory", False):
+        import tracemalloc
+
+        tracemalloc_module = tracemalloc
+        tracemalloc_started_here = not tracemalloc.is_tracing()
+        if tracemalloc_started_here:
+            with contextlib.suppress(Exception):
+                tracemalloc.start()
+        else:
+            # tracemalloc was already tracing when this bracket was entered (external
+            # tooling, a pytest memory-leak plugin, or a leftover start elsewhere in the
+            # process). Reset its high-water mark before yielding so the peak reported
+            # below is scoped to this forward pass instead of an arbitrary earlier,
+            # unrelated high-water mark from before this bracket ran.
+            with contextlib.suppress(Exception):
+                tracemalloc.reset_peak()
+        # Snapshot the currently-live traced size as a baseline. When tracemalloc was
+        # already running, this "current" size can itself be sizeable (e.g. process-wide
+        # Python-level state that happens to already be resident, such as this same
+        # trace() call's own one-time model-preparation work that ran moments earlier,
+        # just before this bracket). reset_peak() alone only discards *historical* peaks
+        # reached before the bracket; it cannot lower "current". Subtracting this
+        # baseline from the post-yield peak below isolates the delta genuinely
+        # introduced by the forward pass, mirroring the RSS-delta measurement used for
+        # the CPU/MPS path just below.
+        if tracemalloc.is_tracing():
+            with contextlib.suppress(Exception):
+                traced_baseline, _peak_at_entry = tracemalloc.get_traced_memory()
     try:
         yield
     finally:
         traced_peak = 0
-        if tracemalloc.is_tracing():
+        if tracemalloc_module is not None and tracemalloc_module.is_tracing():
             with contextlib.suppress(Exception):
-                _current, traced_peak = tracemalloc.get_traced_memory()
+                _current, traced_peak = tracemalloc_module.get_traced_memory()
                 traced_peak = max(0, traced_peak - traced_baseline)
             if tracemalloc_started_here:
                 with contextlib.suppress(Exception):
-                    tracemalloc.stop()
-        if backend_label == "mps" and torch_module is not None:
-            after = int(torch_module.mps.current_allocated_memory())
-        else:
-            after = _process_rss_bytes()
+                    tracemalloc_module.stop()
+        # Both readers can raise on a hostile host (`mps.current_allocated_memory()`
+        # on a degraded MPS build, `psutil.Process().memory_info()` with AccessDenied /
+        # NoSuchProcess inside a restricted container -- `_process_rss_bytes` only
+        # catches ImportError). They were the only two statements in this finally
+        # outside a suppress, so a failure there replaced the user's in-flight forward
+        # exception with a psutil/MPS error AND skipped both field writes, contrary to
+        # the docstring's "measurement never raises into the capture path". Default to
+        # a zero delta: an unmeasurable host reports no measured growth, never a lie.
+        after = before
+        with contextlib.suppress(Exception):
+            if backend_label == "mps" and torch_module is not None:
+                after = int(torch_module.mps.current_allocated_memory())
+            else:
+                after = _process_rss_bytes()
         rss_delta = max(0, after - before)
         trace.forward_memory_backend = backend_label
         trace.forward_peak_memory = Bytes(max(rss_delta, int(traced_peak)))
@@ -288,9 +374,9 @@ def _clear_saved_activation_dedup_caches(trace: "Trace") -> None:
         cache = getattr(trace, cache_name, None)
         if isinstance(cache, dict):
             cache.clear()
-    build_state = trace.__dict__.get("_build_state")
-    if build_state is not None:
-        registry = getattr(build_state, "container_registry", None)
+    wrapper_ws = trace.__dict__.get("_wrapper_runtime_ws")
+    if wrapper_ws is not None:
+        registry = getattr(wrapper_ws, "container_registry", None)
         if registry is not None:
             registry.clear_live_state()
 
@@ -326,7 +412,7 @@ def _run_predicate_forward_with_root_frame(
         Raw model output.
     """
 
-    from ..capture.predicates import _evaluate_keep_module, _is_halt_only_capture
+    from ..capture.predicates import _is_halt_only_capture, _module_capture_spec
     from ..capture.projections import (
         _build_record_context,
         append_projected_event,
@@ -367,7 +453,7 @@ def _run_predicate_forward_with_root_frame(
         if halt_only:
             evaluate_halt_stop(trace, enter_ctx, state.options)
         else:
-            enter_spec = _evaluate_keep_module(enter_ctx, state.options)
+            enter_spec = _module_capture_spec(state.options)
             append_projected_event(
                 trace,
                 enter_ctx,
@@ -420,7 +506,7 @@ def _run_predicate_forward_with_root_frame(
             if halt_only:
                 evaluate_halt_stop(trace, exit_ctx, state.options, frontier_output=outputs)
             else:
-                exit_spec = _evaluate_keep_module(exit_ctx, state.options)
+                exit_spec = _module_capture_spec(state.options)
                 append_projected_event(
                     trace,
                     exit_ctx,
@@ -463,6 +549,7 @@ def save_new_outs(
     grad_layers_to_save: str | list[Any] | None = "all",
     random_seed: int | None = None,
     backward_ready: bool | None = None,
+    _run_until_plan: Any | None = None,
 ) -> None:
     """Re-run the model with new inputs, saving refreshed outs.
 
@@ -514,6 +601,7 @@ def save_new_outs(
                 grad_layers_to_save=grad_layers_to_save,
                 random_seed=random_seed,
                 backward_ready=None,
+                _run_until_plan=_run_until_plan,
             )
         finally:
             self.detach_saved_activations = model_detach_saved_activations
@@ -565,6 +653,14 @@ def save_new_outs(
         verbose=getattr(self, "verbose", False),
         backward_ready=getattr(self, "backward_ready", False),
         inference_only=getattr(self, "inference_only", False),
+        # A refresh retains payloads like any capture; dropping the configured
+        # budget here silently rebudgeted every refresh/run() forward at the
+        # default "auto" (or left a save_budget=None session budgeted).
+        save_budget=getattr(self, "save_budget", "auto"),
+        # F2: a refresh re-arms the nonfinite tripwire. The historical refresh
+        # forwarded only inference_only, so a raise_on_nan capture silently
+        # lost its abort policy on every refreshed forward.
+        raise_on_nan=bool(getattr(self, "raise_on_nan", False)),
         output_transform=getattr(self, "_output_transform", None),
         save_raw_output=getattr(self, "save_raw_output", "small"),
         retain_output_parents_for_layers_to_save=True,
@@ -575,6 +671,11 @@ def save_new_outs(
             else tuple(cast(list[int], grad_layer_nums_to_save))
         ),
         _refresh_projection_capture=True,
+        # L4 2.3 live until=: the run-installed halt latch rides the EXISTING
+        # halt= surface of the internal refresh capture (one forwarded argument;
+        # the driver's halt arm settles the throwaway HALTED and returns the
+        # partial normally into the projection flow below).
+        halt_predicate=None if _run_until_plan is None else _run_until_plan.halt_predicate,
     )
     projected_layer_nums = (
         "all" if layer_nums_to_save == "all" else tuple(cast(list[int], layer_nums_to_save))
@@ -584,6 +685,31 @@ def save_new_outs(
         if grad_layer_nums_to_save == "all"
         else tuple(cast(list[int], grad_layer_nums_to_save))
     )
+    if _run_until_plan is not None and _run_until_plan.fired:
+        # L4 2.3 truncated refresh: the latch fired and the internal capture
+        # settled HALTED. The projection is PREFIX-SCOPED (all projector
+        # tripwires at full strength on the executed prefix; a prefix mismatch
+        # refuses exactly like a full mismatch), and BOTH post-return feedback
+        # writes are suppressed with their inherited authority explicitly
+        # neutralized -- never left to absence:
+        #   (1) output-losslessness: the fork INHERITED the source's positive
+        #       stamp via the fork builder's runnable copy pass, and the halt
+        #       frontier's own proof attests the truncated frontier tensor,
+        #       never the full-forward output -- so the :672-style copy is
+        #       SKIPPED and the inherited proof is CLEARED to None (the shipped
+        #       fail-closed state; the live reconstructor fails closed).
+        #   (2) replay-arg completeness: a truncated refresh did not witness
+        #       complete replay arg/version data over a partial forward, and the
+        #       field initializes True at construction -- so it is SET FALSE
+        #       explicitly, never merely skipped.
+        RefreshProjector(
+            self,
+            projected_layer_nums,
+            projected_grad_layer_nums,
+        ).project_prefix(refreshed, _run_until_plan)
+        self._runnable.output_losslessness = None
+        self._replay_arg_version_data_complete = False
+        return
     RefreshProjector(
         self,
         projected_layer_nums,
@@ -594,9 +720,7 @@ def save_new_outs(
     # original capture, so the live provider must gate its bare-tensor fast path on the fresh
     # proof (``bare_tensor_root``), not the stale capture-time one. Missing/malformed fresh
     # proof leaves the field absent -> the live reconstructor fails closed (not faithful).
-    self.__dict__["_runnable_output_losslessness"] = refreshed.__dict__.get(
-        "_runnable_output_losslessness"
-    )
+    self._runnable.output_losslessness = refreshed._runnable.output_losslessness
     if self.save_arg_values:
         self._replay_arg_version_data_complete = True
 
@@ -611,7 +735,7 @@ def _get_op_nums_from_user_labels(
     unique raw operation numbers for refresh projection.
     """
     if which_layers == "all":
-        return which_layers  # type: ignore[return-value]
+        return which_layers
     elif which_layers in [None, "none", "None", "NONE", []]:
         return []
 
@@ -655,7 +779,7 @@ def _get_op_nums_from_user_labels(
                 )
                 continue
         if layer_key in self._lookup_keys_to_layer_num_dict:
-            raw_layer_nums_to_save.add(self._lookup_keys_to_layer_num_dict[layer_key])  # type: ignore[index]
+            raw_layer_nums_to_save.add(self._lookup_keys_to_layer_num_dict[layer_key])
             continue
 
         keys_with_substr = [key for key in self.layer_dict_all_keys if str(layer_key) in str(key)]
@@ -666,11 +790,12 @@ def _get_op_nums_from_user_labels(
 
         _give_user_feedback_about_lookup_key(self, layer_key, "query_multiple")
 
-    raw_layer_nums_to_save = sorted(list(raw_layer_nums_to_save))  # type: ignore[assignment]
+    raw_layer_nums_to_save = sorted(raw_layer_nums_to_save)  # type: ignore[assignment]
     return raw_layer_nums_to_save  # type: ignore[return-value]
 
 
 def _fetch_label_move_input_tensors(
+    session: object,
     input_args: list[Any],
     input_arg_names: list[str],
     input_kwargs: dict[Any, Any],
@@ -680,6 +805,8 @@ def _fetch_label_move_input_tensors(
 
     Parameters
     ----------
+    session:
+        Active capture session receiving input-boundary diagnostics.
     input_args:
         Copied positional inputs that may be mutated for internal device moves.
     input_arg_names:
@@ -704,7 +831,7 @@ def _fetch_label_move_input_tensors(
             )
         backend = spec.capture_backend()
     return backend.fetch_label_move_input_tensors(
-        None,
+        session,
         input_args,
         input_arg_names,
         input_kwargs,
@@ -736,7 +863,7 @@ def _register_model_input_container_snapshots(
     ).capabilities.input_container_structure
     if capability == "none":
         return
-    registry = trace._ensure_build_state().container_registry
+    registry = trace._wrapper_runtime_ws.container_registry
     first_spec = None
     for index, arg in enumerate(input_args):
         result = walk_container(arg, role=Role.MODEL_INPUT, capability=capability)
@@ -885,7 +1012,7 @@ def _record_runnable_input_literal_leaves(
         _walk_site(("kwarg", key), value)
 
     if leaves:
-        trace.__dict__["_runnable_input_nontensor_leaves"] = tuple(leaves)
+        runnable_trace_state(trace).input_nontensor_leaves = tuple(leaves)
 
 
 def _record_runnable_input_structure(
@@ -919,7 +1046,7 @@ def _record_runnable_input_structure(
         record = snapshot_input_boundary(value)
         record["position"] = ["kwarg", str(key)]
         snapshots.append(record)
-    trace.__dict__["_runnable_input_structure"] = tuple(snapshots)
+    runnable_trace_state(trace).input_structure = tuple(snapshots)
 
 
 def _record_runnable_input_tensor_sites(
@@ -996,7 +1123,7 @@ def _record_runnable_input_tensor_sites(
         _walk_site(("kwarg", key), value)
 
     if sites:
-        trace.__dict__["_runnable_input_tensor_sites"] = sites
+        runnable_trace_state(trace).input_tensor_sites = sites
         from ..backends.torch.completeness_witness import record_runnable_input_storage_sites
 
         record_runnable_input_storage_sites(trace, tensor_leaves)
@@ -1011,8 +1138,11 @@ def _record_runnable_module_training_modes(trace: "Trace", model: Any) -> None:
     on the given inputs, so the captured mode is DECLARED state the replay reproduces.
     Recording it (per submodule -- submodules can differ) lets the producer declare the mode
     as a witness fact; a mode-sensitive op replayed without a recorded mode fact is downgraded
-    to UNVERIFIABLE (fail closed). It runs only for intervention-ready captures, touches no
-    tensors, and stores an in-memory map consumed by the producer at save time.
+    to UNVERIFIABLE (fail closed). It runs for every capture (D18 widened the former
+    intervention-ready gate so the live refresh projector's mode-claim belt holds on the
+    default path; the widening is verdict-inert on the sparse side because the runnable
+    producer refuses non-intervention-ready captures outright), touches no tensors, and
+    stores an in-memory map consumed by the producer at save time and by the projector belt.
 
     Parameters
     ----------
@@ -1022,8 +1152,6 @@ def _record_runnable_module_training_modes(trace: "Trace", model: Any) -> None:
         The prepared source model whose per-module ``training`` flags are recorded.
     """
 
-    if not bool(getattr(trace, "intervention_ready", False)):
-        return
     named_modules = getattr(model, "named_modules", None)
     if not callable(named_modules):
         return
@@ -1035,7 +1163,93 @@ def _record_runnable_module_training_modes(trace: "Trace", model: Any) -> None:
     except (AttributeError, TypeError):
         return
     if modes:
-        trace.__dict__["_runnable_module_training_modes"] = modes
+        runnable_trace_state(trace).module_training_modes = modes
+
+
+#: Session-time semantic-output scratch (B1-02). Written at capture entry
+#: (``user_funcs.py``) and consumed ONLY by ``decode_outputs_for_trace`` on the
+#: normal forward-return arm. Two of the four pin LIVE USER OBJECTS -- an HF
+#: tokenizer (``bridge/hf.py``) and a model-derived metadata key -- so a copy
+#: surviving onto a settled product is both a retention leak and a privacy leak:
+#: plain ``pickle``/``torch.save`` of the Trace serializes the tokenizer's
+#: vocab/merges into an artifact the user believes is a graph. Declared
+#: ``FieldPolicy.DROP`` on ``Trace`` and dropped on EVERY settlement path.
+_SEMANTIC_OUTPUT_TRANSIENT_FIELDS: tuple[str, ...] = (
+    "_output_style",
+    "_output_head",
+    "_output_tokenizer",
+    "_semantic_output_metadata",
+)
+
+
+def _drop_semantic_output_transients(self: "Trace") -> None:
+    """Drop the session-time semantic-output scratch from one trace.
+
+    Idempotent, and safe on every arm: the sole consumer
+    (``decode_outputs_for_trace``) runs on the normal forward-return arm
+    strictly before this, and the halted/failed arms never decode at all.
+
+    Parameters
+    ----------
+    self:
+        Trace whose semantic-output scratch should be discarded.
+
+    Returns
+    -------
+    None. Mutates ``self.__dict__``.
+    """
+
+    for attr_name in _SEMANTIC_OUTPUT_TRANSIENT_FIELDS:
+        self.__dict__.pop(attr_name, None)
+
+
+def _scrub_failed_capture_transients(self: "Trace") -> None:
+    """Failure-axis twin of the success arms' transient drops (R11/R32).
+
+    The success arms pop ``_output_attribution_input_tensors`` (live USER
+    INPUT tensors) and postprocess replaces the mutable ``capture_events``
+    alias with the payload-free ``_capture_events`` home. A failed or
+    interrupted forward reached neither, so the trace escaping on
+    ``exc.partial_log`` pickled the user's input tensors through an
+    undeclared attribute and retained every activation payload and grad_fn
+    handle of the failed run (GB-class on real models).
+
+    Partial diagnostics stay intact: ``PartialTrace.from_trace`` materialized
+    the raw layers during backend cleanup, strictly before this scrub, and
+    sidecar release keeps the structural event facts.
+
+    Predicate (fastlog) captures keep their event buffer untouched apart from
+    the trace-side alias pop: the buffer may be OWNED by the live Recorder
+    (a shared object accumulating prior passes), and the failed-pass snapshot
+    (``_failed_fastlog_capture_events``) already isolated the failing pass.
+
+    Parameters
+    ----------
+    self:
+        Trace settled FAILED whose capture transients should be discarded.
+
+    Returns
+    -------
+    None. Mutates ``self.__dict__``.
+    """
+
+    from ..utils.tensor_utils import synchronize_pending_cpu_async_copies
+
+    # A failed forward may leave in-flight cpu_async D2H copies whose
+    # pinned host buffers escape on ``exc.partial_log`` (R36-1): fence them
+    # before anything reads the partial's payloads.
+    synchronize_pending_cpu_async_copies()
+    self.__dict__.pop("_output_attribution_input_tensors", None)
+    events = self.__dict__.pop("capture_events", None)
+    if events is None:
+        return
+    if getattr(self, "capture_mode", None) == "predicate":
+        return
+    if hasattr(events, "release_runtime_sidecars"):
+        events.release_runtime_sidecars()
+        # The trace is the sole strong owner of its (sidecar-released) event
+        # stream, mirroring the postprocess success seam.
+        self.__dict__["_capture_events"] = events
 
 
 def _extract_and_mark_outputs(
@@ -1078,6 +1292,44 @@ def _extract_and_mark_outputs(
     return list(output_tensors), output_tensor_addresses
 
 
+def _settle_interrupted_halted_arm(
+    trace: "Trace",
+    capture_session: Any,
+    interrupt_exc: BaseException,
+    halt_exc: HaltSignal,
+) -> None:
+    """Stamp an interrupt that escaped the halted arm, never masking it.
+
+    Mirrors the outer ``except BaseException`` arm's guarded settlement: the
+    stamp is FAILED/interrupted with the halt boundary disclosed, and an
+    ordinary settlement/scrub failure attaches as a note instead of replacing
+    the unwinding KeyboardInterrupt/SystemExit (B8-23 discipline).
+    """
+
+    try:
+        settle_failed(
+            trace,
+            capture_session,
+            interrupt_exc,
+            interrupted=True,
+            settlement_note=(
+                "interrupted during halted finalization after halt at "
+                f"{getattr(halt_exc, 'reason', '')!r}"
+            ),
+        )
+        _scrub_failed_capture_transients(trace)
+    except Exception as settle_exc:
+        note = (
+            "TorchLens settlement/scrub also failed while handling this "
+            f"interrupt: {type(settle_exc).__name__}: {safe_exception_str(settle_exc)}"
+        )
+        add_note = getattr(interrupt_exc, "add_note", None)
+        if add_note is not None:
+            add_note(note)
+        else:  # Python 3.10: no PEP 678 notes -- surface via warning.
+            warnings.warn(note, RuntimeWarning, stacklevel=2)
+
+
 def _finalize_halted_trace(
     self: "Trace",
     backend: CaptureBackend,
@@ -1109,15 +1361,22 @@ def _finalize_halted_trace(
         Halt-frontier output object when available.
     """
 
-    backend.cleanup_model_session(self, (model, input_tensors))
+    # Settlement phase marker: everything from halted cleanup through frontier
+    # recovery and output extraction is the FINALIZE failure class; the halted
+    # postprocess below is POSTPROCESS. The two classes are never conflated.
+    set_capture_phase(self, CapturePhase.FINALIZE)
+    # F3a: recover the frontier BEFORE model-session cleanup. The cleanup
+    # strips TorchLens metadata from model-owned tensors, so the reverse scan
+    # must read the raw entries while their capture-time state is intact.
     frontier_output = halt_exc.frontier_output
     if frontier_output is None:
-        raw_layer_dict = getattr(self, "_raw_layer_dict", {})
+        raw_layer_dict = self._raw_graph_ws.raw_layer_dict
         for event in reversed(getattr(self.capture_events, "op_events", ())):
             entry = raw_layer_dict.get(event.label_raw)
             if entry is not None and getattr(entry, "out", None) is not None:
                 frontier_output = entry.out
                 break
+    backend.cleanup_model_session(self, (model, input_tensors))
     if frontier_output is None:
         raise RuntimeError(
             "trace(halt=...) could not identify a tensor frontier for the halted partial graph."
@@ -1128,6 +1387,7 @@ def _finalize_halted_trace(
     self.halt_frontier = halt_exc.reason
     self.raw_output = None
     if not postprocess:
+        self.__dict__.pop("_output_attribution_input_tensors", None)
         self.capture_end_time = time.time()
         return frontier_output
 
@@ -1136,7 +1396,12 @@ def _finalize_halted_trace(
         frontier_output,
         backend,
     )
+    # Mirror the completed paths: the transient attribution inputs are consumed
+    # by output extraction and must never survive onto the finished product
+    # (an unpopped copy blocked halted analysis saves via PORTABLE_STATE_SPEC).
+    self.__dict__.pop("_output_attribution_input_tensors", None)
     _vprint(self, f"Postprocessing halted graph at {self.halt_frontier!r}...")
+    set_capture_phase(self, CapturePhase.POSTPROCESS)
     self._postprocess(output_tensors, output_tensor_addresses)
     return frontier_output
 
@@ -1150,6 +1415,7 @@ def run_and_log_inputs_through_model(
     grad_layers_to_save: str | list[str | int] | None = "all",
     random_seed: int | None = None,
     postprocess: bool = True,
+    reservation_resume: object | None = None,
 ) -> Any:
     """Core orchestration: run a forward pass and log everything into Trace.
 
@@ -1171,8 +1437,22 @@ def run_and_log_inputs_through_model(
     identical graph structure.
     """
     if random_seed is None:
-        random_seed = random.randint(1, 4294967294)
+        # R57 (neutrality half): the auto-seed pick draws from a PRIVATE
+        # entropy stream, never the user's global ``random`` engine. Drawing
+        # from the global stream either leaked one ``randint`` advance past
+        # the restore bracket below (capture not byte-neutral to a seeded
+        # host process) or, if bracketed, made every ``random_seed=None``
+        # capture reuse the identical seed (correlated dropout across runs).
+        # The private stream keeps both properties: byte-exact global-engine
+        # neutrality AND fresh seeds per capture.
+        random_seed = _AUTO_SEED_ENTROPY.randint(1, 4294967294)
     self.random_seed = random_seed  # type: ignore[assignment]
+    # The per-capture code-context cache (and the call-site anchor stored
+    # inside it) is only valid for the stack of ONE capture run: the anchor
+    # frame is proven alive by identity for the duration of a single capture,
+    # but a re-capture on a carried-over Trace state (e.g. a live-refresh
+    # fork) must never consult a prior run's anchor or locations.
+    self._code_context_cache = {}
     backend = _capture_backend_from_registry(
         _backend_name_for_trace(self),
         model,
@@ -1225,29 +1505,113 @@ def run_and_log_inputs_through_model(
             combined = set(layer_nums_to_save) | output_parent_nums
             self._layer_nums_to_save = sorted(combined)
 
-    backend.seed_rng(self, random_seed)
-    input_args, input_kwargs, input_arg_names, model_device = backend.setup_inputs_and_device(
-        self,
-        model,
-        input_args,
-        input_kwargs,
-    )
+    # Reserve the capture slot BEFORE any capture-global side effect (label
+    # session swap in model prep, compiled-submodule swaps, the fastlog
+    # recording state installed by the recorder around this call): a
+    # concurrent capture destined for the typed ``ReentrantTraceError`` used
+    # to run those mutations first and orphan the admitted winner's session
+    # (runtime-probed ``capture_verified=False``). r8 R54 moved the claim
+    # ahead of the RNG snapshot + reseed and input/device setup too -- a
+    # refused loser used to reseed the process-global RNG engines mid-window
+    # (corrupting the admitted winner's replay determinism) and the refusal
+    # path skipped the R57 restore entirely; refusing FIRST covers that path
+    # for free (nothing is seeded yet). Same-thread re-entry from the
+    # recorder's outer reservation passes through only by presenting the
+    # recorder's continuation token (R55: a bare same-thread re-entry is a
+    # nested public capture from user code inside the window and refuses);
+    # the reservation is released in the outermost ``finally`` below.
+    capture_slot = _state.capture_reservation(resume=reservation_resume)
+    capture_slot.__enter__()
+    _rng_restorers: list[Any] = []
+    try:
+        # R57 (restore half): capture seeding reseeds the USER'S three global
+        # RNG engines (random / numpy / torch, plus CUDA); the sibling refresh
+        # and fast-run paths snapshot and restore around their reseeds, but
+        # the primary capture used to leave the process reseeded permanently
+        # -- code after ``tl.trace()`` silently continued from the capture's
+        # stream, not the user's. Snapshot the pre-seed states here and
+        # restore them on EVERY settlement path (the outermost ``finally``
+        # below, plus the pre-``try`` failure windows). The reseed POLICY
+        # itself (whether capture seeds at all) is the fenced R21 fork and is
+        # deliberately unchanged.
+        pre_capture_rng_states = log_current_rng_states()
+        rng_restore_pending = [True]
 
-    self.capture_start_time = time.time()
+        def _restore_user_global_rng() -> None:
+            """Restore the user's pre-capture global RNG streams exactly once."""
+
+            if rng_restore_pending[0]:
+                rng_restore_pending[0] = False
+                set_rng_from_saved_states(pre_capture_rng_states)
+
+        _rng_restorers.append(_restore_user_global_rng)
+        backend.seed_rng(self, random_seed)
+        try:
+            input_args, input_kwargs, input_arg_names, model_device = (
+                backend.setup_inputs_and_device(
+                    self,
+                    model,
+                    input_args,
+                    input_kwargs,
+                )
+            )
+            # B3R4-R12-1: a non-total namedtuple `_fields` schema on any input
+            # site refuses typed HERE, for every capture. The tensor-extraction
+            # BFS cannot see positional slots of tuple subclasses, so such an
+            # input used to lose its tensor leaves silently (no input node,
+            # parents dropped, the gap misattributed to a stale-reference
+            # escape) while settling COMPLETE.
+            from torchlens._input_walk import refuse_nontotal_namedtuple_inputs
+
+            refuse_nontotal_namedtuple_inputs(input_args, input_kwargs)
+        except BaseException:
+            # A pre-outer-``finally`` setup failure: the seeded engines must
+            # not leak to the user.
+            _restore_user_global_rng()
+            raise
+
+        self.capture_start_time = time.time()
+        # Settlement state for this pass: the phase marker attributes failures
+        # to FORWARD/FINALIZE/POSTPROCESS, and any stale stop-request latch
+        # from a prior pass on a carried-over Trace must never classify this
+        # one.
+        set_capture_phase(self, CapturePhase.FORWARD)
+        self.__dict__.pop("_stop_requested", None)
+    except BaseException:
+        # A raise between the reservation claim and the outer ``try`` would
+        # otherwise leak the reservation and wedge every later admission.
+        for restorer in _rng_restorers:
+            restorer()
+        capture_slot.__exit__(None, None, None)
+        raise
     input_tensors: list[Any] = []
     capture_session: CaptureSession | None = None
     capture_events: object | None = None
     compiled_unwrap_exception: tuple[
         type[BaseException] | None, BaseException | None, TracebackType | None
     ] = (None, None, None)
-    compiled_unwrap_context = (
-        unwrap_compiled_submodules(model)
-        if isinstance(model, nn.Module)
-        else contextlib.nullcontext()
-    )
-    compiled_unwrap_context.__enter__()
+    try:
+        compiled_capture_context = (
+            prepare_compiled_capture(model)
+            if isinstance(model, nn.Module)
+            else contextlib.nullcontext()
+        )
+        compiled_capture_prep = compiled_capture_context.__enter__()
+    except BaseException:
+        # A raise between the reservation claim and the outer ``try`` would
+        # otherwise leak the reservation and wedge every later admission.
+        capture_slot.__exit__(None, None, None)
+        _restore_user_global_rng()
+        raise
 
     try:
+        # B8-25b: everything after ``__enter__`` runs INSIDE the try whose
+        # ``finally`` exits the context -- a KeyboardInterrupt between enter
+        # and try used to strand the compiled-submodule swaps on the user
+        # model with no unwind.
+        if not isinstance(compiled_capture_prep, CompiledCapturePrep):
+            compiled_capture_prep = CompiledCapturePrep(sites=(), force_eager_stance=False)
+        compiled_callable_sites = compiled_capture_prep.sites
         global _ACTIVE_CAPTURE_BACKEND
         previous_capture_backend = _ACTIVE_CAPTURE_BACKEND
         _ACTIVE_CAPTURE_BACKEND = backend
@@ -1256,6 +1620,7 @@ def run_and_log_inputs_through_model(
                 input_tensors_any,
                 input_tensor_addresses,
             ) = _fetch_label_move_input_tensors(
+                self,
                 input_args,
                 input_arg_names,
                 input_kwargs,
@@ -1264,13 +1629,13 @@ def run_and_log_inputs_through_model(
         finally:
             _ACTIVE_CAPTURE_BACKEND = previous_capture_backend
         input_tensors = list(input_tensors_any)
-        self._input_tensor_addresses = list(input_tensor_addresses)
+        self._raw_graph_ws.input_tensor_addresses = list(input_tensor_addresses)
         self._output_attribution_input_tensors = input_tensors
 
         # RNG state snapshot for deterministic explicit refreshes and legacy
         # two-pass consistency (#58).
         if self.capture_mode == "exhaustive":
-            self._pre_forward_rng_states = backend.snapshot_rng(self)  # type: ignore[attr-defined]
+            self._pre_forward_rng_states = backend.snapshot_rng(self)
 
         from ..ir import CaptureEvents
 
@@ -1336,19 +1701,25 @@ def run_and_log_inputs_through_model(
             # storage overlap) must be captured BEFORE ``snapshot_capture_state``'s
             # clones erase it; the runnable producer refuses unsupported topologies
             # at save and reproduces identity groups from this record.
-            self._runnable_state_alias_topology = snapshot_state_alias_topology(model)
+            self._runnable.state_alias_topology = snapshot_state_alias_topology(model)
             # r63 C1: per-slot metadata signatures are stamped from the LIVE tensors
             # PRE-clone -- the clone itself compacts ``storage_offset`` and
             # materializes conj/neg, so a post-clone signature is blind to two of
             # the four transport-lossy physical dims. Consumed by the escape-gated
             # ``producer_state_metadata`` preflight.
-            self._runnable_capture_state_signatures = snapshot_capture_state_signatures(model)
-            self._runnable_capture_state = snapshot_capture_state(model)
+            self._runnable.capture_state_signatures = snapshot_capture_state_signatures(model)
+            self._runnable.capture_state = snapshot_capture_state(model)
             # r77 F2: the persistent-buffer NAME universe survives non-tensor state
             # (``get_extra_state()`` / packed entries), so a dead-model
             # include_weights=False save declares the SAME slot universe as the
             # live lane instead of silently dropping never-forward-used buffers.
-            self._runnable_persistent_buffer_universe = snapshot_persistent_buffer_universe(model)
+            self._runnable.persistent_buffer_universe = snapshot_persistent_buffer_universe(model)
+
+        if str(_backend_name_for_trace(self)) == TORCH_BACKEND_NAME:
+            # The provenance manifest needs the capture-time default, never the
+            # potentially different save-time default. Runnable-ready captures
+            # replace this minimal snapshot below with the complete ambient record.
+            self._runnable.capture_ambient = {"default_dtype": str(get_default_dtype())}
 
         # Turn on the logging toggle and run the forward pass.
         # Inside this context, every decorated torch function will log its
@@ -1357,6 +1728,27 @@ def run_and_log_inputs_through_model(
         # automatically by the decorated wrappers.
         _vprint(self, f"Running {self.capture_mode} forward pass...")
         with backend.active_logging(self):
+            # Under an active ``force_eager`` stance (torch >= 2.6) the
+            # inventoried compiled callables run their original eager Python and
+            # their interiors ARE logged, so the capture keeps full verified
+            # semantics; the ceiling below is the honest pre-2.6 fallback.
+            if compiled_callable_sites and not compiled_capture_prep.force_eager_stance:
+                self._raw_dynamo_region_detected = True
+                self._raw_transform_escape_detected = True
+                _state._dynamo_warning_emitted = True
+                warnings.warn(
+                    "TorchLens detected a torch.compile (Dynamo) region on the captured model "
+                    f"at {', '.join(compiled_callable_sites)}. Operations that run inside the "
+                    "compiled region are not logged: on a cold compile the tensors there are "
+                    "data-free FakeTensors, while a warm-cache execution can bypass Python "
+                    "wrappers entirely. The returned Trace contains only operations that ran "
+                    "OUTSIDE the compiled region. Use the eager callable during capture if you "
+                    "need its interior logged (on torch >= 2.6, TorchLens instead runs compiled "
+                    "callables eagerly via torch.compiler.set_stance and this gap does not "
+                    "arise).",
+                    UserWarning,
+                    stacklevel=2,
+                )
             for i, t in enumerate(input_tensors):
                 backend.log_source_tensor(self, t, "input", input_tensor_addresses[i])
             _register_model_input_container_snapshots(self, input_args, input_kwargs)
@@ -1371,17 +1763,18 @@ def run_and_log_inputs_through_model(
                 # descriptor can restore it explicitly at replay.
                 from ..utils._torch_compat import snapshot_ambient_execution_context
 
-                self._runnable_capture_ambient = snapshot_ambient_execution_context()
+                self._runnable.capture_ambient = snapshot_ambient_execution_context()
 
             if self.capture_mode == "predicate":
-                outputs = _run_predicate_forward_with_root_frame(
-                    self,
-                    backend,
-                    model,
-                    input_args,
-                    input_kwargs,
-                    model_device,
-                )
+                with _structure_only_forward_boundary(self):
+                    outputs = _run_predicate_forward_with_root_frame(
+                        self,
+                        backend,
+                        model,
+                        input_args,
+                        input_kwargs,
+                        model_device,
+                    )
             else:
                 with _timed_phase(self, "dispatch:forward_model"):
                     with _forward_peak_memory_bracket(self, model_device):
@@ -1398,41 +1791,117 @@ def run_and_log_inputs_through_model(
                             # frozen vocabulary. Any touch is permanently unreplayable
                             # (no identifiable seed); monitor uncertainty downgrades
                             # completeness, never reads as no-consumption.
-                            from ..utils.rng import host_nondeterminism_monitor
-
+                            #
+                            # The channel monitor is armed ONLY for runnable-capable
+                            # captures: ``intervention_ready`` is the exact predicate
+                            # for "this capture can produce a passing sparse runnable
+                            # descriptor" (the same predicate that gates the ambient
+                            # execution-context snapshot above), and the descriptor
+                            # builder is the witness verdict's only consumer. A
+                            # disarmed capture stamps ``monitor_uncertain`` fail-closed
+                            # so any unforeseen descriptor build ceilings through the
+                            # existing RNG_MONITOR_UNCERTAIN witness gap
+                            # (unverifiable, never a silent false VERIFIED) -- channel
+                            # coverage on the disarmed lane is unknowable, not absent.
+                            # Stamp the FAIL-CLOSED verdict before the forward runs.
+                            # The real verdict is stamped after the monitor tears down,
+                            # several statements away from its only consumer
+                            # (``_io/runnable.py`` treats a falsy/``None`` flag as
+                            # CERTAIN), so anything raising in between -- the swallowed-
+                            # stop checkpoint, the global-engine diff, a Ctrl-C during
+                            # teardown -- used to leave the field ``None`` and read as a
+                            # proven-clean window. Pre-stamping means an unreached stamp
+                            # ceilings through the existing RNG_MONITOR_UNCERTAIN
+                            # witness gap instead.
+                            self._runnable.rng_monitor_uncertain = True
+                            self._runnable.rng_monitor_uncertain_detail = (
+                                "monitor_verdict_not_stamped",
+                            )
                             _host_rng_before = snapshot_host_rng()
-                            with host_nondeterminism_monitor(model) as _rng_channels:
-                                outputs = cast(Callable[..., Any], model)(
-                                    *input_args, **input_kwargs
-                                )
+                            if bool(getattr(self, "intervention_ready", False)):
+                                from ..utils.rng import host_nondeterminism_monitor
+
+                                with host_nondeterminism_monitor(model) as _rng_channels:
+                                    outputs = cast(Callable[..., Any], model)(
+                                        *input_args, **input_kwargs
+                                    )
+                            else:
+                                _rng_channels = None
+                                with _structure_only_forward_boundary(self):
+                                    outputs = cast(Callable[..., Any], model)(
+                                        *input_args, **input_kwargs
+                                    )
                             _global_advanced = host_rng_advanced(
                                 _host_rng_before, snapshot_host_rng()
                             )
-                            # r65 CLUSTER Z stamping split: a torch RNG
-                            # ``replayable_read`` (the ``initial_seed`` family --
-                            # a host scalar fully determined by the capture seed)
-                            # sets CONSUMED without poisoning the capture seed, so
-                            # a run at the capture seed stays verified while any
-                            # other/absent seed ceilings; ceiling ``channels``
-                            # alone decide UNREPLAYABLE.
-                            self._runnable_host_rng_consumed = (
-                                _global_advanced
-                                or bool(_rng_channels.channels)
-                                or bool(_rng_channels.replayable_reads)
-                            )
-                            self._runnable_host_rng_unreplayable = bool(_rng_channels.channels)
-                            self._runnable_host_rng_channels = tuple(sorted(_rng_channels.channels))
-                            self._runnable_host_rng_replayable_reads = tuple(
-                                sorted(_rng_channels.replayable_reads)
-                            )
-                            self._runnable_rng_monitor_uncertain = bool(_rng_channels.uncertain)
-                            # r39 CLASS A: name the offending threads / coverage failure so
-                            # the INCOMPLETE ceiling's readiness diagnostic is actionable.
-                            self._runnable_rng_monitor_uncertain_detail = tuple(
-                                _rng_channels.uncertain_detail
-                            )
+                            if _rng_channels is not None:
+                                # r65 CLUSTER Z stamping split: a torch RNG
+                                # ``replayable_read`` (the ``initial_seed`` family --
+                                # a host scalar fully determined by the capture seed)
+                                # sets CONSUMED without poisoning the capture seed, so
+                                # a run at the capture seed stays verified while any
+                                # other/absent seed ceilings; ceiling ``channels``
+                                # alone decide UNREPLAYABLE.
+                                self._runnable.host_rng_consumed = (
+                                    _global_advanced
+                                    or bool(_rng_channels.channels)
+                                    or bool(_rng_channels.replayable_reads)
+                                )
+                                self._runnable.host_rng_unreplayable = bool(_rng_channels.channels)
+                                self._runnable.host_rng_channels = tuple(
+                                    sorted(_rng_channels.channels)
+                                )
+                                self._runnable.host_rng_replayable_reads = tuple(
+                                    sorted(_rng_channels.replayable_reads)
+                                )
+                                self._runnable.rng_monitor_uncertain = bool(_rng_channels.uncertain)
+                                # r39 CLASS A: name the offending threads / coverage
+                                # failure so the INCOMPLETE ceiling's readiness
+                                # diagnostic is actionable.
+                                self._runnable.rng_monitor_uncertain_detail = tuple(
+                                    _rng_channels.uncertain_detail
+                                )
+                            else:
+                                # Global engines are still bracketed (cheap); the
+                                # channel verdict was never observed, so it must
+                                # read as UNKNOWABLE, never as no-consumption.
+                                self._runnable.host_rng_consumed = _global_advanced
+                                self._runnable.rng_monitor_uncertain = True
+                                self._runnable.rng_monitor_uncertain_detail = ("monitor_not_armed",)
 
-        backend.finalize_forward_session(self)
+        # F6 boundary checkpoint: a "normal" forward return with the
+        # stop-request latch set means user code swallowed the control signal
+        # (halt or nonfinite abort) in a broad except. The capture must never
+        # be blessed COMPLETE; the typed error settles FAILED through the
+        # normal failure arm. Covers tl.trace and every Recorder pass.
+        swallowed_stop = self.__dict__.get("_stop_requested")
+        if swallowed_stop is not None:
+            from .outcome import StopSignalSwallowedError
+
+            raise StopSignalSwallowedError(
+                "TorchLens raised a "
+                f"{'halt' if swallowed_stop.kind == 'halt' else 'non-finite abort'} "
+                "stop signal during this forward, but the forward returned "
+                "normally: user code swallowed the control signal (typically a "
+                "broad `except:` or `except BaseException:` around the model "
+                "body). The capture cannot be trusted as complete. Stop "
+                f"boundary: {swallowed_stop.boundary_label or swallowed_stop.reason!r}.",
+                kind=swallowed_stop.kind,
+                boundary_label=swallowed_stop.boundary_label,
+            )
+        set_capture_phase(self, CapturePhase.FINALIZE)
+        from ..data_classes._nonfinite import drain_pending_nonfinite
+        from ..utils.tensor_utils import synchronize_pending_cpu_async_copies
+
+        # Fence every cpu_async D2H copy recorded this forward BEFORE any
+        # host-side consumer (finalize, postprocess digests, ``op.out``,
+        # ``tl.save`` serialization) can observe partial bytes (R36-1).
+        synchronize_pending_cpu_async_copies()
+        # Settle deferred track_nonfinite device flags here, after the forward
+        # is complete, so the record costs one batch of scalar reads instead of
+        # a per-op device synchronization (the flags' kernels are long done).
+        drain_pending_nonfinite(self)
+        backend.finalize_forward_session(self, self._raw_graph_ws)
 
         output_transform = getattr(self, "_output_transform", None)
         self.raw_output = output_transform(outputs) if output_transform is not None else None
@@ -1444,13 +1913,10 @@ def run_and_log_inputs_through_model(
             output_style=getattr(self, "_output_style", None),
             output_head=getattr(self, "_output_head", None),
         )
-        for attr_name in (
-            "_output_style",
-            "_output_head",
-            "_output_tokenizer",
-            "_semantic_output_metadata",
-        ):
-            self.__dict__.pop(attr_name, None)
+        # Tight window on the normal arm: drop immediately after the only
+        # consumer. The outer ``finally`` repeats this for the arms that never
+        # reach here (halt, failure, interrupt) -- see B1-02.
+        _drop_semantic_output_transients(self)
 
         self.forward_duration = Duration(
             time.time() - self.capture_start_time - self.setup_duration
@@ -1484,7 +1950,7 @@ def run_and_log_inputs_through_model(
             backend.cleanup_model_session(self, (model, input_tensors, (input_args, input_kwargs)))
             self.capture_end_time = time.time()
             self.__dict__.pop("_capture_producer_policy", None)
-            capture_session.transition("complete")
+            settle_completed(self, capture_session)
             return outputs
 
         output_tensors_any, output_tensor_addresses = backend.extract_and_mark_outputs(
@@ -1495,9 +1961,10 @@ def run_and_log_inputs_through_model(
 
         backend.cleanup_model_session(self, (model, input_tensors, (input_args, input_kwargs)))
         _vprint(self, f"Postprocessing {len(self.capture_events.op_events)} operations...")
+        set_capture_phase(self, CapturePhase.POSTPROCESS)
         self._postprocess(output_tensors, output_tensor_addresses)
         self.__dict__.pop("_capture_producer_policy", None)
-        capture_session.transition("complete")
+        settle_completed(self, capture_session)
         return outputs
 
     except HaltSignal as halt_exc:
@@ -1508,67 +1975,269 @@ def run_and_log_inputs_through_model(
             and getattr(options, "halt", None) is not None
             and getattr(self, "_halt_returns_partial_trace", False)
         ):
-            halted_output = _finalize_halted_trace(
-                self,
-                backend,
-                halt_exc,
-                model,
-                input_tensors,
-                postprocess,
-            )
-            self.__dict__.pop("_capture_producer_policy", None)
-            if capture_session is not None:
-                capture_session.transition(
-                    "halted",
+            try:
+                halted_output = _finalize_halted_trace(
+                    self,
+                    backend,
+                    halt_exc,
+                    model,
+                    input_tensors,
+                    postprocess,
                 )
+            except Exception as secondary_exc:
+                # Halted-finalization secondary failure: the capture settles
+                # FAILED (FINALIZE or POSTPROCESS per the finalizer's phase
+                # markers) with a mandatory disclosure note; the secondary
+                # exception propagates with the HaltSignal chained, exactly
+                # as before settlement existed.
+                self.__dict__.pop("_capture_producer_policy", None)
+                settle_failed(
+                    self,
+                    capture_session,
+                    secondary_exc,
+                    settlement_note=(
+                        "halted finalization failed after halt at "
+                        f"{getattr(halt_exc, 'reason', '')!r}"
+                    ),
+                )
+                _scrub_failed_capture_transients(self)
+                raise
+            except BaseException as halt_interrupt_exc:
+                # Halted-arm interrupt: ``except Exception`` above cannot see a
+                # KeyboardInterrupt/SystemExit, which used to escape with NO
+                # settlement stamp -- the product read UNKNOWN only through the
+                # fail-closed no-sidecar default instead of a settled record.
+                # Stamp FAILED/interrupted like the outer BaseException arm.
+                self.__dict__.pop("_capture_producer_policy", None)
+                _settle_interrupted_halted_arm(self, capture_session, halt_interrupt_exc, halt_exc)
+                raise
+            self.__dict__.pop("_capture_producer_policy", None)
+            settle_halted(
+                self,
+                capture_session,
+                halt_exc,
+                finalize_partial=True,
+                postprocess_ran=postprocess,
+            )
             return halted_output
-        if capture_session is not None and not postprocess:
-            capture_session.snapshot_recording_projection(self)
-            self._fastlog_captured_run_core = capture_session.seal()
-        backend.cleanup_halted_forward_session(
-            self, (model, input_tensors, (input_args, input_kwargs))
-        )
+        try:
+            # Same double-fault fence as the failed-forward arm below: a raising
+            # seal must not skip the model-session teardown.
+            try:
+                if capture_session is not None and not postprocess:
+                    capture_session.snapshot_recording_projection(self)
+                    self._fastlog_captured_run_core = capture_session.seal()
+            finally:
+                backend.cleanup_halted_forward_session(
+                    self, (model, input_tensors, (input_args, input_kwargs))
+                )
+        except Exception as secondary_exc:
+            self.__dict__.pop("_capture_producer_policy", None)
+            settle_failed(
+                self,
+                capture_session,
+                secondary_exc,
+                settlement_note=(
+                    f"halted cleanup failed after halt at {getattr(halt_exc, 'reason', '')!r}"
+                ),
+            )
+            _scrub_failed_capture_transients(self)
+            raise
+        except BaseException as halt_interrupt_exc:
+            # Same halted-arm interrupt stamp as the finalize path above: the
+            # seal/cleanup seam's ``except Exception`` cannot see an interrupt,
+            # which used to escape unsettled.
+            self.__dict__.pop("_capture_producer_policy", None)
+            _settle_interrupted_halted_arm(self, capture_session, halt_interrupt_exc, halt_exc)
+            raise
         self.__dict__.pop("_capture_producer_policy", None)
-        if capture_session is not None:
-            capture_session.transition("halted")
+        settle_halted(
+            self,
+            capture_session,
+            halt_exc,
+            finalize_partial=False,
+            postprocess_ran=False,
+        )
         raise
 
     except Exception as e:
         compiled_unwrap_exception = sys.exc_info()
-        if capture_session is not None and not postprocess:
-            capture_session.snapshot_recording_projection(self)
-            self._fastlog_captured_run_core = capture_session.seal()
-        backend.cleanup_failed_forward_session(
-            self, (model, input_tensors, (input_args, input_kwargs)), e
-        )
-        self.__dict__.pop("_capture_producer_policy", None)
-        if capture_session is not None:
-            capture_session.transition(
-                "failed",
-            )
+        # Boundary facts snapshot eagerly at cause time: cleanup below may pop
+        # the event stream (or double-fault on already-popped workspaces), and
+        # the stamp in ``finally`` must still carry the committed-op count.
+        committed_ops = count_committed_ops(self)
+        try:
+            # The seal runs FIRST (it reads live capture state that cleanup
+            # strips) but must not be able to SKIP cleanup: a raising seal used
+            # to bypass requires_grad restore, tl_* metadata stripping, buffer
+            # tracker uninstall and end_label_session, leaving the user's model
+            # permanently altered by a failed capture.
+            try:
+                try:
+                    if capture_session is not None and not postprocess:
+                        capture_session.snapshot_recording_projection(self)
+                        self._fastlog_captured_run_core = capture_session.seal()
+                finally:
+                    backend.cleanup_failed_forward_session(
+                        self, (model, input_tensors, (input_args, input_kwargs)), e
+                    )
+                self.__dict__.pop("_capture_producer_policy", None)
+            except Exception as cleanup_exc:
+                # grind-r6 b1 R06 (sol MED, probe): the PRIMARY user error must
+                # propagate. An ordinary seal/cleanup double-fault used to
+                # escape INSTEAD of ``raise e`` -- the settled CaptureOutcome
+                # named the primary while the escaping exception was the
+                # secondary and carried no partial_log. Mirror the interrupt
+                # arm: attach the secondary as a note and re-raise the primary
+                # below. A BaseException secondary (Ctrl-C during cleanup)
+                # keeps escaping -- interrupts always win (B8-23 doctrine).
+                note = (
+                    "TorchLens failed-forward cleanup also failed while handling "
+                    f"this error: {type(cleanup_exc).__name__}: "
+                    f"{safe_exception_str(cleanup_exc)}"
+                )
+                add_note = getattr(e, "add_note", None)
+                if add_note is not None:
+                    add_note(note)
+                else:  # Python 3.10: no PEP 678 notes -- surface via warning.
+                    warnings.warn(note, RuntimeWarning, stacklevel=2)
+        finally:
+            # Guaranteed settlement: a cleanup double-fault still stamps the
+            # terminal outcome before the (original or secondary) exception
+            # escapes; exception identity/chaining is byte-identical to the
+            # pre-settlement arms. The transient scrub runs after settlement
+            # (R11/R32: the escaping partial must not pin live input tensors
+            # or the payload-bearing event stream).
+            settle_failed(self, capture_session, e, n_ops_committed=committed_ops)
+            _scrub_failed_capture_transients(self)
         raise e
 
-    except BaseException:
+    except BaseException as interrupt_exc:
         # ``except Exception`` above handles ordinary failed-forward diagnostics,
         # but user code may raise e.g. KeyboardInterrupt or a custom BaseException.
         # The torch session forces gradient-capable parameters to require grads, so
         # its teardown must run before re-raising any such escape.
         compiled_unwrap_exception = sys.exc_info()
-        backend.cleanup_model_session(self, (model, input_tensors, (input_args, input_kwargs)))
-        self.__dict__.pop("_capture_producer_policy", None)
-        if capture_session is not None:
-            capture_session.transition("failed")
+        committed_ops = count_committed_ops(self)
+        try:
+            try:
+                backend.cleanup_model_session(
+                    self, (model, input_tensors, (input_args, input_kwargs))
+                )
+            except Exception as cleanup_exc:
+                # B8-23: the PRIMARY control-flow exception (KeyboardInterrupt /
+                # SystemExit) must propagate. Letting an ordinary cleanup
+                # Exception escape here demoted the KI to ``__context__``, and
+                # a caller's ``except Exception`` retry loop swallowed Ctrl-C
+                # outright. Attach the cleanup failure instead of raising it.
+                note = (
+                    "TorchLens model-session cleanup also failed while handling "
+                    f"this interrupt: {type(cleanup_exc).__name__}: "
+                    f"{safe_exception_str(cleanup_exc)}"
+                )
+                add_note = getattr(interrupt_exc, "add_note", None)
+                if add_note is not None:
+                    add_note(note)
+                else:  # Python 3.10: no PEP 678 notes -- surface via warning.
+                    warnings.warn(note, RuntimeWarning, stacklevel=2)
+            self.__dict__.pop("_capture_producer_policy", None)
+        finally:
+            try:
+                settle_failed(
+                    self,
+                    capture_session,
+                    interrupt_exc,
+                    interrupted=True,
+                    n_ops_committed=committed_ops,
+                )
+                _scrub_failed_capture_transients(self)
+            except Exception as settle_exc:
+                # B8-23 applies here too: an ordinary settlement/scrub failure
+                # inside this ``finally`` would replace the unwinding
+                # KeyboardInterrupt/SystemExit (demoting it to __context__),
+                # letting a caller's ``except Exception`` swallow Ctrl-C.
+                # Attach the failure to the interrupt instead; an unsettled
+                # outcome reads UNKNOWN (most restrictive), never blessed.
+                note = (
+                    "TorchLens settlement/scrub also failed while handling "
+                    f"this interrupt: {type(settle_exc).__name__}: "
+                    f"{safe_exception_str(settle_exc)}"
+                )
+                add_note = getattr(interrupt_exc, "add_note", None)
+                if add_note is not None:
+                    add_note(note)
+                else:  # Python 3.10: no PEP 678 notes -- surface via warning.
+                    warnings.warn(note, RuntimeWarning, stacklevel=2)
         raise
 
     finally:
+        # B1-02: the ONE site every settlement path passes through. The pop
+        # block above lives only on the normal forward-return arm, so a halt
+        # (or a failure, or a KeyboardInterrupt) used to exit with the live
+        # tokenizer and metadata key still pinned to the escaping product.
+        # Placed before the teardown ladder so a teardown double-fault cannot
+        # skip it.
+        _drop_semantic_output_transients(self)
+        # Snapshot the exception this ``finally`` is unwinding through (None on
+        # the normal return path): the teardown double-fault guard below needs
+        # to know whether an ordinary teardown Exception would be replacing a
+        # control-flow BaseException.
+        inflight_exc = sys.exc_info()[1]
         try:
-            _clear_saved_activation_dedup_caches(self)
-            # Release input tensor references so GC can reclaim backend memory.
-            input_tensors = None  # type: ignore[assignment]
             try:
-                _cleanup_forward_memory_once(self, backend, capture_session)
+                _clear_saved_activation_dedup_caches(self)
+                # Release input tensor references so GC can reclaim backend memory.
+                input_tensors = None  # type: ignore[assignment]
+                try:
+                    _cleanup_forward_memory_once(self, backend, capture_session)
+                finally:
+                    if capture_session is not None and capture_events is not None:
+                        detach_capture_session(self, capture_events, capture_session)
             finally:
-                if capture_session is not None and capture_events is not None:
-                    detach_capture_session(self, capture_events, capture_session)
+                compiled_capture_context.__exit__(*compiled_unwrap_exception)
+        except BaseException as teardown_exc:
+            # Post-settlement teardown failure (path 7): the already-settled
+            # COMPLETE/HALTED outcome demotes to FAILED/TEARDOWN in both homes
+            # and the teardown exception propagates -- the raise preempts the
+            # return, so no product escapes carrying an undemoted claim.
+            demote_outcome(
+                self,
+                capture_session,
+                note=(
+                    f"teardown failed: {type(teardown_exc).__name__}: "
+                    f"{safe_exception_str(teardown_exc)}"
+                ),
+                exc=teardown_exc,
+            )
+            if (
+                inflight_exc is not None
+                and not isinstance(inflight_exc, Exception)
+                and isinstance(teardown_exc, Exception)
+            ):
+                # R63 (B8-23 one frame out): an ordinary teardown Exception
+                # must not replace an unwinding KeyboardInterrupt/SystemExit
+                # (demoting it to ``__context__``), or a caller's
+                # ``except Exception`` retry loop swallows Ctrl-C. Keep the
+                # demotion, attach the teardown failure, and re-raise the
+                # ORIGINAL interrupt (the teardown exception stays visible as
+                # its ``__context__``).
+                note = (
+                    "TorchLens post-settlement teardown also failed while handling "
+                    f"this interrupt: {type(teardown_exc).__name__}: "
+                    f"{safe_exception_str(teardown_exc)}"
+                )
+                add_note = getattr(inflight_exc, "add_note", None)
+                if add_note is not None:
+                    add_note(note)
+                else:  # Python 3.10: no PEP 678 notes -- surface via warning.
+                    warnings.warn(note, RuntimeWarning, stacklevel=2)
+                raise inflight_exc
+            raise
         finally:
-            compiled_unwrap_context.__exit__(*compiled_unwrap_exception)
+            # Outermost: a teardown double-fault must not leak the capture
+            # reservation, or every later admission refuses forever. The RNG
+            # restore (R57) runs first but can never displace the release.
+            try:
+                _restore_user_global_rng()
+            finally:
+                capture_slot.__exit__(None, None, None)

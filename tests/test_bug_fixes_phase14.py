@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
-import torch.nn.functional as F
 import torch.nn as nn
+import torch.nn.functional as F
 
 import torchlens as tl
 from torchlens.capture.arg_positions import FUNC_ARG_SPECS, extract_tensors_and_params
 from torchlens.data_classes.func_call_location import FuncCallLocation
+from torchlens.options import SaveOptions
 from torchlens.utils.hashing import make_short_barcode_from_input
 from torchlens.utils.tensor_utils import tensor_nanequal
 from torchlens.validation import (
@@ -22,8 +24,8 @@ from torchlens.validation import (
     validate_forward_pass,
 )
 from torchlens.validation.core import _check_arglocs_correct_for_arg
-from torchlens.validation.exemptions import _check_lstm_exempt
-from torchlens.visualization.rendering import GRADIENT_ARROW_COLOR
+from torchlens.validation.exemptions import _check_interpolate_exempt, _check_lstm_exempt
+from torchlens.visualization._render_common import GRADIENT_ARROW_COLOR
 
 
 def _sample_func_for_location(x: torch.Tensor) -> torch.Tensor:
@@ -149,6 +151,17 @@ class _IdentityOutputModel(nn.Module):
         """
 
         return x
+
+
+class _ViewMutationOutputTransformModel(nn.Module):
+    """Return a base tensor after mutating one of its views."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Mutate a two-row view and return its six-row base tensor."""
+
+        base = x + 1
+        base[1:3].zero_()
+        return base
 
 
 class _NewEmptyFilledModel(nn.Module):
@@ -335,6 +348,42 @@ def test_functional_parameter_view_does_not_inflate_param_counts() -> None:
     assert check_metadata_invariants(trace) is True
 
 
+@pytest.mark.parametrize("save_raw_activations", [True, False])
+def test_view_mutation_output_recomputes_transformed_payload_metadata(
+    *, save_raw_activations: bool
+) -> None:
+    """Describe transformed synthetic outputs from the actual returned base tensor."""
+
+    input_value = torch.arange(18.0).reshape(6, 3)
+    expected_raw = input_value + 1
+    expected_raw[1:3].zero_()
+    expected_transformed = expected_raw + 10
+    trace = tl.trace(
+        _ViewMutationOutputTransformModel(),
+        input_value,
+        save=SaveOptions(
+            activation_transform=lambda value: value + 10,
+            save_raw_activations=save_raw_activations,
+        ),
+    )
+    output_op = trace[trace.output_layers[0]]
+
+    assert output_op.shape == (6, 3)
+    assert output_op.dtype == expected_raw.dtype
+    assert output_op.activation_memory == expected_raw.nelement() * expected_raw.element_size()
+    if save_raw_activations:
+        assert torch.equal(output_op.out, expected_raw)
+    else:
+        assert output_op.out is None
+    assert torch.equal(output_op.transformed_out, expected_transformed)
+    assert output_op.transformed_out_shape == (6, 3)
+    assert output_op.transformed_out_dtype == expected_transformed.dtype
+    assert output_op.transformed_activation_memory == (
+        expected_transformed.nelement() * expected_transformed.element_size()
+    )
+    assert check_metadata_invariants(trace) is True
+
+
 def test_conditional_then_children_merge_across_multipass_layerlog() -> None:
     """Rolled LayerLogs expose THEN and ELSE child views from all ops."""
 
@@ -377,12 +426,28 @@ def test_conditional_then_invariant_catches_derived_view_corruption() -> None:
 
 
 def test_short_barcode_uses_stable_sha256_prefix() -> None:
-    """Deterministic barcodes are stable SHA-256 prefixes."""
+    """Deterministic barcodes are SHA-256 prefixes of the type-tagged encoding.
+
+    The pre-fcd3172e encoding (``str()`` joined by a raw NUL byte) is the
+    collision bug that commit fixed — ``1`` vs ``"1"`` and ``["a\\x00b"]`` vs
+    ``["a", "b"]`` hashed identically — so this pins the current type-tagged
+    JSON construction and the collision cases the fix exists to keep distinct.
+    """
 
     payload = ["ab", "c", 123]
-    expected = hashlib.sha256("\x00".join(str(x) for x in payload).encode("utf-8")).hexdigest()
+    expected = hashlib.sha256(
+        json.dumps(
+            [[type(x).__name__, repr(x)] for x in payload],
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()
 
     assert make_short_barcode_from_input(payload, barcode_len=16) == expected[:16]
+
+    # The collisions the type-tagged encoding exists to prevent stay distinct.
+    assert make_short_barcode_from_input([1]) != make_short_barcode_from_input(["1"])
+    assert make_short_barcode_from_input(["a\x00b"]) != make_short_barcode_from_input(["a", "b"])
 
 
 def test_validate_forward_pass_restores_state_after_exception() -> None:
@@ -423,17 +488,76 @@ def test_validation_arglocs_allow_same_parent_tensor_in_multiple_slots() -> None
 
 
 def test_lstm_exemption_only_treats_hidden_state_as_structural() -> None:
-    """LSTM perturbation exemption handles hidden tuples but not params."""
+    """LSTM exemption uses hidden-state position despite equal data content."""
 
     h = torch.zeros(1, 2, 3)
     c = torch.ones(1, 2, 3)
     weight = torch.randn(12, 3)
-    layer = SimpleNamespace(saved_args=(torch.randn(4, 2, 3), (h, c), [weight]))
-    hidden_log = {"hidden": SimpleNamespace(out=c)}
-    weight_log = {"weight": SimpleNamespace(out=weight)}
+    layer = SimpleNamespace(
+        saved_args=(h.clone(), (h, c), [weight]),
+        parent_arg_positions={
+            "args": {0: "equal_data", 1: "hidden", 2: "weight"},
+            "kwargs": {},
+        },
+    )
+    trace = {
+        "equal_data": SimpleNamespace(out=h.clone()),
+        "hidden": SimpleNamespace(out=h),
+        "weight": SimpleNamespace(out=weight),
+    }
 
-    assert _check_lstm_exempt(hidden_log, layer, ["hidden"])  # type: ignore[arg-type]
-    assert not _check_lstm_exempt(weight_log, layer, ["weight"])  # type: ignore[arg-type]
+    assert _check_lstm_exempt(trace, layer, ["hidden"])  # type: ignore[arg-type]
+    assert not _check_lstm_exempt(trace, layer, ["equal_data"])  # type: ignore[arg-type]
+    assert not _check_lstm_exempt(trace, layer, ["weight"])  # type: ignore[arg-type]
+
+
+def test_lstm_exemption_resolves_real_nested_hidden_state_positions() -> None:
+    """Nested ``(1, i)`` hidden-state keys still resolve to positional slot 1.
+
+    A real ``lstm(input, (h0, c0))`` capture registers its hidden-state parents
+    under TUPLE keys ``(1, 0)`` / ``(1, 1)``, never a bare ``1``; matching only
+    bare integer keys silently makes this exemption unreachable.
+    """
+
+    h = torch.zeros(1, 2, 3)
+    c = torch.ones(1, 2, 3)
+    layer = SimpleNamespace(
+        saved_args=(torch.randn(4, 2, 3), (h, c)),
+        parent_arg_positions={
+            "args": {0: "data", (1, 0): "h0", (1, 1): "c0"},
+            "kwargs": {},
+        },
+    )
+    trace = {
+        "data": SimpleNamespace(out=torch.randn(4, 2, 3)),
+        "h0": SimpleNamespace(out=h),
+        "c0": SimpleNamespace(out=c),
+    }
+
+    assert _check_lstm_exempt(trace, layer, ["h0"])  # type: ignore[arg-type]
+    assert _check_lstm_exempt(trace, layer, ["c0"])  # type: ignore[arg-type]
+    assert not _check_lstm_exempt(trace, layer, ["data"])  # type: ignore[arg-type]
+
+
+def test_interpolate_exemption_uses_scale_factor_position_not_content() -> None:
+    """Equal-valued input and scale tensors are disambiguated structurally."""
+
+    equal_value = torch.tensor(2.0)
+    layer = SimpleNamespace(
+        saved_args=(equal_value, None, equal_value.clone()),
+        saved_kwargs={},
+        parent_arg_positions={
+            "args": {0: "equal_data", 2: "scale_factor"},
+            "kwargs": {},
+        },
+    )
+    trace = {
+        "equal_data": SimpleNamespace(out=equal_value.clone()),
+        "scale_factor": SimpleNamespace(out=equal_value.clone()),
+    }
+
+    assert _check_interpolate_exempt(trace, layer, ["scale_factor"])  # type: ignore[arg-type]
+    assert not _check_interpolate_exempt(trace, layer, ["equal_data"])  # type: ignore[arg-type]
 
 
 @pytest.mark.smoke

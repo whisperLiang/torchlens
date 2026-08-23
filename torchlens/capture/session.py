@@ -2,36 +2,26 @@
 
 from __future__ import annotations
 
+import tempfile
+import warnings
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-import tempfile
 from types import MappingProxyType
-from typing import Any, Callable, Literal, Mapping
-import warnings
-from weakref import ReferenceType, WeakKeyDictionary, ref
+from typing import Any, Literal
+from weakref import ref
 
 from .. import _state
 from ..ir.events import OpEvent
 from ..utils.tensor_utils import safe_copy
-from .kernel import CaptureKernel
-from .ledgers import (
-    CompletenessManifest,
-    CompletenessState,
-    DecisionLedger,
-    DecisionRecord,
-    EventFact,
-    EventId,
-    EventJournal,
-    PayloadLedger,
-    PayloadRecord,
-)
+from .outcome import CaptureOutcome
 from .plan import CapturePlan, EnrichmentLevel, RetentionKind, RetentionProfile
 
 TerminalState = Literal["complete", "halted", "failed"]
+"""First-transition log vocabulary. The settlement authority passes
+``CaptureStatus``-derived values that collapse onto these three states; the
+full six-status truth rides ``RunOutcome.capture_outcome``."""
 CleanupCallback = Callable[[], None]
-
-_LEGACY_CAPTURE_SESSIONS: "WeakKeyDictionary[object, CaptureSession]" = WeakKeyDictionary()
-_LEGACY_EVENT_SESSIONS: dict[int, tuple[ReferenceType[object], ReferenceType[CaptureSession]]] = {}
 
 
 @dataclass(slots=True)
@@ -61,21 +51,21 @@ class CapturedRunCore:
 
     Parameters
     ----------
-    event_facts
-        Immutable operation facts in producer order.
-    decisions
-        Selection and intervention sidecars keyed by stable event identity.
-    payloads
-        Payload leases keyed by stable event identity.
-    completeness
-        Truthful observability states recorded for the run.
+    events
+        Canonical immutable operation event spine in producer order, folded
+        through the journal's amendment reducer at seal time.
+    projection_facts
+        Snapshot of legacy run facts needed by Recording projections.
+    amendment_watermark
+        Highest amendment seq (lane-local domain) consumed by the seal fold,
+        or ``None`` when the session had no bound journal. Projectors source
+        working-copy watermarks from here (reviewer note S-N2) so carried
+        amendments the seal already folded can never apply twice.
     """
 
-    event_facts: tuple[EventFact, ...]
-    decisions: Mapping[EventId, DecisionRecord]
-    payloads: Mapping[EventId, PayloadRecord]
-    completeness: Mapping[str, CompletenessState]
+    events: tuple[OpEvent, ...]
     projection_facts: Mapping[str, Any]
+    amendment_watermark: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +84,9 @@ class RunOutcome:
         Partial product attached by an existing compatibility path.
     exception
         Terminal failure or halt exception when one exists.
+    capture_outcome
+        Typed settled outcome record written by the settlement authority
+        (``torchlens.capture.outcome``); the authority is its only writer.
     """
 
     state: TerminalState
@@ -101,6 +94,7 @@ class RunOutcome:
     product: Any = None
     partial_product: Any = None
     exception: BaseException | None = None
+    capture_outcome: CaptureOutcome | None = None
 
 
 @dataclass(slots=True)
@@ -144,10 +138,6 @@ class CaptureSession:
 
     plan: CapturePlan
     backend_token: object | None = None
-    event_journal: EventJournal = field(default_factory=EventJournal)
-    decision_ledger: DecisionLedger = field(default_factory=DecisionLedger)
-    payload_ledger: PayloadLedger = field(default_factory=PayloadLedger)
-    completeness: CompletenessManifest = field(default_factory=CompletenessManifest)
     output_bindings: dict[str, object] = field(default_factory=dict)
     counters: dict[str, int] = field(default_factory=dict)
     module_state: dict[str, object] = field(default_factory=dict)
@@ -155,8 +145,9 @@ class CaptureSession:
     builders: dict[str, object] = field(default_factory=dict)
     cleanup_stack: list[_CleanupEntry] = field(default_factory=list)
     outcome: RunOutcome | None = None
-    kernel: CaptureKernel = field(init=False)
+    _event_spine: list[OpEvent] | None = field(default=None, init=False, repr=False)
     _sealed_core: CapturedRunCore | None = field(default=None, init=False, repr=False)
+    _event_journal: Any | None = field(default=None, init=False, repr=False)
     projection_facts: dict[str, Any] = field(default_factory=dict)
     activation_escrow: dict[int, ActivationEscrowPayload] = field(default_factory=dict)
     gradient_reference_escrow: dict[int, Any] = field(default_factory=dict)
@@ -166,16 +157,40 @@ class CaptureSession:
     _activation_escrow_spill_index: int = field(default=0, init=False, repr=False)
     gradient_reference_logical_bytes: int = 0
     gradient_reference_peak_count: int = 0
-    live_gradient_labels: set[str] = field(default_factory=set)
     _activation_spill_dir: tempfile.TemporaryDirectory[str] | None = field(
         default=None, init=False, repr=False
     )
     _gradient_warning_emitted: bool = field(default=False, init=False, repr=False)
 
-    def __post_init__(self) -> None:
-        """Compile the session's fixed-order capture kernel."""
+    def bind_event_spine(self, events: list[OpEvent]) -> None:
+        """Bind the session to the active ``CaptureEvents`` operation list.
 
-        self.kernel = CaptureKernel(self)
+        Parameters
+        ----------
+        events
+            Canonical mutable operation-event list for this capture run.
+        """
+
+        if self._sealed_core is not None:
+            raise RuntimeError("Cannot bind a capture spine after the run core is sealed.")
+        self._event_spine = events
+
+    def bind_event_journal(self, events: Any) -> None:
+        """Bind the session to the whole ``CaptureEvents`` journal object.
+
+        The seal reads the op lane through the journal's amendment reducer
+        and stamps the seal watermark back onto it; the raw list binding
+        above remains the fallback for spine-only callers.
+
+        Parameters
+        ----------
+        events
+            Canonical mutable ``CaptureEvents`` buffer for this capture run.
+        """
+
+        if self._sealed_core is not None:
+            raise RuntimeError("Cannot bind a capture journal after the run core is sealed.")
+        self._event_journal = events
 
     def release(self) -> None:
         """Release all run-local compatibility sidecars.
@@ -191,10 +206,8 @@ class CaptureSession:
             This operation is idempotent.
         """
 
-        self.event_journal.clear()
-        self.decision_ledger.clear()
-        self.payload_ledger.clear()
-        self.completeness.clear()
+        self._event_spine = None
+        self._event_journal = None
         self.output_bindings.clear()
         self.counters.clear()
         self.module_state.clear()
@@ -211,20 +224,25 @@ class CaptureSession:
         self._activation_escrow_spill_index = 0
         self.gradient_reference_logical_bytes = 0
         self.gradient_reference_peak_count = 0
-        self.live_gradient_labels.clear()
         if self._activation_spill_dir is not None:
-            self._activation_spill_dir.cleanup()
-            self._activation_spill_dir = None
+            try:
+                self._activation_spill_dir.cleanup()
+            except Exception:
+                pass
+            finally:
+                self._activation_spill_dir = None
         self._gradient_warning_emitted = False
         self.backend_token = None
         if self.outcome is not None:
-            self.outcome = RunOutcome(state=self.outcome.state)
+            self.outcome = RunOutcome(
+                state=self.outcome.state,
+                capture_outcome=self.outcome.capture_outcome,
+            )
 
     def escrow_candidate(
         self,
         raw_index: int,
         tensor: Any,
-        fields_dict: Mapping[str, Any] | None = None,
         *,
         retain_activation: bool = True,
     ) -> None:
@@ -236,15 +254,11 @@ class CaptureSession:
             Reserved raw operation index.
         tensor
             Live backend tensor for the operation.
-        fields_dict
-            Live event fields, used to identify positive-index gradient targets.
         retain_activation
             Whether this candidate still needs detached deferred retention.
         """
 
         profile = self.plan.retention_profile
-        if raw_index in profile.gradient_live_indices and fields_dict is not None:
-            self.live_gradient_labels.add(str(fields_dict["_label_raw"]))
         if profile.activation_kind is RetentionKind.ACTIVATION and retain_activation:
             with _state.pause_logging():
                 payload = safe_copy(tensor, detach_tensor=True)
@@ -263,6 +277,7 @@ class CaptureSession:
                         self.activation_escrow_ram_bytes -= evicted.nbytes
                     elif evicted.spill_path is not None:
                         evicted.spill_path.unlink(missing_ok=True)
+                        self.activation_escrow_spilled_bytes -= evicted.nbytes
             self._spill_activation_escrow_to_budget()
         if profile.gradient_kind is RetentionKind.GRADIENT_REFERENCE:
             self.gradient_reference_escrow[raw_index] = tensor
@@ -339,26 +354,55 @@ class CaptureSession:
         activation_selector = getattr(trace, "_deferred_retention_selector", None)
         if activation_selector is not None:
             live_output_by_raw_index: dict[int, Any] = {}
-            for output_label, output_tensor in zip(trace.output_layers, output_tensors):
+            for output_label, output_tensor in zip(
+                trace.output_layers, output_tensors, strict=True
+            ):
                 output_op = trace.layer_dict_all_keys[output_label]
                 live_output_by_raw_index[output_op.raw_index] = output_tensor
                 for parent_label in output_op.parents:
                     parent = trace.layer_dict_all_keys[parent_label]
                     live_output_by_raw_index[parent.raw_index] = output_tensor
-            selected = _get_op_nums_from_user_labels(trace, activation_selector)
+            from ..intervention.selectors import BaseSelector
+            from ..ir.selector_eval import selector_contains_kind
+
+            selected: list[int] | str
+            if isinstance(activation_selector, BaseSelector):
+                from ..intervention.resolver import _resolve_unchecked
+
+                selected = sorted(
+                    {
+                        raw_index
+                        for site in _resolve_unchecked(
+                            tuple(getattr(trace, "layer_list", ())),
+                            activation_selector,
+                            strict=False,
+                        )
+                        if isinstance((raw_index := getattr(site, "raw_index", None)), int)
+                    }
+                )
+                trace._tl_save_selector_fire_count = len(selected)
+            else:
+                selected = _get_op_nums_from_user_labels(trace, activation_selector)
             requested_nums = set() if selected == "all" else set(selected)
             selected_nums = set(requested_nums)
-            selected_nums.update(
-                op.raw_index
-                for op in trace.layer_list
-                if getattr(op, "layer_type", None) == "output"
+            exact_selector = isinstance(activation_selector, BaseSelector) and (
+                selector_contains_kind(activation_selector, "module")
             )
-            for op in trace.layer_list:
-                if op.raw_index in selected_nums and getattr(op, "layer_type", None) == "output":
-                    selected_nums.update(
-                        trace.layer_dict_all_keys[parent_label].raw_index
-                        for parent_label in op.parents
-                    )
+            if not exact_selector:
+                selected_nums.update(
+                    op.raw_index
+                    for op in trace.layer_list
+                    if getattr(op, "layer_type", None) == "output"
+                )
+                for op in trace.layer_list:
+                    if (
+                        op.raw_index in selected_nums
+                        and getattr(op, "layer_type", None) == "output"
+                    ):
+                        selected_nums.update(
+                            trace.layer_dict_all_keys[parent_label].raw_index
+                            for parent_label in op.parents
+                        )
             for op in trace.layer_list:
                 if op.raw_index not in selected_nums:
                     continue
@@ -427,51 +471,6 @@ class CaptureSession:
         trace.__dict__.pop("_deferred_retention_selector", None)
         trace.__dict__.pop("_deferred_gradient_selector", None)
 
-    def observe_event(self, event: OpEvent) -> None:
-        """Populate stage-2 sidecars from an existing producer event.
-
-        Parameters
-        ----------
-        event
-            Frozen event already appended to the legacy ``CaptureEvents``
-            buffer.  No event fields, payloads, selectors, or interventions are
-            recomputed here.
-        """
-
-        if self._sealed_core is not None:
-            raise RuntimeError("Cannot append capture facts after the run core is sealed.")
-        event_id = self.event_journal.append(event)
-        self.decision_ledger.append_from_event(event_id, event)
-        self.payload_ledger.append_from_event(event_id, event)
-        self.counters["events"] = self.counters.get("events", 0) + 1
-
-    def note_legacy_emission(self) -> None:
-        """Record entry through the Stage-1 producer compatibility seam.
-
-        Returns
-        -------
-        None
-            Updates only session-local instrumentation; the legacy producer
-            remains solely responsible for capture behavior.
-        """
-
-        self.counters["producer_emissions"] = self.counters.get("producer_emissions", 0) + 1
-
-    def replace_event(self, event: OpEvent) -> None:
-        """Mirror an existing immutable producer-event replacement.
-
-        Parameters
-        ----------
-        event
-            Replacement event produced by a legacy compatibility helper.
-        """
-
-        if self._sealed_core is not None:
-            raise RuntimeError("Cannot replace capture facts after the run core is sealed.")
-        event_id = self.event_journal.replace(event)
-        self.decision_ledger.append_from_event(event_id, event)
-        self.payload_ledger.append_from_event(event_id, event)
-
     def seal(self) -> CapturedRunCore:
         """Seal and return the repeatedly readable projection source.
 
@@ -483,12 +482,27 @@ class CaptureSession:
         """
 
         if self._sealed_core is None:
+            journal = self._event_journal
+            if journal is not None:
+                # Fold the amendment lane into the sealed spine and stamp the
+                # watermark on BOTH the live journal and the pre-seal
+                # projection clone stored by snapshot_recording_projection —
+                # the clone predates this seal, so stamping only the live
+                # object would strand it without a filter anchor (S-N2).
+                events = tuple(journal.amended_op_records())
+                watermark = int(journal.amendment_seq or 0)
+                journal.core_seal_watermark = watermark
+                journal.amendments_sealed = True
+                projection_clone = self.projection_facts.get("capture_events")
+                if projection_clone is not None:
+                    projection_clone.core_seal_watermark = watermark
+            else:
+                events = tuple(self._event_spine or ())
+                watermark = None
             self._sealed_core = CapturedRunCore(
-                event_facts=self.event_journal.facts,
-                decisions=MappingProxyType(dict(self.decision_ledger.records)),
-                payloads=MappingProxyType(dict(self.payload_ledger.records)),
-                completeness=MappingProxyType(dict(self.completeness.states)),
+                events=events,
                 projection_facts=MappingProxyType(dict(self.projection_facts)),
+                amendment_watermark=watermark,
             )
         return self._sealed_core
 
@@ -537,11 +551,11 @@ class CaptureSession:
                 "forward_memory_backend": getattr(trace, "forward_memory_backend", None),
                 "random_seed": getattr(trace, "random_seed", None),
                 "source_model_ref": getattr(trace, "_source_model_ref", None),
-                "layer_counter": getattr(trace, "_layer_counter", 0),
+                "layer_counter": getattr(getattr(trace, "_raw_graph_ws", None), "layer_counter", 0),
             }
         )
 
-    def register_cleanup(self, name: str, callback: CleanupCallback) -> None:
+    def register_cleanup(self, name: str, callback: CleanupCallback) -> _CleanupEntry:
         """Register one teardown action on the session-owned cleanup stack.
 
         Parameters
@@ -551,11 +565,19 @@ class CaptureSession:
             the original callback so cleanup remains exactly once.
         callback
             Existing teardown callback to invoke.
+
+        Returns
+        -------
+        _CleanupEntry
+            Existing or newly registered cleanup entry.
         """
 
-        if any(entry.name == name for entry in self.cleanup_stack):
-            return
-        self.cleanup_stack.append(_CleanupEntry(name=name, callback=callback))
+        for entry in self.cleanup_stack:
+            if entry.name == name:
+                return entry
+        entry = _CleanupEntry(name=name, callback=callback)
+        self.cleanup_stack.append(entry)
+        return entry
 
     def run_cleanup(self, name: str, callback: CleanupCallback) -> bool:
         """Run one registered teardown action exactly once.
@@ -574,16 +596,12 @@ class CaptureSession:
             ``True`` when this invocation ran the callback, otherwise ``False``.
         """
 
-        self.register_cleanup(name, callback)
-        for entry in reversed(self.cleanup_stack):
-            if entry.name != name:
-                continue
-            if entry.completed:
-                return False
-            entry.completed = True
-            entry.callback()
-            return True
-        raise RuntimeError(f"CaptureSession cleanup action was not registered: {name!r}")
+        entry = self.register_cleanup(name, callback)
+        if entry.completed:
+            return False
+        entry.completed = True
+        entry.callback()
+        return True
 
     def transition(
         self,
@@ -593,6 +611,7 @@ class CaptureSession:
         product: Any = None,
         partial_product: Any = None,
         exception: BaseException | None = None,
+        capture_outcome: CaptureOutcome | None = None,
     ) -> RunOutcome:
         """Perform the single terminal transition for this session.
 
@@ -602,6 +621,8 @@ class CaptureSession:
             Terminal state to record.
         output, product, partial_product, exception
             Existing compatibility outcome fields to mirror.
+        capture_outcome
+            Typed settled outcome from the settlement authority.
 
         Returns
         -------
@@ -611,21 +632,22 @@ class CaptureSession:
         Raises
         ------
         RuntimeError
-            If a caller attempts a second, conflicting terminal transition.
+            If a caller attempts a second terminal transition. The guard is
+            unconditional: ``RunOutcome.output`` can hold a tensor, so an
+            equality-based "same transition" carve-out would raise the
+            ambiguous-bool ``RuntimeError`` from tensor ``__eq__`` instead.
         """
 
-        candidate = RunOutcome(
+        if self.outcome is not None:
+            raise RuntimeError("CaptureSession already reached a terminal state.")
+        self.outcome = RunOutcome(
             state=state,
             output=output,
             product=product,
             partial_product=partial_product,
             exception=exception,
+            capture_outcome=capture_outcome,
         )
-        if self.outcome is None:
-            self.outcome = candidate
-            return candidate
-        if self.outcome != candidate:
-            raise RuntimeError("CaptureSession already reached a terminal state.")
         return self.outcome
 
 
@@ -673,11 +695,20 @@ def compile_legacy_capture_plan(
     deferred_activation = bool(getattr(trace, "_deferred_retention_selector", None))
     deferred_gradients = bool(getattr(trace, "_deferred_gradient_selector", None))
     graph_connected = bool(getattr(trace, "backward_ready", False))
+    from .._trace_selector_helpers import _selector_requires_unwindowed_escrow
+
     negative_windows = _negative_selector_windows(layers_to_save)
     grad_negative_windows = _negative_selector_windows(grad_layers_to_save)
-    grad_positive_indices = _positive_selector_indices(grad_layers_to_save)
     activation_window = max(negative_windows) if negative_windows else None
     gradient_window = max(grad_negative_windows) if grad_negative_windows else None
+    # Final-numbering components (integer ordinals, indexed labels) resolve
+    # post-postprocess at arbitrary graph positions: a mixed selection such as
+    # ``[1, -1]`` must not let the tail window evict the payload the positive
+    # component needs before deferred resolution runs.
+    if _selector_requires_unwindowed_escrow(layers_to_save):
+        activation_window = None
+    if _selector_requires_unwindowed_escrow(grad_layers_to_save):
+        gradient_window = None
     retention_profile = RetentionProfile(
         activation_kind=(
             RetentionKind.ACTIVATION
@@ -685,20 +716,17 @@ def compile_legacy_capture_plan(
             else RetentionKind.NONE
         ),
         activation_window=activation_window if deferred_activation else 0,
+        # Every deferred gradient selector retains references and installs its
+        # hooks post-postprocess: positive integer ordinals are FINAL layer
+        # numbers, so no raw-index "prediction" can place their hooks live.
         gradient_kind=(
-            RetentionKind.GRADIENT_REFERENCE
-            if deferred_gradients
-            and not _contains_only_positive_integer_selectors(grad_layers_to_save)
-            else RetentionKind.NONE
+            RetentionKind.GRADIENT_REFERENCE if deferred_gradients else RetentionKind.NONE
         ),
         gradient_window=gradient_window if deferred_gradients else 0,
         spillable=deferred_activation and not graph_connected,
-        gradient_live_indices=grad_positive_indices,
     )
     return CapturePlan.compile(
         projection_target=projection_target,
-        available_capabilities=(),
-        required_completeness=(),
         default_enrichment=default_enrichment,
         selectors={"layers": layers_to_save, "grad_layers": grad_layers_to_save},
         interventions=getattr(trace, "_intervention_plan", None),
@@ -743,26 +771,6 @@ def _negative_selector_windows(selector: Any) -> tuple[int, ...]:
     return ()
 
 
-def _positive_selector_indices(selector: Any) -> tuple[int, ...]:
-    """Return raw indices declared by positive integer gradient selectors."""
-
-    if isinstance(selector, int) and not isinstance(selector, bool) and selector >= 0:
-        return (selector + 1,)
-    if isinstance(selector, (list, tuple, set, frozenset)):
-        return tuple(index for item in selector for index in _positive_selector_indices(item))
-    return ()
-
-
-def _contains_only_positive_integer_selectors(selector: Any) -> bool:
-    """Return whether a gradient selection can install every hook live."""
-
-    if isinstance(selector, int) and not isinstance(selector, bool):
-        return selector >= 0
-    if isinstance(selector, (list, tuple, set, frozenset)) and selector:
-        return all(_contains_only_positive_integer_selectors(item) for item in selector)
-    return False
-
-
 def attach_legacy_capture_session(
     trace: object,
     *,
@@ -803,12 +811,14 @@ def attach_legacy_capture_session(
         ),
         backend_token=backend_token,
     )
-    _LEGACY_CAPTURE_SESSIONS[trace] = session
+    # The trace is the SOLE strong owner of its run session; no side registry
+    # may be an ownership head.
+    trace._capture_session = session  # type: ignore[attr-defined]
     return session
 
 
 def capture_session_for(owner: object) -> CaptureSession | None:
-    """Return the stage-2 session attached to a legacy compatibility owner.
+    """Return the run session attached to a trace-like owner.
 
     Parameters
     ----------
@@ -818,78 +828,68 @@ def capture_session_for(owner: object) -> CaptureSession | None:
     Returns
     -------
     CaptureSession | None
-        Attached session when the owner is on the Stage 2 adapter path.
+        Attached session when the owner is on an active capture run.
     """
 
-    try:
-        return _LEGACY_CAPTURE_SESSIONS.get(owner)
-    except TypeError:
-        return None
+    session = getattr(owner, "_capture_session", None)
+    return session if isinstance(session, CaptureSession) else None
 
 
 def detach_capture_session(trace: object, events: object, session: CaptureSession) -> None:
-    """Detach and release a completed legacy compatibility session.
+    """Detach and release a completed capture session.
 
     Parameters
     ----------
     trace
-        Legacy trace compatibility owner for the completed run.
+        Trace owner for the completed run.
     events
-        Legacy event buffer associated with the completed run.
+        Event buffer associated with the completed run.
     session
-        Stage-2 session to detach.  Mismatched registry entries are retained
-        to avoid disturbing a subsequent run.
+        Session to detach.  Mismatched attachments are retained to avoid
+        disturbing a subsequent run.
 
     Returns
     -------
     None
-        Removes both compatibility registrations and clears the session.  The
-        operation is safe to invoke more than once.
+        Removes both attachments and clears the session.  The operation is
+        safe to invoke more than once.
     """
 
-    try:
-        if _LEGACY_CAPTURE_SESSIONS.get(trace) is session:
-            _LEGACY_CAPTURE_SESSIONS.pop(trace, None)
-    except TypeError:
-        pass
-
-    event_id = id(events)
-    entry = _LEGACY_EVENT_SESSIONS.get(event_id)
-    if entry is not None:
-        events_ref, session_ref = entry
-        if events_ref() is events and session_ref() is session:
-            _LEGACY_EVENT_SESSIONS.pop(event_id, None)
+    if getattr(trace, "_capture_session", None) is session:
+        try:
+            trace.__dict__.pop("_capture_session", None)
+        except AttributeError:
+            pass
+    events_session_ref = getattr(events, "_tl_capture_session_ref", None)
+    if events_session_ref is not None and events_session_ref() is session:
+        events.__dict__.pop("_tl_capture_session_ref", None)
     session.release()
 
 
 def attach_capture_events_session(events: object, session: CaptureSession) -> None:
-    """Associate a legacy event buffer with its session outside serialized state.
+    """Associate an event buffer with its owning run session.
 
     Parameters
     ----------
     events
         Existing mutable ``CaptureEvents`` buffer for the active run.
     session
-        Stage-2 run owner that mirrors producer facts into its ledgers.
+        Run owner whose sealed core snapshots this buffer's operation spine.
     """
 
-    event_id = id(events)
-
-    def discard_events(
-        _events_ref: ReferenceType[object],
-        _registry: dict[int, tuple[ReferenceType[object], ReferenceType[CaptureSession]]] = (
-            _LEGACY_EVENT_SESSIONS
-        ),
-    ) -> None:
-        """Drop the compatibility association when its event buffer is collected."""
-
-        _registry.pop(event_id, None)
-
-    _LEGACY_EVENT_SESSIONS[event_id] = (ref(events, discard_events), ref(session))
+    op_events = getattr(events, "op_events", None)
+    if not isinstance(op_events, list):
+        raise TypeError("Capture event buffers must expose a mutable op_events list.")
+    session.bind_event_spine(op_events)
+    if hasattr(events, "amended_op_records"):
+        session.bind_event_journal(events)
+    # Weak backref only: the session (via the trace) owns the run; the buffer
+    # must never keep a completed session alive.
+    events._tl_capture_session_ref = ref(session)  # type: ignore[attr-defined]
 
 
 def capture_session_for_events(events: object) -> CaptureSession | None:
-    """Return the session associated with one legacy event buffer.
+    """Return the session associated with one event buffer.
 
     Parameters
     ----------
@@ -899,16 +899,11 @@ def capture_session_for_events(events: object) -> CaptureSession | None:
     Returns
     -------
     CaptureSession | None
-        Active compatibility session, if one is registered.
+        Active owning session, if the buffer is still attached to one.
     """
 
-    entry = _LEGACY_EVENT_SESSIONS.get(id(events))
-    if entry is None:
+    session_ref = getattr(events, "_tl_capture_session_ref", None)
+    if session_ref is None:
         return None
-    events_ref, session_ref = entry
-    if events_ref() is events:
-        session = session_ref()
-        if session is not None:
-            return session
-    _LEGACY_EVENT_SESSIONS.pop(id(events), None)
-    return None
+    session = session_ref()
+    return session if isinstance(session, CaptureSession) else None

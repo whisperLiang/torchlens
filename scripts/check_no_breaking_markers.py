@@ -4,8 +4,7 @@ Hard-reject commit messages or push payloads that contain semantic-release
 major-bump triggers (Conventional Commits ``!`` markers or ``BREAKING CHANGE:``
 footers).
 
-TorchLens stays on the 2.x family per the locked policy in
-``~/.claude/projects/-home-jtaylor-projects-torchlens/memory/feedback_version_bumps.md``.
+TorchLens stays on the 2.x family per the locked project release policy.
 The PyPI 1.0.0 and 2.0.0 slots have already been burned by accidental major
 bumps; the 3.0.0 slot was nearly burned a third time on 2026-05-01 (rescued
 only by an unrelated workflow bug). This script makes the failure mode
@@ -21,11 +20,11 @@ Override (use ONLY when JMT explicitly authorizes a major bump in this turn):
 Usage::
 
     # commit-msg stage (pre-commit framework passes the message-file path)
-    python scripts/check_no_breaking_markers.py --commit-msg <file>
+    scripts/check_no_breaking_markers.py --commit-msg <file>
 
     # pre-push stage (pre-commit framework passes "<remote> <url>" via argv,
     # then "<local_ref> <local_sha> <remote_ref> <remote_sha>" lines on stdin)
-    python scripts/check_no_breaking_markers.py --pre-push
+    scripts/check_no_breaking_markers.py --pre-push
 
 Exit codes:
     0  -- no major-bump triggers found
@@ -88,7 +87,7 @@ ERROR_BANNER = """
  with the override:
    {override}=1 <your git command>
 
- Background: ~/.claude/projects/-home-jtaylor-projects-torchlens/memory/feedback_version_bumps.md
+ Background: see the project release-policy notes tracked by the maintainer.
 ==============================================================================
 """.rstrip()
 
@@ -106,7 +105,11 @@ def _find_triggers(text: str) -> list[str]:
 
 
 def _override_active() -> bool:
-    return os.environ.get(OVERRIDE_ENV, "").strip() not in ("", "0", "false", "False")
+    # Exact "1" only, matching the golden mutation-flag discipline (grind r5,
+    # b10 R86 probe): the former truthy parse authorized a major bump on
+    # OVERRIDE=FALSE, =no, or any templated junk — values a user sets to
+    # DISABLE the override — while the notice claimed "=1 active".
+    return os.environ.get(OVERRIDE_ENV, "").strip() == "1"
 
 
 def _emit_block(triggers: Iterable[str], location: str) -> None:
@@ -149,16 +152,55 @@ def _check_commit_msg(path: str) -> int:
     return _check_text(body, location=str(msg_path))
 
 
-def _check_pre_push() -> int:
-    """Read pre-push refspecs from stdin and scan every outgoing commit message."""
+def _push_records() -> list[list[str]]:
+    """Collect "<local_ref> <local_sha> <remote_ref> <remote_sha>" records.
 
-    # pre-commit framework passes "<remote_name> <remote_url>" as argv[1:] and
-    # the "<local_ref> <local_sha> <remote_ref> <remote_sha>" lines on stdin.
+    Raw git hands the refspec lines on stdin. The pre-commit FRAMEWORK, however,
+    consumes that stdin itself and re-executes hooks with EMPTY stdin, exporting
+    ``PRE_COMMIT_TO_REF`` (local sha) / ``PRE_COMMIT_FROM_REF`` (remote sha)
+    instead -- so an stdin-only reader silently scans NOTHING and passes under
+    the framework (grind r3, R61/B27: the pre-push layer was green-but-inert).
+    Read stdin first, then fall back to the framework's env contract.
+    """
+
+    records = [parts for line in sys.stdin if len(parts := line.strip().split()) == 4]
+    if not records:
+        to_ref = os.environ.get("PRE_COMMIT_TO_REF", "")
+        from_ref = os.environ.get("PRE_COMMIT_FROM_REF", "")
+        if to_ref and from_ref:
+            records = [["(pre-commit framework push)", to_ref, "(remote)", from_ref]]
+    if not records:
+        # Ref-less remote (e.g. first push to an empty repository): the
+        # framework exports the branch names but NO FROM_REF/TO_REF at all
+        # (grind r4, b9-opus R70r4-F1: this branch used to return [] and the
+        # hook printed "Passed" having scanned NOTHING -- a BREAKING CHANGE
+        # commit landed). Synthesize a new-branch record from the local
+        # branch so the merge-base scan path runs over the outgoing commits.
+        local_branch = os.environ.get("PRE_COMMIT_LOCAL_BRANCH", "")
+        if local_branch:
+            records = [[local_branch, local_branch, "(remote)", "0" * 40]]
+    return records
+
+
+def _check_pre_push() -> int:
+    """Scan every outgoing commit message in the push payload."""
+
     rc = 0
-    for line in sys.stdin:
-        parts = line.strip().split()
-        if len(parts) != 4:
-            continue
+    records = _push_records()
+    if not records:
+        # FAIL CLOSED: raw git always hands refspec lines on stdin and the
+        # framework always exports at least the local branch, so "no records"
+        # means the push range could not be determined -- refusing to scan is
+        # a usage error, never a pass (the fail-open half of R70r4-F1).
+        print(
+            "[check_no_breaking_markers] could not determine the push range: "
+            "no refspecs on stdin and no PRE_COMMIT_FROM_REF/PRE_COMMIT_TO_REF/"
+            "PRE_COMMIT_LOCAL_BRANCH in the environment. Refusing to pass "
+            "without scanning any commits.",
+            file=sys.stderr,
+        )
+        return 2
+    for parts in records:
         local_ref, local_sha, _remote_ref, remote_sha = parts
         if local_sha == "0000000000000000000000000000000000000000":
             # Branch deletion -- nothing to scan.

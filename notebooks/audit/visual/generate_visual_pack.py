@@ -24,14 +24,14 @@ from __future__ import annotations
 # matplotlib.use("Agg") and the sys.path shim must precede zoo/torchlens
 # imports, so module-level imports legitimately follow code (E402).
 # ruff: noqa: E402
-
 import gc
 import pathlib
 import shutil
 import sys
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 _VISUAL_DIR = pathlib.Path(__file__).resolve().parent
 _AUDIT_DIR = _VISUAL_DIR.parent  # notebooks/audit/
@@ -574,7 +574,7 @@ def _collapse_diag_text() -> str:
 
 # ---------------------------------------------------------------------------
 # Coverage axes (enumerated from source: _literals.py, _trace_viz.py draw(),
-# themes.py THEME_PRESETS, modes.py NODE_MODES, rendering.py node/edge kinds)
+# themes.py THEME_PRESETS, modes.py NODE_MODES, _render_nodes.py/_render_edges.py node/edge kinds)
 # ---------------------------------------------------------------------------
 
 AXES: dict[str, str] = {
@@ -681,7 +681,7 @@ AXES: dict[str, str] = {
     # --- label grammar ---
     "label:xN": "'(xN)' true recurrence multiplier (same params)",
     "label:plusN": "'+N more Class' ellipsis (distinct same-type instances)",
-    "label:remainder": "collapsed-box 'N layers total' remainder (incl. buffers)",
+    "label:remainder": "collapsed-box 'N ops + M buffers' contents remainder",
     "label:segment_range": "segment box address-range label",
     "label:arm": "conditional IF/ELIF/ELSE arm labels",
     # --- control flow / structure ---
@@ -694,6 +694,14 @@ AXES: dict[str, str] = {
     "artifact:apparent_cycle": "interleaved repeat-fold apparent-cycle artifact (known)",
     "diag:collapse_plan": "Trace.collapse_plan() diagnostic",
     "diag:collapse_schedule": "Trace.collapse_schedule() diagnostic",
+    "labels:checked_suppression": (
+        "default-on checked suppression of constructor args proven equal to captured shape dims"
+    ),
+    "labels:show_redundant_args": "show_redundant_args=True opt-out (every captured arg)",
+    "channel:color_by": "color_by= fill encoding (field / scalar builtin / callable)",
+    "channel:size_by": "size_by= box-minimum encoding ('dims' / field / callable)",
+    "channel:size_scale": "scale='sqrt' (default) vs 'linear' size transform",
+    "channel:stack_by": "stack_by= rank columns (licensed auto + explicit annotation)",
 }
 
 # Axes that are deliberately NOT given a page, with the honest reason.
@@ -1090,7 +1098,7 @@ SECTIONS: list[Section] = [
                     "vis_call_depth caps how deep module boxes nest. LEFT: unlimited (default 1000) shows "
                     "inner_module containing loop_module at full detail. RIGHT: depth 1 keeps only the "
                     "outermost module level -- modules deeper than the cap COLLAPSE into single summary "
-                    "boxes carrying an honest 'N layers total' remainder (the same collapsed-box element "
+                    "boxes carrying an honest 'N ops + M buffers' contents remainder (the same collapsed-box element "
                     "as Section E).\n"
                     "CHECK: at depth 1 no box appears INSIDE another box, and the collapsed inner_module "
                     "box reports the layer/param count it swallowed."
@@ -1124,7 +1132,7 @@ SECTIONS: list[Section] = [
                 caption=(
                     "collapse_fn is a module predicate: subtrees for which it returns True render as a single "
                     "collapsed representative box. Here every SmallResBlock in an 8-block stack is collapsed.\n"
-                    "CHECK: each collapsed box states its class and an honest 'N layers total' remainder "
+                    "CHECK: each collapsed box states its class and an honest 'N ops + M buffers' "
                     "count -- the count includes buffer leaves (each block hides conv+bn+relu+add AND the "
                     "batch-norm buffer reads). No block internals leak out."
                 ),
@@ -1541,11 +1549,11 @@ SECTIONS: list[Section] = [
             ),
             Page(
                 label="e7_remainder_labels",
-                title="Remainder labels: 'N layers total' includes buffer leaves",
+                title="Remainder labels: 'N ops + M buffers' accounts for buffer leaves",
                 caption=(
                     "block_stack at collapse='auto' (all 8 blocks as collapsed boxes) and at collapse='max' "
                     "(the same blocks condensed further into segment ranges). Collapsed boxes and segments "
-                    "must account for EVERYTHING they hide: the 'N layers total' remainder on each collapsed "
+                    "must account for EVERYTHING they hide: the 'N ops + M buffers' remainder on each collapsed "
                     "box counts ops AND buffer leaves (each block's batch-norm reads its running stats), and "
                     "the segment labels' block/op totals must add up to the whole stack.\n"
                     "CHECK: per-box layer counts are consistent with one uncollapsed block (conv, bn, relu, "
@@ -1554,7 +1562,7 @@ SECTIONS: list[Section] = [
                 ),
                 panels=[
                     Panel(
-                        "collapse='auto' -- per-block 'N layers total'",
+                        "collapse='auto' -- per-block 'N ops + M buffers'",
                         "block_stack",
                         kwargs={"collapse": "auto"},
                     ),
@@ -1718,7 +1726,7 @@ SECTIONS: list[Section] = [
                 title="node_label_fields: choosing the label rows",
                 caption=(
                     "node_label_fields replaces the default label rows with an explicit list. Supported "
-                    "fields: label/name, type/op, shape, memory/bytes, module, params, pass, flops, time.\n"
+                    "fields: label/name, type/op, shape, shape_summary (rolled across-pass summary, when set), memory/bytes, module, params, pass, flops, time.\n"
                     "CHECK: rows appear in the requested order and nothing else."
                 ),
                 panels=[
@@ -1734,6 +1742,31 @@ SECTIONS: list[Section] = [
                     ),
                 ],
                 covers=["node_label_fields"],
+            ),
+            Page(
+                label="f5b_checked_suppression",
+                title="Checked suppression: redundant constructor args (default-on)",
+                caption=(
+                    "Node labels omit a module constructor arg exactly when the CHECK licenses it: the "
+                    "arg value provably equals the captured shape dimension it duplicates on THIS trace "
+                    "(closed torch-family table; kernel_size/stride/padding/groups are never candidates). "
+                    "A mismatch or unavailable shape keeps the arg VISIBLE -- the rule reveals, never "
+                    "hides. show_redundant_args=True restores every captured arg.\n"
+                    "CHECK: left panel omits in_channels/out_channels/in_features/out_features; right "
+                    "panel shows them; kernel/stride/padding rows are identical in both."
+                ),
+                panels=[
+                    Panel(
+                        "default draw() -- proven-redundant args suppressed",
+                        "small_conv",
+                    ),
+                    Panel(
+                        "show_redundant_args=True -- every captured arg",
+                        "small_conv",
+                        kwargs={"show_redundant_args": True},
+                    ),
+                ],
+                covers=["labels:checked_suppression", "labels:show_redundant_args"],
             ),
             Page(
                 label="f6_code_panel",
@@ -2279,6 +2312,89 @@ SECTIONS: list[Section] = [
             ),
         ],
     ),
+    # =====================================================================
+    Section(
+        "M",
+        "Encoding Channels (L5, documented-unstable spellings)",
+        "Declarative value -> visual channel mappings on draw(): color_by "
+        "(fill), size_by + scale (box minimums), stack_by (rank columns). "
+        "All strictly opt-in, dot-layout-only, legend/caption-disclosed.",
+        [
+            Page(
+                label="m1_color_by",
+                title="color_by: sequential fill from a value source",
+                caption=(
+                    "color_by fills eligible op nodes from a colorblind-safe sequential ramp, "
+                    "normalized linear min-max over visible nodes. Sources: a record field, a scalar "
+                    "builtin (time/flops/bytes/magnitude/grad_norm), or a callable. The AUTO legend "
+                    "(show_legend=None) discloses the source, the transform, and min/mid/max swatches.\n"
+                    "CHECK: fills vary across nodes; the encoding legend block is present and names the "
+                    "source; unencoded nodes (missing values) keep their role fill."
+                ),
+                panels=[
+                    Panel(
+                        "color_by='time' -- per-op forward duration",
+                        "small_conv",
+                        kwargs={"color_by": "time"},
+                    ),
+                    Panel(
+                        "color_by='bytes' -- activation memory",
+                        "small_conv",
+                        kwargs={"color_by": "bytes"},
+                    ),
+                ],
+                covers=["channel:color_by"],
+            ),
+            Page(
+                label="m2_size_by",
+                title="size_by + scale: box minimums from a value source (D4 default mapping)",
+                caption=(
+                    "size_by sizes nodes by a scalar field, a callable, or the closed 'dims' shape "
+                    "token (numel of the non-batch output shape -- the conservative D4 default "
+                    "mapping, sqrt scale default). Emitted sizes are MINIMUMS under fixedsize=false: "
+                    "labels never truncate, fonts never scale, and encoded area is clamped to 4x the "
+                    "default node area. On text-heavy nodes the label's natural size dominates -- the "
+                    "motif reads on compact nodes (ellipses, small labels).\n"
+                    "CHECK: the legend states 'size ~ sqrt(dims)' (left) / 'linear(dims)' (right); "
+                    "larger-activation nodes are never SMALLER than smaller-activation ones."
+                ),
+                panels=[
+                    Panel(
+                        "size_by='dims' (scale='sqrt' default)",
+                        "small_conv",
+                        kwargs={"size_by": "dims"},
+                    ),
+                    Panel(
+                        "size_by='dims', scale='linear' (literal area motif)",
+                        "small_conv",
+                        kwargs={"size_by": "dims", "scale": "linear"},
+                    ),
+                ],
+                covers=["channel:size_by", "channel:size_scale"],
+            ),
+            Page(
+                label="m3_stack_by",
+                title="stack_by: rank columns from an annotation (the classic timestep diagram)",
+                caption=(
+                    "stack_by=True derives pass_index on multi-pass ops under the LOCKSTEP LICENSE "
+                    "(globally monotone execution windows -- non-monotone traces refuse "
+                    "stack_by_auto_underivable and an explicit field/callable bypasses). Nodes sharing "
+                    "an annotation value pin to one rank; with direction='leftright' the ranks read as "
+                    "timestep columns. The graph caption and legend disclose the annotation used.\n"
+                    "CHECK: each recurrent pass forms one column; the stem/head ops hang free (not "
+                    "pinned to column 1); the caption line 'stacked by: pass_index (auto)' is present."
+                ),
+                panels=[
+                    Panel(
+                        "stack_by=True, direction='leftright' -- RNN cell over 4 steps",
+                        "rnn_cell_seq",
+                        kwargs={"stack_by": True, "direction": "leftright"},
+                    ),
+                ],
+                covers=["channel:stack_by"],
+            ),
+        ],
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -2343,7 +2459,7 @@ def _toc_body(plan: list[tuple[str, object]]) -> str:
         "Visual-grammar cheat sheet:",
         "  '(xN)'          true recurrence: the SAME parameters applied N times (rolled mode)",
         "  '+N more Class' ellipsis: N further DISTINCT same-class instances (run folding)",
-        "  'N layers total' collapsed-box remainder: everything hidden inside, incl. buffers",
+        "  'N ops + M buffers' collapsed-box remainder: everything hidden inside, buffers counted",
         "  dashed segment  adjacency-only range: consecutive siblings, NOT a real module",
         "  double border   this op has hidden buffer dependencies (peripheries=2)",
         "  yellow node     runtime boolean that decided a branch; IF/THEN/ELIF/ELSE edge",
@@ -2507,7 +2623,9 @@ def _write_coverage_matrix(plan: list[tuple[str, object]]) -> None:
     lines.append("Coverage axes are enumerated from the renderer/option source")
     lines.append("(`torchlens/_literals.py`, `Trace.draw()` in `_trace_viz.py`,")
     lines.append("`visualization/themes.py`, `visualization/modes.py`, node/edge kinds in")
-    lines.append("`visualization/rendering.py`). Each axis must be demonstrated by at least")
+    lines.append(
+        "`visualization/_render_nodes.py` and `visualization/_render_edges.py`). Each axis must be demonstrated by at least"
+    )
     lines.append("one page or carry an explicit N/A rationale; anything else is a defect.")
     lines.append("")
     lines.append("## Axis coverage")

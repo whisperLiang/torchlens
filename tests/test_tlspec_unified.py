@@ -5,21 +5,22 @@ from __future__ import annotations
 import json
 import re
 import warnings
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens._io import TLSPEC_VERSION, TorchLensIOError
+from torchlens._io import TLSPEC_VERSION, ArtifactSchemaAgeWarning, TorchLensIOError
 from torchlens._io.tlspec import _TlSpecWriter
 from torchlens.backends import BackendPayloadUnsupportedError
 from torchlens.intervention.types import FireRecord, HelperSpec, InterventionSpec
 from torchlens.options import CaptureOptions
-from torchlens.validation import validate_tlspec
+from torchlens.validation import _SUPPORTED_JSON_SCHEMA_KEYWORDS, validate_tlspec
 
 
 class UnifiedTinyModel(nn.Module):
@@ -189,6 +190,43 @@ def _write_manifest(path: Path, manifest: dict[str, Any]) -> None:
         json.dumps(manifest, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def _schema_keywords(schema: dict[str, Any]) -> set[str]:
+    """Return JSON Schema keywords used at schema-fragment positions.
+
+    Parameters
+    ----------
+    schema:
+        Decoded root JSON Schema.
+
+    Returns
+    -------
+    set[str]
+        Keywords found without mistaking property names for keywords.
+    """
+
+    keywords: set[str] = set()
+
+    def visit(fragment: Any) -> None:
+        """Visit one schema fragment recursively."""
+
+        if not isinstance(fragment, dict):
+            return
+        keywords.update(fragment)
+        properties = fragment.get("properties")
+        if isinstance(properties, dict):
+            for property_schema in properties.values():
+                visit(property_schema)
+        for keyword in ("items", "if", "then", "additionalProperties"):
+            visit(fragment.get(keyword))
+        all_of = fragment.get("allOf")
+        if isinstance(all_of, list):
+            for child in all_of:
+                visit(child)
+
+    visit(schema)
+    return keywords
 
 
 def _mlx_schema_v2_manifest(path: Path) -> dict[str, Any]:
@@ -413,14 +451,23 @@ def test_validate_tlspec_rejects_unparseable_manifest(tmp_path: Path) -> None:
 
 
 @pytest.mark.smoke
-def test_validate_tlspec_still_accepts_genuine_legacy_bundle() -> None:
-    """A checked-in v2.16 model-log fixture remains accepted for backcompat."""
+def test_validate_tlspec_refuses_pre_floor_legacy_modellog_bundle() -> None:
+    """A checked-in v2.16 model-log fixture refuses at the 2.33 floor.
+
+    Both validation and loading refuse the same real pre-floor artifact with
+    the typed floor error; legacy 2.16 intervention specs remain accepted.
+    """
+
+    from torchlens.errors import ArtifactVersionBelowFloorError
 
     fixture_path = (
         Path(__file__).parent / "fixtures" / "tlspec_v2_16" / "F2_modellog_tiny_cnn.tlspec"
     )
 
-    validate_tlspec(fixture_path)
+    with pytest.raises(ArtifactVersionBelowFloorError, match="torchlens 2.33"):
+        validate_tlspec(fixture_path)
+    with pytest.raises(ArtifactVersionBelowFloorError, match="torchlens 2.33"):
+        tl.load(fixture_path)
 
 
 @pytest.mark.smoke
@@ -493,7 +540,7 @@ def test_unified_round_trip_preserves_requires_grad(tmp_path: Path) -> None:
 
 
 @pytest.mark.smoke
-def test_fresh_unified_save_reports_current_version_with_no_deprecation_warning(
+def test_fresh_unified_save_reports_current_version_with_no_schema_age_warning(
     tmp_path: Path,
 ) -> None:
     """A same-runtime save/load round trip must not report a false "older" version.
@@ -505,7 +552,8 @@ def test_fresh_unified_save_reports_current_version_with_no_deprecation_warning(
     merge in ``_TlSpecWriter.write_trace_manifest`` let the stale constant win,
     so every freshly-saved bundle reported ``tlspec_version=1`` on disk and
     every same-runtime load raised a false "Bundle tlspec_version=1 is older
-    than the runtime ``tlspec_version``" ``DeprecationWarning``.
+    than the runtime ``tlspec_version``" advisory (an ``ArtifactSchemaAgeWarning``
+    today; a ``DeprecationWarning`` when the regression was first caught).
     """
 
     log = _captured_log()
@@ -516,7 +564,7 @@ def test_fresh_unified_save_reports_current_version_with_no_deprecation_warning(
     assert manifest["tlspec_version"] == TLSPEC_VERSION
 
     with warnings.catch_warnings():
-        warnings.simplefilter("error", DeprecationWarning)
+        warnings.simplefilter("error", ArtifactSchemaAgeWarning)
         loaded = tl.load(path)
     assert isinstance(loaded, tl.Trace)
 
@@ -807,6 +855,38 @@ def test_validate_tlspec_enforces_shipped_schema_properties_pattern(tmp_path: Pa
 
     with pytest.raises(ValueError, match="python_version"):
         validate_tlspec(path)
+
+
+@pytest.mark.parametrize("field_name", ("model_fingerprint", "backward_summary"))
+def test_validate_tlspec_rejects_unknown_nested_schema_fields(
+    tmp_path: Path,
+    field_name: str,
+) -> None:
+    """Nested ``additionalProperties: false`` declarations reject bogus keys."""
+
+    path = tmp_path / f"bad_{field_name}_extra.tlspec"
+    _captured_log().save(path)
+    manifest = _read_manifest(path)
+    nested = manifest[field_name]
+    assert isinstance(nested, dict)
+    nested["bogus_round5_field"] = True
+    _write_manifest(path, manifest)
+
+    with pytest.raises(ValueError, match="unsupported fields"):
+        validate_tlspec(path)
+
+
+def test_shipped_tlspec_schema_keywords_are_all_walker_supported() -> None:
+    """A new shipped schema keyword cannot silently bypass the runtime walker."""
+
+    schema_dir = Path(tl.__file__).resolve().parent / "schemas"
+    observed: set[str] = set()
+    for schema_path in sorted(schema_dir.glob("tlspec_manifest_v*.json")):
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        assert isinstance(schema, dict)
+        observed.update(_schema_keywords(schema))
+
+    assert observed <= _SUPPORTED_JSON_SCHEMA_KEYWORDS
 
 
 @pytest.mark.smoke

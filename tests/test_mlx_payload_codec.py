@@ -13,8 +13,7 @@ from torchlens.backends import BackendRuntimeCompatibilityError
 
 mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 
-
-pytestmark = pytest.mark.optional
+pytestmark = [pytest.mark.optional, pytest.mark.backend_mlx]
 
 
 @pytest.mark.parametrize(

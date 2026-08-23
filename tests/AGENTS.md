@@ -20,16 +20,22 @@ pytest config excludes `rare` tests via `addopts = -m 'not rare'`.
 | Bridges/compat/export | `test_bridges_*.py`, `test_compat_report.py`, `test_exports.py`, `test_extractor_compat.py` |
 | Examples/audit | `test_examples.py`, `test_examples_load.py`, `test_not_mvp_audit.py` |
 | Train mode | `test_train_mode/` |
+| Backend contracts | `backend_conformance/`, `backend_parity/`, `backends/` |
+| Capture and surface oracles | `capture_oracle/`, `godobject_oracle/`, `surface_oracle/` |
+| Producer and semantic parity | `producer_parity/`, `semantic/`; the producer ledger is a committed gate artifact |
+| Crawler and benchmarks | `crawler/`, `bench/` |
+| Validation and visualization goldens | `validation_goldens/`, `visualization/`, `golden/`, `snapshots/` |
+| Shared data and helpers | `fixtures/`, `support/` |
 
 ## Running Tests
 
 ```bash
-pytest tests/                              # default suite excluding rare
-pytest tests/ -m smoke                     # critical path
-pytest tests/ -m "not rare and not slow and not heavy" -x --tb=short  # fast per-step gate
-pytest tests/ -m "not slow"                # skip slow real-world tests
-pytest tests/test_toy_models.py            # single file
+pytest tests/test_toy_models.py            # single file — targeted suites ARE the per-step gate
 pytest tests/test_toy_models.py::test_name # single test
+pytest tests/ -m smoke                     # commit-level gate (~20 min loaded; measured 2026-08-13)
+pytest tests/ -m "not rare and not slow and not heavy" -x --tb=short  # mid backstop
+pytest tests/ -m "not rare and not slow"   # phase-boundary backstop (keeps rare excluded)
+pytest tests/                              # default suite excluding rare
 pytest tests/ -k "loop"                    # keyword filter
 ```
 
@@ -37,18 +43,63 @@ Run memory-heavy real-world tests sequentially. Optional dependency tests should
 `pytest.importorskip()` or extras-aware skips.
 
 ## Markers
-- `slow` - long-running real-world or heavy tests.
-- `heavy` - mid-cost tests excluded from the fast per-step gate.
-- `smoke` - fast critical-path checks.
-- `rare` - excluded by default unless explicitly selected.
+
+| Marker | Meaning |
+| --- | --- |
+| `smoke` | Critical-path checks, <5s each (measured); the commit-level gate, not per-step. |
+| `heavy` | Mid-cost (5-20s) tests, excluded from smoke and the mid backstop. |
+| `slow` | Long-running (>20s) real-world tests. |
+| `serial` | Load-sensitive tests that should run away from parallel worker load. NOT a budget exemption: serial items resolve their heavy/smoke/unmarked duration budget normally. |
+| (none) | Unmarked tests — the majority (7,396/12,840, 58%, measured 2026-08-16 at adb3d450) — run only in the backstops, never the commit gate, but are budgeted at the same <5s tier as smoke. |
+| `rare` | Always excluded by default unless explicitly selected. |
+| `optional` | Requires an optional dependency or runtime. |
+| `requires_assertions` | Needs Python `assert`; skipped under `python -O`. |
+| `backend_parity` | Active backend-substrate parity gate. |
+| `backend_jax` | Requires the optional JAX runtime. |
+| `backend_mlx` | Requires the optional MLX runtime. |
+| `backend_tinygrad` | Requires the optional tinygrad runtime. |
+| `backend_paddle` | Requires the optional Paddle runtime. |
+| `tf_backend` | Requires the optional TensorFlow runtime. |
+
+Markers are additive: a test carrying `smoke` together with `heavy`/`slow`/`serial`/`rare`
+still runs under `-m smoke`, so those combinations are forbidden — drop `smoke` instead
+(a per-parametrize-cell `slow` refinement of a `heavy` family is the one sanctioned combo).
+`tests/test_marker_lint.py` enforces the partition and the runtime tripwire: smoke/unmarked
+tests budget 5s and heavy 20s (load-scaled 1x-4x plus a 2s boundary-noise grace, charged on min(wall, cpu)), checked at
+the end of every session — literally: `tests/conftest.py::pytest_sessionfinish` flips a green
+session to failing on any recorded offender, so targeted runs that never collect
+`test_marker_lint.py` are enforced too (r7 R41). Known bounds of the tripwire: it charges only
+tests that actually RAN in the session (a permanently deselected test is never bounded), the
+budget is load-scaled so the same family can pass loaded and fail quiet (the boundary is
+compute cost, not wall time), and a test that mostly sleeps is uncatchable by design
+(min(wall, cpu) charging). Subprocess-per-cell parametrized families whose AGGREGATE compute
+is heavy-class belong in `heavy` even when each cell is under 5s (the lazy-module
+import-pattern families are the precedent).
 
 ## Fixtures
 `tests/conftest.py` owns deterministic seeding and common inputs such as image tensors,
-small inputs, vector/2D/complex inputs, and output directories. Model fixtures/classes live
+small inputs, vector/2D/complex inputs, and output directories.
+`tests/backends/conftest.py` supplies backend test isolation, and
+`tests/test_train_mode/conftest.py` supplies train-mode fixtures. Model fixtures/classes live
 primarily in `tests/example_models.py`.
 
+## Shared package-source corpus
+A lint/census test that walks `torchlens/` source must consume
+`tests/_source_corpus.py` (`package_files()` / `package_source(path)` /
+`package_ast(path)`; `module_ast()` / `module_source()` for helpers that may
+also receive non-package paths) instead of running its own
+`rglob` + `ast.parse` sweep — each private sweep costs ~5s CPU and ~270 MB of
+AST churn, duplicated per file. Import `_source_corpus` at MODULE level: that
+import is what triggers the one prewarm in
+`conftest.pytest_collection_finish`, BEFORE the import-time `gc.freeze()`, so
+the corpus lands in the frozen generation and gen-2 collections never scan
+it. Returned trees and sources are SHARED — never mutate them (a scanner that
+annotates parent pointers keeps its own private parse instead).
+
 ## Output Directories
-All generated outputs go under `tests/generated_outputs/` (gitignored):
+All generated outputs go under pytest's private basetemp at
+`<basetemp>/torchlens-generated/` (assigned in `tests/conftest.py::pytest_configure` and
+exported as `TORCHLENS_TEST_OUTPUTS_DIR`):
 - `reports/` for coverage, aesthetics, profiling.
 - `visualizations/` for rendered graph artifacts.
 

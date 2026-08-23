@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import time
 import inspect
+import time
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -11,7 +11,9 @@ from dataclasses import dataclass, replace
 from typing import Any, cast
 
 from ..._deprecations import MISSING, MissingType
-from ...backends import BackendName, BackendUnsupportedError
+from ..._trace_core.relation_views import freeze_trace_relation_views
+from ...backends import BackendUnsupportedError, get_backend_spec
+from ...capture.outcome import stamp_backend_finalized
 from ...data_classes.derived_grad import (
     DerivedGradAccessor,
     DerivedGradRecord,
@@ -30,6 +32,7 @@ from ...ir.events import (
     OutputRef,
     ParentEdge,
 )
+from ...ir.op_record import amend_preview_output_parent_rebind
 from ...ir.predicate import RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, ParamRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
@@ -40,16 +43,31 @@ from ...validation.status import (
     ValidationReplayStatus,
     count_importer_region_annotations,
 )
-from .._finalize import attach_function_root_module, attach_object_module_logs
-from .._finalize import finalize_single_pass_trace
-from .._options import TINYGRAD_EXTRA_KWARG_POLICY, TINYGRAD_PREVIEW_TRACE_OPTION_POLICY
-from .._options import default_if_missing as _default_if_missing
-from .._options import is_missing as _is_missing
-from .._options import reject_extra_trace_kwargs, reject_unsupported_trace_options
-from .._selective_save import apply_static_label_save_policy
-from .._selective_save import pop_static_label_save_predicate
+from .._finalize import (
+    attach_function_root_module,
+    attach_object_module_logs,
+    finalize_single_pass_trace,
+    join_module_address as _join_module_address,
+    mirror_param_derived_grads,
+    module_source_metadata as _module_source_metadata,
+    new_preview_function_trace,
+    normalize_op_module_calls,
+    numel_from_shape as _numel,
+    session_callable_identity as _callable_identity,
+    value_nbytes as _nbytes,
+)
+from .._options import (
+    TINYGRAD_EXTRA_KWARG_POLICY,
+    TINYGRAD_PREVIEW_TRACE_OPTION_POLICY,
+    default_if_missing as _default_if_missing,
+    is_missing as _is_missing,
+    reject_extra_trace_kwargs,
+    reject_unsupported_trace_options,
+)
+from .._selective_save import apply_static_label_save_policy, pop_static_label_save_predicate
+from .._validation_shared import float_replay_tolerances_for_dtype_name, scalar_replay_close
 
-_ACTIVE_TINYGRAD_MODULE_STACK: list["TinygradModuleFrame"] = []
+_ACTIVE_TINYGRAD_MODULE_STACK: list[TinygradModuleFrame] = []
 
 
 def _live_tinygrad_tensors_by_uop(model: Any) -> dict[int, Any]:
@@ -291,6 +309,7 @@ class TinygradBackend:
         save_code_context: bool | MissingType = MISSING,
         save_rng_states: bool | MissingType = MISSING,
         recurrence_detection: bool | MissingType = MISSING,
+        compute_input_output_distances: bool | MissingType = MISSING,
         verbose: bool | MissingType = MISSING,
         backward_ready: bool | MissingType = MISSING,
         name: str | None | MissingType = MISSING,
@@ -400,6 +419,8 @@ class TinygradBackend:
         save_rng_states = _default_if_missing(save_rng_states, False)
         random_seed = _default_if_missing(random_seed, None)
         recurrence_detection = _default_if_missing(recurrence_detection, True)
+        # Torch-parity default: the depth flood runs unless explicitly disabled.
+        compute_input_output_distances = _default_if_missing(compute_input_output_distances, True)
         verbose = _default_if_missing(verbose, False)
         backward_ready = _default_if_missing(backward_ready, False)
         name = _default_if_missing(name, None)
@@ -452,6 +473,7 @@ class TinygradBackend:
             keep_orphans=cast(bool, keep_orphans),
             num_context_lines=cast(int, num_context_lines),
             recurrence_detection=cast(bool, recurrence_detection),
+            compute_input_output_distances=cast(bool, compute_input_output_distances),
             verbose=cast(bool, verbose),
             name=cast(str | None, name),
             raw_input=raw_input,
@@ -471,12 +493,12 @@ class TinygradBackend:
             if use_object_module and module_tree is not None
             else _null_context()
         )
-        with module_call_context:
-            with (
-                _observe_tensor_ops(observed_ops, observed_module_stacks),
-                _reject_mid_capture_execution(),
-            ):
-                output = model(*args)
+        with (
+            module_call_context,
+            _observe_tensor_ops(observed_ops, observed_module_stacks),
+            _reject_mid_capture_execution(),
+        ):
+            output = model(*args)
         if self._input_identities(args) != input_identities:
             raise BackendUnsupportedError(
                 "tinygrad backend preview cannot capture Tensor.assign(), Tensor.replace(), "
@@ -532,6 +554,8 @@ class TinygradBackend:
                 captured_output=output,
                 grad_options=cast(GradOptions, grad_options),
             )
+        freeze_trace_relation_views(trace)
+        stamp_backend_finalized(trace)
         return trace
 
     def validate_trace(
@@ -685,78 +709,26 @@ class TinygradBackend:
         batch_render: str,
         output_transform: object | None,
         save_raw_output: str | bool,
+        compute_input_output_distances: bool = True,
     ) -> Trace:
-        """Construct an empty tinygrad trace.
+        """Construct an empty trace shell via the shared preview constructor."""
 
-        Parameters
-        ----------
-        model
-            Captured callable.
-        keep_orphans
-            Whether orphan ops are retained.
-        num_context_lines
-            Source context line count.
-        recurrence_detection
-            Recurrence-detection setting.
-        verbose
-            Verbose flag.
-        name
-            Optional trace label.
-        raw_input
-            Original user input.
-        save_raw_input
-            Raw-input save policy.
-        batch_render
-            Raw-input render policy.
-        output_transform
-            Optional output transform.
-        save_raw_output
-            Raw-output save policy.
-
-        Returns
-        -------
-        Trace
-            Empty trace initialized for tinygrad.
-        """
-
-        trace = Trace(
-            model_class_name=getattr(model, "__name__", type(model).__name__),
-            output_device="same",
-            activation_transform=None,
-            grad_transform=None,
-            save_raw_activations=True,
-            save_raw_gradients=True,
+        return new_preview_function_trace(
+            backend_name=self.name,
+            model=model,
             keep_orphans=keep_orphans,
-            save_arg_values=False,
-            save_grads=None,
-            detach_saved_activations=False,
-            mark_layer_depths=False,
             num_context_lines=num_context_lines,
-            optimizer=None,
-            save_code_context=False,
-            save_rng_states=False,
             recurrence_detection=recurrence_detection,
             verbose=verbose,
-            backward_ready=False,
-            module_filter=None,
-            emit_nvtx=False,
-            transform=None,
+            name=name,
             raw_input=raw_input,
             save_raw_input=save_raw_input,
             batch_render=batch_render,
-            output_transform=cast("Callable[[Any], Any] | None", output_transform),
+            output_transform=output_transform,
             save_raw_output=save_raw_output,
-            layer_visualizers=None,
-            save_visualizations=False,
+            param_source="none",
+            compute_input_output_distances=compute_input_output_distances,
         )
-        trace.trace_label = name
-        trace.backend = cast(BackendName, self.name)
-        trace.module_identity_mode = "function_root"
-        trace.param_source = "none"
-        trace.model_label = trace.model_class_name
-        trace.model_class_qualname = getattr(model, "__qualname__", trace.model_class_name)
-        trace._pre_forward_rng_states = None
-        return trace
 
     def _emit_input_sources(self, trace: Trace, args: Sequence[Any]) -> dict[int, str]:
         """Emit source events for positional tinygrad tensor inputs.
@@ -937,14 +909,8 @@ class TinygradBackend:
         func_call_id = trace.capture_events.func_call_id_counter + 1
         trace.capture_events.func_call_id_counter = func_call_id
         policy = CapturePolicy(
-            must_keep_topology=True,
             save_payload=True,
-            requires_isolation=False,
-            save_args=False,
-            save_code=False,
-            save_rng=False,
             save_grad=False,
-            stream=False,
         )
         tensor_ref = self._tensor_ref(output, reserved.label_raw)
         event_module_stack = tuple(
@@ -1211,13 +1177,14 @@ class TinygradBackend:
                 in_multi_output=is_multi_output,
                 container_path=(leaf_index,) if is_multi_output else (),
             )
-            updated = replace(event, is_output_parent=True, output=updated_output)
-            trace.capture_events.op_event_by_label_raw[label] = updated
-            trace.capture_events.live_index.replace(updated)
-            for index, candidate in enumerate(trace.capture_events.op_events):
-                if candidate.label_raw == label:
-                    trace.capture_events.op_events[index] = updated
-                    break
+            trace.capture_events.append_amendment(
+                amend_preview_output_parent_rebind(
+                    event.seq,
+                    label,
+                    is_output_parent=True,
+                    output=updated_output,
+                )
+            )
 
     def _finish_trace(self, trace: Trace, module_tree: TinygradModuleTree | None = None) -> None:
         """Finalize materialized tinygrad raw logs into public accessors.
@@ -1235,6 +1202,10 @@ class TinygradBackend:
             Trace accessors are populated.
         """
 
+        # The tinygrad validation sidecar (trace.tinygrad_uop_captures) speaks
+        # RAW label space and the replay resolver is raw-keyed; op-side labels
+        # are resolved back to raw space at comparison time, so no relabel
+        # hook is needed here.
         finalize_single_pass_trace(
             trace,
             backend_name=self.name,
@@ -1245,6 +1216,7 @@ class TinygradBackend:
             enrich_layer=_enrich_tinygrad_layer,
             update_param_totals_from_layers=True,
             finish_before_module_logs=False,
+            recurrence_detection=bool(getattr(trace, "recurrence_detection", False)),
         )
 
     def _attach_object_module_logs(self, trace: Trace, tree: TinygradModuleTree) -> None:
@@ -1266,7 +1238,7 @@ class TinygradBackend:
         attach_object_module_logs(
             trace,
             tree,
-            normalize_module_calls=_tinygrad_op_module_calls,
+            normalize_module_calls=normalize_op_module_calls,
             metadata_top_level=_tinygrad_metadata_top_level,
             op_top_level=_tinygrad_op_top_level,
             training_mode=_tinygrad_training_mode,
@@ -1354,7 +1326,7 @@ class TinygradBackend:
         finally:
             _restore_tinygrad_grads(snapshots)
         trace.derived_grads = DerivedGradAccessor(records)
-        self._mirror_param_derived_grads(trace, records)
+        mirror_param_derived_grads(trace, records)
 
     def _derive_intermediate_grads_no_realize(
         self,
@@ -1439,35 +1411,6 @@ class TinygradBackend:
         )
         return IntermediateDerivedGradAccessor(records)
 
-    def _mirror_param_derived_grads(
-        self, trace: Trace, records: Mapping[str, DerivedGradRecord]
-    ) -> None:
-        """Mirror unambiguous tinygrad param derived gradients onto param records.
-
-        Parameters
-        ----------
-        trace
-            Trace containing optional parameter metadata.
-        records
-            Derived gradient records keyed by leaf path.
-
-        Returns
-        -------
-        None
-            Matching ``trace.params`` entries receive the same gradient payload.
-        """
-
-        for address, param in trace.params.items():
-            record = records.get(f"params.{address}")
-            if record is None:
-                continue
-            param._derived_grad_payload = record.grad
-            param._derived_grad_record_path = record.path
-            param.has_grad = True
-            param.grad_shape = tuple(getattr(record.grad, "shape", ()))
-            param.grad_dtype = cast(Any, str(getattr(record.grad, "dtype", "")))
-            param.gradient_memory = _nbytes(record.grad) or 0
-
     def _validate_uops(self, trace: Trace) -> bool:
         """Validate saved tinygrad payloads against replayed UOps.
 
@@ -1547,8 +1490,25 @@ class TinygradBackend:
         """
 
         src = list(getattr(capture.uop, "src", ()) or ())
-        graph_positions = getattr(op, "parent_arg_positions", {}).get("args", {})
-        parent_labels = tuple(getattr(op, "parents", ()))
+        # Captured UOp metadata speaks RAW label space (frozen at emit time).
+        # Recurrence grouping rewrites graph edges to final pass-qualified
+        # labels, so op-side labels are resolved back to raw space before the
+        # frozen-capture comparison; an unresolvable label keeps its literal
+        # text and fails closed against the capture.
+        final_to_raw = {
+            str(known_op.label): str(known_op._label_raw)
+            for known_op in ops_by_raw_label.values()
+            if isinstance(getattr(known_op, "label", None), str)
+            and isinstance(getattr(known_op, "_label_raw", None), str)
+        }
+        graph_positions = {
+            position: (final_to_raw.get(label, label) if isinstance(label, str) else label)
+            for position, label in getattr(op, "parent_arg_positions", {}).get("args", {}).items()
+        }
+        parent_labels = tuple(
+            final_to_raw.get(label, label) if isinstance(label, str) else label
+            for label in getattr(op, "parents", ())
+        )
         if not graph_positions and not parent_labels:
             return capture.payload_snapshot
         positioned_labels = {label for label in graph_positions.values() if isinstance(label, str)}
@@ -1722,7 +1682,11 @@ class TinygradBackend:
             Returns when all options are supported.
         """
 
-        reject_unsupported_trace_options(options, TINYGRAD_PREVIEW_TRACE_OPTION_POLICY)
+        reject_unsupported_trace_options(
+            options,
+            TINYGRAD_PREVIEW_TRACE_OPTION_POLICY,
+            spec=get_backend_spec("tinygrad"),
+        )
 
     def _reject_extra_kwargs(self, kwargs: Mapping[str, Any]) -> None:
         """Reject unrecognized kwargs reaching the backend.
@@ -1738,7 +1702,11 @@ class TinygradBackend:
             Returns when no extras are present.
         """
 
-        reject_extra_trace_kwargs(dict(kwargs), TINYGRAD_EXTRA_KWARG_POLICY)
+        reject_extra_trace_kwargs(
+            dict(kwargs),
+            TINYGRAD_EXTRA_KWARG_POLICY,
+            spec=get_backend_spec("tinygrad"),
+        )
 
 
 def discover_tinygrad_module_tree(model: Any) -> TinygradModuleTree | None:
@@ -1810,43 +1778,56 @@ def scoped_tinygrad_module_calls(
 
     del observed_module_stacks
     originals: dict[type[Any], Any] = {}
-    for module_class, address_by_instance_id in tree.modules_by_class.items():
-        original_call = getattr(module_class, "__call__")
-        originals[module_class] = original_call
 
-        def wrapper(
-            self: Any,
-            *args: Any,
-            __address_by_id: dict[int, str] = address_by_instance_id,
-            __original: Any = original_call,
-            **kwargs: Any,
-        ) -> Any:
-            """Call the original module while the live stack records this module."""
+    def _restore_installed() -> None:
+        """Restore every class ``__call__`` patch that actually landed."""
 
-            address = __address_by_id.get(id(self))
-            if address is None:
-                return __original(self, *args, **kwargs)
-            call_index = tree.call_counts.get(address, 0) + 1
-            tree.call_counts[address] = call_index
-            tree.forward_args_by_call[(address, call_index)] = (args, kwargs)
-            _ACTIVE_TINYGRAD_MODULE_STACK.append(
-                TinygradModuleFrame(
-                    address=address,
-                    call_index=call_index,
-                    module_type=type(self).__name__,
+        for module_class, original_call in originals.items():
+            setattr(module_class, "__call__", original_call)
+
+    # R07 (the L4 unwind standard): the install loop mutates process-global
+    # module classes BEFORE the try that owns the yield; a BaseException
+    # escaping it used to strand every wrapper installed so far.
+    try:
+        for module_class, address_by_instance_id in tree.modules_by_class.items():
+            original_call = getattr(module_class, "__call__")  # noqa: B004 - fetches the __call__ object, not a callability test
+            originals[module_class] = original_call
+
+            def wrapper(
+                self: Any,
+                *args: Any,
+                __address_by_id: dict[int, str] = address_by_instance_id,
+                __original: Any = original_call,
+                **kwargs: Any,
+            ) -> Any:
+                """Call the original module while the live stack records this module."""
+
+                address = __address_by_id.get(id(self))
+                if address is None:
+                    return __original(self, *args, **kwargs)
+                call_index = tree.call_counts.get(address, 0) + 1
+                tree.call_counts[address] = call_index
+                tree.forward_args_by_call[(address, call_index)] = (args, kwargs)
+                _ACTIVE_TINYGRAD_MODULE_STACK.append(
+                    TinygradModuleFrame(
+                        address=address,
+                        call_index=call_index,
+                        module_type=type(self).__name__,
+                    )
                 )
-            )
-            try:
-                return __original(self, *args, **kwargs)
-            finally:
-                _ACTIVE_TINYGRAD_MODULE_STACK.pop()
+                try:
+                    return __original(self, *args, **kwargs)
+                finally:
+                    _ACTIVE_TINYGRAD_MODULE_STACK.pop()
 
-        setattr(module_class, "__call__", wrapper)
+            setattr(module_class, "__call__", wrapper)
+    except BaseException:
+        _restore_installed()
+        raise
     try:
         yield
     finally:
-        for module_class, original_call in originals.items():
-            setattr(module_class, "__call__", original_call)
+        _restore_installed()
 
 
 @contextmanager
@@ -2125,123 +2106,6 @@ def _is_tinygrad_tensor(value: Any) -> bool:
     return isinstance(value, Tensor)
 
 
-def _module_source_metadata(module: Any) -> dict[str, Any]:
-    """Return best-effort source metadata for a tinygrad module-like object.
-
-    Parameters
-    ----------
-    module
-        Module-like object.
-
-    Returns
-    -------
-    dict[str, Any]
-        Source metadata compatible with TorchLens module logs.
-    """
-
-    cls = type(module)
-    init = getattr(cls, "__init__", None)
-    call = getattr(cls, "__call__", None)
-    return {
-        "class_source_file": _safe_source_file(cls),
-        "class_source_line": _source_line(cls),
-        "init_source_file": _safe_source_file(init) if init is not None else None,
-        "init_source_line": _source_line(init),
-        "forward_source_file": _safe_source_file(call) if call is not None else None,
-        "forward_source_line": _source_line(call),
-        "class_docstring": inspect.getdoc(cls),
-        "init_signature": _signature_string(init),
-        "init_docstring": inspect.getdoc(init) if init is not None else None,
-        "forward_signature": _signature_string(call),
-        "forward_docstring": inspect.getdoc(call) if call is not None else None,
-    }
-
-
-def _safe_source_file(obj: Any) -> str | None:
-    """Return the source file for ``obj`` when inspectable.
-
-    Parameters
-    ----------
-    obj
-        Object to inspect.
-
-    Returns
-    -------
-    str | None
-        Source file path, or ``None`` when ``obj`` is not inspectable (e.g.
-        a class defined without a backing source file, such as one built
-        via ``exec``/``compile`` or implemented as a builtin).
-    """
-
-    try:
-        return inspect.getsourcefile(obj)
-    except (OSError, TypeError):
-        return None
-
-
-def _source_line(obj: Any) -> int | None:
-    """Return the first source line for ``obj`` when inspectable.
-
-    Parameters
-    ----------
-    obj
-        Object to inspect.
-
-    Returns
-    -------
-    int | None
-        First source line, or ``None``.
-    """
-
-    if obj is None:
-        return None
-    try:
-        return inspect.getsourcelines(obj)[1]
-    except (OSError, TypeError):
-        return None
-
-
-def _signature_string(obj: Any) -> str | None:
-    """Return ``obj``'s signature string when inspectable.
-
-    Parameters
-    ----------
-    obj
-        Object to inspect.
-
-    Returns
-    -------
-    str | None
-        Signature string, or ``None``.
-    """
-
-    if obj is None:
-        return None
-    try:
-        return str(inspect.signature(obj))
-    except (TypeError, ValueError):
-        return None
-
-
-def _join_module_address(parent: str, child_name: str) -> str:
-    """Return a TorchLens child module address.
-
-    Parameters
-    ----------
-    parent
-        Parent module address.
-    child_name
-        Child attribute name.
-
-    Returns
-    -------
-    str
-        Joined module address.
-    """
-
-    return child_name if parent == "self" else f"{parent}.{child_name}"
-
-
 def _module_stack_for_uop(
     uop: Any,
     observed_module_stacks: Mapping[int, tuple[TinygradModuleFrame, ...]],
@@ -2402,33 +2266,6 @@ def _synthetic_stack_for_address(
     return tuple(frames)
 
 
-def _tinygrad_op_module_calls(value: Sequence[Any]) -> tuple[tuple[str, int], ...]:
-    """Normalize an op's raw module tuple list.
-
-    Parameters
-    ----------
-    value
-        Materialized op ``modules`` field.
-
-    Returns
-    -------
-    tuple[tuple[str, int], ...]
-        Normalized ``(address, call_index)`` pairs.
-    """
-
-    calls: list[tuple[str, int]] = []
-    for item in value:
-        if isinstance(item, tuple) and len(item) == 2:
-            address, call_index = item
-            calls.append((str(address), int(call_index)))
-            continue
-        text = str(item)
-        address, separator, index_text = text.rpartition(":")
-        if separator and index_text.isdigit():
-            calls.append((address, int(index_text)))
-    return tuple(calls)
-
-
 def _enrich_tinygrad_op(op_log: Any) -> None:
     """Attach tinygrad backend identity refs to one finalized op log.
 
@@ -2445,7 +2282,10 @@ def _enrich_tinygrad_op(op_log: Any) -> None:
 
     op_log.dtype_ref = DtypeRef(backend="tinygrad", name=str(op_log.dtype))
     op_log.device_ref = DeviceRef.from_value(getattr(op_log.out, "device", None))
-    op_log.backend_address = f"uop:{op_log.layer_label}"
+    # The raw label is the per-op capture identity; the layer label is shared
+    # across recurrent passes and would collide under grouping. Identical for
+    # single-pass layers (raw label == layer label).
+    op_log.backend_address = f"uop:{op_log._label_raw}"
     op_log.resolver_status = "resolved"
 
 
@@ -2566,26 +2406,6 @@ def _resolve_tinygrad_module_identity_mode(
     return module_tree is not None
 
 
-def _numel(shape: tuple[int, ...]) -> int:
-    """Return number of elements for ``shape``.
-
-    Parameters
-    ----------
-    shape
-        Tensor shape.
-
-    Returns
-    -------
-    int
-        Product of dimensions.
-    """
-
-    result = 1
-    for dim in shape:
-        result *= int(dim)
-    return result
-
-
 class _observe_tensor_ops:
     """Context manager observing tinygrad Tensor API UOp results."""
 
@@ -2614,7 +2434,7 @@ class _observe_tensor_ops:
         self.observed_tensors = observed_tensors
         self.original: Any = None
 
-    def __enter__(self) -> "_observe_tensor_ops":
+    def __enter__(self) -> _observe_tensor_ops:
         """Install the Tensor._apply_uop observer.
 
         Returns
@@ -2642,7 +2462,7 @@ class _observe_tensor_ops:
             return result
 
         # tinygrad deliberately exposes this as a method; preview capture replaces it temporarily.
-        Tensor._apply_uop = wrapped  # type: ignore[method-assign, assignment]
+        Tensor._apply_uop = wrapped
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
@@ -2666,7 +2486,7 @@ class _observe_tensor_ops:
         from tinygrad import Tensor
 
         # Restore the deliberately replaced tinygrad method after preview capture.
-        Tensor._apply_uop = self.original  # type: ignore[method-assign]
+        Tensor._apply_uop = self.original
 
 
 class _reject_mid_capture_execution:
@@ -2678,7 +2498,7 @@ class _reject_mid_capture_execution:
         self.original_tensor_run_linear: Any = None
         self.original_jit_run_linear: Any = None
 
-    def __enter__(self) -> "_reject_mid_capture_execution":
+    def __enter__(self) -> _reject_mid_capture_execution:
         """Install guarded tinygrad realization hooks.
 
         Returns
@@ -3003,29 +2823,6 @@ def _identity(tensor: Any) -> str:
     )
 
 
-def _nbytes(tensor: Any) -> int | None:
-    """Return tinygrad tensor byte size when available.
-
-    Parameters
-    ----------
-    tensor
-        tinygrad Tensor.
-
-    Returns
-    -------
-    int | None
-        Estimated byte size.
-    """
-
-    try:
-        return int(tensor.nbytes())
-    except Exception:
-        try:
-            return int(tensor.numel() * tensor.dtype.itemsize)
-        except Exception:
-            return None
-
-
 def _payload_list(tensor: Any) -> Any:
     """Return a host payload list/scalar for comparison.
 
@@ -3109,7 +2906,18 @@ def _parent_perturbations_change_output(
         True when a value parent perturbation affects replayed child output.
     """
 
-    graph_positions = getattr(op, "parent_arg_positions", {}).get("args", {})
+    # Op-side labels may be pass-qualified after recurrence grouping; resolve
+    # them back to the raw capture identity before raw-keyed lookups.
+    final_to_raw = {
+        str(known_op.label): str(known_op._label_raw)
+        for known_op in ops_by_raw_label.values()
+        if isinstance(getattr(known_op, "label", None), str)
+        and isinstance(getattr(known_op, "_label_raw", None), str)
+    }
+    graph_positions = {
+        position: (final_to_raw.get(label, label) if isinstance(label, str) else label)
+        for position, label in getattr(op, "parent_arg_positions", {}).get("args", {}).items()
+    }
     if not graph_positions:
         return True
     positions_by_parent: dict[str, list[int]] = {}
@@ -3128,7 +2936,7 @@ def _parent_perturbations_change_output(
             continue
         for candidate in _perturb_candidates(parent_value):
             attempted = True
-            replacements = {position: candidate for position in value_positions}
+            replacements = dict.fromkeys(value_positions, candidate)
             try:
                 perturbed_output = backend._replay_uop_from_trace_graph(
                     capture,
@@ -3515,7 +3323,9 @@ def _tinygrad_outputs_close(backend: TinygradBackend, left: Any, right: Any) -> 
         return False
     return all(
         _payloads_close(backend._realized_copy(left_leaf), backend._realized_copy(right_leaf))
-        for (_left_path, left_leaf), (_right_path, right_leaf) in zip(left_leaves, right_leaves)
+        for (_left_path, left_leaf), (_right_path, right_leaf) in zip(
+            left_leaves, right_leaves, strict=True
+        )
     )
 
 
@@ -3534,25 +3344,6 @@ def _is_scalar_tinygrad_value(value: Any) -> bool:
     """
 
     return tuple(getattr(value, "shape", ())) == ()
-
-
-def _callable_identity(fn: Callable[[Any], Any] | None) -> str | None:
-    """Return a stable best-effort callable identity.
-
-    Parameters
-    ----------
-    fn
-        Callable or ``None``.
-
-    Returns
-    -------
-    str | None
-        Identity string used in derived-gradient provenance.
-    """
-
-    if fn is None:
-        return None
-    return f"{getattr(fn, '__module__', '')}.{getattr(fn, '__qualname__', repr(fn))}:{id(fn)}"
 
 
 def _payload_values_close(left: Any, right: Any, dtype_name: str) -> bool:
@@ -3578,8 +3369,14 @@ def _payload_values_close(left: Any, right: Any, dtype_name: str) -> bool:
             return False
         return all(
             _payload_values_close(left_item, right_item, dtype_name)
-            for left_item, right_item in zip(left, right)
+            for left_item, right_item in zip(left, right, strict=True)
         )
     if "bool" in dtype_name or "int" in dtype_name:
         return left == right
-    return abs(float(left) - float(right)) <= 1e-6 + 1e-5 * abs(float(right))
+    # The ONE shared eps-derived band + scalar NaN/inf doctrine (b5-opus
+    # R17-1 sweep: this oracle kept the dtype-blind 1e-6/1e-5 decimal pair
+    # the R13 port replaced everywhere else, and its naive band test
+    # false-FAILED byte-identical NaN replays -- the only backend where an
+    # honest NaN-bearing capture could not validate).
+    rtol, atol = float_replay_tolerances_for_dtype_name(dtype_name)
+    return scalar_replay_close(left, right, rtol, atol)

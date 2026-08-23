@@ -94,7 +94,7 @@ def encode_input_site_position(position: Any) -> str:
     raise ValueError(f"Model-input site position {position!r} is outside the root grammar.")
 
 
-def decode_input_site_position(member: str) -> "tuple[str, str | int]":
+def decode_input_site_position(member: str) -> tuple[str, str | int]:
     """Decode one canonical site member ID back to its ``(kind, key)`` position."""
 
     kind, separator, key = member.partition(":")
@@ -274,6 +274,15 @@ class RunnableErrorCode(str, Enum):
     CONTEXT_FIELD_INVALID = "context_field_invalid"
     NUMERIC_ATTESTATION_FAILED = "numeric_attestation_failed"
     POISONED_RUN_REFUSED = "poisoned_run_refused"
+    COLLECTIVE_BOUNDARY_RUNNABLE_UNSUPPORTED = "collective_boundary_runnable_unsupported"
+    HALTED_CAPTURE_NOT_RUNNABLE = "halted_capture_not_runnable"
+    USER_INTERVENTION_NOT_REPLAYABLE = "user_intervention_not_replayable"
+    #: PROVISIONAL SPELLING (D18, ships documented-unstable pending naming
+    #: ratification): the live refresh projector refused buffer-sink routing --
+    #: a train-mode (value-changing) buffer writer, unproven (``None``) write
+    #: evidence, a claim/evidence contradiction, or a refreshed rerun that
+    #: wrote a buffer on the newly-allowed eval-mode path.
+    BUFFER_SINK_ROUTING_MUTABLE = "buffer_sink_routing_mutable"
 
 
 class LiteralAtomKind(str, Enum):
@@ -329,7 +338,7 @@ class LiteralTorchSymbol:
 class LiteralTupleKey:
     """One recursively safe tuple used as a literal mapping key."""
 
-    items: tuple[LiteralAtom | "LiteralTupleKey", ...]
+    items: tuple[LiteralAtom | LiteralTupleKey, ...]
 
 
 LiteralDictKey: TypeAlias = LiteralAtom | LiteralTupleKey
@@ -340,7 +349,7 @@ class LiteralSequence:
     """One list or tuple node in a sparse non-tensor argument tree."""
 
     kind: LiteralSequenceKind
-    items: tuple["NonTensorLiteral", ...]
+    items: tuple[NonTensorLiteral, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,7 +357,7 @@ class LiteralMappingEntry:
     """One ordered key/value entry in a sparse literal mapping."""
 
     key: LiteralDictKey
-    value: "NonTensorLiteral"
+    value: NonTensorLiteral
 
 
 @dataclass(frozen=True, slots=True)
@@ -492,7 +501,7 @@ class RunnableCallDescriptor:
     parent_call_ids: tuple[str, ...]
     is_inplace: bool
     runtime_fingerprint: str
-    execution_context: "CallExecutionContext"
+    execution_context: CallExecutionContext
     control_obligations: tuple[CallControlObligation, ...]
     control_dependencies: tuple[ControlDependencyEdge, ...]
 
@@ -837,7 +846,7 @@ class GapSpec:
     """Closed gap-registry row: the structural source and resulting floor per cause."""
 
     source_family: str
-    resulting_completeness: "WitnessCompleteness"
+    resulting_completeness: WitnessCompleteness
 
 
 WITNESS_GAP_REGISTRY: Final[Mapping[WitnessGapKind, GapSpec]] = MappingProxyType(
@@ -937,7 +946,7 @@ class WitnessCoverageGap:
 
 
 def derived_witness_completeness(
-    gaps: "tuple[WitnessCoverageGap, ...]",
+    gaps: tuple[WitnessCoverageGap, ...],
 ) -> WitnessCompleteness:
     """Derive the completeness FLOOR from the ordered gap ledger (r71 A3).
 
@@ -1266,10 +1275,10 @@ class ReplayWitnessStructure:
     @classmethod
     def from_descriptor(
         cls,
-        descriptor: "SparseRunDescriptor",
+        descriptor: SparseRunDescriptor,
         *,
-        container_members: "tuple[str, ...] | None" = None,
-    ) -> "ReplayWitnessStructure":
+        container_members: tuple[str, ...] | None = None,
+    ) -> ReplayWitnessStructure:
         """Project a descriptor onto its witness-free replay structure."""
 
         return cls(
@@ -1283,7 +1292,7 @@ class ReplayWitnessStructure:
 
 def derive_required_witness_members(
     structure: ReplayWitnessStructure,
-) -> "dict[str, list[str]]":
+) -> dict[str, list[str]]:
     """Derive every family's REQUIRED member identities from replay structure (r71 A2).
 
     THE independent required-coverage authority: iterates the closed
@@ -1406,6 +1415,69 @@ NONDETERMINISTIC_SOURCE_VOCABULARY: Final[frozenset[str]] = frozenset(
 """Closed vocabulary for ``RunReport.nondeterministic_sources`` (r53 F4)."""
 
 
+RUN_TRUNCATION_REGIME_VOCABULARY: Final[frozenset[str]] = frozenset(
+    {"closure", "sequential_prefix", "live_stop_after"}
+)
+"""Closed vocabulary for ``RunTruncation.regime`` (L4 until=; [S2-PROV])."""
+
+
+RUN_TRUNCATION_CAUSE_VOCABULARY: Final[frozenset[str]] = frozenset(
+    {"unprovable_independence", "coverage_gap", "ancestry_break"}
+)
+"""Closed cause vocabulary for the sequential-prefix fallback disclosure ([S2-PROV])."""
+
+
+@dataclass(slots=True)
+class _RunUntilPlan:
+    """Internal resolved plan for one ``until=`` run (L4 sec 2; session-only).
+
+    Built at the run door from the SOURCE trace's settled final labels, threaded
+    through the live refresh as a run-installed halt latch (2.3) or consumed by
+    the loaded-sparse closure engine (2.1). ``fired`` records whether the live
+    latch actually stopped the internal refresh capture.
+    """
+
+    requested_sites: tuple[str, ...]
+    stop_raw_index: int
+    stopped_at: str | None
+    #: Ordered raw labels of the executed prefix (non-output target ops).
+    executed_raw_labels: tuple[str, ...]
+    #: Ordered raw labels of every skipped target op (real output nodes included).
+    skipped_raw_labels: tuple[str, ...]
+    #: Final layer labels of every resolved requested layer (call mapping key).
+    requested_layer_labels: tuple[str, ...] = ()
+    halt_predicate: Any = None
+    fired: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RunTruncation:
+    """Run-result truncation disclosure for ``until=`` (L4 sec 3; [S2-PROV]).
+
+    Truncation is a RESULT/REPORT term, NEVER a capture outcome: the source
+    trace's ``CaptureOutcome`` is untouched by any run, and no N-gate row
+    branches on this record. ``None`` on the report means a full run.
+    """
+
+    #: Which regime executed: ``closure`` (loaded-sparse dependency closure),
+    #: ``sequential_prefix`` (the disclosed loaded-sparse fallback), or
+    #: ``live_stop_after`` (the live regime's stop-after semantics).
+    regime: str
+    #: The caller's requested site labels, as resolved.
+    requested_sites: tuple[str, ...]
+    #: The frontier label the run stopped at (the slate's ``stopped_at``).
+    stopped_at: str | None
+    #: Count of executed calls/ops.
+    executed_count: int
+    #: Count of skipped (not-run) calls/ops -- semantically "not-run",
+    #: never "passed" and never "unverified-but-fine".
+    skipped_count: int
+    #: Order-stable digest of the skipped site labels.
+    skipped_digest: str
+    #: Sequential-prefix fallback cause tag, ``None`` for other regimes.
+    cause: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class RunReport:
     """Honesty, state, resolution, and contract metadata for one run.
@@ -1429,6 +1501,17 @@ class RunReport:
     numeric_attestation: NumericAttestationStatus
     poisoned: bool
     nondeterministic_sources: tuple[str, ...]
+    #: PROVISIONAL (documented-unstable, rides naming/S2): ``True`` when the
+    #: live run was invoked with ``carry_state=True`` and declared-state
+    #: mutations were deliberately left on the live model (the default run
+    #: snapshot-restores declared state and reports ``False``).
+    state_carried: bool = False
+    #: Truncation disclosure ([S2-PROV], L4 until=): ``None`` for a full run.
+    truncation: RunTruncation | None = None
+    #: Ratified flat reading surface (S2 sec 2): ``truncation is not None``.
+    truncated: bool = False
+    #: Ratified flat reading surface (S2 sec 2): the stop-frontier site label.
+    stopped_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1448,6 +1531,7 @@ class RunnableTraceProtocol(Protocol):
         inputs: Any,
         *,
         seed: int | None = None,
+        fast: bool = False,
         on_divergence: DivergencePolicy = DivergencePolicy.RAISE,
     ) -> RunResult:
         """Execute through the provider selected by the Trace.
@@ -1458,6 +1542,9 @@ class RunnableTraceProtocol(Protocol):
             Structured runtime inputs.
         seed:
             Optional isolated state and runtime RNG seed.
+        fast:
+            Explicit guarded static-loop mode. The first loaded run verifies normally;
+            subsequent runs reuse staged state and compiled call binders.
         on_divergence:
             Frozen strict or poison-return divergence policy.
 
@@ -1501,11 +1588,9 @@ def mark_trace_path_status(
         Effective monotonic status and retained first mismatch.
     """
 
-    previous = trace.__dict__.get("_runnable_path_faithfulness")
-    previous_mismatch = trace.__dict__.get("_runnable_first_mismatch")
-    if previous is PathFaithfulness.DIVERGED:
-        effective = PathFaithfulness.DIVERGED
-    elif status is PathFaithfulness.DIVERGED:
+    previous = trace._runnable.path_faithfulness
+    previous_mismatch = trace._runnable.first_mismatch
+    if previous is PathFaithfulness.DIVERGED or status is PathFaithfulness.DIVERGED:
         effective = PathFaithfulness.DIVERGED
     elif previous is PathFaithfulness.UNVERIFIABLE or status is PathFaithfulness.UNVERIFIABLE:
         effective = PathFaithfulness.UNVERIFIABLE
@@ -1514,9 +1599,9 @@ def mark_trace_path_status(
     retained = (
         previous_mismatch if isinstance(previous_mismatch, RunnableDiagnostic) else first_mismatch
     )
-    trace.__dict__["_runnable_path_faithfulness"] = effective
-    trace.__dict__["_runnable_first_mismatch"] = retained
-    trace.__dict__["_runnable_poisoned"] = effective is not PathFaithfulness.VERIFIED
+    trace._runnable.path_faithfulness = effective
+    trace._runnable.first_mismatch = retained
+    trace._runnable.poisoned = effective is not PathFaithfulness.VERIFIED
     return effective, retained
 
 
@@ -1536,18 +1621,72 @@ def refuse_poisoned_trace(trace: Any, operation: str) -> None:
         If the Trace carries a monotonic non-faithful sparse-run mark.
     """
 
-    if not bool(trace.__dict__.get("_runnable_poisoned", False)):
+    if not trace._runnable.poisoned:
         return
     from .errors import PoisonedRunError
 
-    status = trace.__dict__.get("_runnable_path_faithfulness")
-    mismatch = trace.__dict__.get("_runnable_first_mismatch")
+    status = trace._runnable.path_faithfulness
+    mismatch = trace._runnable.first_mismatch
     raise PoisonedRunError(
         f"{operation} refused a poison-marked sparse run Trace.",
         code=RunnableErrorCode.POISONED_RUN_REFUSED.value,
         operation=operation,
         path_faithfulness=status,
         first_mismatch=mismatch,
+    )
+
+
+def collective_boundaries_of(trace: Any) -> list:
+    """Return the trace's recorded collective boundary journal entries."""
+
+    annotations = getattr(trace, "annotations", None)
+    if not isinstance(annotations, dict):
+        return []
+    distributed = annotations.get("distributed")
+    if not isinstance(distributed, dict):
+        return []
+    boundaries = distributed.get("boundaries")
+    return list(boundaries) if isinstance(boundaries, list) else []
+
+
+def refuse_collective_boundary_trace(trace: Any, operation: str) -> None:
+    """Refuse a downstream operation that would replay across a collective.
+
+    A rank core whose taken path crosses a collective boundary cannot be
+    single-device replayed: re-issuing the collective outside its
+    communicator either hangs or computes garbage, and the recorded values
+    depend on peers the artifact does not contain. Runnable save and
+    forward-replay validation refuse typed; metadata invariants run in full
+    (design-merge-ranks-c v5, 3.4).
+
+    Parameters
+    ----------
+    trace:
+        Trace being consumed.
+    operation:
+        Human-readable faithful consumer name.
+
+    Raises
+    ------
+    CollectiveBoundaryReplayError
+        If the trace records one or more collective boundaries.
+    """
+
+    boundaries = collective_boundaries_of(trace)
+    if not boundaries:
+        return
+    from .errors import CollectiveBoundaryReplayError
+
+    kinds = sorted({str(entry.get("kind")) for entry in boundaries})
+    raise CollectiveBoundaryReplayError(
+        f"{operation} refused: this rank-local trace's taken path crosses "
+        f"{len(boundaries)} collective boundary node(s) ({', '.join(kinds)}). "
+        "A collective cannot be replayed single-device; merge-ranks (tier c) "
+        "is the cross-rank story. Metadata invariants remain available.",
+        code=RunnableErrorCode.COLLECTIVE_BOUNDARY_RUNNABLE_UNSUPPORTED.value,
+        operation=operation,
+        boundary_count=len(boundaries),
+        boundary_kinds=kinds,
     )
 
 
@@ -1629,5 +1768,6 @@ __all__ = [
     "SlotByteDigest",
     "WitnessCompleteness",
     "mark_trace_path_status",
+    "refuse_collective_boundary_trace",
     "refuse_poisoned_trace",
 ]

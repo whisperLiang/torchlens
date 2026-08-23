@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Iterable
 from typing import Any
 
@@ -86,6 +87,14 @@ def _resolve_analyzer(module: Any, analyzer: Any | None) -> Any:
         return analyzer
     for attr_name in ("analyze", "Analyzer", "Dialz"):
         candidate = getattr(module, attr_name, None)
+        if candidate is None:
+            continue
+        # An analyzer CLASS must be instantiated: passing the class straight to
+        # ``_call_analyzer`` would invoke ``Class.analyze(outs, ...)`` as an unbound
+        # method and misbind ``self`` to the outs list (a crash, or silent wrong
+        # results when ``analyze`` has defaulted parameters).
+        if inspect.isclass(candidate):
+            return candidate()
         if callable(candidate):
             return candidate
     raise RuntimeError("Installed dialz does not expose analyze, Analyzer, or Dialz.")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -51,16 +52,98 @@ def dump(model: Any, x: Any, path: str | Path | None = None, **kwargs: Any) -> A
     for attr_name in ("dump", "decompile", "prepare_debug"):
         candidate = getattr(depyf_module, attr_name, None)
         if callable(candidate):
-            try:
-                if output_dir is None:
-                    return candidate(model, x, **kwargs)
-                return candidate(model, x, output_dir, **kwargs)
-            except TypeError:
-                if output_dir is None:
-                    return candidate(model, **kwargs)
-                return candidate(model, output_dir, **kwargs)
+            if output_dir is None:
+                full_args: tuple[Any, ...] = (model, x)
+                reduced_args: tuple[Any, ...] = (model,)
+            else:
+                full_args = (model, x, output_dir)
+                reduced_args = (model, output_dir)
+            return _call_depyf_entrypoint(candidate, full_args, reduced_args, kwargs)
 
     raise RuntimeError("Installed depyf does not expose dump, decompile, or prepare_debug.")
+
+
+def _can_bind(signature: inspect.Signature, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
+    """Return whether ``args``/``kwargs`` bind cleanly to ``signature``.
+
+    Parameters
+    ----------
+    signature:
+        Callable signature.
+    args:
+        Positional arguments.
+    kwargs:
+        Keyword arguments.
+
+    Returns
+    -------
+    bool
+        ``True`` when binding succeeds without a ``TypeError``.
+    """
+
+    try:
+        signature.bind(*args, **kwargs)
+    except TypeError:
+        return False
+    return True
+
+
+def _call_depyf_entrypoint(
+    candidate: Any,
+    full_args: tuple[Any, ...],
+    reduced_args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> Any:
+    """Call a depyf entrypoint, choosing arity by signature rather than by exception.
+
+    The example input ``x`` is passed when the entrypoint's signature accepts it.
+    A ``TypeError`` raised *inside* the entrypoint body (a genuine depyf failure) is
+    never confused with an argument-arity mismatch: we decide the arity up front so
+    the entrypoint runs exactly once and its own errors propagate unchanged. This
+    prevents the old fallback from silently re-running the entrypoint without the
+    user's example input and returning a semantically different result.
+
+    Parameters
+    ----------
+    candidate:
+        Selected depyf entrypoint callable.
+    full_args:
+        Positional arguments including the example input (and optional output dir).
+    reduced_args:
+        Positional arguments with the example input dropped.
+    kwargs:
+        Keyword arguments forwarded to the entrypoint.
+
+    Returns
+    -------
+    Any
+        The entrypoint return value.
+    """
+
+    try:
+        signature: inspect.Signature | None = inspect.signature(candidate)
+    except (TypeError, ValueError):
+        signature = None
+
+    if signature is not None:
+        if _can_bind(signature, full_args, kwargs):
+            return candidate(*full_args, **kwargs)
+        if _can_bind(signature, reduced_args, kwargs):
+            return candidate(*reduced_args, **kwargs)
+        # Neither arity binds cleanly; call with the full arity so the entrypoint's
+        # own TypeError (naming the real mismatch) surfaces instead of being masked.
+        return candidate(*full_args, **kwargs)
+
+    # No introspectable signature (e.g. some C-level callables): attempt the full
+    # arity and only retry the reduced arity when the TypeError was raised binding
+    # our arguments (no callee frame), never when it came from inside the callee.
+    try:
+        return candidate(*full_args, **kwargs)
+    except TypeError as exc:
+        traceback = exc.__traceback__
+        if traceback is not None and traceback.tb_next is not None:
+            raise
+        return candidate(*reduced_args, **kwargs)
 
 
 __all__ = ["dump"]

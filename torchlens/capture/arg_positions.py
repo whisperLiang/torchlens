@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import torch
 
 from .. import _state
-
+from ..constants import get_orig_torch_funcs
 
 # COMMUTATIVE reflected operator dunders (invoked when a non-tensor is on the LEFT, e.g.
 # ``int & tensor`` routes to ``tensor.__rand__(int)``). For a COMMUTATIVE op the swapped operand
@@ -135,8 +135,14 @@ def extract_tensors_and_params(
         if pos < len(args):
             _append_tensor_or_param(args[pos])
 
+    # An index present in BOTH ``positions`` and ``sequence_positions`` (e.g.
+    # ``_foreach_add`` arg 1: a single Tensor in the ``.Tensor`` overload, a
+    # Tensor list in ``.List``) was already fully extracted above --
+    # ``_append_tensor_or_param`` walks shallow sequences -- so re-walking it
+    # here would duplicate every member's parent edge (round-31 M3).
+    position_set = set(spec.positions)
     for pos in spec.sequence_positions:
-        if pos < len(args):
+        if pos < len(args) and pos not in position_set:
             seq = args[pos]
             if isinstance(seq, (list, tuple)):
                 for item in seq:
@@ -153,6 +159,288 @@ def extract_tensors_and_params(
     return tensors, params
 
 
+_ATEN_PACKET_NAMESPACE_PREFIXES: dict[str, tuple[str, ...]] = {
+    "torch.linalg": ("linalg_",),
+    "torch.special": ("special_",),
+}
+
+
+def _iter_aten_packet_names(namespace_name: str, func_name: str) -> tuple[str, ...]:
+    """Return candidate ATen packet names for a wrapped torch target.
+
+    Parameters
+    ----------
+    namespace_name:
+        Namespace string from ``get_orig_torch_funcs()``.
+    func_name:
+        Wrapped callable name in that namespace.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Candidate ``torch.ops.aten`` packet names to inspect for schemas.
+    """
+
+    canonical_name = func_name.strip("_")
+    candidates = [canonical_name]
+    for prefix in _ATEN_PACKET_NAMESPACE_PREFIXES.get(namespace_name, ()):
+        candidates.append(f"{prefix}{canonical_name}")
+    return tuple(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+
+def _schema_tensor_arg_kind(schema_arg: object) -> str | None:
+    """Classify whether a schema argument carries tensor provenance.
+
+    Parameters
+    ----------
+    schema_arg:
+        One ``torch.FunctionSchema`` argument entry.
+
+    Returns
+    -------
+    str | None
+        ``"single"`` for a tensor/optional tensor, ``"sequence"`` for a tensor
+        list, else ``None``.
+    """
+
+    arg_type = str(getattr(schema_arg, "type", ""))
+    if "Tensor" not in arg_type:
+        return None
+    if arg_type.startswith("List[") or arg_type.endswith("[]"):
+        return "sequence"
+    return "single"
+
+
+def _schema_arg_is_parent_candidate(schema_arg: object) -> bool:
+    """Return whether a schema argument should become a graph parent.
+
+    Parameters
+    ----------
+    schema_arg:
+        One ``torch.FunctionSchema`` argument entry.
+
+    Returns
+    -------
+    bool
+        ``True`` when the argument is an input operand rather than an ``out=``
+        destination slot.
+    """
+
+    if getattr(schema_arg, "name", None) == "out" and bool(
+        getattr(schema_arg, "kwarg_only", False)
+    ):
+        return False
+    alias_info = getattr(schema_arg, "alias_info", None)
+    return not (
+        alias_info is not None
+        and bool(getattr(alias_info, "is_write", False))
+        and not bool(getattr(alias_info, "is_read", False))
+    )
+
+
+def _merge_schema_tensor_slots(spec: ArgSpec, schemas: tuple[object, ...]) -> ArgSpec:
+    """Return ``spec`` widened by tensor operands present in authoritative schemas.
+
+    Parameters
+    ----------
+    spec:
+        Existing static argument spec.
+    schemas:
+        Function schemas associated with wrapped variants of the same operator.
+
+    Returns
+    -------
+    ArgSpec
+        Merged argument spec. Existing positions stay intact; schema-backed
+        tensor positions and kwarg names are appended when missing.
+    """
+
+    positions = list(spec.positions)
+    position_set = set(spec.positions)
+    sequence_positions = list(spec.sequence_positions)
+    sequence_position_set = set(spec.sequence_positions)
+    tensor_kwargs = list(spec.tensor_kwargs)
+    tensor_kwarg_set = set(spec.tensor_kwargs)
+
+    for schema in schemas:
+        for index, schema_arg in enumerate(getattr(schema, "arguments", ()) or ()):
+            if not _schema_arg_is_parent_candidate(schema_arg):
+                continue
+            tensor_kind = _schema_tensor_arg_kind(schema_arg)
+            if tensor_kind is None:
+                continue
+            if tensor_kind == "single" and index not in position_set:
+                positions.append(index)
+                position_set.add(index)
+            if tensor_kind == "sequence" and index not in sequence_position_set:
+                sequence_positions.append(index)
+                sequence_position_set.add(index)
+            arg_name = getattr(schema_arg, "name", None)
+            if isinstance(arg_name, str) and arg_name not in tensor_kwarg_set:
+                tensor_kwargs.append(arg_name)
+                tensor_kwarg_set.add(arg_name)
+
+    return ArgSpec(
+        positions=tuple(positions),
+        sequence_positions=tuple(sequence_positions),
+        tensor_kwargs=tuple(tensor_kwargs),
+    )
+
+
+def _apply_schema_tensor_position_corrections() -> None:
+    """Upgrade under-specified static specs from ATen schemas.
+
+    Every static spec is widened by the union of its ATen schemas' input-tensor
+    slots (round-22 F1/F2/F4/F5 class fix). The pass previously refused to touch
+    non-unary-style specs (any nonzero position or sequence position), which left
+    hand-grouped multi-operand entries permanently exempt from schema correction:
+    ``lu_solve`` keyed to the generic binary (0, 1) spec dropped its third tensor
+    operand, ``cosine_similarity`` grouped with the input/target losses dropped
+    both kwarg-passed operands, ``ctc_loss`` dropped tensor lengths, and
+    ``searchsorted`` dropped ``sorter``. The merge is append-only (existing
+    positions/kwargs stay intact) and parent-candidate-filtered (write-only
+    ``out=`` destinations never join), so widening a correct spec is a no-op and
+    widening an under-specified spec can only restore dropped parent edges.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+        Mutates ``FUNC_ARG_SPECS`` in place.
+    """
+
+    corrected_specs: dict[str, ArgSpec] = {}
+    for namespace_name, func_name in get_orig_torch_funcs(include_torchvision=False):
+        normalized_name = _normalize_func_name(func_name.strip("_"))
+        current_spec = corrected_specs.get(normalized_name, FUNC_ARG_SPECS.get(normalized_name))
+        if current_spec is None:
+            continue
+
+        schemas: list[object] = []
+        for packet_name in _iter_aten_packet_names(namespace_name, func_name):
+            packet = getattr(torch.ops.aten, packet_name, None)
+            if packet is None:
+                continue
+            for overload_name in packet.overloads():
+                overload = getattr(packet, overload_name, None)
+                schema = getattr(overload, "_schema", None)
+                if schema is not None:
+                    schemas.append(schema)
+        if not schemas:
+            continue
+
+        widened_spec = _merge_schema_tensor_slots(current_spec, tuple(schemas))
+        if widened_spec != current_spec:
+            corrected_specs[normalized_name] = widened_spec
+
+    FUNC_ARG_SPECS.update(corrected_specs)
+
+
+_schema_corrections_applied = False
+
+
+def _ensure_schema_tensor_position_corrections() -> None:
+    """Apply the ATen schema correction pass exactly once, on demand.
+
+    The sweep over ``torch.ops.aten`` schemas is torch-capture setup, but this
+    module is imported on every backend's first capture dispatch (via selector
+    helpers and postprocess). Running it eagerly at import time made non-torch
+    first captures pay the full torch schema sweep (~24% of a small Paddle
+    first capture). ``wrap_torch()`` calls this before wrappers can log any
+    op, so every torch capture still reads the fully corrected table; callers
+    that audit ``FUNC_ARG_SPECS`` outside a capture must call it explicitly.
+    """
+
+    global _schema_corrections_applied
+    if _schema_corrections_applied:
+        return
+    _apply_schema_tensor_position_corrections()
+    _schema_corrections_applied = True
+
+
+DYNAMIC_SPEC_UNCACHEABLE = object()
+"""Sentinel cached for Tier-2 names whose BFS-found tensors cannot be represented
+by an ``ArgSpec`` (tensors nested deeper than top-level args, shallow sequences,
+or top-level kwargs). Such names must re-crawl every call: caching a lossy spec
+would silently drop the unrepresentable operands from every later call."""
+
+
+def _shallow_holds_tensor(value: object) -> bool:
+    """Return whether ``value`` is a tensor or a shallow sequence holding one.
+
+    Parameters
+    ----------
+    value:
+        Candidate argument value.
+
+    Returns
+    -------
+    bool
+        ``True`` for a tensor/Parameter or a list/tuple containing one.
+    """
+
+    if isinstance(value, torch.Tensor):
+        return True
+    if isinstance(value, (list, tuple)):
+        return any(isinstance(item, torch.Tensor) for item in value)
+    return False
+
+
+def dynamic_spec_covers_call(
+    spec: ArgSpec,
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+) -> bool:
+    """Return whether a Tier-2 cached spec covers every shallow tensor in this call.
+
+    The dynamic cache derives an ``ArgSpec`` from a previously OBSERVED call shape.
+    A later call may put a tensor at a slot an earlier call filled with a scalar
+    (``x % 2.0`` then ``a % b``); extracting through the frozen spec would silently
+    drop that operand's parent edge, making capture correctness depend on call
+    order within and ACROSS traces (round-22 F3b: the cache is process-global).
+    This coverage check is the guard: when the live call carries a tensor at any
+    position or kwarg the cached spec does not extract, the caller must fall back
+    to a fresh BFS crawl (and union-merge the result) instead of trusting the
+    cache. With it, every top-level / shallow-sequence tensor operand is extracted
+    identically regardless of what any earlier call looked like.
+
+    Parameters
+    ----------
+    spec:
+        Cached dynamic spec for the normalized function name.
+    args:
+        Live positional arguments.
+    kwargs:
+        Live keyword arguments.
+
+    Returns
+    -------
+    bool
+        ``True`` when extraction through ``spec`` finds every shallow tensor in
+        the live call; ``False`` when a fresh crawl is required.
+    """
+
+    position_set = set(spec.positions)
+    sequence_position_set = set(spec.sequence_positions)
+    for index, arg in enumerate(args):
+        if isinstance(arg, torch.Tensor):
+            if index not in position_set:
+                return False
+        elif isinstance(arg, (list, tuple)) and any(isinstance(item, torch.Tensor) for item in arg):
+            if index not in position_set and index not in sequence_position_set:
+                return False
+    if not kwargs:
+        return True
+    covered_kwargs = {_normalize_func_name(str(name)) for name in spec.tensor_kwargs}
+    for key, value in kwargs.items():
+        if _shallow_holds_tensor(value) and _normalize_func_name(str(key)) not in covered_kwargs:
+            return False
+    return True
+
+
 def _cache_dynamic_spec(
     normalized_name: str,
     args: tuple[object, ...],
@@ -160,7 +448,47 @@ def _cache_dynamic_spec(
     found_tensors: list[torch.Tensor],
     found_params: list[torch.nn.Parameter],
 ) -> None:
-    """Construct and cache an ArgSpec from BFS crawl results (Tier 3)."""
+    """Construct, union-merge, and cache an ArgSpec from BFS crawl results (Tier 3).
+
+    Round-22 F3 hardening. The cache used to freeze the FIRST observed call shape
+    for the lifetime of the process, so one ``x % scalar`` observation dropped the
+    tensor RHS parent of every later ``a % b`` -- in the same trace AND in every
+    later ``tl.trace`` (``_state._dynamic_arg_specs`` is never cleared). Now:
+
+    * the derived spec is UNION-merged (append-only) with any existing cached spec,
+      so a new observation can only widen coverage, never narrow it; and
+    * when the merged spec cannot re-extract everything the BFS found (tensors
+      nested beyond ArgSpec's representable shapes), the name is marked
+      ``DYNAMIC_SPEC_UNCACHEABLE`` so every later call re-crawls instead of
+      silently dropping the unrepresentable operands on calls after the first.
+
+    Together with the ``dynamic_spec_covers_call`` guard at the lookup site, this
+    restores order-independence: extraction results for a call no longer depend on
+    which call shapes were observed earlier in the process.
+
+    Parameters
+    ----------
+    normalized_name:
+        Normalized function name key.
+    args:
+        Positional arguments of the crawled call.
+    kwargs:
+        Keyword arguments of the crawled call.
+    found_tensors:
+        Tensors the BFS crawl located anywhere in the call.
+    found_params:
+        Parameters the BFS crawl located anywhere in the call.
+
+    Returns
+    -------
+    None
+        Mutates ``_state._dynamic_arg_specs`` in place.
+    """
+
+    existing = _state._dynamic_arg_specs.get(normalized_name)
+    if existing is DYNAMIC_SPEC_UNCACHEABLE:
+        return
+
     all_found_ids = {id(t) for t in found_tensors} | {id(p) for p in found_params}
 
     positions = []
@@ -177,14 +505,37 @@ def _cache_dynamic_spec(
                     break
 
     for key, val in kwargs.items():
-        if val is not None and id(val) in all_found_ids:
+        if val is None:
+            continue
+        if (
+            id(val) in all_found_ids
+            or isinstance(val, (list, tuple))
+            and any(id(item) in all_found_ids for item in val)
+        ):
             tensor_kwargs_found.append(key)
+
+    if isinstance(existing, ArgSpec):
+        existing_positions = set(existing.positions)
+        existing_sequences = set(existing.sequence_positions)
+        existing_kwargs = set(existing.tensor_kwargs)
+        positions = list(existing.positions) + [p for p in positions if p not in existing_positions]
+        sequence_positions = list(existing.sequence_positions) + [
+            p for p in sequence_positions if p not in existing_sequences
+        ]
+        tensor_kwargs_found = list(existing.tensor_kwargs) + [
+            k for k in tensor_kwargs_found if k not in existing_kwargs
+        ]
 
     spec = ArgSpec(
         positions=tuple(positions),
         sequence_positions=tuple(sequence_positions),
         tensor_kwargs=tuple(tensor_kwargs_found),
     )
+    re_tensors, re_params = extract_tensors_and_params(spec, args, kwargs)
+    re_found_ids = {id(t) for t in re_tensors} | {id(p) for p in re_params}
+    if not all_found_ids <= re_found_ids:
+        _state._dynamic_arg_specs[normalized_name] = DYNAMIC_SPEC_UNCACHEABLE
+        return
     _state._dynamic_arg_specs[normalized_name] = spec
 
 
@@ -222,6 +573,13 @@ VARIADIC_TENSOR_ARG_FUNCS: frozenset[str] = frozenset(
         "autogradhvp",
         "autogradvhp",
         "meshgrid",
+        # Collective boundary nodes pass their contribution tensors as
+        # positional call_args; the list-taking collectives (and root-only
+        # scatter, whose contribution arity differs by rank role) vary per
+        # call, so they must never lock in a first-observed ArgSpec arity.
+        "reducescatter",
+        "alltoall",
+        "scatter",
     }
 )
 
@@ -348,6 +706,8 @@ _UNARY_FUNCS = [
     # Memory / storage
     "pinmemory",
     "sharememory",
+    "isshared",
+    "isview",
     "recordstream",
     "storage",
     "storageoffset",
@@ -712,6 +1072,23 @@ _UNARY_FUNCS = [
     "hammingwindow",
     "hannwindow",
     "kaiserwindow",
+    # The MODERN torch.signal.windows namespace (B3 R02 inventory fix). Same shape as
+    # the legacy top-level ``*_window`` twins above: the first positional argument is a
+    # length, never a tensor, so nothing beyond position 0 can be a tensor arg.
+    "bartlett",
+    "blackman",
+    "cosine",
+    "exponential",
+    "gaussian",
+    "generalcosine",
+    "generalhamming",
+    "hamming",
+    "hann",
+    "kaiser",
+    "nuttall",
+    # torch.from_dlpack builds a tensor from a FOREIGN capsule/producer object, so it
+    # has no tensor argument at all -- the same source-factory shape as from_numpy.
+    "fromdlpack",
     # CUDNN / MKLDNN
     "cudnnisacceptable",
     "mkldnnadaptiveavgpool2d",
@@ -763,6 +1140,11 @@ _BINARY_FUNCS = [
     "floordivide",
     "remainder",
     "fmod",
+    # "mod" is Tensor.__mod__, the PUBLIC ``%`` operator (the only decorated callable
+    # normalizing to this key). It was missing here, so it fell to the Tier-2 dynamic
+    # cache and a first ``x % scalar`` observation froze positions=(0,), dropping the
+    # tensor RHS parent of every later ``a % b`` (round-22 F3a).
+    "mod",
     "rsub",
     "pow",
     "floatpower",
@@ -958,7 +1340,9 @@ _FACTORY_FUNCS = [
     "eye",
     "full",
     "empty",
-    "tensor",
+    # NOTE: "tensor" (torch.tensor) is NOT a pure factory -- ``torch.tensor(data)``
+    # accepts an existing tensor as ``data`` (torch warns but executes), a real
+    # data-lineage edge. It gets an explicit spec below (round-22 F6).
     "astensor",
     "fromnumpy",
     "fromfile",
@@ -974,6 +1358,11 @@ _FACTORY_FUNCS = [
 for _name in _FACTORY_FUNCS:
     FUNC_ARG_SPECS[_name] = _NONE
 
+# ``fill_value`` is schema-typed as ``Scalar``, but PyTorch also accepts a scalar
+# tensor there.  When it is a tensor its runtime value is a real data dependency;
+# extraction's type checks leave ordinary Python scalar calls parentless.
+FUNC_ARG_SPECS["full"] = ArgSpec(positions=(1,), tensor_kwargs=("fill_value",))
+
 # Guardrail: a normalized name must not be claimed by BOTH the binary-op and factory-func
 # tables -- they assign conflicting arg-specs (tensor parents at positions 0,1 vs. NO tensor
 # parents), and dict last-writer-wins would silently corrupt whichever loses. A collision means
@@ -982,11 +1371,17 @@ for _name in _FACTORY_FUNCS:
 # forward op in _COMMUTATIVE_REFLECTED_DUNDERS). Fail LOUDLY at import so this class of silent
 # dataflow corruption can never recur unnoticed.
 _BINARY_FACTORY_KEY_COLLISIONS = set(_BINARY_FUNCS) & set(_FACTORY_FUNCS)
-assert not _BINARY_FACTORY_KEY_COLLISIONS, (
-    "arg-spec key collision between binary-op and factory-func tables: "
-    f"{sorted(_BINARY_FACTORY_KEY_COLLISIONS)} -- these ops disagree on tensor-parent positions; "
-    "give them distinct normalized keys (see _COMMUTATIVE_REFLECTED_DUNDERS)."
-)
+if _BINARY_FACTORY_KEY_COLLISIONS:
+    # A real ``raise``, never ``assert`` (R24-1): ``python -O`` strips
+    # asserts, and this guard's whole promise is that the corruption "can
+    # never recur unnoticed" -- under ``-O`` a future table collision would
+    # import clean and silently mis-assign tensor parents (wrong dataflow
+    # edges in every trace).
+    raise RuntimeError(
+        "arg-spec key collision between binary-op and factory-func tables: "
+        f"{sorted(_BINARY_FACTORY_KEY_COLLISIONS)} -- these ops disagree on tensor-parent "
+        "positions; give them distinct normalized keys (see _COMMUTATIVE_REFLECTED_DUNDERS)."
+    )
 
 # Factory-from-source functions inherit shape/dtype/device from a tensor source.
 # Record that source as a topology parent, matching view/reshape-style dependencies
@@ -1010,6 +1405,17 @@ FUNC_ARG_SPECS["fulllike"] = ArgSpec(
 )
 FUNC_ARG_SPECS["newfull"] = ArgSpec(positions=(0, 2), tensor_kwargs=("self", "fill_value"))
 FUNC_ARG_SPECS["newtensor"] = ArgSpec(positions=(0, 1), tensor_kwargs=("self", "data"))
+
+# torch.tensor(data): a value-COPY factory whose ``data`` may be an EXISTING tensor
+# (legal; torch emits a UserWarning recommending clone().detach() but executes).
+# That is a data-lineage edge exactly like ``as_tensor``/``clone``/``detach``, so the
+# source must become a graph parent; dropping it disconnected the op from its input
+# ancestry with NO unattributed marker (round-22 F6 -- the only fully silent drop
+# found, because the narrower scalar-only ``aten::tensor`` packet disarmed the
+# witness; see _arg_position_is_tensor_operand in backends/torch/ops.py for the
+# witness-side fix). Scalar/list ``data`` holds no tensor, so extraction's
+# isinstance checks keep plain factory calls parentless.
+FUNC_ARG_SPECS["tensor"] = ArgSpec(positions=(0,), tensor_kwargs=("data",))
 
 # ---------------------------------------------------------------------------
 # Special patterns (custom ArgSpec per function or group)
@@ -1057,6 +1463,13 @@ FUNC_ARG_SPECS["indexput"] = ArgSpec(
 
 # linear: F.linear(input, weight, bias) — weight/bias can be keyword args
 FUNC_ARG_SPECS["linear"] = ArgSpec(positions=(0, 1, 2), tensor_kwargs=("input", "weight", "bias"))
+
+# linear_cross_entropy: F.linear_cross_entropy(input, linear_weight, target, *, linear_bias=None,
+# weight=None, ...) — three positional tensors, optional tensor kwargs linear_bias/weight
+FUNC_ARG_SPECS["linearcrossentropy"] = ArgSpec(
+    positions=(0, 1, 2),
+    tensor_kwargs=("input", "linear_weight", "target", "linear_bias", "weight"),
+)
 
 # conv: F.conv2d(input, weight, bias, stride, ...) — bias at position 2
 _CONV_SPEC = ArgSpec(positions=(0, 1, 2), tensor_kwargs=("input", "weight", "bias"))
@@ -1366,6 +1779,12 @@ for _name in [
     FUNC_ARG_SPECS[_name] = _P01_BINARY
 
 FUNC_ARG_SPECS["addr"] = ArgSpec(positions=(0, 1, 2), tensor_kwargs=("input", "vec1", "vec2"))
+# ``align_as`` (named-tensor Tensor method) was REMOVED from torch in 2.13, so on this runtime
+# it is undecorated and this static spec is unused. It is RETAINED (not pruned) because the
+# pinned torch<=2.12 CI legs still decorate ``Tensor.align_as``; deleting the spec there would
+# make it a decorated-without-static-spec op absent from the arg-spec ledger, hard-failing
+# tests/test_arg_spec_coverage.py::test_every_decorated. It is version-varying, so it is dropped
+# from _HIGH_CONFIDENCE_STATIC_NAMES (mirrors F5's handling of torch-version-varying fills).
 FUNC_ARG_SPECS["alignas"] = ArgSpec(positions=(0, 1), tensor_kwargs=("self", "other"))
 FUNC_ARG_SPECS["binarycrossentropy"] = ArgSpec(
     positions=(0, 1, 2), tensor_kwargs=("input", "target", "weight")
@@ -1584,6 +2003,7 @@ _PHASE5B_VALIDATED_ARG_SPECS = {
     "foreachceil": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
     "foreachclampmax": ArgSpec(sequence_positions=(0, 1), tensor_kwargs=("self", "other")),
     "foreachclampmin": ArgSpec(sequence_positions=(0, 1), tensor_kwargs=("self", "other")),
+    "foreachclone": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
     "foreachcopy": ArgSpec(sequence_positions=(0, 1), tensor_kwargs=("self", "src")),
     "foreachcos": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
     "foreachcosh": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
@@ -1607,12 +2027,14 @@ _PHASE5B_VALIDATED_ARG_SPECS = {
     "foreachmax": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
     "foreachmaximum": ArgSpec(sequence_positions=(0, 1), tensor_kwargs=("self", "other")),
     "foreachminimum": ArgSpec(sequence_positions=(0, 1), tensor_kwargs=("self", "other")),
+    "foreachmm": ArgSpec(sequence_positions=(0, 1), tensor_kwargs=("self", "mat2")),
     "foreachmul": ArgSpec(
         positions=(1,), sequence_positions=(0, 1), tensor_kwargs=("self", "other")
     ),
     "foreachneg": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
     "foreachnorm": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
     "foreachpow": ArgSpec(sequence_positions=(0, 1), tensor_kwargs=("self", "exponent")),
+    "foreachpowsum": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
     "foreachreciprocal": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
     "foreachround": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
     "foreachrsqrt": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
@@ -1721,6 +2143,7 @@ _PHASE5B_VALIDATED_ARG_SPECS = {
         positions=(0, 1, 2, 3, 4, 5), tensor_kwargs=("input", "hx", "w_ih", "w_hh", "b_ih", "b_hh")
     ),
     "hascompatibleshallowcopytype": ArgSpec(positions=(0, 1), tensor_kwargs=("self", "from")),
+    "hashtensor": ArgSpec(positions=(0,), tensor_kwargs=("self", "input")),
     "histogramddbinedges": ArgSpec(positions=(0,), tensor_kwargs=("self", "weight")),
     "histogramddfrombincts": ArgSpec(positions=(0,), tensor_kwargs=("self", "weight")),
     "histogramddfrombintensors": ArgSpec(
@@ -1731,6 +2154,9 @@ _PHASE5B_VALIDATED_ARG_SPECS = {
     ),
     "indicescopy": ArgSpec(positions=(0,), tensor_kwargs=("self",)),
     "infersize": ArgSpec(),
+    # F.max_unpool*'s internal size check: (output_size: list[int], dim: int),
+    # no tensor-bearing arguments.
+    "checkunpooloutputsize": ArgSpec(),
     "inprojection": ArgSpec(
         positions=(0, 1, 2, 3, 4, 5, 6, 7, 8),
         tensor_kwargs=("q", "k", "v", "w_q", "w_k", "w_v", "b_q", "b_k", "b_v"),
@@ -2024,6 +2450,20 @@ _PHASE5B_VALIDATED_ARG_SPECS = {
     "sparsecsrtensor": ArgSpec(
         positions=(0, 1, 2), tensor_kwargs=("crow_indices", "col_indices", "values")
     ),
+    # The rest of the PUBLIC sparse-compressed family (B3 R02 inventory fix): each takes
+    # the two index tensors plus the value tensor in positions 0-2, spelled per layout.
+    "sparsecsctensor": ArgSpec(
+        positions=(0, 1, 2), tensor_kwargs=("ccol_indices", "row_indices", "values")
+    ),
+    "sparsebsrtensor": ArgSpec(
+        positions=(0, 1, 2), tensor_kwargs=("crow_indices", "col_indices", "values")
+    ),
+    "sparsebsctensor": ArgSpec(
+        positions=(0, 1, 2), tensor_kwargs=("ccol_indices", "row_indices", "values")
+    ),
+    "sparsecompressedtensor": ArgSpec(
+        positions=(0, 1, 2), tensor_kwargs=("compressed_indices", "plain_indices", "values")
+    ),
     "sparsemaskprojection": ArgSpec(positions=(0, 1), tensor_kwargs=("self", "mask")),
     "sparseresize": ArgSpec(positions=(0,), tensor_kwargs=("self",)),
     "sparseresizeandclear": ArgSpec(positions=(0,), tensor_kwargs=("self",)),
@@ -2164,6 +2604,12 @@ for _name in [
     "reinforce",
 ]:
     FUNC_ARG_SPECS[_name] = _P0
+
+# Schema correction is deliberately NOT applied at import time: this module is
+# imported on every backend's first capture dispatch (selector helpers,
+# postprocess), and the ATen schema sweep is a torch-only cost that dominated
+# non-torch first-capture profiles. ``wrap_torch()`` arms it before any torch
+# op record can be built, so torch capture always reads the corrected table.
 
 # Cleanup loop variable leakage
 del _name, _spec

@@ -2,31 +2,102 @@
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import math
-import os
 import re
 import time
-import weakref
 import warnings
+import weakref
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from .._errors import InvalidArgumentError
 from .._literals import CollapseLiteral, FoldRepeatsLiteral, VisModeLiteral
+from ..errors._base import TorchLensWarning
+
+# Condensed-flow-graph construction: split to _condensed_flow.py under the R43
+# file-size ratchet. The dataclasses and helpers re-export here (historical
+# surface); call sites below that tests monkeypatch on _condensed_flow go
+# through the module attribute so the patch seam has one home.
+from . import _condensed_flow
+from ._condensed_flow import (  # noqa: F401
+    JUNCTION_FUNC_NAMES,
+    ChildCondensedFlowGraph,
+    FlowIntervalFlags,
+    ModuleCollapseSignals,
+    _compute_child_condensed_flow_graphs,
+    _condensed_owner_for_op,
+    _condensed_owner_map,
+    _count_landmark_edges,
+    _count_passthrough_edges,
+    _empty_signal,
+    _flow_interval_flags,
+    _module_address_stack,
+    _op_func_name,
+    _output_junctions,
+)
+from ._render_common import strict_collapse_checks_enabled
 from .collapse_plan import RenderContext, collapse_plan_for_trace, count
 
 if TYPE_CHECKING:
     from ..data_classes.module import Module
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace
+    from .collapse_optimizer import OptimizerResult
 
 
 GENERIC_CONTAINER_CLASSES = frozenset({"Sequential", "ModuleList", "ModuleDict", "ParameterList"})
 _COUNT_MISMATCH_WARNING_EMITTED = False
-JUNCTION_FUNC_NAMES = frozenset({"__add__", "add", "cat", "concat", "concatenate"})
-_INDEXED_CHILD_RE = re.compile(r"^(?P<stem>.*?)(?:\.?\d+|_?\d+[a-z]?)$")
+
+
+def _indexed_child_stem(name: str) -> str | None:
+    """Return the stem of an indexed child name, or ``None`` when unindexed.
+
+    Manual, linear-time equivalent of the historical
+    ``^(?P<stem>.*?)(?:\\.?\\d+|_?\\d+[a-z]?)$`` regex, whose lazy stem plus
+    digit-run alternation backtracked QUADRATICALLY on artifact-supplied
+    names like ``"9"*n + "!!"`` (measured 26s at 40k chars). The lazy stem
+    means the LONGEST valid suffix wins: trailing decimal digits reaching
+    the end (optionally preceded by one ``.`` or ``_``), or reaching one
+    final ``a``-``z`` letter for the underscore form. ``str.isdecimal`` is
+    exactly the ``\\d`` character class. One deliberate tightening: the
+    regex ``$`` also matched before a trailing newline; a newline-bearing
+    name now reads as unindexed.
+
+    Parameters
+    ----------
+    name:
+        Leaf child name.
+
+    Returns
+    -------
+    str | None
+        Stem before the numeric suffix, or ``None`` for unindexed names.
+    """
+
+    end = len(name)
+    suffix_starts: list[int] = []
+    # Form A: optional "." + decimal digits running to the end.
+    cut = end
+    while cut > 0 and name[cut - 1].isdecimal():
+        cut -= 1
+    if cut < end:
+        suffix_starts.append(cut - 1 if cut > 0 and name[cut - 1] == "." else cut)
+    # Form B: optional "_" + decimal digits + optional ONE final a-z letter.
+    tail = end - 1 if end and "a" <= name[end - 1] <= "z" else end
+    cut = tail
+    while cut > 0 and name[cut - 1].isdecimal():
+        cut -= 1
+    if cut < tail:
+        suffix_starts.append(cut - 1 if cut > 0 and name[cut - 1] == "_" else cut)
+    if not suffix_starts:
+        return None
+    return name[: min(suffix_starts)]
+
+
 RUN_FOLD_MIN_LENGTH = 3
 
 
@@ -54,6 +125,10 @@ class ModuleRepeatFold:
         Short first-to-last output-shape summary when shapes vary, else ``None``.
     hidden_member_composition:
         Metadata describing hidden members represented by the ellipsis.
+    hidden_calls:
+        Total forward calls made by the hidden members ``addresses[1:]``, or
+        ``None`` when unknown. Multi-call members hide more forward calls than
+        addresses, and the elision label must disclose that mass.
     """
 
     representative: str
@@ -65,118 +140,13 @@ class ModuleRepeatFold:
     num_params_frozen: int
     shape_summary: str | None
     hidden_member_composition: Mapping[str, int]
+    hidden_calls: int | None = None
 
     @property
     def multiplicity(self) -> int:
         """Return the number of folded sibling modules."""
 
         return len(self.addresses)
-
-
-@dataclass(frozen=True)
-class ModuleCollapseSignals:
-    """Precomputed structural signals for one module.
-
-    Parameters
-    ----------
-    address:
-        Primary module address.
-    subtree_ops:
-        Pass-qualified operation labels in module scope.
-    own_func_names:
-        Function names for ops directly owned by the module, in call order.
-    internal_edges:
-        Distinct op-graph edges with both endpoints in the module.
-    input_edges:
-        Distinct op-graph edges entering the module from outside.
-    output_edges:
-        Distinct op-graph edges leaving the module.
-    landmark_edges:
-        Boundary-crossing edges that enter or leave non-boundary internal
-        operations and therefore hide a meaningful cross-module junction.
-    passthrough_edges:
-        Internal output junctions that combine module input with internal work.
-    output_junctions:
-        External multi-parent children fed by module outputs.
-    params:
-        Number of recursive parameters for the module.
-    depth:
-        Address-tree depth.
-    num_calls:
-        Number of module calls.
-    structural_digest:
-        Trace-local structural digest.
-    peer_count:
-        Number of modules in the same address-keyed peer group.
-    hidden_ops:
-        Rendered op count hidden by collapsing this module.
-    eligible:
-        Whether renderer-faithful hard gating allows collapse.
-    """
-
-    address: str
-    subtree_ops: tuple[str, ...]
-    own_func_names: tuple[str, ...]
-    internal_edges: int
-    input_edges: int
-    output_edges: int
-    landmark_edges: int
-    passthrough_edges: int
-    output_junctions: tuple[str, ...]
-    params: int
-    depth: int
-    num_calls: int
-    structural_digest: str
-    peer_count: int
-    hidden_ops: int
-    eligible: bool
-
-
-@dataclass(frozen=True)
-class FlowIntervalFlags:
-    """Blocker flags for an interval between flow-adjacent children.
-
-    Parameters
-    ----------
-    landmark:
-        Whether landmark edges cross the interval.
-    passthrough:
-        Whether passthrough-style parent-owned flow crosses the interval.
-    """
-
-    landmark: bool
-    passthrough: bool
-
-
-@dataclass(frozen=True)
-class ChildCondensedFlowGraph:
-    """Child-condensed flow graph for one parent module call.
-
-    Parameters
-    ----------
-    parent:
-        Parent module address.
-    flow_children:
-        Direct child module addresses ordered by first executed op.
-    parent_owned_ops:
-        Parent-owned operation labels in execution order.
-    nodes:
-        Condensed graph nodes: child subtrees plus parent-owned ops.
-    edges:
-        Condensed op-flow edges between nodes.
-    child_external_endpoint_counts:
-        Per-child ``(entries, exits)`` counts against the condensed graph.
-    interval_flags:
-        Flags keyed by flow-child address pairs.
-    """
-
-    parent: str
-    flow_children: tuple[str, ...]
-    parent_owned_ops: tuple[str, ...]
-    nodes: tuple[str, ...]
-    edges: tuple[tuple[str, str], ...]
-    child_external_endpoint_counts: Mapping[str, tuple[int, int]]
-    interval_flags: Mapping[tuple[str, str], FlowIntervalFlags]
 
 
 @dataclass(frozen=True)
@@ -205,19 +175,70 @@ class CollapseAnalysis:
     elapsed_ms: float
 
 
-_ANALYSIS_CACHE: weakref.WeakKeyDictionary[Any, CollapseAnalysis] = weakref.WeakKeyDictionary()
-_OP_ADJACENCY_INDEX_CACHE: weakref.WeakKeyDictionary[Any, Mapping[str, str]] = (
+_ANALYSIS_CACHE: weakref.WeakKeyDictionary[Any, tuple[tuple[object, ...], CollapseAnalysis]] = (
     weakref.WeakKeyDictionary()
 )
+_OP_ADJACENCY_INDEX_CACHE: weakref.WeakKeyDictionary[
+    Any, tuple[tuple[object, ...], Mapping[str, str]]
+] = weakref.WeakKeyDictionary()
 
 
-def _op_adjacency_index(trace: "Trace") -> Mapping[str, str]:
+def _collapse_graph_revision(trace: Trace) -> tuple[object, ...]:
+    """Return a by-value graph fingerprint for visualization cache invalidation.
+
+    Parameters
+    ----------
+    trace:
+        Trace whose mutable graph and module relations are fingerprinted.
+
+    Returns
+    -------
+    tuple[object, ...]
+        Stable snapshot of collapse-relevant operation and module metadata.
+    """
+
+    op_revision = tuple(
+        (
+            op.label,
+            op.label_short,
+            op._label_raw,
+            op.layer_label,
+            op.layer_label_short,
+            tuple(op.parents),
+            tuple(op.children),
+            tuple(str(module) for module in (op.modules or ())),
+            op.func_name,
+            tuple(op.shape),
+            op.io_role,
+        )
+        for op in trace.ops
+    )
+    module_revision = tuple(
+        (
+            module.address,
+            getattr(module, "address_parent", None),
+            tuple(getattr(module, "address_children", ()) or ()),
+            getattr(module, "num_calls", None),
+            getattr(module, "num_params", None),
+        )
+        for module in trace.modules
+    )
+    return (op_revision, module_revision)
+
+
+def _op_adjacency_index(
+    trace: Trace, revision: tuple[object, ...] | None = None
+) -> Mapping[str, str]:
     """Return unambiguous relationship labels mapped to canonical Op labels.
 
     Parameters
     ----------
     trace:
         Trace whose operation relationships are being indexed.
+    revision:
+        Already-computed graph fingerprint for this probe. ``None`` computes
+        it here; entry points that just fingerprinted the trace pass it in so
+        validation stays one O(ops) walk per public call, not one per probe.
 
     Returns
     -------
@@ -225,9 +246,14 @@ def _op_adjacency_index(trace: "Trace") -> Mapping[str, str]:
         Unambiguous accessor label forms mapped to canonical operation labels.
     """
 
+    if revision is None:
+        revision = _collapse_graph_revision(trace)
     cached = _OP_ADJACENCY_INDEX_CACHE.get(trace)
-    if cached is not None:
-        return cached
+    # Identity first: a walk threads ONE revision object through every
+    # resolve, so repeat probes within that walk are O(1), not a full
+    # tuple-equality pass over the fingerprint.
+    if cached is not None and (cached[0] is revision or cached[0] == revision):
+        return cached[1]
     unique_ops: dict[str, Op] = {}
     ambiguous_forms: set[str] = set()
     for op in trace.ops:
@@ -248,11 +274,13 @@ def _op_adjacency_index(trace: "Trace") -> Mapping[str, str]:
             elif existing is not op:
                 ambiguous_forms.add(form)
     index = {form: op.label for form, op in unique_ops.items() if form not in ambiguous_forms}
-    _OP_ADJACENCY_INDEX_CACHE[trace] = index
+    _OP_ADJACENCY_INDEX_CACHE[trace] = (revision, index)
     return index
 
 
-def _resolve_relationship_op(trace: "Trace", label: str) -> "Op":
+def _resolve_relationship_op(
+    trace: Trace, label: str, revision: tuple[object, ...] | None = None
+) -> Op:
     """Resolve a parent/child relationship label without changing accessor semantics.
 
     Parameters
@@ -261,6 +289,12 @@ def _resolve_relationship_op(trace: "Trace", label: str) -> "Op":
         Trace that owns the operation relationship.
     label:
         Label stored in an operation's ``parents`` or ``children`` collection.
+    revision:
+        Graph fingerprint already computed by the calling walk. ``None``
+        fingerprints here; per-edge callers must thread the walk-level
+        revision or every edge pays a full O(ops) fingerprint just to probe
+        the adjacency cache. The index itself still builds lazily, on the
+        first resolve that actually needs it.
 
     Returns
     -------
@@ -268,13 +302,13 @@ def _resolve_relationship_op(trace: "Trace", label: str) -> "Op":
         The same operation returned by the public trace accessor.
     """
 
-    canonical_label = _op_adjacency_index(trace).get(label)
+    canonical_label = _op_adjacency_index(trace, revision).get(label)
     if canonical_label is None:
         return cast("Op", trace.ops[label])
     return cast("Op", trace.ops[canonical_label])
 
 
-def analyze_collapse(trace: "Trace") -> CollapseAnalysis:
+def analyze_collapse(trace: Trace) -> CollapseAnalysis:
     """Return cached module-collapse signals and canonical scores for ``trace``.
 
     Parameters
@@ -288,14 +322,15 @@ def analyze_collapse(trace: "Trace") -> CollapseAnalysis:
         Cached signal, digest, peer, and score data.
     """
 
+    revision = _collapse_graph_revision(trace)
     cached = _ANALYSIS_CACHE.get(trace)
-    if cached is not None:
-        return cached
+    if cached is not None and cached[0] == revision:
+        return cached[1]
     start = time.perf_counter()
-    signals_without_peers = _compute_signal_skeleton(trace)
+    signals_without_peers = _compute_signal_skeleton(trace, revision)
     digests = _compute_structural_digests(trace, signals_without_peers)
     peer_groups = _group_structural_peers(trace, digests)
-    child_flow_graphs = _compute_child_condensed_flow_graphs(trace, signals_without_peers)
+    child_flow_graphs = _compute_child_condensed_flow_graphs(trace, signals_without_peers, revision)
     peer_count_by_address: dict[str, int] = {}
     for group in peer_groups.values():
         for address in group:
@@ -329,11 +364,11 @@ def analyze_collapse(trace: "Trace") -> CollapseAnalysis:
         child_flow_graphs=child_flow_graphs,
         elapsed_ms=(time.perf_counter() - start) * 1000.0,
     )
-    _ANALYSIS_CACHE[trace] = analysis
+    _ANALYSIS_CACHE[trace] = (revision, analysis)
     return analysis
 
 
-def _child_condensed_flow_graphs(trace: "Trace") -> Mapping[str, ChildCondensedFlowGraph]:
+def _child_condensed_flow_graphs(trace: Trace) -> Mapping[str, ChildCondensedFlowGraph]:
     """Return cached child-condensed flow graphs for tests and v2 downstream work.
 
     Parameters
@@ -351,7 +386,7 @@ def _child_condensed_flow_graphs(trace: "Trace") -> Mapping[str, ChildCondensedF
 
 
 def collapse_order(
-    trace: "Trace",
+    trace: Trace,
     weights: Mapping[str, float] | None = None,
     mode: Literal["auto", "max"] = "auto",
 ) -> list[tuple[str, float]]:
@@ -374,9 +409,24 @@ def collapse_order(
 
     _ = weights
     if mode not in {"auto", "max"}:
-        raise ValueError("mode must be 'auto' or 'max'.")
+        raise InvalidArgumentError(
+            f"mode must be 'auto' or 'max'; received {mode!r}",
+            code="collapse_mode_invalid",
+            remedy="pass mode='auto' or 'max'",
+            argument="mode",
+        )
+    from .collapse_optimizer import select_collapse_plan
+
+    result = select_collapse_plan(trace, RenderContext(), mode=mode)
+    if result.declined:
+        # Over-ceiling decline (r8 R60-8): the old order ran the full
+        # O(N*D) ``analyze_collapse`` only to zero every score afterwards.
+        # An empty table is the honest degraded surface -- every consumer
+        # reads through ``.get(address, 0.0)``, so the observable scores
+        # are identical without the wasted analysis.
+        return []
     analysis = analyze_collapse(trace)
-    scores = _v2_selected_module_scores(trace, analysis, mode=mode)
+    scores = _v2_selected_module_scores(trace, analysis, mode=mode, result=result)
     return sorted(scores.items(), key=lambda item: (-item[1], item[0]))
 
 
@@ -385,7 +435,7 @@ def _signal_size_scores(signals: Mapping[str, ModuleCollapseSignals]) -> dict[st
 
     max_hidden = max((signal.hidden_ops for signal in signals.values()), default=0)
     if max_hidden <= 0:
-        return {address: 0.0 for address in signals}
+        return dict.fromkeys(signals, 0.0)
     return {
         address: round(signal.hidden_ops / max_hidden, 6) if signal.eligible else 0.0
         for address, signal in signals.items()
@@ -393,16 +443,18 @@ def _signal_size_scores(signals: Mapping[str, ModuleCollapseSignals]) -> dict[st
 
 
 def _v2_selected_module_scores(
-    trace: "Trace",
+    trace: Trace,
     analysis: CollapseAnalysis,
     *,
     mode: Literal["auto", "max"],
+    result: OptimizerResult | None = None,
 ) -> dict[str, float]:
     """Return same-shape scores derived from the v2 selected module set."""
 
     from .collapse_optimizer import select_collapse_plan
 
-    result = select_collapse_plan(trace, RenderContext(), mode=mode)
+    if result is None:
+        result = select_collapse_plan(trace, RenderContext(), mode=mode)
     selected = result.selected if not result.declined else frozenset()
     hidden_max = max(
         (
@@ -412,7 +464,7 @@ def _v2_selected_module_scores(
         ),
         default=0,
     )
-    scores = {address: 0.0 for address in analysis.signals}
+    scores = dict.fromkeys(analysis.signals, 0.0)
     for address in selected:
         signal = analysis.signals.get(address)
         if signal is None or hidden_max <= 0:
@@ -422,11 +474,11 @@ def _v2_selected_module_scores(
 
 
 def resolve_collapse_fn(
-    trace: "Trace",
+    trace: Trace,
     collapse: CollapseLiteral,
     vis_mode: VisModeLiteral,
     context: RenderContext | None = None,
-) -> Callable[["Module"], bool] | None:
+) -> Callable[[Module], bool] | None:
     """Resolve a public collapse option to a renderer predicate.
 
     Parameters
@@ -449,7 +501,12 @@ def resolve_collapse_fn(
     resolved_context = RenderContext(vis_mode=vis_mode) if context is None else context
     if isinstance(collapse, float):
         if not 0.0 <= collapse <= 1.0:
-            raise ValueError("collapse float level must be in [0.0, 1.0].")
+            raise InvalidArgumentError(
+                f"collapse float level must be in [0.0, 1.0]; received {collapse!r}",
+                code="collapse_level_invalid",
+                remedy="pass a collapse level between 0.0 and 1.0",
+                argument="collapse",
+            )
         if collapse == 0.0:
             return None
         from .collapse_optimizer import select_collapse_level
@@ -457,7 +514,7 @@ def resolve_collapse_fn(
         result = select_collapse_level(trace, resolved_context, collapse)
         if not result.declined:
 
-            def v2_collapse_fn(module: "Module") -> bool:
+            def v2_collapse_fn(module: Module) -> bool:
                 """Return whether ``module`` is selected by the v2 optimizer."""
 
                 return module.address in result.selected
@@ -471,7 +528,13 @@ def resolve_collapse_fn(
     if collapse == "none":
         return None
     if collapse not in {"auto", "max"}:
-        raise ValueError("collapse must be 'none', 'auto', 'max', or a float in [0.0, 1.0].")
+        raise InvalidArgumentError(
+            "collapse must be 'none', 'auto', 'max', or a float in [0.0, 1.0]; "
+            f"received {collapse!r}",
+            code="collapse_mode_invalid",
+            remedy="pass collapse='none', 'auto', 'max', or an in-range float",
+            argument="collapse",
+        )
     if collapse in {"auto", "max"}:
         from .collapse_optimizer import select_collapse_plan
 
@@ -479,7 +542,7 @@ def resolve_collapse_fn(
         result = select_collapse_plan(trace, resolved_context, mode=mode)
         if not result.declined:
 
-            def v2_collapse_fn(module: "Module") -> bool:
+            def v2_collapse_fn(module: Module) -> bool:
                 """Return whether ``module`` is selected by the v2 optimizer."""
 
                 return module.address in result.selected
@@ -494,8 +557,8 @@ def resolve_collapse_fn(
 
 
 def resolve_repeat_folds(
-    trace: "Trace",
-    collapse_fn: Callable[["Module"], bool] | None,
+    trace: Trace,
+    collapse_fn: Callable[[Module], bool] | None,
     context: RenderContext | None = None,
     fold_repeats: FoldRepeatsLiteral = None,
 ) -> dict[str, ModuleRepeatFold]:
@@ -522,10 +585,34 @@ def resolve_repeat_folds(
 
     resolved_context = RenderContext() if context is None else context
     if fold_repeats not in {None, True, False}:
-        raise ValueError("fold_repeats must be None, True, or False.")
+        raise InvalidArgumentError(
+            f"fold_repeats must be None, True, or False; received {fold_repeats!r}",
+            code="fold_repeats_invalid",
+            remedy="pass fold_repeats=None, True, or False",
+            argument="fold_repeats",
+        )
     if fold_repeats is False:
         return {}
     if collapse_fn is None and fold_repeats is not True:
+        return {}
+    from .collapse_optimizer import COLLAPSE_OPTIMIZER_MAX_OPS
+
+    if len(trace.ops) > COLLAPSE_OPTIMIZER_MAX_OPS:
+        # Compute-ceiling parity (r8 R60-9): ``draw(fold_repeats=True)`` with
+        # ``collapse="none"`` entered run folding directly -- full
+        # ``analyze_collapse`` plus uncached per-candidate structural digests
+        # and three extra plan builds -- without ever consulting the one
+        # op-count ceiling the collapse engine has. Decline DISCLOSED, same
+        # policy as the optimizer: the graph renders without run folds.
+        warnings.warn(
+            f"TorchLens is skipping repeat-run folding: this trace has "
+            f"{len(trace.ops)} ops, above the collapse engine's compute "
+            f"ceiling COLLAPSE_OPTIMIZER_MAX_OPS={COLLAPSE_OPTIMIZER_MAX_OPS}. "
+            "The graph renders without folds; reduce the rendered graph "
+            "first with module= focus, vis_call_depth, or rolled mode.",
+            TorchLensWarning,
+            stacklevel=2,
+        )
         return {}
     eligibility_collapse_fn = collapse_fn if collapse_fn is not None else _always_collapse_module
     render_collapse_fn = collapse_fn
@@ -552,6 +639,11 @@ def resolve_repeat_folds(
     analysis = analyze_collapse(trace)
     candidate_folds: list[ModuleRepeatFold] = []
     candidate_addresses: set[str] = set()
+    # One selected-module index per discovery sweep (r8 R29): the per-group
+    # rebuild inside the iterators evaluated collapse_fn over every module
+    # once per sibling group -- Theta(M^2) predicate calls on module-heavy
+    # models.
+    sweep_selected_index = _selected_address_index(trace, eligibility_collapse_fn)
     for parent_address, child_addresses in _sibling_address_groups(trace).items():
         graph = _flow_graph_for_sibling_group(
             trace,
@@ -563,7 +655,7 @@ def resolve_repeat_folds(
         for run in _iter_collapsible_runs(trace, flow_addresses, eligibility_collapse_fn):
             if not _run_fold_is_legal(run, graph):
                 continue
-            if not _run_fold_hidden_members_uniform(trace, run):
+            if not _run_fold_members_uniform(trace, run):
                 continue
             fold = _make_run_fold(trace, run)
             candidate_folds.append(fold)
@@ -572,6 +664,7 @@ def resolve_repeat_folds(
             trace,
             flow_addresses,
             eligibility_collapse_fn,
+            selected_index=sweep_selected_index,
         ):
             if any(address in candidate_addresses for address in run):
                 continue
@@ -584,7 +677,7 @@ def resolve_repeat_folds(
             )
             if not _run_fold_is_legal(run, run_graph):
                 continue
-            if not _run_fold_hidden_members_uniform(trace, run):
+            if not _run_fold_members_uniform(trace, run):
                 continue
             fold = _make_run_fold(trace, run)
             candidate_folds.append(fold)
@@ -594,12 +687,13 @@ def resolve_repeat_folds(
             flow_addresses,
             eligibility_collapse_fn,
             allow_selected_descendant=True,
+            selected_index=sweep_selected_index,
         ):
             if any(address in candidate_addresses for address in run):
                 continue
             if not _run_fold_is_legal(run, graph):
                 continue
-            if not _run_fold_hidden_members_uniform(trace, run):
+            if not _run_fold_members_uniform(trace, run):
                 continue
             fold = _make_run_fold(trace, run)
             candidate_folds.append(fold)
@@ -627,7 +721,7 @@ def resolve_repeat_folds(
     return folds_by_address
 
 
-def _always_collapse_module(module: "Module") -> bool:
+def _always_collapse_module(module: Module) -> bool:
     """Return ``True`` for standalone repeat-fold eligibility checks.
 
     Parameters
@@ -645,7 +739,7 @@ def _always_collapse_module(module: "Module") -> bool:
     return True
 
 
-def _sibling_address_groups(trace: "Trace") -> dict[str | None, list[str]]:
+def _sibling_address_groups(trace: Trace) -> dict[str | None, list[str]]:
     """Return ordered sibling module addresses grouped by parent address.
 
     Parameters
@@ -695,7 +789,7 @@ def _flow_ordered_child_addresses(
 
 
 def _flow_graph_for_sibling_group(
-    trace: "Trace",
+    trace: Trace,
     parent_address: str,
     child_addresses: list[str],
     analysis: CollapseAnalysis,
@@ -734,7 +828,7 @@ def _flow_graph_for_sibling_group(
 
 
 def _synthetic_child_condensed_flow_graph(
-    trace: "Trace",
+    trace: Trace,
     parent_address: str,
     child_addresses: list[str],
     signals: Mapping[str, ModuleCollapseSignals],
@@ -766,7 +860,7 @@ def _synthetic_child_condensed_flow_graph(
         sorted(
             child_sets,
             key=lambda child: (
-                _first_flow_op_order(trace, child_sets[child], op_order),
+                _condensed_flow._first_flow_op_order(trace, child_sets[child], op_order),
                 child,
             ),
         )
@@ -776,12 +870,15 @@ def _synthetic_child_condensed_flow_graph(
         for label in labels:
             owner_by_label[label] = child_address
     edges: set[tuple[str, str]] = set()
+    # Reachable outside analyze_collapse (optimizer synthetic scopes), so this
+    # walk fingerprints once here rather than per edge.
+    revision = _collapse_graph_revision(trace)
     for op in trace.ops:
         source = owner_by_label.get(op.label)
         for child_label in getattr(op, "children", ()) or ():
-            child_op = _resolve_relationship_op(trace, child_label)
+            child_op = _resolve_relationship_op(trace, child_label, revision)
             target_label = child_op.label
-            if not _is_forward_dataflow_edge(trace, op.label, target_label):
+            if not _condensed_flow._is_forward_dataflow_edge(trace, op.label, target_label):
                 continue
             target = owner_by_label.get(target_label)
             if source is None and target is None:
@@ -810,12 +907,16 @@ def _synthetic_child_condensed_flow_graph(
         parent_owned_ops=(),
         nodes=ordered_nodes,
         edges=sorted_edges,
-        child_external_endpoint_counts=_child_external_endpoint_counts(sorted_edges, flow_children),
-        interval_flags=_flow_interval_flags(trace, flow_children, child_sets, sorted_edges),
+        child_external_endpoint_counts=_condensed_flow._child_external_endpoint_counts(
+            sorted_edges, flow_children
+        ),
+        interval_flags=_condensed_flow._flow_interval_flags(
+            trace, flow_children, child_sets, sorted_edges
+        ),
     )
 
 
-def module_collapse_score(module: "Module") -> float:
+def module_collapse_score(module: Module) -> float:
     """Return the canonical default collapse score for a module.
 
     Parameters
@@ -835,85 +936,36 @@ def module_collapse_score(module: "Module") -> float:
     return dict(collapse_order(trace)).get(module.address, 0.0)
 
 
-def _compute_dimless_structural_digests(trace: "Trace") -> dict[str, str]:
-    """Compute module structural digests that ignore dimensions and parameters.
-
-    Parameters
-    ----------
-    trace:
-        Trace whose module hierarchy is being fingerprinted.
-
-    Returns
-    -------
-    dict[str, str]
-        Digest keyed by pass-free module address.
-    """
-
-    signals = _compute_signal_skeleton(trace)
-    digests: dict[str, str] = {}
-    modules = sorted(trace.modules, key=lambda module: module.address_depth, reverse=True)
-    for module in modules:
-        signal = signals[module.address]
-        child_sigs = tuple(
-            digests[child_address]
-            for child_address in getattr(module, "address_children", ()) or ()
-            if child_address in digests
-        )
-        payload = repr(
-            (
-                getattr(module, "class_name", ""),
-                child_sigs,
-                len(signal.subtree_ops),
-                int(getattr(module, "num_layers", 0) or 0),
-                _normalized_internal_topology(trace, signal.subtree_ops),
-            )
-        ).encode("utf-8")
-        digests[module.address] = hashlib.sha1(payload).hexdigest()
-    return digests
-
-
-def _normalized_internal_topology(
-    trace: "Trace",
-    subtree_ops: tuple[str, ...],
-) -> tuple[tuple[int, int], ...]:
-    """Return dimension-free internal op-edge topology for ``subtree_ops``.
-
-    Parameters
-    ----------
-    trace:
-        Trace owning the operation graph.
-    subtree_ops:
-        Pass-qualified operation labels in module scope.
-
-    Returns
-    -------
-    tuple[tuple[int, int], ...]
-        Internal edges expressed as subtree-order indices.
-    """
-
-    index_by_label = {label: index for index, label in enumerate(subtree_ops)}
-    subtree = set(subtree_ops)
-    edges: set[tuple[int, int]] = set()
-    for parent_label in subtree_ops:
-        parent = cast("Op", trace.ops[parent_label])
-        parent_index = index_by_label[parent.label]
-        for child_label in getattr(parent, "children", ()) or ():
-            if child_label not in subtree:
-                continue
-            edges.add((parent_index, index_by_label[child_label]))
-    return tuple(sorted(edges))
-
-
-def _module_structural_signature(module: "Module") -> tuple[int, int, int, int]:
+def _module_structural_signature(
+    module: Module,
+) -> tuple[int, int, int, int, tuple[tuple[str, str, str], ...], object]:
     """Return a per-module structural fingerprint for fold-honesty checks.
 
     Two modules are only considered structurally interchangeable for the
-    "+N more" repeat-fold ellipsis when this fingerprint matches exactly. It is
-    used to require that the *hidden* members of a fold (every member except
-    the visible representative) share one structure, so a same-class,
+    "+N more" repeat-fold ellipsis when this fingerprint matches exactly. It
+    is used to require that EVERY member of a fold — the visible
+    representative included — shares one structure, so a same-class,
     same-output-shape sibling with genuinely different internals (extra
     layers/params) can never be silently hidden inside a ``+N more`` box that
     claims uniformity.
+
+    r-b6 R19-1: counts alone were not enough — a kwargs-different conv
+    (dilation 2) and a tanh-for-relu block both matched the historical 4-int
+    fingerprint, so two DIFFERENT models rendered byte-identical DOT under
+    the homogeneity claim. The fingerprint therefore also carries the ordered
+    per-layer op-type sequence and a canonical ``func_config`` digest.
+
+    r3 b6-opus R19-1: op types and kwargs are still not enough — a residual
+    ``x + y`` block and a self-add ``y + y`` block share the same ordered op
+    list and params but are DIFFERENT DAGs. The fingerprint therefore also
+    carries :func:`_module_wiring_digest`, a canonical intra-module dataflow
+    component.
+
+    r4 b6-opus R19-1: ``func_config`` is the MODULE configuration, so a
+    functional/dunder op's scalar operand never entered the fingerprint —
+    ``* 1.0`` and ``* 3.0`` blocks folded behind one ``+N more``. Each row
+    therefore also carries a canonical digest of the op's captured
+    non-tensor arguments (:func:`_non_tensor_args_digest`).
 
     Parameters
     ----------
@@ -922,51 +974,208 @@ def _module_structural_signature(module: "Module") -> tuple[int, int, int, int]:
 
     Returns
     -------
-    tuple[int, int, int, int]
-        ``(num_layers, num_params, num_params_trainable, num_params_frozen)``.
+    tuple
+        ``(num_layers, num_params, num_params_trainable, num_params_frozen,
+        ops_signature, wiring_digest)`` where ``ops_signature`` is a tuple of
+        ``(op_type, func_config_digest, non_tensor_args_digest)`` rows in
+        layer order and ``wiring_digest`` canonicalizes the member's
+        interior edges plus boundary crossings.
     """
 
+    ops_signature = tuple(
+        (
+            str(getattr(layer, "func_name", None) or getattr(layer, "layer_type", "")),
+            _func_config_digest(getattr(layer, "func_config", None)),
+            _non_tensor_args_digest(layer),
+        )
+        for layer in module.layers
+    )
     return (
         int(module.num_layers),
         int(module.num_params),
         int(module.num_params_trainable),
         int(module.num_params_frozen),
+        ops_signature,
+        _module_wiring_digest(module),
     )
 
 
-def _module_trainability_signature(module: "Module") -> tuple[bool, bool]:
-    """Return whether a module owns trainable and frozen parameters.
+def _module_wiring_walk(module: Module) -> tuple[object, tuple[tuple[str, int], ...]]:
+    """Walk one member's wiring; return ``(digest_rows, exterior_bindings)``.
 
-    Parameters
-    ----------
-    module:
-        Module whose parameter trainability should be classified.
+    ``digest_rows`` encodes, per interior op in execution order, the ordered
+    parent slots as either ``("i", position)`` — an edge from the interior op
+    at that execution position — or ``("x", k)`` — a boundary crossing from
+    the ``k``-th distinct exterior source first seen while walking this
+    member. ``exterior_bindings`` is the sorted ``(exterior_label, k)``
+    correspondence those crossings used, for the cross-member consistency
+    check (:func:`_exterior_bindings_consistent`).
 
-    Returns
-    -------
-    tuple[bool, bool]
-        ``(has_trainable, has_frozen)`` for label-honest repeat folding.
+    Raises on unresolvable wiring; callers own the degrade policy.
     """
 
-    return (bool(module.num_params_trainable), bool(module.num_params_frozen))
+    trace = module.trace
+    if trace is None:
+        return "", ()
+    canonical: list[str] = []
+    seen: set[str] = set()
+    for label in module._op_labels():
+        resolved = trace.ops[label].label
+        if resolved not in seen:
+            seen.add(resolved)
+            canonical.append(resolved)
+    position = {label: index for index, label in enumerate(canonical)}
+    exterior: dict[str, int] = {}
+    rows: list[tuple[tuple[str, int], ...]] = []
+    for label in canonical:
+        slots: list[tuple[str, int]] = []
+        for parent_label in trace.ops[label].parents:
+            parent = trace.ops[parent_label].label
+            if parent in position:
+                slots.append(("i", position[parent]))
+            else:
+                slots.append(("x", exterior.setdefault(parent, len(exterior))))
+        rows.append(tuple(slots))
+    return tuple(rows), tuple(sorted(exterior.items()))
 
 
-def _run_fold_hidden_members_uniform(trace: "Trace", addresses: Sequence[str]) -> bool:
-    """Return whether every hidden run member shares one structural signature.
+def _module_wiring_digest(module: Module) -> object:
+    """Return a canonical intra-module dataflow digest for one fold member.
+
+    Exterior sources are numbered per member (never by label), so two run
+    members fed by different upstream blocks still compare equal when their
+    interior wiring matches, while a residual skip (``x + y``) can never
+    match a self-add (``y + y``): the former's add row reads
+    ``(("x", 0), ("i", j))`` and the latter's ``(("i", j), ("i", j))``.
+
+    A member whose wiring cannot be resolved degrades to a UNIQUE
+    per-member sentinel, so it can never fold (r4 b6-fable R19): degrading
+    every failing member to a shared exception type name made two members
+    with genuinely different-but-unresolvable wiring compare equal, silently
+    falling back to the op-signature-only comparison the r3 HIGH proved
+    insufficient.
+    """
+
+    try:
+        rows, _ = _module_wiring_walk(module)
+        return rows
+    except Exception as error:
+        return (
+            "__torchlens_wiring_unresolved__",
+            str(getattr(module, "address", "") or id(module)),
+            type(error).__name__,
+        )
+
+
+def _module_exterior_bindings(module: Module) -> tuple[tuple[str, int], ...] | None:
+    """Return one member's exterior-source binding, or ``None`` if unresolvable."""
+
+    try:
+        _, bindings = _module_wiring_walk(module)
+        return bindings
+    except Exception:
+        return None
+
+
+def _exterior_bindings_consistent(
+    merged: dict[str, int],
+    bindings: tuple[tuple[str, int], ...] | None,
+) -> bool:
+    """Merge one member's exterior binding into the fold's shared frame.
+
+    r4 b6-sol R19-1: per-member first-seen numbering alone erases the
+    cross-member source correspondence — ``sub(a, b)`` and ``sub(b, a)``
+    both canonicalize to ``(("x", 0), ("x", 1))``. When fold members SHARE
+    an exterior source, that source must occupy the SAME operand slot in
+    every member; members with disjoint exterior sets (consecutive chain
+    blocks fed by different upstream blocks) impose no constraint and keep
+    folding. Returns whether the member is consistent, updating ``merged``
+    in place on success.
+    """
+
+    if bindings is None:
+        return False
+    return all(merged.setdefault(label, index) == index for label, index in bindings)
+
+
+def _func_config_digest(func_config: Any) -> str:
+    """Return a canonical, order-independent digest of one ``func_config``.
+
+    ``func_config`` values are capture-recorded primitives (ints, tuples,
+    strings), so ``repr`` over key-sorted items is deterministic. An exotic
+    unsortable/unreprable config degrades to its type name — coarser matching,
+    never a crash.
+    """
+
+    if not func_config:
+        return ""
+    try:
+        return repr(sorted(func_config.items(), key=lambda item: str(item[0])))
+    except Exception:
+        return type(func_config).__name__
+
+
+_MEMORY_ADDRESS_PATTERN = re.compile(r"0x[0-9a-fA-F]+")
+
+
+def _non_tensor_args_digest(layer: Any) -> str:
+    """Return a canonical digest of one op's captured non-tensor arguments.
+
+    r4 b6-opus R19-1: ``func_config`` is empty for functional/dunder ops, so
+    a scalar operand (``* 3.0`` vs ``* 1.0``) never entered the fold
+    fingerprint and two models computing DIFFERENT functions folded behind
+    one ``+N more`` ellipsis. The captured positional and keyword non-tensor
+    argument values are already recorded per op; digest them canonically.
+
+    Default-object reprs embed memory addresses, which are nondeterministic
+    per process; they are masked so equal-valued members keep comparing
+    equal (coarser matching for address-only-distinct objects, matching the
+    ``_func_config_digest`` degrade discipline). An unreprable value
+    degrades to its type name — coarser matching, never a crash.
+    """
+
+    try:
+        # Multi-pass layers refuse per-pass reads at the aggregate (typed
+        # layer_pass_ambiguous, not AttributeError), so read each pass's op
+        # directly; the operand values of EVERY pass are fingerprint-relevant.
+        ops = getattr(layer, "ops", None)
+        sources = list(ops.values()) if ops is not None else [layer]
+        parts = tuple(
+            (
+                getattr(source, "non_tensor_pos_args", None),
+                getattr(source, "non_tensor_kwargs", None),
+            )
+            for source in (sources or [layer])
+        )
+        if not any(pos or kw for pos, kw in parts):
+            return ""
+        text = repr(parts)
+    except Exception as error:
+        return type(error).__name__
+    return _MEMORY_ADDRESS_PATTERN.sub("0xADDR", text)
+
+
+def _run_fold_members_uniform(trace: Trace, addresses: Sequence[str]) -> bool:
+    """Return whether every run member shares one structural signature.
 
     A run fold renders the first member (``addresses[0]``) as a visible
     representative box and elides the rest behind a ``... +N more <class>``
-    ellipsis. That ellipsis claims the hidden members are interchangeable, so
-    the fold is only honest when every hidden member
-    (``addresses[1:]``) has the same structural fingerprint
-    (:func:`_module_structural_signature`). The representative itself may
-    differ structurally (its own stats stay visible) -- e.g. a MobileNetV2
-    stage whose first block changes channel width before a plateau of
-    identical residual blocks. Its trainability classification must still
-    match every hidden member because the representative's visible parameter
-    label otherwise mischaracterizes the ``+N more`` modules. When a
-    genuinely-different hidden module or a trainability mismatch would be
-    hidden, this returns ``False`` and the fold is rejected.
+    ellipsis. That ellipsis claims the hidden members are interchangeable
+    with the visible representative, so the fold is only honest when EVERY
+    member — representative included — has the same structural fingerprint
+    (:func:`_module_structural_signature`).
+
+    T9 (grind-p3, HIGH): the comparison previously spanned only
+    ``addresses[1:]`` on the theory that the representative's own stats stay
+    visible. That left the reverse direction unproven: a plateau uniformly
+    different from its representative (e.g. every hidden block swapping ReLU
+    for Tanh) folded anyway, and the hidden structure appeared NOWHERE in
+    the render — two different models drew byte-identical DOT. Requiring
+    the representative to match closes that hole; a run with an odd first
+    member splits (both run assemblers retry shorter sub-runs), so the
+    plateau re-folds from its own structurally-matching representative.
+    The former separate trainability screen is subsumed: exact trainable and
+    frozen parameter counts are components of the structural fingerprint.
 
     Parameters
     ----------
@@ -978,49 +1187,51 @@ def _run_fold_hidden_members_uniform(trace: "Trace", addresses: Sequence[str]) -
     Returns
     -------
     bool
-        Whether the hidden members are structurally uniform.
+        Whether all members are structurally uniform.
     """
 
     if len(addresses) <= 1:
         return True
-    trainability_signatures = {
-        _module_trainability_signature(cast("Module", trace.modules[address]))
+    signatures = {
+        _module_structural_signature(cast("Module", trace.modules[address]))
         for address in addresses
     }
-    if len(trainability_signatures) != 1:
+    if len(signatures) != 1:
         return False
-    hidden = addresses[1:]
-    if len(hidden) <= 1:
-        return True
-    signatures = {
-        _module_structural_signature(cast("Module", trace.modules[address])) for address in hidden
-    }
-    return len(signatures) == 1
+    # r4 b6-sol R19-1: equal per-member signatures are not enough when the
+    # members SHARE exterior sources — the shared source must occupy the
+    # same operand slot in every member (a - b vs b - a must never fold).
+    merged: dict[str, int] = {}
+    return all(
+        _exterior_bindings_consistent(
+            merged, _module_exterior_bindings(cast("Module", trace.modules[address]))
+        )
+        for address in addresses
+    )
 
 
-def _split_run_by_hidden_uniformity(
-    trace: "Trace",
+def _split_run_by_member_uniformity(
+    trace: Trace,
     run: tuple[str, ...],
 ) -> Iterator[tuple[str, ...]]:
-    """Split one grouped run into its maximal hidden-uniform sub-runs.
+    """Split one grouped run into its maximal member-uniform sub-runs.
 
     :func:`_iter_collapsible_runs` groups addresses into a run purely by
     class, stem, and flow/shape adjacency -- that grouping says nothing
-    about whether the *hidden* fold members (everything but the visible
-    representative) are structurally uniform. Without this retry, a single
-    structurally-odd module anywhere inside an otherwise-eligible run would
-    cause the caller to reject the *entire* run wholesale the moment
-    :func:`_run_fold_hidden_members_uniform` failed on it, even though the
-    legal sub-runs on either side of the odd member are still independently
-    foldable.
+    about whether the fold members are structurally uniform. Without this
+    retry, a single structurally-odd module anywhere inside an
+    otherwise-eligible run would cause the caller to reject the *entire*
+    run wholesale the moment :func:`_run_fold_members_uniform` failed on
+    it, even though the legal sub-runs on either side of the odd member are
+    still independently foldable.
 
     This mirrors :func:`collapse_optimizer._maximal_legal_runs`'s
     retry-shorter-subrun approach: grow a candidate window from each
-    unconsumed starting position, keep the longest hidden-uniform prefix,
+    unconsumed starting position, keep the longest member-uniform prefix,
     emit it, and resume scanning from the next unconsumed address. A
-    structurally-odd module becomes the new *representative* of its own
-    retried sub-run (representatives are exempt from the uniformity check)
-    instead of silently sinking every run it happens to sit inside.
+    structurally-odd module stays visible on its own (every fold member,
+    representative included, must match the fingerprint) instead of
+    silently sinking every run it happens to sit inside.
 
     Parameters
     ----------
@@ -1034,35 +1245,64 @@ def _split_run_by_hidden_uniformity(
     ------
     tuple[str, ...]
         Maximal sub-runs of at least :data:`RUN_FOLD_MIN_LENGTH` addresses,
-        each with uniform hidden members.
+        each with structurally uniform members.
     """
 
+    # Uniformity is "all members share ONE structural signature", so the
+    # maximal uniform window starting at any index is exactly the run of
+    # consecutive equal signatures from that index. Computing one signature
+    # per member and grouping equal neighbours is output-identical to the
+    # historical grow-every-window scan, which recomputed signatures for
+    # every (start, end) pair — near-cubic on long runs (b6/b4-sol
+    # instrumented) — while this is linear in run length.
     total = len(run)
+    if total < RUN_FOLD_MIN_LENGTH:
+        return
+    signatures = [
+        _module_structural_signature(cast("Module", trace.modules[address])) for address in run
+    ]
+    bindings = [
+        _module_exterior_bindings(cast("Module", trace.modules[address])) for address in run
+    ]
     index = 0
     while index < total:
-        best: tuple[str, ...] = ()
-        for end in range(index + RUN_FOLD_MIN_LENGTH, total + 1):
-            candidate = run[index:end]
-            if _run_fold_hidden_members_uniform(trace, candidate):
-                best = candidate
-        if best:
-            yield best
-            index += len(best)
-        else:
-            index += 1
+        end = index + 1
+        # r4 b6-sol R19-1: a window member must both share the signature AND
+        # bind any exterior source it shares with earlier window members to
+        # the same operand slot (see _exterior_bindings_consistent).
+        merged: dict[str, int] = {}
+        if not _exterior_bindings_consistent(merged, bindings[index]):
+            index = end
+            continue
+        while (
+            end < total
+            and signatures[end] == signatures[index]
+            and _exterior_bindings_consistent(merged, bindings[end])
+        ):
+            end += 1
+        if end - index >= RUN_FOLD_MIN_LENGTH:
+            yield run[index:end]
+        # Windows inside a shorter-than-minimum equal-signature block can
+        # never reach the minimum length, so skipping the whole block is
+        # NOT always output-identical to the historical index += 1 rescan
+        # once binding consistency joins the constraint: a member rejected
+        # for a binding conflict can open its own consistent window, and
+        # `end` stopped exactly at the first such member.
+        index = end
 
 
 def _iter_collapsible_runs(
-    trace: "Trace",
+    trace: Trace,
     child_addresses: list[str],
-    collapse_fn: Callable[["Module"], bool],
+    collapse_fn: Callable[[Module], bool],
     run_stem: str | None = None,
     allow_selected_descendant: bool = False,
+    selected_index: tuple[str, ...] | None = None,
 ) -> Iterator[tuple[str, ...]]:
     """Yield flow-consecutive same-class runs with equal adjacent output shapes.
 
     Each assembled group is further split by
-    :func:`_split_run_by_hidden_uniformity` into its maximal hidden-uniform
+    :func:`_split_run_by_member_uniformity` into its maximal member-uniform
     sub-runs before being yielded, so a single structurally-odd module
     anywhere inside an otherwise-eligible run only knocks out the sub-run(s)
     that would have hidden it -- the legal sub-runs on either side still
@@ -1083,14 +1323,27 @@ def _iter_collapsible_runs(
     allow_selected_descendant:
         Whether selected descendants allow a sibling ancestor to stand in as
         the folded member.
+    selected_index:
+        Optional precomputed selected-address index shared across sibling
+        groups (r8 R29); ``None`` rebuilds it for this group.
 
     Yields
     ------
     tuple[str, ...]
         One run of at least :data:`RUN_FOLD_MIN_LENGTH` addresses, with
-        uniform hidden members.
+        structurally uniform members.
     """
 
+    # One shared sorted index instead of a full trace.modules scan per child:
+    # the per-child rescans made descendant-aware discovery Theta(S*M) in
+    # sibling count x module count (hunt-6 R29-3). r8 R29: callers walking
+    # MANY sibling groups pass the index in, so it builds once per discovery
+    # sweep instead of once per group (the cross-group rebuild was Theta(M^2)
+    # in module count).
+    if selected_index is None and allow_selected_descendant:
+        selected_index = _selected_address_index(trace, collapse_fn)
+    if not allow_selected_descendant:
+        selected_index = None
     current_key: tuple[str, str] | None = None
     current_descendant_only_num_layers: int | None = None
     current_has_direct_selection = False
@@ -1098,14 +1351,14 @@ def _iter_collapsible_runs(
     for address in child_addresses:
         module = cast("Module", trace.modules[address])
         directly_selected = collapse_fn(module)
-        descendant_selected = allow_selected_descendant and bool(
-            _selected_descendants(trace, address, collapse_fn)
+        descendant_selected = selected_index is not None and bool(
+            _selected_descendants_in_index(selected_index, address)
         )
         selected = directly_selected or descendant_selected
         if not selected:
             if allow_selected_descendant:
                 continue
-            yield from _split_run_by_hidden_uniformity(trace, tuple(current_run))
+            yield from _split_run_by_member_uniformity(trace, tuple(current_run))
             current_key = None
             current_descendant_only_num_layers = None
             current_has_direct_selection = False
@@ -1133,18 +1386,19 @@ def _iter_collapsible_runs(
             if not current_has_direct_selection:
                 current_descendant_only_num_layers = num_layers
             continue
-        yield from _split_run_by_hidden_uniformity(trace, tuple(current_run))
+        yield from _split_run_by_member_uniformity(trace, tuple(current_run))
         current_key = key
         current_descendant_only_num_layers = None if directly_selected else num_layers
         current_has_direct_selection = directly_selected
         current_run = [address]
-    yield from _split_run_by_hidden_uniformity(trace, tuple(current_run))
+    yield from _split_run_by_member_uniformity(trace, tuple(current_run))
 
 
 def _iter_collapsible_child_path_runs(
-    trace: "Trace",
+    trace: Trace,
     sibling_addresses: list[str],
-    collapse_fn: Callable[["Module"], bool],
+    collapse_fn: Callable[[Module], bool],
+    selected_index: tuple[str, ...] | None = None,
 ) -> Iterator[tuple[str, ...]]:
     """Yield repeated selected child paths under consecutive sibling parents.
 
@@ -1156,6 +1410,9 @@ def _iter_collapsible_child_path_runs(
         Ordered direct children for one parent module.
     collapse_fn:
         Active collapse predicate.
+    selected_index:
+        Optional precomputed selected-address index shared across sibling
+        groups (r8 R29); ``None`` rebuilds it for this group.
 
     Yields
     ------
@@ -1163,12 +1420,16 @@ def _iter_collapsible_child_path_runs(
         One run of selected descendant modules sharing the same relative path.
     """
 
+    # Shared index: the former per-sibling _selected_descendants call scanned
+    # the whole module table once per sibling (hunt-6 R29-3). r8 R29: callers
+    # walking many sibling groups pass it in (once per sweep, not per group).
+    if selected_index is None:
+        selected_index = _selected_address_index(trace, collapse_fn)
     relative_paths = sorted(
         {
             selected_address.removeprefix(f"{sibling}.")
             for sibling in sibling_addresses
-            for selected_address in _selected_descendants(trace, sibling, collapse_fn)
-            if selected_address.startswith(f"{sibling}.")
+            for selected_address in _selected_descendants_in_index(selected_index, sibling)
         }
     )
     for relative_path in relative_paths:
@@ -1224,11 +1485,11 @@ def _indexed_parent_stem(address: str) -> str:
         parent, name = address.rsplit(".", 1)
     else:
         parent, name = "", address
-    match = _INDEXED_CHILD_RE.match(name)
-    if match is None:
+    indexed_stem = _indexed_child_stem(name)
+    if indexed_stem is None:
         stem = name
     else:
-        stem = match.group("stem").rstrip("._") or ""
+        stem = indexed_stem.rstrip("._") or ""
     return f"{parent}.{stem}" if parent and stem else parent or stem or name
 
 
@@ -1252,7 +1513,7 @@ def _common_parent_address(addresses: tuple[str, ...]) -> str | None:
     return next(iter(parents))
 
 
-def _module_output_shapes_equal(trace: "Trace", left: str, right: str) -> bool:
+def _module_output_shapes_equal(trace: Trace, left: str, right: str) -> bool:
     """Return whether two modules have exactly equal known output shapes.
 
     Parameters
@@ -1378,9 +1639,7 @@ def _run_fold_is_chain_interval(
     ]
     if len(entries) != 1 or entries[0][1] != addresses[0]:
         return False
-    if len(exits) != 1 or exits[0][0] != addresses[-1]:
-        return False
-    return True
+    return not (len(exits) != 1 or exits[0][0] != addresses[-1])
 
 
 def _chain_connector_nodes(
@@ -1501,21 +1760,44 @@ def _run_fold_is_parallel_fan(
     )
 
 
-def _selected_descendants(
-    trace: "Trace",
-    address: str,
-    collapse_fn: Callable[["Module"], bool],
+def _selected_address_index(
+    trace: Trace,
+    collapse_fn: Callable[[Module], bool],
 ) -> tuple[str, ...]:
-    """Return selected descendant module addresses under ``address``.
+    """Return the sorted addresses of every module selected by ``collapse_fn``.
+
+    One pass over the module table shared by all descendant lookups in a
+    discovery sweep; the former per-child/per-sibling full scans made
+    repeat-fold discovery Theta(S*M) (hunt-6 R29-3).
 
     Parameters
     ----------
     trace:
         Trace owning the modules.
-    address:
-        Parent module address.
     collapse_fn:
         Active collapse predicate.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Selected module addresses in lexical order.
+    """
+
+    return tuple(sorted(module.address for module in trace.modules if collapse_fn(module)))
+
+
+def _selected_descendants_in_index(
+    selected_index: tuple[str, ...],
+    address: str,
+) -> tuple[str, ...]:
+    """Return the selected addresses strictly under ``address``.
+
+    Parameters
+    ----------
+    selected_index:
+        Sorted selected addresses from :func:`_selected_address_index`.
+    address:
+        Parent module address.
 
     Returns
     -------
@@ -1524,14 +1806,14 @@ def _selected_descendants(
     """
 
     prefix = f"{address}."
-    return tuple(
-        module.address
-        for module in trace.modules
-        if module.address.startswith(prefix) and collapse_fn(module)
-    )
+    start = bisect.bisect_left(selected_index, prefix)
+    end = start
+    while end < len(selected_index) and selected_index[end].startswith(prefix):
+        end += 1
+    return selected_index[start:end]
 
 
-def _make_run_fold(trace: "Trace", addresses: tuple[str, ...]) -> ModuleRepeatFold:
+def _make_run_fold(trace: Trace, addresses: tuple[str, ...]) -> ModuleRepeatFold:
     """Build aggregate metadata for one folded run.
 
     Parameters
@@ -1562,10 +1844,11 @@ def _make_run_fold(trace: "Trace", addresses: tuple[str, ...]) -> ModuleRepeatFo
         ),
         shape_summary=_run_shape_summary(trace, addresses),
         hidden_member_composition=_hidden_member_composition(trace, addresses),
+        hidden_calls=sum(int(getattr(module, "num_calls", 1) or 1) for module in modules[1:]),
     )
 
 
-def _hidden_member_composition(trace: "Trace", addresses: tuple[str, ...]) -> Mapping[str, int]:
+def _hidden_member_composition(trace: Trace, addresses: tuple[str, ...]) -> Mapping[str, int]:
     """Return residual/passthrough composition for hidden run members.
 
     Parameters
@@ -1601,7 +1884,7 @@ def _hidden_member_composition(trace: "Trace", addresses: tuple[str, ...]) -> Ma
     return composition
 
 
-def _run_shape_summary(trace: "Trace", addresses: tuple[str, ...]) -> str | None:
+def _run_shape_summary(trace: Trace, addresses: tuple[str, ...]) -> str | None:
     """Return a compact first-to-last output shape summary for a folded run.
 
     Parameters
@@ -1625,44 +1908,7 @@ def _run_shape_summary(trace: "Trace", addresses: tuple[str, ...]) -> str | None
     return f"{first}->{last}"
 
 
-def _run_span_allows_fold(trace: "Trace", addresses: tuple[str, ...]) -> bool:
-    """Return whether first-to-last tensor shape span is safe to fold.
-
-    Parameters
-    ----------
-    trace:
-        Trace owning the modules.
-    addresses:
-        Consecutive sibling addresses in the candidate run.
-
-    Returns
-    -------
-    bool
-        True when the run does not cross a spatial-resolution boundary and
-        does not span more than a 2x channel-width change. Unknown shapes are
-        treated as foldable because the structural key is the primary guard.
-    """
-
-    first = _module_output_shape_tuple(trace, addresses[0])
-    last = _module_output_shape_tuple(trace, addresses[-1])
-    if first is None or last is None:
-        return True
-    if len(first) != len(last):
-        return False
-    first_spatial = _shape_spatial_dims(first)
-    last_spatial = _shape_spatial_dims(last)
-    if first_spatial is not None and last_spatial is not None and first_spatial != last_spatial:
-        return False
-    first_channels = _shape_channel_dim(first)
-    last_channels = _shape_channel_dim(last)
-    if first_channels is None or last_channels is None:
-        return True
-    smaller = min(first_channels, last_channels)
-    larger = max(first_channels, last_channels)
-    return smaller > 0 and larger <= smaller * 2
-
-
-def _module_output_shape_tuple(trace: "Trace", address: str) -> tuple[int, ...] | None:
+def _module_output_shape_tuple(trace: Trace, address: str) -> tuple[int, ...] | None:
     """Return the primary output shape tuple for a module address.
 
     Parameters
@@ -1692,7 +1938,7 @@ def _module_output_shape_tuple(trace: "Trace", address: str) -> tuple[int, ...] 
         return None
 
 
-def _module_call_output_op(trace: "Trace", call_label: str) -> "Op | None":
+def _module_call_output_op(trace: Trace, call_label: str) -> Op | None:
     """Return the primary output Op for a module-call label.
 
     Parameters
@@ -1762,7 +2008,7 @@ def _shape_channel_dim(shape: tuple[int, ...]) -> int | None:
     return None
 
 
-def _module_output_shape(trace: "Trace", address: str) -> str | None:
+def _module_output_shape(trace: Trace, address: str) -> str | None:
     """Return the primary output shape string for a module address.
 
     Parameters
@@ -1784,7 +2030,9 @@ def _module_output_shape(trace: "Trace", address: str) -> str | None:
     return str(tuple(shape))
 
 
-def _compute_signal_skeleton(trace: "Trace") -> dict[str, ModuleCollapseSignals]:
+def _compute_signal_skeleton(
+    trace: Trace, revision: tuple[object, ...]
+) -> dict[str, ModuleCollapseSignals]:
     """Compute all non-peer module signals in one shared traversal."""
 
     op_labels_by_module: dict[str, list[str]] = defaultdict(list)
@@ -1796,26 +2044,34 @@ def _compute_signal_skeleton(trace: "Trace") -> dict[str, ModuleCollapseSignals]
     ops = list(trace.ops)
     op_by_label = {op.label: op for op in ops}
     stack_by_label = {op.label: _module_address_stack(op) for op in ops}
+    labels_by_stack: dict[tuple[str, ...], list[str]] = defaultdict(list)
 
     for op in ops:
         stack = stack_by_label[op.label]
-        for address in stack:
-            op_labels_by_module[address].append(op.label)
+        labels_by_stack[stack].append(op.label)
         if stack:
             own_func_names_by_module[stack[-1]].append(_op_func_name(op))
 
+    # Most ops share an enclosing module stack. Expand each distinct stack once,
+    # rather than repeating the same ancestry walk for every op in the module.
+    for stack, labels in labels_by_stack.items():
+        for address in stack:
+            op_labels_by_module[address].extend(labels)
+
+    stack_sets = {stack: frozenset(stack) for stack in labels_by_stack}
+
     for parent in ops:
         parent_stack = stack_by_label[parent.label]
-        parent_set = set(parent_stack)
+        parent_set = stack_sets.setdefault(parent_stack, frozenset(parent_stack))
         for child_label in parent.children:
             child = op_by_label.get(child_label)
             if child is None:
-                child = _resolve_relationship_op(trace, child_label)
+                child = _resolve_relationship_op(trace, child_label, revision)
                 op_by_label[child_label] = child
                 op_by_label[child.label] = child
                 stack_by_label[child.label] = _module_address_stack(child)
             child_stack = stack_by_label[child.label]
-            child_set = set(child_stack)
+            child_set = stack_sets.setdefault(child_stack, frozenset(child_stack))
             edge = (parent.label, child.label)
             for address in parent_set & child_set:
                 internal_edges[address].add(edge)
@@ -1841,8 +2097,9 @@ def _compute_signal_skeleton(trace: "Trace") -> dict[str, ModuleCollapseSignals]
                 module,
                 subtree_ops,
                 input_edges.get(address, set()) | output_edges.get(address, set()),
+                revision,
             ),
-            passthrough_edges=_count_passthrough_edges(trace, module, subtree_ops),
+            passthrough_edges=_count_passthrough_edges(trace, module, subtree_ops, revision),
             output_junctions=_output_junctions(
                 trace,
                 module,
@@ -1860,670 +2117,8 @@ def _compute_signal_skeleton(trace: "Trace") -> dict[str, ModuleCollapseSignals]
     return signals
 
 
-def _module_address_stack(op: "Op") -> tuple[str, ...]:
-    """Return pass-free module addresses enclosing an op."""
-
-    return tuple(str(module).rsplit(":", 1)[0] for module in getattr(op, "modules", ()) or ())
-
-
-def _compute_child_condensed_flow_graphs(
-    trace: "Trace",
-    signals: Mapping[str, ModuleCollapseSignals],
-) -> dict[str, ChildCondensedFlowGraph]:
-    """Compute child-condensed flow graphs for every parent module.
-
-    Parameters
-    ----------
-    trace:
-        Trace owning the module hierarchy.
-    signals:
-        Precomputed module signal skeletons.
-
-    Returns
-    -------
-    dict[str, ChildCondensedFlowGraph]
-        Flow graph artifacts keyed by parent module address.
-    """
-
-    graphs: dict[str, ChildCondensedFlowGraph] = {}
-    op_order = {op.label: index for index, op in enumerate(trace.ops)}
-    for module in trace.modules:
-        parent = module.address
-        child_addresses = tuple(
-            str(child)
-            for child in getattr(module, "address_children", ()) or ()
-            if child in trace.modules
-        )
-        if not child_addresses:
-            graphs[parent] = ChildCondensedFlowGraph(
-                parent=parent,
-                flow_children=(),
-                parent_owned_ops=(),
-                nodes=(),
-                edges=(),
-                child_external_endpoint_counts={},
-                interval_flags={},
-            )
-            continue
-        child_sets = {
-            child: set(signals[child].subtree_ops) for child in child_addresses if child in signals
-        }
-        flow_children = tuple(
-            sorted(
-                child_sets,
-                key=lambda child: (
-                    min((op_order[label] for label in child_sets[child]), default=10**12),
-                    child,
-                ),
-            )
-        )
-        parent_ops = tuple(
-            label
-            for label in signals.get(parent, _empty_signal(parent)).subtree_ops
-            if _condensed_owner_for_op(label, parent, flow_children, child_sets) == label
-            and not _is_buffer_op_label(trace, label)
-        )
-        nodes = (*flow_children, *parent_ops)
-        edges = _condensed_edges(trace, parent, flow_children, child_sets, set(parent_ops))
-        endpoint_counts = _child_external_endpoint_counts(edges, flow_children)
-        interval_flags = _flow_interval_flags(trace, flow_children, child_sets, edges)
-        graphs[parent] = ChildCondensedFlowGraph(
-            parent=parent,
-            flow_children=flow_children,
-            parent_owned_ops=parent_ops,
-            nodes=nodes,
-            edges=edges,
-            child_external_endpoint_counts=endpoint_counts,
-            interval_flags=interval_flags,
-        )
-    return graphs
-
-
-def _empty_signal(address: str) -> ModuleCollapseSignals:
-    """Return an empty signal used for missing parent bookkeeping.
-
-    Parameters
-    ----------
-    address:
-        Module address.
-
-    Returns
-    -------
-    ModuleCollapseSignals
-        Empty signal with no subtree operations.
-    """
-
-    return ModuleCollapseSignals(
-        address=address,
-        subtree_ops=(),
-        own_func_names=(),
-        internal_edges=0,
-        input_edges=0,
-        output_edges=0,
-        landmark_edges=0,
-        passthrough_edges=0,
-        output_junctions=(),
-        params=0,
-        depth=0,
-        num_calls=1,
-        structural_digest="",
-        peer_count=1,
-        hidden_ops=0,
-        eligible=False,
-    )
-
-
-def _first_flow_op_order(
-    trace: "Trace",
-    op_labels: set[str],
-    op_order: Mapping[str, int],
-) -> int:
-    """Return first non-buffer op order for a child subtree.
-
-    Parameters
-    ----------
-    trace:
-        Trace owning the operation graph.
-    op_labels:
-        Operation labels in the child subtree.
-    op_order:
-        Deterministic operation-order index keyed by op label.
-
-    Returns
-    -------
-    int
-        First non-buffer operation index, falling back to any operation index
-        when the subtree has no non-buffer ops.
-    """
-
-    non_buffer_orders = [
-        op_order[label] for label in op_labels if not _is_buffer_op_label(trace, label)
-    ]
-    if non_buffer_orders:
-        return min(non_buffer_orders)
-    return min((op_order[label] for label in op_labels), default=10**12)
-
-
-def _is_buffer_op_label(trace: "Trace", op_label: str) -> bool:
-    """Return whether ``op_label`` identifies a buffer/source op.
-
-    Parameters
-    ----------
-    trace:
-        Trace owning the operation graph.
-    op_label:
-        Operation label to inspect.
-
-    Returns
-    -------
-    bool
-        True when the label exists and represents a buffer op.
-    """
-
-    if op_label not in trace.ops:
-        return False
-    return bool(getattr(cast("Op", trace.ops[op_label]), "is_buffer", False))
-
-
-def _is_forward_dataflow_edge(trace: "Trace", source_label: str, target_label: str) -> bool:
-    """Return whether an op edge is real forward tensor dataflow.
-
-    Parameters
-    ----------
-    trace:
-        Trace owning the operation graph.
-    source_label:
-        Source operation label.
-    target_label:
-        Target operation label.
-
-    Returns
-    -------
-    bool
-        True for non-buffer endpoint edges. Registered-buffer provenance and
-        write-version edges are excluded from the child-condensed dataflow
-        artifact.
-    """
-
-    return not _is_buffer_op_label(trace, source_label) and not _is_buffer_op_label(
-        trace,
-        target_label,
-    )
-
-
-def _condensed_owner_for_op(
-    op_label: str,
-    parent: str,
-    flow_children: Sequence[str],
-    child_sets: Mapping[str, set[str]],
-) -> str:
-    """Return the condensed node that owns an op within ``parent``.
-
-    Parameters
-    ----------
-    op_label:
-        Operation label.
-    parent:
-        Parent module address.
-    flow_children:
-        Direct children in flow order.
-    child_sets:
-        Child subtree operation labels.
-
-    Returns
-    -------
-    str
-        Child address when the op belongs to a child subtree; otherwise the op label.
-    """
-
-    _ = parent
-    for child in flow_children:
-        if op_label in child_sets.get(child, set()):
-            return child
-    return op_label
-
-
-def _condensed_edges(
-    trace: "Trace",
-    parent: str,
-    flow_children: Sequence[str],
-    child_sets: Mapping[str, set[str]],
-    parent_ops: set[str],
-) -> tuple[tuple[str, str], ...]:
-    """Return condensed edges within one parent module subtree.
-
-    Parameters
-    ----------
-    trace:
-        Trace owning the operation graph.
-    parent:
-        Parent module address.
-    flow_children:
-        Direct children in flow order.
-    child_sets:
-        Child subtree operation labels.
-    parent_ops:
-        Parent-owned operation labels.
-
-    Returns
-    -------
-    tuple[tuple[str, str], ...]
-        Deterministically sorted condensed edges.
-    """
-
-    parent_subtree = set().union(*child_sets.values()) if child_sets else set()
-    parent_subtree.update(parent_ops)
-    order = {node: index for index, node in enumerate((*flow_children, *sorted(parent_ops)))}
-    edges: set[tuple[str, str]] = set()
-    for label in sorted(
-        parent_subtree, key=lambda item: int(getattr(trace.ops[item], "step_index", 0))
-    ):
-        op = cast("Op", trace.ops[label])
-        source = _condensed_owner_for_op(label, parent, flow_children, child_sets)
-        for parent_label in getattr(op, "parents", ()) or ():
-            parent_op = _resolve_relationship_op(trace, parent_label)
-            normalized_parent_label = parent_op.label
-            if normalized_parent_label in parent_subtree:
-                continue
-            if not _is_forward_dataflow_edge(trace, normalized_parent_label, label):
-                continue
-            edges.add((f"external_source:{normalized_parent_label}", source))
-        for child_label in getattr(op, "children", ()) or ():
-            child = _resolve_relationship_op(trace, child_label)
-            normalized_child_label = child.label
-            if not _is_forward_dataflow_edge(trace, label, normalized_child_label):
-                continue
-            if normalized_child_label not in parent_subtree:
-                edges.add((source, f"external_sink:{normalized_child_label}"))
-                continue
-            target = _condensed_owner_for_op(
-                normalized_child_label,
-                parent,
-                flow_children,
-                child_sets,
-            )
-            if source != target:
-                edges.add((source, target))
-    return tuple(
-        sorted(edges, key=lambda edge: (order.get(edge[0], 10**9), order.get(edge[1], 10**9), edge))
-    )
-
-
-def _child_external_endpoint_counts(
-    edges: Sequence[tuple[str, str]],
-    flow_children: Sequence[str],
-) -> dict[str, tuple[int, int]]:
-    """Return per-child external entry and exit endpoint counts.
-
-    Parameters
-    ----------
-    edges:
-        Condensed graph edges.
-    flow_children:
-        Direct children in flow order.
-
-    Returns
-    -------
-    dict[str, tuple[int, int]]
-        Mapping from child address to ``(entries, exits)``.
-    """
-
-    child_set = set(flow_children)
-    entries: dict[str, set[str]] = {child: set() for child in flow_children}
-    exits: dict[str, set[str]] = {child: set() for child in flow_children}
-    for source, target in edges:
-        if target in child_set and source != target:
-            entries[target].add(source)
-        if source in child_set and source != target:
-            exits[source].add(target)
-    return {child: (len(entries[child]), len(exits[child])) for child in flow_children}
-
-
-def _flow_interval_flags(
-    trace: "Trace",
-    flow_children: Sequence[str],
-    child_sets: Mapping[str, set[str]],
-    edges: Sequence[tuple[str, str]],
-) -> dict[tuple[str, str], FlowIntervalFlags]:
-    """Return landmark and passthrough flags for child-flow intervals.
-
-    Parameters
-    ----------
-    trace:
-        Trace owning the operation graph.
-    flow_children:
-        Direct children in flow order.
-    child_sets:
-        Child subtree operation labels.
-    edges:
-        Condensed graph edges.
-
-    Returns
-    -------
-    dict[tuple[str, str], FlowIntervalFlags]
-        Flags keyed by adjacent child pairs in flow order.
-    """
-
-    if len(flow_children) < 2:
-        return {}
-    child_index = {child: index for index, child in enumerate(flow_children)}
-    edge_set = set(edges)
-    flags: dict[tuple[str, str], FlowIntervalFlags] = {}
-    for left, right in zip(flow_children[:-1], flow_children[1:], strict=True):
-        left_index = child_index[left]
-        right_index = child_index[right]
-        crossing_edges = [
-            edge
-            for edge in edge_set
-            if edge[0] in child_index
-            and edge[1] in child_index
-            and child_index[edge[0]] <= left_index
-            and child_index[edge[1]] >= right_index
-        ]
-        passthrough = any(
-            edge[0] not in child_index or edge[1] not in child_index
-            for edge in edge_set
-            if _edge_touches_interval(edge, child_index, left_index, right_index)
-        )
-        landmark = any(
-            _child_has_junction_op(trace, child_sets.get(child, set()))
-            for child in flow_children[left_index : right_index + 1]
-        ) or bool(crossing_edges)
-        flags[(left, right)] = FlowIntervalFlags(landmark=landmark, passthrough=passthrough)
-    return flags
-
-
-def _edge_touches_interval(
-    edge: tuple[str, str],
-    child_index: Mapping[str, int],
-    left_index: int,
-    right_index: int,
-) -> bool:
-    """Return whether a condensed edge touches an interval boundary.
-
-    Parameters
-    ----------
-    edge:
-        Condensed edge.
-    child_index:
-        Child address to flow index.
-    left_index:
-        Left child index of the interval.
-    right_index:
-        Right child index of the interval.
-
-    Returns
-    -------
-    bool
-        True when the edge is adjacent to the interval.
-    """
-
-    source, target = edge
-    source_index = child_index.get(source)
-    target_index = child_index.get(target)
-    return source_index in {left_index, right_index} or target_index in {left_index, right_index}
-
-
-def _child_has_junction_op(trace: "Trace", op_labels: set[str]) -> bool:
-    """Return whether a child subtree contains a junction operation.
-
-    Parameters
-    ----------
-    trace:
-        Trace owning the operation graph.
-    op_labels:
-        Operation labels in the child subtree.
-
-    Returns
-    -------
-    bool
-        True when a known fan-in/fan-out junction op is present.
-    """
-
-    return any(
-        _op_func_name(cast("Op", trace.ops[label])) in JUNCTION_FUNC_NAMES for label in op_labels
-    )
-
-
-def _op_func_name(op: "Op") -> str:
-    """Return a stable operation function name for digesting."""
-
-    return str(getattr(op, "func_name", None) or getattr(op, "layer_type", "") or "")
-
-
-def _count_landmark_edges(
-    trace: "Trace",
-    module: "Module",
-    subtree_ops: tuple[str, ...],
-    boundary_edges: set[tuple[str, str]],
-) -> int:
-    """Return boundary-crossing junction edges for a module.
-
-    Parameters
-    ----------
-    trace:
-        Trace that owns the operation graph.
-    module:
-        Candidate module being scored.
-    subtree_ops:
-        Pass-qualified operation labels in the module subtree.
-    boundary_edges:
-        Distinct edges crossing the module boundary.
-
-    Returns
-    -------
-    int
-        Count of boundary edges that would hide or visually skip a junction
-        across the collapsed module boundary. Fully internal junctions and
-        ordinary module I/O edges are intentionally not counted because they are
-        safely represented by the collapsed module box.
-    """
-
-    subtree = set(subtree_ops)
-    input_layers = {_base_label(label) for label in getattr(module, "input_layers", ()) or ()}
-    output_layers = {_base_label(label) for label in getattr(module, "output_layers", ()) or ()}
-    landmarks: set[tuple[str, str]] = set()
-    for parent_label, child_label in boundary_edges:
-        parent = cast("Op", trace.ops[parent_label])
-        child = cast("Op", trace.ops[child_label])
-        if getattr(parent, "is_buffer", False) or getattr(child, "is_buffer", False):
-            continue
-        parent_inside = parent.label in subtree
-        child_inside = child.label in subtree
-        if parent_inside == child_inside:
-            continue
-        parent_base = _base_label(parent.label)
-        child_base = _base_label(child.label)
-        if child_inside and parent_base in input_layers:
-            continue
-        if parent_inside and parent_base in output_layers:
-            continue
-        if child_inside and child_base in output_layers:
-            continue
-        if getattr(parent, "is_output", False) or getattr(child, "is_output", False):
-            continue
-        if not _boundary_edge_preserves_junction(trace, parent, child, subtree):
-            continue
-        landmarks.add((parent.label, child.label))
-    return len(landmarks)
-
-
-def _boundary_edge_preserves_junction(
-    trace: "Trace",
-    parent: "Op",
-    child: "Op",
-    subtree: set[str],
-) -> bool:
-    """Return whether a boundary edge is part of a cross-boundary junction.
-
-    Parameters
-    ----------
-    trace:
-        Trace that owns the operation graph.
-    parent:
-        Parent endpoint of the boundary edge.
-    child:
-        Child endpoint of the boundary edge.
-    subtree:
-        Pass-qualified operation labels in the candidate module subtree.
-
-    Returns
-    -------
-    bool
-        True when collapsing the subtree would obscure a junction whose visible
-        endpoints span the module boundary.
-    """
-
-    parent_inside = parent.label in subtree
-    child_inside = child.label in subtree
-    if parent_inside == child_inside:
-        return False
-    internal = parent if parent_inside else child
-    external = child if parent_inside else parent
-    if _is_junction_op(external):
-        return True
-    if not _is_junction_op(internal):
-        return False
-    return _has_external_parent(trace, internal, subtree) and _has_external_child(
-        trace,
-        internal,
-        subtree,
-    )
-
-
-def _is_junction_op(op: "Op") -> bool:
-    """Return whether an operation is a fan-in or fan-out junction."""
-
-    return _op_func_name(op) in JUNCTION_FUNC_NAMES
-
-
-def _has_external_parent(trace: "Trace", op: "Op", subtree: set[str]) -> bool:
-    """Return whether an operation has a non-buffer parent outside ``subtree``."""
-
-    for parent_label in getattr(op, "parents", ()) or ():
-        parent = _resolve_relationship_op(trace, parent_label)
-        if parent.label not in subtree and not getattr(parent, "is_buffer", False):
-            return True
-    return False
-
-
-def _has_external_child(trace: "Trace", op: "Op", subtree: set[str]) -> bool:
-    """Return whether an operation has a non-buffer child outside ``subtree``."""
-
-    for child_label in getattr(op, "children", ()) or ():
-        child = _resolve_relationship_op(trace, child_label)
-        if child.label not in subtree and not getattr(child, "is_buffer", False):
-            return True
-    return False
-
-
-def _base_label(label: str) -> str:
-    """Return a pass-free operation label.
-
-    Parameters
-    ----------
-    label:
-        Operation label that may include a pass suffix.
-
-    Returns
-    -------
-    str
-        Operation label without the trailing pass suffix.
-    """
-
-    return str(label).rsplit(":", 1)[0]
-
-
-def _count_passthrough_edges(
-    trace: "Trace",
-    module: "Module",
-    subtree_ops: tuple[str, ...],
-) -> int:
-    """Return internal output joins fed directly by module inputs.
-
-    Parameters
-    ----------
-    trace:
-        Trace that owns the operation graph.
-    module:
-        Candidate module being scored.
-    subtree_ops:
-        Pass-qualified operation labels in the module subtree.
-
-    Returns
-    -------
-    int
-        Number of module-output Ops that merge an external module input with
-        internal computation. These joins are useful orientation landmarks for
-        ``collapse="auto"`` but may be hidden by ``collapse="max"``.
-    """
-
-    subtree = set(subtree_ops)
-    input_layers = {_base_label(label) for label in getattr(module, "input_layers", ()) or ()}
-    output_layers = {_base_label(label) for label in getattr(module, "output_layers", ()) or ()}
-    passthrough_edges = 0
-    for label in subtree_ops:
-        op = cast("Op", trace.ops[label])
-        if _base_label(op.label) not in output_layers:
-            continue
-        if _op_func_name(op) not in JUNCTION_FUNC_NAMES:
-            continue
-        has_internal_parent = False
-        has_input_parent = False
-        for parent_label in op.parents:
-            parent = _resolve_relationship_op(trace, parent_label)
-            if parent.label in subtree:
-                has_internal_parent = True
-            elif _base_label(parent.label) in input_layers:
-                has_input_parent = True
-        if has_internal_parent and has_input_parent:
-            passthrough_edges += 1
-    return passthrough_edges
-
-
-def _output_junctions(
-    trace: "Trace",
-    module: "Module",
-    subtree_ops: tuple[str, ...],
-    output_edges: set[tuple[str, str]],
-) -> tuple[str, ...]:
-    """Return external multi-parent junction children fed by module outputs.
-
-    Parameters
-    ----------
-    trace:
-        Trace that owns the operation graph.
-    module:
-        Candidate module being scored.
-    subtree_ops:
-        Pass-qualified operation labels in the module subtree.
-    output_edges:
-        Distinct edges leaving the module subtree.
-
-    Returns
-    -------
-    tuple[str, ...]
-        Pass-free labels for external multi-parent children fed by this module.
-    """
-
-    subtree = set(subtree_ops)
-    output_layers = {_base_label(label) for label in getattr(module, "output_layers", ()) or ()}
-    junctions: set[str] = set()
-    for parent_label, child_label in output_edges:
-        parent = cast("Op", trace.ops[parent_label])
-        child = cast("Op", trace.ops[child_label])
-        if parent.label not in subtree:
-            continue
-        if _base_label(parent.label) not in output_layers:
-            continue
-        if len(getattr(child, "parents", ()) or ()) < 2:
-            continue
-        junctions.add(_base_label(child.label))
-    return tuple(sorted(junctions))
-
-
 def _gate_module(
-    module: "Module",
+    module: Module,
     hidden_ops: int,
     partial_signals: Mapping[str, ModuleCollapseSignals],
 ) -> bool:
@@ -2542,7 +2137,7 @@ def _gate_module(
 
 
 def _compute_structural_digests(
-    trace: "Trace",
+    trace: Trace,
     signals: Mapping[str, ModuleCollapseSignals],
 ) -> dict[str, str]:
     """Compute structural digests bottom-up for every module."""
@@ -2569,7 +2164,7 @@ def _compute_structural_digests(
 
 
 def _group_structural_peers(
-    trace: "Trace",
+    trace: Trace,
     digests: Mapping[str, str],
 ) -> dict[tuple[str, str | None], tuple[str, ...]]:
     """Group trace-local structural peers by exact and relaxed sibling signatures."""
@@ -2594,14 +2189,14 @@ def _sibling_stem(address: str) -> str:
     """Return a relaxed sibling-address stem for stage-like module names."""
 
     name = address.rsplit(".", 1)[-1]
-    match = _INDEXED_CHILD_RE.match(name)
-    if match is None:
+    indexed_stem = _indexed_child_stem(name)
+    if indexed_stem is None:
         return name
-    stem = match.group("stem").rstrip("._")
+    stem = indexed_stem.rstrip("._")
     return stem or name
 
 
-def _peer_scope_key(trace: "Trace", module: "Module") -> str | None:
+def _peer_scope_key(trace: Trace, module: Module) -> str | None:
     """Return the sibling scope key used for repeated structural peers.
 
     Parameters
@@ -2630,7 +2225,7 @@ def _peer_scope_key(trace: "Trace", module: "Module") -> str | None:
     return f"{grandparent}:{parent_class}"
 
 
-def _readable_band_high(trace: "Trace") -> int:
+def _readable_band_high(trace: Trace) -> int:
     """Return the high watermark for a readable auto-collapsed render.
 
     Parameters
@@ -2647,7 +2242,7 @@ def _readable_band_high(trace: "Trace") -> int:
     return 25 if len(trace.ops) > 100 else 40
 
 
-def _is_trunk_collapse(trace: "Trace", signal: ModuleCollapseSignals) -> bool:
+def _is_trunk_collapse(trace: Trace, signal: ModuleCollapseSignals) -> bool:
     """Return whether a module would collapse nearly the whole input-output trunk."""
 
     visible_after = max(1, len(trace.ops) - signal.hidden_ops)
@@ -2659,7 +2254,7 @@ def _is_trunk_collapse(trace: "Trace", signal: ModuleCollapseSignals) -> bool:
     return has_input or has_output
 
 
-def _rendered_module_hidden_counts(trace: "Trace", context: RenderContext) -> dict[str, int]:
+def _rendered_module_hidden_counts(trace: Trace, context: RenderContext) -> dict[str, int]:
     """Return rendered-node counts hidden by selecting each module alone.
 
     Parameters
@@ -2676,12 +2271,10 @@ def _rendered_module_hidden_counts(trace: "Trace", context: RenderContext) -> di
         rendered nodes with one box contributes ``n - 1``.
     """
 
-    from .rendering import (
-        BoundaryNode,
-        _entries_to_plot_for_context,
-        _is_buffer_visible,
-        _normalize_buffer_visibility,
-    )
+    from ._render_common import BoundaryNode
+    from ._render_edges import _is_buffer_visible
+    from ._render_flow import _entries_to_plot_for_context
+    from ._render_nodes import _normalize_buffer_visibility
 
     absorbed_counts: dict[str, int] = defaultdict(int)
     show_buffer_layers = _normalize_buffer_visibility(context.show_buffer_layers)
@@ -2705,8 +2298,8 @@ def _rendered_module_hidden_counts(trace: "Trace", context: RenderContext) -> di
 
 
 def _assert_plan_count(
-    trace: "Trace",
-    collapse_fn: Callable[["Module"], bool] | None,
+    trace: Trace,
+    collapse_fn: Callable[[Module], bool] | None,
     repeat_folds: Mapping[str, ModuleRepeatFold] | None,
     context: RenderContext,
     running_count: int,
@@ -2739,16 +2332,8 @@ def _assert_plan_count(
     _warn_count_mismatch_once(message)
 
 
-def _strict_count_checks_enabled() -> bool:
-    """Return whether collapse count mismatches should fail loudly.
-
-    Returns
-    -------
-    bool
-        True under pytest or when ``TORCHLENS_COLLAPSE_STRICT=1`` is set.
-    """
-
-    return os.environ.get("TORCHLENS_COLLAPSE_STRICT") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+# r-b7 R42-9: one shared TORCHLENS_COLLAPSE_STRICT parser (_render_common).
+_strict_count_checks_enabled = strict_collapse_checks_enabled
 
 
 def _warn_count_mismatch_once(message: str) -> None:
@@ -2772,8 +2357,8 @@ def _warn_count_mismatch_once(message: str) -> None:
 
 
 def _run_fold_hidden_member_contributions(
-    trace: "Trace",
-    collapse_fn: Callable[["Module"], bool] | None,
+    trace: Trace,
+    collapse_fn: Callable[[Module], bool] | None,
     context: RenderContext,
 ) -> dict[str, int]:
     """Return pre-fold rendered contribution under each module address.

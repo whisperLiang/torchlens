@@ -12,6 +12,7 @@ from typing import Any
 
 import torch
 
+from ...utils._multipass_access import get_multipass_attr
 from ...utils.display import human_readable_size
 from ...visualization.node_spec import (
     INTERVENTION_CONE_COLOR,
@@ -273,14 +274,20 @@ def _path_component_role(component: Any) -> str:
 
 
 def _container_semantic_attrs(entry: Any) -> dict[str, str | None]:
-    """Return portable container semantics for a trace entry."""
+    """Return portable container semantics for a trace entry.
 
-    spec = getattr(entry, "container_spec", None)
-    path = tuple(getattr(entry, "container_path", ()) or ())
+    Container metadata is per-pass: a rolled multi-pass Layer has no single
+    honest value, so it explicitly degrades to no container semantics
+    instead of leaking the multi-pass ValueError tripwire (same policy as
+    the Graphviz renderer's ``_container_group_id``).
+    """
+
+    spec = get_multipass_attr(entry, "container_spec", None, multipass=None)
+    path = tuple(get_multipass_attr(entry, "container_path", (), multipass=None) or ())
     if spec is None or not path:
         return {"container_group": None, "container_kind": None, "container_role": None}
-    func_call_id = getattr(entry, "func_call_id", None)
-    if bool(getattr(entry, "is_output", False)):
+    func_call_id = get_multipass_attr(entry, "func_call_id", None, multipass=None)
+    if bool(get_multipass_attr(entry, "is_output", False, multipass=False)):
         root = "final_output:0"
     elif func_call_id is not None:
         root = f"call:{func_call_id}"

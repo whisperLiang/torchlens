@@ -6,6 +6,7 @@ import argparse
 import re
 import sys
 from dataclasses import dataclass
+from os import getenv
 from pathlib import Path
 
 SECTION_2_6_PATTERN = re.compile(r"§2\.6|Section 2\.6")
@@ -13,6 +14,7 @@ PLAN_LINE_RANGE_PATTERN = re.compile(r"plan lines (\d+)-(\d+)")
 COMPARISON_TABLE_PHRASE_PATTERN = re.compile(r"comparison table", re.IGNORECASE)
 FIRST_COMPARISON_ROW = "| Captures every eager op"
 LAST_COMPARISON_ROW = "| Mature transformer-internals shortcuts"
+DEFAULT_PLAN_PATH = Path(getenv("TORCHLENS_PLAN_PATH", "docs-plan-megasprint_PLAN.md"))
 
 
 @dataclass(frozen=True)
@@ -193,7 +195,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "plan_path",
         nargs="?",
-        default=".research/docs-plan-megasprint_PLAN.md",
+        default=DEFAULT_PLAN_PATH,
         type=Path,
         help="Path to the canonical plan Markdown file.",
     )

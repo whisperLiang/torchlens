@@ -11,6 +11,12 @@ _T = TypeVar("_T")
 def state_items(obj: Any) -> Iterable[tuple[str, Any]]:
     """Yield the live state fields stored on an object.
 
+    Classes whose state does not live in ``__dict__``/``__slots__`` (for
+    example columnar-backed facades) opt in by defining
+    ``__tl_state_items__(self)``, which must yield the complete
+    ``(field_name, field_value)`` state and takes precedence over storage
+    introspection.
+
     Parameters
     ----------
     obj:
@@ -23,6 +29,10 @@ def state_items(obj: Any) -> Iterable[tuple[str, Any]]:
         first, followed by any distinct set slots in MRO slot order.
     """
 
+    items_hook = getattr(type(obj), "__tl_state_items__", None)
+    if items_hook is not None:
+        yield from items_hook(obj)
+        return
     instance_dict = getattr(obj, "__dict__", None)
     if instance_dict is not None:
         yield from instance_dict.items()
@@ -54,6 +64,11 @@ def state_new(cls: type[_T]) -> _T:
 def state_restore(obj: _T, mapping: Mapping[str, Any]) -> _T:
     """Restore fields onto an object without using class-specific state storage.
 
+    Classes that define ``__tl_state_restore__(self, mapping)`` (the columnar
+    opt-in counterpart of ``__tl_state_items__``) receive the mapping whole
+    and install it into their backing store; the hook takes precedence over
+    storage introspection.
+
     Parameters
     ----------
     obj:
@@ -67,6 +82,10 @@ def state_restore(obj: _T, mapping: Mapping[str, Any]) -> _T:
         The same object, after field restoration.
     """
 
+    restore_hook = getattr(type(obj), "__tl_state_restore__", None)
+    if restore_hook is not None:
+        restore_hook(obj, mapping)
+        return obj
     instance_dict = getattr(obj, "__dict__", None)
     if instance_dict is not None:
         instance_dict.update(mapping)

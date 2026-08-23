@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-from v2_helpers import split_request
-
 from typing import Any
 
 import pytest
+from _paddle_subprocess import run_paddle_subprocess
+from v2_helpers import split_request
 
 from torchlens.split.adapters import resolve_split_adapter
 from torchlens.split.errors import SplitUnsupportedError
-
-from _paddle_subprocess import run_paddle_subprocess
 
 
 def _flatten_numbers(value: Any) -> list[float]:

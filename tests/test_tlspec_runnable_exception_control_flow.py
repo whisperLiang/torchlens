@@ -24,6 +24,7 @@ from torchlens.options import CaptureOptions
 from torchlens.runnable import (
     NumericAttestationStatus,
     PathFaithfulness,
+    RunnableErrorCode,
     WitnessCompleteness,
 )
 
@@ -47,10 +48,23 @@ def _pd_input() -> torch.Tensor:
 
 
 def _non_pd_input() -> torch.Tensor:
-    """Non-positive-definite, SINGULAR 2x2 matrix (raising branch for both
-    the Cholesky and the inversion fallback models)."""
+    """Negative-definite-leading AND SINGULAR 2x2 matrix (raising branch for
+    both the Cholesky and the inversion fallback models).
 
-    return torch.tensor([[1.0, 1.0], [1.0, 1.0]])
+    The leading entry is exactly ``-1.0``, so ``cholesky`` fails on its FIRST
+    pivot (``sqrt(-1)``) and ``det`` is exactly ``0``, so ``inv`` fails as
+    singular. Both hold on every BLAS/LAPACK kernel with no rounding involved.
+
+    Deliberately not ``[[1, 1], [1, 1]]``: that is singular, but whether
+    ``cholesky`` raises on it is a float32 knife edge. The second pivot is
+    ``1 - (A21/L11)**2``, and CPUs whose LAPACK kernel computes ``A21/L11`` as
+    ``0.99999994`` instead of exactly ``1.0`` get a tiny POSITIVE pivot and
+    SUCCEED, silently taking the non-raising branch and disarming this
+    tripwire. Observed doing exactly that on a 4-core cluster box at the same
+    torch build that raises on a 20-core workstation.
+    """
+
+    return torch.tensor([[-1.0, 0.0], [0.0, 0.0]])
 
 
 class _CholeskyFallbackModel(nn.Module):
@@ -112,7 +126,7 @@ def test_capture_on_fallback_never_verifies(tmp_path: Path, model_cls: type[nn.M
     path = tmp_path / "fallback.tlspec"
     tl.save(trace, str(path), level="runnable", include_weights=True)
     loaded = tl.load(str(path))
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     assert descriptor.witness_completeness is not WitnessCompleteness.COMPLETE
 
     for runtime_input in (_non_pd_input(), _pd_input()):
@@ -129,8 +143,11 @@ def test_capture_on_success_raising_runtime_input_stays_typed(tmp_path: Path) ->
     path = tmp_path / "success.tlspec"
     tl.save(trace, str(path), level="runnable", include_weights=True)
     loaded = tl.load(str(path))
-    with pytest.raises(RuntimeSignatureDriftError):
+    with pytest.raises(RuntimeSignatureDriftError) as captured:
         loaded.run(inputs=_non_pd_input())
+    # Provocation pin (r3 b6-opus R25-2): the typed code rides the raise; a
+    # swap of the code value must fail a test that actually provokes it.
+    assert captured.value.fields["code"] == RunnableErrorCode.RUNTIME_SIGNATURE_DRIFT.value
 
 
 def test_raise_free_model_records_zero_facts_and_stays_verified(tmp_path: Path) -> None:
@@ -157,7 +174,7 @@ def test_caught_mutating_failure_downgrades_opaque(tmp_path: Path) -> None:
     path = tmp_path / "mutating.tlspec"
     tl.save(trace, str(path), level="runnable", include_weights=True)
     loaded = tl.load(str(path))
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     assert descriptor.witness_completeness is WitnessCompleteness.INCOMPLETE_OPAQUE_SIDE_EFFECT
     result = loaded.run(inputs=x)
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
@@ -186,7 +203,7 @@ def test_successful_unmodeled_host_return_also_downgrades(tmp_path: Path) -> Non
     path = tmp_path / "hostreturn.tlspec"
     tl.save(trace, str(path), level="runnable", include_weights=True)
     loaded = tl.load(str(path))
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     assert descriptor.witness_completeness is not WitnessCompleteness.COMPLETE
     result = loaded.run(inputs=x)
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE

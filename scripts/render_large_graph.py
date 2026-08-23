@@ -19,7 +19,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tests"))
 
 import torch
 from example_models import RandomGraphModel
-from torchlens import log_forward_pass
+
+import torchlens as tl
 
 
 def main() -> None:
@@ -46,7 +47,7 @@ def main() -> None:
     print(f"Model constructed ({time.time() - t0:.1f}s)", flush=True)
 
     # Log forward pass WITHOUT rendering — collect metadata only.
-    ml = log_forward_pass(model, x, layers_to_save=None, verbose=True)
+    ml = tl.trace(model, x, save=lambda _ctx: False)
     print(f"Forward pass logged ({time.time() - t0:.1f}s)", flush=True)
 
     # Free model parameters and autograd graphs before the graph render.
@@ -56,7 +57,7 @@ def main() -> None:
         torch.cuda.empty_cache()
 
     # Render from ModelLog metadata (model tensors no longer in memory).
-    ml.render_graph(
+    ml.draw(
         vis_mode="rolled",
         vis_outpath=os.path.join(args.outdir, label),
         vis_save_only=True,

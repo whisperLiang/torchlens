@@ -1,10 +1,12 @@
 """Technical-preview MLX backend for TorchLens.
 
-This backend is a smoke-level implementation for the capture-pipeline
-unification sprint. It is not feature-complete: ``mx.compile``-wrapped models
-are unsupported, backward capture is unsupported so MLX traces always report
-``Trace.has_backward_pass = False``, and RNG replay snapshots are currently
-``None``. See plan §9 for the full MLX-readiness checklist.
+Eager wrapper capture with live per-op replay validation, static-label
+``save=`` filtering, static-label ``intervene=``/``halt=`` dispatch, and
+derived gradients. ``mx.compile``/``mx.grad``/``mx.vmap`` traced-transform
+entries refuse typed at capture entry (a compiled model attribute ceilings the
+capture with ``capture_verified=False``); true backward capture is unsupported
+so MLX traces always report ``Trace.has_backward_pass = False``, and RNG
+replay snapshots are currently ``None``.
 """
 
 from __future__ import annotations

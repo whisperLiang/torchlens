@@ -6,10 +6,9 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.data_classes.layer import Layer
-from torchlens.data_classes.trace import Trace
 from torchlens.data_classes.op import Op
+from torchlens.data_classes.trace import Trace
 from torchlens.options import CaptureOptions
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -273,7 +272,7 @@ class TestMultiPassLayerLog:
         """log['label:2'] still returns Op."""
         for layer_log in recurrent_log.layer_logs.values():
             if layer_log.num_passes > 1:
-                for pass_index, pass_log in layer_log.ops.items():
+                for _pass_index, pass_log in layer_log.ops.items():
                     result = recurrent_log[pass_log.label]
                     assert isinstance(result, Op)
                 break
@@ -363,7 +362,7 @@ class TestTraceIntegration:
 
     def test_len_layer_logs(self, simple_log):
         """Number of LayerLogs equals number of unique no-pass labels."""
-        unique = set(pl.layer_label for pl in simple_log.layer_list)
+        unique = {pl.layer_label for pl in simple_log.layer_list}
         assert len(simple_log.layer_logs) == len(unique)
 
 

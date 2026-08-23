@@ -192,7 +192,7 @@ coords_by_layer = tl.repgeom.mds_evolution(trace, save=mds_layers, min_n=8)
 ```
 
 The selected activations must be saved by the original capture; this is why
-the demo uses a curated `save=` subset instead of `save="all"`. `min_n`
+the demo uses a curated `save=` subset instead of exhaustive saving. `min_n`
 defaults to 8 because the scatter is a visual summary over a stimulus batch,
 not a statistical inference routine. Recurrent aggregate layers are rejected;
 select a pass-qualified op when a reused module should be visualized.

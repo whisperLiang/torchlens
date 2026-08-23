@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
-from typing import Callable
 
 import pytest
 import torch

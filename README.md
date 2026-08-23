@@ -8,15 +8,16 @@ computational graph, exposes rich per-op metadata, and lets you intervene on the
 network as it runs. Any architecture, even dynamic and recurrent ones.
 
 > **[Explore the Model Menagerie](https://modelmenagerie.ai)** -- a live, browsable atlas of
-> **11,000+ unique neural-network architectures** captured with TorchLens, from McCulloch & Pitts (1943)
+> **11,600+ cataloged neural-network architecture entries** captured with TorchLens, from
+> McCulloch & Pitts (1943)
 > to today's frontier models. *(Early preview.)*
 
-Run on **all 11,670 architectures** in the Model Menagerie (image, video, audio,
-multimodal, language; feedforward, recurrent, transformer, GNN, MoE, diffusion) — now
-**100% algorithmically verified** for capture correctness: every model's capture is
-replayed op-by-op against its own forward pass, with metadata-invariant tripwires over
-the graph, so faithful capture is **proven, not assumed**. And it records **every last
-detail of every part of your model**: **180+ metadata fields per operation**, and
+Run across **11,600+ cataloged entries** in the Model Menagerie (image, video, audio,
+multimodal, language; feedforward, recurrent, transformer, GNN, MoE, diffusion). Roughly
+**89% are currently algorithmically verified** for capture correctness: each verified
+capture is replayed op-by-op against its own forward pass, with metadata-invariant
+tripwires over the graph, so faithful capture is **proven, not assumed**. TorchLens also
+records **180+ metadata fields per operation**, and
 **550+ fields in total** across every record type — operations, modules, parameters,
 buffers, gradients, and the model itself.
 
@@ -46,15 +47,15 @@ log.draw()                    # PDF of the computational graph
 - [Performance guide](docs/performance.md) |
   [Receptive & projective fields](docs/receptive_projective_fields.md) |
   [AI-agent quick reference](docs/for-ai-agents.md) |
-  [Limitations](docs/LIMITATIONS.md) |
+  [Limitations and remedies](docs/reference/limitations.md) |
   [Migration tables](docs/migration/)
 
 
-## Validated on 11,600+ architectures
+## Validated across 11,600+ catalog entries
 
 TorchLens is not just smoke-tested on example models. Its menagerie validation
-campaign runs the same adversarial check across more than **11,600 neural-net
-architecture families**: capture the model with TorchLens, forward-replay the
+campaign runs the same adversarial check across more than **11,600 cataloged
+architecture entries**: capture the model with TorchLens, forward-replay the
 captured DAG, compare replayed outputs against the original forward pass, and
 run metadata-invariant tripwires over the resulting graph. If replay or an
 invariant fails, the capture is treated as genuinely wrong and caught
@@ -64,8 +65,9 @@ automatically, not waved through because the model "ran."
 model forward -> TorchLens capture -> DAG replay -> output parity + metadata invariants
 ```
 
-Today, roughly **89%** of that 11.6k+ menagerie is algorithmically verified and
-climbing, covering about **5,400 distinct architectures**. That is the wedge:
+Today, roughly **89%** of that 11,600+ catalog is algorithmically verified and
+climbing, covering about **5,400 distinct architecture families** after variants are
+collapsed. That is the wedge:
 TorchLens aims for captures that are **provably faithful, not just plausible**.
 Plain forward hooks and static extraction utilities can be fast and useful, but
 they can also silently miss dynamic paths, reused modules, functional ops,
@@ -151,8 +153,8 @@ Save everything, or select exactly what you need:
 # Save only relu activations
 log = tl.trace(model, x, save=tl.func('relu'))
 
-# Save all ops inside the 'encoder' submodule
-log = tl.trace(model, x, save=tl.in_module('encoder'))
+# Save all ops inside the 'classifier' submodule
+log = tl.trace(model, x, save=tl.in_module('classifier'))
 
 # Save conv2d ops that are immediately followed by a relu, keeping a 4-op lookback window
 conv_before_relu = tl.func('conv2d') & tl.followed_by(tl.func('relu'))
@@ -160,7 +162,7 @@ log = tl.trace(model, x, save=conv_before_relu,
                lookback=4, lookback_payload_policy='detached_raw')
 
 # Stop capture early (can be faster than a plain forward pass)
-log = tl.trace(model, x, save=tl.in_module('layer2'), halt=tl.in_module('layer2'))
+log = tl.trace(model, x, save=tl.in_module('features.6'), halt=tl.in_module('features.6'))
 
 # Lightweight sparse recording for tight loops -- materialize structure later
 recording = tl.record(model, x, save=tl.func('relu'))
@@ -169,11 +171,10 @@ trace = recording.to_trace()
 # One-line activation pull
 act = tl.pluck(model, x, 'relu_1_2')   # returns tensor directly
 
-# Batch extraction across a dataset
-# `dataset` is an application-provided iterable of input batches; for example:
-# dataset = [torch.randn(1, 3, 224, 224) for _ in range(8)]
+# Batch extraction across a dataset (any iterable of unbatched samples works)
+dataset = [torch.randn(3, 224, 224) for _ in range(8)]
 tl.extract_dataset(model, dataset, layers=['relu_1_2', 'conv2d_3_7'],
-                   batch_size=32, output_dir='/tmp/torchlens-activations/')
+                   batch_size=32, output_dir='torchlens-activations/')
 ```
 
 **Performance note:** With `halt=` and `tl.record`, capture can run *faster
@@ -195,7 +196,7 @@ Capture per-op gradients with the same API:
 
 ```python
 x = torch.randn(1, 3, 224, 224, requires_grad=True)
-log = tl.trace(model, x, save_grads=True)
+log = tl.trace(model, x, capture=tl.options.CaptureOptions(save_grads=True))
 log.log_backward(log[log.output_layers[0]].out.sum())
 
 grad = log['relu_1_2'].grad      # gradient tensor flowing through that op
@@ -205,7 +206,7 @@ print(grad.shape)                 # torch.Size([1, 64, 55, 55])
 Narrow gradient saving to specific ops with the same selector predicates:
 
 ```python
-log = tl.trace(model, x, save_grads=tl.func('relu'))
+log = tl.trace(model, x, capture=tl.options.CaptureOptions(save_grads=tl.func('relu')))
 log.log_backward(log[log.output_layers[0]].out.sum())
 ```
 
@@ -227,7 +228,9 @@ rf = target.receptive_field
 unit = rf.center_unit(batch_index=0)
 box = rf.at((3, 3))
 check = rf.check(unit)
-outgoing = target.projective_field.at((3, 3))
+# Projective geometry needs a windowed path; AlexNet's dense classifier head is not,
+# so select a downstream conv endpoint explicitly with target=.
+outgoing = target.projective_field.at((3, 3), target=log['features.8'])
 ```
 
 <img src="images/receptive_projective_fields.svg" width="70%" alt="Receptive and projective field directions through a neural-network graph">
@@ -304,11 +307,11 @@ class SimpleRecurrent(torch.nn.Module):
             x = x * 2
         return x
 
-model = SimpleRecurrent()
-x = torch.randn(6, 5)
-log = tl.trace(model, x)
-print(log['linear_1:2'].out)     # second pass of the linear layer
-log.draw(vis_mode='rolled')
+recurrent_model = SimpleRecurrent()
+seq = torch.randn(6, 5)
+recurrent_log = tl.trace(recurrent_model, seq)
+print(recurrent_log['linear_1:2'].out)     # second pass of the linear layer
+recurrent_log.draw(vis_mode='rolled')
 ```
 
 ### 5. Interventions
@@ -340,8 +343,11 @@ for the full reference.
 Compare multiple runs side by side with `tl.bundle`:
 
 ```python
+clean_log = tl.trace(model, x, save=tl.func('relu'))
+patched_log = tl.trace(model, x, save=tl.func('relu'),
+                       intervene=tl.when(tl.func('relu'), tl.zero_ablate()))
 bundle = tl.bundle({'clean': clean_log, 'patched': patched_log}, baseline='clean')
-bundle.compare_at(tl.func('relu'))
+bundle.compare_at('relu_1_2')   # one site; a multi-site selector must resolve uniquely
 ```
 
 **Facets** provide named sub-views for attention heads, LSTM outputs, and
@@ -351,6 +357,7 @@ The following is an API sketch; `vit_model` and `lstm` must be models whose modu
 structures provide the shown paths, and are not defined by this generic example.
 
 ```python
+# API sketch; `vit_model` and `lstm` are application-supplied models with these paths.
 # ViT / transformer model with attention blocks
 log = tl.trace(vit_model, x)
 q = log.modules['blocks.0.attn'].facets['q']    # query vectors for head 0
@@ -378,6 +385,13 @@ This is the key differentiator from static-graph extractors like
 `torchvision.feature_extraction`, which require static computational graphs
 and cannot handle dynamic architectures.
 
+**Distributed boundaries.** With `tl.distributed.arm()` enabled before rank-local
+capture, explicit in-forward `torch.distributed` Python collectives become first-class
+boundary nodes. Diagnose rank sets with `tl.merge_report(...)` and merge compatible
+rank traces with `tl.merge_ranks(...)`. Sharded tensor topologies such as DTensor/FSDP/TP
+and pipeline point-to-point graphs still refuse with typed findings; see the
+[merged-trace contract](docs/reference/merged_trace_contract.md).
+
 **Multi-backend.** The same `tl.trace` API works across frameworks via
 `backend=`:
 
@@ -388,8 +402,16 @@ and cannot handle dynamic architectures.
 | Control-flow unroll | eager Python | `lax.scan`/`cond`/`while_loop` | lazy UOp graph | limited | dygraph/eager Python only | eager Python control flow |
 | Static-label `save=` | yes | yes | yes | yes | yes | yes |
 | Portable array `.tlspec` payloads | full | forward/derived arrays | forward/derived arrays | forward/derived arrays | forward/derived arrays | forward arrays |
-| Gradients | full backward graph | leaf-level + zero-tap T1 intermediate derived | leaf-level + T1 intermediate derived | leaf-level + custom-VJP-tap T1 intermediate derived | leaf-level + T1 intermediate derived | deferred |
-| Interventions / halt / fastlog | yes | -- | -- | -- | -- | -- |
+| Gradients | full backward graph | leaf-level + zero-tap T1 intermediate derived | leaf-level + T1 intermediate derived | leaf-level + custom-VJP-tap T1 intermediate derived | leaf-level + T1 intermediate derived | leaf + exact T1 intermediate derived (eager entries, `tl.backends.tf.GradOptions`) |
+| Recurrence grouping (multi-pass layers) | yes | yes | yes (eager) | yes (eager) | yes (eager) | yes (eager; static FuncGraph path stays ungrouped) |
+| Validation oracle (live) | whole-forward replay | per-equation replay + perturbation | per-UOp replay + perturbation | per-op replay + perturbation | replay + perturbation + coverage guard | per-op replay (allowlisted) + self-consistency |
+| Interventions | yes | -- | -- | yes (+`halt=`) | yes (+`halt=`, value-dependent predicates) | yes (eager entries, static-label, fail-closed) |
+| Halt / fastlog / streaming | yes | -- | -- | halt only | halt only | -- |
+
+Preview `save=` selectors filter what is exposed, not what is captured (no memory
+reduction); preview `tl.validate(...)` returns a status whose `bool()` raises for
+partial coverage; and every preview auto-routes genuine framework models on
+`backend=None`. See `docs/backends.md` for the per-backend contract.
 
 ```python
 # API sketch; supply compatible models and input in an application context.
@@ -407,9 +429,10 @@ documented in [`docs/`](docs/).
 ## Gallery
 
 TorchLens visualizes any architecture -- no matter how exotic. Explore the
-**[Model Menagerie](https://modelmenagerie.ai)**: a browsable atlas of **11,000+ unique
-neural-network architectures** -- from McCulloch & Pitts (1943) to today's frontier models -- each with
-structured metadata and a faithful TorchLens-rendered diagram.
+**[Model Menagerie](https://modelmenagerie.ai)**: a browsable atlas of **11,600+ cataloged
+neural-network architecture entries** -- from McCulloch & Pitts (1943) to today's frontier
+models -- each with structured metadata and a TorchLens-rendered diagram. Roughly 89%
+currently carry the replay-and-invariant verification described above.
 
 > **Early preview.** The gallery is live and growing; full-text search, a downloadable dataset, and
 > richer per-model pages are on the way.
@@ -453,11 +476,11 @@ Use the provisional address-free structural hash to catch an unintended graph ch
 pinning model weights or module names:
 
 ```python
-# `model` and `example_input` must be supplied by the application.
+# `model` and `x` are your model and a representative example input.
 import torchlens as tl
 
-pinned = tl.assert_unchanged(model, example_input, expected=None)  # prints and returns a hash
-tl.assert_unchanged(model, example_input, pinned)  # raises if the architecture changes
+pinned = tl.assert_unchanged(model, x, expected=None)  # prints and returns a hash
+tl.assert_unchanged(model, x, pinned)  # raises if the architecture changes
 ```
 
 See [`tl.hash`](docs/reference/hash.md) for trace-level hashing and its structural scope.
@@ -476,18 +499,30 @@ print(compat.to_markdown())
 input tensors, CUDA visibility, and common framework markers, then reports
 each row as `pass`, `known_broken`, `scope`, or `not_tested`.
 
-TorchLens is **not** compatible with `torch.compile`'d models, TorchScript,
-or `torch.export` -- the forward pass does not run as ordinary Python, so the
-wrappers cannot intercept ops. It also has specific behaviors around FSDP,
-sparse tensors, meta tensors, quantization, and `torch.func.vmap`.
+`torch.compile` coexists with capture. On torch >= 2.6, every capture holds the
+public `torch.compiler.set_stance("force_eager")` scoped to the forward, so
+compiled regions run their original eager Python: the interior is fully logged
+with full verified semantics, zero graph breaks or new compiles happen during
+capture, compiled caches stay intact, and wrapper install/uninstall costs at
+most one bounded recompile on the next compiled call. On torch < 2.6 the
+historical fallback holds: a Dynamo-traced region reached mid-capture is
+bypassed with a one-per-forward warning and the returned trace honestly
+contains only what ran outside it (`capture_verified=False`, reason
+`"dynamo_region_not_logged"`). TorchLens remains **not** compatible with
+TorchScript or `torch.export` -- those forwards do not run as ordinary Python,
+so the wrappers cannot intercept ops. It also has specific behaviors around
+FSDP, sparse tensors, meta tensors, quantization, and `torch.func.vmap`.
 
 See [LIMITATIONS.md](docs/LIMITATIONS.md) for the full matrix: what fails, what
 works, and the recommended workaround for each context.
 
-TorchLens also repairs detached `from torch import ...` references when wrappers are installed.
-The release default retains the legacy broad crawl; an opt-in
-[`patch_policy="scoped"`](docs/migration/scoped_detached_patching.md) mode narrows foreign-object
-mutation and offers a default-off shadow escape detector for pre-wrap closures and containers.
+TorchLens recovers most detached `from torch import ...` references with a disclosed rescue
+re-run and a small mechanical belt. The historical broad `sys.modules` crawl and
+`patch_policy=` rollout are deleted; those arguments are deprecated no-ops. For the strongest
+and simplest guarantee, call `torchlens.backends.torch.wrappers.wrap_torch()` before creating
+detached references. The optional `escape_detector="shadow"` diagnoses raw callable escapes. See
+[detached-reference handling](docs/migration/scoped_detached_patching.md) and the
+[limitations catalog](docs/reference/limitations.md).
 
 
 ## Tutorials and Docs
@@ -509,6 +544,8 @@ mutation and offers a default-off shadow escape detector for pre-wrap closures a
 | [docs/reference/hash.md](docs/reference/hash.md) | Provisional structural hashes and CI architecture pins |
 | [docs/reference/attribution.md](docs/reference/attribution.md) | Native input and layer attribution methods |
 | [docs/reference/collapse.md](docs/reference/collapse.md) | Smart-collapse visual reference and label contract |
+| [docs/reference/glossary.md](docs/reference/glossary.md) | Public terminology and stable mechanism names |
+| [docs/reference/limitations.md](docs/reference/limitations.md) | Edge scenarios, typed symptoms, and remedies |
 
 
 ## Security

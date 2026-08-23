@@ -132,8 +132,8 @@ def test_r35_prior_poisoned_fork_mark_caps_attestation(tmp_path: Path) -> None:
     loaded = tl.load(path)
     # Simulate an inherited monotonic poisoned mark on the source Trace: forks
     # copy it, so the eligibility verdict must fold it in.
-    loaded.__dict__["_runnable_path_faithfulness"] = PathFaithfulness.UNVERIFIABLE
-    loaded.__dict__["_runnable_poisoned"] = True
+    loaded._runnable.path_faithfulness = PathFaithfulness.UNVERIFIABLE
+    loaded._runnable.poisoned = True
     result = loaded.run(inputs=x)
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE

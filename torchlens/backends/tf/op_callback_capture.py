@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
@@ -19,10 +20,10 @@ from ...ir.events import (
     ParentEdge,
 )
 from ...ir.predicate import RecordContext
-from ...ir.refs import DeviceRef, DtypeRef, TensorRef
+from ...ir.refs import DtypeRef, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
-from ._tf_compat import get_op_callbacks_module, get_tf_device_name
-from .modules import TFModuleTree, patched_tf_module_stack
+from ._tf_compat import get_op_callbacks_module
+from .modules import TFModuleTree, device_ref_from_tf_device, patched_tf_module_stack
 
 _INIT_OP_TYPES = frozenset(
     {
@@ -184,6 +185,8 @@ class TFEagerCaptureSession:
         module_tree: TFModuleTree | None,
         save_payloads: bool = True,
         save_predicate: Callable[[Any], Any] | None = None,
+        output_tap: Callable[[TFOpCapture, tuple[str, ...]], None] | None = None,
+        module_exit_hook: Any | None = None,
     ) -> None:
         """Initialize a TensorFlow eager capture session.
 
@@ -203,6 +206,13 @@ class TFEagerCaptureSession:
             Whether op output values should be snapshotted.
         save_predicate
             Optional static selector used to decide which op payloads are saved.
+        output_tap
+            Optional per-output observer invoked with each ``TFOpCapture`` and
+            the live module stack as ``"address:call_index"`` labels. The tap
+            must not issue TensorFlow ops (the callback would recurse).
+        module_exit_hook
+            Optional module-exit output substitution hook forwarded to the
+            module-stack patch.
         """
 
         self.tf = tf
@@ -212,6 +222,8 @@ class TFEagerCaptureSession:
         self.module_tree = module_tree
         self.save_payloads = save_payloads
         self.save_predicate = save_predicate
+        self.output_tap = output_tap
+        self.module_exit_hook = module_exit_hook
         self.events = CaptureEvents()
         self.module_stack: list[ModuleFrame] = []
         self.producer_by_ref: dict[object, str] = {}
@@ -221,6 +233,11 @@ class TFEagerCaptureSession:
         self.init_op_labels: list[str] = []
         self.op_type_counts: Counter[str] = Counter()
         self.op_captures: list[TFOpCapture] = []
+        # Zero-match disclosure accounting: TF gates payload retention per-op
+        # instead of running the shared post-finalization resolver, so the
+        # capture entry needs this count to warn when a typo'd save= matched
+        # nothing (R17 parity with the sibling previews).
+        self.save_predicate_match_count = 0
         self._source_label_by_ref: dict[object, str] = {}
 
     def run(self) -> TFCaptureResult:
@@ -256,7 +273,9 @@ class TFEagerCaptureSession:
 
         callback_module.add_op_callback(callback)
         try:
-            with patched_tf_module_stack(self.module_tree, self.tf, self.module_stack):
+            with patched_tf_module_stack(
+                self.module_tree, self.tf, self.module_stack, self.module_exit_hook
+            ):
                 output = self.callable_obj(*self.args, **self.kwargs)
         finally:
             callback_module.remove_op_callback(callback)
@@ -343,16 +362,20 @@ class TFEagerCaptureSession:
                 record_context=record_context,
             )
             self.events.append(event)
-            self.op_captures.append(
-                TFOpCapture(
-                    label_raw=label.label_raw,
-                    op_type=op_type_text,
-                    attrs=_attrs_to_raw_dict(attrs),
-                    output_index=output_index,
-                    inputs=input_captures,
-                    output_tensor=output,
-                )
+            op_capture = TFOpCapture(
+                label_raw=label.label_raw,
+                op_type=op_type_text,
+                attrs=_attrs_to_raw_dict(attrs),
+                output_index=output_index,
+                inputs=input_captures,
+                output_tensor=output,
             )
+            self.op_captures.append(op_capture)
+            if self.output_tap is not None:
+                self.output_tap(
+                    op_capture,
+                    tuple(f"{frame.address}:{frame.call_index}" for frame in self.module_stack),
+                )
             ref_key = _tensor_ref_key(output)
             if ref_key is not None:
                 self.producer_by_ref[ref_key] = label.label_raw
@@ -487,14 +510,8 @@ class TFEagerCaptureSession:
                 bytes_peak_at_call=None,
             ),
             policy=CapturePolicy(
-                must_keep_topology=True,
                 save_payload=save_payload,
-                requires_isolation=False,
-                save_args=False,
-                save_code=False,
-                save_rng=False,
                 save_grad=False,
-                stream=False,
             ),
             predicate_matched=save_payload,
             pass_index=1,
@@ -584,7 +601,7 @@ class TFEagerCaptureSession:
             input_output_address=None,
             shape=_shape_tuple(output),
             dtype=DtypeRef(backend="tf", name=str(getattr(output, "dtype", ""))),
-            tensor_device=DeviceRef(backend="tf", name=get_tf_device_name(output)),
+            tensor_device=device_ref_from_tf_device(getattr(output, "device", "")),
             tensor_requires_grad=None,
             output_index=output_index,
             is_bottom_level_func=True,
@@ -619,7 +636,10 @@ class TFEagerCaptureSession:
             return False
         if self.save_predicate is None:
             return True
-        return bool(self.save_predicate(record_context))
+        matched = bool(self.save_predicate(record_context))
+        if matched:
+            self.save_predicate_match_count += 1
+        return matched
 
     def _parents_for_inputs(
         self,
@@ -826,14 +846,8 @@ class TFEagerCaptureSession:
                 bytes_peak_at_call=None,
             ),
             policy=CapturePolicy(
-                must_keep_topology=True,
                 save_payload=True,
-                requires_isolation=False,
-                save_args=False,
-                save_code=False,
-                save_rng=False,
                 save_grad=False,
-                stream=False,
             ),
             predicate_matched=True,
             pass_index=1,

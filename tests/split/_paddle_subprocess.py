@@ -31,7 +31,5 @@ def run_paddle_subprocess(code: str, *, timeout: int = 180) -> None:
         check=False,
     )
     assert result.returncode == 0, (
-        "Paddle split subprocess failed\n"
-        f"stdout:\n{result.stdout}\n"
-        f"stderr:\n{result.stderr}"
+        f"Paddle split subprocess failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )

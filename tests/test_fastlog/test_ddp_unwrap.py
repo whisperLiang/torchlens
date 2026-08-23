@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -26,28 +27,36 @@ class DdpModel(nn.Module):
         return self.linear(x)
 
 
-def _init_process_group(tmp_path: Path) -> bool:
-    """Initialize a local single-rank process group if needed."""
+@pytest.fixture()
+def process_group(tmp_path: Path) -> Iterator[None]:
+    """Single-rank gloo group, destroyed on teardown.
+
+    The historical helper left the default group INITIALIZED for the rest of
+    the session, which flipped ``warn_parallel``'s distributed-rank exception
+    on for every later test in the process (the round-3 child-process refusal
+    reds: a fake child read as a rank because ``dist.is_initialized()`` was
+    still True). Only a group THIS module created is destroyed.
+    """
 
     if not torch.distributed.is_available():
-        return False
-    if torch.distributed.is_initialized():
-        return True
-    init_file = tmp_path / "ddp_init"
-    torch.distributed.init_process_group(
-        "gloo",
-        init_method=f"file://{init_file}",
-        rank=0,
-        world_size=1,
-    )
-    return True
+        pytest.skip("torch.distributed is unavailable")
+    created = not torch.distributed.is_initialized()
+    if created:
+        init_file = tmp_path / "ddp_init"
+        torch.distributed.init_process_group(
+            "gloo",
+            init_method=f"file://{init_file}",
+            rank=0,
+            world_size=1,
+        )
+    yield
+    if created and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
 
-def test_ddp_wrapped_model_records_unwrapped_module(tmp_path: Path) -> None:
+def test_ddp_wrapped_model_records_unwrapped_module(process_group: None) -> None:
     """This exercises only the unwrapped .module, NOT DDP forward semantics."""
 
-    if not _init_process_group(tmp_path):
-        pytest.skip("torch.distributed is unavailable")
     ddp_model = torch.nn.parallel.DistributedDataParallel(DdpModel())
 
     recording = tl.fastlog.record(ddp_model, torch.ones(1, 2), default_op=True)
@@ -55,11 +64,9 @@ def test_ddp_wrapped_model_records_unwrapped_module(tmp_path: Path) -> None:
     assert len(recording) > 0
 
 
-def test_ddp_bundle_path_gets_rank_prefix(tmp_path: Path) -> None:
+def test_ddp_bundle_path_gets_rank_prefix(process_group: None, tmp_path: Path) -> None:
     """DDP disk bundles are written under a rank_NN prefix."""
 
-    if not _init_process_group(tmp_path):
-        pytest.skip("torch.distributed is unavailable")
     ddp_model = torch.nn.parallel.DistributedDataParallel(DdpModel())
     requested = tmp_path / "bundle.tlfast"
 

@@ -5,20 +5,101 @@ plus environment checks (Jupyter detection, parallel-processing guard).
 """
 
 import multiprocessing as mp
+import os
+import shutil
 import sys
+import tempfile
 import time
-from collections.abc import Iterable
+import weakref
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Iterator, List, TypeVar, cast
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import torch
 
 from ..quantities import Bytes, Flops
 
 if TYPE_CHECKING:
+    from types import FrameType
+
     from ..data_classes.trace import Trace
 
 _T = TypeVar("_T")
+
+# Package directory, resolved once at import: `user_stacklevel` compares frame
+# filenames against it to find the first non-torchlens frame. Matches the
+# already-established approach in utils/introspection.py's stack filter.
+_PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + os.sep
+
+
+def atomic_write_text(path: str | Path, text: str, *, encoding: str = "utf-8") -> None:
+    """Atomically replace a text file with fully written content.
+
+    Parameters
+    ----------
+    path:
+        Destination path.
+    text:
+        Complete text payload.
+    encoding:
+        Text encoding used for the temporary file.
+    """
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.name}.tmp.",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding=encoding) as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, destination)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def ensure_trace_visualizer_dir(trace: Any) -> Path:
+    """Return a trace-owned visualizer scratch directory.
+
+    Parameters
+    ----------
+    trace:
+        Trace-like owner receiving the scratch path.
+
+    Returns
+    -------
+    pathlib.Path
+        Existing or newly created scratch directory.
+    """
+
+    current = getattr(trace, "_visualizer_dir", None)
+    if current is not None and Path(current).is_dir():
+        return Path(current)
+    output_dir = Path(tempfile.mkdtemp(prefix="torchlens_visualizers_"))
+    trace._visualizer_dir = str(output_dir)
+    weakref.finalize(trace, shutil.rmtree, output_dir, ignore_errors=True)
+    return output_dir
+
+
+def cleanup_trace_visualizer_dir(trace: Any) -> None:
+    """Remove a trace-owned visualizer scratch directory if one exists.
+
+    Parameters
+    ----------
+    trace:
+        Trace-like owner whose scratch directory should be removed.
+    """
+
+    output_dir = getattr(trace, "_visualizer_dir", None)
+    if output_dir is not None:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        trace._visualizer_dir = None
 
 
 def _record_phase_timing(trace: "Trace", bucket: str, elapsed_s: float) -> None:
@@ -73,7 +154,7 @@ def identity(x: Any) -> Any:
     return x
 
 
-def int_list_to_compact_str(int_list: List[int]) -> str:
+def int_list_to_compact_str(int_list: list[int]) -> str:
     """Collapse a list of integers into a compact range string.
 
     Contiguous runs are collapsed into ``"start-end"`` ranges, separated
@@ -247,8 +328,12 @@ def _non_torch_array_summary(array: Any) -> str:
         exposes. Never raises.
     """
 
+    # Reject callables (e.g. a ``.shape``/``.dtype`` *method* rather than a
+    # value attribute): reading them unguarded stringifies a bound-method repr
+    # as if it were a shape/dtype. Treat a callable -- or an absent attribute --
+    # as "unknown" so this helper never surfaces garbage and never raises.
     shape = getattr(array, "shape", None)
-    if shape is not None:
+    if shape is not None and not callable(shape):
         try:
             shape_text = "Tensor[" + ", ".join(str(dim) for dim in tuple(shape)) + "]"
         except TypeError:
@@ -256,7 +341,7 @@ def _non_torch_array_summary(array: Any) -> str:
     else:
         shape_text = "Tensor[?]"
     dtype = getattr(array, "dtype", None)
-    dtype_text = str(dtype) if dtype is not None else "unknown dtype"
+    dtype_text = str(dtype) if dtype is not None and not callable(dtype) else "unknown dtype"
     return f"{shape_text} {dtype_text}"
 
 
@@ -380,9 +465,9 @@ def in_notebook() -> bool:
     IPython is not installed.
     """
     try:
-        from IPython import get_ipython  # type: ignore[attr-defined]
+        from IPython import get_ipython
 
-        ipython = get_ipython()  # type: ignore[no-untyped-call]
+        ipython = get_ipython()
         if ipython is None or "IPKernelApp" not in ipython.config:
             return False
     except (ImportError, AttributeError):
@@ -418,17 +503,152 @@ def _vtimed(trace: "Trace", description: str) -> Iterator[None]:
         print(f" done ({elapsed:.2f}s)")
 
 
-def warn_parallel() -> None:
-    """Raise ``RuntimeError`` if called from a child process.
+def user_stacklevel(extra: int = 0) -> int:
+    """Return the ``warnings.warn`` stacklevel that blames the caller's caller.
 
-    TorchLens is single-threaded by design — its global toggle state and
-    ordered tensor counter are not safe for concurrent access.  This guard
-    is called early in ``trace`` to fail fast rather than
-    produce silently corrupted logs.
+    A warning about the user's model or arguments should point at the user's own
+    line, not at whichever torchlens internal happened to notice. A fixed
+    ``stacklevel=`` cannot do that from deep in the pipeline: the capture path is
+    ~10 frames below ``tl.trace`` and the depth is not even constant (the rescue
+    re-run adds a frame), so a hardcoded number is wrong about as often as it is
+    right.
+
+    This walks outward from the caller and returns the depth of the first frame
+    outside the torchlens package, which is what ``stacklevel`` wants. Falls back
+    to ``2`` (the caller's caller) when every frame is internal -- e.g. under a
+    test that drives postprocess directly.
+
+    Parameters
+    ----------
+    extra:
+        Frames between the caller of this function and the ``warnings.warn``
+        call, for helpers that warn on someone else's behalf.
+
+    Returns
+    -------
+    int
+        Stacklevel to pass to ``warnings.warn``.
     """
-    if mp.current_process().name != "MainProcess":
-        raise RuntimeError(
-            "WARNING: It looks like you are using parallel execution; only run "
-            "torchlens in the main process, since certain operations "
-            "depend on execution order."
+
+    frame: FrameType | None = sys._getframe(1)
+    depth = 1
+    while frame is not None:
+        if not frame.f_code.co_filename.startswith(_PACKAGE_ROOT):
+            return depth + extra
+        frame = frame.f_back
+        depth += 1
+    return 2 + extra
+
+
+#: PID of the interpreter that imported this module (r-b6 R40-3b). A raw
+#: ``os.fork()`` child inherits the stamp with a different ``getpid()``, which
+#: is how ``warn_parallel`` sees through multiprocessing-invisible forks.
+_WARN_PARALLEL_IMPORT_PID: int = os.getpid()
+
+#: PID that first observed an initialized process group at capture entry.
+#: Inheriting another process's stamp marks a fork child of a rank, never a
+#: rank. Dict-in-a-slot so the fork-inherited copy stays readable.
+_DIST_GROUP_OBSERVED_PID: dict[str, int] = {}
+
+
+def warn_parallel() -> None:
+    """Refuse capture from a non-rank CHILD PROCESS.
+
+    TorchLens capture is single-owner by design — its global toggle state and
+    ordered tensor counter are not safe for concurrent access. This guard is
+    called early in ``trace`` to fail fast rather than produce silently
+    corrupted logs.
+
+    Scope, exactly (the name is historical and broader than the check):
+
+    * Refused HERE: capture in a child process, i.e. any process whose name is
+      not ``MainProcess`` and which is not a distributed rank.
+    * NOT refused here, and covered elsewhere: THREAD concurrency. A second
+      capture entering while one is active is refused atomically by
+      ``_state.active_logging`` (``ReentrantTraceError``); a non-owner thread's
+      ``pause_logging()`` is a no-op that cannot blind the owner's capture; a
+      non-owner thread's torch ops are skipped by the wrapper's owner-thread
+      fast path and disclosed by the thread-count witness. ``nn.DataParallel``
+      (which parallelizes over threads, not processes) is unwrapped to its
+      ``.module`` at capture entry and traced single-threaded, so it never
+      reaches a concurrent-capture path at all.
+
+    A DISTRIBUTED RANK process is the deliberate exception: each rank is its
+    own interpreter with its own torchlens state, capturing its own rank-local
+    forward (merge-ranks tier (b)). ``torchrun`` ranks are independent
+    ``MainProcess`` es and never hit this guard; ``multiprocessing.spawn``
+    ranks are recognized by having an initialized process group in a
+    non-daemonic process. Daemonic children (DataLoader workers) stay refused
+    even when a forked flag claims an initialized group.
+
+    Raises
+    ------
+    CaptureContextError
+        If called from a child process that is not a distributed rank
+        (code ``child_process_capture_unsupported``).
+    """
+    # r-b6 R40-3b: child detection does NOT trust ``process.name`` — it is a
+    # user-assignable constructor kwarg (``mp.Process(name="MainProcess")``),
+    # and a raw ``os.fork()`` child is invisible to multiprocessing entirely
+    # (it inherits the parent's process object wholesale). ``parent_process()``
+    # catches every multiprocessing child regardless of name; the import-time
+    # PID stamp catches raw-forked children, which inherit the module state
+    # (and the wrapped-torch toggle state that makes their captures unsafe).
+    process = mp.current_process()
+    if mp.parent_process() is None and os.getpid() == _WARN_PARALLEL_IMPORT_PID:
+        # r5 b6-fable R40 (4th round): stamp rank ownership on THIS return
+        # too. The early-return skipped the stamp, so a MAIN-process rank
+        # that captured first never claimed it -- a raw ``os.fork()`` child
+        # then setdefault'ed its OWN pid below and was accepted as a rank.
+        try:
+            import torch.distributed as dist
+
+            if not process.daemon and dist.is_available() and dist.is_initialized():
+                _DIST_GROUP_OBSERVED_PID.setdefault("pid", os.getpid())
+        except Exception:
+            pass
+        return
+    try:
+        import torch.distributed as dist
+
+        is_rank_process = not process.daemon and dist.is_available() and dist.is_initialized()
+        if is_rank_process:
+            # A FORKED child inherits the parent's initialized-group flag, so
+            # "initialized" alone does not prove this process is a rank. The
+            # first process to reach this check with an initialized group
+            # stamps its PID; an inheritor of somebody else's stamp is a fork
+            # child of a rank, not a rank (r-b6 R40-3b). A rank whose parent
+            # never captured is stamped here on ITS first capture — the stamp
+            # is per-interpreter state, reset by spawn's fresh import.
+            owner_pid = _DIST_GROUP_OBSERVED_PID.setdefault("pid", os.getpid())
+            if owner_pid != os.getpid() and os.getpid() == _WARN_PARALLEL_IMPORT_PID:
+                # R40 steal closure: first-observer stamping must not be
+                # first-FORK-CHILD stamping. A rank that raw-forks BEFORE its
+                # first capture would otherwise lose the stamp to the child
+                # (child accepted as "rank", the REAL rank then refused). The
+                # interpreter's original importer can never be a fork child —
+                # a fork child inherits the parent's import-PID value, which
+                # differs from its own pid — so the import-PID process
+                # reclaims the stamp unconditionally. Non-importer processes
+                # (raw-fork children) still cannot displace an existing stamp.
+                _DIST_GROUP_OBSERVED_PID["pid"] = os.getpid()
+                owner_pid = os.getpid()
+            is_rank_process = owner_pid == os.getpid()
+    except Exception:
+        is_rank_process = False
+    if not is_rank_process:
+        from .._errors import CaptureContextError
+
+        raise CaptureContextError(
+            "TorchLens capture was started in child process "
+            f"{process.name!r}, which is not a distributed rank; capture state "
+            "is per-interpreter and ordered, so a child-process capture "
+            "produces a silently corrupted Trace",
+            code="child_process_capture_unsupported",
+            remedy=(
+                "run the capture in the main process (a distributed rank with an "
+                "initialized, non-daemonic process group is the one exception)"
+            ),
+            process_name=process.name,
+            process_daemon=bool(process.daemon),
         )

@@ -2,25 +2,26 @@
 
 from __future__ import annotations
 
+import json
+import math
+import platform
+import weakref
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
 from enum import Enum
 from hashlib import sha256
-import json
-import math
-import platform
 from typing import Any, cast
 
 import numpy as np
 import torch
 
 from .. import __version__ as TORCHLENS_VERSION
-from . import TorchLensIOError
 from .._runnable_state import runnable_tensor_byte_digest
-from ..utils._callable_safety import _STORAGE_UNSAFE_NAMES
+from ..backends.registry import BackendRegistryError, get_backend_spec
 from ..data_classes._state_adapter import state_items
 from ..errors import RunnablePreflightError
+from ..errors.runnable import SparseCorePayloadError
 from ..intervention.types import (
     CapturedArgTemplate,
     FunctionRegistryKey,
@@ -33,30 +34,27 @@ from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleInde
 from ..ir.container_registry import ModelSite, Role
 from ..runnable import (
     RUNNABLE_ACTIVATION_PAYLOAD_SCHEMA_VERSION,
-    RUNNABLE_CALLABLE_REF_SCHEMA_VERSION,
     RUNNABLE_CALL_RECIPE_VERSION,
+    RUNNABLE_CALLABLE_REF_SCHEMA_VERSION,
     RUNNABLE_INITIALIZER_POLICY_VERSION,
     RUNNABLE_TLSPEC_SCHEMA_VERSION,
+    WITNESS_FAMILY_REGISTRY,
+    WITNESS_FAMILY_REGISTRY_VERSION,
+    WITNESS_GAP_REGISTRY,
     ActivationPayloadLayerDescriptor,
     ActivationPayloadMember,
     AmbientExecutionContext,
     AutocastDeviceContext,
+    CallableRegistryEntry,
     CallControlObligation,
     CallExecutionContext,
-    CallableRegistryEntry,
     ControlDependencyEdge,
+    ControlWitness,
+    ControlWitnessKind,
     InputAttestationFingerprint,
     InputBoundarySite,
     InputBoundaryTensorSite,
-    ControlWitness,
-    ControlWitnessKind,
     InputSlotBinding,
-    WITNESS_GAP_REGISTRY,
-    WitnessCoverageGap,
-    WitnessGapKind,
-    control_dependency_site_label,
-    decode_input_site_position,
-    derived_witness_completeness,
     LiteralArgumentRef,
     LiteralAtom,
     LiteralAtomKind,
@@ -78,11 +76,8 @@ from ..runnable import (
     RunnableDiagnostic,
     RunnableErrorCode,
     RunnableRngProfile,
-    SparseRunDescriptor,
-    WITNESS_FAMILY_REGISTRY,
-    WITNESS_FAMILY_REGISTRY_VERSION,
-    encode_input_site_position,
     SlotByteDigest,
+    SparseRunDescriptor,
     StateByteDigest,
     StateSlotBinding,
     StateSlotRole,
@@ -90,7 +85,15 @@ from ..runnable import (
     TensorSlotDescriptor,
     TensorSlotRole,
     TensorUseSite,
+    WitnessCoverageGap,
+    WitnessGapKind,
+    control_dependency_site_label,
+    decode_input_site_position,
+    derived_witness_completeness,
+    encode_input_site_position,
 )
+from ..utils._callable_safety import _STORAGE_UNSAFE_NAMES
+from . import TorchLensIOError
 
 
 @dataclass(slots=True)
@@ -257,7 +260,7 @@ def _ambient_execution_context(
     mark only widens ``not_applicable``, never a positive claim.
     """
 
-    snapshot = getattr(trace, "_runnable_capture_ambient", None)
+    snapshot = trace._runnable.capture_ambient
     if not isinstance(snapshot, Mapping) or "default_dtype" not in snapshot:
         return None
     # r53 hon_1: the global autograd/inference mode is REQUIRED. A capture
@@ -270,10 +273,14 @@ def _ambient_execution_context(
         return None
 
     def _optional_bool(name: str) -> bool | None:
+        """Read one optional boolean field from the execution-context snapshot."""
+
         value = snapshot.get(name)
         return None if value is None else bool(value)
 
     def _optional_str(name: str) -> str | None:
+        """Read one optional string field from the execution-context snapshot."""
+
         value = snapshot.get(name)
         return None if value is None else str(value)
 
@@ -322,7 +329,11 @@ def build_sparse_run_descriptor(trace: Any) -> SparseRunDescriptor:
     _normalize_trace_numpy_scalar_metadata(trace)
     diagnostics: list[RunnableDiagnostic] = []
     backend = str(getattr(trace, "backend", "torch"))
-    if backend != "torch":
+    try:
+        runnable_supported = "runnable" in get_backend_spec(backend).capabilities.save_levels
+    except BackendRegistryError:
+        runnable_supported = False
+    if not runnable_supported:
         diagnostics.append(
             _diagnostic(
                 RunnableErrorCode.UNSUPPORTED_BACKEND_REPLAY,
@@ -331,7 +342,52 @@ def build_sparse_run_descriptor(trace: Any) -> SparseRunDescriptor:
             )
         )
 
+    from ..runnable import collective_boundaries_of
+
+    collective_boundaries = collective_boundaries_of(trace)
+    if collective_boundaries:
+        kinds = sorted({str(entry.get("kind")) for entry in collective_boundaries})
+        diagnostics.append(
+            _diagnostic(
+                RunnableErrorCode.COLLECTIVE_BOUNDARY_RUNNABLE_UNSUPPORTED,
+                "This rank-local trace's taken path crosses "
+                f"{len(collective_boundaries)} collective boundary node(s) "
+                f"({', '.join(kinds)}); a collective cannot be replayed "
+                "single-device, so the trace is not runnable. Cross-rank "
+                "merging (merge-ranks tier c) is the supported story.",
+                detection_stage="producer_collective_boundary",
+            )
+        )
+
     ops = list(getattr(trace, "layer_list", ()))
+
+    # Deephunt F1: a user intervention REPLACED at least one op's value during this
+    # capture, so the archived provenance (activations, downstream taken path) reflects
+    # the intervened computation while the descriptor's callable registry can only
+    # replay the ORIGINAL functions. A runnable replay would silently recompute the
+    # un-intervened function -- a different computation than the artifact's provenance
+    # -- so the producer refuses with a named diagnostic instead of shipping a
+    # permanently-unverifiable artifact whose cause is unfindable from the report.
+    # Zero-fire selectors leave every op unreplaced and stay runnable.
+    intervention_replaced_labels = tuple(
+        str(op.label) for op in ops if bool(getattr(op, "intervention_replaced", False))
+    )
+    if intervention_replaced_labels:
+        diagnostics.append(
+            _diagnostic(
+                RunnableErrorCode.USER_INTERVENTION_NOT_REPLAYABLE,
+                "This capture carries "
+                f"{len(intervention_replaced_labels)} user-intervention-replaced op(s); "
+                "the replacement value has no traceable function, so a sparse runnable "
+                "replay would recompute the UN-intervened computation -- a different "
+                "function than the captured provenance. Runnable save is refused; save "
+                "the intervention spec separately and re-apply it at capture time, or "
+                "use an analysis-level save for the intervened artifact.",
+                affected_ops=intervention_replaced_labels,
+                detection_stage="producer_user_intervention",
+            )
+        )
+
     op_by_alias = _op_alias_index(trace, ops)
     slot_drafts, slot_for_op = _build_op_slot_drafts(trace, ops, diagnostics)
     _build_child_version_slot_drafts(trace, ops, slot_drafts, slot_for_op)
@@ -590,11 +646,21 @@ def build_sparse_run_descriptor(trace: Any) -> SparseRunDescriptor:
             _gap(WitnessGapKind.LIFECYCLE_LEDGER_MUTATION, "capture")
         else:
             _gap(WitnessGapKind.LIFECYCLE_LEDGER_DISPATCH, "capture")
-    if bool(getattr(trace, "_runnable_rng_monitor_uncertain", False)):
+    if trace._runnable.rng_monitor_uncertain:
         # r37 hon1_2 fail-closed rule: the host-nondeterminism monitor could not
         # prove its own installation/chain/restoration, so channel coverage for
         # this forward is unknowable -- INCOMPLETE, never "no consumption".
         _gap(WitnessGapKind.RNG_MONITOR_UNCERTAIN, "capture")
+    from ..backends.torch.buffer_writes import param_byte_witness_not_armed
+
+    if param_byte_witness_not_armed(trace):
+        # W6 witness gating, the param-byte twin of the ``monitor_not_armed`` RNG
+        # stamp above: the whole-storage param/state byte-witness (r18/r19-A
+        # snapshot + reconcile) is armed only for runnable-capable captures. A
+        # disarmed capture reaching descriptor build has UNKNOWABLE state-writeback
+        # coverage for its forward, so it ceilings through the observer-uncertain
+        # gap (unverifiable), never a silent false VERIFIED.
+        _gap(WitnessGapKind.ESCAPE_OBSERVER_UNCERTAIN, "capture")
     if getattr(trace, "capture_verified", None) is False:
         # r35 I2 completion: a capture whose own verification tripwire fired
         # (unaccounted dispatches, escaped callables, unverified transform
@@ -765,9 +831,9 @@ def _normalize_trace_numpy_scalar_metadata(trace: Any) -> None:
         ):
             if hasattr(op, field_name):
                 setattr(op, field_name, _normalize_numpy_scalars(getattr(op, field_name)))
-    leaves = getattr(trace, "_runnable_input_nontensor_leaves", None)
+    leaves = trace._runnable.input_nontensor_leaves
     if leaves is not None:
-        trace._runnable_input_nontensor_leaves = _normalize_numpy_scalars(leaves)
+        trace._runnable.input_nontensor_leaves = _normalize_numpy_scalars(leaves)
 
 
 def _normalize_numpy_scalars(value: Any) -> Any:
@@ -828,7 +894,7 @@ def _build_rng_profile(trace: Any) -> RunnableRngProfile:
     ``random_seed`` is the concrete effective seed every capture is seeded with.
     """
 
-    consumed = bool(getattr(trace, "_runnable_host_rng_consumed", False))
+    consumed = bool(trace._runnable.host_rng_consumed)
     seed = getattr(trace, "random_seed", None)
     capture_seed = int(seed) if isinstance(seed, int) and not isinstance(seed, bool) else None
     # r37 hon1_2: a touch on any NON-global monitored channel (RNG instances,
@@ -837,7 +903,7 @@ def _build_rng_profile(trace: Any) -> RunnableRngProfile:
     # host consumption with NO identifiable capture seed, landing every run in
     # the permanent-unreproduced ceiling (UNVERIFIABLE + NOT_APPLICABLE). The
     # replayable global engines keep their seeded-reproduction semantics.
-    if bool(getattr(trace, "_runnable_host_rng_unreplayable", False)):
+    if trace._runnable.host_rng_unreplayable:
         return RunnableRngProfile(host_rng_consumed=True, capture_seed=None)
     return RunnableRngProfile(host_rng_consumed=consumed, capture_seed=capture_seed)
 
@@ -863,12 +929,49 @@ def require_sparse_run_descriptor(trace: Any) -> SparseRunDescriptor:
 
     descriptor = build_sparse_run_descriptor(trace)
     if not descriptor.preflight.passed:
+        diagnostics = descriptor.preflight.diagnostics
+        # Fold the first diagnostic and the total count into the refusal message (R65):
+        # the bare "preflight failed." string hid the remediation, code, and affected
+        # labels in fields["diagnostics"] with nothing pointing there.
         raise RunnablePreflightError(
-            "Sparse runnable producer preflight failed.",
+            _preflight_failure_message(descriptor.preflight.diagnostics),
             code=RunnableErrorCode.SPARSE_PREFLIGHT_FAILED.value,
-            diagnostics=descriptor.preflight.diagnostics,
+            diagnostics=diagnostics,
         )
     return descriptor
+
+
+_PREFLIGHT_SUMMARY_MESSAGE_LIMIT = 300
+"""Length bound for the first-diagnostic summary inlined into the preflight message."""
+
+
+def _preflight_failure_message(diagnostics: tuple[RunnableDiagnostic, ...]) -> str:
+    """Summarize the first producer diagnostic into the preflight refusal message.
+
+    The full structured diagnostics stay on ``exc.fields["diagnostics"]``; the
+    message carries the first diagnostic's code, bounded text, detection stage,
+    and affected ops so the most common runnable refusal is actionable without
+    unpacking the exception fields.
+    """
+
+    if not diagnostics:
+        return "Sparse runnable producer preflight failed."
+    first = diagnostics[0]
+    detail = " ".join(first.message.split())
+    if len(detail) > _PREFLIGHT_SUMMARY_MESSAGE_LIMIT:
+        detail = detail[: _PREFLIGHT_SUMMARY_MESSAGE_LIMIT - 3] + "..."
+    labels = ", ".join(first.affected_op_labels[:3])
+    if len(first.affected_op_labels) > 3:
+        labels += ", ..."
+    site = f" (stage {first.detection_stage}" + (f"; ops {labels})" if labels else ")")
+    remainder = len(diagnostics) - 1
+    tail = (
+        f" (+{remainder} more diagnostic{'s' if remainder != 1 else ''} on "
+        "exc.fields['diagnostics'].)"
+        if remainder
+        else " (Full diagnostics on exc.fields['diagnostics'].)"
+    )
+    return f"Sparse runnable producer preflight failed: [{first.code.value}] {detail}{site}.{tail}"
 
 
 def with_weight_payload(descriptor: SparseRunDescriptor) -> SparseRunDescriptor:
@@ -993,6 +1096,69 @@ def detach_sparse_core_nested_trace_backrefs(value: Any) -> None:
         detach_conditional_trace_backrefs(value)
 
 
+_NODE_PAYLOAD = -1
+_NODE_SKIP = 0
+_NODE_DATACLASS = 1
+_NODE_MAPPING = 2
+_NODE_SEQUENCE = 3
+_NODE_PORTABLE = 4
+
+# The sparse-core invariant walk dispatches on node type for over a million nodes
+# per save. The dispatch is a pure function of the type, so it is resolved once per
+# type instead of re-running an ABC ``isinstance`` chain (and ``dataclasses.fields``)
+# per node. Branch order below mirrors the original per-node chain exactly.
+# WEAK type keys: a notebook-cell / factory-made class used once as a node type
+# would otherwise be pinned (with its ``__globals__``) for the whole process
+# lifetime, since these memos never evict (R60-12). The equivalent scrub/rehydrate
+# caches in this package are already weak; match them.
+_SPARSE_CORE_NODE_KINDS: weakref.WeakKeyDictionary[type, int] = weakref.WeakKeyDictionary()
+_DATACLASS_FIELD_NAMES: weakref.WeakKeyDictionary[type, tuple[str, ...]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _sparse_core_node_kind(node_type: type) -> int:
+    """Classify one node type for the sparse-core tensor-payload invariant walk."""
+
+    from . import BlobRef
+
+    if issubclass(node_type, (torch.Tensor, BlobRef)):
+        kind = _NODE_PAYLOAD
+    elif node_type is type(None) or issubclass(node_type, (str, bytes, bool, int, float, Enum)):
+        kind = _NODE_SKIP
+    elif is_dataclass(node_type) and not issubclass(node_type, type):
+        kind = _NODE_DATACLASS
+    elif issubclass(node_type, Mapping):
+        kind = _NODE_MAPPING
+    elif issubclass(node_type, (list, tuple, set, frozenset)):
+        kind = _NODE_SEQUENCE
+    else:
+        kind = _NODE_PORTABLE
+    _SPARSE_CORE_NODE_KINDS[node_type] = kind
+    return kind
+
+
+def _dataclass_field_names(node_type: type) -> tuple[str, ...]:
+    """Return the cached declared field names of a dataclass type."""
+
+    names = _DATACLASS_FIELD_NAMES.get(node_type)
+    if names is None:
+        names = tuple(field.name for field in fields(node_type))
+        _DATACLASS_FIELD_NAMES[node_type] = names
+    return names
+
+
+def _dotted_node_path(path: tuple[Any, ...] | None) -> str:
+    """Render a parent-linked walk path as the dotted path used in refusals."""
+
+    labels: list[str] = []
+    while path is not None:
+        label, path = path
+        labels.append(label if type(label) is str else str(label))
+    labels.reverse()
+    return ".".join(labels) or "<root>"
+
+
 def assert_sparse_core_has_no_tensor_payload(value: Any) -> None:
     """Assert that a sparse core contains no tensor or tensor-blob value.
 
@@ -1003,11 +1169,13 @@ def assert_sparse_core_has_no_tensor_payload(value: Any) -> None:
 
     Raises
     ------
-    AssertionError
+    SparseCorePayloadError
         If a tensor, parameter, or portable tensor blob reference is present.
+        The error carries ``fields["code"] == "sparse_core_tensor_payload"``
+        (:attr:`RunnableErrorCode.SPARSE_CORE_TENSOR_PAYLOAD`) plus the dotted
+        payload path; ``AssertionError`` remains in its MRO for historical
+        callers of this ``assert_``-named tripwire.
     """
-
-    from . import BlobRef
 
     # Detach runtime-only nested-Trace back-references (conditional arm ``_trace``)
     # from the scrub product BEFORE the value-free invariant is enforced. These are
@@ -1017,40 +1185,63 @@ def assert_sparse_core_has_no_tensor_payload(value: Any) -> None:
     detach_sparse_core_nested_trace_backrefs(value)
 
     seen: set[int] = set()
+    kinds = _SPARSE_CORE_NODE_KINDS
+    classify = _sparse_core_node_kind
 
-    def visit(node: Any, path: tuple[str, ...]) -> None:
-        """Visit one node in the sparse-core invariant walk."""
+    def visit(node: Any, path: tuple[Any, ...] | None) -> None:
+        """Visit one node in the sparse-core invariant walk.
 
-        if isinstance(node, (torch.Tensor, BlobRef)):
-            dotted_path = ".".join(path) or "<root>"
-            raise AssertionError(f"Sparse core tensor payload at {dotted_path}.")
-        if node is None or isinstance(node, (str, bytes, bool, int, float, Enum)):
+        ``path`` is a parent-linked ``(label, parent_path)`` pair rather than a
+        flat tuple: the dotted path is only ever needed to describe a refusal, so
+        building it eagerly cost one O(depth) tuple copy (plus a ``str()``) per
+        visited node on a walk that visits over a million nodes.
+        """
+
+        kind = kinds.get(type(node))
+        if kind is None:
+            kind = classify(type(node))
+        if kind == _NODE_PAYLOAD:
+            dotted_path = _dotted_node_path(path)
+            raise SparseCorePayloadError(
+                f"Sparse core tensor payload at {dotted_path}. Remedy: route the "
+                "tensor through a declared payload blob family (state_dict_v1 / "
+                "runnable_nonpersistent_buffer_v1 / selected_activation_v2) or drop "
+                "the field from the portable state; the sparse core must stay "
+                "value-free.",
+                code=RunnableErrorCode.SPARSE_CORE_TENSOR_PAYLOAD.value,
+                remedy=(
+                    "route the tensor through a declared payload blob family or "
+                    "drop the field from the portable state"
+                ),
+                payload_path=dotted_path,
+            )
+        if kind == _NODE_SKIP:
             return
         node_id = id(node)
         if node_id in seen:
             return
         seen.add(node_id)
-        if is_dataclass(node) and not isinstance(node, type):
-            for field in fields(node):
+        if kind == _NODE_DATACLASS:
+            for field_name in _dataclass_field_names(type(node)):
                 try:
-                    field_value = getattr(node, field.name)
+                    field_value = getattr(node, field_name)
                 except AttributeError:
                     continue
-                visit(field_value, (*path, field.name))
+                visit(field_value, (field_name, path))
             return
-        if isinstance(node, Mapping):
+        if kind == _NODE_MAPPING:
             for key, item in node.items():
-                visit(key, (*path, "<key>"))
-                visit(item, (*path, str(key)))
+                visit(key, ("<key>", path))
+                visit(item, (key, path))
             return
-        if isinstance(node, (list, tuple, set, frozenset)):
+        if kind == _NODE_SEQUENCE:
             for index, item in enumerate(node):
-                visit(item, (*path, str(index)))
+                visit(item, (index, path))
             return
         for field_name, field_value in state_items(node):
-            visit(field_value, (*path, str(field_name)))
+            visit(field_value, (field_name, path))
 
-    visit(value, ())
+    visit(value, None)
 
 
 def _build_op_slot_drafts(
@@ -1246,8 +1437,15 @@ def _add_persistent_buffer_slot_drafts(
             for name in names
         }
     else:
-        # r75 F2 capture-time fallback: the model died before the save.
-        snapshot = getattr(trace, "_runnable_capture_state", None)
+        # r75 F2 capture-time fallback: the model died before the save. A LOADED
+        # runnable artifact has no capture-time snapshot either, but it embeds the
+        # full capture-time ``state_dict`` (the ``state_dict_v1`` family: parameters
+        # plus persistent buffers with real values) -- the same universe basis --
+        # so a runnable->load->runnable re-save is served from it instead of
+        # refusing with a factually false "no state records" claim.
+        snapshot = trace._runnable.capture_state
+        if not isinstance(snapshot, Mapping):
+            snapshot = trace._runnable.embedded_state
         if isinstance(snapshot, Mapping):
             parameter_names = set()
             param_logs = getattr(trace, "param_logs", None)
@@ -1261,6 +1459,22 @@ def _add_persistent_buffer_slot_drafts(
             # snapshot admitted tensor-only values, so the complement IS the persistent
             # buffer set.
             buffer_names = tuple(name for name in snapshot if name not in parameter_names)
+            # Mirror the live lane's isinstance(torch.Tensor) admission (its
+            # ``buffer_names`` comprehension filters non-tensor state): a
+            # non-tensor entry in a loaded/embedded snapshot must refuse typed
+            # here, not crash with AttributeError on ``.shape`` mid-save.
+            non_tensor_names = sorted(
+                name for name in buffer_names if not isinstance(snapshot[name], torch.Tensor)
+            )
+            if non_tensor_names:
+                raise TorchLensIOError(
+                    "Runnable save found non-tensor persistent-buffer state entries "
+                    f"in the capture-time snapshot: {', '.join(non_tensor_names)}. "
+                    "The embedded state snapshot admits tensors only; refusing to "
+                    "re-save an incoherent runnable artifact.",
+                    code=RunnableErrorCode.SPARSE_PREFLIGHT_FAILED.value,
+                    detection_stage="runnable_resave_state_snapshot",
+                )
             geometry_by_name = {
                 name: (
                     tuple(int(dim) for dim in cast(torch.Tensor, snapshot[name]).shape),
@@ -1278,18 +1492,23 @@ def _add_persistent_buffer_slot_drafts(
             # extra state). A silent return here DROPPED never-forward-used
             # buffers (``num_batches_tracked``) and refused honest binds with
             # ``state_unexpected_key``.
-            universe = getattr(trace, "_runnable_persistent_buffer_universe", None)
+            universe = trace._runnable.persistent_buffer_universe
             if not isinstance(universe, Mapping):
                 # No capture-time record either (``state_dict()`` failed at the
-                # capture boundary): the universe is UNKNOWN. Refuse loudly and
-                # typed -- mirroring the include_weights=True lane -- never
-                # silently under-declare.
+                # capture boundary, or the artifact was saved without embedded
+                # weights): the universe is UNKNOWN. Refuse loudly and typed --
+                # mirroring the include_weights=True lane -- never silently
+                # under-declare.
                 raise TorchLensIOError(
                     "Runnable save requires the persistent-buffer state universe, "
-                    "but the source model is no longer alive and no capture-time "
-                    "state records are available. The declared slot universe "
-                    "cannot be proven complete, so the runnable save is refused. "
-                    "Ordinary analysis save levels remain available."
+                    "but no source is available: the source model is not alive, "
+                    "no capture-time state records exist, and the trace carries "
+                    "no embedded capture state (a runnable artifact saved with "
+                    "include_weights=True re-saves; one saved without embedded "
+                    "weights cannot prove its slot universe complete). Ordinary "
+                    "analysis save levels remain available.",
+                    code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+                    detection_stage="runnable_resave_state_universe",
                 )
             buffer_names = tuple(str(name) for name in universe)
             geometry_by_name = {
@@ -1300,15 +1519,26 @@ def _add_persistent_buffer_slot_drafts(
                 )
                 for name, record in universe.items()
             }
-        topology = getattr(trace, "_runnable_state_alias_topology", None)
-        topology_groups = (topology.get("groups") if isinstance(topology, Mapping) else None) or {}
+        topology = trace._runnable.state_alias_topology
+        topology_groups = topology.get("groups") if isinstance(topology, Mapping) else None
+        if topology_groups is None and trace._runnable.descriptor is not None:
+            # Loaded re-save: the session-time alias-topology record does not
+            # survive save/load, but the loaded descriptor's state bindings carry
+            # the exact declared groups -- carry them forward rather than silently
+            # weakening a tied-state declaration on the re-saved artifact.
+            topology_groups = {
+                slot.state_binding.state_dict_name: slot.state_binding.alias_group
+                for slot in trace._runnable.descriptor.tensor_slots
+                if slot.state_binding is not None and slot.state_binding.alias_group is not None
+            }
+        topology_groups = topology_groups or {}
         buffer_name_set = set(buffer_names)
         names_by_group: dict[str, list[str]] = defaultdict(list)
         for name in buffer_names:
             group = topology_groups.get(name)
             if isinstance(group, str):
                 names_by_group[group].append(name)
-        alias_by_name = {name: None for name in buffer_names}
+        alias_by_name = dict.fromkeys(buffer_names)
         for names in names_by_group.values():
             # Same convention as the live path: only groups with >=2 BUFFER members
             # (a param<->buffer identity pair is the alias-topology gates' domain).
@@ -1327,7 +1557,7 @@ def _add_persistent_buffer_slot_drafts(
         existing = existing_by_name.get(name)
         if existing is not None:
             binding = existing.state_binding
-            assert binding is not None
+            assert binding is not None  # narrowing; guarded by the branch above
             existing.state_binding = replace(
                 binding,
                 persistent=True,
@@ -1952,7 +2182,7 @@ def _match_parameter(
     path: tuple[str | int, ...],
     op: Any,
     candidates: Sequence[Any],
-    template_barcode: "str | None" = None,
+    template_barcode: str | None = None,
 ) -> Any | None:
     """Match a template tensor literal to one cooked named parameter.
 
@@ -2221,7 +2451,7 @@ def _build_control_witnesses(
     calls: Sequence[RunnableCallDescriptor],
     diagnostics: list[RunnableDiagnostic],
     *,
-    gap: "Callable[[WitnessGapKind, str], None]",
+    gap: Callable[[WitnessGapKind, str], None],
 ) -> tuple[
     list[ControlWitness],
     dict[str, list[CallControlObligation]],
@@ -2387,6 +2617,8 @@ def _collect_baked_literal_values(
     sequences: set[tuple[Any, ...]] = set()
 
     def visit(node: Any) -> None:
+        """Accumulate the literal footprints reachable from one literal-argument node."""
+
         if isinstance(node, LiteralAtom):
             if node.kind is LiteralAtomKind.INT and isinstance(node.value, int):
                 ints.add(int(node.value))
@@ -2569,13 +2801,13 @@ def _build_input_boundary(
     partial boundary record.
     """
 
-    snapshots = trace.__dict__.get("_runnable_input_structure")
+    snapshots = trace._runnable.input_structure
     if not isinstance(snapshots, tuple):
         # The positive-proof preflight (``_preflight_input_structure``) owns this
         # refusal; an empty boundary can never bless a run (parse requires the
         # boundary to cross-anchor every MODEL_INPUT binding).
         return ()
-    reads = trace.__dict__.get("_runnable_input_metadata_reads")
+    reads = trace._runnable.input_metadata_reads
     reads_map: Mapping[Any, Any] = reads if isinstance(reads, Mapping) else {}
     tensor_by_position: dict[tuple[Any, ...], list[InputBoundaryTensorSite]] = {}
     for draft in slot_drafts.values():
@@ -2627,7 +2859,7 @@ def _build_input_boundary(
                 )
             )
             continue
-        assert snapshot_position is not None
+        assert snapshot_position is not None  # narrowing; guarded by the branch above
         seen_positions.add(snapshot_position)
         tensor_sites = sorted(
             tensor_by_position.get(snapshot_position, []),
@@ -2679,7 +2911,7 @@ def _stamp_state_binding_facts(
 
     from ..backends.torch.completeness_witness import host_escape_state_metadata_facts
 
-    signatures = trace.__dict__.get("_runnable_capture_state_signatures")
+    signatures = trace._runnable.capture_state_signatures
     signature_map: Mapping[str, Any] = signatures if isinstance(signatures, Mapping) else {}
     read_facts = host_escape_state_metadata_facts(trace)
     for draft in slot_drafts.values():
@@ -2815,7 +3047,7 @@ def _escape_witnesses(
     slot_drafts: Mapping[str, _SlotDraft],
     *,
     start_order: int,
-    gap: "Callable[[WitnessGapKind, str], None]",
+    gap: Callable[[WitnessGapKind, str], None],
 ) -> list[ControlWitness]:
     """Witness the SOURCE of every tensor->host escape in one exhaustive fail-closed pass.
 
@@ -2937,7 +3169,7 @@ def _escape_witnesses(
         binding = draft.state_binding
         if binding is not None and slot_id in bound_slot_ids:
             bound_state_names.add(binding.state_dict_name)
-    capture_state = trace.__dict__.get("_runnable_capture_state")
+    capture_state = trace._runnable.capture_state
 
     # ---- PASS A: state-slot escape/host-path witnesses (bound-or-unbound) ----
     for slot_id, draft in slot_drafts.items():
@@ -3246,7 +3478,7 @@ def _input_structure_witnesses(trace: Any, *, start_order: int) -> list[ControlW
     nested-kind/class-identity/empty-dataclass/hidden-state classes at every depth.
     """
 
-    snapshots = trace.__dict__.get("_runnable_input_structure")
+    snapshots = trace._runnable.input_structure
     if not isinstance(snapshots, tuple):
         return []
     witnesses: list[ControlWitness] = []
@@ -3277,7 +3509,7 @@ def _input_structure_witnesses(trace: Any, *, start_order: int) -> list[ControlW
     return witnesses
 
 
-def witness_family_of(site_label: str) -> "str | None":
+def witness_family_of(site_label: str) -> str | None:
     """Resolve one ``SHAPE_STRUCTURE_FACT`` site label to its registered family.
 
     Returns the ``WITNESS_FAMILY_REGISTRY`` family whose declared ``site_prefix``
@@ -3293,7 +3525,7 @@ def witness_family_of(site_label: str) -> "str | None":
     return None
 
 
-def witness_family_of_witness(witness: "ControlWitness") -> "str | None":
+def witness_family_of_witness(witness: ControlWitness) -> str | None:
     """Resolve ANY control witness to its registered family (r71 A).
 
     Direct-kind witnesses (scalar_bool / loop_predicate / conditional_arm_entry /
@@ -3307,8 +3539,8 @@ def witness_family_of_witness(witness: "ControlWitness") -> "str | None":
 
 
 def required_witness_family_members(
-    witnesses: "Sequence[ControlWitness]",
-) -> "dict[str, list[str]]":
+    witnesses: Sequence[ControlWitness],
+) -> dict[str, list[str]]:
     """Derive per-family member IDs from the emitted witness stream (r69 A).
 
     THE single member-ID authority: the producer builds the persisted
@@ -3388,7 +3620,7 @@ def required_witness_family_members(
 
 
 def _build_required_witness_inventory(
-    witnesses: "Sequence[ControlWitness]",
+    witnesses: Sequence[ControlWitness],
     slot_drafts: Mapping[str, _SlotDraft],
 ) -> RequiredWitnessInventory:
     """Author the redundant discharge MIRROR from the final witnesses + claims (r71 A).
@@ -3432,7 +3664,7 @@ def _preflight_input_structure(trace: Any) -> list[RunnableDiagnostic]:
     intervention-ready capture refuses the same way: absence of proof is never proof.
     """
 
-    snapshots = trace.__dict__.get("_runnable_input_structure")
+    snapshots = trace._runnable.input_structure
     diagnostics: list[RunnableDiagnostic] = []
     if not isinstance(snapshots, tuple):
         diagnostics.append(
@@ -3491,7 +3723,7 @@ def _module_training_mode_witnesses(
     closed). No tensors are recorded.
     """
 
-    modes = getattr(trace, "__dict__", {}).get("_runnable_module_training_modes", None)
+    modes = trace._runnable.module_training_modes
     if not isinstance(modes, Mapping) or not modes:
         return []
     fact = {
@@ -3639,7 +3871,7 @@ explicit here."""
 
 def _input_metadata_witnesses(
     trace: Any,
-    input_boundary: "tuple[InputBoundarySite, ...]",
+    input_boundary: tuple[InputBoundarySite, ...],
     *,
     start_order: int,
 ) -> list[ControlWitness]:
@@ -3661,7 +3893,7 @@ def _input_metadata_witnesses(
     the read-site existence; the witness carries the observed values).
     """
 
-    reads = getattr(trace, "__dict__", {}).get("_runnable_input_metadata_reads", None)
+    reads = trace._runnable.input_metadata_reads
     reads_map: Mapping[Any, Any] = reads if isinstance(reads, Mapping) else {}
     witnesses: list[ControlWitness] = []
     for site in input_boundary:
@@ -3750,7 +3982,7 @@ def _input_literal_witnesses(
         ``encodable=False`` literal fact.
     """
 
-    leaves = getattr(trace, "__dict__", {}).get("_runnable_input_nontensor_leaves", ())
+    leaves = trace._runnable.input_nontensor_leaves or ()
     witnesses: list[ControlWitness] = []
     opaque_members: list[str] = []
     for position, path, value in leaves:
@@ -3820,7 +4052,7 @@ def _preflight_state_alias_topology(
     same-storage views serialize independently and stay admitted.
     """
 
-    topology = getattr(trace, "_runnable_state_alias_topology", None)
+    topology = trace._runnable.state_alias_topology
     if not isinstance(topology, Mapping):
         return []
     refusals = topology.get("refusals") or ()
@@ -3896,7 +4128,7 @@ def _preflight_state_metadata(trace: Any) -> list[RunnableDiagnostic]:
     # ``is_pinned``) -- the observed-value kinds validate the user's one real return
     # against the device-defined staged canonical, never a speculative signature stamp.
     observations = host_escape_state_metadata_observations(trace)
-    signatures = trace.__dict__.get("_runnable_capture_state_signatures")
+    signatures = trace._runnable.capture_state_signatures
     signature_map: Mapping[str, Any] = signatures if isinstance(signatures, Mapping) else {}
     for name in sorted(reads):
         violations = state_metadata_read_violations(
@@ -3929,7 +4161,7 @@ def _preflight_state_metadata(trace: Any) -> list[RunnableDiagnostic]:
     # The ordinary population (frozen OR trainable models reading ``requires_grad`` on
     # float state) records facts staging reproduces exactly -- no refusal, no ceiling.
     facts_by_state = host_escape_state_metadata_facts(trace)
-    capture_state = trace.__dict__.get("_runnable_capture_state")
+    capture_state = trace._runnable.capture_state
     capture_map: Mapping[str, Any] = capture_state if isinstance(capture_state, Mapping) else {}
     for name in sorted(facts_by_state):
         slot_facts = facts_by_state[name]
@@ -3977,7 +4209,7 @@ def _preflight_output_contracts(trace: Any, ops: Sequence[Any]) -> list[Runnable
     # the runnable save uniformly (bare/nested/one-tensor/empty sets, frozensets and
     # subclasses, opaque tensor holders, duplicate paths, BFS fallback), never a
     # save-then-UNVERIFIABLE landmine and never an advertise-then-crash artifact.
-    losslessness = getattr(trace, "__dict__", {}).get("_runnable_output_losslessness")
+    losslessness = trace._runnable.output_losslessness
     if not isinstance(losslessness, Mapping) or not losslessness.get("lossless", False):
         reason = (
             str(losslessness.get("reason", "unknown"))
@@ -4123,7 +4355,7 @@ def _buffer_binding(trace: Any, op: Any) -> StateSlotBinding | None:
     # r37 corr2-4: repeated live object identity (captured before state cloning)
     # becomes a shared alias group so the loader stages ONE allocation per group and
     # preserves ``a is b`` / in-place propagation semantics across the tied names.
-    topology = getattr(trace, "_runnable_state_alias_topology", None)
+    topology = trace._runnable.state_alias_topology
     groups = topology.get("groups") if isinstance(topology, Mapping) else None
     alias_group = groups.get(address) if isinstance(groups, Mapping) else None
     return StateSlotBinding(
@@ -4249,7 +4481,20 @@ def _tensor_container_skeleton(component: Any) -> NonTensorLiteral:
     return _encode_literal(component)
 
 
-def _encode_literal(value: Any) -> NonTensorLiteral:
+_MAX_ENCODE_LITERAL_NESTING_DEPTH = 64
+"""Save-side literal nesting bound, strictly below every decode ceiling.
+
+The load side bounds decoded literals at 200 levels AND the bounded JSON
+reader refuses ``manifest.json`` documents deeper than 200 levels; one
+encoded literal level costs several JSON levels, so an unbounded save could
+succeed while producing a bundle no loader can open (~65-70 literal levels)
+or die inside ``save()`` with a raw ``RecursionError`` (~1000 levels).
+Refusing at 64 keeps every successfully saved bundle loadable and routes the
+refusal through the existing typed ``UNSUPPORTED_LITERAL`` diagnostic.
+"""
+
+
+def _encode_literal(value: Any, _depth: int = 0) -> NonTensorLiteral:
     """Encode a Python value using only the frozen safe literal grammar.
 
     r69 B: scalar admission is CLASSIFIER-FIRST (``torchlens._input_walk.
@@ -4259,9 +4504,23 @@ def _encode_literal(value: Any) -> NonTensorLiteral:
     ``_UnsupportedLiteralError`` (typed refusal / opaque routing at the caller).
     Stock NumPy numeric/bool wrappers normalize through the RATIFIED transparent
     value lane (``.item()``); exact builtin atoms encode as before.
+
+    Container admission is EXACT-TYPE (same r69 B discipline as the key codec):
+    a namedtuple, ``OrderedDict``/``defaultdict``, or user list/dict subclass
+    carries semantic type identity or extra state the decode side rebuilds as
+    plain builtins, so it refuses typed instead of laundering. ``torch.Size``
+    is the one ratified allowlisted subclass: it encodes as a plain int tuple
+    (a documented value normalization with no hidden state).
     """
 
     from torchlens._input_walk import classify_scalar
+
+    if _depth > _MAX_ENCODE_LITERAL_NESTING_DEPTH:
+        raise _UnsupportedLiteralError(
+            "Literal nesting exceeds the maximum encodable depth of "
+            f"{_MAX_ENCODE_LITERAL_NESTING_DEPTH}; a deeper value could not be "
+            "decoded by any loader."
+        )
 
     scalar_kind, scalar_payload = classify_scalar(value)
     if scalar_kind == "semantic":
@@ -4302,20 +4561,20 @@ def _encode_literal(value: Any) -> NonTensorLiteral:
     torch_symbol = _torch_symbol_qualname(value)
     if torch_symbol is not None:
         return LiteralTorchSymbol(torch_symbol)
-    if isinstance(value, list):
+    if type(value) is list:
         return LiteralSequence(
             LiteralSequenceKind.LIST,
-            tuple(_encode_literal(item) for item in value),
+            tuple(_encode_literal(item, _depth + 1) for item in value),
         )
-    if isinstance(value, tuple):
+    if type(value) is tuple or type(value) is torch.Size:
         return LiteralSequence(
             LiteralSequenceKind.TUPLE,
-            tuple(_encode_literal(item) for item in value),
+            tuple(_encode_literal(item, _depth + 1) for item in value),
         )
-    if isinstance(value, Mapping):
+    if type(value) is dict:
         return LiteralMapping(
             tuple(
-                LiteralMappingEntry(_encode_literal_key(key), _encode_literal(item))
+                LiteralMappingEntry(_encode_literal_key(key), _encode_literal(item, _depth + 1))
                 for key, item in value.items()
             )
         )
@@ -4422,24 +4681,17 @@ def input_path_key_component(key: Any) -> Any:
 def empty_container_kind(value: Any) -> str | None:
     """Return the KIND string of an EMPTY non-tensor container, else ``None`` (r29-C2).
 
-    ``None`` for non-containers and for NON-empty containers (whose leaves are witnessed
-    ordinarily). Namedtuples are treated as sequences by field arity; an empty namedtuple has
-    no fields. r67 C2 (free-F2/hon1-F2c): a ZERO-FIELD dataclass is an EMPTY container by
-    KIND -- without the row it emitted nothing at all, so the argument vanished from the
-    input contract and a run against a different-arity model falsely VERIFIED.
+    Compatibility alias for ``_input_walk.empty_input_container_kind``, which owns the
+    inert implementation. Two authorities for the same decision is the drift class the
+    walker-parity meta-test exists to prevent, and this copy's live
+    ``hasattr(value, "_fields")`` / ``value._fields`` reads executed an untrusted
+    instance hook during ``snapshot_input_boundary`` and treated a zero-field namedtuple
+    physically carrying tensors as an EMPTY container.
     """
 
-    import dataclasses as _dataclasses
+    from torchlens._input_walk import empty_input_container_kind
 
-    if isinstance(value, tuple) and hasattr(value, "_fields"):
-        return "namedtuple" if len(value._fields) == 0 else None
-    if _dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return "dataclass" if len(_dataclasses.fields(value)) == 0 else None
-    if isinstance(value, Mapping):
-        return "mapping" if len(value) == 0 else None
-    if isinstance(value, (list, tuple)):
-        return "sequence" if len(value) == 0 else None
-    return None
+    return empty_input_container_kind(value)
 
 
 def _encode_literal_key(value: Any) -> LiteralAtom | LiteralTupleKey:
@@ -4475,19 +4727,47 @@ def _literal_sequence_to_python(value: LiteralSequence) -> tuple[Any, ...]:
     return tuple(result)
 
 
+_TORCH_SYMBOL_NAMES: dict[int, tuple[Any, str]] = {}
+_TORCH_SYMBOL_NAMESPACE_SIZE = -1
+
+
+def _torch_symbol_index() -> dict[int, tuple[Any, str]]:
+    """Return the identity index of allowlisted non-callable ``torch`` symbols.
+
+    Built once from ``vars(torch)`` in iteration order (so the first binding of a
+    shared singleton wins, exactly as the linear scan this replaces did) and
+    rebuilt if the ``torch`` namespace grows, which it can when a lazily exposed
+    submodule attribute is first touched. Values are held in the index so an entry
+    can never be a recycled ``id()``.
+    """
+
+    global _TORCH_SYMBOL_NAMESPACE_SIZE
+    namespace = vars(torch)
+    if len(namespace) != _TORCH_SYMBOL_NAMESPACE_SIZE:
+        index: dict[int, tuple[Any, str]] = {}
+        for name, candidate in list(namespace.items()):
+            if callable(candidate):
+                continue
+            if not isinstance(candidate, (torch.dtype, torch.layout, torch.memory_format)):
+                continue
+            index.setdefault(id(candidate), (candidate, f"torch.{name}"))
+        _TORCH_SYMBOL_NAMES.clear()
+        _TORCH_SYMBOL_NAMES.update(index)
+        _TORCH_SYMBOL_NAMESPACE_SIZE = len(namespace)
+    return _TORCH_SYMBOL_NAMES
+
+
 def _torch_symbol_qualname(value: Any) -> str | None:
     """Return an allowlisted torch symbolic name for a non-callable value."""
 
     if isinstance(value, torch.device):
         return f"torch.device({value})"
-    for name, candidate in vars(torch).items():
-        if callable(candidate):
-            continue
-        if candidate is value and isinstance(
-            value, (torch.dtype, torch.layout, torch.memory_format)
-        ):
-            return f"torch.{name}"
-    return None
+    if not isinstance(value, (torch.dtype, torch.layout, torch.memory_format)):
+        return None
+    entry = _torch_symbol_index().get(id(value))
+    if entry is None or entry[0] is not value:
+        return None
+    return entry[1]
 
 
 def _runtime_fingerprint(
@@ -4685,7 +4965,6 @@ from .runnable_load import (  # noqa: E402 - keep producer helpers grouped above
     parse_sparse_run_descriptor,
     preflight_sparse_run_descriptor,
 )
-
 
 __all__ = [
     "assert_sparse_core_has_no_tensor_payload",

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from fractions import Fraction
-from typing import TYPE_CHECKING, ClassVar, Literal, Mapping, cast
+from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
+from ..selection import _SelectionOperand
 from ._errors import ReceptiveFieldError, ReceptiveFieldValidationError
-
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -330,7 +331,13 @@ class ReceptiveField:
 
 @dataclass(frozen=True)
 class ReceptiveFieldBoxAxis:
-    """Concrete receptive-field bounds for one model-input axis."""
+    """Concrete receptive-field bounds for one model-input axis.
+
+    ``sparse_possible`` mirrors the axis-view disclosure: the bounds are the
+    tight integer hull, but positions inside it may provably not influence
+    the unit (dilated kernels, strided slices). ``exact`` on the parent box
+    speaks to the hull, not to interior density.
+    """
 
     input_axis: int
     kind: AxisKind
@@ -340,6 +347,7 @@ class ReceptiveFieldBoxAxis:
     index_stop: int | None
     clipped_start: int | None
     clipped_stop: int | None
+    sparse_possible: bool = False
 
     def __post_init__(self) -> None:
         """Validate paired bounds and axis identity.
@@ -364,7 +372,7 @@ class ReceptiveFieldBoxAxis:
 
 
 @dataclass(frozen=True)
-class ReceptiveFieldBox:
+class ReceptiveFieldBox(_SelectionOperand):
     """Concrete per-unit geometric receptive-field answer."""
 
     __match_args__: ClassVar[tuple[str, ...]] = (
@@ -410,6 +418,20 @@ class ReceptiveFieldBox:
         if tuple(axis.input_axis for axis in self.axes) != tuple(range(len(self.input_shape))):
             raise ValueError("box axes must be ordered by consecutive input_axis values.")
 
+    def __selection__(self) -> object:
+        """Lift this hull as an ACT selection term (mask exact AS A SET).
+
+        Pointwise axes without a coordinate fall to the documented full-slice
+        convention, which the lift treats as part of the hull (disclosed).
+        Hull inexactness rides ``provenance.relation`` (``exact`` only when
+        the box is exact with no sparse-possible axis, else ``upper_bound``),
+        never a fuzzy mask.
+        """
+
+        from ..selection import _selection_from_box
+
+        return _selection_from_box(self)
+
     def slices(self, pointwise_coords: Mapping[int, int] | None = None) -> tuple[slice, ...]:
         """Return input-space slices corresponding to this box.
 
@@ -422,7 +444,10 @@ class ReceptiveFieldBox:
         Returns
         -------
         tuple[slice, ...]
-            One slice per input axis.
+            One slice per input axis. An ``empty=True`` box yields zero-width
+            slices on its windowed axes, so indexing selects no elements; the
+            absent-bound full-slice convention applies only to pointwise axes
+            whose coordinate was intentionally left unspecified.
         """
 
         coordinates = {} if pointwise_coords is None else pointwise_coords
@@ -435,11 +460,25 @@ class ReceptiveFieldBox:
                         f"pointwise coordinate for axis {axis.input_axis} is out of bounds."
                     )
                 result.append(slice(coordinate, coordinate + 1))
+            elif self.empty and axis.kind == "windowed":
+                result.append(slice(0, 0))
             elif axis.clipped_start is None or axis.clipped_stop is None:
                 result.append(slice(0, extent))
             else:
                 result.append(slice(axis.clipped_start, axis.clipped_stop))
         return tuple(result)
+
+    @property
+    def sparse_possible(self) -> bool:
+        """Return whether any axis hull may contain non-influencing positions.
+
+        ``exact`` speaks to the tight integer hull; a dilated kernel or a
+        strided slice keeps the hull exact while provably skipping interior
+        positions. This aggregate mirrors the per-axis disclosure so box
+        consumers see it without walking ``axes``.
+        """
+
+        return any(axis.sparse_possible for axis in self.axes)
 
     @property
     def source_key(self) -> str:
@@ -464,7 +503,7 @@ class ReceptiveFieldBox:
 
 
 @dataclass(frozen=True)
-class GradientReceptiveField:
+class GradientReceptiveField(_SelectionOperand):
     """Empirical receptive-field influence set measured by autograd."""
 
     __match_args__: ClassVar[tuple[str, ...]] = (
@@ -486,10 +525,10 @@ class GradientReceptiveField:
     op_label: str
     io_role: str
     unit: tuple[int, ...]
-    grad: "torch.Tensor"
-    support_mask: "torch.Tensor"
+    grad: torch.Tensor
+    support_mask: torch.Tensor
     support_ranges: tuple[tuple[int, int], ...] | None
-    spatial_support_mask: "torch.Tensor | None"
+    spatial_support_mask: torch.Tensor | None
     batch_support: tuple[int, ...] | None
     cross_batch_influence: bool
     atol: float
@@ -500,6 +539,12 @@ class GradientReceptiveField:
         default=ReceptiveFieldDirection.RECEPTIVE, repr=False, kw_only=True
     )
     unit_shape: tuple[int, ...] = field(default=(), repr=False, kw_only=True)
+    # SIGNED gradient values. ``grad`` holds magnitudes (the influence-set
+    # semantics every support/effective consumer wants), but the empirical
+    # adjoint identity is a SIGNED equality -- comparing absolute values lets
+    # a sign-disagreeing adjoint (the exact error class the check exists to
+    # catch) pass. ``None`` only on legacy/pickled results predating the field.
+    signed_grad: torch.Tensor | None = field(default=None, repr=False, kw_only=True)
 
     def __post_init__(self) -> None:
         """Validate scalar threshold and support metadata.
@@ -518,6 +563,17 @@ class GradientReceptiveField:
             start < 0 or stop < start for start, stop in self.support_ranges
         ):
             raise ValueError("support_ranges must contain non-negative half-open bounds.")
+
+    def __selection__(self) -> object:
+        """Lift the empirical support mask as an exact-set ACT selection term.
+
+        The mask's own epistemics remain the RF layer's documented claim
+        (relation=``exact`` w.r.t. the empirical mask), unchanged by lifting.
+        """
+
+        from ..selection import _selection_from_gradient
+
+        return _selection_from_gradient(self)
 
     @property
     def source_key(self) -> str:
@@ -654,10 +710,10 @@ class ReceptiveFieldValidation:
 class ReceptiveFieldProfile:
     """Tabular receptive-field report at one trace granularity."""
 
-    frame: "pd.DataFrame"
+    frame: pd.DataFrame
     level: Literal["op", "layer", "call", "module"]
 
-    def to_pandas(self) -> "pd.DataFrame":
+    def to_pandas(self) -> pd.DataFrame:
         """Return a copy of the underlying dataframe.
 
         Returns

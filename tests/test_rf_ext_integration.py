@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from fractions import Fraction
-import importlib
 from pathlib import Path
 from unittest import mock
 
 import pytest
 import torch
+from support.rf_isolation import preserved_rf_registry
 from torch import nn
 
 import torchlens as tl
@@ -26,31 +26,12 @@ from torchlens.receptive_field._types import (
 from torchlens.receptive_field._validation import check_geometric_metadata_invariants
 
 
-_PACK: dict[str, object] | None = None
-
-
 @pytest.fixture(autouse=True)
 def built_in_rule_pack() -> Iterator[None]:
     """Install the built-in RF rules while preserving registry isolation."""
 
-    global _PACK
-    original = dict(_rules._RF_RULES)
-    original_epoch = _rules._RF_RULES_EPOCH
-    _rules._RF_RULES.clear()
-    if _PACK is None:
-        module = importlib.import_module("torchlens.receptive_field.rules")
-        if not _rules._RF_RULES:
-            for name in module.__all__:
-                importlib.reload(getattr(module, name))
-        _PACK = dict(_rules._RF_RULES)
-    else:
-        _rules._RF_RULES.update(_PACK)
-    try:
+    with preserved_rf_registry(install_builtin=True):
         yield
-    finally:
-        _rules._RF_RULES.clear()
-        _rules._RF_RULES.update(original)
-        _rules._RF_RULES_EPOCH = original_epoch
 
 
 def _capture(model: nn.Module, inputs: torch.Tensor, *, backward_ready: bool = False) -> object:
@@ -274,7 +255,14 @@ def test_basic_block_geometric_adjoint_battery_is_exact() -> None:
 
 
 def test_default_validation_runs_cheap_rf_metadata_without_autograd() -> None:
-    """Keep always-on RF metadata checks in ordinary forward validation."""
+    """Keep always-on RF metadata checks in ordinary forward validation.
+
+    The autograd tripwire patches the RF gradient ENTRY POINTS, not the
+    ``torch.autograd.grad`` slot: forward validation now runs its ground-truth
+    oracle on pristine torch (R75-1), and a foreign patch layered over the
+    installed torchlens autograd wrapper would trip the R56 buried-site
+    disclosure during that unwrap/rewrap cycle.
+    """
 
     model = nn.Conv2d(1, 1, 3, padding=1)
     with (
@@ -282,7 +270,14 @@ def test_default_validation_runs_cheap_rf_metadata_without_autograd() -> None:
             "torchlens.receptive_field._validation.check_geometric_metadata_invariants",
             wraps=check_geometric_metadata_invariants,
         ) as geometry_check,
-        mock.patch("torch.autograd.grad", side_effect=AssertionError("autograd invoked")),
+        mock.patch(
+            "torchlens.receptive_field._validation.gradient_for_unit",
+            side_effect=AssertionError("RF gradient autograd invoked"),
+        ),
+        mock.patch(
+            "torchlens.receptive_field._validation.projective_gradient_for_unit",
+            side_effect=AssertionError("RF projective gradient autograd invoked"),
+        ),
     ):
         result = tl.validate(model, torch.ones(1, 1, 5, 5), scope="forward")
 
@@ -384,19 +379,18 @@ def test_source_target_caches_reuse_and_drop_across_portable_round_trip(
     source, target = _ops(trace, "conv2d")
 
     target.receptive_field.at((3, 3), source=source)  # type: ignore[union-attr]
-    source_cache = trace.__dict__["_rf_source_solutions"]
+    source_cache = trace.__dict__["_rf_directional_solutions"]["source"]
     first_source_solution = source_cache[source.label][2]  # type: ignore[union-attr]
     target.receptive_field.at((3, 3), source=source)  # type: ignore[union-attr]
     assert source_cache[source.label][2] is first_source_solution  # type: ignore[union-attr]
 
     source.projective_field.at((3, 3), target=target)  # type: ignore[union-attr]
-    target_cache = trace.__dict__["_rf_target_solutions"]
+    target_cache = trace.__dict__["_rf_directional_solutions"]["target"]
     target_key = (target.label,)  # type: ignore[union-attr]
     first_target_solution = target_cache[target_key][2]
     source.projective_field.at((3, 3), target=target)  # type: ignore[union-attr]
     assert target_cache[target_key][2] is first_target_solution
-    assert type(trace).PORTABLE_STATE_SPEC["_rf_source_solutions"] is FieldPolicy.DROP
-    assert type(trace).PORTABLE_STATE_SPEC["_rf_target_solutions"] is FieldPolicy.DROP
+    assert type(trace).PORTABLE_STATE_SPEC["_rf_directional_solutions"] is FieldPolicy.DROP
 
     path = tmp_path / "rf-endpoint-caches.tlspec"
     trace.save(path)
@@ -404,8 +398,7 @@ def test_source_target_caches_reuse_and_drop_across_portable_round_trip(
     loaded_source = loaded.ops[source.label]  # type: ignore[union-attr]
     loaded_target = loaded.ops[target.label]  # type: ignore[union-attr]
 
-    assert loaded.__dict__.get("_rf_source_solutions") is None
-    assert loaded.__dict__.get("_rf_target_solutions") is None
+    assert loaded.__dict__.get("_rf_directional_solutions") is None
     assert loaded_target.receptive_field.at((3, 3), source=loaded_source).exact
     assert loaded_source.projective_field.at((3, 3), target=loaded_target).exact
     with pytest.raises(ReceptiveFieldUnavailableError, match="backward_ready=True"):

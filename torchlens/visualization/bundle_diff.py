@@ -10,12 +10,13 @@ from typing import TYPE_CHECKING, Any, Literal
 import graphviz
 import torch
 
+from .._errors import InvalidArgumentError
 from ._render_utils import html_escape, render_dot_to_file, strip_known_extension
 from .themes import resolve_theme, theme_edge_attrs, theme_graph_attrs, theme_node_attrs
 
-if TYPE_CHECKING:  # pragma: no cover - typing-only
-    from ..data_classes.trace import Trace
+if TYPE_CHECKING:
     from ..bundle import Bundle
+    from ..data_classes.trace import Trace
 
 
 DiffLayout = Literal["paired"]
@@ -23,13 +24,13 @@ DiffTensorField = Literal["out", "grad"]
 
 
 def bundle_diff(
-    bundle: "Bundle",
+    bundle: Bundle,
     *,
     metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = "relative_l2",
     layout: DiffLayout = "paired",
-    left: str | "Trace" | None = None,
-    right: str | "Trace" | None = None,
-    baseline: str | "Trace" | None = None,
+    left: str | Trace | None = None,
+    right: str | Trace | None = None,
+    baseline: str | Trace | None = None,
     on: DiffTensorField = "out",
     vis_outpath: str = "bundle_diff",
     vis_save_only: bool = False,
@@ -78,7 +79,12 @@ def bundle_diff(
     """
 
     if layout != "paired":
-        raise ValueError("bundle_diff layout must be 'paired'.")
+        raise InvalidArgumentError(
+            f"bundle_diff layout must be 'paired'; received {layout!r}",
+            code="bundle_diff_layout_invalid",
+            remedy="pass layout='paired'",
+            argument="layout",
+        )
 
     left_name, right_name = _resolve_side_names(bundle, left=left, right=right)
     baseline_ref = baseline if baseline is not None else left_name
@@ -115,10 +121,10 @@ def bundle_diff(
 
 
 def _resolve_side_names(
-    bundle: "Bundle",
+    bundle: Bundle,
     *,
-    left: str | "Trace" | None,
-    right: str | "Trace" | None,
+    left: str | Trace | None,
+    right: str | Trace | None,
 ) -> tuple[str, str]:
     """Resolve the left and right bundle member names.
 
@@ -139,15 +145,23 @@ def _resolve_side_names(
 
     names = bundle.names
     if len(names) < 2 and (left is None or right is None):
-        raise ValueError("bundle_diff requires at least two bundle members.")
+        raise InvalidArgumentError(
+            "bundle_diff requires at least two bundle members",
+            code="bundle_diff_members_invalid",
+            remedy="diff a bundle with at least two members, or name both sides",
+        )
     left_name = _resolve_member_name(bundle, left if left is not None else names[0])
     right_name = _resolve_member_name(bundle, right if right is not None else names[1])
     if left_name == right_name:
-        raise ValueError("bundle_diff requires distinct left and right members.")
+        raise InvalidArgumentError(
+            "bundle_diff requires distinct left and right members",
+            code="bundle_diff_members_invalid",
+            remedy="pass two different member names for left and right",
+        )
     return left_name, right_name
 
 
-def _resolve_member_name(bundle: "Bundle", member: str | "Trace") -> str:
+def _resolve_member_name(bundle: Bundle, member: str | Trace) -> str:
     """Resolve a member reference inside a bundle.
 
     Parameters
@@ -173,7 +187,7 @@ def _resolve_member_name(bundle: "Bundle", member: str | "Trace") -> str:
     raise KeyError("Trace is not a member of this Bundle.")
 
 
-def _layer_to_supergraph_node(bundle: "Bundle") -> dict[str, str]:
+def _layer_to_supergraph_node(bundle: Bundle) -> dict[str, str]:
     """Map layer labels to their supergraph node names.
 
     Parameters
@@ -203,7 +217,7 @@ def _layer_to_supergraph_node(bundle: "Bundle") -> dict[str, str]:
 def _build_dot(
     *,
     pairs: list[tuple[Any, Any]],
-    bundle: "Bundle",
+    bundle: Bundle,
     left_name: str,
     right_name: str,
     metric_name: str,
@@ -498,7 +512,12 @@ def _select_pairs(
     if max_pairs is None or len(pairs) <= max_pairs:
         return pairs
     if max_pairs < 1:
-        raise ValueError("max_pairs must be at least 1 or None.")
+        raise InvalidArgumentError(
+            f"max_pairs must be at least 1 or None; received {max_pairs!r}",
+            code="max_pairs_invalid",
+            remedy="pass max_pairs >= 1 or None",
+            argument="max_pairs",
+        )
     scored: list[tuple[float, int, tuple[Any, Any]]] = []
     for index, (left_layer, right_layer) in enumerate(pairs):
         left_label = str(getattr(left_layer, "layer_label", ""))
@@ -817,46 +836,13 @@ def _delta_color(value: float, max_delta: float) -> str:
 def _interpolate(start: str, end: str, fraction: float) -> str:
     """Linearly interpolate between two hex colors.
 
-    Parameters
-    ----------
-    start:
-        Start color.
-    end:
-        End color.
-    fraction:
-        Interpolation fraction in ``[0, 1]``.
-
-    Returns
-    -------
-    str
-        Interpolated hex color.
+    Thin alias of the ONE colormap interpolation home
+    (:func:`torchlens.visualization._encoding.interpolate_hex`).
     """
 
-    start_rgb = _hex_to_rgb(start)
-    end_rgb = _hex_to_rgb(end)
-    values = [
-        round(start_value + (end_value - start_value) * fraction)
-        for start_value, end_value in zip(start_rgb, end_rgb)
-    ]
-    return "#" + "".join(f"{value:02X}" for value in values)
+    from ._encoding import interpolate_hex
 
-
-def _hex_to_rgb(value: str) -> tuple[int, int, int]:
-    """Convert a ``#RRGGBB`` color to RGB integers.
-
-    Parameters
-    ----------
-    value:
-        Hex color.
-
-    Returns
-    -------
-    tuple[int, int, int]
-        RGB values.
-    """
-
-    raw = value.lstrip("#")
-    return int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16)
+    return interpolate_hex(start, end, fraction)
 
 
 def _add_svg_accessibility(path: str, aria_label: str) -> None:

@@ -58,12 +58,11 @@ class RaisingModel(nn.Module):
 def test_root_only_linear_emits_root_enter_exit() -> None:
     """A single root nn.Linear still emits root enter and exit events."""
 
-    with pytest.warns(DeprecationWarning, match="keep_module"):
-        recording = tl.fastlog.record(
-            RootLinear(3, 2),
-            torch.ones(1, 3),
-            keep_module=lambda ctx: ctx.address == "",
-        )
+    recording = tl.fastlog.record(
+        RootLinear(3, 2),
+        torch.ones(1, 3),
+        default_module=True,
+    )
 
     assert [record.ctx.kind for record in recording] == ["module_enter", "module_exit"]
 
@@ -71,12 +70,11 @@ def test_root_only_linear_emits_root_enter_exit() -> None:
 def test_shared_module_pass_counter_increments_for_two_calls() -> None:
     """Shared module pass counters increment for repeated calls in one forward."""
 
-    with pytest.warns(DeprecationWarning, match="keep_module"):
-        recording = tl.fastlog.record(
-            SharedModule(),
-            torch.ones(1, 3),
-            keep_module=lambda ctx: ctx.address == "shared",
-        )
+    recording = tl.fastlog.record(
+        SharedModule(),
+        torch.ones(1, 3),
+        default_module=True,
+    )
     child_events = [record.ctx for record in recording if record.ctx.address == "shared"]
 
     assert [ctx.kind for ctx in child_events] == [
@@ -91,13 +89,12 @@ def test_shared_module_pass_counter_increments_for_two_calls() -> None:
 def test_identity_sequence_pass_through_tensor_is_visible() -> None:
     """Identity modules emit events and pass-through tensors remain visible."""
 
-    with pytest.warns(DeprecationWarning, match="keep_module"):
-        recording = tl.fastlog.record(
-            IdentitySequence(),
-            torch.ones(1, 3),
-            keep_module=lambda ctx: bool(ctx.address and "1" in ctx.address),
-            default_op=False,
-        )
+    recording = tl.fastlog.record(
+        IdentitySequence(),
+        torch.ones(1, 3),
+        default_module=True,
+        default_op=False,
+    )
 
     assert any(record.ctx.module_type == "Identity" for record in recording)
 
@@ -125,7 +122,7 @@ def test_predicate_exception_cleans_stack_and_respects_fail_fast() -> None:
         tl.fastlog.record(
             SharedModule(),
             torch.ones(1, 3),
-            keep_op=keep_op,
+            save=keep_op,
             on_predicate_error="fail-fast",
         )
 

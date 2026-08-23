@@ -95,12 +95,11 @@ def test_r35_no_float_torch_equal_in_runnable_modules() -> None:
 
     package_root = Path(torchlens.__file__).parent
     runnable_modules = (
-        "_io/runnable.py",
-        "_runnable_execution.py",
-        "_runnable_state.py",
-        "backends/torch/completeness_witness.py",
-        "backends/torch/backend.py",
-        "backends/torch/ops.py",
+        *sorted(path.relative_to(package_root) for path in package_root.glob("_runnable_*.py")),
+        Path("_io/runnable.py"),
+        Path("backends/torch/completeness_witness.py"),
+        Path("backends/torch/backend.py"),
+        Path("backends/torch/ops.py"),
     )
     offenders: list[str] = []
     for relative in runnable_modules:
@@ -239,7 +238,7 @@ def test_r35_cpu_only_seeded_run_never_touches_cuda_lazy_seed(tmp_path: Path) ->
     loaded = tl.load(str(path))
     from torchlens._runnable_execution import _seeded_fork_devices
 
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     if torch.cuda.is_available() and torch.cuda.is_initialized():
         assert _seeded_fork_devices(descriptor, 5) == list(range(torch.cuda.device_count()))
     else:

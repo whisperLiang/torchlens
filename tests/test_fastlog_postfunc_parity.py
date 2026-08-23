@@ -215,6 +215,37 @@ def test_ram_disk_mirror_populates_both_transformed_payloads(tmp_path: Path) -> 
         )
 
 
+def test_ram_disk_mirror_invokes_transform_once_per_selected_event(tmp_path: Path) -> None:
+    """Mirror mode shares one transform result between RAM and disk payloads."""
+
+    invocations = {"n": 0}
+
+    def counting_transform(t: torch.Tensor) -> torch.Tensor:
+        """Return a stateful transform so double invocation is observable."""
+
+        invocations["n"] += 1
+        return t + invocations["n"]
+
+    recording = tl.fastlog.record(
+        _PostfuncModel(),
+        torch.ones(1, 3),
+        save=lambda ctx: ctx.kind == "op" and ctx.func_name == "relu",
+        activation_transform=counting_transform,
+        streaming=tl.StreamingOptions(
+            bundle_path=tmp_path / "mirror_once.tlfast", retain_in_memory=True
+        ),
+    )
+
+    records = _out_records(recording)
+
+    assert len(records) == 1
+    assert invocations["n"] == 1
+    torch.testing.assert_close(
+        records[0].transformed_ram_payload,
+        records[0].transformed_disk_payload,
+    )
+
+
 def test_train_mode_well_behaved_transform_keeps_graph_connected_payload() -> None:
     """A graph-preserving transform keeps RAM payload differentiable."""
 
@@ -302,7 +333,7 @@ def test_predicate_transform_invocation_count_matches_kept_events() -> None:
     recording = tl.fastlog.record(
         _PostfuncModel(),
         torch.ones(1, 3),
-        keep_op=keep_op,
+        save=keep_op,
         activation_transform=counting_transform,
     )
 
@@ -328,7 +359,7 @@ def test_dry_run_does_not_invoke_transform() -> None:
     trace = tl.fastlog.dry_run(
         _PostfuncModel(),
         torch.ones(1, 3),
-        keep_op=lambda ctx: ctx.kind == "op",
+        save=lambda ctx: ctx.kind == "op",
     )
 
     assert trace.contexts

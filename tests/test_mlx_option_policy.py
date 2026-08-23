@@ -124,3 +124,28 @@ def test_mlx_extra_kwarg_policy_rejects_inert_runtime_options(
 
     with pytest.raises(BackendUnsupportedError, match=option_name):
         reject_extra_trace_kwargs(kwargs, MLX_EXTRA_KWARG_POLICY)
+
+
+def test_mlx_save_raw_activations_false_is_a_declared_capability() -> None:
+    """MLX honors ``save_raw_activations=False``; the other four previews refuse.
+
+    The asymmetry is intent, not drift (R17-5): MLX's capture-policy seam
+    drops payloads while preserving shape/dtype metadata, so its policy
+    carries no refusal message. A future backend must pick a side explicitly.
+    """
+
+    from torchlens.backends._options import (
+        JAX_PREVIEW_TRACE_OPTION_POLICY,
+        PADDLE_PREVIEW_TRACE_OPTION_POLICY,
+        TF_PREVIEW_TRACE_OPTION_POLICY,
+        TINYGRAD_PREVIEW_TRACE_OPTION_POLICY,
+    )
+
+    assert MLX_PREVIEW_TRACE_OPTION_POLICY.save_raw_activations_false_message is None
+    for policy in (
+        JAX_PREVIEW_TRACE_OPTION_POLICY,
+        TINYGRAD_PREVIEW_TRACE_OPTION_POLICY,
+        PADDLE_PREVIEW_TRACE_OPTION_POLICY,
+        TF_PREVIEW_TRACE_OPTION_POLICY,
+    ):
+        assert policy.save_raw_activations_false_message is not None

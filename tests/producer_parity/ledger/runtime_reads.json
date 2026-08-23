@@ -1,0 +1,164 @@
+{
+ "_edge_uses": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "backend_semantics": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "bool_value": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "capture_spec": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "construction_done": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "dropped_edge_tensor_args": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "equivalence_class": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "fire_results": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "func_call_id": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "function": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "grad_fn_class_qualname": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "grad_fn_handle": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "has_internal_source_ancestor": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "input_ancestors": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "input_was_parameter": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "internal_source_ancestors": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "intervention_fired": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "intervention_replaced": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "intervention_template_ref": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "is_bottom_level": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "is_output_parent": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "is_scalar_bool": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "is_transform": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "kind": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "label_raw": {
+  "tests/producer_parity/_snapshot.py": 3
+ },
+ "layer_label_raw": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "layer_type": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "module_stack": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "modules": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "output": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "params": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "parent_arg_positions": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "parent_params": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "parents": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "pass_index": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "policy": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "predicate_matched": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "raw_index": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "record_context": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "root_ancestors": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "seq": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "source_trace": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "source_trace_id": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "step_index": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "templates": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "tracing_finished": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "transform_chain": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "transform_config": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "transform_fn_name": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "transform_fn_qualname": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "transform_fn_source": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "transform_kind": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "type_index": {
+  "tests/producer_parity/_snapshot.py": 1
+ },
+ "unattributed_tensor_args": {
+  "tests/producer_parity/_snapshot.py": 1
+ }
+}

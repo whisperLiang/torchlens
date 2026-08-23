@@ -136,9 +136,10 @@ from __future__ import annotations
 import inspect
 import sys
 import warnings
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from functools import lru_cache
-from typing import Any, Callable, Iterator
+from typing import Any
 
 import torch
 
@@ -667,9 +668,7 @@ def _is_global_state_mutator_name(name: str) -> bool:
         return True
     if "clear" in low and "cache" in low:
         return True
-    if "set_plan_cache" in low:
-        return True
-    return False
+    return "set_plan_cache" in low
 
 
 # STRUCTURAL close of the arbitrary-callable-INVOKE class by SIGNATURE (r41,
@@ -799,13 +798,18 @@ def _is_side_effecting_callable_name(func: Callable[..., Any]) -> bool:
 
 
 def _tensor_method_owners() -> frozenset[type]:
-    """Return the class objects that own genuine C-level tensor method descriptors."""
+    """Return the class objects that own genuine C-level tensor method descriptors.
+
+    The C tensor base resolves through the ONE ``_torch_compat`` accessor
+    (``HAS_TENSORBASE_CLASS``, r-b4 R26-2) instead of a duplicated local probe.
+    """
+
+    from ._torch_compat import get_tensorbase_class
 
     owners: set[type] = {torch.Tensor}
-    for name in ("TensorBase", "_TensorBase"):
-        candidate = getattr(torch._C, name, None)
-        if isinstance(candidate, type):
-            owners.add(candidate)
+    tensorbase = get_tensorbase_class()
+    if tensorbase is not None:
+        owners.add(tensorbase)
     return frozenset(owners)
 
 
@@ -825,8 +829,11 @@ def _unwrap_capture_wrapper(func: Callable[..., Any]) -> Callable[..., Any]:
         from .. import _state
     except Exception:  # pragma: no cover - defensive; _state always imports here.
         return func
-    current = func
-    seen: set[int] = set()
+    original = _state._decorated_to_orig.get(id(func))
+    if original is None:
+        return func
+    current = original
+    seen: set[int] = {id(func)}
     while id(current) not in seen:
         seen.add(id(current))
         original = _state._decorated_to_orig.get(id(current))
@@ -970,7 +977,9 @@ def _iter_tensor_getset_descriptor_names() -> tuple[str, ...]:
     a new tensor property is seen by the classifier automatically.
     """
 
-    base = getattr(torch._C, "TensorBase", None) or getattr(torch._C, "_TensorBase", None)
+    from ._torch_compat import get_tensorbase_class
+
+    base = get_tensorbase_class()
     if base is None:  # pragma: no cover - torch always exposes the C tensor base here.
         return ()
     return tuple(
@@ -1002,8 +1011,14 @@ def _mode_free_probe_context() -> Iterator[None]:
     grad/inference/default-device state is untouched on exit.
     """
 
+    from ._torch_compat import get_disable_torch_function_context
+
     with ExitStack() as stack:
-        disabler = getattr(torch._C, "DisableTorchFunction", None)
+        # r-b4 R26-2: resolved through _torch_compat (HAS_DISABLE_TORCH_FUNCTION).
+        # The CPU-device fallback does NOT neutralize an ambient torch-FUNCTION
+        # mode, so its use is now disclosed by the flipped flag in doctor/compat
+        # rather than silently absorbed.
+        disabler = get_disable_torch_function_context()
         if disabler is not None:
             stack.enter_context(disabler())
         else:
@@ -1042,10 +1057,20 @@ def _pure_view(name: str) -> bool:
         # crash import. ``DisableTorchFunction`` does NOT alter the default device, so no
         # state leaks (verified: the caller's default device is untouched).
         with _mode_free_probe_context():
+            # Deterministic constructors, never ``torch.randn`` (B8-7): the
+            # probes used to draw from the user's GLOBAL default generator at
+            # first-capture lazy import, perturbing even a ``random_seed=``-
+            # pinned capture. Distinct element values keep the pure-read
+            # equality checks below meaningful; zero RNG is consumed.
             if use_complex:
-                probe = torch.randn(2, 3, device="cpu", dtype=torch.complex64, requires_grad=True)
+                ramp = torch.arange(6, dtype=torch.float32, device="cpu")
+                probe = torch.complex(ramp, ramp + 1.0).reshape(2, 3).requires_grad_(True)
             else:
-                probe = torch.randn(2, 3, device="cpu", requires_grad=True)
+                probe = (
+                    torch.arange(6, dtype=torch.float32, device="cpu")
+                    .reshape(2, 3)
+                    .requires_grad_(True)
+                )
             before = probe.detach().clone()
             version = probe._version
             try:
@@ -1094,6 +1119,16 @@ def _torch_overridable_callable_ids() -> frozenset[int]:
     both makes the membership test correct regardless of when this ``lru_cache`` is first
     populated relative to wrapping, since ``is_pure_forward_callable`` always tests the
     UNWRAPPED identity. Built once and frozen: the overridable set is torch-version-fixed.
+
+    ID-PINNING DEPENDENCY (why a frozen ``id()`` set stays valid for the
+    process lifetime): every recorded id is kept alive by a strong reference
+    elsewhere -- the raw callables by their owning torch modules (imported for
+    the process lifetime), and the capture-unwrapped originals by
+    ``_state._decorated_to_orig``, which is a LOCKED append-only ledger
+    (lesson b1842a1f: entries are never removed, even on unwrap). If either
+    pinning source ever weakens, a freed callable's id can recycle onto an
+    arbitrary object and this membership test silently mis-admits it -- do
+    not clear the ledger and do not make this cache outlive its pins.
     """
 
     ids: set[int] = set()
@@ -1155,6 +1190,11 @@ def _is_recognized_operator(real: Callable[..., Any], terminal_name: str) -> boo
     never re-admits a belt-denied or non-forward-dunder op.
     """
 
+    # Sound only while the id-set's members stay pinned: torch modules hold
+    # the raw callables and the append-only ``_state._decorated_to_orig``
+    # ledger holds the unwrapped originals (see the pinning note on
+    # ``_torch_overridable_callable_ids``). ``real`` itself is live here, so a
+    # recycled id cannot alias a still-pinned member.
     if id(real) in _torch_overridable_callable_ids():
         return True
     if _has_aten_operator_schema(terminal_name):
@@ -1449,7 +1489,9 @@ def is_denied_operator_gadget(func: Callable[..., Any]) -> bool:
 # Extras-gated "appliance" subpackages whose ``__init__`` imports FOREIGN
 # third-party dependencies; a callable resolved from one of these ran foreign
 # top-level code on import and must never be treated as inert first-party code.
-# Mirrors ``torchlens._io._safe_unpickle._TORCHLENS_APPLIANCE_MODULES``.
+# This is the canonical appliance-module vocabulary used by safe unpickling and
+# first-party callable classification. The intervention resolver keeps a fenced
+# import-order pin that is equality-gated in the SSOT drift suite.
 _APPLIANCE_MODULES: frozenset[str] = frozenset({"torchlens.neuro", "torchlens.notebook"})
 
 # Attribute stamped on a callable at ``@torchlens.facets.register`` time (on the

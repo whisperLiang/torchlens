@@ -3,16 +3,17 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import sys
-import importlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
 
 import torch
 
-from torchlens import log_forward_pass
+import torchlens as tl
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
@@ -34,13 +35,13 @@ class ReferenceSpec:
     title: str
     structural_role: str
     description: str
-    substitution_note: Optional[str]
+    substitution_note: str | None
     vis_mode: str
     vis_direction: str
     vis_nesting_depth: int
     builder_name: str
     input_description: str
-    build: Callable[[], Tuple[Any, Any]]
+    build: Callable[[], tuple[Any, Any]]
 
 
 def _simple_ff():
@@ -98,7 +99,7 @@ def _monster():
     ).eval(), torch.rand(2, 64)
 
 
-REFERENCE_SPECS: List[ReferenceSpec] = [
+REFERENCE_SPECS: list[ReferenceSpec] = [
     ReferenceSpec(
         key="simple_ff",
         title="Simple feedforward",
@@ -232,17 +233,17 @@ REFERENCE_SPECS: List[ReferenceSpec] = [
 ]
 
 
-def _render_one(spec: ReferenceSpec, gallery_dir: Path) -> Dict[str, Any]:
+def _render_one(spec: ReferenceSpec, gallery_dir: Path) -> dict[str, Any]:
     model, input_args = spec.build()
-    log = log_forward_pass(model, input_args, layers_to_save=None)
+    log = tl.trace(model, input_args, save=lambda _ctx: False)
     outpath = gallery_dir / f"{spec.key}.png"
     try:
-        log.render_graph(
+        log.draw(
             vis_renderer="dagua",
             vis_theme="torchlens",
             vis_mode=spec.vis_mode,
             direction=spec.vis_direction,
-            vis_nesting_depth=spec.vis_nesting_depth,
+            vis_call_depth=spec.vis_nesting_depth,
             vis_save_only=True,
             vis_fileformat="png",
             vis_outpath=str(outpath),
@@ -289,7 +290,7 @@ def _render_one(spec: ReferenceSpec, gallery_dir: Path) -> Dict[str, Any]:
 def build_gallery(
     gallery_dir: Path = DEFAULT_GALLERY_DIR,
     report_dir: Path = DEFAULT_REPORT_DIR,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     gallery_dir.mkdir(parents=True, exist_ok=True)
     report_dir.mkdir(parents=True, exist_ok=True)
 

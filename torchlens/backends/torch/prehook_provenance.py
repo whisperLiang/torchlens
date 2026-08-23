@@ -7,11 +7,11 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import Any, Literal, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
-from torch import nn
 import torch.nn.modules.module as torch_module
+from torch import nn
 
 from ... import _state
 from ...data_classes.func_call_location import FuncCallLocation
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 _INCOMPLETE_VERSION = "tensor_version_unavailable"
 _INCOMPLETE_BYPASS = "registration_interposition_bypassed"
+_INCOMPLETE_OPAQUE_OBJECT = "opaque_object_untraversed"
 _IMMUTABLE_LEAF_TYPES = (str, bytes, int, float, bool, complex, type(None))
 
 
@@ -99,7 +100,7 @@ class _InstanceAttributeReplacement:
 class PreHookProvenanceLedger:
     """Strong session-only ledger for all reversible interposition."""
 
-    trace: "Trace"
+    trace: Trace
     model: nn.Module
     modules: tuple[nn.Module, ...]
     prepared_ids: frozenset[int]
@@ -123,7 +124,7 @@ class PreHookProvenanceLedger:
 
 
 def install_prehook_provenance(
-    trace: "Trace",
+    trace: Trace,
     model: nn.Module,
     *,
     forward_hook_wrapper_factory: Callable[[nn.Module, Callable[..., Any]], Callable[..., Any]]
@@ -181,7 +182,7 @@ def install_prehook_provenance(
     return ledger
 
 
-def rollback_prehook_provenance(trace: "Trace") -> None:
+def rollback_prehook_provenance(trace: Trace) -> None:
     """Roll back all TorchLens pre-hook interposition by identity three-way merge.
 
     Parameters
@@ -398,7 +399,7 @@ def _refresh_observers(ledger: PreHookProvenanceLedger) -> None:
             _ensure_observer(ledger, module)
 
 
-def refresh_registration_bypasses(trace: "Trace", module: nn.Module | None = None) -> None:
+def refresh_registration_bypasses(trace: Trace, module: nn.Module | None = None) -> None:
     """Scan for private/pre-bound registration bypasses and downgrade attribution.
 
     Parameters
@@ -534,7 +535,7 @@ def _ensure_root_forward_binder(ledger: PreHookProvenanceLedger) -> None:
 
 
 def bind_invocation(
-    trace: "Trace",
+    trace: Trace,
     module: nn.Module,
     address: str,
     call_index: int,
@@ -562,7 +563,7 @@ def bind_invocation(
                 observation = _observe_state(args, kwargs)
                 snapshot = _snapshot_state(args, kwargs, observation)
             reasons = tuple(sorted({_INCOMPLETE_BYPASS, *observation.incomplete_reasons}))
-            trace.capture_events.pre_hook_events.append(
+            trace.capture_events.append_pre_hook(
                 PreHookProvenanceEvent(
                     address=address or "self",
                     call_index=call_index,
@@ -598,7 +599,7 @@ def _emit_token_event(
     reasons = tuple(sorted(token.incomplete_reasons | set(after_observation.incomplete_reasons)))
     before_snapshot = _snapshot_with_reasons(token.before_snapshot, reasons)
     after_snapshot = _snapshot_with_reasons(after_snapshot, reasons)
-    ledger.trace.capture_events.pre_hook_events.append(
+    ledger.trace.capture_events.append_pre_hook(
         PreHookProvenanceEvent(
             address=address,
             call_index=call_index,
@@ -830,6 +831,7 @@ def _walk_value(
         structure.append((path, "immutable", type(value).__name__))
         leaves.append((path, "immutable", (type(value).__name__, value)))
         return
+    reasons.add(_INCOMPLETE_OPAQUE_OBJECT)
     structure.append((path, "object", type(value).__qualname__))
     leaves.append((path, "object", (type(value).__qualname__, id(value))))
 
@@ -903,7 +905,7 @@ def _snapshot_state(
     kwargs: dict[str, Any],
     observation: _StateObservation,
     *,
-    trace: "Trace | None" = None,
+    trace: Trace | None = None,
     reuse_source_payload: bool = False,
 ) -> ModuleInputSnapshot:
     """Create one truthful detached snapshot, deduplicating tensor aliases."""
@@ -929,7 +931,7 @@ def _snapshot_state(
                     payload_origins[tensor_id] = "immutable_producer_snapshot"
                     return payload
             try:
-                copied = value.detach().clone()  # noqa: detach - provenance snapshot copy
+                copied = value.detach().clone()  # detach-ok: provenance snapshot copy
             except Exception:
                 copied = None
                 copy_failures.add(tensor_id)

@@ -23,14 +23,11 @@ import traceback
 from os.path import join as opj
 from pathlib import Path
 
+import example_models
 import pytest
 import torch
-
-from conftest import REPORTS_DIR, VIS_OUTPUT_DIR
-
 import torch.nn as nn
 
-import example_models
 from torchlens import func, trace as trace_fn
 from torchlens.options import CaptureOptions
 from torchlens.visualization import show_model_graph
@@ -39,6 +36,9 @@ from torchlens.visualization import show_model_graph
 # Report helpers
 # ---------------------------------------------------------------------------
 
+TEST_OUTPUTS_DIR = os.environ["TORCHLENS_TEST_OUTPUTS_DIR"]
+REPORTS_DIR = opj(TEST_OUTPUTS_DIR, "reports")
+VIS_OUTPUT_DIR = opj(TEST_OUTPUTS_DIR, "visualizations")
 REPORT_PATH = opj(REPORTS_DIR, "aesthetic_report.txt")
 VIS_DIR = opj(VIS_OUTPUT_DIR, "aesthetic_test_models")
 
@@ -586,6 +586,7 @@ def test_generate_aesthetic_report():
         model = model_cls()
         report.write(_capture_model_outputs(name, model, x, description))
 
+    os.makedirs(REPORTS_DIR, exist_ok=True)
     with open(REPORT_PATH, "w") as f:
         f.write(report.getvalue())
 
@@ -1216,8 +1217,8 @@ def _build_latex_report() -> str:
     for (
         stem,
         caption,
-        model_class_name,
-        input_desc,
+        _model_class_name,
+        _input_desc,
         vis_mode,
         depth,
         direction,
@@ -1252,8 +1253,8 @@ def _build_latex_report() -> str:
     for (
         stem,
         caption,
-        model_class_name,
-        input_desc,
+        _model_class_name,
+        _input_desc,
         vis_mode,
         depth,
         direction,
@@ -1295,7 +1296,7 @@ def _ensure_vis_pdfs_exist():
 
     # Standard gallery
     missing = [g for g in VIS_GALLERY if not os.path.exists(opj(VIS_DIR, f"{g[0]}.pdf"))]
-    for stem, caption, model_class_name, _, vis_mode, depth, direction, buffers in missing:
+    for stem, _caption, model_class_name, _, vis_mode, depth, direction, buffers in missing:
         model, x = model_inputs[model_class_name]
         _vis(
             model,
@@ -1311,7 +1312,7 @@ def _ensure_vis_pdfs_exist():
     grad_missing = [
         g for g in GRADIENT_VIS_GALLERY if not os.path.exists(opj(VIS_DIR, f"{g[0]}.pdf"))
     ]
-    for stem, caption, model_class_name, _, vis_mode, depth, direction in grad_missing:
+    for stem, _caption, model_class_name, _, vis_mode, depth, direction in grad_missing:
         model, x = model_inputs[model_class_name]
         _vis_grad(model, x, stem, vis_mode=vis_mode, depth=depth, direction=direction)
 
@@ -1334,6 +1335,7 @@ def test_generate_pdf_report():
     # Build LaTeX source
     tex_content = _build_latex_report()
 
+    os.makedirs(REPORTS_DIR, exist_ok=True)
     with open(TEX_PATH, "w") as f:
         f.write(tex_content)
 
@@ -1368,17 +1370,29 @@ def test_generate_pdf_report():
 # ---------------------------------------------------------------------------
 
 
+def _assert_generated_pdf(path: Path) -> None:
+    """Assert that a visualization run created a fresh non-empty PDF artifact."""
+
+    assert path.exists(), f"expected visualization artifact at {path}"
+    pdf_bytes = path.read_bytes()
+    assert pdf_bytes.startswith(b"%PDF"), f"expected {path} to be a PDF artifact"
+    assert len(pdf_bytes) > 0, f"expected non-empty PDF artifact at {path}"
+
+
 def _vis(
-    model,
-    x,
-    filename,
-    vis_mode="unrolled",
-    depth=1000,
-    direction="bottomup",
-    buffer_layers=False,
-    code_panel=False,
-):
-    """Generate a single visualization PDF."""
+    model: nn.Module,
+    x: torch.Tensor,
+    filename: str,
+    vis_mode: str = "unrolled",
+    depth: int = 1000,
+    direction: str = "bottomup",
+    buffer_layers: bool = False,
+    code_panel: bool = False,
+) -> None:
+    """Generate one visualization PDF and assert that it was freshly written."""
+
+    pdf_path = Path(VIS_DIR) / f"{filename}.pdf"
+    pdf_path.unlink(missing_ok=True)
     show_model_graph(
         model,
         x,
@@ -1392,14 +1406,24 @@ def _vis(
         code_panel=code_panel,
         random_seed=42,
     )
+    _assert_generated_pdf(pdf_path)
 
 
-def _vis_grad(model, x, filename, vis_mode="unrolled", depth=1000, direction="bottomup"):
+def _vis_grad(
+    model: nn.Module,
+    x: torch.Tensor,
+    filename: str,
+    vis_mode: str = "unrolled",
+    depth: int = 1000,
+    direction: str = "bottomup",
+) -> None:
     """Generate a visualization PDF with grad backward arrows.
 
     Uses trace_fn(save_grads=True) + backward() + draw()
     since show_model_graph() hardcodes save_grads=False.
     """
+    pdf_path = Path(VIS_DIR) / f"{filename}.pdf"
+    pdf_path.unlink(missing_ok=True)
     log = trace_fn(model, x, save_grads=True, random_seed=42)
     output = log[log.output_layers[0]].out
     output.sum().backward()
@@ -1411,6 +1435,7 @@ def _vis_grad(model, x, filename, vis_mode="unrolled", depth=1000, direction="bo
         vis_fileformat="pdf",
         direction=direction,
     )
+    _assert_generated_pdf(pdf_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1562,13 +1587,12 @@ class TestVisualizationBugfixes:
     ) -> None:
         """Failed forward rendering keeps the DOT source so the error hint is truthful."""
 
-        from torchlens.visualization.rendering import GraphvizRenderError
+        from torchlens.visualization import _render_utils
+        from torchlens.visualization._render_common import GraphvizRenderError
 
         def _raise_dot_failure(
             cmd: list[str],
-            timeout: int,
-            check: bool,
-            capture_output: bool,
+            **kwargs: object,
         ) -> subprocess.CompletedProcess[bytes]:
             """Raise a Graphviz process failure after the DOT source is written."""
 
@@ -1581,7 +1605,9 @@ class TestVisualizationBugfixes:
         model = nn.Identity()
         log = trace_fn(model, torch.randn(2, 3))
         outpath = tmp_path / "identity_render_failure"
-        monkeypatch.setattr(subprocess, "run", _raise_dot_failure)
+        # Every render spawn routes through the ONE bounded-subprocess seam
+        # (process-group teardown, r3 3.10 VIZ); patch it, not subprocess.run.
+        monkeypatch.setattr(_render_utils, "run_bounded_subprocess", _raise_dot_failure)
         try:
             with pytest.raises(GraphvizRenderError):
                 log.draw(
@@ -1598,13 +1624,15 @@ class TestVisualizationBugfixes:
             log.cleanup()
 
     def test_vis_call_depth_0(self):
-        """vis_call_depth=0 should not crash."""
+        """vis_call_depth=0 should not crash and must emit a real PDF."""
         model = _SimpleLinear()
         log = trace_fn(model, torch.randn(2, 10))
+        pdf_path = Path(VIS_DIR) / "test_call_depth_0.pdf"
+        pdf_path.unlink(missing_ok=True)
         try:
-            from torchlens.visualization.rendering import draw
+            from torchlens.visualization._render_dot import draw
 
-            draw(
+            dot = draw(
                 log,
                 vis_call_depth=0,
                 vis_save_only=True,
@@ -1612,6 +1640,9 @@ class TestVisualizationBugfixes:
             )
         except ImportError:
             pytest.skip("graphviz not available")
+        # A no-op renderer would return "" and write nothing; assert real output.
+        assert isinstance(dot, str) and "digraph" in dot
+        _assert_generated_pdf(pdf_path)
 
     def test_intervention_visualization_styles(self):
         """Intervention node-mark and as-node modes emit expected style cues."""
@@ -1648,15 +1679,20 @@ class TestVisualizationBugfixes:
             log.cleanup()
 
     def test_vis_selective_save(self):
-        """Selective activation saving should not crash visualization."""
+        """Selective activation saving should render a real PDF, not just not crash."""
         model = _SimpleLinear()
         log = trace_fn(model, torch.randn(2, 10), layers_to_save="all")
+        pdf_path = Path(VIS_DIR) / "test_selective_save.pdf"
+        pdf_path.unlink(missing_ok=True)
         try:
-            from torchlens.visualization.rendering import draw
+            from torchlens.visualization._render_dot import draw
 
-            draw(log, vis_save_only=True, vis_outpath=opj(VIS_DIR, "test_selective_save"))
+            dot = draw(log, vis_save_only=True, vis_outpath=opj(VIS_DIR, "test_selective_save"))
         except ImportError:
             pytest.skip("graphviz not available")
+        # A no-op renderer would return "" and write nothing; assert real output.
+        assert isinstance(dot, str) and "digraph" in dot
+        _assert_generated_pdf(pdf_path)
 
 
 class TestVisModuleListFormat:
@@ -1681,4 +1717,9 @@ class TestVisModuleListFormat:
 
         model = Outer()
         log = trace_fn(model, torch.randn(2, 10))
-        log.draw(vis_save_only=True, vis_outpath=opj(VIS_DIR, "test_nested_modules"))
+        pdf_path = Path(VIS_DIR) / "test_nested_modules.pdf"
+        pdf_path.unlink(missing_ok=True)
+        dot = log.draw(vis_save_only=True, vis_outpath=opj(VIS_DIR, "test_nested_modules"))
+        # A no-op renderer would return "" and write nothing; assert real output.
+        assert isinstance(dot, str) and "digraph" in dot
+        _assert_generated_pdf(pdf_path)

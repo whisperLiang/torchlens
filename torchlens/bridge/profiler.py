@@ -6,9 +6,17 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+from .._io import _json
+from ..utils.display import atomic_write_text
+
 
 def execution_trace(log: Any, trace_path: str | Path) -> dict[str, Any]:
-    """Export a lightweight PyTorch ExecutionTraceObserver-compatible trace.
+    """Export a lightweight TorchLens execution-trace JSON file.
+
+    This writes TorchLens' own ``torchlens.execution_trace.v1`` schema (per-layer
+    ``id``/``name``/``op``/``inputs``/``bytes`` nodes). It is NOT the PyTorch
+    ExecutionTraceObserver / Chakra execution-trace schema (``1.1.1-chakra`` with
+    ``attrs``/``ctrl_deps``/``outputs``), so Chakra/HTA consumers cannot parse it.
 
     Parameters
     ----------
@@ -37,7 +45,7 @@ def execution_trace(log: Any, trace_path: str | Path) -> dict[str, Any]:
     payload = {"schema": "torchlens.execution_trace.v1", "nodes": nodes}
     path = Path(trace_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, indent=2))
     return payload
 
 
@@ -99,7 +107,12 @@ def _load_trace(kineto_trace: str | Path | dict[str, Any]) -> dict[str, Any]:
     if isinstance(kineto_trace, dict):
         return kineto_trace
     path = Path(kineto_trace)
-    return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
+    # A Kineto trace file is external, potentially attacker-supplied input on the
+    # same footing as a ``.tlspec`` manifest, so it routes through the ONE bounded
+    # reader: ``read_text`` allocated the whole file before any ceiling applied, and
+    # stdlib ``json.loads`` answered a deeply nested payload with an untyped
+    # ``RecursionError`` rather than a typed refusal.
+    return cast(dict[str, Any], _json.read_bounded(path))
 
 
 def _trace_events(trace: dict[str, Any]) -> list[dict[str, Any]]:
@@ -116,7 +129,11 @@ def _trace_events(trace: dict[str, Any]) -> list[dict[str, Any]]:
         Event dictionaries.
     """
 
-    events = trace.get("traceEvents", trace.get("events", []))
+    events = trace.get("traceEvents")
+    if events is None:
+        events = trace.get("events")
+    if events is None:
+        events = []
     return [event for event in events if isinstance(event, dict)]
 
 
@@ -141,7 +158,14 @@ def _event_matches_layer(event: dict[str, Any], *, label: str, func_name: str) -
     event_name = str(event.get("name", ""))
     if not event_name:
         return False
-    return label in event_name or (func_name != "none" and func_name in event_name)
+    # A blank label/func_name would substring-match EVERY event ("" in anything is
+    # True), so a layer record missing layer_label/func_name would silently absorb
+    # the entire trace. Refuse blank matches. The substring/many-to-many matching
+    # of NON-blank labels/funcs is the owner-reserved join contract and is left
+    # unchanged here.
+    label_match = bool(label.strip()) and label in event_name
+    func_match = bool(func_name.strip()) and func_name != "none" and func_name in event_name
+    return label_match or func_match
 
 
 def _metadata(trace: dict[str, Any]) -> dict[str, Any]:

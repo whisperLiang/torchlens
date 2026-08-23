@@ -49,7 +49,8 @@ def main() -> None:
     set_log.set(tl.func("relu"), torch.zeros(relu_shape), confirm_mutation=True).replay()
 
     hook_log = log.fork("hook")
-    hook_log.attach_hooks(tl.func("relu"), tl.zero_ablate()).replay()
+    hook_log.attach_hooks(tl.func("relu"), tl.zero_ablate())
+    hook_log.replay()
 
     assert torch.allclose(set_log.layer_list[-1].out, hook_log.layer_list[-1].out)
     assert set_log.state_history[-2]["op"] == "set"

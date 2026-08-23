@@ -14,8 +14,10 @@ import argparse
 import html
 import shutil
 import sys
+import tempfile
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AUDIT_DIR = REPO_ROOT / "notebooks" / "audit"
@@ -44,9 +46,10 @@ sys.path.insert(0, str(AUDIT_DIR))
 sys.path.insert(0, str(VISUAL_DIR))
 
 import torch  # noqa: E402
-import torchlens as tl  # noqa: E402
 from _models import ZOO  # noqa: E402
 from _visual_models import VZOO  # noqa: E402
+
+import torchlens as tl  # noqa: E402
 
 
 def _verify_checkout() -> None:
@@ -160,13 +163,16 @@ def _copy_for_review(out_dir: Path) -> None:
         shutil.copy2(out_dir / image_name, REVIEW_OUT_DIR / image_name)
 
 
-def render(out_dir: Path) -> None:
-    """Render every reference image and copy it for human review.
+def render(out_dir: Path, *, copy_for_review: bool = True) -> None:
+    """Render every reference image and optionally copy it for human review.
 
     Parameters
     ----------
     out_dir:
         Directory where checked-in SVG images are written.
+    copy_for_review:
+        Whether to also copy the gallery to the human-review staging
+        directory. ``--check`` renders to a throwaway directory and skips it.
     """
 
     _verify_checkout()
@@ -206,7 +212,37 @@ def render(out_dir: Path) -> None:
     missing = [image_name for image_name in IMAGE_NAMES if not (out_dir / image_name).is_file()]
     if missing:
         raise RuntimeError(f"Missing rendered images: {', '.join(missing)}")
-    _copy_for_review(out_dir)
+    if copy_for_review:
+        _copy_for_review(out_dir)
+
+
+def check(reference_dir: Path) -> list[str]:
+    """Regenerate the gallery into a temp dir and byte-diff the reference.
+
+    Parameters
+    ----------
+    reference_dir:
+        Directory holding the checked-in SVG gallery to verify.
+
+    Returns
+    -------
+    list[str]
+        Names of images that are missing from the reference directory or
+        whose bytes differ from a fresh regeneration; empty when current.
+    """
+
+    stale: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="collapse-check-") as tmp:
+        fresh_dir = Path(tmp)
+        render(fresh_dir, copy_for_review=False)
+        for image_name in IMAGE_NAMES:
+            reference = reference_dir / image_name
+            if not reference.is_file():
+                stale.append(f"{image_name} (missing)")
+                continue
+            if reference.read_bytes() != (fresh_dir / image_name).read_bytes():
+                stale.append(f"{image_name} (differs)")
+    return stale
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -221,13 +257,19 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument(
-        "--check", action="store_true", help="verify the expected checked-in image set"
+        "--check",
+        action="store_true",
+        help="regenerate to a temp dir and byte-diff against the checked-in gallery",
     )
     args = parser.parse_args(argv)
     if args.check:
-        missing = [name for name in IMAGE_NAMES if not (args.out_dir / name).is_file()]
-        if missing:
-            raise SystemExit(f"Missing collapse reference images: {', '.join(missing)}")
+        stale = check(args.out_dir)
+        if stale:
+            raise SystemExit(
+                "Stale collapse reference images (regenerate with "
+                f"`python scripts/render_collapse_reference.py`): {', '.join(stale)}"
+            )
+        print(f"ok: {len(IMAGE_NAMES)} collapse reference images are current")
         return
     render(args.out_dir)
 

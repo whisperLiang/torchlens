@@ -2,9 +2,11 @@
 
 # ruff: noqa: F403, F405
 
+from .._errors import InvalidArgumentError
+from ..utils._multipass_access import get_multipass_attr
 from ._render_common import *
-from ._render_leaf import *
 from ._render_edges import *
+from ._render_leaf import *
 from ._render_nodes import *
 
 
@@ -105,13 +107,19 @@ def _is_non_file_svg_href(href: str) -> bool:
     )
 
 
-def _resolve_svg_image_path(href: str) -> Path:
+def _resolve_svg_image_path(href: str, image_root: Path | None = None) -> Path:
     """Resolve an SVG href to a local path.
 
     Parameters
     ----------
     href:
         SVG image href value.
+    image_root:
+        Directory a relative href is resolved against — the graph-level
+        ``imagepath`` root Graphviz itself used (r-b6 R19-6 emits node image
+        attrs relative to the visualizer scratch dir). Falls back to the
+        working directory when the root is unset or the rooted file does not
+        exist, matching Graphviz's own search order.
 
     Returns
     -------
@@ -120,9 +128,13 @@ def _resolve_svg_image_path(href: str) -> Path:
     """
 
     candidate = Path(href).expanduser()
-    if not candidate.is_absolute():
-        candidate = Path.cwd() / candidate
-    return candidate
+    if candidate.is_absolute():
+        return candidate
+    if image_root is not None:
+        rooted = image_root / candidate
+        if rooted.exists():
+            return rooted
+    return Path.cwd() / candidate
 
 
 def _replace_svg_attr_value(tag: str, attr_name: str, value: str) -> str:
@@ -285,12 +297,16 @@ def _build_skip_filtered_edge_map(
             if not skip_fn(layer_log):
                 continue
             if layer_log.is_input or layer_log.is_output:
-                raise ValueError(
-                    f"skip_fn cannot skip input or output layer '{layer_log.layer_label}'."
+                raise InvalidArgumentError(
+                    f"skip_fn cannot skip input or output layer '{layer_log.layer_label}'",
+                    code="skip_fn_boundary_invalid",
+                    remedy="return False from skip_fn for input and output layers",
+                    label=layer_log.layer_label,
                 )
             skipped_labels.add(_render_node_label(node, vis_mode))
 
     edge_map: dict[str, list[RenderEdge]] = {}
+    visible_entries_by_layer = {node.layer_label: node for node in visible_entries.values()}
     for node in visible_entries.values():
         if _render_node_label(node, vis_mode) in skipped_labels:
             continue
@@ -298,6 +314,7 @@ def _build_skip_filtered_edge_map(
             trace,
             node,
             visible_entries,
+            visible_entries_by_layer,
             skipped_labels,
             vis_mode,
         )
@@ -308,6 +325,7 @@ def _is_hidden_buffer_update_node(
     trace: "Trace",
     node: GraphNode,
     entries_to_plot: Mapping[str, GraphNode],
+    entries_by_layer_label: Mapping[str, GraphNode],
     show_buffer_layers: BufferVisibilityLiteral,
     vis_mode: str,
 ) -> bool:
@@ -321,6 +339,8 @@ def _is_hidden_buffer_update_node(
         Candidate non-buffer update operation.
     entries_to_plot:
         Nodes visible before buffer filtering.
+    entries_by_layer_label:
+        Render entries indexed by their canonical layer labels.
     show_buffer_layers:
         Active buffer visibility mode.
     vis_mode:
@@ -337,7 +357,6 @@ def _is_hidden_buffer_update_node(
     endpoint_labels = list(node.parents) + list(node.children)
     if not endpoint_labels:
         return False
-    entries_by_layer_label = {entry.layer_label: entry for entry in entries_to_plot.values()}
     endpoints: list[GraphNode] = []
     for label in endpoint_labels:
         endpoint = entries_to_plot.get(label) or entries_by_layer_label.get(label)
@@ -424,6 +443,7 @@ def _enumerate_base_rendered_node_emissions(
 
     emitted_names: set[str] = set()
     emissions: list[RenderedNodeEmission] = []
+    entries_by_layer_label = {entry.layer_label: entry for entry in entries_to_plot.values()}
     for node in entries_to_plot.values():
         if _render_node_label(node, vis_mode) in skipped_labels:
             continue
@@ -433,6 +453,7 @@ def _enumerate_base_rendered_node_emissions(
             trace,
             node,
             entries_to_plot,
+            entries_by_layer_label,
             show_buffer_layers,
             vis_mode,
         ):
@@ -528,7 +549,11 @@ def _base_rendered_node_emission(
             fold=_run_fold_for_address(address, repeat_folds),
         )
     name = _render_node_label(node, vis_mode).replace(":", "pass")
-    if show_containers in {"collapsed", "auto"} and name in collapsed_container_nodes:
+    # Map membership is the ONE collapse predicate: _collapsed_container_leaf_nodes
+    # owns the mode decision ({"collapsed", "auto", "nodes"}), and the edge pass
+    # reroutes every mapped leaf's edges to the summary box. Re-checking the mode
+    # here orphaned the leaves in "nodes" mode (drawn, but edges stolen).
+    if name in collapsed_container_nodes:
         return None
     if isinstance(node, BoundaryNode):
         return RenderedNodeEmission(
@@ -707,7 +732,9 @@ def _collapsed_endpoint_for_emission(
 def _container_role(node: BaseGraphNode) -> str | None:
     """Return the node's role within its container, if present."""
 
-    path = tuple(getattr(node, "container_path", ()) or ())
+    # Per-pass field: a rolled multi-pass Layer degrades to no role (see
+    # _container_group_id) instead of leaking the multi-pass tripwire.
+    path = tuple(get_multipass_attr(node, "container_path", (), multipass=None) or ())
     if not path:
         return None
     return _container_component_role(path[-1])
@@ -1235,9 +1262,12 @@ def _build_module_focus_entries(
         if _node_is_inside_module(node, target_module.address)
     }
     if not focus_labels:
-        raise ValueError(
+        raise InvalidArgumentError(
             f"Module '{target_module.address}' has no layers to render. "
-            "Empty modules cannot be focused."
+            "Empty modules cannot be focused",
+            code="module_focus_empty",
+            remedy="focus a module that contains rendered layers",
+            module=target_module.address,
         )
 
     focused_entries: dict[str, GraphNode] = {
@@ -1550,7 +1580,8 @@ def _render_edge_occurrences(
 def _expand_edges_through_skipped(
     trace: "Trace",
     parent_node: GraphNode,
-    visible_entries: dict[str, GraphNode],
+    visible_entries: Mapping[str, GraphNode],
+    visible_entries_by_layer: Mapping[str, GraphNode],
     skipped_labels: set[str],
     vis_mode: str,
 ) -> list[RenderEdge]:
@@ -1564,6 +1595,8 @@ def _expand_edges_through_skipped(
         Source node whose outgoing edges should be expanded.
     visible_entries:
         Visible nodes before applying ``skip_fn``.
+    visible_entries_by_layer:
+        Visible entries indexed by their canonical layer labels.
     skipped_labels:
         Labels elided by ``skip_fn``.
     vis_mode:
@@ -1575,7 +1608,6 @@ def _expand_edges_through_skipped(
         Deduplicated non-skipped targets.
     """
 
-    visible_entries_by_layer = {node.layer_label: node for node in visible_entries.values()}
     by_target: dict[tuple[str, tuple[Any, ...]], RenderEdge] = {}
     for child_label in parent_node.children:
         child_node = visible_entries.get(child_label) or visible_entries_by_layer.get(child_label)
@@ -1592,6 +1624,7 @@ def _expand_edges_through_skipped(
                 trace,
                 child_node,
                 visible_entries,
+                visible_entries_by_layer,
                 skipped_labels,
                 vis_mode,
                 seen={parent_label},
@@ -1621,7 +1654,8 @@ def _expand_edges_through_skipped(
 def _walk_skipped_successors(
     trace: "Trace",
     node: GraphNode,
-    visible_entries: dict[str, GraphNode],
+    visible_entries: Mapping[str, GraphNode],
+    visible_entries_by_layer: Mapping[str, GraphNode],
     skipped_labels: set[str],
     vis_mode: str,
     seen: set[str],
@@ -1636,6 +1670,8 @@ def _walk_skipped_successors(
         Current node in the traversal.
     visible_entries:
         Visible nodes before applying ``skip_fn``.
+    visible_entries_by_layer:
+        Visible entries indexed by their canonical layer labels.
     skipped_labels:
         Labels elided by ``skip_fn``.
     vis_mode:
@@ -1656,7 +1692,6 @@ def _walk_skipped_successors(
     if node_label not in skipped_labels:
         return [node]
     reached: list[GraphNode] = []
-    visible_entries_by_layer = {entry.layer_label: entry for entry in visible_entries.values()}
     for child_label in node.children:
         child_node = visible_entries.get(child_label) or visible_entries_by_layer.get(child_label)
         if child_node is None and vis_mode == "unrolled":
@@ -1668,6 +1703,7 @@ def _walk_skipped_successors(
                 trace,
                 child_node,
                 visible_entries,
+                visible_entries_by_layer,
                 skipped_labels,
                 vis_mode,
                 seen=set(seen),
@@ -1778,16 +1814,33 @@ def _assert_sibling_backstops(
     chains: tuple[SiblingOrderChain, ...],
     captured_edges: list[CapturedForwardEdge],
 ) -> None:
-    """Assert sibling-ordering structural backstops."""
+    """Check sibling-ordering structural backstops, raising on violation.
+
+    r-b7 R24-3: raises, not asserts — ``order_siblings=True`` is the shipped
+    DEFAULT, and under ``python -O`` an assert-based backstop vanishes
+    entirely, so an invisible ordering edge coinciding with real dataflow
+    would no longer be rejected.
+    """
 
     real_edges = {(edge.tail_name, edge.head_name) for edge in captured_edges}
-    assert len(baseline.nodes) == len(injected.nodes)
+    if len(baseline.nodes) != len(injected.nodes):
+        raise RuntimeError(
+            f"sibling-order injection changed the node population: baseline "
+            f"{len(baseline.nodes)} nodes vs injected {len(injected.nodes)}"
+        )
     for chain in chains:
         for target in chain.targets:
-            assert target in baseline.nodes
+            if target not in baseline.nodes:
+                raise RuntimeError(
+                    f"sibling-order chain names {target!r}, which is not a baseline layout node"
+                )
         for left, right in zip(chain.targets, chain.targets[1:]):
-            assert (left, right) not in real_edges
-            assert (right, left) not in real_edges
+            if (left, right) in real_edges or (right, left) in real_edges:
+                raise RuntimeError(
+                    f"sibling-order chain pair ({left!r}, {right!r}) coincides "
+                    "with a real dataflow edge; the invisible ordering edge "
+                    "would distort the rendered graph"
+                )
 
 
 def _inject_sibling_rank_groups(source: str, chains: tuple[SiblingOrderChain, ...]) -> str:
@@ -1932,8 +1985,16 @@ def _get_max_call_depth(
 
     while len(module_depth_stack) > 0:
         module, module_depth = module_depth_stack.pop()
-        module_edges = module_edge_dict[module]["edges"]
-        module_submodules = module_submodule_dict[module]
+        # Multi-pass (recurrent) hierarchies expose per-pass call keys (e.g.
+        # ``fc:3``) through ``top_modules``/``module_submodule_dict`` even when
+        # the combined-graph edge payloads only carry the first-pass key
+        # (``fc:1``). Treat any key with no recorded edge payload as edge-empty
+        # rather than indexing blindly, so the depth crawl stays robust instead
+        # of raising ``KeyError`` on a phantom per-pass key. Keys that DO have a
+        # payload resolve byte-identically to the historical direct lookup.
+        module_payload = module_edge_dict.get(module)
+        module_edges = module_payload.get("edges", ()) if module_payload else ()
+        module_submodules = module_submodule_dict.get(module, [])
 
         if (len(module_edges) == 0) and (
             len(module_submodules) == 0

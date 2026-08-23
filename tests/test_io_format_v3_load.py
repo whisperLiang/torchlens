@@ -1,4 +1,4 @@
-"""v3-format .tlspec artifacts must still load cleanly under v4."""
+"""Pre-floor .tlspec artifacts refuse typed; current restores stay clean."""
 
 from __future__ import annotations
 
@@ -9,6 +9,13 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
+from torchlens.data_classes.trace import Trace
+from torchlens.ir.workspaces import (
+    LEGACY_TRACE_BUILD_STATE_KEYS,
+    ModuleCaptureWorkspace,
+    RawGraphWorkspace,
+    WrapperRuntimeWorkspace,
+)
 
 V3_GOLDEN = Path(__file__).parent / "golden" / "io_v3_sample.tlspec"
 _DROPPED_CAPTURE_FIELDS = (
@@ -18,25 +25,13 @@ _DROPPED_CAPTURE_FIELDS = (
 )
 
 
-@pytest.mark.skip(
-    reason=(
-        "feature-removed: metadata-less v3 tlspec golden cannot hydrate a runtime Trace after "
-        "2.0 portable schema consolidation"
-    )
-)
-def test_load_v3_artifact_into_v4_runtime() -> None:
-    """Load a v3 bundle and confirm loader-only normalization strips scratch fields."""
+def test_load_pre_floor_golden_refuses_typed() -> None:
+    """The checked-in pre-floor golden bundle refuses with the floor named."""
 
-    log = tl.load(str(V3_GOLDEN))
+    from torchlens.errors import ArtifactVersionBelowFloorError
 
-    assert log.num_ops > 0
-    assert hasattr(log, "layer_logs")
-    assert hasattr(log, "input_layers")
-
-    for field_name in _DROPPED_CAPTURE_FIELDS:
-        assert field_name not in log.__dict__, (
-            f"v3-loaded Trace carries legacy field {field_name!r}; normalizer failed"
-        )
+    with pytest.raises(ArtifactVersionBelowFloorError, match="torchlens 2.33"):
+        tl.load(str(V3_GOLDEN))
 
 
 def test_save_load_roundtrip_v4(tmp_path: Path) -> None:
@@ -51,3 +46,27 @@ def test_save_load_roundtrip_v4(tmp_path: Path) -> None:
 
     for field_name in _DROPPED_CAPTURE_FIELDS:
         assert field_name not in loaded.__dict__
+
+
+def test_plain_restore_drops_legacy_flat_and_nested_build_scratch() -> None:
+    """Never resurrect legacy capture scratch while restoring a finished Trace."""
+
+    source = tl.trace(nn.Sequential(nn.Linear(2, 2), nn.ReLU()), torch.randn(1, 2))
+    restored = Trace.__new__(Trace)
+    try:
+        state = source.__getstate__()
+        state.update({field_name: object() for field_name in LEGACY_TRACE_BUILD_STATE_KEYS})
+        state["_build_state"] = object()
+        state["_raw_graph_ws"] = RawGraphWorkspace()
+        state["_module_capture_ws"] = ModuleCaptureWorkspace()
+        state["_wrapper_runtime_ws"] = WrapperRuntimeWorkspace()
+        restored.__setstate__(state)
+
+        assert "_build_state" not in restored.__dict__
+        assert "_raw_graph_ws" not in restored.__dict__
+        assert "_module_capture_ws" not in restored.__dict__
+        assert "_wrapper_runtime_ws" not in restored.__dict__
+        assert not LEGACY_TRACE_BUILD_STATE_KEYS.intersection(restored.__dict__)
+    finally:
+        source.cleanup()
+        restored.cleanup()

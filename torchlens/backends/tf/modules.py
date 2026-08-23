@@ -13,7 +13,7 @@ from typing import Any
 from ...data_classes.param import Param
 from ...ir.events import ModuleFrame
 from ...ir.refs import DeviceRef, DtypeRef
-from ._tf_compat import get_tf_device_name
+from .._finalize import numel_from_shape as _numel, value_nbytes as _nbytes
 
 
 @dataclass(frozen=True)
@@ -106,6 +106,7 @@ def patched_tf_module_stack(
     tree: TFModuleTree | None,
     tf: Any,
     module_stack: list[ModuleFrame],
+    module_exit_hook: Any | None = None,
 ) -> Iterator[None]:
     """Temporarily patch TensorFlow module ``__call__`` methods to maintain a stack.
 
@@ -117,6 +118,10 @@ def patched_tf_module_stack(
         Imported TensorFlow module.
     module_stack
         Mutable stack receiving active module frames.
+    module_exit_hook
+        Optional callable ``(frame, module_type, output, module_stack) -> output``
+        consulted at every tracked module exit while the frame is still on the
+        stack; its return value replaces the module output.
 
     Yields
     ------
@@ -128,20 +133,35 @@ def patched_tf_module_stack(
         yield
         return
     originals: dict[type[Any], Any] = {}
-    keras_layer_class = _keras_layer_class(tf)
-    if keras_layer_class is not None:
-        _patch_class_call(keras_layer_class, tree, module_stack, originals)
-    for module_class in tree.modules_by_class:
-        if module_class is keras_layer_class:
-            continue
-        if "__call__" not in vars(module_class):
-            continue
-        _patch_class_call(module_class, tree, module_stack, originals)
+
+    def _restore_installed() -> None:
+        """Restore every class ``__call__`` patch that actually landed."""
+
+        for module_class, original in originals.items():
+            setattr(module_class, "__call__", original)
+
+    # R07 (the L4 unwind standard): the install loop mutates process-global
+    # module classes BEFORE the try that owns the yield, and Python never calls
+    # ``__exit__`` when ``__enter__`` raises -- a BaseException escaping the
+    # install used to strand every wrapper installed so far for the life of the
+    # process.
+    try:
+        keras_layer_class = _keras_layer_class(tf)
+        if keras_layer_class is not None:
+            _patch_class_call(keras_layer_class, tree, module_stack, originals, module_exit_hook)
+        for module_class in tree.modules_by_class:
+            if module_class is keras_layer_class:
+                continue
+            if "__call__" not in vars(module_class):
+                continue
+            _patch_class_call(module_class, tree, module_stack, originals, module_exit_hook)
+    except BaseException:
+        _restore_installed()
+        raise
     try:
         yield
     finally:
-        for module_class, original in originals.items():
-            setattr(module_class, "__call__", original)
+        _restore_installed()
 
 
 def tf_param_logs(tree: TFModuleTree, trace: Any) -> dict[str, Param]:
@@ -181,7 +201,7 @@ def tf_param_logs(tree: TFModuleTree, trace: Any) -> dict[str, Param]:
             has_optimizer=None,
         )
         param.dtype_ref = DtypeRef(backend="tf", name=dtype)
-        param.device_ref = DeviceRef(backend="tf", name=get_tf_device_name(variable))
+        param.device_ref = device_ref_from_tf_device(_variable_device(variable))
         param.backend_address = f"object:{address}"
         param.resolver_status = "resolved"
         param._param_ref = variable
@@ -193,11 +213,72 @@ def tf_param_logs(tree: TFModuleTree, trace: Any) -> dict[str, Param]:
     return logs
 
 
+def _variable_device(variable: Any) -> str:
+    """Return the placement device for a TensorFlow or Keras variable.
+
+    Keras 3 ``Variable`` wrappers expose ``device`` as ``None``; the live
+    ``tf.Variable`` behind their ``value`` property carries the real placement.
+
+    Parameters
+    ----------
+    variable
+        Keras 3 variable or raw ``tf.Variable``.
+
+    Returns
+    -------
+    str
+        Device string, empty when genuinely unavailable.
+    """
+
+    device = getattr(variable, "device", None)
+    if device:
+        return str(device)
+    inner = getattr(variable, "value", None)
+    if inner is not None and not callable(inner):
+        inner_device = getattr(inner, "device", None)
+        if inner_device:
+            return str(inner_device)
+    return ""
+
+
+def device_ref_from_tf_device(text: object) -> DeviceRef | None:
+    """Build a vocabulary-honest ``DeviceRef`` from a TensorFlow device string.
+
+    ``DeviceRef.backend`` is the HARDWARE device class (``"cpu"``, ``"gpu"``),
+    never the framework namespace. TensorFlow spells placement as a full path
+    (``"/job:localhost/replica:0/task:0/device:CPU:0"``); the canonical device
+    string is the lowercased tail after the last ``"device:"`` marker, routed
+    through :meth:`DeviceRef.from_value` like every other preview backend.
+
+    Parameters
+    ----------
+    text
+        TensorFlow device path, bare device string, or falsey when unknown.
+
+    Returns
+    -------
+    DeviceRef | None
+        Neutral device reference, or ``None`` when placement is unknown.
+    """
+
+    if not text:
+        return None
+    canonical = str(text)
+    marker = canonical.rfind("device:")
+    if marker != -1:
+        canonical = canonical[marker + len("device:") :]
+    canonical = canonical.strip("/").lower()
+    if not canonical:
+        return None
+    return DeviceRef.from_value(canonical)
+
+
 def _patch_class_call(
     module_class: type[Any],
     tree: TFModuleTree,
     module_stack: list[ModuleFrame],
     originals: dict[type[Any], Any],
+    module_exit_hook: Any | None = None,
 ) -> None:
     """Patch one concrete module class ``__call__`` method.
 
@@ -211,6 +292,8 @@ def _patch_class_call(
         Active capture stack.
     originals
         Original methods keyed by patched class.
+    module_exit_hook
+        Optional module-exit output substitution hook.
 
     Returns
     -------
@@ -220,7 +303,7 @@ def _patch_class_call(
 
     if module_class in originals:
         return
-    original_call = getattr(module_class, "__call__")
+    original_call = getattr(module_class, "__call__")  # noqa: B004 - fetches the __call__ object, not a callability test
     originals[module_class] = original_call
 
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
@@ -243,7 +326,10 @@ def _patch_class_call(
         )
         module_stack.append(frame)
         try:
-            return original_call(self, *args, **kwargs)
+            result = original_call(self, *args, **kwargs)
+            if module_exit_hook is not None:
+                result = module_exit_hook(frame, frame.module_type, result, tuple(module_stack))
+            return result
         finally:
             if module_stack and module_stack[-1] == frame:
                 module_stack.pop()
@@ -557,48 +643,6 @@ def _safe_address_part(value: str) -> str:
 
     cleaned = value.replace("/", ".").replace(":", "_")
     return cleaned or "module"
-
-
-def _numel(shape: tuple[int, ...]) -> int:
-    """Return the number of elements represented by ``shape``.
-
-    Parameters
-    ----------
-    shape
-        Tensor shape.
-
-    Returns
-    -------
-    int
-        Product of dimensions.
-    """
-
-    result = 1
-    for dim in shape:
-        result *= int(dim)
-    return result
-
-
-def _nbytes(value: Any) -> int | None:
-    """Return TensorFlow tensor memory in bytes when available.
-
-    Parameters
-    ----------
-    value
-        TensorFlow variable or tensor.
-
-    Returns
-    -------
-    int | None
-        Byte size, or ``None`` when unavailable.
-    """
-
-    shape = tuple(int(dim) for dim in getattr(value, "shape", ()))
-    dtype = getattr(value, "dtype", None)
-    size = getattr(dtype, "size", None)
-    if size is None:
-        return None
-    return _numel(shape) * int(size)
 
 
 def monotonic_time() -> float:

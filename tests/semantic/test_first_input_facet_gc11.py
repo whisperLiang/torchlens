@@ -91,8 +91,8 @@ def test_first_input_spec_falls_back_when_forward_args_absent() -> None:
     logic itself is pinned, independent of any one recipe's wiring.
     """
 
-    from torchlens.semantic.recipes._helpers import first_input_spec
     from torchlens.semantic.facets import AbsenceReason
+    from torchlens.semantic.recipes._helpers import first_input_spec
 
     model = nn.Sequential(nn.Linear(4, 4), nn.LayerNorm(4))
     x = torch.randn(2, 4)

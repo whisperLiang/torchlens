@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
 from .._errors import TorchLensPostfuncError
 from .._state import pause_logging
 from .._training_validation import TrainingModeConfigError
-from ..utils.tensor_utils import safe_copy
-from ..utils.tensor_utils import SaveMode
+from ..utils.tensor_utils import SaveMode, safe_copy
 from .exceptions import InvalidStorageError, PredicateError
 from .types import CaptureSpec, RecordContext, StorageIntent
 
@@ -69,7 +69,7 @@ def _resolve_storage(
     spec: CaptureSpec,
     intent: StorageIntent,
     *,
-    activation_transform: "ActivationPostfunc | None" = None,
+    activation_transform: ActivationPostfunc | None = None,
     save_raw_activations: bool = True,
     ctx: Any | None = None,
     kind: Literal["activation", "grad"] = "activation",
@@ -116,14 +116,25 @@ def _resolve_storage(
     """
 
     if spec.keep_grad and intent.on_disk and not intent.in_ram:
-        message = f"keep_grad=True is not valid for disk-only {kind} storage"
+        message = (
+            f"keep_grad=True is not valid for disk-only {kind} storage. "
+            "Remedy: set retain_in_memory=True or drop keep_grad=True."
+        )
         if kind == "grad":
-            raise InvalidStorageError(message)
-        raise PredicateError(message)
+            raise InvalidStorageError(message, code="predicate_storage_conflict")
+        raise PredicateError(message, code="predicate_storage_conflict")
     if spec.keep_grad and (tensor.dtype in _INTEGER_DTYPES or spec.dtype in _INTEGER_DTYPES):
-        raise PredicateError("keep_grad=True is not valid for integer or bool tensors")
+        raise PredicateError(
+            "keep_grad=True is not valid for integer or bool tensors. "
+            "Remedy: drop keep_grad=True or keep the payload in a floating dtype.",
+            code="predicate_storage_conflict",
+        )
     if spec.save_mode not in {"copy", "reference", "view", "cpu_async"}:
-        raise PredicateError("save_mode must be one of 'copy', 'reference', 'view', or 'cpu_async'")
+        raise PredicateError(
+            "save_mode must be one of 'copy', 'reference', 'view', or 'cpu_async'. "
+            "Remedy: set save_mode to one of those documented modes.",
+            code="save_mode_invalid",
+        )
     if spec.save_mode == "reference":
         _warn_reference_save_mode_once()
     if spec.save_mode == "view" and not spec.keep_grad:
@@ -169,24 +180,60 @@ def _resolve_storage(
         if keep_raw:
             ram_payload = raw_ram
     if intent.on_disk:
-        raw_disk = safe_copy(
-            tensor,
-            detach_tensor=True,
-            save_mode=_save_mode_for_payload(spec, target="disk"),
-        )
-        raw_disk = _apply_payload_transforms(raw_disk, spec)
-        if transform is not None:
-            transformed_disk = _invoke_transform(
-                raw_disk,
-                transform,
-                ctx=ctx,
-                spec=spec,
-                intent=intent,
-                target="disk",
+        raw_disk: torch.Tensor | None = None
+        if intent.in_ram:
+            if raw_ram is None:
+                raise RuntimeError("RAM mirror payload missing for disk-backed fastlog capture")
+            # The mirror consumers write their blobs synchronously before the
+            # forward advances, so the disk slot can alias the retained RAM
+            # payload instead of cloning it: the writer reads the same bytes a
+            # copy taken here would hold. A detached view keeps the disk mirror's
+            # documented detached-inspection contract (and the manifest's
+            # requires_grad=False) without a data copy.
+            if keep_raw:
+                disk_payload = _detached_write_alias(raw_ram)
+            if transformed_ram is not None:
+                transformed_disk = _detached_write_alias(transformed_ram)
+        else:
+            raw_disk = safe_copy(
+                tensor,
+                detach_tensor=True,
+                save_mode=_save_mode_for_payload(spec, target="disk"),
             )
-        if keep_raw:
-            disk_payload = raw_disk
+            raw_disk = _apply_payload_transforms(raw_disk, spec)
+            if transform is not None:
+                transformed_disk = _invoke_transform(
+                    raw_disk,
+                    transform,
+                    ctx=ctx,
+                    spec=spec,
+                    intent=intent,
+                    target="disk",
+                )
+            if keep_raw:
+                disk_payload = raw_disk
     return ram_payload, disk_payload, transformed_ram, transformed_disk
+
+
+def _detached_write_alias(tensor: torch.Tensor) -> torch.Tensor:
+    """Return a zero-copy detached handle on a RAM payload for a synchronous write.
+
+    Parameters
+    ----------
+    tensor:
+        Retained RAM payload whose bytes the blob writer will read immediately.
+
+    Returns
+    -------
+    torch.Tensor
+        The payload itself when already detached, else a detached view sharing
+        its storage (``save_mode="reference"`` through the sanctioned copy
+        primitive; only :func:`safe_copy` may detach on fastlog paths).
+    """
+
+    if not tensor.requires_grad:
+        return tensor
+    return safe_copy(tensor, detach_tensor=True, save_mode="reference")
 
 
 def _invoke_transform(
@@ -269,18 +316,23 @@ def _validate_train_mode_transformed(
     if not isinstance(transformed, torch.Tensor):
         raise TrainingModeConfigError(
             "activation_transform must return a torch.Tensor while keep_grad=True "
-            f"for fastlog event {label!r}."
+            f"for fastlog event {label!r}. "
+            "Remedy: return a differentiable torch.Tensor from activation_transform.",
+            code="transform_not_differentiable",
         )
     if transformed.dtype in _INTEGER_DTYPES:
         raise TrainingModeConfigError(
             f"backward_ready=True with non-grad dtype {transformed.dtype} on fastlog "
             f"event {label!r}. Integer and bool dtypes cannot propagate grads. "
-            "Adjust activation_transform to return a floating dtype."
+            "Remedy: adjust activation_transform to return a floating dtype.",
+            code="transform_not_differentiable",
         )
     if raw_tensor.requires_grad and transformed.grad_fn is None:
         raise TrainingModeConfigError(
             "activation_transform returned a tensor disconnected from the autograd "
             "graph (grad_fn is None) while keep_grad=True. The transformed out "
-            f"for fastlog event {label!r} must remain differentiable."
+            f"for fastlog event {label!r} must remain differentiable. "
+            "Remedy: keep activation_transform on the autograd graph (no detach/no_grad).",
+            code="transform_not_differentiable",
         )
     _ = spec

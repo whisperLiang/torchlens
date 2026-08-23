@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from ._engine import (
     _concatenation_offsets,
+    _geometry_memo,
     _graph_revision,
     _merge_states,
     _operation_is_live,
@@ -21,21 +22,21 @@ from ._engine import (
 from ._engine_descriptor import _descriptor
 from ._engine_geometry import (
     _Affine,
+    _as_tuple,
     _AxisState,
+    _compose,
     _Dissolved,
     _Full,
+    _identity_map,
     _InputState,
     _Mapped,
-    _as_tuple,
-    _compose,
-    _identity_map,
     _select_full_axes,
     _transpose_mapped,
 )
+from ._errors import ReceptiveFieldConfigurationError
 from ._path import ancestor_labels, resolve_graph_point
-from ._rules import _RuleResult, _rf_rules_epoch
+from ._rules import _rf_rules_epoch, _RuleResult
 from ._types import ReceptiveField, ReceptiveFieldDirection, ReceptiveFieldStatus
-
 
 if TYPE_CHECKING:
     from ..data_classes.op import Op
@@ -84,10 +85,14 @@ def solve_projective(trace: Trace, target_ops: Iterable[Op | str]) -> _Projectiv
     target_labels = tuple(target.label for target in targets)
     epoch = _rf_rules_epoch()
     revision = _graph_revision(trace)
-    cache = trace.__dict__.get("_rf_target_solutions")
+    caches = trace.__dict__.get("_rf_directional_solutions")
+    if not isinstance(caches, dict):
+        caches = {}
+        trace.__dict__["_rf_directional_solutions"] = caches
+    cache = caches.get("target")
     if not isinstance(cache, OrderedDict):
         cache = OrderedDict()
-        trace.__dict__["_rf_target_solutions"] = cache
+        caches["target"] = cache
 
     cached = cache.get(target_labels)
     if cached is not None:
@@ -96,7 +101,8 @@ def solve_projective(trace: Trace, target_ops: Iterable[Op | str]) -> _Projectiv
             cache.move_to_end(target_labels)
             return cached_solution
 
-    solution = _solve_projective_uncached(trace, targets, epoch, revision)
+    with _geometry_memo():
+        solution = _solve_projective_uncached(trace, targets, epoch, revision)
     cache[target_labels] = (epoch, revision, solution)
     cache.move_to_end(target_labels)
     while len(cache) > _TARGET_SOLUTION_CACHE_SIZE:
@@ -104,42 +110,20 @@ def solve_projective(trace: Trace, target_ops: Iterable[Op | str]) -> _Projectiv
     return solution
 
 
-def lookup_projective(
-    trace: Trace, source: Op | str, target_ops: Iterable[Op | str]
-) -> Mapping[str, ReceptiveField]:
-    """Return all target-space descriptors for one source operation.
-
-    Parameters
-    ----------
-    trace:
-        Captured TorchLens trace.
-    source:
-        Source operation or exact pass-qualified label.
-    target_ops:
-        Target operations passed to :func:`solve_projective`.
-
-    Returns
-    -------
-    collections.abc.Mapping
-        Mapping from reachable target result key to projective descriptor.
-    """
-
-    source_op = resolve_graph_point(trace, source)
-    return solve_projective(trace, target_ops).per_op.get(source_op.label, MappingProxyType({}))
-
-
 def _canonical_targets(trace: Trace, target_ops: Iterable[Op | str]) -> tuple[Op, ...]:
     """Resolve, deduplicate, and trace-order one target set."""
 
     resolved = {resolve_graph_point(trace, target).label for target in target_ops}
     if not resolved:
-        raise ValueError("Projective descriptor solving requires at least one target operation.")
+        raise ReceptiveFieldConfigurationError(
+            "Projective descriptor solving requires at least one target operation."
+        )
     targets = tuple(
         op for op in trace.layer_list if op.label in resolved and _operation_is_live(op)
     )
     keys = [target.io_role or target.label for target in targets]
     if len(keys) != len(set(keys)):
-        raise ValueError("Projective targets must have distinct result keys.")
+        raise ReceptiveFieldConfigurationError("Projective targets must have distinct result keys.")
     return targets
 
 
@@ -177,6 +161,11 @@ def _solve_projective_uncached(
             for reference in op.children
             if reference in by_reference and by_reference[reference].label in active_labels
         )
+        # This reverse program visits each edge from the PARENT side, so one
+        # child's local rule and concatenation layout are re-requested once per
+        # parent -- quadratic on a wide fan-in concatenation, since each miss is
+        # itself linear in the child's parents. The enclosing ``_geometry_memo``
+        # scope opened by ``solve_projective`` collapses both to once per child.
         for child in children:
             result, rule_name = _rule_result(child)
             for role, child_state in states_by_op.get(child.label, {}).items():
@@ -608,9 +597,7 @@ def _transpose_full(
         if child_rank == parent_rank:
             child_to_parent = {axis: axis for axis in range(child_rank)}
         elif child_rank == len(surviving_axes):
-            child_to_parent = {
-                child_axis: parent_axis for child_axis, parent_axis in enumerate(surviving_axes)
-            }
+            child_to_parent = dict(enumerate(surviving_axes))
     passthrough = _transpose_passthrough(
         child,
         parent,
@@ -634,7 +621,20 @@ def _transpose_full(
             for axis in state.axes
         )
         return replace(state, axes=fallback_axes, notes=notes, rule=rule_name)
-    assert passthrough.axes is not None
+    if passthrough.axes is None:
+        # A partial-axes kind="full" rule transposed onto a rank-mismatched
+        # parent (for example the computed-weight branch of F.linear) has no
+        # derivable axis map and no explicit surviving_parent_axes obligation.
+        # Degrade fail-closed to UNKNOWN instead of crashing a public
+        # validation or table query with a bare assertion.
+        return replace(
+            state,
+            axes=None,
+            taint=ReceptiveFieldStatus.UNKNOWN,
+            notes=notes
+            + (f"{child.label}: rank-changing partial-full relation lacks an explicit axis map",),
+            rule=rule_name,
+        )
     axes: list[_AxisState] = []
     batch_axis = passthrough.batch_axis
     for axis_index, (old_axis, mapped_axis) in enumerate(
@@ -691,6 +691,8 @@ def _transpose_axis_map(
             rule=rule_name,
         )
     mapping = {int(child_axis): int(parent_axis) for child_axis, parent_axis in raw_mapping.items()}
+    raw_edges = result.values.get("out_axis_edges", {})
+    out_axis_edges = raw_edges if isinstance(raw_edges, Mapping) else {}
     assert state.axes is not None
     axes: list[_AxisState] = []
     for axis in state.axes:
@@ -707,15 +709,99 @@ def _transpose_axis_map(
                 )
             )
         else:
+            geometry = axis.geometry
+            kind = axis.kind if axis.kind != "unknown" else "pointwise"
+            provenance = child.label if axis.kind == "unknown" else axis.provenance
+            edge = out_axis_edges.get(axis.output_axis)
+            if edge is not None and isinstance(geometry, _Mapped):
+                # Walking child->parent, the new frame coordinate ``p`` maps
+                # to the old child coordinate ``(p - start) / step``; without
+                # this inverse-affine composition every slice offset was
+                # dropped from the transposed relation (disputed-r2 b6/R20-2).
+                step, start = int(edge[0]), int(edge[1])
+                inverse_slope = Fraction(1, step)
+                local = _Mapped(
+                    _Affine(inverse_slope, Fraction(-start, step)),
+                    _Affine(inverse_slope, Fraction(-start, step)),
+                    sparse=inverse_slope.denominator != 1,
+                )
+                geometry = _compose(geometry, local)
+                if kind == "pointwise":
+                    kind = "windowed"
+                    provenance = child.label
             axes.append(
                 replace(
                     axis,
+                    geometry=geometry,
                     output_axis=mapping[axis.output_axis],
-                    kind=axis.kind if axis.kind != "unknown" else "pointwise",
-                    provenance=child.label if axis.kind == "unknown" else axis.provenance,
+                    kind=kind,
+                    provenance=provenance,
                 )
             )
-    return replace(state, axes=tuple(axes), notes=notes, rule=rule_name)
+    return _degrade_for_selected_axes(child, parent, state, result, rule_name, notes, axes)
+
+
+def _degrade_for_selected_axes(
+    child: Op,
+    parent: Op,
+    state: _InputState,
+    result: _RuleResult,
+    rule_name: str,
+    notes: tuple[str, ...],
+    axes: list[_AxisState],
+) -> _InputState:
+    """Widen a transposed axis-map state whose scalar-select drops real extent.
+
+    A scalar-selected parent axis of extent > 1 makes the whole transposed
+    image CONDITIONAL on the source's dropped coordinate: sources at the
+    recorded index project as mapped, every other source projects NOWHERE.
+    The descriptor lattice has no per-axis slot for the dropped parent axis,
+    so the sound presentation is an upper-bound envelope — every surviving
+    claim loses exactness. When the dropped axis is the parent's leading
+    axis (the batch heuristic shared with :func:`_transpose_full`) the
+    select also rebases batch indices across the boundary, so the known
+    target batch axis widens to a whole-extent full claim, DECLARING the
+    coupling geometrically instead of serving an identity pointwise claim
+    that misses the true mapping (disputed-r3 F2).
+    """
+
+    raw_selected = result.values.get("selected_parent_axes", ())
+    selected = (
+        tuple(int(axis) for axis in raw_selected)
+        if isinstance(raw_selected, Sequence) and not isinstance(raw_selected, (str, bytes))
+        else ()
+    )
+    oversized = tuple(
+        axis for axis in selected if 0 <= axis < len(parent.shape) and int(parent.shape[axis]) > 1
+    )
+    if not oversized:
+        return replace(state, axes=tuple(axes), notes=notes, rule=rule_name)
+    widened: list[_AxisState] = []
+    for index, axis in enumerate(axes):
+        if (
+            index == state.batch_axis
+            and 0 in oversized
+            and len(parent.shape) > 1
+            and not isinstance(axis.geometry, _Dissolved)
+        ):
+            widened.append(
+                replace(
+                    axis,
+                    geometry=_Full(exact=False),
+                    output_axis=None,
+                    kind="full",
+                    provenance=child.label,
+                )
+            )
+        elif isinstance(axis.geometry, (_Mapped, _Full)):
+            widened.append(replace(axis, geometry=replace(axis.geometry, exact=False)))
+        else:
+            widened.append(axis)
+    notes += (
+        f"{child.label}: a scalar-selected parent axis restricts which sources project;"
+        " unselected sources project nowhere, so these bounds are an upper-bound envelope",
+    )
+    return replace(state, axes=tuple(widened), notes=notes, rule=rule_name)
 
 
 __all__: list[str] = []

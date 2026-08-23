@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Tuple
 
 import numpy as np
 import pytest
@@ -47,7 +46,7 @@ def _fresh_log() -> Trace:
     )
 
 
-def _first_logs(trace: Trace) -> Tuple[Op, Layer]:
+def _first_logs(trace: Trace) -> tuple[Op, Layer]:
     """Return one layer-pass log and its aggregate layer log."""
     op_log = trace.layer_list[0]
     layer_log = trace.layer_logs[op_log.layer_label]

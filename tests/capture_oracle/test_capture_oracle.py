@@ -6,9 +6,9 @@ import copy
 import hashlib
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -107,7 +107,11 @@ def _run_worker(case: CaseSpec) -> dict[str, Any]:
 
 
 def _read_or_update_golden(case: CaseSpec, actual: dict[str, Any]) -> dict[str, Any]:
-    """Read one golden or regenerate it under the update environment flag.
+    """Read one golden, or regenerate it and SKIP under the update flag.
+
+    An update run must never report green: comparing the payload to the file
+    just written is vacuous (b10 R78-8d), so regeneration writes the golden,
+    then skips with instructions to re-run without the flag for a real verify.
 
     Parameters
     ----------
@@ -122,12 +126,23 @@ def _read_or_update_golden(case: CaseSpec, actual: dict[str, Any]) -> dict[str, 
         Decoded golden payload.
     """
 
+    from _oracle_env import flag_armed, require_update_reason, write_provenance
+
     path = _GOLDEN_DIR / f"{case.name}.json"
-    payload = _golden_payload(actual)
-    if os.environ.get(_UPDATE_ENV) == "1":
+    if flag_armed(os.environ, _UPDATE_ENV):
+        # Generation runs in an isolated subprocess (no wrap-state guard
+        # needed); the WHY is still required and recorded (b10 R78 round-3).
+        reason = require_update_reason(_UPDATE_ENV)
+        payload = _golden_payload(actual)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        return payload
+        write_provenance(
+            _GOLDEN_DIR,
+            f"tests/capture_oracle ({case.name})",
+            _UPDATE_ENV,
+            reason,
+        )
+        pytest.skip(f"updated golden {path.name}; re-run without {_UPDATE_ENV} to verify")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -277,6 +292,34 @@ def _assert_record_matches_golden(
     _assert_tracking_is_relative(actual, golden)
 
 
+def _recording_torch_matches(recorded: str | None, current: str) -> bool:
+    """Return whether the golden's recording torch matches the running torch.
+
+    The build tag is stripped from both sides, mirroring
+    ``_oracle_env.env_fingerprint``: a ``2.13.0+cu130``-recorded golden IS
+    enforceable on a ``2.13.0+cpu`` CI runtime (same source version, same CPU
+    kernels), and comparing full build strings made the nightly enforcement
+    leg skip the whole matrix forever (T13.2). Kernel float drift the gate
+    exists for happens across VERSIONS, which still mismatch after the strip.
+
+    Parameters
+    ----------
+    recorded:
+        ``tracking.torch_version`` from the committed golden, if present.
+    current:
+        ``torch.__version__`` of the running interpreter.
+
+    Returns
+    -------
+    bool
+        True when both name the same torch source version.
+    """
+
+    if recorded is None:
+        return False
+    return recorded.split("+", 1)[0] == current.split("+", 1)[0]
+
+
 def _forward_invocation_count(record: dict[str, Any]) -> int:
     """Return the recorded user-forward invocation count.
 
@@ -312,6 +355,18 @@ def test_capture_characterization_matches_golden(case: CaseSpec) -> None:
     golden_payload = _read_or_update_golden(case, actual)
     golden = golden_payload["record"]
     assert "".join(golden_payload["sha256_chunks"]) == _digest_payload(golden)
+    recorded_torch = golden["tracking"].get("torch_version")
+    current_torch = actual["tracking"]["torch_version"]
+    if not _recording_torch_matches(recorded_torch, current_torch):
+        # The goldens embed raw float-byte digests: on a different torch the
+        # comparison cannot distinguish real capture regression from expected
+        # kernel drift (b10 R78-7). A visible skip, never a red that trains
+        # people to ignore the oracle — the executed-floor attestation keeps
+        # an all-skipping leg from reading as coverage.
+        pytest.skip(
+            f"capture-oracle golden recorded under torch {recorded_torch}; "
+            f"running under {current_torch} — enforceable only on the recording version"
+        )
     _assert_record_matches_golden(actual, golden, case)
     assert _forward_invocation_count(actual) == case.expected_forward_invocations
 
@@ -368,7 +423,7 @@ def test_stage0_legacy_paths_pin_exactly_once_counts() -> None:
 
 
 def test_only_stateful_two_pass_case_carves_out_outcome() -> None:
-    """Only train-mode BatchNorm may treat the current two-pass failure as a wart."""
+    """Only train-mode BatchNorm may retain its fixed two-pass outcome as a wart."""
 
     for case in CASES:
         payload = json.loads((_GOLDEN_DIR / f"{case.name}.json").read_text(encoding="utf-8"))[
@@ -378,10 +433,7 @@ def test_only_stateful_two_pass_case_carves_out_outcome() -> None:
         if case.name == "train_batchnorm__two_pass_negative":
             assert "outcome" not in payload["ground_truth"]
             assert wart is not None
-            assert wart["current"]["status"] == "failed"
-            assert wart["current"]["failed"] is True
-            assert wart["current"]["error_type"] == "ValueError"
-            assert "computational graph changed" in wart["current"]["error_message"]
+            _validate_stateful_two_pass_outcome_fix(payload)
         else:
             assert "outcome" in payload["ground_truth"]
             assert wart is None

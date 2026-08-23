@@ -2,81 +2,91 @@
 
 from __future__ import annotations
 
-import inspect
 import importlib
+import importlib.metadata
+import inspect
+import re
 import subprocess
 from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal, cast, get_args, get_origin, get_type_hints
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Literal,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 import torch
+from packaging.requirements import Requirement
 from torch import nn
 
 from .. import _state
-from ._torch_compat import get_torch_capability_snapshot
-from .rng import (
-    set_random_seed,
-    log_current_rng_states,
-    set_rng_from_saved_states,
-    log_current_autocast_state,
-    AutocastRestore,
-    _AUTOCAST_DEVICES,
-)
-from .tensor_utils import (
-    MAX_FLOATING_POINT_TOLERANCE,
-    _cuda_available,
-    _is_cuda_available,
-    tensor_all_nan,
-    tensor_nanequal,
-    safe_to,
-    get_memory_amount,
-    copy_tensor_payload,
-    safe_copy,
-    print_override,
-)
-from .arg_handling import (
-    _safe_copy_arg,
-    copy_arg_tree,
-    safe_copy_args,
-    safe_copy_kwargs,
-    _model_expects_single_arg,
-    normalize_input_args,
-)
-from .introspection import (
-    _ATTR_SKIP_SET,
-    get_vars_of_type_from_obj,
-    get_attr_values_from_tensor_list,
-    nested_getattr,
-    nested_assign,
-    iter_accessible_attributes,
-    remove_attributes_with_prefix,
-    _get_code_context,
-)
-from .collections import (
-    is_iterable,
-    ensure_iterable,
-    index_nested,
-    remove_entry_from_list,
-    assign_to_sequence_or_dict,
-)
-from .hashing import (
-    make_random_barcode,
-    make_short_barcode_from_input,
-)
-from .display import (
-    format_flops,
-    format_size,
-    identity,
-    int_list_to_compact_str,
-    human_readable_size,
-    in_notebook,
-    progress_bar,
-    tensor_stats_summary,
-    warn_parallel,
-)
-from ..capture.flops import register_op_rule
+
+if TYPE_CHECKING:
+    from ..capture.flops import register_op_rule
+    from .arg_handling import (
+        _model_expects_single_arg,
+        _safe_copy_arg,
+        copy_arg_tree,
+        normalize_input_args,
+        safe_copy_args,
+        safe_copy_kwargs,
+    )
+    from .collections import (
+        assign_to_sequence_or_dict,
+        ensure_iterable,
+        index_nested,
+        is_iterable,
+        remove_entry_from_list,
+    )
+    from .display import (
+        format_flops,
+        format_size,
+        human_readable_size,
+        identity,
+        in_notebook,
+        int_list_to_compact_str,
+        progress_bar,
+        tensor_stats_summary,
+        warn_parallel,
+    )
+    from .hashing import make_random_barcode, make_short_barcode_from_input
+    from .introspection import (
+        _ATTR_SKIP_SET,
+        _get_code_context,
+        get_attr_values_from_tensor_list,
+        get_vars_of_type_from_obj,
+        iter_accessible_attributes,
+        nested_assign,
+        nested_getattr,
+        remove_attributes_with_prefix,
+    )
+    from .rng import (
+        _AUTOCAST_DEVICES,
+        AutocastRestore,
+        log_current_autocast_state,
+        log_current_rng_states,
+        set_random_seed,
+        set_rng_from_saved_states,
+    )
+    from .tensor_utils import (
+        MAX_FLOATING_POINT_TOLERANCE,
+        _cuda_available,
+        _is_cuda_available,
+        copy_tensor_payload,
+        get_memory_amount,
+        print_override,
+        safe_copy,
+        safe_to,
+        tensor_all_nan,
+        tensor_nanequal,
+    )
 
 
 @dataclass(frozen=True)
@@ -136,28 +146,97 @@ class DoctorReport:
         return self.show()
 
 
-_EXTRA_PROBES: dict[str, tuple[str, ...]] = {
-    "notebook": ("IPython", "jupyter_client"),
-    "viz": ("torchshow", "lovely_tensors"),
-    "tabular": ("pandas",),
-    "captum": ("captum",),
-    "neuro": ("rsatoolbox", "brainscore_core"),
-    "lightning": ("lightning",),
-    "wandb": ("wandb",),
-    "hf": ("transformers", "timm"),
-    "gradcam": ("pytorch_grad_cam",),
-    "shap": ("shap",),
-    "inseq": ("inseq",),
-    "steering": ("steering_vectors",),
-    "repeng": ("repeng",),
-    "dialz": ("dialz",),
-    "nnsight": ("nnsight",),
-    "lit": ("lit_nlp",),
-    "depyf": ("depyf",),
-    "compat-shims": ("torchextractor", "sentence_transformers"),
-    "vision-shims": ("torchvision",),
-    "io": ("pyarrow",),
+_DOCTOR_EXCLUDED_EXTRAS = frozenset({"all", "all-stretch", "dev", "test"})
+_EXTRA_MARKER_RE = re.compile(r"""extra\s*==\s*['"](?P<extra>[^'"]+)['"]""")
+_REQUIREMENT_IMPORT_NAME_OVERRIDES: dict[str, tuple[str, ...]] = {
+    "brain-score": ("brainscore_core",),
+    "jupyter-client": ("jupyter_client",),
+    "lit-nlp": ("lit_nlp",),
+    "lovely-tensors": ("lovely_tensors",),
+    "paddlepaddle": ("paddle",),
+    "pytorch-grad-cam": ("pytorch_grad_cam",),
+    "sae-lens": ("sae_lens",),
+    "sentence-transformers": ("sentence_transformers",),
+    "steering-vectors": ("steering_vectors",),
 }
+
+
+def _extras_from_requirement_marker(requirement: Requirement) -> tuple[str, ...]:
+    """Return every extra referenced by a requirement marker.
+
+    Parameters
+    ----------
+    requirement:
+        Parsed requirement line from package metadata.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Extras referenced in the requirement marker, preserving first-seen
+        order.
+    """
+
+    marker = requirement.marker
+    if marker is None:
+        return ()
+    extras = [
+        match.group("extra")
+        for match in _EXTRA_MARKER_RE.finditer(str(marker))
+        if match.group("extra") not in _DOCTOR_EXCLUDED_EXTRAS
+    ]
+    return tuple(dict.fromkeys(extras))
+
+
+def _probe_modules_for_requirement(requirement: Requirement) -> tuple[str, ...]:
+    """Return import-module probes for one optional requirement.
+
+    Parameters
+    ----------
+    requirement:
+        Parsed requirement line from package metadata.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Module names whose importability best approximates whether the
+        requirement is installed for diagnostic reporting.
+    """
+
+    normalized_name = requirement.name.lower()
+    override = _REQUIREMENT_IMPORT_NAME_OVERRIDES.get(normalized_name)
+    if override is not None:
+        return override
+    return (requirement.name.replace("-", "_"),)
+
+
+def _declared_extra_probes() -> dict[str, tuple[str, ...]]:
+    """Return doctor extra probes derived from installed package metadata.
+
+    Returns
+    -------
+    dict[str, tuple[str, ...]]
+        Optional extra names mapped to representative import-module probes.
+
+    Raises
+    ------
+    importlib.metadata.PackageNotFoundError
+        If the installed ``torchlens`` distribution metadata is unavailable.
+    """
+
+    distribution = importlib.metadata.distribution("torchlens")
+    extra_names = sorted(
+        extra
+        for extra in (distribution.metadata.get_all("Provides-Extra") or [])
+        if extra not in _DOCTOR_EXCLUDED_EXTRAS
+    )
+    probes: dict[str, list[str]] = {extra: [] for extra in extra_names}
+    for requirement_line in distribution.requires or ():
+        requirement = Requirement(requirement_line)
+        for extra in _extras_from_requirement_marker(requirement):
+            if extra not in probes:
+                continue
+            probes[extra].extend(_probe_modules_for_requirement(requirement))
+    return {extra: tuple(dict.fromkeys(module_names)) for extra, module_names in probes.items()}
 
 
 def _module_is_installed(module_name: str) -> bool:
@@ -192,7 +271,13 @@ def _probe_graphviz() -> DoctorCheck:
 
     python_graphviz = _module_is_installed("graphviz")
     try:
-        completed = subprocess.run(
+        # R40: routed through the ONE bounded spawn seam. subprocess.run's
+        # timeout killed only the direct child, so a wedged ``dot`` wrapper's
+        # grandchild survived the "bounded" probe for the life of the box;
+        # the shared runner tears down the whole process group.
+        from ._subprocess import run_bounded_subprocess
+
+        completed = run_bounded_subprocess(
             ["dot", "-V"],
             check=False,
             capture_output=True,
@@ -225,14 +310,26 @@ def _probe_extras() -> DoctorCheck:
         Optional-extras health-check row.
     """
 
+    try:
+        extra_probes = _declared_extra_probes()
+    except importlib.metadata.PackageNotFoundError as exc:
+        return DoctorCheck("extras", "FAIL", f"package metadata unavailable ({exc})")
+
     installed = []
     missing = []
-    for extra, modules in _EXTRA_PROBES.items():
+    no_python_probes = []
+    for extra, modules in extra_probes.items():
+        if not modules:
+            no_python_probes.append(extra)
+            continue
         if all(_module_is_installed(module_name) for module_name in modules):
             installed.append(extra)
         else:
             missing.append(extra)
-    detail = f"installed={installed or 'none'}; missing={missing or 'none'}"
+    detail = (
+        f"installed={installed or 'none'}; missing={missing or 'none'}; "
+        f"no_python_probes={no_python_probes or 'none'}"
+    )
     return DoctorCheck("extras", "PASS", detail)
 
 
@@ -265,12 +362,27 @@ def _probe_torch_capabilities() -> DoctorCheck:
         Snapshot of probed private integration capabilities.
     """
 
+    from ._torch_compat import OPTIONAL_CAPABILITY_FLAGS
+
     snapshot = _runtime_capability_snapshot()
-    missing = [name for name, available in snapshot.items() if not available]
+    absent = [name for name, available in snapshot.items() if not available]
+    # r-b4 R26-4: only genuine DEGRADATIONS drive WARN. An absent optional
+    # feature (interpreter-version surface, upstream-removed API, an optional
+    # backend that is not installed) is reported with its true value but keeps
+    # a healthy install at PASS -- a permanent false alarm trains users to
+    # ignore the row.
+    missing = [name for name in absent if name not in OPTIONAL_CAPABILITY_FLAGS]
+    optional_absent = [name for name in absent if name in OPTIONAL_CAPABILITY_FLAGS]
     detail = _format_capability_snapshot(snapshot)
     if missing:
         detail += "; missing=" + ",".join(missing)
-    return DoctorCheck("runtime capabilities", "PASS", detail)
+    if optional_absent:
+        detail += "; optional_absent=" + ",".join(optional_absent)
+    # Report the true state: a missing private-integration capability is a
+    # degraded (WARN) row, not a "PASS". These flags are feature-detected and may
+    # be legitimately absent across torch versions, so WARN (not FAIL) is honest.
+    status: Literal["PASS", "WARN"] = "PASS" if not missing else "WARN"
+    return DoctorCheck("runtime capabilities", status, detail)
 
 
 def _probe_torch_wrapper_bindings() -> DoctorCheck:
@@ -284,6 +396,8 @@ def _probe_torch_wrapper_bindings() -> DoctorCheck:
         import relu`` references, but it catches the cheap process-global case
         where torch itself is no longer pointing at registered wrappers.
     """
+
+    from .introspection import nested_getattr
 
     if not _state._orig_to_decorated:
         return DoctorCheck("torch wrapper bindings", "SKIP", "wrappers not installed yet")
@@ -324,6 +438,59 @@ def _probe_torch_wrapper_bindings() -> DoctorCheck:
     )
 
 
+def _probe_mechanical_belt() -> DoctorCheck:
+    """Report protocol-invisible belt coverage gaps.
+
+    Returns
+    -------
+    DoctorCheck
+        Disclosure row for belt probe failures and unprobed candidates. A
+        candidate whose mode visibility could not be MEASURED (probe raised,
+        or no probe recipe exists) is neither belt-patched nor proven
+        protocol-visible, so a stale pre-wrap reference to it can drop ops
+        with zero signal while the capture still reports
+        ``capture_verified=True`` (grind-r6 b3 R02, sol MED).
+    """
+
+    from ..backends.torch.belt import belt_report
+
+    if not _state._is_decorated:
+        return DoctorCheck(
+            "mechanical belt",
+            "SKIP",
+            "belt not derived yet (torch wrapping is lazy; run a capture first)",
+        )
+    report = belt_report()
+    if report is None:
+        return DoctorCheck("mechanical belt", "SKIP", "belt derivation unavailable")
+    # Unprobed candidates are a STANDING recipe-coverage limitation (hundreds
+    # of in-place variants have no probe recipe on every healthy build), so
+    # they are disclosed as a count with examples but never flip the status —
+    # a permanent false alarm trains users to ignore the row (r-b4 R26-4).
+    # A probe FAILURE is unexpected breakage on this build and drives WARN.
+    unprobed_examples = ", ".join(f"{ns}.{fn}" for ns, fn in report.unprobed_candidates[:5])
+    unprobed_detail = f"unprobed_candidates={report.unprobed_candidate_count}"
+    if unprobed_examples:
+        unprobed_detail += f" (e.g. {unprobed_examples})"
+    if not report.probe_failures:
+        return DoctorCheck(
+            "mechanical belt",
+            "PASS",
+            f"members={len(report.members)}; probe_failures=none; {unprobed_detail}",
+        )
+    failure_names = ", ".join(f"{ns}.{fn}" for ns, fn in report.probe_failures)
+    detail = (
+        f"members={len(report.members)}; probe FAILURES (visibility unmeasured; a stale "
+        f"pre-wrap reference to these can silently drop ops): {failure_names}; "
+        f"{unprobed_detail}"
+    )
+    if report.probe_failure_details:
+        detail += "; failure_details=" + "; ".join(
+            f"{ns}.{fn}: {reason}" for ns, fn, reason in report.probe_failure_details
+        )
+    return DoctorCheck("mechanical belt", "WARN", detail)
+
+
 def _runtime_capability_snapshot() -> dict[str, bool]:
     """Return all runtime compatibility capability flags.
 
@@ -332,6 +499,8 @@ def _runtime_capability_snapshot() -> dict[str, bool]:
     dict[str, bool]
         Mapping from capability flag names to availability.
     """
+
+    from ._torch_compat import get_torch_capability_snapshot
 
     snapshot = get_torch_capability_snapshot()
     try:
@@ -373,6 +542,7 @@ def doctor() -> DoctorReport:
         DoctorCheck("pytorch", "PASS", torch.__version__),
         _probe_torch_capabilities(),
         _probe_torch_wrapper_bindings(),
+        _probe_mechanical_belt(),
         DoctorCheck(
             "cuda",
             "PASS" if torch.cuda.is_available() else "SKIP",
@@ -454,7 +624,11 @@ def _log_ops_for_mode(
     from torchlens import trace as trace_fn
     from torchlens.options import CaptureOptions
 
-    original_mode = model.training
+    # Snapshot every submodule's training flag, not just the root's. A recursive
+    # ``model.train(root_mode)`` restore would clobber mixed child states (e.g. a
+    # frozen ``bn.eval()`` under a training root). For ``mode="current"`` no mode
+    # change is applied at all, so the model is left byte-for-byte as found.
+    original_modes = {submodule: submodule.training for submodule in model.modules()}
     if mode == "eval":
         model.eval()
     elif mode == "train":
@@ -466,7 +640,8 @@ def _log_ops_for_mode(
             capture=CaptureOptions(layers_to_save=None),
         )
     finally:
-        model.train(original_mode)
+        for submodule, was_training in original_modes.items():
+            submodule.training = was_training
     return _ops_from_log(trace)
 
 
@@ -669,6 +844,20 @@ def synthetic_input(model: nn.Module) -> torch.Tensor | tuple[torch.Tensor, ...]
             inspect.Parameter.VAR_KEYWORD,
         }:
             continue
+        if parameter.kind is inspect.Parameter.KEYWORD_ONLY:
+            # The public return is positional-only, so a keyword-only argument
+            # can never be delivered through it. An optional keyword-only param
+            # is safely omitted (forward uses its default); a *required* one
+            # cannot be represented and must fail loudly here rather than emit a
+            # positional tuple that raises a confusing TypeError at forward call.
+            if parameter.default is not inspect.Signature.empty:
+                continue
+            raise ValueError(
+                "Cannot build a positional synthetic input for required "
+                f"keyword-only forward parameter {parameter.name!r}. "
+                "synthetic_input only returns positional tensors; pass this "
+                "input explicitly."
+            )
         if parameter.default is not inspect.Signature.empty and not isinstance(
             parameter.default, (torch.Tensor, tuple, list)
         ):
@@ -776,6 +965,128 @@ def trace_streaming(model: nn.Module, inputs_iter: Iterable[Any], **kwargs: Any)
     if not logs:
         raise ValueError("inputs_iter must yield at least one input.")
     return tuple(logs)
+
+
+_LAZY_EXPORTS: dict[str, tuple[str, str]] = {
+    "AutocastRestore": ("torchlens.utils.rng", "AutocastRestore"),
+    "MAX_FLOATING_POINT_TOLERANCE": (
+        "torchlens.utils.tensor_utils",
+        "MAX_FLOATING_POINT_TOLERANCE",
+    ),
+    "_ATTR_SKIP_SET": ("torchlens.utils.introspection", "_ATTR_SKIP_SET"),
+    "_AUTOCAST_DEVICES": ("torchlens.utils.rng", "_AUTOCAST_DEVICES"),
+    "_cuda_available": ("torchlens.utils.tensor_utils", "_cuda_available"),
+    "_get_code_context": ("torchlens.utils.introspection", "_get_code_context"),
+    "_is_cuda_available": ("torchlens.utils.tensor_utils", "_is_cuda_available"),
+    "_model_expects_single_arg": (
+        "torchlens.utils.arg_handling",
+        "_model_expects_single_arg",
+    ),
+    "_safe_copy_arg": ("torchlens.utils.arg_handling", "_safe_copy_arg"),
+    "assign_to_sequence_or_dict": (
+        "torchlens.utils.collections",
+        "assign_to_sequence_or_dict",
+    ),
+    "copy_arg_tree": ("torchlens.utils.arg_handling", "copy_arg_tree"),
+    "copy_tensor_payload": ("torchlens.utils.tensor_utils", "copy_tensor_payload"),
+    "ensure_iterable": ("torchlens.utils.collections", "ensure_iterable"),
+    "format_flops": ("torchlens.utils.display", "format_flops"),
+    "format_size": ("torchlens.utils.display", "format_size"),
+    "get_attr_values_from_tensor_list": (
+        "torchlens.utils.introspection",
+        "get_attr_values_from_tensor_list",
+    ),
+    "get_memory_amount": ("torchlens.utils.tensor_utils", "get_memory_amount"),
+    "get_torch_capability_snapshot": (
+        "torchlens.utils._torch_compat",
+        "get_torch_capability_snapshot",
+    ),
+    "get_vars_of_type_from_obj": (
+        "torchlens.utils.introspection",
+        "get_vars_of_type_from_obj",
+    ),
+    "human_readable_size": ("torchlens.utils.display", "human_readable_size"),
+    "identity": ("torchlens.utils.display", "identity"),
+    "in_notebook": ("torchlens.utils.display", "in_notebook"),
+    "index_nested": ("torchlens.utils.collections", "index_nested"),
+    "int_list_to_compact_str": ("torchlens.utils.display", "int_list_to_compact_str"),
+    "is_iterable": ("torchlens.utils.collections", "is_iterable"),
+    "iter_accessible_attributes": (
+        "torchlens.utils.introspection",
+        "iter_accessible_attributes",
+    ),
+    "log_current_autocast_state": ("torchlens.utils.rng", "log_current_autocast_state"),
+    "log_current_rng_states": ("torchlens.utils.rng", "log_current_rng_states"),
+    "make_random_barcode": ("torchlens.utils.hashing", "make_random_barcode"),
+    "make_short_barcode_from_input": (
+        "torchlens.utils.hashing",
+        "make_short_barcode_from_input",
+    ),
+    "nested_assign": ("torchlens.utils.introspection", "nested_assign"),
+    "nested_getattr": ("torchlens.utils.introspection", "nested_getattr"),
+    "normalize_input_args": ("torchlens.utils.arg_handling", "normalize_input_args"),
+    "print_override": ("torchlens.utils.tensor_utils", "print_override"),
+    "progress_bar": ("torchlens.utils.display", "progress_bar"),
+    "register_op_rule": ("torchlens.capture.flops", "register_op_rule"),
+    "remove_attributes_with_prefix": (
+        "torchlens.utils.introspection",
+        "remove_attributes_with_prefix",
+    ),
+    "remove_entry_from_list": (
+        "torchlens.utils.collections",
+        "remove_entry_from_list",
+    ),
+    "safe_copy": ("torchlens.utils.tensor_utils", "safe_copy"),
+    "safe_copy_args": ("torchlens.utils.arg_handling", "safe_copy_args"),
+    "safe_copy_kwargs": ("torchlens.utils.arg_handling", "safe_copy_kwargs"),
+    "safe_to": ("torchlens.utils.tensor_utils", "safe_to"),
+    "set_random_seed": ("torchlens.utils.rng", "set_random_seed"),
+    "set_rng_from_saved_states": ("torchlens.utils.rng", "set_rng_from_saved_states"),
+    "tensor_all_nan": ("torchlens.utils.tensor_utils", "tensor_all_nan"),
+    "tensor_nanequal": ("torchlens.utils.tensor_utils", "tensor_nanequal"),
+    "tensor_stats_summary": ("torchlens.utils.display", "tensor_stats_summary"),
+    "warn_parallel": ("torchlens.utils.display", "warn_parallel"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve one legacy utility facade export on first access.
+
+    Parameters
+    ----------
+    name:
+        Module attribute requested by Python's PEP 562 lookup.
+
+    Returns
+    -------
+    Any
+        The original object from its defining module.
+
+    Raises
+    ------
+    AttributeError
+        If ``name`` is not a utility facade export.
+    """
+
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attribute_name = target
+    value = getattr(importlib.import_module(module_name), attribute_name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    """Return eager and lazy utility facade attributes.
+
+    Returns
+    -------
+    list[str]
+        Sorted module attribute names, including unresolved lazy exports.
+    """
+
+    return sorted(set(globals()) | set(_LAZY_EXPORTS))
 
 
 __all__ = [

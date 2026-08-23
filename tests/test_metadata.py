@@ -8,18 +8,39 @@ import copy
 import linecache
 import pickle
 
+import example_models
 import pytest
 import torch
 import torch.nn as nn
 
-import example_models
 import torchlens
 from torchlens import trace as trace_fn
-from torchlens.data_classes import FuncCallLocation
 from torchlens.capture.flops import (
     compute_backward_flops,
     compute_forward_flops,
 )
+from torchlens.data_classes import FuncCallLocation
+
+
+class _SharedMultiOutputModel(nn.Module):
+    """Small DAG whose shared node reaches two outputs."""
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return two children of one shared operation.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            Additive and subtractive branches from one shared value.
+        """
+
+        shared = x * 2
+        return shared + 1, shared - 1
 
 
 # =============================================================================
@@ -125,20 +146,51 @@ def test_tensor_info_fields(small_input):
 
 
 def test_forward_peak_memory_is_populated(small_input):
-    """forward_peak_memory reflects a real forward-pass peak, not a hard zero.
+    """forward_peak_memory is measured and labeled on the default capture path.
 
     Regression: forward_peak_memory was declared and serialized but never written,
     so it was always 0 while backward_peak_memory was measured. The forward pass
-    is now bracketed by a CPU/CUDA peak-memory probe (CUDA device peak; CPU host
-    RSS delta combined with the tracemalloc Python-allocation peak so even small
-    models read positive).
+    is now bracketed by a peak-memory probe (CUDA device peak; CPU/MPS host
+    resident-set-size or MPS allocator delta).
+
+    The default path deliberately does NOT run a tracemalloc probe -- that
+    allocator hook costs 1.7x-2.5x total capture time -- so the coarse host delta
+    may legitimately round to 0 for a model this small. The measurement is
+    present and labeled; positive Python-allocation peaks for small models are
+    the opt-in behavior asserted by
+    ``test_measure_python_peak_memory_opt_in_reports_positive_peak``.
     """
 
     model = example_models.SimpleFF()
     mh = trace_fn(model, small_input)
     assert isinstance(mh.forward_peak_memory, torchlens.Bytes)
-    assert int(mh.forward_peak_memory) > 0
+    assert int(mh.forward_peak_memory) >= 0
     assert mh.forward_memory_backend in {"cpu", "cuda", "mps"}
+    assert mh.measure_python_peak_memory is False
+
+
+def test_measure_python_peak_memory_opt_in_reports_positive_peak(small_input):
+    """The opt-in tracemalloc probe reads positive even for a tiny model.
+
+    ``CaptureOptions(measure_python_peak_memory=True)`` folds the stdlib
+    tracemalloc Python-allocation peak into ``forward_peak_memory`` via ``max()``,
+    which stays reliably positive where the host RSS delta rounds to zero. Only
+    the measurement changes: the captured graph must be identical to the default
+    path.
+    """
+
+    model = example_models.SimpleFF()
+    baseline = trace_fn(model, small_input)
+    measured = trace_fn(
+        model,
+        small_input,
+        capture=torchlens.options.CaptureOptions(measure_python_peak_memory=True),
+    )
+    assert measured.measure_python_peak_memory is True
+    assert isinstance(measured.forward_peak_memory, torchlens.Bytes)
+    assert int(measured.forward_peak_memory) > 0
+    assert measured.forward_memory_backend in {"cpu", "cuda", "mps"}
+    assert [op.layer_label for op in measured.ops] == [op.layer_label for op in baseline.ops]
 
 
 def test_param_info_fields(small_input):
@@ -282,8 +334,8 @@ def test_graph_relationships(small_input):
     mh = trace_fn(model, small_input)
     for label in mh.layer_labels:
         entry = mh[label]
-        assert isinstance(entry.parents, list)
-        assert isinstance(entry.children, list)
+        assert isinstance(entry.parents, tuple)
+        assert isinstance(entry.children, tuple)
         for parent_label in entry.parents:
             parent = mh[parent_label]
             assert label in parent.children
@@ -376,6 +428,71 @@ def test_sibling_spouse_fields(small_input):
         entry = mh[label]
         assert isinstance(entry.siblings, list)
         assert isinstance(entry.co_parents, list)
+
+
+def test_layer_siblings_tolerate_orphan_relation_labels():
+    """Layer aggregates mirror the op-level orphan tolerance (r3 R05-N1).
+
+    ``Op.siblings``/``Op.co_parents`` deliberately resolve relation labels
+    through the ``orphans`` fallback on ``keep_orphans=True`` traces and may
+    APPEND orphan labels to their result; the Layer aggregates (``siblings``,
+    ``co_parents``, ``children``, ``parents``, and the per-pass dict views)
+    previously did a bare ``trace[label]`` lookup on those same labels and
+    raised from public read-only properties — the ``children`` instance even
+    fired INSIDE ``Op.siblings`` whenever a relation label resolved to a
+    Layer, outside its own fallback. No public capture constructs the state
+    today (orphans are component-disjoint by the step-3 bidirectional flood),
+    so the state is injected surgically: a mainline parent's relation list
+    gains an orphan child label, exactly the shape the op-level fallback
+    exists for.
+    """
+
+    class _WithOrphans(nn.Module):
+        def forward(self, x):
+            internal = torch.ones(3)
+            _a = internal * 2
+            _b = internal + 3
+            return x * 5
+
+    mh = trace_fn(
+        model=_WithOrphans(),
+        input_args=torch.randn(2, 3),
+        capture=torchlens.options.CaptureOptions(keep_orphans=True),
+    )
+    orphan_labels = list(mh.orphans.keys())
+    assert orphan_labels, "probe model must produce orphans"
+    orphan_sibling = next(k for k in orphan_labels if mh.orphans[k].siblings)
+
+    mainline = next(
+        mh[label] for label in mh.layer_labels if not mh[label].is_input and mh[label].parents
+    )
+    parent_op = list(mh[mainline.parents[0]].ops.values())[0]
+    # Direct assignment is the supported mutation spelling on Op records; the
+    # list normalizes to the immutable view type.
+    parent_op.children = list(parent_op.children) + [orphan_sibling]
+
+    op0 = list(mainline.ops.values())[0]
+    assert orphan_sibling in op0.siblings  # op level tolerates and appends
+    aggregated = mainline.siblings  # RED before the fix: uncaught lookup error
+    assert mh.orphans[orphan_sibling].layer_label in aggregated
+    assert isinstance(mainline.co_parents, list)
+
+    # b3 R05-N2: the 62aba742 tolerance stopped at label aggregates -- the
+    # OBJECT-resolving surfaces of the same relation family crashed on the
+    # fix's own output (`parent_layer.children` succeeded while
+    # `parent_layer.get_children()` raised "not found"). They now resolve
+    # orphan labels through the same fallback.
+    parent_layer = mh[mainline.parents[0]]
+    layer_children = parent_layer.get_children()
+    assert orphan_sibling in {getattr(c, "layer_label", None) for c in layer_children} or any(
+        getattr(c, "label", None) == orphan_sibling for c in layer_children
+    )
+    op_children = parent_op.get_children()
+    assert any(
+        getattr(c, "label", "").startswith(orphan_sibling.split(":")[0]) for c in op_children
+    )
+    assert isinstance(parent_op.get_parents(), list)
+    assert isinstance(parent_layer.get_parents(), list)
 
 
 def test_conditional_fields():
@@ -499,6 +616,42 @@ def test_layer_labels_properties(small_input):
     assert all(isinstance(lbl, str) for lbl in mh.op_labels)
 
 
+def test_output_descendants_complete_when_distances_disabled() -> None:
+    """Disabling distance fields must not degrade serialized output ancestry."""
+
+    trace = trace_fn(
+        _SharedMultiOutputModel(),
+        torch.ones(1),
+        compute_input_output_distances=False,
+        layers_to_save="all",
+    )
+    expected_outputs = set(trace.output_layers)
+    shared = next(op for op in trace.ops if op.func_name == "__mul__")
+
+    assert trace.input_ops[0].output_descendants == expected_outputs
+    assert shared.output_descendants == expected_outputs
+
+
+def test_exhaustive_saved_layer_count_uses_finalized_layer_list() -> None:
+    """Exhaustive capture must report its saved unique-layer count after Step 11."""
+
+    trace = trace_fn(
+        nn.Sequential(nn.Linear(2, 2), nn.ReLU()),
+        torch.ones(1, 2),
+        layers_to_save="all",
+    )
+    expected = len(
+        {
+            op.layer_label
+            for op in trace.ops
+            if op.has_saved_activation and not getattr(op, "is_orphan", False)
+        }
+    )
+
+    assert trace.num_saved_layers == expected
+    assert trace.num_saved_layers == trace.num_saved_ops
+
+
 # =============================================================================
 # Function args saving
 # =============================================================================
@@ -612,6 +765,30 @@ def test_flops_matmul():
     output_shape = (3, 5)
     result = compute_forward_flops("matmul", output_shape, [], (a, b), {})
     assert result == 2 * 3 * 4 * 5  # 120
+
+
+@pytest.mark.parametrize(
+    "a_shape,b_shape,output_shape,expected",
+    [
+        ((5, 3), (3,), (5,), 30),
+        ((2, 4, 5), (5,), (2, 4), 80),
+        ((3,), (3, 5), (5,), 30),
+    ],
+)
+def test_flops_matmul_vector_operands(
+    a_shape: tuple[int, ...],
+    b_shape: tuple[int, ...],
+    output_shape: tuple[int, ...],
+    expected: int,
+) -> None:
+    """Matmul accounts for unit axes removed from vector-operand outputs."""
+
+    a = torch.randn(a_shape)
+    b = torch.randn(b_shape)
+
+    result = compute_forward_flops("matmul", output_shape, [], (a, b), {})
+
+    assert result == expected
 
 
 def test_flops_bmm():
@@ -754,7 +931,7 @@ def test_flops_by_type():
     fbt = mh.flops_by_op_type()
     assert isinstance(fbt, dict)
     assert len(fbt) > 0
-    for layer_type, info in fbt.items():
+    for _layer_type, info in fbt.items():
         assert "forward" in info
         assert "backward" in info
         assert "count" in info
@@ -771,6 +948,25 @@ def test_flops_conv_model():
     mh = trace_fn(model, x)
     # Conv2d(3, 16, 3): 2 * (1*16*32*32) * 3 * 9 = 884736
     assert mh.total_flops_forward > 800000
+
+
+def test_flops_conv_transpose_uses_input_work_basis() -> None:
+    """Grouped transposed convolution counts input scatter MACs exactly."""
+
+    model = nn.ConvTranspose2d(
+        6,
+        4,
+        kernel_size=3,
+        stride=2,
+        padding=1,
+        groups=2,
+        bias=False,
+    )
+    trace = trace_fn(model, torch.randn(1, 6, 8, 8))
+    operation = next(entry for entry in trace.layer_list if entry.func_name == "conv_transpose2d")
+
+    assert operation.shape == (1, 4, 15, 15)
+    assert operation.flops_forward == 2 * 6 * 8 * 8 * (4 // 2) * 3 * 3
 
 
 def test_flops_coverage_on_model():
@@ -794,13 +990,13 @@ def test_flops_coverage_on_model():
 # =============================================================================
 
 
-def test_module_training_modes_populated(small_input):
+def test_module_training_modes_populated(small_input: torch.Tensor) -> None:
     """Module.training should capture the training flag."""
     model = example_models.SimpleFF()
     model.train()
     mh = trace_fn(model, small_input)
-    # SimpleFF has no submodules beyond root
-    assert isinstance(mh.modules, object)
+    assert mh.root_module.training is True
+    assert mh.modules["self"].training is True
 
 
 def test_module_training_modes_train_vs_eval():
@@ -862,6 +1058,126 @@ def test_flops_einsum_matmul():
     output_shape = (3, 5)
     result = compute_forward_flops("einsum", output_shape, [], ("ij,jk->ik", a, b), {})
     assert result == 2 * 3 * 4 * 5  # 120
+
+
+def test_flops_einsum_attention_contraction() -> None:
+    """Attention einsum contracts the shared feature axis, not a matrix tail axis."""
+
+    class _AttentionEinsum(nn.Module):
+        """Two-operand attention-score einsum."""
+
+        def forward(self, query: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
+            """Contract query and key over their shared feature axis."""
+
+            return torch.einsum("bid,bjd->bij", query, key)
+
+    q = torch.randn(2, 5, 4)
+    k = torch.randn(2, 7, 4)
+    output_shape = (2, 5, 7)
+
+    direct = compute_forward_flops("einsum", output_shape, [], ("bid,bjd->bij", q, k), {})
+    nested = compute_forward_flops("einsum", output_shape, [], ("bid,bjd->bij", (q, k)), {})
+
+    assert direct == 2 * 2 * 5 * 7 * 4
+    assert nested == 2 * 2 * 5 * 7 * 4
+    trace = trace_fn(_AttentionEinsum(), (q, k))
+    operation = next(entry for entry in trace.layer_list if entry.func_name == "einsum")
+    assert operation.flops_forward == 2 * 2 * 5 * 7 * 4
+
+
+def test_unknown_flops_survive_trace_materialization() -> None:
+    """An unregistered operation remains unknown instead of becoming zero FLOPs."""
+
+    class _PadModel(nn.Module):
+        """Model containing an intentionally unregistered pad operation."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Pad the final dimension."""
+
+            return torch.nn.functional.pad(x, (1, 1))
+
+    trace = trace_fn(_PadModel(), torch.randn(2, 3))
+    operation = next(entry for entry in trace.layer_list if entry.func_name == "pad")
+
+    assert operation.flops_forward is None
+    assert operation.flops_backward is None
+    assert trace.total_flops_forward == 0
+
+
+def test_rerun_refreshes_shape_derived_flops_everywhere() -> None:
+    """A changed batch size refreshes every public route to one operation's FLOPs."""
+
+    class _LinearModel(nn.Module):
+        """One biased linear operation with batch-dependent FLOPs."""
+
+        def __init__(self) -> None:
+            """Initialize a four-to-eight feature projection."""
+
+            super().__init__()
+            self.linear = nn.Linear(4, 8)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Apply the projection."""
+
+            return self.linear(x)
+
+    model = _LinearModel()
+    trace = trace_fn(model, torch.randn(2, 4))
+    captured = next(entry for entry in trace.layer_list if entry.func_name == "linear")
+    assert captured.flops_forward == 144
+
+    with pytest.warns(UserWarning, match="Tensor shape changed"):
+        result = trace.run(inputs=torch.randn(8, 4))
+    refreshed = next(entry for entry in result.trace.layer_list if entry.func_name == "linear")
+
+    assert refreshed.shape == (8, 8)
+    assert refreshed.flops_forward == 576
+    assert result.trace[refreshed.layer_label].flops_forward == 576
+    assert result.trace.total_flops_forward == sum(
+        entry.flops_forward for entry in result.trace.layer_list if entry.flops_forward is not None
+    )
+
+
+def test_refresh_shape_change_emits_single_aggregated_warning() -> None:
+    """A multi-layer shape-change refresh emits ONE aggregated warning (B8-36).
+
+    Per-layer warnings with the label interpolated into the message defeated
+    Python's warning dedup: hundreds of warnings per refresh on a real CNN, and
+    ``-W error`` aborted the refresh at layer one. The refresh now aggregates to
+    one warning naming the changed-layer count.
+    """
+
+    import re
+    import warnings as warnings_module
+
+    class _TwoStage(nn.Module):
+        """Two linear stages so several layers change shape at once."""
+
+        def __init__(self) -> None:
+            """Initialize two chained projections."""
+
+            super().__init__()
+            self.linear1 = nn.Linear(4, 8)
+            self.linear2 = nn.Linear(8, 8)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Apply linear -> relu -> linear."""
+
+            return self.linear2(torch.relu(self.linear1(x)))
+
+    model = _TwoStage()
+    trace = trace_fn(model, torch.randn(2, 4))
+
+    with warnings_module.catch_warnings(record=True) as caught:
+        warnings_module.simplefilter("always")
+        trace.run(inputs=torch.randn(8, 4))
+
+    shape_warnings = [w for w in caught if "Tensor shape changed" in str(w.message)]
+    assert len(shape_warnings) == 1
+    message = str(shape_warnings[0].message)
+    match = re.search(r"Tensor shape changed for (\d+) layer", message)
+    assert match is not None
+    assert int(match.group(1)) >= 2
 
 
 def test_flops_pool_with_kernel():
@@ -1112,7 +1428,12 @@ def test_custom_num_context_lines(small_input):
                 if loc.code_context is not None:
                     assert loc.num_context_lines == 7  # 3 + 1 + 3
                     return
-    pytest.skip("No non-input layer with code context found")
+    pytest.fail(
+        "No non-input layer with code context found. SimpleFF traced with "
+        "save_code_context=True is fully under this test's control, so an empty "
+        "code-context surface is a capture regression, not an environment limit "
+        "(hardened from a silent fall-through skip, R79 skip audit 2026-08-15)."
+    )
 
 
 def test_num_context_lines_stored_on_trace(small_input):
@@ -1267,7 +1588,13 @@ def test_corrupt_saved_args(valid_mh_and_ground_truth):
                     entry.saved_args = tuple(corrupted_args)
                     assert mh.validate_forward_pass(ground_truth) is False
                     return
-    pytest.skip("No layer with tensor saved_args found")
+    pytest.fail(
+        "No layer with tensor saved_args found. The fixture traces with "
+        "save_arg_values enabled on a model with tensor-consuming ops, so an "
+        "empty saved_args surface is a capture regression, not an environment "
+        "limit (hardened from a silent fall-through skip, R79 skip audit "
+        "2026-08-15)."
+    )
 
 
 # =============================================================================
@@ -1457,9 +1784,10 @@ class TestConditionalBranchDetection:
 
     def test_if_label_in_visualization(self):
         """Rendered graph contains 'IF' edge label."""
-        from torchlens.visualization import show_model_graph
-        import tempfile
         import os
+        import tempfile
+
+        from torchlens.visualization import show_model_graph
 
         model = example_models.ConditionalBranching()
         x = self._cond_input()
@@ -1481,8 +1809,8 @@ class TestConditionalBranchDetection:
 
     def test_then_label_in_visualization(self):
         """Rendered graph contains 'THEN' edge label with save_code_context."""
-        import tempfile
         import os
+        import tempfile
 
         model = example_models.ConditionalBranching()
         x = self._pos_input()
@@ -1505,9 +1833,10 @@ class TestConditionalBranchDetection:
 
     def test_rolled_graph_conditional_edges(self):
         """Rolled view preserves IF/THEN labels."""
-        from torchlens.visualization import show_model_graph
-        import tempfile
         import os
+        import tempfile
+
+        from torchlens.visualization import show_model_graph
 
         model = example_models.ConditionalBranching()
         x = self._cond_input()

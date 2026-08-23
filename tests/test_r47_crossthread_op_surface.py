@@ -49,7 +49,7 @@ from torchlens.backends.torch.completeness_witness import (
 from torchlens.options import CaptureOptions
 from torchlens.runnable import PathFaithfulness
 
-_CAP = dict(intervention_ready=True, capture_container_structure=True, cache=False)
+_CAP = {"intervention_ready": True, "capture_container_structure": True, "cache": False}
 
 
 def _gate_pos() -> torch.Tensor:
@@ -117,8 +117,8 @@ class _PreexistingWorker:
     def __init__(self) -> None:
         import queue
 
-        self._jobs: "queue.Queue[Any]" = queue.Queue()
-        self._results: "queue.Queue[Any]" = queue.Queue()
+        self._jobs: queue.Queue[Any] = queue.Queue()
+        self._results: queue.Queue[Any] = queue.Queue()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
@@ -374,7 +374,10 @@ def test_install_failure_marks_observer_incomplete(monkeypatch: pytest.MonkeyPat
 @pytest.mark.xfail(
     reason="documented residual: torch._C._VariableFunctions.<op> is a read-only, non-Python-"
     "patchable private-C free-function surface; its public alias torch.<op> IS wrapped",
-    strict=False,
+    # strict: an XPASS means the residual CLOSED -- that must fail the run so the
+    # xfail is retired, not silently absorbed (the witness outcome is deterministic:
+    # the private-C surface either is patchable on this torch build or is not).
+    strict=True,
 )
 def test_variable_functions_private_spelling_residual(tmp_path: Path) -> None:
     """A worker consuming a captured operand through the PRIVATE ``torch._C._VariableFunctions.<op>``

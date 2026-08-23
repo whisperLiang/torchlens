@@ -9,16 +9,21 @@ by partial saves. The bundle format is intentionally a plain directory with
 
 from __future__ import annotations
 
-from collections import OrderedDict, defaultdict
-from collections.abc import Collection, Iterable, Mapping
-from dataclasses import dataclass
+import contextlib
+import glob
 import json
-import platform
+import os
 import pickle
+import pickletools
+import platform
 import shutil
+import subprocess
 import sys
 import uuid
 import warnings
+import weakref
+from collections.abc import Collection, Iterable, Mapping, Set
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
@@ -27,25 +32,43 @@ import torch
 from safetensors import SafetensorError
 from safetensors.torch import load_file, save_file
 
-from . import BlobRef, FieldPolicy, PayloadLoadHints, TLSPEC_VERSION, TorchLensIOError
-from . import _json
+from .. import __version__ as TORCHLENS_VERSION
+from .._errors import InvalidArgumentError
+from ..backends import BackendPayloadUnsupportedError, BackendSpec, get_backend_spec
+from ..data_classes._state_adapter import state_items
+from ..data_classes.trace import Trace
+from ..errors import TorchLensWarning
+from ..utils.display import user_stacklevel
+from . import (
+    MIN_TLSPEC_VERSION,
+    TLSPEC_VERSION,
+    BlobRef,
+    FieldPolicy,
+    PayloadLoadHints,
+    TorchLensIOError,
+    _json,
+    below_floor_error,
+)
+from ._canonical_pickle import dump_canonical_metadata
+from ._durability import fsync_dir, fsync_tree
 from ._safe_unpickle import SafeBundleUnpickler
 from .lazy import LazyActivationRef
-from .manifest import Manifest, TensorEntry, enforce_version_policy, sha256_of_file
+from .manifest import Manifest, Provenance, TensorEntry, enforce_version_policy, sha256_of_file
+from .paths import (
+    reject_symlink_path as _reject_symlink_path,
+    resolve_bundle_blob_path,
+    resolve_bundle_blobs_dir,
+)
 from .payload_codec import (
     PayloadCodec,
     get_payload_codec,
     numpy_to_transport_tensor,
 )
-from .paths import resolve_bundle_blob_path
 from .rehydrate import rehydrate_trace
 from .scrub import BlobSpec, scrub_for_save
+from .state_keys import invalidate_static_class_attr_cache
 from .tensor_policy import FailReason, Ok
 from .tlspec import _TlSpecWriter, coerce_tlspec_save_level
-from .. import __version__ as TORCHLENS_VERSION
-from ..backends import BackendPayloadUnsupportedError, BackendSpec, get_backend_spec
-from ..data_classes._state_adapter import state_items
-from ..data_classes.trace import Trace
 
 if TYPE_CHECKING:
     from ..bundle import Bundle
@@ -59,6 +82,53 @@ if TYPE_CHECKING:
 
 PARTIAL_SENTINEL = "PARTIAL"
 REASON_SENTINEL = "REASON.txt"
+# Coarse anti-DoS ceiling on ``metadata.pkl`` (B8-16), for parity with the JSON
+# boundary's byte ceiling (512 MiB, ``_json._MAX_JSON_BYTES``). Structural trace
+# metadata (tensor payloads live in separate safetensors blobs) never approaches
+# this, so the cap only refuses an absurd artifact; it is deliberately generous
+# to avoid refusing a real save.
+_MAX_METADATA_PKL_BYTES = 512 * 1024**2
+
+# THE single authority for the load-provenance transient family (R50-2): every
+# attribute _io/bundle attaches to a LOADED trace that must never persist into
+# a re-save. One conceptual family used to have four declaration stories and a
+# function-local strip tuple as its only complete inventory; the strip pass in
+# ``scrub_for_save``'s caller and the exemption ledger in
+# ``data_classes/_trace_components.py`` both key off this constant's members.
+LOAD_PROVENANCE_TRANSIENT_ATTRS: tuple[str, ...] = (
+    "_loaded_from_bundle",
+    "_source_bundle_manifest_sha256",
+    "_source_bundle_path",
+    "_source_bundle_created_at",
+    "_source_bundle_provenance",
+    "_source_bundle_model_fingerprint",
+    "payload_load_status",
+    "_validation_replay_status",
+)
+# Object-count ceiling for ``metadata.pkl`` (R60/F6): the byte cap alone does not
+# bound allocation -- a pickle of tiny values expands its byte size into RSS
+# BEFORE any structural check can refuse it. This is the same lesson the JSON
+# boundary's ``_MAX_JSON_NODES`` prescan already encodes, carried to the sibling
+# pickle boundary. The prescan walks the opcode stream (pickletools.genops, no
+# object allocation) with an early stop, so its own worst case is bounded CPU,
+# never unbounded memory.
+#
+# CALIBRATION (r6 R60-F1 recalibration): the original 64M value was derived
+# from a ~5x bytes->RSS expansion assumption, but the measured worst case for
+# dict-of-tiny-dict payloads is 22-26x -- about 70 BYTES OF RSS PER OPCODE --
+# so a within-ceiling hostile artifact still projected to ~2.8 GiB of RSS and
+# minutes of CPU inside ``tl.load()``. The ceiling is now derived from that
+# measured per-opcode cost against a ~1.6 GiB worst-case allocation budget:
+# 24M opcodes x ~70 B/opcode ~= 1.6 GiB, with in-ceiling wall time under a
+# minute. Still far above any honest save: structural metadata at this opcode
+# count would be a multi-hundred-MB pickle, an order of magnitude beyond the
+# largest real traces (tensor payloads live in separate safetensors blobs).
+_MAX_METADATA_PKL_OPCODES = 24_000_000
+# Prescan only files large enough to matter: below this, worst-case expansion is
+# a few hundred MiB and the prescan would tax every real load for nothing.
+_METADATA_PKL_PRESCAN_BYTES = 8 * 1024**2
+# Belt bound on the persisted PARTIAL failure-reason sentinel (B8-12).
+_MAX_PARTIAL_REASON_CHARS = 200
 _BLOB_TENSOR_KEY = "data"
 _RUNNABLE_WEIGHT_KIND = "runnable_weight"
 _RUNNABLE_NONPERSISTENT_BUFFER_KIND = "runnable_nonpersistent_buffer"
@@ -180,6 +250,92 @@ class _FastCopySpec:
     source_ref: LazyActivationRef
 
 
+def _refuse_edge_intervened_save(trace: Any) -> None:
+    """PERMANENT erasure-prevention invariant for edge substitutions (L6 4.3).
+
+    The tlspec v8 coordinated bump persists ``Op.edge_substitutions``
+    (BLOB_RECURSIVE) and ``Op.edge_replacement_stamps`` (KEEP), so ordinary
+    saves of edge-intervened traces now proceed. Like the shard-local guard
+    below, the predicate keys on the ACTIVE SCHEMA rather than being deleted:
+    it refuses typed IFF tier-(ii) entries are present AND the active policy
+    would drop them (a schema regression re-dropping the carrier, with the S3
+    switch inactive). Any such regression re-fires this refusal instead of
+    silently presenting post-edit values with zero edge provenance.
+    """
+
+    carriers = [
+        op.label
+        for op in getattr(trace, "layer_list", ()) or ()
+        if getattr(op, "edge_substitutions", None)
+    ]
+    if not carriers:
+        return
+    from ..data_classes.op import Op as _Op
+    from . import FieldPolicy
+    from .prerelease import prerelease_fields_active
+
+    policy_entry = _Op.FIELD_POLICY.get("edge_substitutions")
+    portable_policy = getattr(policy_entry, "portable_policy", policy_entry)
+    if portable_policy is not None and portable_policy is not FieldPolicy.DROP:
+        return
+    if prerelease_fields_active():
+        return
+    from .._errors import InvalidArgumentError
+
+    raise InvalidArgumentError(
+        "this trace carries edge-substitution interventions, and the active "
+        "schema has no occurrence-granular carrier at ANY save level: the "
+        "artifact would present post-edit values with zero edge provenance. "
+        "Edge-intervened traces are session-only under such a schema.",
+        code="edge_intervention_save_unsupported",
+        remedy="analyze in-session, or re-capture without the edge edit before saving",
+        carriers=tuple(carriers),
+    )
+
+
+def _refuse_shard_local_erasure(trace: Any) -> None:
+    """PERMANENT erasure-prevention invariant for the shard-local disclosure.
+
+    L8/F6 (census plan 3.2b): an ordinary bundle write must NEVER complete if
+    it would silently drop the shard-local disclosure -- a saved shard-local
+    trace reloading as a plain dense-looking trace is the marker-free-artifact
+    class this invariant keeps EMPTY BY CONSTRUCTION. Refuses typed IFF the
+    trace carries ``distributed_scope == "rank_local_shard"`` AND the marker
+    is not persisted by the active schema (still ``FieldPolicy.DROP`` with the
+    S3 pre-release switch inactive). The wave-3 coordinated bump changes the
+    ENVIRONMENT, not this predicate: once the policy persists, the second
+    conjunct goes false by construction and ordinary saves proceed; the code,
+    predicate, and forced-DROP tamper red all REMAIN so any schema regression
+    that would re-drop the disclosure re-fires the invariant. Never deleted,
+    never a narrowing, no D-ruling owed.
+    """
+
+    if getattr(trace, "distributed_scope", None) != "rank_local_shard":
+        return
+    from ..data_classes.trace import Trace as _Trace
+    from . import FieldPolicy
+    from .prerelease import prerelease_fields_active
+
+    policy_entry = _Trace.FIELD_POLICY.get("distributed_scope")
+    portable_policy = getattr(policy_entry, "portable_policy", policy_entry)
+    if portable_policy is not None and portable_policy is not FieldPolicy.DROP:
+        return
+    if prerelease_fields_active():
+        return
+    from .._errors import InvalidArgumentError
+
+    raise InvalidArgumentError(
+        "this trace is a shard-local capture (distributed_scope == "
+        "'rank_local_shard'), and the active schema does not persist the "
+        "shard-local disclosure: an ordinary save would reload as a plain "
+        "trace with silently mis-stated parameter geometry. Shard-local "
+        "traces are session-only until the coordinated schema bump persists "
+        "the marker and its dual-geometry evidence.",
+        code="shard_local_persistence_unsupported",
+        remedy="analyze in-session; persistence lands with the coordinated schema bump",
+    )
+
+
 def save(
     trace: Trace,
     path: str | Path,
@@ -192,6 +348,8 @@ def save(
     include_weights: bool = False,
     include_activations: bool = False,
     include_source: bool = True,
+    include_custom_attributes: bool = True,
+    include_buffer_values: bool = True,
     strict: bool = True,
     overwrite: bool = False,
 ) -> None:
@@ -236,6 +394,32 @@ def save(
         (``$HOME``, OS username, site-packages / capturing-script layout) are
         always reduced to a bare basename, so no host filesystem PII is ever
         embedded. Applies at every save ``level``.
+    include_custom_attributes:
+        Whether harvested public module instance attributes
+        (``Module.custom_attributes`` — every public, non-callable attribute a
+        module instance holds, captured verbatim at prep time) are persisted
+        (default ``True``, the historical behavior). These are arbitrary user
+        values, so tokens, paths, or config blobs stored as module attributes
+        ride along in a shared bundle; set ``False`` to drop the whole channel.
+        Values are never rewritten or partially scrubbed. Every save discloses
+        the channel in ``manifest.json`` under ``custom_attributes_disclosure``
+        (module count + top-level key names). Sparse runnable cores always drop
+        the field regardless of this flag.
+    include_buffer_values:
+        Whether captured pre-forward buffer values are persisted (default
+        ``True``, the historical behavior). When a forward pass overwrites a
+        registered buffer (BatchNorm running statistics, step counters,
+        caches), TorchLens records the value the buffer held BEFORE the
+        forward in ``Trace._buffer_initial_values``, and every save level —
+        audit included — shipped those tensors verbatim with no opt-out.
+        Buffer values are training-data-derived state, so set ``False`` to
+        drop the whole channel from the artifact; values are never rewritten
+        or partially scrubbed. Every save discloses the channel in
+        ``manifest.json`` under ``buffer_values_disclosure`` (buffer count +
+        buffer names). Sparse runnable cores always drop the field regardless
+        of this flag (used non-persistent buffers ship separately there as the
+        REQUIRED, independently disclosed ``runnable_nonpersistent_buffer_v1``
+        family).
     strict:
         Whether unsupported tensors should abort the save instead of being skipped.
     overwrite:
@@ -261,23 +445,154 @@ def save(
 
     Warnings
     --------
-    Portable bundles contain a pickle file. Only load bundles from trusted
-    sources. Loading an untrusted bundle can execute arbitrary code.
+    Portable bundles contain a pickle file, but the default load path decodes
+    it through a restricted, default-deny unpickler: only allowlisted
+    constructors resolve, and foreign ``custom`` callable modules are never
+    imported unless explicitly trusted via ``trust_custom_callables=True`` or
+    ``allowed_custom_callable_modules=...``. The exposure is that residual
+    trust model, not ordinary arbitrary-code execution: opting into trusted
+    custom-callable execution imports and runs module top-level code, so only
+    grant it to artifacts whose provenance you trust.
     """
 
+    # A MergedTrace is a presenter, never a Trace: tl.save() refuses it typed
+    # (contract 2.5 "merged runnable export ... refused typed") instead of the
+    # historical bare AttributeError from the poison gate. The sys.modules
+    # gate keeps ordinary saves free of any merged import: a MergedTrace can
+    # only exist after its module was imported.
+    merged_presenter = sys.modules.get("torchlens.merged._presenter")
+    if merged_presenter is not None and isinstance(trace, merged_presenter.MergedTrace):
+        from ..merged import MergedErrorCode, MergedSurfaceUnsupportedError
+
+        raise MergedSurfaceUnsupportedError(
+            "tl.save() does not support MergedTrace. Write the merged-directory "
+            "artifact with merged.save(path), or save a single rank core with "
+            "tl.save(merged.ranks[r], path).",
+            code=MergedErrorCode.MERGED_SURFACE_UNSUPPORTED,
+        )
+    # A TraceSlice is likewise a presenter, never a Trace: a slice has
+    # dangling boundary edges whose other ends live outside it, so a
+    # persisted slice would imply replay/validation capabilities it cannot
+    # honour. Same sys.modules gate shape as the MergedTrace refusal above
+    # (owners disjoint; a slice can only exist after its module imported).
+    slice_presenter = sys.modules.get("torchlens.trace_slice")
+    if slice_presenter is not None and isinstance(trace, slice_presenter.TraceSlice):
+        from ..selection import SelectionError
+
+        raise SelectionError(
+            "tl.save() does not support TraceSlice: a slice is a VIEW with "
+            "declared dangling boundary edges, not a self-contained capture. "
+            "Save the underlying trace (tl.save(slice.source_trace, path)) "
+            "and re-derive the view after loading.",
+            code="slice_save_unsupported",
+        )
+    # N1: the settled capture outcome gates every export. FAILED, aborted, and
+    # UNKNOWN captures never produce a portable artifact (the historical
+    # ungated pass-through of failed partials was the hole this closes);
+    # HALTED and legacy UNATTESTED re-export stay open. This runs BEFORE the
+    # poison gate because a failed PartialTrace / failed Recording has no
+    # ``_runnable`` sparse-run state, so refuse_poisoned_trace crashed with a
+    # bare AttributeError before this typed N1 refusal could fire -- the exact
+    # shape the MergedTrace typed-refusal-first check above already closed.
+    from ..capture.outcome import CaptureOutcomeError, require_capture_capability
+
+    require_capture_capability(trace, "save_analysis")
+    # L7a: a structure-only trace refuses persistence wholesale until the
+    # wave-3 coordinated bump lands the marker + load-validation rows (the
+    # registrar's test-only activation switch is the one sanctioned
+    # exit-gate round-trip; every switch-on write stamps the fail-closed
+    # pre-release marker).
+    from ..capture.structure_only import require_structure_only_capability
+
+    require_structure_only_capability(trace, "save_analysis_artifact")
+    # L6 stage 3: THE v7 PERSISTENCE BOUNDARY for edge-intervened traces,
+    # keyed on TWO conjuncts — tier-(ii) edge-substitution entries PRESENT
+    # AND the S3 pre-release switch INACTIVE (the state in which the gated
+    # fields scrub DROP, i.e. every state v7 production code can reach). No
+    # occurrence-granular carrier survives a v7 save at ANY level, so an
+    # edge-intervened trace is SESSION-ONLY in production until the wave-3
+    # coordinated bump flips the registered rows. Runs at the save entry
+    # AHEAD of level dispatch/validation, so on trace-carrying artifacts
+    # this refusal PRECEDES artifact_save_level_unsupported. SAVE-ENTRY
+    # REFUSAL ORDER (owners disjoint, all fail closed — do not silently
+    # reorder another owner's refusal): (1) MergedTrace presenter refusal,
+    # (2) N1 capture-outcome gate, (3) L7a structure-only chokepoint,
+    # (4) this L6 edge boundary. Reviewers of record for this hunk: L4 + S3
+    # registrar + L7 (chokepoint co-owner).
+    _refuse_edge_intervened_save(trace)
+    # (5) L8 shard-local erasure prevention: appended AFTER the pinned
+    # four-refusal order above (owners disjoint; nothing reordered). Same
+    # two-conjunct key shape as the L6 edge boundary.
+    _refuse_shard_local_erasure(trace)
+    # A PartialTrace is a failed-capture inspection wrapper, never a savable
+    # product (its FIELD_POLICY declares both fields session-time DROP). Every
+    # SHIPPED wrapper settles FAILED and refuses through the gate above; this
+    # closes the hand-built wrapper-around-a-settled-trace residual, which
+    # before the b1-opus-R06-1 outcome delegation fail-closed only by ACCIDENT
+    # (the gate read the wrapper's empty ``__dict__`` as UNKNOWN) and would
+    # now otherwise crash untyped deeper in the save machinery. Same
+    # sys.modules shape as the MergedTrace refusal: a PartialTrace can only
+    # exist after its module was imported.
+    partial_module = sys.modules.get("torchlens.partial")
+    if partial_module is not None and isinstance(trace, partial_module.PartialTrace):
+        from ..capture.outcome import outcome_for
+
+        settled = outcome_for(trace)
+        raise CaptureOutcomeError(
+            "tl.save() does not support PartialTrace wrappers: a partial "
+            "capture is an inspection product with no persistable schema. "
+            "Inspect it live (draw, audit, first_nonfinite), or re-capture "
+            "successfully and save the resulting Trace.",
+            code="N1",
+            capability="save_analysis",
+            status="unknown" if settled is None else settled.status.value,
+        )
     from ..runnable import refuse_poisoned_trace
 
-    refuse_poisoned_trace(trace, "export")
+    # The poison gate only applies to products that carry sparse-run state; a
+    # PartialTrace / Recording has none, so there is nothing to refuse.
+    if getattr(trace, "_runnable", None) is not None:
+        refuse_poisoned_trace(trace, "export")
     save_level = coerce_tlspec_save_level(level)
+    if save_level == "runnable":
+        require_structure_only_capability(trace, "save_runnable")
+        # N4: a halted capture records a PREFIX of the forward, and the sparse
+        # runnable contract requires the complete taken path. Refusal surfaces
+        # through the runnable error vocabulary.
+        try:
+            require_capture_capability(trace, "save_runnable")
+        except CaptureOutcomeError as outcome_exc:
+            if outcome_exc.fields.get("code") == "N4":
+                from ..errors import RunnablePreflightError
+                from ..runnable import RunnableErrorCode
+
+                raise RunnablePreflightError(
+                    "Runnable save refuses a HALTED capture: the recorded graph "
+                    "is an honest prefix of the forward, not the complete taken "
+                    "path the sparse runnable contract requires. Re-capture "
+                    "without halt= to produce a runnable artifact.",
+                    code=RunnableErrorCode.HALTED_CAPTURE_NOT_RUNNABLE.value,
+                ) from outcome_exc
+            raise
     sparse_run_descriptor = None
     sparse_run_json = None
     weight_blob_specs: list[BlobSpec] = []
     nonpersistent_buffer_blob_specs: list[BlobSpec] = []
     activation_blob_specs: list[BlobSpec] = []
     if include_weights and save_level != "runnable":
-        raise ValueError("include_weights=True requires level='runnable'.")
+        raise InvalidArgumentError(
+            f"include_weights=True cannot be used with save level {save_level!r}",
+            code="save_payload_level_conflict",
+            remedy="set level='runnable' or set include_weights=False",
+            arguments=("include_weights", "level"),
+        )
     if include_activations and save_level != "runnable":
-        raise ValueError("include_activations=True requires level='runnable'.")
+        raise InvalidArgumentError(
+            f"include_activations=True cannot be used with save level {save_level!r}",
+            code="save_payload_level_conflict",
+            remedy="set level='runnable' or set include_activations=False",
+            arguments=("include_activations", "level"),
+        )
     if save_level == "runnable":
         from .runnable import (
             require_sparse_run_descriptor,
@@ -307,6 +622,8 @@ def save(
                 capture_state_digests,
                 input_fingerprints,
             ) = _capture_activation_blob_specs(trace, sparse_run_descriptor)
+            if activation_members and not original_input_digests:
+                _warn_unattestable_activation_archive_once()
             sparse_run_descriptor = with_activation_payload(
                 sparse_run_descriptor,
                 members=activation_members,
@@ -346,15 +663,20 @@ def save(
     backup_path: Path | None = None
     tmp_path = _make_tmp_bundle_path(bundle_path)
     try:
-        if bundle_path.exists():
-            if not overwrite:
-                raise FileExistsError(f"Bundle path already exists: {bundle_path}")
-            backup_path = _make_backup_path(bundle_path)
-            bundle_path.rename(backup_path)
+        if bundle_path.exists() and not overwrite:
+            raise FileExistsError(f"Bundle path already exists: {bundle_path}")
 
         tmp_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path.mkdir()
         (tmp_path / "blobs").mkdir()
+        # B8-10: safetensors blobs are already 0600, but the bundle directories and
+        # the metadata.pkl / manifest.json sidecars (which carry forward source and
+        # harvested module attributes) inherited the ambient umask -- group/world
+        # readable on the common umask 002. Tighten the directories to 0700 up front
+        # so no second principal can even swap a blob file in a group-writable dir;
+        # the sidecar files are tightened to 0600 after they are written below.
+        _restrict_mode(tmp_path, 0o700)
+        _restrict_mode(tmp_path / "blobs", 0o700)
 
         scrubbed_state, blob_specs, scrub_unsupported_tensors = _scrub_trace_for_bundle(
             trace,
@@ -363,6 +685,8 @@ def save(
             include_saved_args=include_saved_args,
             include_rng_states=include_rng_states,
             include_source=include_source,
+            include_custom_attributes=include_custom_attributes,
+            include_buffer_values=include_buffer_values,
             sparse_runnable=sparse_run_descriptor is not None,
         )
         if sparse_run_descriptor is not None:
@@ -450,29 +774,68 @@ def save(
             trace=trace,
             tensor_entries=tensor_entries,
             unsupported_tensors=unsupported_tensors,
+            include_source=include_source,
+            custom_attributes_disclosure=(
+                custom_attributes_disclosure := _custom_attributes_disclosure(
+                    trace,
+                    included=include_custom_attributes and sparse_run_descriptor is None,
+                )
+            ),
+            buffer_values_disclosure=(
+                buffer_values_disclosure := _buffer_values_disclosure(
+                    trace,
+                    included=include_buffer_values and sparse_run_descriptor is None,
+                )
+            ),
         )
+        _warn_custom_attribute_embedding(custom_attributes_disclosure)
+        _warn_buffer_value_embedding(buffer_values_disclosure)
         _TlSpecWriter.write_trace_manifest(
             path=tmp_path / "manifest.json",
             trace=trace,
             legacy_manifest=manifest,
             save_level=save_level,
             sparse_run=sparse_run_json,
+            scrubbed_state=scrubbed_state,
         )
+        _restrict_mode(tmp_path / "manifest.json", 0o600)
         with (tmp_path / "metadata.pkl").open("wb") as handle:
-            pickle.dump(scrubbed_state, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            # B3R4-R21-2: canonical container bytes (set/frozenset members
+            # sorted), so persisted metadata does not vary with PYTHONHASHSEED.
+            dump_canonical_metadata(scrubbed_state, handle)
+        _restrict_mode(tmp_path / "metadata.pkl", 0o600)
 
+        # Durability before publish: fsync every written blob/sidecar and the
+        # bundle directories so a power/OS crash after the rename below cannot
+        # publish a bundle holding zero-length or partial files.
+        fsync_tree(tmp_path)
+        # Move the existing target aside only NOW, immediately before the
+        # swap (mirroring ``_TlSpecWriter.write_bundle``). Doing it at save
+        # start left the target with NO bundle for the whole (potentially
+        # minutes-long) scrub/blob write: the Python exception nets below
+        # restore it, but SIGKILL/power loss mid-save stranded the old data
+        # under an undocumented ``.bak.<uuid>`` name, and concurrent readers
+        # saw the bundle vanish for the entire save.
+        if bundle_path.exists():
+            if not overwrite:
+                raise FileExistsError(f"Bundle path already exists: {bundle_path}")
+            backup_path = _make_backup_path(bundle_path)
+            bundle_path.rename(backup_path)
         tmp_path.rename(bundle_path)
+        # Make the rename itself durable before declaring the save complete.
+        fsync_dir(bundle_path.parent)
         if backup_path is not None:
-            _remove_path(backup_path)
-    except TorchLensIOError:
-        _mark_partial(tmp_path)
-        if backup_path is not None and not bundle_path.exists() and backup_path.exists():
-            _restore_backup(backup_path, bundle_path)
+            try:
+                _remove_path(backup_path)
+            except OSError:
+                # The replacement is already installed atomically. A stale backup
+                # is recoverable cleanup debris, not a failed save.
+                pass
+    except TorchLensIOError as exc:
+        _run_save_recovery(tmp_path, backup_path, bundle_path, primary=exc)
         raise
-    except BackendPayloadUnsupportedError:
-        _mark_partial(tmp_path)
-        if backup_path is not None and not bundle_path.exists() and backup_path.exists():
-            _restore_backup(backup_path, bundle_path)
+    except BackendPayloadUnsupportedError as exc:
+        _run_save_recovery(tmp_path, backup_path, bundle_path, primary=exc)
         raise
     except (ImportError, OSError, TypeError, ValueError, pickle.PickleError) as exc:
         # ``TypeError`` is caught alongside the other serialization failure
@@ -483,10 +846,15 @@ def save(
         # the ``PARTIAL`` sentinel (leaving the ``.tmp`` dir un-sweepable by
         # ``cleanup_tmp()``) and the backup restore (permanently losing the
         # pre-overwrite bundle under an undocumented ``.bak.<uuid>`` name).
-        _mark_partial(tmp_path, reason=str(exc))
-        if backup_path is not None and not bundle_path.exists() and backup_path.exists():
-            _restore_backup(backup_path, bundle_path)
-        raise TorchLensIOError(f"Failed to save bundle at {bundle_path}.") from exc
+        _run_save_recovery(tmp_path, backup_path, bundle_path, primary=exc)
+        raise TorchLensIOError(
+            f"Failed to save bundle at {bundle_path}: {type(exc).__name__}: {exc}. "
+            "Remedy: the staging directory was marked PARTIAL (sweepable by "
+            "cleanup) and any pre-overwrite bundle was restored; fix the named "
+            "cause and re-save.",
+            code="bundle_save_failed",
+            cause_type=type(exc).__name__,
+        ) from exc
     except BaseException as exc:
         # Safety-net catch-all that closes the whole *class* of bug the
         # branches above were built to fix one exception type at a time
@@ -506,11 +874,16 @@ def save(
         # unwinding mid-write; those are re-raised unwrapped below so control
         # flow semantics are preserved, while ordinary exceptions are wrapped
         # in ``TorchLensIOError`` to match the sibling branch above.
-        _mark_partial(tmp_path, reason=str(exc))
-        if backup_path is not None and not bundle_path.exists() and backup_path.exists():
-            _restore_backup(backup_path, bundle_path)
+        _run_save_recovery(tmp_path, backup_path, bundle_path, primary=exc)
         if isinstance(exc, Exception):
-            raise TorchLensIOError(f"Failed to save bundle at {bundle_path}.") from exc
+            raise TorchLensIOError(
+                f"Failed to save bundle at {bundle_path}: {type(exc).__name__}: {exc}. "
+                "Remedy: the staging directory was marked PARTIAL (sweepable by "
+                "cleanup) and any pre-overwrite bundle was restored; fix the named "
+                "cause and re-save.",
+                code="bundle_save_failed",
+                cause_type=type(exc).__name__,
+            ) from exc
         raise
 
 
@@ -686,8 +1059,8 @@ def _capture_activation_blob_specs(
         If a selected payload is unavailable or is not a dense torch tensor.
     """
 
-    from .._runnable_state import runnable_tensor_byte_digest
     from .._runnable_execution import build_input_attestation_fingerprint
+    from .._runnable_state import runnable_tensor_byte_digest
     from ..runnable import ActivationPayloadMember, SlotByteDigest, StateByteDigest
 
     slot_ids = {slot.slot_id for slot in descriptor.tensor_slots}
@@ -790,7 +1163,7 @@ def _capture_source_state(trace: Trace, *, option_name: str) -> Mapping[str, tor
     label.
     """
 
-    state = getattr(trace, "_runnable_capture_state", None)
+    state = trace._runnable.capture_state
     if not isinstance(state, Mapping) or any(
         not isinstance(name, str) or not isinstance(value, torch.Tensor)
         for name, value in state.items()
@@ -863,8 +1236,8 @@ def load(
     payload_hints: PayloadLoadHints | None = None,
     trust_custom_callables: bool = False,
     allowed_custom_callable_modules: Collection[str] | None = None,
-    _bundle_visited: "frozenset[Path] | None" = None,
-) -> "Trace | Bundle | InterventionSpec":
+    _bundle_visited: frozenset[Path] | None = None,
+) -> Trace | Bundle | InterventionSpec:
     """Load a ``.tlspec`` object with eager tensor materialization.
 
     Parameters
@@ -898,8 +1271,8 @@ def load(
     payload_hints: PayloadLoadHints | None = None,
     trust_custom_callables: bool = False,
     allowed_custom_callable_modules: Collection[str] | None = None,
-    _bundle_visited: "frozenset[Path] | None" = None,
-) -> "Trace | Bundle | InterventionSpec":
+    _bundle_visited: frozenset[Path] | None = None,
+) -> Trace | Bundle | InterventionSpec:
     """Load a ``.tlspec`` object while leaving direct tensors lazy.
 
     Parameters
@@ -932,8 +1305,8 @@ def load(
     payload_hints: PayloadLoadHints | None = None,
     trust_custom_callables: bool = False,
     allowed_custom_callable_modules: Collection[str] | None = None,
-    _bundle_visited: "frozenset[Path] | None" = None,
-) -> "Trace | Bundle | InterventionSpec":
+    _bundle_visited: frozenset[Path] | None = None,
+) -> Trace | Bundle | InterventionSpec:
     """Load a TorchLens ``.tlspec`` object polymorphically.
 
     Parameters
@@ -983,18 +1356,62 @@ def load(
 
     Warnings
     --------
-    Portable bundles contain a pickle file. Only load bundles from trusted
-    sources. Loading an untrusted bundle can execute arbitrary code.
+    Portable bundles contain a pickle file, but the default load path decodes
+    it through a restricted, default-deny unpickler: only allowlisted
+    constructors resolve, and foreign ``custom`` callable modules are never
+    imported unless explicitly trusted via ``trust_custom_callables=True`` or
+    ``allowed_custom_callable_modules=...``. The exposure is that residual
+    trust model, not ordinary arbitrary-code execution: opting into trusted
+    custom-callable execution imports and runs module top-level code, so only
+    grant it to artifacts whose provenance you trust.
     """
 
+    # Load boundary: force every memoized class-owned static lookup to re-validate
+    # its class-definition fingerprint before this artifact is decoded.
+    invalidate_static_class_attr_cache()
     bundle_path = Path(path)
     if bundle_path.is_dir():
+        # Version-gated merged-directory branch: the merged root manifest is a
+        # different discriminated object from a trace bundle's manifest (it
+        # carries no tensor table), so it routes before Manifest parsing.
+        # Runtimes without this branch refuse the format typed at the closed
+        # bundle_format vocabulary check.
+        merged_manifest_path = bundle_path / "manifest.json"
+        if merged_manifest_path.is_file() and not merged_manifest_path.is_symlink():
+            try:
+                # ``read_text`` allocated the entire attacker-sized file BEFORE the
+                # ceiling could refuse it; the bounded path reader reads at most
+                # ``max_bytes + 1``, so discovery cannot be an allocation DoS.
+                candidate = _json.read_bounded(merged_manifest_path)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                candidate = None
+            if isinstance(candidate, dict) and candidate.get("bundle_format") == "merged-directory":
+                from ..merged._artifact import load_merged
+
+                return load_merged(bundle_path)  # type: ignore[return-value]
         from ..io import detect_tlspec_format
 
         tlspec_format = detect_tlspec_format(bundle_path)
         if tlspec_format in {"v2.16_intervention", "v2.16_intervention_with_kind"}:
             from ..intervention.save import load_intervention_spec
 
+            # Typed boundary (r7 R73): a trace manifest whose ``tlspec_version``
+            # key was lost still carries ``kind``, so format detection
+            # classifies it as a v2.16 intervention spec and the spec loader
+            # then surfaced a RAW FileNotFoundError for the spec.json the
+            # artifact never had. Incoherent format markers are a corrupt
+            # artifact and must refuse typed at the dispatch.
+            if bundle_path.is_dir() and not (bundle_path / "spec.json").exists():
+                raise TorchLensIOError(
+                    f"Artifact at {bundle_path} classifies as {tlspec_format} "
+                    "(its manifest carries 'kind' without 'tlspec_version') but "
+                    "contains no spec.json — the format markers are incoherent, "
+                    "which means the manifest lost required keys or the "
+                    "artifact is corrupt. Remedy: restore the manifest's "
+                    "tlspec_version key or re-save the artifact from its "
+                    "source trace.",
+                    code="tlspec_format_markers_incoherent",
+                )
             return load_intervention_spec(
                 bundle_path,
                 trust_custom_callables=trust_custom_callables,
@@ -1019,13 +1436,18 @@ def load(
             trust_custom_callables=trust_custom_callables,
             allowed_custom_callable_modules=allowed_custom_callable_modules,
         )
-    _reject_symlink_path(bundle_path, context="bundle path")
+    # Stable ``fields["code"]`` on the six distinct tl.load front-door causes so a
+    # caller can branch on the cause instead of parsing one content-free string
+    # (R65): a symlinked load path, an unreadable manifest, a non-object manifest
+    # root, a metadata-integrity refusal (tagged at the unpickle boundary below), a
+    # below-floor version, and a generic bundle-load failure.
+    _reject_symlink_path(bundle_path, context="bundle path", code="load_path_symlink_rejected")
     manifest_path = bundle_path / "manifest.json"
     metadata_path = bundle_path / "metadata.pkl"
     blobs_path = bundle_path / "blobs"
-    _reject_symlink_path(manifest_path, context="manifest")
-    _reject_symlink_path(metadata_path, context="metadata")
-    _reject_symlink_path(blobs_path, context="blobs directory")
+    _reject_symlink_path(manifest_path, context="manifest", code="load_path_symlink_rejected")
+    _reject_symlink_path(metadata_path, context="metadata", code="load_path_symlink_rejected")
+    _reject_symlink_path(blobs_path, context="blobs directory", code="load_path_symlink_rejected")
 
     try:
         manifest = Manifest.read(manifest_path)
@@ -1054,7 +1476,7 @@ def _load_trace_payload(
     sparse_run: Mapping[str, Any] | None = None,
     trust_custom_callables: bool = False,
     allowed_custom_callable_modules: Collection[str] | None = None,
-) -> "Trace | Bundle | InterventionSpec":
+) -> Trace | Bundle | InterventionSpec:
     """Load a portable Trace payload after manifest dispatch.
 
     Parameters
@@ -1086,18 +1508,50 @@ def _load_trace_payload(
     python_major_mismatch = False
     try:
         enforce_version_policy(manifest)
-        _validate_manifest_blob_paths(manifest, bundle_path)
+        resolved_blobs_dir = resolve_bundle_blobs_dir(bundle_path)
+        _validate_manifest_blob_paths(manifest, bundle_path, resolved_blobs_dir)
         _check_unknown_blob_entries(manifest, blobs_path)
         if not lazy:
-            _eager_verify_blob_payloads(manifest, bundle_path, map_location)
+            _eager_verify_blob_payloads(
+                manifest,
+                bundle_path,
+                map_location,
+                resolved_blobs_dir,
+            )
 
         python_major_mismatch = _python_major_mismatch(manifest)
         with metadata_path.open("rb") as handle:
+            # Coarse allocation guard for parity with the JSON boundary (B8-16):
+            # every JSON read enforces a byte ceiling, but ``metadata.pkl`` had
+            # none. This bounds an absurd on-disk pickle before it is streamed into
+            # the unpickler; the SafeBundleUnpickler allowlist remains the actual
+            # code-execution defense, and pickle expansion bombs are out of scope
+            # for a file-size cap. The ceiling is generous so no real structural
+            # metadata is refused.
+            metadata_size = os.fstat(handle.fileno()).st_size
+            if metadata_size > _MAX_METADATA_PKL_BYTES:
+                raise TorchLensIOError(
+                    f"Bundle metadata {metadata_path} is {metadata_size} bytes, above "
+                    f"the {_MAX_METADATA_PKL_BYTES}-byte ceiling; refusing to load a "
+                    "structurally implausible artifact."
+                )
+            if metadata_size > _METADATA_PKL_PRESCAN_BYTES:
+                _prescan_metadata_pickle_opcodes(handle, metadata_path)
             scrubbed_state = _RenameAwareUnpickler(
                 handle,
                 trust_custom_callables=trust_custom_callables,
                 allowed_custom_callable_modules=allowed_custom_callable_modules,
             ).load()
+        if not isinstance(scrubbed_state, dict):
+            # R65/F10: without this guard a corrupt/hostile payload escapes
+            # tl.load() as a raw stdlib TypeError/ValueError from the downstream
+            # dict() walk, naming a "dictionary update sequence element".
+            raise TorchLensIOError(
+                f"Bundle metadata at {metadata_path} is not a metadata mapping "
+                f"(got {type(scrubbed_state).__name__}); the artifact is corrupt or "
+                "hand-edited. Remedy: re-save the trace with tl.save().",
+                code="metadata_payload_not_a_mapping",
+            )
     except TorchLensIOError:
         raise
     except (pickle.UnpicklingError, EOFError) as exc:
@@ -1107,25 +1561,48 @@ def _load_trace_payload(
                 f" Bundle was written with python_version={manifest.python_version} but runtime is "
                 f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}."
             )
+        # A guarded-unpickler denylist refusal or corrupt/truncated pickle stream
+        # is a bundle-INTEGRITY signal, not environmental drift: it is tagged with
+        # a stable code so a downstream loader (e.g. the merged-artifact rank-core
+        # loader, A-R58-1) can refuse it as tamper rather than laundering it into
+        # the "no longer parses on this runtime" degradation channel.
         raise TorchLensIOError(
-            f"Failed to load bundle metadata from {metadata_path}.{hint}"
+            f"Failed to load bundle metadata from {metadata_path}.{hint}",
+            code="bundle_metadata_integrity_refused",
         ) from exc
-    except (OSError, AttributeError, EOFError, ImportError, TypeError, ValueError) as exc:
-        raise TorchLensIOError(f"Failed to load bundle at {bundle_path}.") from exc
+    except (OSError, AttributeError, ImportError, TypeError, ValueError) as exc:
+        # Generic bundle-load failure (torch/codec drift, missing dep): the sixth
+        # tl.load front-door cause gets its own stable code (R65).
+        raise TorchLensIOError(
+            f"Failed to load bundle at {bundle_path}.", code="bundle_load_failed"
+        ) from exc
 
-    trace = rehydrate_trace(
-        scrubbed_state,
-        manifest,
-        bundle_path,
-        lazy=lazy,
-        map_location=map_location,
-        materialize_nested=materialize_nested,
-        payload_hints=payload_hints,
-    )
+    try:
+        trace = rehydrate_trace(
+            scrubbed_state,
+            manifest,
+            bundle_path,
+            lazy=lazy,
+            map_location=map_location,
+            materialize_nested=materialize_nested,
+            payload_hints=payload_hints,
+            resolved_blobs_dir=resolved_blobs_dir,
+        )
+    except RecursionError as exc:
+        # b4:R27-3 sub-fix: a hostile scrubbed-state object graph deeply nested
+        # enough to blow the C stack during the rehydrate walk must surface as a
+        # typed artifact error, not an uncaught RecursionError that escapes
+        # ``tl.load(path)``. Pairs with the load-walk depth ceiling.
+        raise TorchLensIOError(
+            f"Failed to load bundle at {bundle_path}: metadata nesting exceeded the "
+            "interpreter recursion limit during rehydration."
+        ) from exc
+    _reanchor_visualizer_paths(trace, bundle_path)
     setattr(trace, "_loaded_from_bundle", True)
     setattr(trace, "_source_bundle_manifest_sha256", sha256_of_file(manifest_path))
     setattr(trace, "_source_bundle_path", bundle_path)
     setattr(trace, "_source_bundle_created_at", manifest.created_at)
+    setattr(trace, "_source_bundle_provenance", manifest.provenance)
     from .runnable_load import attach_sparse_run_readiness
 
     attach_sparse_run_readiness(trace, sparse_run)
@@ -1134,24 +1611,30 @@ def _load_trace_payload(
         manifest=manifest,
         bundle_path=bundle_path,
         map_location=map_location,
+        resolved_blobs_dir=resolved_blobs_dir,
     )
     _bind_embedded_weight_payload(
         trace,
         manifest=manifest,
         bundle_path=bundle_path,
         map_location=map_location,
+        resolved_blobs_dir=resolved_blobs_dir,
     )
     _bind_archived_activation_payload(
         trace,
         manifest=manifest,
         bundle_path=bundle_path,
         map_location=map_location,
+        resolved_blobs_dir=resolved_blobs_dir,
     )
     return trace
 
 
 _NONPERSISTENT_DISCLOSURE_WARNED = False
 """One-time process flag for the non-persistent buffer save disclosure."""
+
+_UNATTESTABLE_ACTIVATION_DISCLOSURE_WARNED = False
+"""One-time process flag for the unattestable-activation-archive save disclosure (r6 H2)."""
 
 
 def _warn_nonpersistent_buffer_disclosure_once() -> None:
@@ -1174,7 +1657,38 @@ def _warn_nonpersistent_buffer_disclosure_once() -> None:
         "declared state the artifact cannot replay without, and they are written "
         "even with include_weights/include_activations false. Review the buffers "
         "before sharing the artifact if they may hold sensitive data.",
-        UserWarning,
+        TorchLensWarning,
+        stacklevel=3,
+    )
+
+
+def _warn_unattestable_activation_archive_once() -> None:
+    """Disclose an activation archive saved without any original-input eligibility (r6 H2).
+
+    ``_capture_activation_blob_specs`` can only record ``original_input_digests`` /
+    ``input_fingerprints`` for a model input that the capture actually SELECTED. With a
+    ``save=`` selector -- the recommended idiom -- the input op is usually unselected, so
+    the archive ships blobs and digests but ZERO input eligibility, and numeric attestation
+    is permanently ``NOT_APPLICABLE`` no matter what the caller later passes to ``.run()``.
+    Left silent that is indistinguishable from "you changed the input", so disclose it at
+    SAVE time. The run report carries the matching named
+    ``numeric_attestation:not_applicable:no_recorded_original_input_eligibility`` entry.
+
+    This is the behavior-preserving half only: the status itself is deliberately NOT
+    promoted to ``ATTESTED``.
+    """
+
+    global _UNATTESTABLE_ACTIVATION_DISCLOSURE_WARNED
+    if _UNATTESTABLE_ACTIVATION_DISCLOSURE_WARNED:
+        return
+    _UNATTESTABLE_ACTIVATION_DISCLOSURE_WARNED = True
+    warnings.warn(
+        "This runnable save archives activations but records no original-input "
+        "digests/fingerprints, because the capture selection did not include the model "
+        "input. Numeric attestation on a later .run() will report not_applicable for that "
+        "reason -- not because the inputs changed. Capture the model input alongside the "
+        "selected activations if byte-exact attestation is wanted.",
+        TorchLensWarning,
         stacklevel=3,
     )
 
@@ -1203,7 +1717,7 @@ def _runnable_payload_disposition(trace: Trace, entries: tuple[Any, ...]) -> str
 
     if trace.runnable_descriptor is not None:
         return "bind"
-    readiness = trace.__dict__.get("_runnable_readiness")
+    readiness = trace._runnable.readiness
     if getattr(readiness, "provider", None) is RunProvider.LOADED_SPARSE:
         # A refused/legacy sparse descriptor degrades to analysis-only; skip binding.
         return "skip"
@@ -1217,6 +1731,7 @@ def _bind_embedded_nonpersistent_buffer_payload(
     manifest: Manifest,
     bundle_path: Path,
     map_location: str | torch.device,
+    resolved_blobs_dir: Path | None = None,
 ) -> None:
     """Decode and bind mandatory captured non-persistent buffer values.
 
@@ -1230,6 +1745,8 @@ def _bind_embedded_nonpersistent_buffer_payload(
         Artifact root used to resolve blob paths safely.
     map_location:
         Device selected for loaded buffer tensors.
+    resolved_blobs_dir:
+        Canonical blob containment root for this load operation.
 
     Raises
     ------
@@ -1239,6 +1756,8 @@ def _bind_embedded_nonpersistent_buffer_payload(
         If decoded values violate the non-persistent buffer slot contract.
     """
 
+    if resolved_blobs_dir is None:
+        resolved_blobs_dir = resolve_bundle_blobs_dir(bundle_path)
     descriptor = trace.runnable_descriptor
     entries = tuple(
         entry for entry in manifest.tensors if entry.kind == _RUNNABLE_NONPERSISTENT_BUFFER_KIND
@@ -1271,7 +1790,11 @@ def _bind_embedded_nonpersistent_buffer_payload(
             raise TorchLensIOError(
                 f"Runnable non-persistent buffer payload repeats canonical name {entry.label!r}."
             )
-        blob_path = resolve_bundle_blob_path(bundle_path, entry.relative_path)
+        blob_path = resolve_bundle_blob_path(
+            bundle_path,
+            entry.relative_path,
+            resolved_blobs_dir=resolved_blobs_dir,
+        )
         observed_sha256 = sha256_of_file(blob_path)
         if observed_sha256 != entry.sha256:
             raise TorchLensIOError(
@@ -1297,6 +1820,7 @@ def _bind_embedded_weight_payload(
     manifest: Manifest,
     bundle_path: Path,
     map_location: str | torch.device,
+    resolved_blobs_dir: Path | None = None,
 ) -> None:
     """Decode and strictly bind the optional runnable state-dict blob family.
 
@@ -1310,6 +1834,8 @@ def _bind_embedded_weight_payload(
         Artifact root used to resolve blob paths safely.
     map_location:
         Device selected for loaded state tensors.
+    resolved_blobs_dir:
+        Canonical blob containment root for this load operation.
 
     Raises
     ------
@@ -1320,6 +1846,8 @@ def _bind_embedded_weight_payload(
         If the decoded state violates the shared strict binding contract.
     """
 
+    if resolved_blobs_dir is None:
+        resolved_blobs_dir = resolve_bundle_blobs_dir(bundle_path)
     descriptor = trace.runnable_descriptor
     weight_entries = tuple(
         entry for entry in manifest.tensors if entry.kind == _RUNNABLE_WEIGHT_KIND
@@ -1348,7 +1876,11 @@ def _bind_embedded_weight_payload(
             raise TorchLensIOError(
                 f"Runnable weight payload repeats canonical state name {entry.label!r}."
             )
-        blob_path = resolve_bundle_blob_path(bundle_path, entry.relative_path)
+        blob_path = resolve_bundle_blob_path(
+            bundle_path,
+            entry.relative_path,
+            resolved_blobs_dir=resolved_blobs_dir,
+        )
         observed_sha256 = sha256_of_file(blob_path)
         if observed_sha256 != entry.sha256:
             raise TorchLensIOError(
@@ -1371,6 +1903,7 @@ def _bind_archived_activation_payload(
     manifest: Manifest,
     bundle_path: Path,
     map_location: str | torch.device,
+    resolved_blobs_dir: Path | None = None,
 ) -> None:
     """Load the inspection-only selected-activation family without seeding execution.
 
@@ -1384,6 +1917,8 @@ def _bind_archived_activation_payload(
         Artifact root used to resolve blob paths safely.
     map_location:
         Device selected for loaded activation tensors.
+    resolved_blobs_dir:
+        Canonical blob containment root for this load operation.
 
     Raises
     ------
@@ -1391,8 +1926,11 @@ def _bind_archived_activation_payload(
         If descriptor membership, blob entries, or file checksums disagree.
     """
 
+    from .._runnable_state import runnable_tensor_byte_digest
     from ..runnable import ActivationPayloadLayerDescriptor, ArchivedActivation
 
+    if resolved_blobs_dir is None:
+        resolved_blobs_dir = resolve_bundle_blobs_dir(bundle_path)
     descriptor = trace.runnable_descriptor
     activation_entries = {
         entry.blob_id: entry
@@ -1415,7 +1953,7 @@ def _bind_archived_activation_payload(
             raise TorchLensIOError(
                 "Runnable activation blobs are present while their payload flag is false."
             )
-        trace.__dict__["_runnable_archived_activations"] = {}
+        trace._runnable.archived_activations = {}
         return
     if not isinstance(declared, ActivationPayloadLayerDescriptor):
         raise TorchLensIOError("Runnable activation payload metadata is incomplete.")
@@ -1432,7 +1970,11 @@ def _bind_archived_activation_payload(
             raise TorchLensIOError(
                 f"Runnable activation member {member.blob_id!r} has no tensor entry."
             )
-        blob_path = resolve_bundle_blob_path(bundle_path, entry.relative_path)
+        blob_path = resolve_bundle_blob_path(
+            bundle_path,
+            entry.relative_path,
+            resolved_blobs_dir=resolved_blobs_dir,
+        )
         observed_sha256 = sha256_of_file(blob_path)
         if observed_sha256 != entry.sha256:
             raise TorchLensIOError(
@@ -1442,6 +1984,21 @@ def _bind_archived_activation_payload(
         if tensor is None:
             raise TorchLensIOError(
                 f"Archived activation blob {blob_path} lacks {_BLOB_TENSOR_KEY!r}."
+            )
+        # r6 M4: the file ``sha256`` above attests the BLOB against the MANIFEST, but the
+        # member's ``byte_digest`` -- the value republished on the public
+        # ``ArchivedActivation.byte_digest`` beside ``.value`` -- was never checked
+        # against what actually loaded. Editing one member digest (blobs untouched) loaded
+        # silently and produced a record that CONTRADICTED ITSELF on the inspection
+        # surface. Verify the loaded tensor against its own declared digest so the
+        # published pair is always internally consistent.
+        observed_byte_digest = runnable_tensor_byte_digest(tensor)
+        if observed_byte_digest != member.byte_digest:
+            raise TorchLensIOError(
+                "Archived activation byte-digest mismatch for "
+                f"blob_id={entry.blob_id} (slot_id={member.slot_id!r}, field={member.field!r}): "
+                f"declared {member.byte_digest!r} but the loaded tensor digests to "
+                f"{observed_byte_digest!r}."
             )
         archive_key = f"{member.slot_id}:{member.field}"
         if archive_key in archived:
@@ -1456,7 +2013,7 @@ def _bind_archived_activation_payload(
         )
     if set(activation_entries) != {member.blob_id for member in declared.members}:
         raise TorchLensIOError("Runnable activation blobs and declared membership disagree.")
-    trace.__dict__["_runnable_archived_activations"] = archived
+    trace._runnable.archived_activations = archived
 
 
 def _load_unified_tlspec(
@@ -1468,8 +2025,8 @@ def _load_unified_tlspec(
     payload_hints: PayloadLoadHints | None,
     trust_custom_callables: bool,
     allowed_custom_callable_modules: Collection[str] | None,
-    bundle_visited: "frozenset[Path] | None" = None,
-) -> "Trace | Bundle | InterventionSpec":
+    bundle_visited: frozenset[Path] | None = None,
+) -> Trace | Bundle | InterventionSpec:
     """Load a unified ``.tlspec`` bundle by manifest kind.
 
     Parameters
@@ -1519,7 +2076,7 @@ def _load_unified_tlspec(
     if kind == "trace":
         _preflight_unified_trace_manifest(manifest, bundle_path=bundle_path)
         parsed_manifest = _manifest_for_unified_trace_load(manifest)
-        return _load_trace_payload(
+        loaded_trace = _load_trace_payload(
             bundle_path,
             parsed_manifest,
             lazy=lazy,
@@ -1530,6 +2087,10 @@ def _load_unified_tlspec(
             trust_custom_callables=trust_custom_callables,
             allowed_custom_callable_modules=allowed_custom_callable_modules,
         )
+        model_fingerprint = manifest.get("model_fingerprint")
+        if isinstance(model_fingerprint, dict):
+            setattr(loaded_trace, "_source_bundle_model_fingerprint", model_fingerprint)
+        return loaded_trace
     if kind == "bundle":
         return _load_unified_bundle(bundle_path, bundle_visited=bundle_visited)
     raise TorchLensIOError(f"Unsupported unified tlspec kind={kind!r}.")
@@ -1551,6 +2112,11 @@ def _preflight_unified_trace_manifest(
 
     Raises
     ------
+    ArtifactVersionBelowFloorError
+        If the manifest predates the tlspec_version 6 / torchlens 2.33
+        rehydration floor. Checked before schema validation so a pre-floor
+        artifact (which also fails the current schema) refuses with the
+        floor named instead of a missing-field error.
     TorchLensIOError
         If the manifest schema version is unsupported or inconsistent.
     BackendPayloadUnsupportedError
@@ -1559,9 +2125,22 @@ def _preflight_unified_trace_manifest(
 
     from ..validation import validate_tlspec
 
+    raw_version = manifest.get("tlspec_version")
+    if isinstance(raw_version, int) and raw_version < MIN_TLSPEC_VERSION:
+        raise below_floor_error(
+            observed=f"tlspec_version={raw_version}",
+            subject="Bundle manifest",
+            path=str(bundle_path),
+        )
+
     try:
         validate_tlspec(bundle_path, allow_unsupported_runnable_versions=True)
     except ValueError as exc:
+        # Never launder an already-typed refusal (R65-4): re-wrapping a
+        # ValueError-lineage TorchLens error here stripped its stable code and
+        # structured fields into one content-free message.
+        if isinstance(getattr(exc, "fields", None), dict) and exc.fields.get("code"):  # type: ignore[attr-defined]
+            raise
         raise TorchLensIOError(f"Invalid unified trace manifest: {exc}") from exc
 
     schema_version = manifest.get("schema_version", 1)
@@ -1650,7 +2229,9 @@ def _preflight_unified_trace_body_index(
         )
 
     missing_blob_ids: list[str] = []
-    for index, (body_entry, tensor_entry) in enumerate(zip(body_index, tensors)):
+    # The explicit length guard above already refused any mismatch, so these
+    # pair exactly.
+    for index, (body_entry, tensor_entry) in enumerate(zip(body_index, tensors, strict=True)):
         if not isinstance(body_entry, dict) or not isinstance(tensor_entry, dict):
             raise TorchLensIOError(
                 f"Unified trace body_index/tensors entry {index} must be an object."
@@ -1907,8 +2488,8 @@ def _manifest_for_unified_trace_load(manifest: dict[str, Any]) -> Manifest:
 def _load_unified_bundle(
     bundle_path: Path,
     *,
-    bundle_visited: "frozenset[Path] | None" = None,
-) -> "Bundle":
+    bundle_visited: frozenset[Path] | None = None,
+) -> Bundle:
     """Load a unified ``Bundle`` payload.
 
     Parameters
@@ -1942,6 +2523,19 @@ def _load_unified_bundle(
     _reject_symlink_path(legacy_pickle_path, context="bundle metadata")
     try:
         with legacy_pickle_path.open("rb") as handle:
+            # Same coarse allocation guard as the trace metadata path (B8-16):
+            # the legacy kind=bundle branch fed the unpickler an uncapped file,
+            # so an absurd on-disk pickle was an alloc/time DoS at tl.load even
+            # though the SafeBundleUnpickler still blocked code execution.
+            metadata_size = os.fstat(handle.fileno()).st_size
+            if metadata_size > _MAX_METADATA_PKL_BYTES:
+                raise TorchLensIOError(
+                    f"Bundle metadata {legacy_pickle_path} is {metadata_size} bytes, above "
+                    f"the {_MAX_METADATA_PKL_BYTES}-byte ceiling; refusing to load a "
+                    "structurally implausible artifact."
+                )
+            if metadata_size > _METADATA_PKL_PRESCAN_BYTES:
+                _prescan_metadata_pickle_opcodes(handle, legacy_pickle_path)
             bundle = _RenameAwareUnpickler(handle).load()
     except (
         pickle.UnpicklingError,
@@ -2024,8 +2618,8 @@ def _load_unified_bundle_directory(
     bundle_path: Path,
     metadata_path: Path,
     *,
-    bundle_visited: "frozenset[Path] | None" = None,
-) -> "Bundle":
+    bundle_visited: frozenset[Path] | None = None,
+) -> Bundle:
     """Load a unified bundle container from nested member specs.
 
     Parameters
@@ -2100,7 +2694,53 @@ def _load_unified_bundle_directory(
     baseline_name = metadata.get("baseline_name")
     if baseline_name is not None and not isinstance(baseline_name, str):
         raise TorchLensIOError("Unified bundle baseline_name must be a string or null.")
-    return Bundle(members, baseline=baseline_name)
+    member_relations = _load_gated_member_relations(metadata)
+    return Bundle(members, baseline=baseline_name, member_relations=member_relations)
+
+
+def _load_gated_member_relations(metadata: dict[str, Any]) -> tuple[Any, ...] | None:
+    """Read the S6 ``member_relations`` key from bundle metadata.
+
+    The key persists plainly as of tlspec v8. Loads still route through the
+    one pre-release validation chokepoint
+    (:func:`torchlens._io.prerelease.validate_prerelease_state`) so a
+    switched-era artifact (marker present, switch inactive) keeps refusing
+    typed and a malformed marker refuses even under the switch; a marker-free
+    payload validates against the closed S6 row schema. An absent key is
+    simply a plain bundle (S6 R7).
+
+    Returns
+    -------
+    tuple | None
+        Parsed relation rows for the Bundle constructor (which re-checks R1
+        against the loaded member names), or ``None`` when the key is absent.
+
+    Raises
+    ------
+    PreReleaseArtifactError
+        Marker present while the switch is inactive, or a malformed marker.
+    BundleRelationError
+        ``bundle_relation_schema_invalid`` when the payload is outside the
+        closed S6 row schema.
+    """
+
+    from .prerelease import validate_prerelease_state
+
+    validate_prerelease_state(metadata, cls_name="Bundle")
+    relations_payload = metadata.get("member_relations")
+    if relations_payload is None:
+        return None
+    from ..bundle._relations import MemberRelationTable
+    from ..errors.episode import BundleRelationError
+
+    try:
+        table = MemberRelationTable.from_payload(relations_payload)
+    except (TypeError, ValueError) as exc:
+        raise BundleRelationError(
+            f"bundle.json 'member_relations' payload is outside the closed S6 schema: {exc}",
+            code="bundle_relation_schema_invalid",
+        ) from exc
+    return table.rows
 
 
 def _read_manifest_object(path: Path) -> dict[str, Any]:
@@ -2126,9 +2766,14 @@ def _read_manifest_object(path: Path) -> dict[str, Any]:
         with path.open("r", encoding="utf-8") as handle:
             data = _json.load_bounded(handle)
     except (OSError, json.JSONDecodeError) as exc:
-        raise TorchLensIOError(f"Failed to read manifest at {path}.") from exc
+        raise TorchLensIOError(
+            f"Failed to read manifest at {path}: {type(exc).__name__}: {exc}.",
+            code="manifest_unreadable",
+        ) from exc
     if not isinstance(data, dict):
-        raise TorchLensIOError("Manifest root must be a JSON object.")
+        raise TorchLensIOError(
+            "Manifest root must be a JSON object.", code="manifest_not_json_object"
+        )
     return data
 
 
@@ -2192,7 +2837,11 @@ def cleanup_tmp(path: str | Path, *, force: bool = False) -> list[Path]:
     bundle_path = Path(path)
     _reject_symlink_path(bundle_path, context="cleanup target")
     removed: list[Path] = []
-    tmp_pattern = f"{bundle_path.name}.tmp.*"
+    # B8-11: the bundle basename is DATA, not a pattern. Escaping it stops glob
+    # metacharacters in a legal filename (e.g. ``job*``) from widening the sweep --
+    # and, crucially, the backup RESTORATION below -- to sibling bundles.
+    escaped_name = glob.escape(bundle_path.name)
+    tmp_pattern = f"{escaped_name}.tmp.*"
     for candidate in bundle_path.parent.glob(tmp_pattern):
         if candidate.is_symlink():
             raise TorchLensIOError(f"Refusing to clean symlink temp directory {candidate}.")
@@ -2204,25 +2853,25 @@ def cleanup_tmp(path: str | Path, *, force: bool = False) -> list[Path]:
             continue
         warnings.warn(
             f"Leaving non-partial temp directory {candidate} in place; pass force=True to remove it.",
-            UserWarning,
+            TorchLensWarning,
             stacklevel=2,
         )
 
-    bak_pattern = f"{bundle_path.name}.bak.*"
+    bak_pattern = f"{escaped_name}.bak.*"
     for candidate in bundle_path.parent.glob(bak_pattern):
         if candidate.is_symlink():
             raise TorchLensIOError(f"Refusing to clean symlink backup directory {candidate}.")
         if not candidate.is_dir():
             continue
         if not bundle_path.exists():
-            _restore_backup(candidate, bundle_path)
+            _restore_backup(candidate, bundle_path, warn_on_failure=False)
             if not candidate.exists():
                 removed.append(bundle_path)
             else:
                 warnings.warn(
                     f"Leaving orphaned backup directory {candidate} in place; "
                     "restoring it onto the missing bundle path failed.",
-                    UserWarning,
+                    TorchLensWarning,
                     stacklevel=2,
                 )
             continue
@@ -2236,7 +2885,7 @@ def cleanup_tmp(path: str | Path, *, force: bool = False) -> list[Path]:
             warnings.warn(
                 f"Force-removed backup directory {candidate} whose contents differ "
                 f"from the live bundle at {bundle_path}; it was not provably redundant.",
-                UserWarning,
+                TorchLensWarning,
                 stacklevel=2,
             )
             continue
@@ -2244,7 +2893,7 @@ def cleanup_tmp(path: str | Path, *, force: bool = False) -> list[Path]:
             f"Leaving backup directory {candidate} in place; its contents differ from "
             f"the live bundle at {bundle_path} and it is not provably redundant. "
             "Pass force=True to remove it anyway.",
-            UserWarning,
+            TorchLensWarning,
             stacklevel=2,
         )
     return removed
@@ -2296,6 +2945,8 @@ def _scrub_trace_for_bundle(
     include_saved_args: bool,
     include_rng_states: bool,
     include_source: bool = True,
+    include_custom_attributes: bool = True,
+    include_buffer_values: bool = True,
     sparse_runnable: bool = False,
 ) -> tuple[dict[str, Any], list[BlobSpec], list[dict[str, str]]]:
     """Scrub a model log while excluding transient load-only private attrs.
@@ -2315,6 +2966,10 @@ def _scrub_trace_for_bundle(
     include_source:
         Whether captured model source text and docstrings are embedded; absolute
         source paths are relativized to basenames regardless.
+    include_custom_attributes:
+        Whether harvested public module instance attributes are persisted.
+    include_buffer_values:
+        Whether captured pre-forward buffer values are persisted.
     sparse_runnable:
         Whether all sparse-core tensor payload families must be dropped.
 
@@ -2325,14 +2980,7 @@ def _scrub_trace_for_bundle(
     """
 
     transient_attrs = {}
-    for attr_name in (
-        "_loaded_from_bundle",
-        "_source_bundle_manifest_sha256",
-        "_source_bundle_path",
-        "_source_bundle_created_at",
-        "payload_load_status",
-        "_validation_replay_status",
-    ):
+    for attr_name in LOAD_PROVENANCE_TRANSIENT_ATTRS:
         if hasattr(trace, attr_name):
             transient_attrs[attr_name] = getattr(trace, attr_name)
             delattr(trace, attr_name)
@@ -2344,6 +2992,8 @@ def _scrub_trace_for_bundle(
             include_saved_args=include_saved_args,
             include_rng_states=include_rng_states,
             include_source=include_source,
+            include_custom_attributes=include_custom_attributes,
+            include_buffer_values=include_buffer_values,
             sparse_runnable=sparse_runnable,
             backend_name=str(getattr(trace, "backend", "torch")),
             payload_materialization=get_backend_spec(
@@ -2386,8 +3036,11 @@ def _apply_visualization_save_policy(
         return
 
     visualizer_dir = tmp_path / "visualizers"
-    final_visualizer_dir = bundle_path / "visualizers"
-    for index, (live_layer, scrubbed_layer) in enumerate(zip(trace.layer_list, scrubbed_layers)):
+    # scrubbed_layers is a 1:1 scrub of trace.layer_list; pairing a truncated
+    # prefix would silently skip visualizer copies for the tail layers.
+    for index, (live_layer, scrubbed_layer) in enumerate(
+        zip(trace.layer_list, scrubbed_layers, strict=True)
+    ):
         source_path_value = getattr(live_layer, "visualizer_path", None)
         if not isinstance(source_path_value, str):
             continue
@@ -2396,10 +3049,19 @@ def _apply_visualization_save_policy(
             scrubbed_layer.visualizer_path = None
             continue
         visualizer_dir.mkdir(parents=True, exist_ok=True)
+        # B8-10 parity: the sidecar tree must not escape the bundle's permission
+        # tightening -- copy2 preserves the scratch file's umask-derived mode and
+        # would leak on cp -a/tar or a relaxed bundle root.
+        _restrict_mode(visualizer_dir, 0o700)
         destination_name = f"{index:05d}_{source_path.name}"
         destination_path = visualizer_dir / destination_name
         shutil.copy2(source_path, destination_path)
-        scrubbed_layer.visualizer_path = str(final_visualizer_dir / destination_name)
+        _restrict_mode(destination_path, 0o600)
+        # Persist a bundle-RELATIVE path (R59-6): the absolute final path embeds
+        # $HOME/username, contradicting the scrub's basename-only PII policy, and
+        # load re-anchors from the basename anyway (_reanchor_visualizer_paths),
+        # so the absolute directory was never used -- only leaked.
+        scrubbed_layer.visualizer_path = f"visualizers/{destination_name}"
 
 
 def _write_tensor_blob(
@@ -2431,7 +3093,7 @@ def _write_tensor_blob(
         Manifest tensor entry for the written blob.
     """
 
-    contiguous_tensor = tensor.contiguous()
+    contiguous_tensor = tensor.resolve_conj().resolve_neg().contiguous()
     relative_path = Path("blobs") / f"{blob_id}.safetensors"
     blob_path = tmp_path / relative_path
     save_file({_BLOB_TENSOR_KEY: contiguous_tensor}, str(blob_path))
@@ -2542,7 +3204,9 @@ def _attach_fast_copy_specs(
 
     used_blob_ids = {blob_spec.blob_id for blob_spec in blob_specs}
     fast_copy_specs: list[_FastCopySpec] = []
-    for live_layer, scrubbed_layer in zip(trace.layer_list, scrubbed_layers):
+    # 1:1 scrub of trace.layer_list -- a truncated pairing would silently drop
+    # fast-copy specs for the tail layers, losing their payloads in the copy.
+    for live_layer, scrubbed_layer in zip(trace.layer_list, scrubbed_layers, strict=True):
         if include_outs:
             fast_copy_spec = _maybe_make_fast_copy_spec(
                 live_layer=live_layer,
@@ -2770,11 +3434,213 @@ def _fast_copy_tensor_blob(
     )
 
 
+_CUSTOM_ATTRIBUTES_DISCLOSURE_KEY_CAP = 100
+"""Bound on the number of distinct top-level key names a disclosure records."""
+
+
+# Structural constructor echoes harvested off stock nn.Module types; their key
+# names carry no user secrets, so they do not by themselves trigger the
+# save-time embedding warning below.
+_BORING_CUSTOM_ATTRIBUTE_KEYS = frozenset(
+    {
+        "add_zero_attn",
+        "affine",
+        "batch_first",
+        "bias",
+        "bidirectional",
+        "ceil_mode",
+        "count_include_pad",
+        "d_model",
+        "dilation",
+        "dim_feedforward",
+        "dropout",
+        "elementwise_affine",
+        "embed_dim",
+        "embedding_dim",
+        "end_dim",
+        "eps",
+        "groups",
+        "hidden_size",
+        "in_channels",
+        "in_features",
+        "inplace",
+        "input_size",
+        "kdim",
+        "kernel_size",
+        "max_norm",
+        "momentum",
+        "nhead",
+        "norm_type",
+        "normalized_shape",
+        "num_embeddings",
+        "num_features",
+        "num_heads",
+        "num_layers",
+        "out_channels",
+        "out_features",
+        "output_padding",
+        "p",
+        "padding",
+        "padding_idx",
+        "padding_mode",
+        "return_indices",
+        "scale_grad_by_freq",
+        "sparse",
+        "start_dim",
+        "stride",
+        "track_running_stats",
+        "vdim",
+    }
+)
+_CUSTOM_ATTRIBUTE_WARNING_KEY_PREVIEW = 8
+
+
+def _warn_custom_attribute_embedding(disclosure: Mapping[str, Any]) -> None:
+    """Tell the SAVER that module attributes are shipping in the artifact (R62).
+
+    The manifest disclosure lands INSIDE the file the user is about to hand
+    out -- the one reader guaranteed not to see it is the person saving. A
+    model carrying ``self.hf_token = os.environ["HF_TOKEN"]`` previously saved
+    with zero terminal output; the token shipped silently. One warning at save
+    time, attributed to the user's save call, changes no default and no
+    persisted byte.
+    """
+
+    if not disclosure.get("included"):
+        return
+    interesting = [
+        key
+        for key in disclosure.get("top_level_keys", ())
+        if key not in _BORING_CUSTOM_ATTRIBUTE_KEYS
+    ]
+    if not interesting:
+        return
+    preview = ", ".join(interesting[:_CUSTOM_ATTRIBUTE_WARNING_KEY_PREVIEW])
+    if len(interesting) > _CUSTOM_ATTRIBUTE_WARNING_KEY_PREVIEW:
+        preview += ", ..."
+    warnings.warn(
+        f"This save embeds {len(interesting)} custom module attribute(s) verbatim "
+        f"in the artifact ({preview}). Review them before sharing the bundle; pass "
+        "include_custom_attributes=False to withhold the values.",
+        TorchLensWarning,
+        stacklevel=user_stacklevel(),
+    )
+
+
+def _custom_attributes_disclosure(trace: Trace, *, included: bool) -> dict[str, Any]:
+    """Summarize the harvested module-attribute channel for the manifest.
+
+    Save-time disclosure for disputed-r2 b8/R62: portable bundles persist every
+    public, non-callable module instance attribute verbatim, so the manifest
+    names the channel — whether it shipped, how many modules carry attributes,
+    and the (bounded, sorted) union of top-level key names. Key NAMES only;
+    values are never inspected or rewritten here.
+
+    Parameters
+    ----------
+    trace:
+        Source model log.
+    included:
+        Whether the save actually persisted the channel
+        (``include_custom_attributes`` and not a sparse runnable core).
+
+    Returns
+    -------
+    dict[str, Any]
+        JSON-ready disclosure mapping.
+    """
+
+    module_count = 0
+    top_level_keys: set[str] = set()
+    for module in getattr(trace, "modules", ()) or ():
+        attrs = getattr(module, "custom_attributes", None)
+        if not isinstance(attrs, Mapping) or not attrs:
+            continue
+        module_count += 1
+        for key in attrs:
+            top_level_keys.add(str(key))
+    truncated = len(top_level_keys) > _CUSTOM_ATTRIBUTES_DISCLOSURE_KEY_CAP
+    return {
+        "included": bool(included),
+        "module_count": module_count,
+        "top_level_keys": sorted(top_level_keys)[:_CUSTOM_ATTRIBUTES_DISCLOSURE_KEY_CAP],
+        "top_level_keys_truncated": truncated,
+    }
+
+
+def _buffer_values_disclosure(trace: Trace, *, included: bool) -> dict[str, Any]:
+    """Summarize the captured pre-forward buffer-value channel for the manifest.
+
+    Save-time disclosure mirroring ``_custom_attributes_disclosure`` (R62
+    buffer extension): every save level embedded the pre-forward value of each
+    forward-overwritten registered buffer (``Trace._buffer_initial_values``)
+    verbatim, with no flag, no warning, and no manifest row — training-data-
+    derived state (running statistics, counters) shipped invisibly even at
+    ``level="audit"``. The manifest names the channel: whether it shipped, how
+    many buffers carry captured values, and the (bounded, sorted) buffer
+    names. Names only; values are never inspected or rewritten here.
+
+    Parameters
+    ----------
+    trace:
+        Source model log.
+    included:
+        Whether the save actually persisted the channel
+        (``include_buffer_values`` and not a sparse runnable core).
+
+    Returns
+    -------
+    dict[str, Any]
+        JSON-ready disclosure mapping.
+    """
+
+    captured = getattr(trace, "_buffer_initial_values", {}) or {}
+    buffer_names = sorted(str(name) for name in captured)
+    truncated = len(buffer_names) > _CUSTOM_ATTRIBUTES_DISCLOSURE_KEY_CAP
+    return {
+        "included": bool(included),
+        "buffer_count": len(buffer_names),
+        "buffer_names": buffer_names[:_CUSTOM_ATTRIBUTES_DISCLOSURE_KEY_CAP],
+        "buffer_names_truncated": truncated,
+    }
+
+
+def _warn_buffer_value_embedding(disclosure: Mapping[str, Any]) -> None:
+    """Tell the SAVER that pre-forward buffer values ship in the artifact.
+
+    Same rationale as ``_warn_custom_attribute_embedding``: the manifest
+    disclosure lands inside the file being handed out, so the saver is the one
+    reader guaranteed not to see it. Fires only when the forward actually
+    overwrote a registered buffer (the common eval-mode capture has an empty
+    channel and stays silent).
+    """
+
+    if not disclosure.get("included"):
+        return
+    buffer_names = list(disclosure.get("buffer_names", ()))
+    if not buffer_names:
+        return
+    preview = ", ".join(buffer_names[:_CUSTOM_ATTRIBUTE_WARNING_KEY_PREVIEW])
+    if len(buffer_names) > _CUSTOM_ATTRIBUTE_WARNING_KEY_PREVIEW:
+        preview += ", ..."
+    warnings.warn(
+        f"This save embeds the pre-forward value(s) of {len(buffer_names)} "
+        f"forward-overwritten buffer(s) verbatim in the artifact ({preview}). "
+        "Buffer values are training-data-derived state; pass "
+        "include_buffer_values=False to withhold them.",
+        TorchLensWarning,
+        stacklevel=user_stacklevel(),
+    )
+
+
 def _build_manifest(
     *,
     trace: Trace,
     tensor_entries: list[TensorEntry],
     unsupported_tensors: list[dict[str, str]],
+    include_source: bool = True,
+    custom_attributes_disclosure: dict[str, Any] | None = None,
+    buffer_values_disclosure: dict[str, Any] | None = None,
 ) -> Manifest:
     """Create a manifest instance for a finished bundle save.
 
@@ -2786,6 +3652,13 @@ def _build_manifest(
         Persisted tensor entries.
     unsupported_tensors:
         Unsupported tensor records accumulated under ``strict=False``.
+    include_source:
+        When ``False`` the environment-provenance git commit hash is omitted, so
+        ``include_source=False`` also drops the cwd repo's HEAD commit (B8-19).
+    custom_attributes_disclosure:
+        Save-time disclosure of the harvested module-attribute channel.
+    buffer_values_disclosure:
+        Save-time disclosure of the captured pre-forward buffer-value channel.
 
     Returns
     -------
@@ -2818,7 +3691,189 @@ def _build_manifest(
         n_auxiliary_blobs=n_auxiliary_blobs,
         tensors=tensor_entries,
         unsupported_tensors=unsupported_tensors,
+        provenance=_collect_provenance(trace, include_source=include_source),
+        custom_attributes_disclosure=custom_attributes_disclosure,
+        buffer_values_disclosure=buffer_values_disclosure,
     )
+
+
+def _collect_provenance(trace: Trace, *, include_source: bool = True) -> Provenance:
+    """Collect a best-effort, bounded provenance certificate for one save.
+
+    Parameters
+    ----------
+    trace:
+        Source trace whose already-recorded capture facts should be certified.
+    include_source:
+        When ``False`` the cwd repo's HEAD commit hash is omitted (B8-19): the
+        manifest otherwise embedded the git commit of whatever repository contained
+        the working directory at save time, with no opt-out. Tying it to the
+        existing source-embedding flag lets ``include_source=False`` drop this
+        environment detail along with the source it already withholds.
+
+    Returns
+    -------
+    Provenance
+        Provenance certificate. Individual unavailable facts are empty or ``None``.
+    """
+
+    from .. import hash as trace_hash
+
+    # A loaded trace carries its source bundle's provenance verbatim so a
+    # plain resave preserves the CAPTURE-time certificate. That passthrough
+    # must not bypass the include_source gate: with include_source=False the
+    # fresh-save path below omits the git commit, so re-emitting a loaded
+    # certificate here both leaked it and let a hostile bundle's forged
+    # provenance propagate into resaves this host appears to attest. With
+    # include_source=False, recompute honestly from the loaded trace instead.
+    source_provenance = getattr(trace, "_source_bundle_provenance", None)
+    if include_source and isinstance(source_provenance, Provenance):
+        return source_provenance
+
+    devices = sorted(
+        {
+            str(device)
+            for op in getattr(trace, "layer_list", ())
+            if (device := getattr(op, "device_ref", None)) is not None
+        }
+    )
+    ambient = trace._runnable.capture_ambient
+    default_dtype = ambient.get("default_dtype") if isinstance(ambient, Mapping) else None
+    autocast_facts: list[dict[str, Any]] = []
+    seen_autocast: set[str] = set()
+    for op in getattr(trace, "layer_list", ()):
+        state = getattr(op, "func_autocast_state", None)
+        if not isinstance(state, Mapping) or not state:
+            continue
+        normalized = _json_ready_provenance_value(state)
+        encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+        if encoded not in seen_autocast:
+            seen_autocast.add(encoded)
+            autocast_facts.append(cast(dict[str, Any], normalized))
+
+    # grind-r5 b7 R22-7 (3rd round): could-not-compute must stay
+    # distinguishable from does-not-apply. A digest failure used to silently
+    # omit the engine (absence read as "engine not present") and the two
+    # hashes degraded to None (indistinguishable from "no inputs"), so a
+    # consumer comparing provenance across artifacts never learned the hash
+    # machinery failed. Failures now record an explicit string-only
+    # "unavailable:<ExceptionName>" sentinel in the same slot.
+    rng_digests: dict[str, str] = {}
+    rng_states = getattr(trace, "_pre_forward_rng_states", None)
+    if isinstance(rng_states, Mapping):
+        for engine, state in rng_states.items():
+            try:
+                rng_digests[str(engine)] = trace_hash.content(state)
+            except Exception as digest_error:
+                rng_digests[str(engine)] = f"unavailable:{type(digest_error).__name__}"
+
+    input_hash: str | None = None
+    try:
+        inputs = [input_op.out for input_op in trace.input_ops]
+        if inputs:
+            input_hash = trace_hash.content(inputs)
+    except Exception as input_error:
+        input_hash = f"unavailable:{type(input_error).__name__}"
+
+    model_structure_hash: str | None = None
+    try:
+        model_structure_hash = trace_hash.trace(trace)
+    except Exception as structure_error:
+        model_structure_hash = f"unavailable:{type(structure_error).__name__}"
+
+    return Provenance(
+        provenance_version=1,
+        capture_devices=devices,
+        dtype_policy={
+            "default_dtype": None if default_dtype is None else str(default_dtype),
+            "observed_autocast": autocast_facts,
+        },
+        rng_state_digests=rng_digests,
+        input_hash=input_hash,
+        model_structure_hash=model_structure_hash,
+        git_commit_hash=_git_commit_hash(_torchlens_package_dir()) if include_source else None,
+    )
+
+
+def _json_ready_provenance_value(value: Any) -> Any:
+    """Convert recorded provenance facts into bounded JSON-ready values.
+
+    Parameters
+    ----------
+    value:
+        Recorded value to normalize.
+
+    Returns
+    -------
+    Any
+        JSON-ready scalar or nested container.
+    """
+
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _json_ready_provenance_value(item) for key, item in value.items()}
+    if isinstance(value, Set):
+        normalized = [_json_ready_provenance_value(item) for item in value]
+        return sorted(
+            normalized,
+            key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+        )
+    if isinstance(value, Collection) and not isinstance(value, str | bytes | bytearray):
+        return [_json_ready_provenance_value(item) for item in value]
+    return str(value)
+
+
+def _torchlens_package_dir() -> Path:
+    """Return the torchlens package directory (provenance root for the git probe)."""
+
+    return Path(__file__).resolve().parent.parent
+
+
+def _git_commit_hash(cwd: Path) -> str | None:
+    """Return the Git commit for ``cwd`` with a short best-effort timeout.
+
+    R21-2: the provenance git commit is resolved from the TORCHLENS package
+    directory, not ``Path.cwd()``. Stamping the working directory's repository
+    recorded the USER's unrelated repo commit (a privacy leak) and made the same
+    capture saved from two directories differ (an ambient-environment dependence in a
+    supposedly portable artifact). Resolving from the package dir yields torchlens's
+    own commit for a dev/editable install and ``None`` for a released wheel (whose
+    ``torchlens_version`` already identifies it) -- deterministic either way.
+
+    Parameters
+    ----------
+    cwd:
+        Directory whose repository HEAD is probed (the torchlens package dir).
+
+    Returns
+    -------
+    str | None
+        Full commit hash, or ``None`` on any failure or timeout.
+    """
+
+    try:
+        # R40: routed through the ONE bounded spawn seam so the timeout path
+        # tears down the whole process group instead of orphaning a wedged
+        # git helper's grandchildren.
+        from ..utils._subprocess import run_bounded_subprocess
+
+        completed = run_bounded_subprocess(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=0.25,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    commit = completed.stdout.strip()
+    if completed.returncode != 0 or not 7 <= len(commit) <= 64:
+        return None
+    if any(character not in "0123456789abcdef" for character in commit.lower()):
+        return None
+    return commit
 
 
 def _validate_activation_transform_outputs(
@@ -2967,16 +4022,50 @@ def _raise_for_unmaterialized_nested_blob_refs(
         If any nested portable blob refs remain in blob-recursive fields.
     """
 
-    if _contains_nested_blob_refs(value, seen=set(), allowed_blob_ids=allowed_blob_ids):
+    if _contains_nested_blob_refs(value, set(), allowed_blob_ids):
         raise TorchLensIOError(
             "Trace contains unmaterialized nested blob references. "
             "Call torchlens.rehydrate_nested(trace) before saving."
         )
 
 
+_NESTED_BLOB_SCALARS = (str, int, float, bool, type(None), torch.dtype, torch.device)
+
+_NESTED_BLOB_SCALAR = 0
+_NESTED_BLOB_REF = 1
+_NESTED_BLOB_DICT = 2
+_NESTED_BLOB_SEQUENCE = 3
+_NESTED_BLOB_OBJECT = 4
+
+# WEAK type keys so a notebook-cell / factory-made class used once as a nested
+# blob value is not pinned (with its __globals__) for the process lifetime
+# (R60-12); matches the weak caches elsewhere in _io.
+_NESTED_BLOB_KINDS: weakref.WeakKeyDictionary[type, int] = weakref.WeakKeyDictionary()
+
+
+def _nested_blob_node_kind(value_type: type) -> int:
+    """Classify one node type for the nested-``BlobRef`` walk, memoized per type.
+
+    Same branch order as the ``isinstance`` chain it replaces. ``frozenset`` is
+    deliberately NOT a container kind here, matching the original chain.
+    """
+
+    if issubclass(value_type, _NESTED_BLOB_SCALARS):
+        kind = _NESTED_BLOB_SCALAR
+    elif issubclass(value_type, BlobRef):
+        kind = _NESTED_BLOB_REF
+    elif issubclass(value_type, dict):
+        kind = _NESTED_BLOB_DICT
+    elif issubclass(value_type, (list, tuple, set)):
+        kind = _NESTED_BLOB_SEQUENCE
+    else:
+        kind = _NESTED_BLOB_OBJECT
+    _NESTED_BLOB_KINDS[value_type] = kind
+    return kind
+
+
 def _contains_nested_blob_refs(
     value: Any,
-    *,
     seen: set[int],
     allowed_blob_ids: set[str],
 ) -> bool:
@@ -2995,42 +4084,28 @@ def _contains_nested_blob_refs(
         ``True`` when a nested ``BlobRef`` is still present in a blob-recursive field.
     """
 
-    if isinstance(value, (str, int, float, bool, type(None), torch.dtype, torch.device)):
+    # ``OrderedDict``/``defaultdict`` were three identical ``.values()`` branches and
+    # ``list``/``tuple``/``set`` three identical direct-iteration branches; they are
+    # collapsed, the ``any(genexpr)`` wrappers are plain loops (this walk visits
+    # hundreds of thousands of nodes per save and paid a generator frame per
+    # container), and the branch chain itself is one cached type lookup.
+    value_type = type(value)
+    kind = _NESTED_BLOB_KINDS.get(value_type)
+    if kind is None:
+        kind = _nested_blob_node_kind(value_type)
+    if kind == _NESTED_BLOB_SCALAR:
         return False
-    if isinstance(value, BlobRef):
+    if kind == _NESTED_BLOB_REF:
         return value.blob_id not in allowed_blob_ids
-    if isinstance(value, list):
-        return any(
-            _contains_nested_blob_refs(item, seen=seen, allowed_blob_ids=allowed_blob_ids)
-            for item in value
-        )
-    if isinstance(value, tuple):
-        return any(
-            _contains_nested_blob_refs(item, seen=seen, allowed_blob_ids=allowed_blob_ids)
-            for item in value
-        )
-    if isinstance(value, OrderedDict):
-        return any(
-            _contains_nested_blob_refs(item, seen=seen, allowed_blob_ids=allowed_blob_ids)
-            for item in value.values()
-        )
-    if isinstance(value, defaultdict):
-        return any(
-            _contains_nested_blob_refs(item, seen=seen, allowed_blob_ids=allowed_blob_ids)
-            for item in value.values()
-        )
-    if isinstance(value, dict):
-        return any(
-            _contains_nested_blob_refs(item, seen=seen, allowed_blob_ids=allowed_blob_ids)
-            for item in value.values()
-        )
-    if isinstance(value, set):
-        return any(
-            _contains_nested_blob_refs(item, seen=seen, allowed_blob_ids=allowed_blob_ids)
-            for item in value
-        )
+    if kind == _NESTED_BLOB_DICT:
+        for item in value.values():
+            if _contains_nested_blob_refs(item, seen, allowed_blob_ids):
+                return True
+        return False
+    if kind == _NESTED_BLOB_SEQUENCE:
+        return any(_contains_nested_blob_refs(item, seen, allowed_blob_ids) for item in value)
 
-    spec = getattr(type(value), "PORTABLE_STATE_SPEC", None)
+    spec = getattr(value_type, "PORTABLE_STATE_SPEC", None)
     if spec is None:
         return False
 
@@ -3039,23 +4114,28 @@ def _contains_nested_blob_refs(
         return False
     seen.add(obj_id)
 
+    from .prerelease import effective_policy
+
     for field_name, field_value in state_items(value):
         policy = spec.get(field_name)
+        if policy is not None:
+            # Registered pre-release fields are guarded under their
+            # switched-on persisting policy: a declared-DROP field that
+            # persisted BLOB_RECURSIVE under the switch can still carry
+            # nested lazy BlobRefs into a resave.
+            policy = effective_policy(type(value), field_name, policy)
         if policy == FieldPolicy.BLOB_RECURSIVE and _container_contains_blob_ref(
-            field_value,
-            allowed_blob_ids=allowed_blob_ids,
+            field_value, allowed_blob_ids
         ):
             return True
         if policy == FieldPolicy.KEEP and _contains_nested_blob_refs(
-            field_value,
-            seen=seen,
-            allowed_blob_ids=allowed_blob_ids,
+            field_value, seen, allowed_blob_ids
         ):
             return True
     return False
 
 
-def _container_contains_blob_ref(value: Any, *, allowed_blob_ids: set[str]) -> bool:
+def _container_contains_blob_ref(value: Any, allowed_blob_ids: set[str]) -> bool:
     """Return whether a nested container still contains a ``BlobRef`` leaf.
 
     Parameters
@@ -3071,33 +4151,10 @@ def _container_contains_blob_ref(value: Any, *, allowed_blob_ids: set[str]) -> b
 
     if isinstance(value, BlobRef):
         return value.blob_id not in allowed_blob_ids
-    if isinstance(value, list):
-        return any(
-            _container_contains_blob_ref(item, allowed_blob_ids=allowed_blob_ids) for item in value
-        )
-    if isinstance(value, tuple):
-        return any(
-            _container_contains_blob_ref(item, allowed_blob_ids=allowed_blob_ids) for item in value
-        )
-    if isinstance(value, OrderedDict):
-        return any(
-            _container_contains_blob_ref(item, allowed_blob_ids=allowed_blob_ids)
-            for item in value.values()
-        )
-    if isinstance(value, defaultdict):
-        return any(
-            _container_contains_blob_ref(item, allowed_blob_ids=allowed_blob_ids)
-            for item in value.values()
-        )
-    if isinstance(value, dict):
-        return any(
-            _container_contains_blob_ref(item, allowed_blob_ids=allowed_blob_ids)
-            for item in value.values()
-        )
-    if isinstance(value, set):
-        return any(
-            _container_contains_blob_ref(item, allowed_blob_ids=allowed_blob_ids) for item in value
-        )
+    if isinstance(value, dict):  # covers OrderedDict / defaultdict
+        return any(_container_contains_blob_ref(item, allowed_blob_ids) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_container_contains_blob_ref(item, allowed_blob_ids) for item in value)
     return False
 
 
@@ -3139,12 +4196,16 @@ def _check_unknown_blob_entries(manifest: Manifest, blobs_path: Path) -> None:
     if extra_names:
         warnings.warn(
             f"Bundle contains unreferenced extra files in blobs/: {', '.join(extra_names)}.",
-            UserWarning,
+            TorchLensWarning,
             stacklevel=2,
         )
 
 
-def _validate_manifest_blob_paths(manifest: Manifest, bundle_path: Path) -> None:
+def _validate_manifest_blob_paths(
+    manifest: Manifest,
+    bundle_path: Path,
+    resolved_blobs_dir: Path | None = None,
+) -> None:
     """Ensure every manifest tensor entry points at a real non-symlink blob file.
 
     Parameters
@@ -3153,6 +4214,8 @@ def _validate_manifest_blob_paths(manifest: Manifest, bundle_path: Path) -> None
         Parsed bundle manifest.
     bundle_path:
         Bundle directory root.
+    resolved_blobs_dir:
+        Canonical blob containment root for this load operation.
 
     Raises
     ------
@@ -3160,9 +4223,15 @@ def _validate_manifest_blob_paths(manifest: Manifest, bundle_path: Path) -> None
         If any referenced blob is missing or symlinked.
     """
 
+    if resolved_blobs_dir is None:
+        resolved_blobs_dir = resolve_bundle_blobs_dir(bundle_path)
     missing_blob_ids: list[str] = []
     for entry in manifest.tensors:
-        blob_path = resolve_bundle_blob_path(bundle_path, entry.relative_path)
+        blob_path = resolve_bundle_blob_path(
+            bundle_path,
+            entry.relative_path,
+            resolved_blobs_dir=resolved_blobs_dir,
+        )
         if blob_path.is_symlink():
             raise TorchLensIOError(f"Refusing to load symlinked blob path {blob_path}.")
         if not blob_path.exists():
@@ -3178,6 +4247,7 @@ def _eager_verify_blob_payloads(
     manifest: Manifest,
     bundle_path: Path,
     map_location: str | torch.device,
+    resolved_blobs_dir: Path | None = None,
 ) -> None:
     """Eagerly checksum and decode every blob for ``lazy=False`` loads.
 
@@ -3189,10 +4259,18 @@ def _eager_verify_blob_payloads(
         Bundle directory root.
     map_location:
         Device passed through to ``safetensors`` decoding.
+    resolved_blobs_dir:
+        Canonical blob containment root for this load operation.
     """
 
+    if resolved_blobs_dir is None:
+        resolved_blobs_dir = resolve_bundle_blobs_dir(bundle_path)
     for entry in manifest.tensors:
-        blob_path = resolve_bundle_blob_path(bundle_path, entry.relative_path)
+        blob_path = resolve_bundle_blob_path(
+            bundle_path,
+            entry.relative_path,
+            resolved_blobs_dir=resolved_blobs_dir,
+        )
         observed_sha256 = sha256_of_file(blob_path)
         if observed_sha256 != entry.sha256:
             raise TorchLensIOError(f"Checksum mismatch for blob_id={entry.blob_id} at {blob_path}.")
@@ -3201,6 +4279,53 @@ def _eager_verify_blob_payloads(
             raise TorchLensIOError(
                 f"Blob {blob_path} does not contain the expected {_BLOB_TENSOR_KEY!r} tensor entry."
             )
+
+
+def _prescan_metadata_pickle_opcodes(handle: Any, metadata_path: Path) -> None:
+    """Refuse a metadata pickle whose opcode count exceeds the allocation ceiling.
+
+    The byte ceiling alone does not bound allocation (R60/F6): a pickle packed
+    with tiny values expands ~5x its byte size into RSS before any structural
+    check can refuse it. Walking the opcode stream with ``pickletools.genops``
+    allocates no payload objects, so the count is established BEFORE the
+    unpickler materializes anything -- the pickle twin of the JSON boundary's
+    ``_MAX_JSON_NODES`` prescan. The handle is rewound for the real unpickle.
+
+    Parameters
+    ----------
+    handle:
+        Open binary handle positioned at the start of the pickle stream.
+    metadata_path:
+        Path named in refusals.
+
+    Raises
+    ------
+    TorchLensIOError
+        If the opcode count exceeds the ceiling or the stream does not parse.
+    """
+
+    opcode_count = 0
+    try:
+        for _opcode, _arg, _pos in pickletools.genops(handle):
+            opcode_count += 1
+            if opcode_count > _MAX_METADATA_PKL_OPCODES:
+                raise TorchLensIOError(
+                    f"Bundle metadata {metadata_path} exceeds the "
+                    f"{_MAX_METADATA_PKL_OPCODES}-opcode allocation ceiling; refusing "
+                    "to load a structurally implausible artifact.",
+                    code="metadata_object_count_exceeded",
+                )
+    except TorchLensIOError:
+        raise
+    except Exception as exc:
+        # A stream genops cannot parse is a stream the unpickler cannot parse:
+        # refuse it on the same integrity channel the unpickler uses.
+        raise TorchLensIOError(
+            f"Failed to load bundle metadata from {metadata_path}.",
+            code="bundle_metadata_integrity_refused",
+        ) from exc
+    finally:
+        handle.seek(0)
 
 
 def _python_major_mismatch(manifest: Manifest) -> bool:
@@ -3257,21 +4382,6 @@ def _load_safetensors_file(
         raise TorchLensIOError(f"Failed to read safetensors blob at {blob_path}.") from exc
 
 
-def _reject_symlink_path(path: Path, *, context: str) -> None:
-    """Raise when a bundle path that must stay local is a symlink.
-
-    Parameters
-    ----------
-    path:
-        Path to validate.
-    context:
-        Human-readable context used in the error message.
-    """
-
-    if path.is_symlink():
-        raise TorchLensIOError(f"Refusing symlinked {context}: {path}.")
-
-
 def _make_tmp_bundle_path(bundle_path: Path) -> Path:
     """Create the deterministic sibling temp path for one bundle target.
 
@@ -3314,16 +4424,139 @@ def _mark_partial(tmp_path: Path, *, reason: str | None = None) -> None:
     tmp_path:
         Temporary bundle directory path.
     reason:
-        Optional failure reason string to persist alongside the sentinel.
+        Optional failure reason string to persist alongside the sentinel. Callers
+        pass a scrubbed value (the exception TYPE name, not ``str(exc)``, whose
+        message can carry object reprs / paths / values); this sink additionally
+        length-bounds it as a belt (B8-12) so recovery debris never grows unbounded
+        or leaks a large payload.
     """
 
     try:
         if tmp_path.exists():
             (tmp_path / PARTIAL_SENTINEL).write_text("", encoding="utf-8")
             if reason is not None:
-                (tmp_path / REASON_SENTINEL).write_text(reason, encoding="utf-8")
+                bounded = reason[:_MAX_PARTIAL_REASON_CHARS]
+                (tmp_path / REASON_SENTINEL).write_text(bounded, encoding="utf-8")
     except OSError:
         return
+
+
+def _run_save_recovery(
+    tmp_path: Path,
+    backup_path: Path | None,
+    bundle_path: Path,
+    *,
+    primary: BaseException,
+) -> None:
+    """Run the failed-save bookkeeping without ever masking ``primary`` (R63).
+
+    The PARTIAL mark and the backup restore are the two contracts the save
+    handlers exist to guarantee, but running them unguarded meant a
+    rollback-time failure (e.g. ENOSPC while writing the sentinel) replaced
+    the primary exception -- a Ctrl-C was reported as an ordinary I/O error --
+    AND skipped the backup restore, stranding the pre-overwrite bundle under
+    its ``.bak.<uuid>`` name. Each step is independently best-effort;
+    recovery failures are disclosed via warning (and ``add_note`` where the
+    runtime has it), never raised over the primary.
+    """
+
+    def _disclose(step: str, failure: BaseException) -> None:
+        """Note and warn that recovery ``step`` failed, never raising over ``primary``."""
+
+        detail = (
+            f"bundle-save recovery step '{step}' itself failed "
+            f"({type(failure).__name__}: {failure}); the primary error is re-raised "
+            f"unchanged. Recovery debris may remain next to {bundle_path}."
+        )
+        note = getattr(primary, "add_note", None)  # py3.11+; 3.10 floor lacks it
+        if callable(note):
+            with contextlib.suppress(Exception):
+                note(detail)
+        with contextlib.suppress(Exception):
+            warnings.warn(detail, TorchLensWarning, stacklevel=3)
+
+    try:
+        _mark_partial(tmp_path, reason=type(primary).__name__)
+    except Exception as failure:
+        _disclose("mark-partial", failure)
+    try:
+        if backup_path is not None and not bundle_path.exists() and backup_path.exists():
+            _restore_backup(backup_path, bundle_path)
+    except Exception as failure:
+        _disclose("backup-restore", failure)
+
+
+def _reanchor_visualizer_paths(trace: Trace, bundle_path: Path) -> None:
+    """Contain every loaded ``visualizer_path`` inside the bundle's own directory.
+
+    ``visualizer_path`` is the one bundle-file field that bypassed
+    ``resolve_bundle_blob_path`` + ``_reject_symlink_path``: it was persisted as an
+    absolute path and flowed verbatim into Graphviz ``image=`` on ``.draw()`` with
+    only a ``.png`` suffix check. A hostile bundle could therefore name ANY local
+    ``.png`` and have ``tl.load(evil).draw()`` disclose it (B8-9).
+
+    On load we discard whatever directory the bundle claimed and re-anchor to
+    ``<bundle>/visualizers/<basename>``, then containment-check that it resolves
+    inside the bundle's own ``visualizers/`` directory and is a real file. Anything
+    that escapes, is missing, or sits behind a symlinked ``visualizers/`` is dropped
+    to ``None`` -- the render then simply omits the thumbnail.
+
+    Parameters
+    ----------
+    trace:
+        Freshly rehydrated trace whose layer ``visualizer_path`` fields are untrusted.
+    bundle_path:
+        Root of the loaded bundle.
+    """
+
+    layer_list = getattr(trace, "layer_list", None)
+    if not layer_list:
+        return
+    visualizers_dir = bundle_path / "visualizers"
+    if visualizers_dir.is_symlink() or not visualizers_dir.is_dir():
+        for layer in layer_list:
+            if getattr(layer, "visualizer_path", None) is not None:
+                layer.visualizer_path = None
+        return
+    resolved_root = visualizers_dir.resolve()
+    for layer in layer_list:
+        claimed = getattr(layer, "visualizer_path", None)
+        if not isinstance(claimed, str) or not claimed:
+            continue
+        candidate = (visualizers_dir / Path(claimed).name).resolve()
+        try:
+            candidate.relative_to(resolved_root)
+        except ValueError:
+            layer.visualizer_path = None
+            continue
+        if candidate.is_symlink() or not candidate.is_file():
+            layer.visualizer_path = None
+            continue
+        layer.visualizer_path = str(candidate)
+
+
+def _restrict_mode(path: Path, mode: int) -> None:
+    """Best-effort tighten a saved bundle path's permissions (POSIX only).
+
+    ``mkdir``/``open`` honor the ambient umask, so a bundle written under the common
+    umask 002 left its directories and metadata sidecars group-writable/readable even
+    though the safetensors blobs are 0600 (B8-10). This restores parity. Best-effort:
+    a filesystem that ignores mode bits is not a save failure.
+
+    Parameters
+    ----------
+    path:
+        Bundle directory or file to tighten.
+    mode:
+        Target permission bits (``0o700`` for directories, ``0o600`` for files).
+    """
+
+    if os.name != "posix":
+        return
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
 
 
 def _remove_path(path: Path) -> None:
@@ -3343,8 +4576,16 @@ def _remove_path(path: Path) -> None:
         path.unlink()
 
 
-def _restore_backup(backup_path: Path, bundle_path: Path) -> None:
+def _restore_backup(backup_path: Path, bundle_path: Path, *, warn_on_failure: bool = True) -> bool:
     """Best-effort restore an overwritten bundle after a failed replacement.
+
+    On a DOUBLE fault (the save failed AND this restore also fails -- permissions,
+    disk-full, a cross-device backup), the user's previous artifact is gone from its
+    canonical ``bundle_path`` but still exists under the ``.bak.<uuid>`` backup name.
+    Silently swallowing that left the prior artifact stranded under a hidden name the
+    error never mentioned; disclose the backup path so it is recoverable (matching the
+    save handler's stated intent). No behavior change on the single-fault path, where
+    the restore succeeds.
 
     Parameters
     ----------
@@ -3352,9 +4593,26 @@ def _restore_backup(backup_path: Path, bundle_path: Path) -> None:
         Backup path holding the previous bundle contents.
     bundle_path:
         Final bundle path to restore.
+    warn_on_failure:
+        Emit a warning naming the stranded backup when the restore fails. Callers that
+        do their own disclosure (``cleanup_tmp``) pass ``False``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the backup was restored onto ``bundle_path``.
     """
 
     try:
         backup_path.rename(bundle_path)
-    except OSError:
-        return
+    except OSError as exc:
+        if warn_on_failure:
+            warnings.warn(
+                f"Could not restore the previous bundle from its backup after a failed "
+                f"save ({exc}). Your prior artifact is NOT lost: it remains at "
+                f"{backup_path}. Move it back to {bundle_path} to recover it.",
+                TorchLensWarning,
+                stacklevel=2,
+            )
+        return False
+    return True

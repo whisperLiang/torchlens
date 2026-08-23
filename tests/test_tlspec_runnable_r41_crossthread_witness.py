@@ -79,7 +79,7 @@ from torchlens.runnable import (
 from torchlens.utils.rng import (
     HOST_NONDETERMINISM_REGISTRY,
     TORCH_RNG_SURFACE,
-    _call_site_argcount,
+    _call_site_explicit_time_value,
     _torch_rng_holder_module,
     host_nondeterminism_monitor,
 )
@@ -89,7 +89,7 @@ try:  # POSIX-only; the getrusage recipe skips on platforms without it.
 except ImportError:  # pragma: no cover - non-POSIX platforms
     _resource = None  # type: ignore[assignment]
 
-_CAP = dict(intervention_ready=True, capture_container_structure=True, cache=False)
+_CAP = {"intervention_ready": True, "capture_container_structure": True, "cache": False}
 
 # Pre-window held references (module import time == before any monitor window).
 _HELD_TIME = _time.time
@@ -130,8 +130,8 @@ class _PreexistingWorker:
     """A worker thread started BEFORE any capture window (a foreign thread)."""
 
     def __init__(self) -> None:
-        self.jobs: "queue.Queue[Any]" = queue.Queue()
-        self.results: "queue.Queue[Any]" = queue.Queue()
+        self.jobs: queue.Queue[Any] = queue.Queue()
+        self.results: queue.Queue[Any] = queue.Queue()
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
 
@@ -444,30 +444,37 @@ def test_held_implicit_now_star_call_marks_fail_closed() -> None:
 
 
 @pytest.mark.smoke
-def test_call_site_argcount_unit_pins() -> None:
-    """Pin the interpreter's CALL decode: 0-arg, 1-arg, and star-call sites.
+def test_call_site_explicit_time_unit_pins() -> None:
+    """Pin the interpreter's CALL decode: 0-arg, value-resolved, None, star-call.
 
     An interpreter bump that changes the bytecode shape turns this RED at upgrade
-    time; the monitor then over-marks (fail-closed) rather than under-marks.
+    time; the monitor then over-marks (fail-closed) rather than under-marks. The
+    decode is VALUE-resolving (r5 b8-fable R57): an explicit ``None`` argument --
+    literal or through a variable -- reads the current clock and must NOT decode
+    as a pure transform.
     """
 
-    captured: list[int | None] = []
+    captured: list[bool] = []
     target = _HELD_LOCALTIME
 
     def probe_hook(frame: Any, event: str, arg: Any) -> None:
         if event == "c_call" and arg is target:
-            captured.append(_call_site_argcount(frame))
+            captured.append(_call_site_explicit_time_value(frame, 0))
 
     star_args = (_FIXED_T,)
+    none_ts = None
     previous = sys.getprofile()
     sys.setprofile(probe_hook)
     try:
-        target()
-        target(_FIXED_T)
-        target(*star_args)
+        target()  # implicit now -> mark
+        target(_FIXED_T)  # module-global explicit time -> pure
+        target(1_000_000)  # literal explicit time -> pure
+        target(None)  # literal None IS a now-read -> mark
+        target(none_ts)  # variable None IS a now-read -> mark
+        target(*star_args)  # undecodable star-call -> mark fail-closed
     finally:
         sys.setprofile(previous)
-    assert captured == [0, 1, None]
+    assert captured == [False, True, True, False, False, False]
 
 
 @pytest.mark.smoke
@@ -573,7 +580,7 @@ def test_held_ref_capture_never_false_verified(factory: Any, channel: str, tmp_p
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(factory(), x, tmp=tmp_path)
-    assert channel in getattr(trace, "_runnable_host_rng_channels", ())
+    assert channel in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
 
@@ -674,7 +681,7 @@ def test_large_model_held_generator_end_to_end_unverifiable(
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_BigHeldGen(), x, tmp=tmp_path)
-    assert "model_attribute_generator" in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
 
@@ -1222,7 +1229,7 @@ def test_tampered_device_literal_degrades_analysis_only(tmp_path: Path) -> None:
     trace.save(path, level="runnable")
     assert _tamper_device_qualname(path), "bundle carried no device literal to tamper"
     loaded = tl.load(path)  # must not hard-fail: corr2_3 analysis-only degradation
-    readiness = loaded._runnable_readiness
+    readiness = loaded._runnable.readiness
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     assert any("torch.device" in (d.message or "") for d in readiness.diagnostics)
     with pytest.raises(RunCapabilityUnavailableError):
@@ -1380,7 +1387,7 @@ def test_datetime_subclass_clock_reader_ceilings(reader: str, tmp_path: Path) ->
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_SubclassClockBranch(), x, tmp=tmp_path)
-    assert "datetime.datetime.%s" % reader in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "datetime.datetime.%s" % reader in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
 
@@ -1432,7 +1439,7 @@ def test_custom_holder_generator_drawn_on_worker_ceilings(
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_CustomHolderGenModel(preexisting_worker), x, tmp=tmp_path)
-    assert "model_attribute_generator" in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
 
@@ -1453,7 +1460,7 @@ def test_custom_holder_undrawn_generator_stays_clean(
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_UndrawnHolderModel(), x, tmp=tmp_path)
-    assert "model_attribute_generator" not in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" not in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
 
 
@@ -1605,7 +1612,7 @@ def test_unregistered_submodule_generator_end_to_end_unverifiable(
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_UnregGenModel(preexisting_worker), x, tmp=tmp_path)
-    assert "model_attribute_generator" in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
 
@@ -1627,7 +1634,7 @@ def test_unregistered_submodule_undrawn_generator_stays_verified(tmp_path: Path)
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_UnregUndrawn(), x, tmp=tmp_path)
-    assert "model_attribute_generator" not in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" not in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
 
 
@@ -1920,7 +1927,7 @@ def test_r53_descriptor_owned_generator_end_to_end_unverifiable(
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_DescriptorRngModel(preexisting_worker), x, tmp=tmp_path)
-    assert "model_attribute_generator" in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
 
@@ -1950,7 +1957,7 @@ def test_r53_weakref_reached_generator_end_to_end_unverifiable(
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_WeakrefRngModel(preexisting_worker), x, tmp=tmp_path)
-    assert "model_attribute_generator" in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
 
@@ -1976,7 +1983,7 @@ def test_r53_callable_instance_generator_end_to_end_unverifiable(
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_CallableOpModel(preexisting_worker), x, tmp=tmp_path)
-    assert "model_attribute_generator" in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
 
@@ -2004,7 +2011,7 @@ def test_r53_inert_holders_present_undrawn_e2e_stays_verified(tmp_path: Path) ->
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_BenignLoadedModel(), x, tmp=tmp_path)
-    assert "model_attribute_generator" not in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" not in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
 
 

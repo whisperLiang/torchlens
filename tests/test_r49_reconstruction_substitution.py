@@ -26,14 +26,14 @@ import typing
 
 import pytest
 
+from torchlens._runnable_execution import _spec_node_reconstruction_lossy
 from torchlens.ir.container import (
     ContainerSpec,
     _metaclass_defines_foreign_call,
     _reconstruction_would_substitute_plain,
-    reconstruction_is_lossy_by_type,
     rebuild_container_from_spec,
+    reconstruction_is_lossy_by_type,
 )
-from torchlens._runnable_execution import _spec_node_reconstruction_lossy
 
 
 # ---- dataclass fixtures ----------------------------------------------------------------------
@@ -60,7 +60,7 @@ class UserInitDC:
 
 
 class _EvilNewBase:
-    def __new__(cls, *args: object, **kwargs: object) -> "_EvilNewBase":
+    def __new__(cls, *args: object, **kwargs: object) -> _EvilNewBase:
         obj = super().__new__(cls)
         object.__setattr__(obj, "secret", 1)  # __new__-computed state, dropped on substitution
         return obj
@@ -79,7 +79,7 @@ class InertModelOutput(collections.OrderedDict):
 class EvilNewModelOutput(collections.OrderedDict):
     """A ModelOutput dict-subclass that OVERRIDES ``__new__`` -> reconstruction substitutes plain."""
 
-    def __new__(cls, *args: object, **kwargs: object) -> "EvilNewModelOutput":
+    def __new__(cls, *args: object, **kwargs: object) -> EvilNewModelOutput:
         obj = super().__new__(cls, *args, **kwargs)
         obj.secret = 1  # dropped on substitution
         return obj

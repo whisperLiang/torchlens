@@ -55,10 +55,18 @@ def lovely(obj: Any, *args: Any, **kwargs: Any) -> Any:
         raise ImportError("Install torchlens[viz] to use torchlens.compat.lovely.") from exc
     tensor = _tensor_from(obj)
     formatter = getattr(lovely_tensors, "lovely", None)
-    if formatter is not None:
-        return formatter(tensor, *args, **kwargs)
-    lovely_tensors.monkey_patch()
-    return repr(tensor)
+    if formatter is None:
+        # The old fallback called lovely_tensors.monkey_patch(), a process-wide
+        # mutation of torch.Tensor.__repr__, as a side effect of a value-formatting
+        # call, and silently dropped the caller's args/kwargs. Refuse to mutate
+        # global state from a formatter; fail loud instead.
+        raise RuntimeError(
+            "The installed lovely_tensors does not expose a lovely() formatter. "
+            "torchlens.compat.lovely will not call the global monkey_patch() to "
+            "work around this. Upgrade lovely-tensors to a version exposing "
+            "lovely(), or call lovely_tensors directly if you want global patching."
+        )
+    return formatter(tensor, *args, **kwargs)
 
 
 def str(obj: Any, *args: Any, **kwargs: Any) -> Any:

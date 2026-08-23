@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, TypeAlias
+from typing import Any, Final, Literal, TypeAlias, cast
 
+from ..errors._base import ConfigurationError
 from ._protocol import CaptureBackend
-
 
 BackendName: TypeAlias = Literal["torch", "mlx", "jax", "tinygrad", "paddle", "tf", "fake"] | str
 """Backend name accepted by public APIs.
@@ -15,11 +16,54 @@ The ``"fake"`` literal is reserved for tests and downstream conformance fixtures
 that register process-local specs; TorchLens intentionally does not ship a
 default fake backend.
 """
+
+TORCH_BACKEND_NAME: Final[BackendName] = "torch"
+"""Canonical registry name of the default torch backend.
+
+Public (non-``backends``) code that branches on backend identity must compare
+against this constant, never a hard-coded literal — the backend-literal gate
+in ``tests/test_backend_registry.py`` enforces it.
+"""
+
+JAX_BACKEND_NAME: Final[BackendName] = "jax"
+"""Canonical registry name of the JAX preview backend."""
+
+TINYGRAD_BACKEND_NAME: Final[BackendName] = "tinygrad"
+"""Canonical registry name of the tinygrad preview backend."""
+
 CanHandleFn: TypeAlias = Callable[[object, object, dict[Any, Any] | None], bool]
 CaptureTraceFn: TypeAlias = Callable[..., Any]
 ValidateEntryFn: TypeAlias = Callable[..., bool]
 ValidateTraceFn: TypeAlias = Callable[..., Any]
 CaptureBackendFactory: TypeAlias = Callable[[], CaptureBackend]
+
+
+def _restore_backend_error(
+    error_type: type[BaseException],
+    args: tuple[object, ...],
+    state: dict[str, object],
+) -> BaseException:
+    """Rebuild a backend error without appending its remedy a second time.
+
+    Parameters
+    ----------
+    error_type:
+        Concrete backend error class stored by pickle.
+    args:
+        Already-formatted ``BaseException.args`` tuple.
+    state:
+        Instance dictionary containing structured diagnostic fields.
+
+    Returns
+    -------
+    BaseException
+        Restored backend error with its exact message and fields.
+    """
+
+    error = error_type.__new__(error_type)
+    BaseException.__init__(error, *args)
+    error.__dict__.update(state)
+    return error
 
 
 TRACE_OPTION_CAPABILITY_EPOCHS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -78,50 +122,127 @@ TINYGRAD_TRACE_OPTIONS: tuple[str, ...] = ("module_identity_mode", "grad_options
 PADDLE_TRACE_OPTIONS: tuple[str, ...] = ("module_identity_mode", "grad_options")
 """Trace options implemented by the Paddle preview backend."""
 
-TF_TRACE_OPTIONS: tuple[str, ...] = ("module_identity_mode",)
+TF_TRACE_OPTIONS: tuple[str, ...] = ("module_identity_mode", "grad_options")
 """Trace options implemented by the TensorFlow preview backend."""
 
 
-class BackendRegistryError(ValueError):
+class BackendRegistryError(ConfigurationError, ValueError):
     """Base class for backend registry failures."""
 
     code: str = "backend_error"
+    default_remedy: str = "pass an explicitly registered backend compatible with the operation"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        remedy: str | None = None,
+        **context: object,
+    ) -> None:
+        """Initialize a backend refusal with its stable code and remedy.
+
+        Parameters
+        ----------
+        message:
+            Description of the rejected backend request and its cause.
+        remedy:
+            Concrete caller action. The class-specific default is used when omitted.
+        **context:
+            Structured, non-authoritative diagnostic context.
+        """
+
+        resolved_remedy = remedy or type(self).default_remedy
+        message_text = message.rstrip()
+        if not message_text.endswith((".", "!", "?", ":", ";")):
+            message_text = f"{message_text}."
+        super().__init__(
+            f"{message_text} Remedy: {resolved_remedy.rstrip().rstrip('.')}.",
+            code=type(self).code,
+            remedy=resolved_remedy,
+            **cast(dict[str, Any], context),
+        )
+
+    def __reduce__(
+        self,
+    ) -> tuple[
+        object,
+        tuple[type[BaseException], tuple[object, ...], dict[str, object]],
+    ]:
+        """Return a pickle reconstruction recipe preserving structured fields."""
+
+        return (
+            _restore_backend_error,
+            (type(self), self.args, dict(self.__dict__)),
+        )
 
 
 class UnknownBackendError(BackendRegistryError):
     """Raised when an explicit backend name is not registered."""
 
     code = "unknown_backend"
+    default_remedy = "pass one of the backend names listed by torchlens.backends"
 
 
 class BackendMismatchError(BackendRegistryError):
     """Raised when an explicit backend cannot handle the supplied model/input."""
 
     code = "backend_mismatch"
+    default_remedy = "select the backend that owns the supplied model and tensor inputs"
 
 
 class BackendAmbiguityError(BackendRegistryError):
     """Raised when backend auto-resolution has multiple equal-priority matches."""
 
     code = "backend_ambiguity"
+    default_remedy = "pass backend= explicitly to select one matching backend"
 
 
 class BackendUnsupportedError(BackendRegistryError, NotImplementedError):
     """Raised when a backend lacks a requested capability."""
 
     code = "backend_unsupported"
+    default_remedy = "omit the unsupported option or use a backend that implements it"
 
 
 class BackendPayloadUnsupportedError(BackendUnsupportedError):
     """Raised when an audit-only backend payload cannot materialize."""
 
     code = "backend_payload_unsupported"
+    default_remedy = "save metadata only or use a backend with a supported payload codec"
 
 
 class BackendRuntimeCompatibilityError(BackendRegistryError):
     """Raised when a backend runtime is incompatible with serialized metadata."""
 
     code = "backend_runtime_compatibility"
+    default_remedy = "install a compatible backend runtime or load the artifact for analysis only"
+
+
+class BackendCapabilityConformanceError(BackendUnsupportedError):
+    """Raised when a ``True`` capability flag has no registered implementation.
+
+    The capability table is a public promise: ``True`` means supported. A
+    flag flipped to ``True`` on a spec that registers no implementing surface
+    for that capability must refuse typed instead of silently admitting the
+    option and dropping the behavior.
+    """
+
+    code = "backend_capability_conformance"
+    default_remedy = "disable the advertised capability or register its implementing surface"
+
+
+GATED_CAPABILITY_FLAGS: frozenset[str] = frozenset(
+    {
+        "backward_capture",
+        "fastlog",
+        "interventions",
+        "rng_replay",
+        "streaming",
+        "structure_only_capture",
+    }
+)
+"""Capability flags that open behavior gates and therefore require a bound
+implementing surface (see ``BackendSpec.capability_implementations``)."""
 
 
 @dataclass(frozen=True)
@@ -144,6 +265,10 @@ class BackendCapabilities:
         Whether loaded payloads can materialize as runtime arrays.
     streaming:
         Whether streaming save is supported.
+    structure_only_capture:
+        Whether structure-only capture (``structure_only=True``) is
+        supported. DOCUMENTED-UNSTABLE surface pending naming-session/S2
+        ratification.
     intermediate_derived_grads:
         Whether the backend can derive exact op-level gradients outside true
         backward capture.
@@ -173,6 +298,7 @@ class BackendCapabilities:
     rng_replay: bool
     payload_materialization: bool
     streaming: bool
+    structure_only_capture: bool = False
     intermediate_derived_grads: bool = False
     input_container_structure: Literal["none", "paths_only", "full_spec"] = "none"
     output_container_structure: Literal["none", "paths_only", "full_spec"] = "none"
@@ -232,6 +358,12 @@ class BackendSpec:
         Whether explicit resolution may accept inputs ``can_handle`` returns false for.
     aliases:
         Alternate explicit names.
+    capability_implementations:
+        Lazy factories for the implementing surface of each ``True`` gated
+        capability flag (``GATED_CAPABILITY_FLAGS``). Gates open only through
+        :func:`require_capability_implementation`, never through the boolean
+        alone, so a flag flip without a registered implementation refuses
+        typed instead of silently admitting unimplemented behavior.
     """
 
     name: BackendName
@@ -245,6 +377,11 @@ class BackendSpec:
     priority: int = 0
     coercible: bool = False
     aliases: tuple[str, ...] = ()
+    # compare=False keeps the frozen spec hashable (dicts are not) and
+    # registry replacement uses identity, not binding equality.
+    capability_implementations: dict[str, Callable[[], object]] | None = field(
+        default=None, compare=False
+    )
 
 
 _REGISTRY: dict[str, BackendSpec] = {}
@@ -322,6 +459,91 @@ def _validate_capture_backend_factory(spec: BackendSpec) -> None:
         )
 
 
+def _validate_capability_implementations(spec: BackendSpec) -> None:
+    """Require an implementation factory for every ``True`` gated flag.
+
+    Parameters
+    ----------
+    spec:
+        Backend spec being registered.
+
+    Returns
+    -------
+    None
+        Returns when every ``True`` gated capability flag has a factory.
+
+    Raises
+    ------
+    BackendCapabilityConformanceError
+        If a gated flag is ``True`` without a registered implementation
+        factory. Factories are not called here so registration stays
+        import-light; :func:`require_capability_implementation` resolves them
+        at gate time.
+    """
+
+    implementations = spec.capability_implementations or {}
+    missing = [
+        flag
+        for flag in sorted(GATED_CAPABILITY_FLAGS)
+        if getattr(spec.capabilities, flag) and implementations.get(flag) is None
+    ]
+    if missing:
+        names = ", ".join(missing)
+        raise BackendCapabilityConformanceError(
+            f"Backend {spec.name!r} declares capability flag(s) {names} as True "
+            "without binding an implementing surface in "
+            "capability_implementations. A boolean flip alone must not admit "
+            "unimplemented behavior; register the implementation factory or "
+            "keep the flag False."
+        )
+
+
+def require_capability_implementation(spec: BackendSpec, flag: str) -> object:
+    """Resolve the implementing surface behind a ``True`` gated capability flag.
+
+    Parameters
+    ----------
+    spec:
+        Backend spec whose gate is being opened.
+    flag:
+        Gated capability flag name from ``GATED_CAPABILITY_FLAGS``.
+
+    Returns
+    -------
+    object
+        The non-``None`` implementing surface the factory resolves to.
+
+    Raises
+    ------
+    BackendCapabilityConformanceError
+        If the flag has no bound factory, the factory raises, or it resolves
+        to ``None`` — i.e. the flag promises support the backend does not
+        actually register.
+    """
+
+    implementations = spec.capability_implementations or {}
+    factory = implementations.get(flag)
+    if factory is None:
+        raise BackendCapabilityConformanceError(
+            f"Backend {spec.name!r} reports capability {flag!r} as True but "
+            "registers no implementing surface for it; refusing instead of "
+            "silently ignoring the requested behavior."
+        )
+    try:
+        implementation = factory()
+    except Exception as exc:
+        raise BackendCapabilityConformanceError(
+            f"Backend {spec.name!r} capability {flag!r} implementation factory "
+            f"failed to resolve: {exc}"
+        ) from exc
+    if implementation is None:
+        raise BackendCapabilityConformanceError(
+            f"Backend {spec.name!r} capability {flag!r} implementation factory "
+            "resolved to None; the capability is not actually implemented."
+        )
+    return implementation
+
+
 def register_backend_spec(spec: BackendSpec, *, replace: bool = False) -> None:
     """Register a backend spec.
 
@@ -343,6 +565,7 @@ def register_backend_spec(spec: BackendSpec, *, replace: bool = False) -> None:
         if not replace and name in _REGISTRY:
             raise ValueError(f"Backend {name!r} is already registered.")
     _validate_capture_backend_factory(spec)
+    _validate_capability_implementations(spec)
     if replace:
         replaced_specs = {
             existing_spec for name in names if (existing_spec := _REGISTRY.get(name)) is not None

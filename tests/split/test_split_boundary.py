@@ -5,10 +5,10 @@ from __future__ import annotations
 import pytest
 import torch
 
+from torchlens.split import BoundarySchema
 from torchlens.split.boundary import ReplayBoundary
 from torchlens.split.errors import SplitBoundaryError
 from torchlens.split.shape import SymbolicShape
-from torchlens.split import BoundarySchema
 
 
 def _spec(label: str = "relu_1_1") -> dict[str, BoundarySchema]:

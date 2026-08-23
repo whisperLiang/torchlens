@@ -104,6 +104,24 @@ is only the slice while the buffer version stores the full registered buffer.
 Those versions are marked as state-transition-only for replay validation. The
 forward state and downstream readers still validate.
 
+## Intervention replay
+
+Written-buffer versions THREAD through `do()`/`push_from` replay: when a value
+edit's cone of effect re-executes a buffer-writing op, the downstream buffer
+version record commits the recomputed post-write state and later consumers
+(including later in-place writes to the same buffer) read the propagated value.
+Editing pass 1 of a `self.b.add_(1.0)` loop captured as `0,1,2,3` to `7` yields
+`7,8,9,10`, never a stale mix. Threading is self-certifying: it applies only to
+`inplace`/`reassign` write kinds whose capture-time buffer value equals the
+writing op's captured output. A version that cannot be certified (fused native
+mutators, slice writes whose op output is only the slice) keeps its captured
+value and discloses the gap with `BufferThreadGapWarning`
+(documented-unstable spelling; raises under `strict=True`) — the edit does not
+propagate through that write, and TorchLens says so rather than guessing.
+Replay never mutates capture truth: in-place ops re-execute on defensive
+clones, so captured payloads, copy-on-write fork sources, and the user's edit
+tensor are never written through.
+
 ## Limitations
 
 Assigning through `.data = new_tensor` is unsupported. It bypasses both normal

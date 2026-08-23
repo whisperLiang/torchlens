@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import builtins
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, ClassVar, Dict, Iterator
 import weakref
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 
-from .._errors import AmbiguousOpLookupError
+from .._errors import AmbiguousOpLookupError, InvalidArgumentError, RecordBindingError
 from .._io import (
-    FieldPolicy,
     TLSPEC_VERSION,
+    FieldPolicy,
     coerce_container_typed_state,
     default_fill_state,
     read_tlspec_version,
@@ -20,9 +21,9 @@ from .._io import (
 from ..constants import GRAD_FN_LOG_FIELD_ORDER
 from ..quantities import Duration
 from ._accessor_base import Accessor
+from ._runtime_handles import runtime_handle_from_owner
 from .field_policy import build_record_field_policy_table, portable_state_spec_from_policy
 from .grad_fn_call import GradFnCall
-from ._runtime_handles import runtime_handle_from_owner
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -87,9 +88,13 @@ class GradFnCallAccessor(Accessor[GradFnCall]):
         if len(matches) == 1:
             return matches[0]
         if matches:
-            raise ValueError(
+            raise InvalidArgumentError(
                 f"GradFn '{self._label}' fired {len(matches)} times in backward pass "
-                f"{pass_index}; use 0-based positional access."
+                f"{pass_index}; use 0-based positional access",
+                code="gradient_pass_ambiguous",
+                remedy="use 0-based positional access to pick one firing",
+                label=self._label,
+                pass_index=pass_index,
             )
         available = [
             getattr(call, "backward_pass_index", None)
@@ -249,7 +254,9 @@ class GradFn:
         "backward_signature": FieldPolicy.KEEP,
         "backward_docstring": FieldPolicy.KEEP,
     }
-    FIELD_POLICY = build_record_field_policy_table(GRAD_FN_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC)
+    FIELD_POLICY = build_record_field_policy_table(
+        GRAD_FN_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="grad_fn"
+    )
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     grad_fn_object_id: int
@@ -297,7 +304,7 @@ class GradFn:
         """Promote call storage to a scoped accessor."""
 
         if not isinstance(self.calls, GradFnCallAccessor):
-            self.calls = GradFnCallAccessor(self.calls, self.label)  # type: ignore[assignment]
+            self.calls = GradFnCallAccessor(self.calls, self.label)
         else:
             self.calls._label = self.label
         for call in self.calls.values():
@@ -316,10 +323,26 @@ class GradFn:
         backward pass.
         """
 
-        state = self.__dict__.copy()
+        from ._state_adapter import state_items
+
+        state = dict(state_items(self))
         state["_source_trace_ref"] = None
         state["tlspec_version"] = TLSPEC_VERSION
         return state
+
+    def __tl_state_items__(self) -> Any:
+        """Yield live state pairs from the backing row (M9 facade hook)."""
+
+        from .._trace_core.record_rows import record_state_items
+
+        return record_state_items(self)
+
+    def __tl_state_restore__(self, mapping: dict[str, Any]) -> None:
+        """Install a state mapping through the cell descriptors (M9 hook)."""
+
+        from .._trace_core.record_rows import record_state_restore
+
+        record_state_restore(self, mapping)
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore pickle state and fill fields added in newer versions."""
@@ -376,7 +399,9 @@ class GradFn:
         from .._io.state_keys import refuse_callable_shadowing_state_keys
 
         refuse_callable_shadowing_state_keys(type(self), state)
-        self.__dict__.update(state)
+        from .._trace_core.record_rows import record_state_restore
+
+        record_state_restore(self, state)
         self.__post_init__()
 
     @property
@@ -413,7 +438,7 @@ class GradFn:
         return self.source_trace
 
     @property
-    def op(self) -> "Layer | None":
+    def op(self) -> Layer | None:
         """Return the forward Op or Layer associated with this GradFn.
 
         Returns
@@ -456,9 +481,11 @@ class GradFn:
         if handle is not None:
             return handle
 
+        # L1 narrowing (r3): a lookup miss/ambiguity or a collected owner means
+        # "no live handle" (None); any other exception is a bug and propagates.
         try:
             op = self.op
-        except Exception:
+        except (AmbiguousOpLookupError, RecordBindingError, KeyError, ValueError):
             op = None
         if op is None:
             return None
@@ -577,9 +604,19 @@ class GradFn:
 
     @property
     def total_backward_duration(self) -> Duration:
-        """Return total backward duration across all calls for this GradFn."""
+        """Return total backward duration across the MEASURED calls.
 
-        return Duration(sum(call.backward_duration for call in self.calls.values()))
+        Untimed fires (``backward_duration is None``) contribute nothing
+        rather than poisoning the sum; a wholly untimed GradFn totals 0.
+        """
+
+        return Duration(
+            sum(
+                duration
+                for call in self.calls.values()
+                if (duration := call.backward_duration) is not None
+            )
+        )
 
     def _log_call(self, grad_inputs: Any, grad_outputs: Any, timestamp: float) -> None:
         """Append one runtime hook firing to this grad_fn_handle log.
@@ -603,7 +640,7 @@ class GradFn:
             _time_finished=timestamp,
         )
 
-    def to_pandas(self) -> "pd.DataFrame":
+    def to_pandas(self) -> pd.DataFrame:
         """Export this grad_fn_handle as a one-row DataFrame.
 
         Returns
@@ -622,6 +659,65 @@ class GradFn:
         return pd.DataFrame([row], columns=GRAD_FN_LOG_FIELD_ORDER)
 
 
+# The M9 facade: the declared stored fields (the literal PORTABLE_STATE_SPEC
+# keys) become row-cell descriptors; dataclass defaults are baked into the
+# generated __init__, so replacing the class-attribute defaults is
+# behavior-preserving. Rows adopt into the owning backward epoch's stores.
+_GRAD_FN_STORED_FIELDS: tuple[str, ...] = (
+    "grad_fn_object_id",
+    "class_name",
+    "class_qualname",
+    "is_custom",
+    "order",
+    "origin_backward_pass",
+    "creator_object_id",
+    "differentiates",
+    "modules",
+    "module_address",
+    "module_membership_source",
+    "label",
+    "type",
+    "type_index",
+    "ordinal_index",
+    "step_index",
+    "has_op",
+    "op_label",
+    "next_grad_fn_ids",
+    "parents",
+    "children",
+    "siblings",
+    "co_parents",
+    "calls",
+    "_source_trace_ref",
+    "class_source_file",
+    "class_source_line",
+    "class_docstring",
+    "init_source_file",
+    "init_source_line",
+    "init_signature",
+    "init_docstring",
+    "forward_source_file",
+    "forward_source_line",
+    "forward_signature",
+    "forward_docstring",
+    "backward_source_file",
+    "backward_source_line",
+    "backward_signature",
+    "backward_docstring",
+)
+
+
+def _install_grad_fn_facade() -> None:
+    """Install the GradFn row-cell descriptors (import-time)."""
+
+    from .._trace_core.record_rows import install_record_facade
+
+    install_record_facade(GradFn, _GRAD_FN_STORED_FIELDS)
+
+
+_install_grad_fn_facade()
+
+
 class GradFnAccessor(Accessor[GradFn]):
     """Dict-like accessor for ``GradFn`` objects.
 
@@ -629,7 +725,7 @@ class GradFnAccessor(Accessor[GradFn]):
     substring match against labels.
     """
 
-    def __init__(self, grad_fn_logs: Dict[int, GradFn], grad_fn_order: list[int]) -> None:
+    def __init__(self, grad_fn_logs: dict[int, GradFn], grad_fn_order: list[int]) -> None:
         """Initialize an accessor from Trace's flat grad_fn_handle fields.
 
         Parameters

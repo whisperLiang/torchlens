@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING, Any, cast
 from ._accessor_base import SuperAccessor
 from ._base import Super, _TensorBearing
 
-if TYPE_CHECKING:  # pragma: no cover - typing-only
+if TYPE_CHECKING:
+    from ...data_classes.aten_op import AtenOp
     from ...data_classes.layer import Layer
     from ...data_classes.op import Op
     from .._topology.topology import SupergraphNode
@@ -19,7 +20,7 @@ class SuperOp(Super["Op"], _TensorBearing):
     def __init__(
         self,
         label: str,
-        node: "SupergraphNode | None" = None,
+        node: SupergraphNode | None = None,
         bundle_trace_names: list[str] | None = None,
         *,
         members: dict[str, Any] | None = None,
@@ -77,6 +78,92 @@ class SuperOp(Super["Op"], _TensorBearing):
 
 class SuperLayer(SuperOp):
     """View of a single aggregate layer label across all bundle members."""
+
+
+class SuperAtenOp(Super["AtenOp"]):
+    """Positional, coverage-qualified alignment of one ATen slot across members."""
+
+    def __init__(
+        self,
+        *,
+        label: str,
+        decomposition_slot: int,
+        members: dict[str, AtenOp] | None = None,
+        bundle_member_names: list[str] | None = None,
+        has_observation_gap: bool = False,
+    ) -> None:
+        """Initialize one lazy primitive-slot alignment.
+
+        Parameters
+        ----------
+        label
+            Display label for the aligned slot.
+        decomposition_slot
+            Zero-based decomposition slot.
+        members
+            Primitive rows keyed by bundle member name.
+        bundle_member_names
+            Complete bundle member order, including missing rows.
+        has_observation_gap
+            Whether any member carries an observation gap or absent profile.
+        """
+
+        resolved_members = dict(members or {})
+        resolved_names = list(bundle_member_names or resolved_members)
+        super().__init__(
+            label,
+            resolved_members,
+            query=decomposition_slot,
+            bundle_member_names=resolved_names,
+        )
+        self.decomposition_slot = decomposition_slot
+        self.comparison_status = self._comparison_status(
+            resolved_members,
+            resolved_names,
+            has_observation_gap=has_observation_gap,
+        )
+
+    @staticmethod
+    def _comparison_status(
+        members: dict[str, AtenOp],
+        member_names: list[str],
+        *,
+        has_observation_gap: bool,
+    ) -> str:
+        """Return the closed alignment status for one positional slot.
+
+        Parameters
+        ----------
+        members
+            Present primitive rows.
+        member_names
+            Complete bundle member order.
+        has_observation_gap
+            Whether gaps prevent a proven missing-row claim.
+
+        Returns
+        -------
+        str
+            One documented-unstable alignment status token.
+        """
+
+        if has_observation_gap:
+            return "coverage_indeterminate"
+        if len(members) != len(member_names):
+            return "sparse"
+        schemas = {
+            (row.namespace, row.operator, row.overload, row.schema_fingerprint)
+            for row in members.values()
+        }
+        return "all_present_same_schema" if len(schemas) <= 1 else "all_present_different_schema"
+
+    def __repr__(self) -> str:
+        """Return a compact alignment representation."""
+
+        return (
+            f"SuperAtenOp(label={self._label!r}, slot={self.decomposition_slot}, "
+            f"status={self.comparison_status!r})"
+        )
 
 
 class SuperOpAccessor(SuperAccessor["Op", SuperOp]):
@@ -219,4 +306,11 @@ class TraceAccessor:
         return self._members.items()
 
 
-__all__ = ["SuperLayer", "SuperLayerAccessor", "SuperOp", "SuperOpAccessor", "TraceAccessor"]
+__all__ = [
+    "SuperAtenOp",
+    "SuperLayer",
+    "SuperLayerAccessor",
+    "SuperOp",
+    "SuperOpAccessor",
+    "TraceAccessor",
+]

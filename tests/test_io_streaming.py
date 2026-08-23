@@ -6,20 +6,19 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import safetensors  # noqa: F401
 import torch
-import torchlens as tl
-import torchlens.postprocess as postprocess_module
 from torch import nn
 
-pytest.importorskip("safetensors")
-
+import torchlens as tl
+import torchlens.postprocess as postprocess_module
 from torchlens import trace as trace_fn
-from torchlens.errors import TorchLensPostfuncError
-from torchlens.io import cleanup_tmp, detect_tlspec_format
-from torchlens.validation import validate_tlspec
 from torchlens._io import TorchLensIOError, streaming as streaming_module
 from torchlens._io.manifest import Manifest
 from torchlens.data_classes.trace import Trace
+from torchlens.errors import TorchLensPostfuncError
+from torchlens.io import cleanup_tmp, detect_tlspec_format
+from torchlens.validation import validate_tlspec
 
 
 class _StreamingModel(nn.Module):
@@ -282,7 +281,10 @@ def test_streaming_finalize_baseexception_marks_partial_and_is_sweepable(
     def _raise_keyboard_interrupt(*args: Any, **kwargs: Any) -> None:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(streaming_module.pickle, "dump", _raise_keyboard_interrupt)
+    # ``finalize()`` writes metadata.pkl through ``dump_canonical_metadata()``
+    # (B3R4-R21-2 canonical container bytes), driving a ``pickle._Pickler``
+    # subclass -- patching bare ``pickle.dump`` would no longer intercept it.
+    monkeypatch.setattr(streaming_module, "dump_canonical_metadata", _raise_keyboard_interrupt)
 
     with pytest.raises(KeyboardInterrupt):
         tl.trace(
@@ -307,6 +309,38 @@ def test_streaming_finalize_baseexception_marks_partial_and_is_sweepable(
     removed = cleanup_tmp(bundle_path)
     assert removed == tmp_dirs
     assert not _tmp_dirs_for(bundle_path)
+
+
+def test_streaming_finalize_rename_failure_marks_partial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A final atomic-rename failure leaves a sweepable partial bundle."""
+
+    bundle_path = tmp_path / "stream_bundle.tl"
+    model, inputs = _make_streaming_model()
+    original_rename = Path.rename
+
+    def fail_final_rename(source: Path, target: str | Path) -> Path:
+        """Fail only the stream writer's final temp-to-target rename."""
+
+        if ".tmp." in source.name and Path(target) == bundle_path:
+            raise OSError("simulated final rename refusal")
+        return original_rename(source, target)
+
+    monkeypatch.setattr(Path, "rename", fail_final_rename)
+    with pytest.raises(TorchLensIOError, match="atomically rename"):
+        tl.trace(
+            model,
+            inputs,
+            storage=tl.to_disk(bundle_path),
+            layers_to_save="all",
+        )
+
+    tmp_dirs = _tmp_dirs_for(bundle_path)
+    assert len(tmp_dirs) == 1
+    assert (tmp_dirs[0] / "PARTIAL").exists()
+    assert (tmp_dirs[0] / "REASON.txt").exists()
 
 
 def test_streaming_write_blob_baseexception_marks_partial_and_is_sweepable(
@@ -377,7 +411,9 @@ def test_out_sink_receives_saved_tensors_and_is_mutually_exclusive(
     assert all(isinstance(label, str) and label for label, _ in received)
     assert all(isinstance(tensor, torch.Tensor) for _, tensor in received)
 
-    with pytest.raises(ValueError, match="mutually exclusive"):
+    with pytest.raises(
+        ValueError, match="choose either bundle_path/save_outs_to or out_callback/out_sink"
+    ):
         model2, inputs2 = _make_streaming_model()
         trace_fn(
             model2,
@@ -485,3 +521,69 @@ def test_streaming_bundle_manifest_is_unified_and_schema_valid(tmp_path: Path) -
     loaded = tl.load(bundle_path)
     assert isinstance(loaded, Trace)
     assert loaded.num_ops == trace.num_ops
+
+
+class _AttrStreamingModel(nn.Module):
+    """Streaming model whose submodule carries a planted public attribute."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = nn.Linear(4, 3)
+        self.api_token = "CANARY_STREAM_TOKEN"  # noqa: S105 (test canary, not a secret)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(x)
+
+
+def _stream(model: nn.Module, inputs: torch.Tensor, bundle_path: Path) -> None:
+    """Run a streaming to-disk capture saving all outs."""
+
+    trace_fn(
+        model,
+        inputs,
+        storage=tl.to_disk(bundle_path),
+        capture=tl.options.CaptureOptions(layers_to_save="all"),
+    )
+
+
+def test_streaming_bundle_permissions_are_tight(tmp_path: Path) -> None:
+    """Streaming bundles must match tl.save's 0700/0600 permission parity (B8-10)."""
+
+    import os
+    import stat
+
+    if os.name != "posix":
+        pytest.skip("POSIX permission bits only")
+
+    bundle_path = tmp_path / "perm_bundle.tl"
+    model, inputs = _make_streaming_model()
+    old = os.umask(0o002)
+    try:
+        _stream(model, inputs, bundle_path)
+    finally:
+        os.umask(old)
+
+    for rel in [Path("."), Path("blobs"), Path("manifest.json"), Path("metadata.pkl")]:
+        target = bundle_path / rel
+        mode = stat.S_IMODE(target.stat().st_mode)
+        assert not (mode & stat.S_IWGRP), f"{rel} group-writable: {oct(mode)}"
+        assert not (mode & stat.S_IWOTH), f"{rel} world-accessible: {oct(mode)}"
+
+
+def test_streaming_bundle_discloses_custom_attributes_channel(tmp_path: Path) -> None:
+    """Streaming save must write the custom_attributes_disclosure manifest row (R62)."""
+
+    import json
+
+    bundle_path = tmp_path / "disclosure_bundle.tl"
+    torch.manual_seed(0)
+    _stream(_AttrStreamingModel(), torch.randn(2, 4), bundle_path)
+
+    manifest = json.loads((bundle_path / "manifest.json").read_text())
+    assert "custom_attributes_disclosure" in manifest, (
+        "every save must disclose the custom_attributes channel in the manifest"
+    )
+    disclosure = manifest["custom_attributes_disclosure"]
+    assert disclosure["included"] is True
+    assert disclosure["module_count"] >= 1
+    assert "api_token" in disclosure["top_level_keys"]

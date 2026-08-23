@@ -27,7 +27,6 @@ from __future__ import annotations
 import io
 import pickle
 import struct
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -188,10 +187,10 @@ def test_pytorch_file_writer_type_denied_no_file_created(tmp_path: Path) -> None
 
 
 @pytest.mark.smoke
-def test_package_importer_type_denied() -> None:
+def test_package_importer_type_denied(tmp_path: Path) -> None:
     """``PackageImporter(dir)`` (directory traversal read) is denied."""
 
-    directory = tempfile.mkdtemp()
+    directory = str(tmp_path)
     for module, name in (
         ("torch.package.package_importer", "PackageImporter"),
         ("torch.package", "PackageImporter"),

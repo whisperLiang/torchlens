@@ -276,7 +276,7 @@ def test_r73_fact_scopes_to_the_rooting_input_only(tmp_path: Path) -> None:
         site.position: tuple(
             name for tensor_site in site.tensor_sites for name in tensor_site.metadata_reads
         )
-        for site in tl.load(path).__dict__["_runnable_descriptor"].input_boundary
+        for site in tl.load(path)._runnable.descriptor.input_boundary
     }
     assert "derived_layout_read" in reads_by_position["arg:0"]
     assert "derived_layout_read" not in reads_by_position["arg:1"]
@@ -302,7 +302,7 @@ def test_r73_derived_fact_rides_the_metadata_envelope(tmp_path: Path) -> None:
 
     x = _nchw()
     path = _save(IntermediateLayoutBranch().eval(), x, tmp_path / "envelope.tlspec")
-    descriptor = tl.load(path).__dict__["_runnable_descriptor"]
+    descriptor = tl.load(path)._runnable.descriptor
     reads = [
         name
         for site in descriptor.input_boundary
@@ -312,7 +312,7 @@ def test_r73_derived_fact_rides_the_metadata_envelope(tmp_path: Path) -> None:
     assert "derived_layout_read" in reads
 
     plain_path = _save(PlainConv().eval(), x, tmp_path / "envelope_plain.tlspec")
-    plain_descriptor = tl.load(plain_path).__dict__["_runnable_descriptor"]
+    plain_descriptor = tl.load(plain_path)._runnable.descriptor
     plain_reads = [
         name
         for site in plain_descriptor.input_boundary

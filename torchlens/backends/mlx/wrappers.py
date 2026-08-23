@@ -37,6 +37,39 @@ class _MLXWrapperRegistry:
         if self._wrapped:
             self.unwrap()
         mx, nn = _import_mlx()
+        # R07 (the L4 unwind standard): the install loops mutate process-global
+        # MLX modules and classes; a BaseException escaping mid-install used to
+        # strand every wrapper already landed (nothing called ``unwrap`` because
+        # the capture-side ``finally`` had not been entered yet). ``unwrap``
+        # restores exactly the slots registered so far, so it is the unwind.
+        try:
+            self._wrap_installed(mx, nn, backend, module_tree)
+        except BaseException:
+            self.unwrap()
+            raise
+        self._wrapped = True
+
+    def _wrap_installed(
+        self,
+        mx: Any,
+        nn: Any,
+        backend: object,
+        module_tree: MLXModuleTree | None,
+    ) -> None:
+        """Run the wrapper install loops (fenced by :meth:`wrap`).
+
+        Parameters
+        ----------
+        mx:
+            Imported ``mlx.core`` module.
+        nn:
+            Imported ``mlx.nn`` module.
+        backend:
+            Active MLX backend that receives wrapper events.
+        module_tree:
+            Optional discovered MLX module tree.
+        """
+
         for name in (
             "add",
             "matmul",
@@ -97,13 +130,28 @@ class _MLXWrapperRegistry:
                     module_tree=module_tree,
                     module_instances=instances,
                 )
-        self._wrapped = True
 
     def unwrap(self) -> None:
-        """Restore all original MLX callables."""
+        """Restore all original MLX callables.
 
+        Every restore is attempted even if one raises; the first failure
+        re-raises after the sweep so a single fallible setattr cannot leave
+        the remaining process-global wrappers installed. Slots that failed
+        to restore stay registered so a retry can restore them.
+        """
+
+        first_failure: BaseException | None = None
         for (owner, name), original in list(self._originals.items()):
-            setattr(owner, name, original)
+            try:
+                setattr(owner, name, original)
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+                continue
+            self._originals.pop((owner, name), None)
+        if first_failure is not None:
+            self._wrapped = bool(self._originals)
+            raise first_failure
         self._originals.clear()
         self._wrapped = False
 
@@ -178,8 +226,11 @@ class _MLXWrapperRegistry:
                     trace._mlx_capture_depth -= 1
                 module_stack = tuple(getattr(trace, "_mlx_module_stack", ()))
                 emit = getattr(backend, "emit_mlx_operation")
-                emit(trace, op_name, original, args, kwargs, output, module_stack=module_stack)
-                return output
+                # emit returns the effective output: intervention-replaced
+                # leaves must be what the model consumes downstream.
+                return emit(
+                    trace, op_name, original, args, kwargs, output, module_stack=module_stack
+                )
             finally:
                 if frame is not None:
                     getattr(trace, "_mlx_module_stack").pop()

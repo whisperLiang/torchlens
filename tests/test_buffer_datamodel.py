@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,12 +13,57 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.errors import TraceNotReproducibleWarning
 from torchlens.backends.torch import buffer_writes
-from torchlens.data_classes.cleanup import _scrub_per_op_equivalence_lists
-
+from torchlens.data_classes.cleanup import (
+    _scrub_layer_entry_conditional_fields,
+    _scrub_per_op_equivalence_lists,
+)
+from torchlens.errors import TraceNotReproducibleWarning
+from torchlens.postprocess.labeling import _replace_layer_names_for_layer_entry
 
 TensorFactory = Callable[[], torch.Tensor]
+
+
+def test_buffer_write_tracker_uninstall_restores_class_after_model_gc() -> None:
+    """Tracker teardown must restore patched classes even after model GC."""
+
+    class _TrackerModel(nn.Module):
+        """Minimal model whose class receives the scoped ``__setattr__`` patch."""
+
+        def __init__(self) -> None:
+            """Register one buffer for tracker installation."""
+
+            super().__init__()
+            self.register_buffer("buf", torch.tensor([1.0]))
+
+    class _TraceStub:
+        """Weak-referenceable stand-in for a Trace.
+
+        The tracker registers the trace in module-level ``WeakSet`` witness
+        ledgers (``_PARAM_BYTE_WITNESS_NOT_ARMED``), which a ``SimpleNamespace``
+        cannot join.
+        """
+
+        def __init__(self) -> None:
+            """Seed only the attribute the tracker reads at install time."""
+
+            self._buffer_initial_values: dict[str, torch.Tensor] = {}
+
+    trace = _TraceStub()
+    model = _TrackerModel()
+    tracker = buffer_writes.BufferWriteTracker(trace, model)
+    original = _TrackerModel.__setattr__
+
+    tracker.install()
+    assert _TrackerModel.__setattr__ is not original
+    assert _TrackerModel in buffer_writes.BufferWriteTracker._patched_classes
+
+    del model
+    gc.collect()
+    tracker.uninstall()
+
+    assert _TrackerModel.__setattr__ is original
+    assert _TrackerModel not in buffer_writes.BufferWriteTracker._patched_classes
 
 
 def test_removed_buffer_raw_label_is_scrubbed_from_per_op_graph_fields() -> None:
@@ -54,15 +100,67 @@ def test_removed_buffer_raw_label_is_scrubbed_from_per_op_graph_fields() -> None
     assert op.internal_source_parents == []
     assert op.internal_source_ancestors == set()
     assert op.conditional_entry_children == []
-    assert op.conditional_then_children == ["relu_1_raw"]
+    assert op.conditional_then_children == []
     # NOTE: op_equivalence_classes is a Trace-level dict, never a per-op field;
     # the dead per-op scrub for it was removed by the cert round-1 data-model fix.
     assert op.equivalent_ops == ["add_1_raw"]
     assert op.recurrent_ops == []
     assert op.parent_arg_positions == {"args": {1: "add_1_raw"}, "kwargs": {}}
     assert set(op.out_versions_by_child) == {"add_1_raw"}
-    assert op.conditional_elif_children == {0: ["add_1_raw"]}
+    assert op.conditional_elif_children == {}
     assert op.conditional_arm_children == {1: {"then": [], "else": ["add_1_raw"]}}
+
+
+def test_conditional_child_views_are_rebuilt_after_label_rename() -> None:
+    """Relabeling rebuilds derived conditional child views from the primary map."""
+
+    trace = SimpleNamespace(
+        _raw_to_final_layer_labels={},
+        _raw_to_final_parent_layer_labels={
+            "child_a_raw": "child_a",
+            "child_b_raw": "child_b",
+        },
+        _raw_to_final_op_labels={},
+    )
+    layer_entry = SimpleNamespace(
+        parents=[],
+        root_ancestors=set(),
+        children=[],
+        input_ancestors=set(),
+        output_descendants=set(),
+        internal_source_parents=[],
+        internal_source_ancestors=set(),
+        conditional_entry_children=[],
+        conditional_then_children=["child_b_raw", "child_a_raw"],
+        conditional_else_children=[],
+        recurrent_ops=[],
+        parent_arg_positions=None,
+        out_versions_by_child=None,
+        conditional_elif_children={},
+        conditional_arm_children={1: {"then": ["child_a_raw", "child_b_raw"]}},
+    )
+
+    _replace_layer_names_for_layer_entry(trace, layer_entry)
+
+    assert layer_entry.conditional_arm_children == {1: {"then": ["child_a", "child_b"]}}
+    assert layer_entry.conditional_then_children == ["child_a", "child_b"]
+
+
+def test_cleanup_rebuilds_conditional_child_views_from_primary_structure() -> None:
+    """Conditional cleanup normalizes derived branch-child order from the primary map."""
+
+    layer_entry = SimpleNamespace(
+        conditional_entry_children=[],
+        conditional_then_children=["drop_me", "child_b", "child_a"],
+        conditional_else_children=[],
+        conditional_elif_children={},
+        conditional_arm_children={1: {"then": ["child_a", "child_b", "drop_me"]}},
+    )
+
+    _scrub_layer_entry_conditional_fields(layer_entry, {"drop_me"})
+
+    assert layer_entry.conditional_arm_children == {1: {"then": ["child_a", "child_b"]}}
+    assert layer_entry.conditional_then_children == ["child_a", "child_b"]
 
 
 class RecurrentReassign(nn.Module):
@@ -230,6 +328,22 @@ class StaticReadOnly(nn.Module):
         return self.b + x
 
 
+def test_internal_source_parents_survive_journal_projection() -> None:
+    """Direct parents carrying buffer ancestry survive materialization."""
+
+    trace = tl.trace(StaticReadOnly(), torch.ones(2))
+
+    add_op = trace["add_1_1"]
+    output_op = trace["output_1"]
+    assert add_op.internal_source_parents == ("buffer_1",)
+    # internal_source_parents is a DIRECT-PARENT relation, so the synthetic output node
+    # names ITS parent (``add_1_1``), which carries the buffer ancestry -- not the
+    # ``buffer_1`` label it used to inherit verbatim from the clone source. The old
+    # expectation pinned that bug in: ``buffer_1`` is not a parent of ``output_1``.
+    assert output_op.parents == ("add_1_1",)
+    assert output_op.internal_source_parents == ("add_1_1",)
+
+
 class DataSetter(nn.Module):
     """``.data = tensor`` buffer storage reassignment model."""
 
@@ -380,8 +494,12 @@ def test_buffer_write_models_validate_and_expose_entities(
     model = model_factory()
     x = input_factory()
     if isinstance(model, DataCopyWrite):
+        # Hardened contract (commit cd516819): a structurally divergent pristine
+        # re-trace warns AND returns False. `.data.copy_` is byte-idempotent on the
+        # validation retrace (same instance, `b` already == `x`), so the buffer-write
+        # node disappears and the shape hash mismatches -> not verified.
         with pytest.warns(TraceNotReproducibleWarning, match="stateful/non-reproducible"):
-            assert tl.validation.validate_forward_pass(
+            assert not tl.validation.validate_forward_pass(
                 model_factory(), x.clone(), random_seed=123, validate_metadata=True
             )
     elif isinstance(model, DataSetter):
@@ -393,7 +511,16 @@ def test_buffer_write_models_validate_and_expose_entities(
             model_factory(), x.clone(), random_seed=123, validate_metadata=True
         )
 
-    trace = tl.trace(model, x, save_arg_values=True)
+    if isinstance(model, DataCopyWrite):
+        # `.data.copy_` writes through a detached `.data` view, which severs graph
+        # provenance for the copy target; TorchLens deliberately warns about the
+        # unattributed argument (postprocess `_warn_unattributed_tensor_args`).
+        # Expect that documented warning here instead of letting the warning-hygiene
+        # filter promote a known `.data` limitation to a fatal error.
+        with pytest.warns(UserWarning, match="no graph/source provenance"):
+            trace = tl.trace(model, x, save_arg_values=True)
+    else:
+        trace = tl.trace(model, x, save_arg_values=True)
     for address, overwrite_count in expected_overwrites.items():
         assert address in trace.buffers
         buffer = trace.buffers[address]
@@ -533,7 +660,8 @@ def test_buffer_op_accessors_partition_read_and_write_versions() -> None:
 def test_buffer_op_accessors_round_trip_through_tlspec(tmp_path: Path) -> None:
     """Derived buffer op accessors remain correct after portable ``.tlspec`` load."""
 
-    pytest.importorskip("safetensors")
+    import safetensors  # noqa: F401
+
     trace = tl.trace(DualRoleInplace(), torch.ones(2), save_arg_values=True)
     path = tmp_path / "buffer_ops.tlspec"
 
@@ -553,7 +681,7 @@ def test_reassignment_double_count_is_exact() -> None:
     """Assert N top-level reassignments produce exactly N write events."""
 
     trace = tl.trace(RecurrentReassign(steps=5), torch.ones(2), save_arg_values=True)
-    events = [event for event in trace._buffer_write_events if event.address == "h"]
+    events = [event for event in trace.event_stream.buffer_write_events if event.address == "h"]
     assert len(events) == 5
     assert trace.buffers["h"].num_overwrites == 5
 
@@ -685,3 +813,92 @@ def test_data_setter_reconciliation_records_buffer_write() -> None:
     assert len(writes) == 1
     assert writes[0].buffer_write_kind == "data_reassign"
     assert torch.equal(writes[0].out, torch.full((2,), 2.0))
+
+
+def test_merged_buffer_survivor_gains_duplicate_output_reach() -> None:
+    """The step-6 merge reconciles the survivor's child-direction reach.
+
+    r3 b1-opus R04-F1 content pin: e12aa996's repair (merge-time
+    ``output_descendants`` union + ancestor-cone re-derivation) previously
+    had ZERO content-effective coverage — an effect-neutralizing revert left
+    135 targeted tests green. Here the merge SURVIVOR (the initial read)
+    feeds only an input-connected dead end, while the equal-valued duplicate
+    read reaches the output: without the repair the survivor ships
+    ``has_output_descendant=False`` and an empty ``output_descendants`` on
+    an op that demonstrably feeds the model output. RED under the revert.
+    """
+
+    from support.postprocess_axes import DivergentReachBufferModel
+
+    trace = tl.trace(DivergentReachBufferModel(), torch.randn(2, 4))
+    try:
+        assert list(trace.buffer_layers), "duplicate reads must merge to one buffer node"
+        merged = trace[trace.buffer_layers[0]]
+        op = next(iter(merged.ops.values()))
+        # The survivor owns BOTH pre-merge children (dead end + output path)...
+        assert len(op.children) == 2
+        # ...and its child-direction reach reflects the merged edges.
+        assert op.has_output_descendant is True
+        assert any(label.startswith("output") for label in op.output_descendants)
+    finally:
+        trace.cleanup()
+
+
+def test_buffer_dedup_avoids_pairwise_tensor_compares_on_distinct_values() -> None:
+    """Distinct-valued same-address buffers must not pay O(G^2) torch.equal.
+
+    Hunt-6 R52-1: step 6's dedup swept every new buffer against EVERY prior
+    unique in its hash group with ``torch.equal`` -- Theta(G^2) whole-tensor
+    compares for a training-mode recurrent BatchNorm whose running stats
+    differ every pass (~500k compares at x1000 passes). A cheap value
+    fingerprint now buckets the uniques, so an all-distinct group performs
+    zero merge-sweep tensor compares.
+    """
+
+    class _LoopBN(nn.Module):
+        """BatchNorm applied repeatedly so buffers update between passes."""
+
+        def __init__(self, num_passes: int) -> None:
+            super().__init__()
+            self.bn = nn.BatchNorm1d(4)
+            self.num_passes = num_passes
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Apply BN ``num_passes`` times (running stats change each pass)."""
+
+            for _ in range(self.num_passes):
+                x = self.bn(x)
+            return x
+
+    num_passes = 12
+    model = _LoopBN(num_passes).train()
+
+    import sys
+
+    calls = {"n": 0}
+    original_equal = torch.equal
+
+    def counting_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
+        """Count tensor-equality comparisons issued by the step-6 dedup module."""
+
+        caller = sys._getframe(1).f_code.co_filename
+        if caller.endswith("control_flow.py"):
+            calls["n"] += 1
+        return original_equal(a, b)
+
+    torch.equal = counting_equal
+    try:
+        trace = tl.trace(model, torch.randn(8, 4))
+    finally:
+        torch.equal = original_equal
+
+    # Buffers stay distinct (running stats differ per pass), so nothing merges
+    # and the merge sweep needs no tensor compares at all; the linear bound
+    # covers step 6's per-buffer source-value checks.
+    linear_bound = 2 * num_passes
+    assert calls["n"] <= linear_bound, (
+        f"step-6 buffer dedup made {calls['n']} torch.equal calls for {num_passes} "
+        f"distinct-value passes (linear bound {linear_bound}) -- the pairwise "
+        "sweep is back"
+    )
+    assert len(trace.buffer_layers) >= num_passes

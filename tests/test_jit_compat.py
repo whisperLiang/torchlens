@@ -7,9 +7,8 @@ import pytest
 import torch
 from torch import nn
 
-import torchlens as tl
-from torchlens import _state
 import torchlens.backends.torch.wrappers as torch_wrappers
+from torchlens import _state
 
 
 class _AttentionStyleModule(nn.Module):
@@ -41,10 +40,15 @@ class _StoredFuncModel(nn.Module):
 
 @pytest.fixture(autouse=True)
 def _ensure_wrapped() -> Iterator[None]:
-    """Ensure torch wrappers are installed for each test."""
+    """Ensure wrappers are installed and restore their incoming state."""
 
+    was_wrapped = _state._is_decorated
     torch_wrappers.wrap_torch()
-    yield
+    try:
+        yield
+    finally:
+        if not was_wrapped:
+            torch_wrappers.unwrap_torch()
 
 
 def _require_torch_jit() -> None:
@@ -90,36 +94,6 @@ def test_jit_builtin_registration_sanitizes_dtype_annotations(
     assert not hasattr(torch.cos, "__wrapped__")
 
 
-def test_patch_model_instance_rescans_each_trace(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Tracing the same model twice should rescan reassigned callable attributes."""
-
-    original_relu = _state._decorated_to_orig[id(torch.relu)]
-    model = _StoredFuncModel(original_relu)
-    walk_count = 0
-    original_patch_model_instance = torch_wrappers.patch_model_instance
-
-    def counted_patch_model_instance(model_arg: Any) -> None:
-        """Count model-instance scans and delegate to the implementation."""
-
-        nonlocal walk_count
-        if model_arg is model:
-            walk_count += 1
-        original_patch_model_instance(model_arg)
-
-    monkeypatch.setattr(torch_wrappers, "patch_model_instance", counted_patch_model_instance)
-
-    first_trace = tl.trace(model, torch.randn(4), layers_to_save="all")
-    model.act = original_relu
-    second_trace = tl.trace(model, torch.randn(4), layers_to_save="all")
-
-    assert walk_count == 2
-    assert model.act is _state._orig_to_decorated[id(original_relu)]
-    assert any("relu" in label.lower() for label in first_trace.layer_labels)
-    assert any("relu" in label.lower() for label in second_trace.layer_labels)
-
-
 def _calls_softsign(x: torch.Tensor) -> torch.Tensor:
     """Call a wrapped pure-Python torch.nn.functional op (not an ATen builtin)."""
 
@@ -142,3 +116,55 @@ def test_jit_script_wrapped_functional_python_op() -> None:
     scripted = torch.jit.script(_calls_softsign)
     x = torch.randn(8)
     assert torch.allclose(scripted(x), torch.nn.functional.softsign(x))
+
+
+class _MaxPoolModule(nn.Module):
+    """Module calling a boolean-dispatched functional (the F.max_pool* family)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply a 2x2 max pool."""
+
+        return torch.nn.functional.max_pool2d(x, kernel_size=2)
+
+
+class _InterpolateModule(nn.Module):
+    """Module calling a pure-Python functional whose source needs extra globals."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Upsample by 2x with nearest-neighbor interpolation."""
+
+        return torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
+
+
+def test_jit_script_boolean_dispatched_functional_while_wrapped() -> None:
+    """TorchScript must compile the boolean-dispatched ``F.max_pool*`` family
+    while wrappers are installed.
+
+    Regression: ``torch._jit_internal.boolean_dispatched`` is keyed by the
+    ORIGINAL function objects, so the namespace wrapper missed the table and
+    jit tried to compile the wrapper's varargs source (``NotSupportedError``).
+    """
+
+    _require_torch_jit()
+
+    scripted = torch.jit.script(_MaxPoolModule())
+    x = torch.randn(1, 1, 4, 4)
+    assert torch.allclose(scripted(x), torch.nn.functional.max_pool2d(x, kernel_size=2))
+
+
+def test_jit_script_functional_needing_original_globals_while_wrapped() -> None:
+    """TorchScript must compile a wrapped pure-Python functional whose source
+    resolves names beyond the imported torch.overrides boilerplate.
+
+    Regression: jit pulled ``F.interpolate``'s original source but resolved
+    globals against the WRAPPER module (``undefined value math``); the
+    ``__prepare_scriptable__`` hook now hands jit the original function with
+    its own self-consistent globals.
+    """
+
+    _require_torch_jit()
+
+    scripted = torch.jit.script(_InterpolateModule())
+    x = torch.randn(1, 1, 4, 4)
+    expected = torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
+    assert torch.allclose(scripted(x), expected)

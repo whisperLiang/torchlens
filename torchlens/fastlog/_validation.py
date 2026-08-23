@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Final
 
-from .._training_validation import TrainingModeConfigError, validate_training_compatibility
 from .exceptions import RecordingConfigError
 from .options import RecordingOptions
 from .types import CaptureSpec
@@ -62,12 +61,17 @@ def _validate_non_empty_capture(options: RecordingOptions) -> None:
 
     if (
         options.keep_op is None
-        and options.keep_module is None
         and options.halt is None
         and options.default_op is False
         and options.default_module is False
     ):
-        raise RecordingConfigError("fastlog requires a predicate or a true default capture spec")
+        # User-vocabulary refusal (R65): the caller typed tl.record(), not
+        # "fastlog", and the remedy is one token.
+        raise RecordingConfigError(
+            "tl.record() would capture nothing: no save= predicate was given and "
+            "both default_op and default_module are False. Remedy: pass a "
+            "predicate such as save=tl.func('relu'), or set default_op=True."
+        )
 
 
 def _validate_disk_only_keep_grad_defaults(options: RecordingOptions) -> None:
@@ -84,15 +88,6 @@ def _validate_disk_only_keep_grad_defaults(options: RecordingOptions) -> None:
         ("default_module", options.default_module),
     ):
         if isinstance(default, CaptureSpec) and default.keep_grad:
-            try:
-                validate_training_compatibility(
-                    backward_ready=True,
-                    streaming=options.streaming,
-                    detach_saved_activations=False,
-                    inference_mode_active=False,
-                )
-            except TrainingModeConfigError:
-                pass
             raise RecordingConfigError(
                 f"{name} cannot use keep_grad=True with disk-only fastlog storage"
             )

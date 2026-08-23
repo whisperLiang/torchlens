@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import defaultdict, deque
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Literal, Mapping
+from typing import TYPE_CHECKING, Any, Literal
 
 from .request import RenderContext
 
@@ -13,9 +14,11 @@ if TYPE_CHECKING:
 
     from ..data_classes.module import Module
     from ..data_classes.trace import Trace
+    from ._render_common import RenderedNodeEmission
+    from ._render_edges import _SegmentLookup
     from .auto_collapse import ModuleRepeatFold
+    from .node_spec import NodeSpec
     from .node_universe import NodeUnit
-    from .rendering import RenderedNodeEmission
     from .renderers.base import RendererCapabilities
 
 
@@ -54,8 +57,20 @@ class RenderIRNode:
     node_calls: tuple[Any, ...] = ()
     owned_node_args: tuple[tuple[str, dict[str, Any]], ...] = ()
     node_color: str = "black"
-    node_spec: Any | None = None
+    # S5 contract (C4): typed NodeSpec | None (was Any).
+    node_spec: NodeSpec | None = None
     region_path: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _NodeDecisionInputs:
+    """Per-draw inputs shared by every render-node presentation decision."""
+
+    universe: Any
+    repeat_folds: Mapping[str, ModuleRepeatFold] | None
+    segment_lookup: _SegmentLookup
+    sibling_counts: Mapping[str, int] | None
+    suppressed_args: Mapping[int, frozenset[str]]
 
 
 @dataclass(frozen=True)
@@ -158,13 +173,34 @@ class RenderIROrderingConstraint:
 
 
 @dataclass(frozen=True)
+class RenderIRRankGroup:
+    """One stacking (rank) channel group: nodes pinned to one Graphviz rank.
+
+    Parameters
+    ----------
+    kind:
+        Constraint kind; v1 emits ``"stack"`` only (the ``stack_by``
+        encoding channel; the license/cohort semantics live in
+        ``visualization._stacking``).
+    key:
+        Repr of the shared annotation value (rank key).
+    members:
+        Rendered node names pinned to the shared rank.
+    """
+
+    kind: str
+    key: str
+    members: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class RenderIRDotStatement:
     """Immutable backend-ready DOT statement without TorchLens host objects."""
 
     kind: Literal["node", "edge", "attr", "subgraph", "raw"]
     args: tuple[Any, ...] = ()
     attrs: tuple[tuple[str, Any], ...] = ()
-    children: tuple["RenderIRDotStatement", ...] = ()
+    children: tuple[RenderIRDotStatement, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -191,8 +227,10 @@ class RenderIR:
     regions: tuple[RenderIRRegion, ...]
     ordering_constraints: tuple[RenderIROrderingConstraint, ...] = ()
     dot_statements: tuple[RenderIRDotStatement, ...] = ()
+    # Stacking channel (L5 M3): rank=same groups resolved at the prepass.
+    stack_rank_groups: tuple[RenderIRRankGroup, ...] = ()
 
-    def required_capabilities(self) -> "RendererCapabilities":
+    def required_capabilities(self) -> RendererCapabilities:
         """Return backend features required to render this IR exactly.
 
         Returns
@@ -256,13 +294,15 @@ def projected_antiparallel_endpoint_pairs(render_ir: RenderIR) -> frozenset[tupl
 
 
 def build_render_ir(
-    trace: "Trace",
+    trace: Trace,
     *,
-    collapse_fn: "Callable[[Module], bool] | None",
-    repeat_folds: "Mapping[str, ModuleRepeatFold] | None",
+    collapse_fn: Callable[[Module], bool] | None,
+    repeat_folds: Mapping[str, ModuleRepeatFold] | None,
     context: RenderContext | None = None,
     universe: Any | None = None,
-    segments: "Mapping[str, Any] | None" = None,
+    segments: Mapping[str, Any] | None = None,
+    segment_lookup: _SegmentLookup | None = None,
+    suppressed_args: Mapping[int, frozenset[str]] | None = None,
 ) -> RenderIR:
     """Build the first render-IR slice from current renderer-faithful emissions.
 
@@ -284,6 +324,10 @@ def build_render_ir(
     """
 
     resolved_context = RenderContext() if context is None else context
+    if segment_lookup is None:
+        from ._render_edges import _build_segment_lookup
+
+        segment_lookup = _build_segment_lookup(segments)
     if universe is None:
         from .node_universe import build_node_universe
         from .source_graph import build_source_graph
@@ -291,22 +335,98 @@ def build_render_ir(
         universe = build_node_universe(
             build_source_graph(trace, resolved_context), collapse_fn, repeat_folds
         )
+    encoding = getattr(resolved_context, "encoding", None)
+    if encoding is not None:
+        # PHASE A of the encoding channel (L5): a data prepass over the
+        # already-chosen visible-node universe, before any per-node spec
+        # resolution -- collect values once, validate, compute the domain.
+        from ._encoding import populate_encoding_state
+
+        populate_encoding_state(encoding, trace, universe)
+    if suppressed_args is None and not getattr(resolved_context, "show_redundant_args", False):
+        # Checked suppression (L5 M4, DEFAULT-ON): the trace-bearing prepass
+        # proves which constructor-arg rows duplicate captured shapes on
+        # THIS trace; unprovable or mismatching args stay visible.
+        from ._arg_suppression import compute_suppressed_arg_keys
+
+        suppressed_args = compute_suppressed_arg_keys(trace, universe)
+    suppressed_args = suppressed_args or {}
+    from ._render_nodes import _atomic_module_sibling_counts
+
+    sibling_counts = _atomic_module_sibling_counts(trace)
+    decision_inputs = _NodeDecisionInputs(
+        universe=universe,
+        repeat_folds=repeat_folds,
+        segment_lookup=segment_lookup,
+        sibling_counts=sibling_counts,
+        suppressed_args=suppressed_args,
+    )
     nodes = tuple(
-        _node_from_unit(trace, unit, resolved_context, universe, repeat_folds, segments)
+        _node_from_unit(
+            trace,
+            unit,
+            resolved_context,
+            decision_inputs,
+        )
         for unit in universe.units
     )
     edges = _build_forward_edges_from_universe(universe)
     regions = _build_regions(trace, nodes, edges)
+    _warn_if_render_exceeds_disclosure_ceiling(len(nodes), len(edges))
+    stack_rank_groups: tuple[RenderIRRankGroup, ...] = ()
+    if encoding is not None:
+        stack_rank_groups = tuple(
+            RenderIRRankGroup(kind="stack", key=key, members=members)
+            for key, members in getattr(encoding, "stack_groups", ()) or ()
+        )
     return RenderIR(
         context=resolved_context,
         nodes=nodes,
         edges=edges,
         regions=regions,
+        stack_rank_groups=stack_rank_groups,
+    )
+
+
+#: Disclosure ceiling for one render (R60): draw() has no hard node/edge cap
+#: anywhere — a hard refusal is a public-behavior decision (it would break
+#: legitimate giant renders such as menagerie sweeps) — but past this size
+#: Graphviz layout time and memory grow super-linearly, so the user gets an
+#: actionable warning instead of an unexplained multi-minute hang.
+RENDER_DISCLOSURE_NODE_CEILING = 10_000
+RENDER_DISCLOSURE_EDGE_CEILING = 40_000
+
+
+def _warn_if_render_exceeds_disclosure_ceiling(num_nodes: int, num_edges: int) -> None:
+    """Warn once per render when the resolved graph is Graphviz-hostile.
+
+    Parameters
+    ----------
+    num_nodes:
+        Resolved visible node count.
+    num_edges:
+        Resolved visible edge count.
+    """
+
+    if num_nodes <= RENDER_DISCLOSURE_NODE_CEILING and num_edges <= RENDER_DISCLOSURE_EDGE_CEILING:
+        return
+    import warnings
+
+    from ..errors._base import TorchLensWarning
+    from ..utils.display import user_stacklevel
+
+    warnings.warn(
+        f"TorchLens is rendering {num_nodes} nodes / {num_edges} edges; Graphviz "
+        "layout beyond ~10k nodes can take minutes and gigabytes. Consider "
+        "collapse='auto' / collapse='max', show_containers=False, or drawing a "
+        "focused subgraph.",
+        TorchLensWarning,
+        stacklevel=user_stacklevel(),
     )
 
 
 def build_backward_render_ir(
-    trace: "Trace",
+    trace: Trace,
     *,
     vis_mode: Literal["rolled", "unrolled"],
     pass_filter: set[int] | None,
@@ -334,6 +454,7 @@ def build_backward_render_ir(
     nodes, visible_by_pass = _normalize_backward_nodes(trace, vis_mode, pass_filter)
     edges = _normalize_backward_edges(trace, vis_mode, pass_filter, visible_by_pass)
     regions = _normalize_backward_regions(nodes, visible_by_pass)
+    _warn_if_render_exceeds_disclosure_ceiling(len(nodes), len(edges))
     return RenderIR(
         context=RenderContext(vis_mode=vis_mode),
         nodes=nodes,
@@ -344,7 +465,7 @@ def build_backward_render_ir(
 
 
 def build_combined_render_ir(
-    trace: "Trace",
+    trace: Trace,
     forward_ir: RenderIR,
     *,
     pass_filter: set[int] | None,
@@ -398,13 +519,13 @@ def build_combined_render_ir(
 
 
 def _normalize_backward_nodes(
-    trace: "Trace",
+    trace: Trace,
     vis_mode: Literal["rolled", "unrolled"],
     pass_filter: set[int] | None,
 ) -> tuple[tuple[RenderIRNode, ...], dict[int, list[tuple[Any, Any]]]]:
     """Normalize visible grad-function handles or calls into IR nodes."""
 
-    from .rendering import (
+    from ._render_leaf import (
         _backward_dot_call_node_name,
         _backward_dot_node_name,
         _grad_fn_call_matches_backward_filter,
@@ -446,14 +567,14 @@ def _normalize_backward_nodes(
 
 
 def _normalize_backward_edges(
-    trace: "Trace",
+    trace: Trace,
     vis_mode: Literal["rolled", "unrolled"],
     pass_filter: set[int] | None,
     visible_by_pass: dict[int, list[tuple[Any, Any]]],
 ) -> tuple[RenderIREdge, ...]:
     """Normalize visible grad-function dependencies into IR edges."""
 
-    from .rendering import (
+    from ._render_leaf import (
         _backward_dot_call_node_name,
         _backward_dot_node_name,
         _grad_fn_matches_backward_filter,
@@ -515,7 +636,7 @@ def _normalized_grad_edge(
 ) -> RenderIREdge:
     """Create one normalized backward dependency edge."""
 
-    from .rendering import _backward_edge_attrs
+    from ._render_leaf import _backward_edge_attrs
 
     return RenderIREdge(
         source_unit=tail_name,
@@ -532,11 +653,11 @@ def _normalized_grad_edge(
 
 
 def _normalize_correspondence_edges(
-    trace: "Trace", pass_filter: set[int] | None
+    trace: Trace, pass_filter: set[int] | None
 ) -> tuple[RenderIREdge, ...]:
     """Normalize visible forward-to-grad-function correspondence edges."""
 
-    from .rendering import _backward_dot_node_name, _grad_fn_matches_backward_filter
+    from ._render_leaf import _backward_dot_node_name, _grad_fn_matches_backward_filter
 
     edges: list[RenderIREdge] = []
     for grad_fn in trace.grad_fns:
@@ -625,12 +746,10 @@ def _build_forward_edges_from_universe(universe: Any) -> tuple[RenderIREdge, ...
 
 
 def _node_from_unit(
-    trace: "Trace",
-    unit: "NodeUnit",
+    trace: Trace,
+    unit: NodeUnit,
     context: RenderContext,
-    universe: Any,
-    repeat_folds: "Mapping[str, ModuleRepeatFold] | None",
-    segments: "Mapping[str, Any] | None",
+    inputs: _NodeDecisionInputs,
 ) -> RenderIRNode:
     """Decorate one structural node-universe unit as a render-IR node."""
 
@@ -642,7 +761,7 @@ def _node_from_unit(
     source_label = emission.op_label or emission.call or emission.boundary_kind
     owner_cluster = emission.module_address
     if emission.kind == "module_box" and emission.call is not None:
-        from .rendering import _collapsed_module_owner_key
+        from ._render_edges import _collapsed_module_owner_key
 
         address, _, call_index = emission.call.partition(":")
         owner_cluster = _collapsed_module_owner_key(
@@ -652,18 +771,21 @@ def _node_from_unit(
             context.vis_mode,
         )
     elif emission.kind == "run_fold_ellipsis" and emission.fold is not None:
-        from .rendering import _run_fold_ellipsis_owner_key
+        from ._render_edges import _run_fold_ellipsis_owner_key
 
         owner_cluster = _run_fold_ellipsis_owner_key(trace, emission.fold, context.vis_mode)
     node_calls: tuple[Any, ...] = ()
     owned_node_args: tuple[tuple[str, dict[str, Any]], ...] = ()
     node_color = "black"
     label_spans: tuple[str, ...] = ()
-    node_spec: Any | None = None
+    node_spec: NodeSpec | None = None
     region_path: tuple[str, ...] = ()
     if emission.node is not None:
         node_calls, owned_node_args, node_color, node_spec, label_spans = _resolve_node_decision(
-            trace, emission, context, universe, repeat_folds, segments
+            trace,
+            emission,
+            context,
+            inputs,
         )
         modules = list(emission.node.modules)
         if emission.kind == "module_box":
@@ -689,14 +811,16 @@ def _node_from_unit(
 
 
 def _resolve_node_decision(
-    trace: "Trace",
-    emission: "RenderedNodeEmission",
+    trace: Trace,
+    emission: RenderedNodeEmission,
     context: RenderContext,
-    universe: Any,
-    repeat_folds: "Mapping[str, ModuleRepeatFold] | None",
-    segments: "Mapping[str, Any] | None",
+    inputs: _NodeDecisionInputs,
 ) -> tuple[
-    tuple[Any, ...], tuple[tuple[str, dict[str, Any]], ...], str, Any | None, tuple[str, ...]
+    tuple[Any, ...],
+    tuple[tuple[str, dict[str, Any]], ...],
+    str,
+    NodeSpec | None,
+    tuple[str, ...],
 ]:
     """Resolve one visible node's complete presentation decision.
 
@@ -708,8 +832,8 @@ def _resolve_node_decision(
         Visible structural emission being decorated.
     context:
         Fully resolved render request.
-    universe:
-        Presentation-free universe that selected the node.
+    inputs:
+        Per-draw structural maps shared across node decisions.
 
     Returns
     -------
@@ -718,27 +842,27 @@ def _resolve_node_decision(
     """
     from collections import defaultdict
 
-    from .rendering import (
-        _RenderIRDecisionBuilder,
+    from ._render_common import _RenderIRDecisionBuilder
+    from ._render_edges import _segment_for_node
+    from ._render_flow import _collapsed_container_leaf_nodes
+    from ._render_nodes import (
         _build_collapsed_module_node,
         _build_layer_node,
-        _collapsed_container_leaf_nodes,
         _normalize_buffer_visibility,
-        _segment_for_node,
-        resolve_theme,
     )
+    from .themes import resolve_theme
 
     node = emission.node
     if node is None:
         return (), (), "black", None, ()
-    if _segment_for_node(node, segments) is not None:
+    if _segment_for_node(node, inputs.segment_lookup) is not None:
         return (), (), "black", None, ()
     recorder = _RenderIRDecisionBuilder()
     module_nodes: dict[str, Any] = defaultdict(dict)
     show_buffers = _normalize_buffer_visibility(context.show_buffer_layers)
     collapsed_containers = _collapsed_container_leaf_nodes(
         trace,
-        universe.source_graph.entries_to_plot,
+        inputs.universe.source_graph.entries_to_plot,
         vis_mode=context.vis_mode,
         show_containers=context.show_containers,
         container_max_inline=context.container_max_inline,
@@ -760,7 +884,7 @@ def _resolve_node_decision(
             context.node_mode,
             context.collapsed_node_spec_fn,
             theme,
-            repeat_folds,
+            inputs.repeat_folds,
             context.collapse_fn,
             resolved_specs,
         )
@@ -782,6 +906,10 @@ def _resolve_node_decision(
             collapsed_containers,
             context.show_input_transform_summary,
             resolved_specs,
+            inputs.sibling_counts,
+            encoding=getattr(context, "encoding", None),
+            suppressed_args=inputs.suppressed_args,
+            show_saved_for_backward=getattr(context, "show_saved_for_backward", False),
         )
     owned = tuple(
         (owner, dict(args))
@@ -830,7 +958,7 @@ def _projection_reason(
 
 
 def _build_regions(
-    trace: "Trace",
+    trace: Trace,
     nodes: tuple[RenderIRNode, ...],
     edges: tuple[RenderIREdge, ...],
 ) -> tuple[RenderIRRegion, ...]:
@@ -907,7 +1035,7 @@ def _region_parent_key(key: str, keys: set[str]) -> str | None:
 
 def finalize_forward_regions(
     render_ir: RenderIR,
-    trace: "Trace",
+    trace: Trace,
     *,
     vis_mode: str,
     module_payloads: dict[str, Any],
@@ -941,8 +1069,8 @@ def finalize_forward_regions(
     """
 
     from ._render_flow import _get_max_call_depth
+    from ._render_leaf import _collapsed_module_rolling_suffix
     from ._render_utils import compute_module_penwidth, make_module_cluster_attrs
-    from .rendering import _collapsed_module_rolling_suffix
 
     captured_by_occurrence = {edge.occurrence_key: edge for edge in captured_edges}
     edges = tuple(
@@ -972,11 +1100,23 @@ def finalize_forward_regions(
         )
         for edge in render_ir.edges
     )
+    # Bucket every per-region lookup ONCE, the way ``_build_regions`` already does,
+    # so the region loop below stays linear. Re-scanning ``render_ir.nodes`` /
+    # ``edges`` / the module tree inside the loop is a linear number of full
+    # collection scans, i.e. quadratic time on module-rich models.
     region_keys = set(module_payloads)
+    region_nodes: defaultdict[str, list[str]] = defaultdict(list)
     for node in render_ir.nodes:
         region_keys.update(node.region_path)
+        if node.region_path:
+            region_nodes[node.region_path[-1]].append(node.name)
+    region_edge_indexes: defaultdict[str, list[int]] = defaultdict(list)
+    for index, edge in enumerate(edges):
+        if edge.owner_cluster is not None:
+            region_edge_indexes[edge.owner_cluster].append(index)
     module_children, top_modules = _region_module_hierarchy(trace, vis_mode)
     max_depth = _get_max_call_depth(top_modules, module_payloads, module_children)
+    call_depths = _region_call_depths(top_modules, module_children)
     regions: list[RenderIRRegion] = []
     for key in sorted(region_keys):
         address = key.split(":", 1)[0]
@@ -995,17 +1135,18 @@ def finalize_forward_regions(
             module_type=module.class_name,
             line_style="solid" if payload.get("has_input_ancestor") else "dashed",
             penwidth=compute_module_penwidth(
-                _region_call_depth(key, top_modules, module_children), max_depth
+                call_depths.get(key, _module_depth(key) - 1), max_depth
             ),
         )
         for attr_name, attr_value in overrides.module.items():
             attrs[attr_name] = str(attr_value(trace, key) if callable(attr_value) else attr_value)
         node_names = tuple(str(args.get("name", "")) for args in payload.get("nodes", ()))
-        node_names += tuple(
-            node.name
-            for node in render_ir.nodes
-            if node.region_path and node.region_path[-1] == key and node.name not in node_names
-        )
+        # ``node_names`` on the right-hand side of the historical ``+=`` was the
+        # payload-derived prefix only (the tuple is fully built before rebinding),
+        # so IR nodes are deduplicated against the prefix and NOT against each
+        # other. ``payload_names`` reproduces exactly that scope.
+        payload_names = set(node_names)
+        node_names += tuple(name for name in region_nodes.get(key, ()) if name not in payload_names)
         regions.append(
             RenderIRRegion(
                 key=key,
@@ -1014,9 +1155,7 @@ def finalize_forward_regions(
                 label=label,
                 style=tuple(attrs.items()),
                 node_names=node_names,
-                edge_indexes=tuple(
-                    index for index, edge in enumerate(edges) if edge.owner_cluster == key
-                ),
+                edge_indexes=tuple(region_edge_indexes.get(key, ())),
             )
         )
     for container in container_regions:
@@ -1060,7 +1199,7 @@ def _module_depth(key: str) -> int:
 
 
 def _region_module_hierarchy(
-    trace: "Trace", vis_mode: str
+    trace: Trace, vis_mode: str
 ) -> tuple[defaultdict[str, list[str]], list[str]]:
     """Return the module hierarchy used by legacy DOT subgraph emission.
 
@@ -1088,17 +1227,21 @@ def _region_module_hierarchy(
     return children, list(trace.modules["self"].call_children)
 
 
-def _region_call_depth(
-    key: str,
+def _region_call_depths(
     top_modules: list[str],
     children: Mapping[str, list[str]],
-) -> int:
-    """Return the legacy BFS subgraph depth for a module region.
+) -> dict[str, int]:
+    """Return legacy BFS subgraph depths for every reachable module key.
+
+    One breadth-first sweep replaces the historical per-key sweep. Both report
+    the depth at which breadth-first traversal from ``top_modules``, in the same
+    child order, first reaches a key -- the shortest root distance -- so every
+    recorded depth matches the per-key search exactly. Keys the sweep never
+    reaches are simply absent; callers keep the historical
+    ``_module_depth(key) - 1`` fallback for those.
 
     Parameters
     ----------
-    key:
-        Region key to locate.
     top_modules:
         Top-level emitted module keys.
     children:
@@ -1106,14 +1249,16 @@ def _region_call_depth(
 
     Returns
     -------
-    int
-        Zero-based nesting depth used for module border widths.
+    dict[str, int]
+        Zero-based nesting depth per reachable key, used for module border widths.
     """
 
-    pending = [(candidate, 0) for candidate in top_modules]
+    depths: dict[str, int] = {}
+    pending: deque[tuple[str, int]] = deque((candidate, 0) for candidate in top_modules)
     while pending:
-        candidate, depth = pending.pop(0)
-        if candidate == key:
-            return depth
-        pending.extend((child, depth + 1) for child in children[candidate])
-    return _module_depth(key) - 1
+        candidate, depth = pending.popleft()
+        if candidate in depths:
+            continue
+        depths[candidate] = depth
+        pending.extend((child, depth + 1) for child in children.get(candidate, ()))
+    return depths

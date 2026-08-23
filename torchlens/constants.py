@@ -16,7 +16,9 @@ uses to permanently wrap every torch function at import time.
 """
 
 import __future__
+
 import functools
+import sys
 import types
 import warnings
 
@@ -35,6 +37,31 @@ RAW_LABEL_SUFFIX = "_raw"
 RAW_LABEL_FIELD = "raw_label"
 ARG_EXPRESSIONS_FIELD = "arg_expressions"
 
+# The documented non-reproducible artifact surface (grind-r5 b7 R21, 3rd
+# round): every persisted field that LEGITIMATELY varies between two
+# byte-level-identical captures (same model, same input, same seeds, same
+# PYTHONHASHSEED, fresh processes). Empirically derived from a same-seed
+# two-process control at 1d00442c -- these were the ONLY semantic diffs.
+# Byte-identity oracles (the trace_core_design surface oracle, cross-process
+# artifact A/B gates) must mask exactly this set and nothing else; widening
+# it is a reviewed contract diff, because every additional row weakens the
+# reproducibility tripwire.
+ARTIFACT_VOLATILE_METADATA_FIELDS: tuple[str, ...] = (
+    "random_seed",
+    "capture_start_time",
+    "capture_end_time",
+    "_phase_timings",
+    "setup_duration",
+    "forward_duration",
+    "cleanup_duration",
+    "func_calls_duration",
+    "forward_peak_memory",
+)
+ARTIFACT_VOLATILE_MANIFEST_FIELDS: tuple[str, ...] = (
+    "created_at",
+    "rng_state_digests",
+)
+
 MODEL_LOG_FIELD_ORDER = [
     # General info
     "trace_label",
@@ -50,17 +77,11 @@ MODEL_LOG_FIELD_ORDER = [
     "param_source",
     "derived_grads",
     "capture_mode",
-    "_runnable_descriptor",
-    "_runnable_readiness",
-    "_runnable_staged_user_state",
-    "_runnable_embedded_state",
-    "_runnable_capture_state",
-    "_runnable_archived_activations",
-    "_runnable_path_faithfulness",
-    "_runnable_first_mismatch",
-    "_runnable_poisoned",
-    "detached_patch_policy",
-    "detached_patch_epoch",
+    "structure_only",
+    "intervention_audit",
+    "_runnable",
+    "_fast_run_session",
+    "_distributed_plane_p",
     "escape_detector_mode",
     "escape_detector_verified",
     "escape_diagnostics",
@@ -78,6 +99,7 @@ MODEL_LOG_FIELD_ORDER = [
     "completeness_witness_callback_ns",
     "capture_verified",
     "capture_verification_reason",
+    "rescue_rerun",
     "capture_owner_thread_id",
     "capture_owner_thread_qualified",
     "capture_thread_count_start",
@@ -87,6 +109,7 @@ MODEL_LOG_FIELD_ORDER = [
     "halted",
     "halt_reason",
     "halt_frontier",
+    "_capture_outcome",
     "_layers_logged",
     "_layers_saved",
     "keep_orphans",
@@ -153,6 +176,11 @@ MODEL_LOG_FIELD_ORDER = [
     "save_code_context",
     "save_rng_states",
     "recurrence_detection",
+    # Grouping knob mirror + grouping-policy stamp (L1 wave 0; both
+    # FieldPolicy.DROP under tlspec v7, prerelease-registered)
+    "grouping",
+    "distributed_scope",
+    "grouping_policy",
     "verbose",
     "profile_enabled",
     "has_gradients",
@@ -391,6 +419,7 @@ LAYER_PASS_LOG_FIELD_ORDER = [
     "transform_fn_qualname",
     "transform_fn_source",
     "unattributed_tensor_args",
+    "dropped_edge_tensor_args",
     # Param info
     "parent_params",
     "_param_barcodes",
@@ -405,10 +434,16 @@ LAYER_PASS_LOG_FIELD_ORDER = [
     "equivalence_class",
     "equivalent_ops",
     "recurrent_ops",
+    # Structural position identity (site_key_v1, minted at step 7; portable
+    # bridging relation -- FieldPolicy.DROP until the coordinated tlspec bump,
+    # prerelease-registered)
+    "site_key",
     # Graph info
     "parents",
     "parent_arg_positions",
     "_edge_uses",
+    "edge_substitutions",
+    "edge_replacement_stamps",
     "root_ancestors",
     "children",
     "has_children",
@@ -923,6 +958,41 @@ BACKWARD_PASS_FIELD_ORDER = [
     "grad_fn_calls",
 ]
 
+PRIMITIVE_OP_FIELD_ORDER = [
+    "label",
+    "sequence",
+    "capture_phase",
+    "forward_pass_index",
+    "backward_epoch_index",
+    "owner_func_call_id",
+    "parent_op_refs",
+    "parent_grad_fn_call_ref",
+    "owner_status",
+    "decomposition_slot",
+    "namespace",
+    "operator",
+    "overload",
+    "schema",
+    "schema_fingerprint",
+    "module_call_stack",
+    "input_tensor_facts",
+    "output_tensor_facts",
+    "mutation_kind",
+    "view_copy_kind",
+    "autocast_context",
+    "dispatch_key_context",
+    "grad_fn_ref",
+    "grad_fn_link_status",
+    "grad_fn_link_provenance",
+    "algorithmic_flops",
+    "flop_status",
+    "flop_formula_source",
+    "flop_formula_version",
+    "outcome",
+    "exception_type",
+    "execution_context",
+]
+
 # ---------------------------------------------------------------------------
 # Function discovery for decoration
 # ---------------------------------------------------------------------------
@@ -978,11 +1048,69 @@ IGNORED_FUNCS = [
     ("torch", "rand"),
     ("torch", "randn"),
     ("torch", "randint"),
+    # r18cg: the random ``*_like`` factories are in torch's get_ignored_functions() (not
+    # overridable via __torch_function__), exactly like their non-``_like`` siblings above, so
+    # they must be re-added here to be decorated. Without them a forward using
+    # ``torch.rand_like`` / ``randn_like`` / ``randint_like`` records the freshly-allocated
+    # output as an unattributed literal (the r45 ``.mH`` capture-gap class); their arg-specs
+    # already exist in capture/arg_positions.py (_FACTORY_SOURCE_SPEC / randintlike).
+    ("torch", "rand_like"),
+    ("torch", "randn_like"),
+    ("torch", "randint_like"),
     ("torch", "randperm"),
     ("torch", "range"),
     ("torch", "scalar_tensor"),
+    # The modern DLPack interop boundary. ``torch.from_dlpack`` (the same object as
+    # ``torch.utils.dlpack.from_dlpack``) is absent from BOTH of torch's override
+    # registries, so it was never decorated and the op vanished from the trace
+    # entirely: ``z = torch.from_dlpack(y); return z + 1`` recorded no dlpack node. In
+    # the aliasing variant the safety net at least disclosed
+    # ``escape_rescue_unrecovered``, but in the common cross-library direction
+    # (numpy/cupy/jax capsule -> torch, a fresh storage with no captured-tensor alias)
+    # there is no provenance signal at all and both detectors default off, so the
+    # freshly-created tensor read as an unattributed literal -- exactly the silent class
+    # the ``rand_like`` / ``.mH`` re-adds fixed. Protocol-invisible like ``from_numpy``,
+    # so it is also a mechanical-belt candidate (see backends/torch/belt.py).
+    ("torch", "from_dlpack"),
+    ("torch.utils.dlpack", "from_dlpack"),
+    # The PUBLIC sparse-compressed constructors. Only the PRIVATE
+    # ``torch._sparse_csr_tensor`` was re-added, so the whole public family was
+    # undecorated: sparse inputs/params refuse at capture entry, but IN-FORWARD sparse
+    # creation was ungated.
     ("torch", "sparse_coo_tensor"),
+    ("torch", "sparse_csr_tensor"),
+    ("torch", "sparse_csc_tensor"),
+    ("torch", "sparse_bsr_tensor"),
+    ("torch", "sparse_bsc_tensor"),
+    ("torch", "sparse_compressed_tensor"),
     ("torch", "_sparse_csr_tensor"),
+    # The MODERN documented window-factory namespace. Only the legacy top-level twins
+    # (``hann_window``, ``bartlett_window``, ...) were re-added, so a model using
+    # ``torch.signal.windows.hann`` silently recorded its window as an unattributed
+    # literal -- the same shape as the fixed ``rand_like`` gap, and silent with
+    # detectors off. Pure factories, so no tensor edge is dropped, only the node.
+    *(
+        ("torch.signal.windows", _window_name)
+        for _window_name in (
+            "bartlett",
+            "blackman",
+            "cosine",
+            "exponential",
+            "gaussian",
+            "general_cosine",
+            "general_hamming",
+            "hamming",
+            "hann",
+            "kaiser",
+            "nuttall",
+        )
+    ),
+    # The public FP8/MoE entry points. Each delegates to a wrapped ``torch._VF``
+    # interior, so capture stayed COMPLETE, but the op recorded under the private v2
+    # name rather than what the user called (mislabel only).
+    ("torch.nn.functional", "scaled_mm"),
+    ("torch.nn.functional", "grouped_mm"),
+    ("torch.nn.functional", "scaled_grouped_mm"),
     ("torch", "tril_indices"),
     ("torch", "triu_indices"),
     ("torch", "vander"),
@@ -990,7 +1118,12 @@ IGNORED_FUNCS = [
     ("torch.nn.functional", "upsample"),
     ("torch.nn.functional", "upsample_bilinear"),
     ("torch.nn.functional", "upsample_nearest"),
-    ("torch.nn.functional", "handle_torch_function"),
+    # ``handle_torch_function`` is deliberately ABSENT: it is __torch_function__
+    # protocol plumbing, not a tensor op. Decorating it made every composite's
+    # ``if has_torch_function(...)`` preamble route through a TorchLens wrapper
+    # whenever ANY foreign TorchFunctionMode was active (torch's own
+    # DeviceContext included), feeding function objects into tensor-arg capture
+    # and crashing with TorchLensTLCollisionError (stage-0 safety-net fix).
     ("torch.nn.functional", "sigmoid"),
     ("torch.nn.functional", "hardsigmoid"),
     ("torch.nn.functional", "tanh"),
@@ -1010,7 +1143,10 @@ IGNORED_FUNCS = [
     ("torch.Tensor", "__delitem__"),
     ("torch.Tensor", "__iter__"),
     ("torch.Tensor", "__init_subclass__"),
-    ("torch.Tensor", "__torch_function__"),
+    # ``__torch_function__`` is deliberately ABSENT: same protocol-plumbing
+    # hazard as ``handle_torch_function`` above. (It was never actually
+    # decorated — classmethod access binds to <class 'method'>, which the
+    # decoration type gate skips — but listing it declared the wrong intent.)
     ("torch.Tensor", "__new__"),
     ("torch.Tensor", "__subclasshook__"),
     ("torch.Tensor", "as_subclass"),
@@ -1104,13 +1240,17 @@ def _get_torch_overridable_functions() -> list[tuple[str, str]]:
                 if ignore:
                     continue
                 if func.__get__ in ignored_funcs_set:
-                    msg = (
-                        "{}.{} is in the tuple returned by torch._overrides.get_ignored_functions "
-                        "but still has an explicit override"
-                    )
-                    assert func.__get__ not in testing_overrides_set, msg.format(
-                        namespace, func.__name__
-                    )
+                    # A real ``raise``, never ``assert`` (R24-4): under
+                    # ``python -O`` a torch release listing an overridable
+                    # descriptor as ignored was silently excluded from the
+                    # wrapper roster -- an invisible capture-gap generator on
+                    # exactly the version boundary this check exists to catch.
+                    if func.__get__ in testing_overrides_set:
+                        raise RuntimeError(
+                            f"{namespace}.{func.__name__} is in the tuple returned by "
+                            "torch._overrides.get_ignored_functions but still has an "
+                            "explicit override"
+                        )
                     continue
                 else:
                     func_names.append((f"{namespace_str}.{func_name}", "__get__"))
@@ -1124,11 +1264,19 @@ def _get_torch_overridable_functions() -> list[tuple[str, str]]:
 
             # cannot be overridden by __torch_function__
             if func in ignored_funcs_set:
-                msg = (
-                    "{}.{} is in the tuple returned by torch._overrides.get_ignored_functions "
-                    "but still has an explicit override"
-                )
-                assert func not in testing_overrides_set, msg.format(namespace, func.__name__)
+                # A real ``raise``, never ``assert`` (grind-r5 b7 R24, the
+                # descriptor branch's twin): under ``python -O`` the assert
+                # stripped and the ``continue`` silently excluded the function
+                # from the wrapper roster -- fault-injection proved
+                # ``torch.tensor`` vanishing from the 3,350-entry roster with
+                # zero signal on exactly the future-torch drift this
+                # contradiction check exists to catch.
+                if func in testing_overrides_set:
+                    raise RuntimeError(
+                        f"{namespace}.{func.__name__} is in the tuple returned by "
+                        "torch._overrides.get_ignored_functions but still has an "
+                        "explicit override"
+                    )
                 continue
             func_names.append((f"{namespace_str}", func_name))
     return func_names
@@ -1158,24 +1306,33 @@ ORIG_TORCH_FUNCS = OVERRIDABLE_FUNCS + IGNORED_FUNCS
 
 
 def _get_torchvision_funcs() -> list[tuple[str, str]]:
-    """Return torchvision torch.ops targets if torchvision is installed.
+    """Return torchvision torch.ops targets if torchvision is already imported.
+
+    TorchLens never imports torchvision itself: importing it costs ~2 s and
+    ~150 MB RSS, and a model cannot call a torchvision custom op unless the
+    user's process has already imported torchvision (the ops only register
+    with the torch dispatcher during ``import torchvision``). The
+    not-yet-imported answer is deliberately uncached so a later user import
+    is picked up by ``wrap_torch()`` on the next capture.
 
     Returns
     -------
     list[tuple[str, str]]
         Torchvision operation targets for wrapper decoration, or an empty list
-        when torchvision is not installed.
+        while torchvision has not (finished) being imported.
     """
 
     global _TORCHVISION_FUNCS_CACHE
     if _TORCHVISION_FUNCS_CACHE is not None:
         return _TORCHVISION_FUNCS_CACHE
-    try:
-        import torchvision  # noqa: F401
-    except ModuleNotFoundError:
-        _TORCHVISION_FUNCS_CACHE = []
-    else:
-        _TORCHVISION_FUNCS_CACHE = list(TORCHVISION_FUNCS)
+    torchvision_module = sys.modules.get("torchvision")
+    if torchvision_module is None:
+        return []
+    spec = getattr(torchvision_module, "__spec__", None)
+    if spec is not None and getattr(spec, "_initializing", False):
+        # Mid-import (circular import): the C ops may not be registered yet.
+        return []
+    _TORCHVISION_FUNCS_CACHE = list(TORCHVISION_FUNCS)
     return _TORCHVISION_FUNCS_CACHE
 
 

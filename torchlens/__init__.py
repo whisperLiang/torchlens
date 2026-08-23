@@ -14,34 +14,54 @@ import importlib as _importlib
 import inspect as _inspect
 import sys as _sys
 import types as _types
+import warnings as _warnings
 from collections.abc import Callable as _Callable, Iterable as _Iterable, Mapping as _Mapping
 from pathlib import Path as _Path
-import warnings as _warnings
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple as _NamedTuple
 
 import torch as _torch
 from torch import nn as _nn
 
-__version__ = "2.33.0"
-
-from .captured_run import ActivationLookup, CapturedRun
-from ._errors import AmbiguousOpLookupError
-from ._state import ReentrantTraceError
-from .ir.container import register_container
-from .observers import record_span, span, tap
-from . import options
-from .options import CaptureOptions as _CaptureOptions
-from .options import to_disk
-from .quantities import Bytes, Duration, Flops, Macs, Quantity
+__version__ = "2.34.1"
 
 if TYPE_CHECKING:
     from .backends import BackendName
     from .data_classes.trace import Trace
     from .intervention import Bundle
 
-_REMOVED_IN = "a future 2.x release"
-
 _LAZY_ATTRS = {
+    # Import cold-start laziness (P4, JMT-rebaselined 2026-08-19): the former
+    # eager import block (options/captured_run+ir/observers/quantities/errors
+    # and their transitive chains) is fully deferred behind these rows -- the
+    # marginal-import guard in tests/test_import_hygiene.py holds the line.
+    # The single advertised removal window. P4 dropped the eager
+    # ``from ._deprecations import REMOVED_IN as _REMOVED_IN`` to keep
+    # _deprecations off the import path, which also removed the module
+    # attribute the deprecation inventory reads to prove every route
+    # advertises the SAME window. Lazy keeps both: no eager import, name
+    # still resolvable.
+    "_REMOVED_IN": ("torchlens._deprecations", "REMOVED_IN"),
+    "ActivationLookup": ("torchlens.captured_run", "ActivationLookup"),
+    "AmbiguousOpLookupError": ("torchlens._errors", "AmbiguousOpLookupError"),
+    "Bytes": ("torchlens.quantities", "Bytes"),
+    "CapturedRun": ("torchlens.captured_run", "CapturedRun"),
+    "Duration": ("torchlens.quantities", "Duration"),
+    "Flops": ("torchlens.quantities", "Flops"),
+    "Macs": ("torchlens.quantities", "Macs"),
+    "Quantity": ("torchlens.quantities", "Quantity"),
+    "ReentrantTraceError": ("torchlens._state", "ReentrantTraceError"),
+    "captured_run": ("torchlens.captured_run", None),
+    "errors": ("torchlens.errors", None),
+    "ir": ("torchlens.ir", None),
+    "observers": ("torchlens.observers", None),
+    "options": ("torchlens.options", None),
+    "quantities": ("torchlens.quantities", None),
+    "record_span": ("torchlens.observers", "record_span"),
+    "register_container": ("torchlens.ir.container", "register_container"),
+    "span": ("torchlens.observers", "span"),
+    "tap": ("torchlens.observers", "tap"),
+    "to_disk": ("torchlens.options", "to_disk"),
+    "AtenOp": ("torchlens.data_classes.aten_op", "AtenOp"),
     "Bundle": ("torchlens.intervention", "Bundle"),
     "Container": ("torchlens.data_classes.container", "Container"),
     "JaxPayloadLoadHint": ("torchlens._io", "JaxPayloadLoadHint"),
@@ -54,6 +74,11 @@ _LAZY_ATTRS = {
     "aggregate": ("torchlens.stats", "aggregate"),
     "assert_unchanged": ("torchlens.hash", "assert_unchanged"),
     "attribution": ("torchlens.attribution", None),
+    # r7 R81 (sol b2): docs/semantic_io.md documents tl.autoroute.output.*
+    # and the agent docs list autoroute among the lazy attrs, but the row
+    # was missing -- the documented spelling resolved only after a separate
+    # `import torchlens.autoroute` (import-order side effect).
+    "autoroute": ("torchlens.autoroute", None),
     "bwd_hook": ("torchlens.intervention", "bwd_hook"),
     "clamp": ("torchlens.intervention", "clamp"),
     "compat": ("torchlens.compat", None),
@@ -61,6 +86,11 @@ _LAZY_ATTRS = {
     "decide_recording_of_batch": ("torchlens.user_funcs", "decide_recording_of_batch"),
     "debug": ("torchlens.debug", None),
     "data_classes": ("torchlens.data_classes", None),
+    # Dataset extraction (D7/V5): the implementation module is lazy so the
+    # manifest/resume machinery costs nothing until first use.
+    "dataset_extraction": ("torchlens.dataset_extraction", None),
+    "extract_dataset": ("torchlens.dataset_extraction", "extract_dataset"),
+    "distributed": ("torchlens.distributed", None),
     "do": ("torchlens.intervention", "do"),
     "examples": ("torchlens.examples", None),
     "experimental": ("torchlens.experimental", None),
@@ -74,6 +104,7 @@ _LAZY_ATTRS = {
     "grad_clamp": ("torchlens.intervention", "grad_clamp"),
     "grad_clip": ("torchlens.intervention", "grad_clip"),
     "grad_fn": ("torchlens.intervention", "grad_fn"),
+    "grad_fn_label": ("torchlens.intervention", "grad_fn_label"),
     "grad_input": ("torchlens.intervention", "grad_input"),
     "grad_noise": ("torchlens.intervention", "grad_noise"),
     "grad_output": ("torchlens.intervention", "grad_output"),
@@ -90,6 +121,9 @@ _LAZY_ATTRS = {
     "load": ("torchlens._io.bundle", "load"),
     "label": ("torchlens.intervention", "label"),
     "mean_ablate": ("torchlens.intervention", "mean_ablate"),
+    "merge_ranks": ("torchlens.merged", "merge_ranks"),
+    "merge_report": ("torchlens.merged", "merge_report"),
+    "merged": ("torchlens.merged", None),
     "module": ("torchlens.intervention", "module"),
     "noise": ("torchlens.intervention", "noise"),
     "output": ("torchlens.intervention", "output"),
@@ -107,6 +141,8 @@ _LAZY_ATTRS = {
     "receptive_field": ("torchlens.receptive_field", None),
     "regex": ("torchlens.intervention", "regex"),
     "register_tensor_connection": ("torchlens.user_funcs", "register_tensor_connection"),
+    "clear_capture_cache": ("torchlens.user_funcs", "clear_capture_cache"),
+    "release_model": ("torchlens.user_funcs", "release_model"),
     "replace_with": ("torchlens.intervention", "replace_with"),
     "replay": ("torchlens.intervention", "replay"),
     "replay_from": ("torchlens.intervention", "replay_from"),
@@ -145,6 +181,37 @@ _LAZY_ATTRS = {
     "where": ("torchlens.intervention", "where"),
     "without_op": ("torchlens.intervention", "without_op"),
     "zero_ablate": ("torchlens.intervention", "zero_ablate"),
+    "Edit": ("torchlens.intervention", "Edit"),
+    "patch_from": ("torchlens.intervention", "patch_from"),
+    # L6 selection algebra (DOCUMENTED-UNSTABLE pending naming-session
+    # ratification; megasprint provisional-name protocol).
+    "Selection": ("torchlens.selection", "Selection"),
+    "ResolvedSelection": ("torchlens.selection", "ResolvedSelection"),
+    "units": ("torchlens.selection", "units"),
+    "params": ("torchlens.selection", "params"),
+    "random_selection": ("torchlens.selection", "random_selection"),
+    # L6 value-based + statistical producers (DOCUMENTED-UNSTABLE pending
+    # naming-session ratification; megasprint provisional-name protocol).
+    "top_k": ("torchlens.selection_values", "top_k"),
+    "top_fraction": ("torchlens.selection_values", "top_fraction"),
+    "threshold": ("torchlens.selection_values", "threshold"),
+    "sign": ("torchlens.selection_values", "sign"),
+    "dead": ("torchlens.selection_values", "dead"),
+    "saturated": ("torchlens.selection_values", "saturated"),
+    "low_variance": ("torchlens.selection_values", "low_variance"),
+    # L6 graph-structural producers (DOCUMENTED-UNSTABLE pending
+    # naming-session ratification; megasprint provisional-name protocol).
+    "neighborhood": ("torchlens.selection_graph", "neighborhood"),
+    "between": ("torchlens.selection_graph", "between"),
+    # L6 comparative producers: differential + cross-pass (DOCUMENTED-UNSTABLE
+    # pending naming-session ratification; megasprint provisional-name protocol).
+    "changed": ("torchlens.selection_compare", "changed"),
+    "top_changed": ("torchlens.selection_compare", "top_changed"),
+    "stable_across_passes": ("torchlens.selection_compare", "stable_across_passes"),
+    "pass_variance": ("torchlens.selection_compare", "pass_variance"),
+    # L6 subspace producer (DOCUMENTED-UNSTABLE pending naming-session
+    # ratification; megasprint provisional-name protocol).
+    "subspace": ("torchlens.selection_subspace", "subspace"),
 }
 
 _MOVED_OBJECTS = {
@@ -206,16 +273,40 @@ _MOVED_OBJECTS = {
     "wrapped": ("torchlens.backends.torch.wrappers", "wrapped"),
 }
 
+
+class _LegacyShim(_NamedTuple):
+    """One paper-era public name kept as a compatibility shim.
+
+    The two fields were previously one positional tuple whose second slot
+    carried a canonical name for some entries and the dispatch discriminator
+    ``"class"`` for others -- so the slot's meaning depended on the row. They
+    are named and separately typed here.
+
+    Parameters
+    ----------
+    advice:
+        Complete replacement spelling as shown to the user. Must name
+        something that actually resolves: the old free-text values produced
+        advice like ``use torchlens.structure getter instead``, and
+        ``torchlens.structure`` does not exist.
+    kind:
+        Dispatch discriminator, ``"callable"`` or ``"class"``.
+    """
+
+    advice: str
+    kind: str
+
+
 _LEGACY_API_SHIMS = {
-    "log_forward_pass": ("trace", "trace"),
-    "validate_model_activations": ("validate", "validate_forward"),
-    "validate_saved_activations": ("validate", "validate_saved"),
-    "render_graph": ("Trace.draw() / show_model_graph", "draw"),
-    "render_model_graph": ("Trace.draw() / show_model_graph", "draw"),
-    "draw_model_graph": ("Trace.draw() / show_model_graph", "draw"),
-    "ModelHistory": ("Trace", "class"),
-    "get_model_structure": ("structure getter", "structure"),
-    "show_model_structure": ("structure getter", "structure"),
+    "log_forward_pass": _LegacyShim("torchlens.trace", "callable"),
+    "validate_model_activations": _LegacyShim("torchlens.validate", "callable"),
+    "validate_saved_activations": _LegacyShim("torchlens.validate", "callable"),
+    "render_graph": _LegacyShim("Trace.draw() (or torchlens.show_model_graph)", "callable"),
+    "render_model_graph": _LegacyShim("Trace.draw() (or torchlens.show_model_graph)", "callable"),
+    "draw_model_graph": _LegacyShim("Trace.draw() (or torchlens.show_model_graph)", "callable"),
+    "ModelHistory": _LegacyShim("torchlens.Trace", "class"),
+    "get_model_structure": _LegacyShim("Trace.modules", "callable"),
+    "show_model_structure": _LegacyShim("Trace.modules", "callable"),
 }
 
 _LEGACY_TRACE_KWARG_ALIASES = {
@@ -386,42 +477,54 @@ def _warn_moved_name(name: str, new_module_path: str, new_attr: str) -> None:
         Canonical attribute name inside ``new_module_path``.
     """
 
+    from ._deprecations import REMOVED_IN, TorchLensDeprecationWarning
+    from .utils.display import user_stacklevel
+
     _warnings.warn(
         f"torchlens.{name} is deprecated; use {new_module_path}.{new_attr} instead. "
-        f"Removed in {_REMOVED_IN}.",
-        DeprecationWarning,
-        stacklevel=4,
+        f"Removed in {REMOVED_IN}.",
+        TorchLensDeprecationWarning,
+        stacklevel=user_stacklevel(),
     )
 
 
-def _warn_legacy_api_name(name: str, replacement: str) -> None:
+def _warn_legacy_api_name(name: str, advice: str) -> None:
     """Emit the long-sunset warning for legacy paper-era API names.
 
     Parameters
     ----------
     name:
         Legacy top-level TorchLens name.
-    replacement:
-        Replacement API spelling.
+    advice:
+        Complete replacement spelling, already resolvable as written.
     """
 
+    from ._deprecations import REMOVED_IN, TorchLensDeprecationWarning
+    from .utils.display import user_stacklevel
+
     _warnings.warn(
-        f"torchlens.{name} is deprecated; use torchlens.{replacement} instead. "
-        "The old paper-era name remains available as a compatibility shim.",
-        DeprecationWarning,
-        stacklevel=3,
+        f"torchlens.{name} is deprecated; use {advice} instead. "
+        f"The old paper-era name remains available as a compatibility shim "
+        f"and will be removed in {REMOVED_IN}.",
+        TorchLensDeprecationWarning,
+        # Two routes reach this function -- module attribute access (via
+        # `__getattr__`, itself reached through the custom module
+        # `__getattribute__`, so one frame deeper) and a `_legacy_trace_alias`
+        # shim CALL. The former fixed `stacklevel=3` was right for neither:
+        # it landed on `__init__.py` itself for the attribute route.
+        stacklevel=user_stacklevel(),
     )
 
 
-def _legacy_trace_alias(name: str, replacement: str) -> _Callable[..., Any]:
+def _legacy_trace_alias(name: str, advice: str) -> _Callable[..., Any]:
     """Build a warning wrapper for a legacy top-level callable.
 
     Parameters
     ----------
     name:
         Legacy callable name.
-    replacement:
-        Replacement public callable name.
+    advice:
+        Replacement spelling as shown to the user.
 
     Returns
     -------
@@ -432,7 +535,7 @@ def _legacy_trace_alias(name: str, replacement: str) -> _Callable[..., Any]:
     def _shim(*args: Any, **kwargs: Any) -> Any:
         """Warn and delegate a legacy top-level API call."""
 
-        _warn_legacy_api_name(name, replacement)
+        _warn_legacy_api_name(name, advice)
         if name == "log_forward_pass":
             return _resolve_top_level("_trace")(*args, **_translate_legacy_trace_kwargs(kwargs))
         if name == "validate_model_activations":
@@ -453,7 +556,7 @@ def _legacy_trace_alias(name: str, replacement: str) -> _Callable[..., Any]:
 
     _shim.__name__ = name
     _shim.__qualname__ = name
-    _shim.__doc__ = f"Deprecated compatibility shim for :func:`torchlens.{replacement}`."
+    _shim.__doc__ = f"Deprecated compatibility shim; use {advice} instead."
     return _shim
 
 
@@ -487,11 +590,11 @@ def __getattr__(name: str) -> Any:
         globals()[name] = value
         return value
     if name in _LEGACY_API_SHIMS:
-        replacement, shim_kind = _LEGACY_API_SHIMS[name]
-        _warn_legacy_api_name(name, replacement)
-        if shim_kind == "class":
+        shim = _LEGACY_API_SHIMS[name]
+        _warn_legacy_api_name(name, shim.advice)
+        if shim.kind == "class":
             return _resolve_top_level("Trace")
-        return _legacy_trace_alias(name, replacement)
+        return _legacy_trace_alias(name, shim.advice)
     if name in _MOVED_OBJECTS:
         new_module_path, new_attr = _MOVED_OBJECTS[name]
         _warn_moved_name(name, new_module_path, new_attr)
@@ -652,12 +755,13 @@ def pluck(model: _nn.Module, x: Any, layer: str, stop_after: Any | None = None) 
     """
 
     from .experimental import _active_stop_after_site
+    from .options import CaptureOptions
 
     _ = stop_after if stop_after is not None else _active_stop_after_site()
     trace = _resolve_top_level("trace")(
         model,
         x,
-        capture=_CaptureOptions(layers_to_save=[layer]),
+        capture=CaptureOptions(layers_to_save=[layer]),
     )
     return _out_from_log(trace, layer)
 
@@ -680,6 +784,63 @@ def peek(model: _nn.Module, x: Any, layer: str, stop_after: Any | None = None) -
 
     warn_deprecated_alias("peek", "pluck")
     return pluck(model, x, layer, stop_after)
+
+
+def _extract_layers_with_trace(
+    model: _nn.Module,
+    x: Any,
+    layers: _Iterable[str] | _Mapping[str, str],
+) -> tuple[Trace, dict[str, _torch.Tensor], dict[str, Any]]:
+    """Run one selective capture and resolve the requested layers.
+
+    Parameters
+    ----------
+    model:
+        PyTorch model to run.
+    x:
+        Positional input argument or argument container for ``model.forward``.
+    layers:
+        Either a list of layer lookups or a mapping of ``user_label -> layer_lookup``.
+
+    Returns
+    -------
+    tuple[Trace, dict[str, torch.Tensor], dict[str, Any]]
+        The capture trace, the saved outs keyed as :func:`extract` keys them,
+        and the resolved ``Layer`` views under the same keys.
+
+    Raises
+    ------
+    ValueError
+        If a lookup does not resolve or did not produce a saved tensor.
+    """
+
+    from .options import CaptureOptions as _LazyCaptureOptions
+
+    layer_plan = _normalize_extract_layers(layers)
+    trace = _resolve_top_level("trace")(
+        model,
+        x,
+        capture=_LazyCaptureOptions(
+            layers_to_save=list(layer_plan.values()),
+        ),
+    )
+    outputs: dict[str, _torch.Tensor] = {}
+    views: dict[str, Any] = {}
+    if isinstance(layers, _Mapping):
+        for label, pattern in layer_plan.items():
+            outputs[label] = _out_from_log(trace, pattern)
+            views[label] = trace[pattern]
+        return trace, outputs, views
+
+    for pattern in layer_plan.values():
+        matches = _matching_saved_layer_labels(trace, pattern)
+        if not matches:
+            suggestions = trace.find_layers(pattern)
+            raise ValueError(_did_you_mean_message(pattern, suggestions))
+        for match in matches:
+            outputs[match] = _out_from_log(trace, match)
+            views[match] = trace[match]
+    return trace, outputs, views
 
 
 def extract(
@@ -705,218 +866,8 @@ def extract(
         resolved layer labels to outs for list inputs.
     """
 
-    layer_plan = _normalize_extract_layers(layers)
-    trace = _resolve_top_level("trace")(
-        model,
-        x,
-        capture=_CaptureOptions(
-            layers_to_save=list(layer_plan.values()),
-        ),
-    )
-    if isinstance(layers, _Mapping):
-        return {label: _out_from_log(trace, pattern) for label, pattern in layer_plan.items()}
-
-    outputs: dict[str, _torch.Tensor] = {}
-    for pattern in layer_plan.values():
-        matches = _matching_saved_layer_labels(trace, pattern)
-        if not matches:
-            suggestions = trace.find_layers(pattern)
-            raise ValueError(_did_you_mean_message(pattern, suggestions))
-        for match in matches:
-            outputs[match] = _out_from_log(trace, match)
+    _trace, outputs, _views = _extract_layers_with_trace(model, x, layers)
     return outputs
-
-
-def _move_nested_to_device(value: Any, device: _torch.device | str | None) -> Any:
-    """Move tensors in a nested value to a device.
-
-    Parameters
-    ----------
-    value:
-        Tensor or nested Python container.
-    device:
-        Target device, or ``None`` to leave values unchanged.
-
-    Returns
-    -------
-    Any
-        Value with tensors moved to ``device``.
-    """
-
-    if device is None:
-        return value
-    if isinstance(value, _torch.Tensor):
-        return value.to(device)
-    if isinstance(value, tuple):
-        return tuple(_move_nested_to_device(item, device) for item in value)
-    if isinstance(value, list):
-        return [_move_nested_to_device(item, device) for item in value]
-    if isinstance(value, dict):
-        return {key: _move_nested_to_device(item, device) for key, item in value.items()}
-    return value
-
-
-def _collate_batch(items: list[Any]) -> Any:
-    """Collate a small list of stimuli into one model input.
-
-    Parameters
-    ----------
-    items:
-        Stimulus items accumulated for one batch.
-
-    Returns
-    -------
-    Any
-        Batched tensor or nested container.
-    """
-
-    if not items:
-        raise ValueError("Cannot collate an empty batch.")
-    first = items[0]
-    if isinstance(first, _torch.Tensor):
-        return _torch.stack(items)
-    if isinstance(first, tuple):
-        return tuple(_collate_batch([item[index] for item in items]) for index in range(len(first)))
-    if isinstance(first, list):
-        return [_collate_batch([item[index] for item in items]) for index in range(len(first))]
-    if isinstance(first, dict):
-        return {key: _collate_batch([item[key] for item in items]) for key in first}
-    return items
-
-
-def _iter_batches(stimuli: Any, batch_size: int) -> _Iterable[Any]:
-    """Yield batched model inputs from tensors or iterables.
-
-    Parameters
-    ----------
-    stimuli:
-        Tensor with batch dimension or iterable stimulus set.
-    batch_size:
-        Number of items per batch.
-
-    Yields
-    ------
-    Any
-        One batch suitable for ``model.forward``.
-    """
-
-    if isinstance(stimuli, _torch.Tensor):
-        for start in range(0, stimuli.shape[0], batch_size):
-            yield stimuli[start : start + batch_size]
-        return
-
-    batch: list[Any] = []
-    for item in stimuli:
-        batch.append(item)
-        if len(batch) == batch_size:
-            yield _collate_batch(batch)
-            batch = []
-    if batch:
-        yield _collate_batch(batch)
-
-
-def _merge_batch_outputs(
-    accumulator: dict[str, list[_torch.Tensor]],
-    batch_outputs: dict[str, _torch.Tensor],
-    transform: _Callable[[_torch.Tensor], _torch.Tensor] | None,
-) -> None:
-    """Append one batch of extracted outs to an accumulator.
-
-    Parameters
-    ----------
-    accumulator:
-        Mutable mapping from layer label to per-batch tensors.
-    batch_outputs:
-        Extraction output from one batch.
-    transform:
-        Optional transform applied to each out before storage.
-    """
-
-    for layer_name, tensor in batch_outputs.items():
-        stored = transform(tensor) if transform is not None else tensor
-        accumulator.setdefault(layer_name, []).append(stored.detach().cpu())
-
-
-def extract_dataset(
-    model: _nn.Module,
-    stimuli: Any,
-    layers: _Iterable[str] | _Mapping[str, str],
-    batch_size: int = 32,
-    device: _torch.device | str | None = None,
-    output_dir: str | _Path | None = None,
-    transform: _Callable[[_torch.Tensor], _torch.Tensor] | None = None,
-    progress: bool = True,
-) -> dict[str, _torch.Tensor] | list[_Path]:
-    """Extract outs from an iterable dataset in batches.
-
-    Parameters
-    ----------
-    model:
-        PyTorch model to run.
-    stimuli:
-        Tensor with a leading batch dimension or iterable of stimulus items.
-    layers:
-        List or mapping accepted by :func:`extract`.
-    batch_size:
-        Number of stimuli per forward pass.
-    device:
-        Optional device for model and stimuli.
-    output_dir:
-        Optional directory. When supplied, each batch output is written as
-        ``batch_XXXXX.pt`` and paths are returned.
-    transform:
-        Optional tensor transform applied to each out before storage.
-    progress:
-        Whether to wrap batch iteration with ``tqdm``.
-
-    Returns
-    -------
-    dict[str, torch.Tensor] | list[pathlib.Path]
-        In-memory concatenated outs, or written batch paths.
-    """
-
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive.")
-    if device is not None:
-        model = model.to(device)
-
-    batch_iterable = _iter_batches(stimuli, batch_size)
-    total = None
-    if isinstance(stimuli, _torch.Tensor):
-        total = (stimuli.shape[0] + batch_size - 1) // batch_size
-    if progress:
-        from .utils.display import progress_bar
-
-        batch_iterable = progress_bar(
-            batch_iterable,
-            total=total,
-            desc="torchlens.extract",
-            enabled=progress,
-        )
-
-    container_paths: list[_Path] = []
-    in_memory: dict[str, list[_torch.Tensor]] = {}
-    container_path = _Path(output_dir) if output_dir is not None else None
-    if container_path is not None:
-        container_path.mkdir(parents=True, exist_ok=True)
-
-    for batch_index, batch in enumerate(batch_iterable):
-        batch = _move_nested_to_device(batch, device)
-        batch_outputs = extract(model, batch, layers)
-        if container_path is not None:
-            processed = {
-                label: (transform(tensor) if transform is not None else tensor).detach().cpu()
-                for label, tensor in batch_outputs.items()
-            }
-            batch_path = container_path / f"batch_{batch_index:05d}.pt"
-            _torch.save(processed, batch_path)
-            container_paths.append(batch_path)
-        else:
-            _merge_batch_outputs(in_memory, batch_outputs, transform)
-
-    if container_path is not None:
-        return container_paths
-    return {label: _torch.cat(tensors, dim=0) for label, tensors in in_memory.items()}
 
 
 def batched_extract(
@@ -943,9 +894,10 @@ def batched_extract(
     """
 
     from ._deprecations import warn_deprecated_alias
+    from .dataset_extraction import extract_dataset as _extract_dataset
 
     warn_deprecated_alias("batched_extract", "extract_dataset")
-    return extract_dataset(
+    return _extract_dataset(
         model, stimuli, layers, batch_size, device, output_dir, transform, progress
     )
 
@@ -994,9 +946,9 @@ def validate_backward_pass(
     perturb_saved_grads: bool = False,
     validate_metadata: bool = True,
     random_seed: int | None = None,
-    atol: float = 1e-5,
-    rtol: float = 1e-4,
-    validate_layer_grads: bool = False,
+    atol: float | None = None,
+    rtol: float | None = None,
+    validate_layer_grads: bool = True,
     layer_grad_atol: float | None = None,
     layer_grad_rtol: float | None = None,
 ) -> bool:
@@ -1229,7 +1181,10 @@ _set_variadic_wrapper_signature(draw_combined, str)
 
 
 __all__ = [
+    "AtenOp",
     "trace",
+    "release_model",
+    "clear_capture_cache",
     "export",
     "hash",
     "assert_unchanged",
@@ -1294,6 +1249,7 @@ __all__ = [
     "func_transform",
     "followed_by",
     "grad_fn",
+    "grad_fn_label",
     "grad_input",
     "grad_output",
     "in_backward_pass",
@@ -1313,6 +1269,8 @@ __all__ = [
     "head",
     "clamp",
     "mean_ablate",
+    "merge_ranks",
+    "merge_report",
     "noise",
     "project_off",
     "project_onto",
@@ -1334,4 +1292,25 @@ __all__ = [
     "grad_zero",
     "tap",
     "record_span",
+    "Selection",
+    "ResolvedSelection",
+    "units",
+    "params",
+    "random_selection",
+    "Edit",
+    "patch_from",
+    "top_k",
+    "top_fraction",
+    "threshold",
+    "sign",
+    "dead",
+    "saturated",
+    "low_variance",
+    "neighborhood",
+    "between",
+    "changed",
+    "top_changed",
+    "stable_across_passes",
+    "pass_variance",
+    "subspace",
 ]

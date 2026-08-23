@@ -17,12 +17,24 @@ partial diagnostics, and fastlog's lightweight `RecordContext` construction.
 | `arg_positions.py` | 3-tier tensor/parameter extraction: static table, dynamic cache, BFS fallback |
 | `salient_args.py` | Human-readable function configuration metadata |
 | `flops.py` | Forward and backward FLOPs estimates with registry hooks |
+| `outcome.py` | SINGLE authority for terminal capture truth: `CaptureOutcome`/`CaptureStatus`/`CapturePhase`/`FailureOrigin` plus the N1-N5 capability chokepoint |
+| `session.py` | Capture-session lifecycle state |
+| `projectors.py` | Projector CLASSES over a sealed capture core — `RefreshProjector` (consumed by `capture/trace.py` refresh runs) and `RecordingProjection`/`RecordingProjector` (consumed by `fastlog/types.py`), not helper callables for `projections.py` |
+| `plan.py` | Capture planning helpers |
 | `__init__.py` | Empty package marker |
 
 ## How It Connects
 
 Decorated wrappers in `backends/torch/wrappers.py` and `backends/torch/ops.py` emit
-backend events for every logged operation. `trace.py` owns the forward session;
+backend events for every logged operation. `CaptureEvents` (torchlens/ir) is the ONE
+logical journal for a run: its append methods are the single writer and stamp every
+event of every kind (op, module prep/enter/exit, pre-hook, output-version, buffer-write,
+and the whole backward family) with one run-monotonic `seq`, so cross-kind and
+forward/backward ordering is an exact recorded fact. Never append to a lane list
+directly. Torch op events are trace-backref-free from birth (`source_trace=None`); the
+trace owns its stream through instance attributes -- `_capture_events`, plus the
+`capture_events` alias during capture until postprocess drops it (the old
+`_EVENT_STREAMS` weak side registry is gone). `trace.py` owns the forward session;
 backend producers create raw op/input/buffer records consumed by `postprocess/`.
 Backward capture is routed through validation/backward and trace methods rather
 than a capture-local `backward.py` module.
@@ -49,8 +61,15 @@ Ordering matters: capture RNG/autocast state, enter `active_logging()`, run mode
 cleanup model session, then postprocess.
 
 ### projections.py
-- `recording_from_capture_events()` - builds sparse `Recording` projections.
-- `trace_from_capture_events()` - materializes a full `Trace` projection.
+- `RecordingState` - live predicate-recording session state (`get_active_recording_state()`,
+  `active_recording_state()`).
+- `_build_record_context()` / `_record_context_from_event()` - predicate-visible
+  `RecordContext` construction for live capture and event replay.
+- `append_projected_event()` - sparse `OpEvent` emission for the predicate path
+  (`_record_from_record_context()` builds the event payload; the old `_event_from_record()`
+  was deleted in P7).
+- `sync_recording_grad_records_from_sidecar()` - rebuilds fastlog gradient records from the
+  unified backward sidecar.
 
 ### predicates.py / stop.py
 - Predicate helpers normalize capture decisions and validate `followed_by` support.

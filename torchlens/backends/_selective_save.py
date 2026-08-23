@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from typing import Any
 
-from .registry import BackendUnsupportedError
-from ..intervention.selectors import (
-    BaseSelector,
-    CompositeSelector,
-    NotSelector,
-    SelectorLike,
-)
+from ..intervention.selectors import BaseSelector
+from ..ir.selector_eval import first_selector_kind_outside
 from ..postprocess.saved_summary import refresh_saved_module_call_count
 from ..quantities import Bytes
+from .registry import BackendUnsupportedError
 
 _STATIC_SELECTOR_KINDS = frozenset(
     {
@@ -28,6 +25,12 @@ _STATIC_SELECTOR_KINDS = frozenset(
         "not",
     }
 )
+
+# Intervention selectors resolve against ops that can be REWRITTEN mid-forward;
+# the synthetic ``output`` pseudo-op only exists after the forward returns, so
+# it is deliberately excluded here. Backends alias this set instead of
+# re-spelling the 8 kinds (the drop of ``output`` is intent, not drift).
+_STATIC_INTERVENTION_SELECTOR_KINDS = _STATIC_SELECTOR_KINDS - frozenset({"output"})
 
 
 def reject_selector_outside_kinds(
@@ -57,13 +60,13 @@ def reject_selector_outside_kinds(
     if not isinstance(predicate, BaseSelector):
         raise BackendUnsupportedError(
             f"{backend_name} backend supports trace(save=...) only for static-label selectors "
-            "tl.func, tl.label, tl.contains and boolean composites (&, |, ~) of those. "
+            "tl.func, tl.label, tl.contains and boolean composites (&, |, -, ~) of those. "
             "Value-dependent predicates need concrete activation values at predicate time. "
             "MLX lazy evaluation defers RecordContext.tensor_requires_grad, is_scalar_bool, "
             "and bool_value without per-op evaluation; use the PyTorch backend for "
             "value-dependent predicates."
         )
-    unsupported = _first_selector_outside_kinds(predicate, allowed=allowed)
+    unsupported = first_selector_kind_outside(predicate, allowed=allowed)
     if unsupported is None:
         return
     if unsupported in {"module", "in_module"}:
@@ -75,11 +78,11 @@ def reject_selector_outside_kinds(
         raise BackendUnsupportedError(
             f"{backend_name} backend does not support value-dependent trace(save=...) "
             "predicates from tl.where. Static-label save= on this backend is limited to "
-            "tl.func, tl.label, tl.contains and boolean composites (&, |, ~) of those."
+            "tl.func, tl.label, tl.contains and boolean composites (&, |, -, ~) of those."
         )
     raise BackendUnsupportedError(
         f"{backend_name} backend supports trace(save=...) only for static-label selectors "
-        "tl.func, tl.label, tl.contains and boolean composites (&, |, ~) of those; "
+        "tl.func, tl.label, tl.contains and boolean composites (&, |, -, ~) of those; "
         f"unsupported selector kind {unsupported!r}."
     )
 
@@ -111,11 +114,49 @@ def apply_static_label_save_policy(
         return
     _reject_non_static_save_predicate(predicate, backend_name=backend_name)
     hidden_payloads = _hidden_payloads_by_label(trace)
+    matched_any = False
     for op in getattr(trace, "layer_list", ()):
-        if not bool(predicate(op)):
+        if bool(predicate(op)):
+            matched_any = True
+        else:
             _drop_public_activation_payload(op)
+    if not matched_any:
+        warn_zero_match_save_predicate(backend_name)
     trace._selective_save_hidden_payloads = hidden_payloads
     _refresh_saved_activation_summary(trace)
+
+
+def warn_zero_match_save_predicate(backend_name: str, *, stacklevel: int = 3) -> None:
+    """Disclose a ``save=`` predicate that matched ZERO operations.
+
+    A predicate matching no sites used to complete silently -- a typo'd label
+    or function name produced a COMPLETE trace with no saved activations and
+    no diagnostic. The trace stays usable (structure and metadata survive),
+    so this warns rather than refusing; TF's intervene-side reachability
+    check remains fail-closed separately. Shared by the post-finalization
+    resolver (jax / paddle / tinygrad / mlx) and TF's per-op retention seams
+    so no backend can drop out of the disclosure family unnoticed.
+
+    Parameters
+    ----------
+    backend_name
+        Backend name used in the diagnostic.
+    stacklevel
+        Forwarded to :func:`warnings.warn`.
+
+    Returns
+    -------
+    None
+        Emits exactly one warning.
+    """
+
+    warnings.warn(
+        f"{backend_name} trace(save=...) predicate matched zero operations; "
+        "the returned trace retains no saved activation payloads. Check the "
+        "selector against the captured op labels (trace.layer_list) -- a "
+        "mistyped label or function name silently saves nothing.",
+        stacklevel=stacklevel,
+    )
 
 
 def _hidden_payloads_by_label(trace: Any) -> dict[str, Any]:
@@ -283,7 +324,7 @@ def _reject_non_static_save_predicate(
             "Use static-label save= selectors or the PyTorch backend for value-dependent "
             "predicates, intervene=, and halt=."
         )
-    unsupported = _first_non_static_selector(predicate)
+    unsupported = first_selector_kind_outside(predicate, allowed=_STATIC_SELECTOR_KINDS)
     if unsupported is None:
         return
     raise BackendUnsupportedError(
@@ -294,66 +335,3 @@ def _reject_non_static_save_predicate(
         "execution. Use the PyTorch backend for value-dependent predicates, intervene=, and "
         "halt=."
     )
-
-
-def _first_non_static_selector(selector: SelectorLike) -> str | None:
-    """Return the first non-static selector kind in a selector tree.
-
-    Parameters
-    ----------
-    selector
-        Selector or target spec to classify.
-
-    Returns
-    -------
-    str | None
-        Unsupported selector kind, or ``None`` if the whole tree is static-label only.
-    """
-
-    if not isinstance(selector, BaseSelector):
-        return "target_spec"
-    kind = selector.selector_kind
-    if kind not in _STATIC_SELECTOR_KINDS:
-        return kind
-    if isinstance(selector, CompositeSelector):
-        left, right = selector.selectors
-        return _first_non_static_selector(left) or _first_non_static_selector(right)
-    if isinstance(selector, NotSelector):
-        return _first_non_static_selector(selector.selector)
-    return None
-
-
-def _first_selector_outside_kinds(
-    selector: SelectorLike,
-    *,
-    allowed: frozenset[str],
-) -> str | None:
-    """Return the first selector kind outside ``allowed`` in a selector tree.
-
-    Parameters
-    ----------
-    selector
-        Selector or target spec to classify.
-    allowed
-        Selector kinds accepted by the caller.
-
-    Returns
-    -------
-    str | None
-        Unsupported selector kind, or ``None`` if the whole tree is allowed.
-    """
-
-    if not isinstance(selector, BaseSelector):
-        return "target_spec"
-    kind = selector.selector_kind
-    if kind not in allowed:
-        return kind
-    if isinstance(selector, CompositeSelector):
-        left, right = selector.selectors
-        return _first_selector_outside_kinds(
-            left,
-            allowed=allowed,
-        ) or _first_selector_outside_kinds(right, allowed=allowed)
-    if isinstance(selector, NotSelector):
-        return _first_selector_outside_kinds(selector.selector, allowed=allowed)
-    return None

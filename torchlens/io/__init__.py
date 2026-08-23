@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from collections.abc import Collection
+from pathlib import Path
 from typing import Any
 
-from .._io import JaxPayloadLoadHint, PayloadLoadHints, TorchLensIOError, rehydrate_nested
-from .._io import _json
+from .._errors import ArgumentTypeError
+from .._io import JaxPayloadLoadHint, PayloadLoadHints, TorchLensIOError, _json, rehydrate_nested
 from .._io.bundle import cleanup_tmp, load, save
 from .._trace_state import TraceState
 from ..intervention.save import save_intervention
@@ -75,7 +75,13 @@ def detect_tlspec_format(path: str | Path) -> str:
         has_tlspec_version = "tlspec_version" in manifest
         if has_tlspec_version and has_kind:
             return "v2.0_unified"
-        if has_kind:
+        if has_kind and _read_json_object_if_present(tlspec_path / "spec.json") is not None:
+            # The intervention classification needs the artifact to actually
+            # BE one: a v2.16 intervention bundle carries spec.json. Inferring
+            # it from `kind` alone misrouted a unified manifest whose
+            # tlspec_version was deleted into the intervention loader, which
+            # died on the absent spec.json with an untyped FileNotFoundError
+            # (R73) instead of falling through to the typed manifest refusal.
             return "v2.16_intervention_with_kind"
 
     spec = _read_json_object_if_present(tlspec_path / "spec.json")
@@ -110,7 +116,14 @@ def _reject_symlinked_metadata_path(path: Path) -> None:
     """
 
     if path.is_symlink():
-        raise TorchLensIOError(f"Refusing symlinked .tlspec format-detection path: {path}.")
+        # Same front-door cause as the bundle loader's symlink guards, so it
+        # carries the same stable code a caller branches on (R65).
+        raise TorchLensIOError(
+            f"Refusing symlinked .tlspec format-detection path: {path}. "
+            f"Remedy: pass the resolved bundle directory instead, e.g. "
+            f"tl.load(str(Path(path).resolve())).",
+            code="load_path_symlink_rejected",
+        )
 
 
 def _read_json_object_if_present(path: Path) -> dict[str, Any] | None:
@@ -215,7 +228,13 @@ def load_intervention_spec(
         allowed_custom_callable_modules=allowed_custom_callable_modules,
     )
     if not isinstance(loaded, InterventionSpec):
-        raise TypeError("torchlens.io.load_intervention_spec expected an intervention spec.")
+        raise ArgumentTypeError(
+            f"load_intervention_spec loaded {type(loaded).__name__}, not InterventionSpec",
+            code="artifact_kind_mismatch",
+            remedy="pass the path of an intervention .tlspec artifact or use torchlens.io.load",
+            argument="path",
+            loaded_type=type(loaded).__name__,
+        )
     return loaded
 
 

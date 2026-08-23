@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import importlib
-from pathlib import Path
 import re
 import subprocess
 import sys
+import warnings
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -19,7 +20,6 @@ import torchlens as tl
 from torchlens import repgeom
 from torchlens.visualization.node_spec import NodeSpec
 from torchlens.viz.node_plots import _DRAW_SCALE, _legend_bbox, _legend_height
-
 
 ANALYTIC_POINTS = np.array(
     [
@@ -120,8 +120,8 @@ def _pil_stimuli(n_items: int = 8) -> list[Any]:
         RGB PIL images with stable colors and simple index marks.
     """
 
-    image_module = pytest.importorskip("PIL.Image")
-    draw_module = pytest.importorskip("PIL.ImageDraw")
+    from PIL import Image as image_module, ImageDraw as draw_module
+
     images = []
     for index in range(n_items):
         image = image_module.new(
@@ -279,6 +279,59 @@ def test_classical_mds_sign_convention_is_deterministic() -> None:
     assert np.array_equal(embedding_a, embedding_b)
 
 
+def test_classical_mds_warns_on_ambiguous_square_feature_matrix() -> None:
+    """Square symmetric feature matrices should no longer be treated silently."""
+
+    features = np.array(
+        [
+            [0.0, 0.81632961, 0.47703871, 0.86999729],
+            [0.81632961, 0.0, 1.886532, 1.35998054],
+            [0.47703871, 1.886532, 0.0, 0.50481297],
+            [0.86999729, 1.35998054, 0.50481297, 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+    with pytest.warns(UserWarning, match="ambiguous square input"):
+        embedding, info = repgeom.classical_mds(features, min_n=3)
+
+    assert embedding.shape == (4, 2)
+    assert info["input_kind"] == "distances"
+
+
+def test_classical_mds_explicit_input_kind_resolves_the_ambiguity() -> None:
+    """Declaring the input kind silences the guess and picks the stated reading."""
+
+    ambiguous = np.array(
+        [
+            [0.0, 0.81632961, 0.47703871, 0.86999729],
+            [0.81632961, 0.0, 1.886532, 1.35998054],
+            [0.47703871, 1.886532, 0.0, 0.50481297],
+            [0.86999729, 1.35998054, 0.50481297, 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        as_distances, distance_info = repgeom.classical_mds(
+            ambiguous, min_n=3, input_kind="distances"
+        )
+        as_features, feature_info = repgeom.classical_mds(ambiguous, min_n=3, input_kind="features")
+
+    assert distance_info["input_kind"] == "distances"
+    assert feature_info["input_kind"] == "features"
+    assert not np.allclose(as_distances, as_features)
+
+    auto_embedding, _ = repgeom.classical_mds(
+        repgeom.activation_distance_matrix(ambiguous), min_n=3, input_kind="distances"
+    )
+    assert np.allclose(auto_embedding, as_features)
+
+    with pytest.raises(ValueError, match="input_kind must be one of"):
+        repgeom.classical_mds(ambiguous, min_n=3, input_kind="dist")
+
+
 def test_activation_distance_matrix_metrics() -> None:
     """Activation distance helper should flatten rows and support core metrics."""
 
@@ -292,6 +345,14 @@ def test_activation_distance_matrix_metrics() -> None:
     assert np.allclose(np.diag(cosine), 0.0)
     assert np.allclose(np.diag(correlation), 0.0)
     assert np.allclose(euclidean, euclidean.T)
+
+    expected_euclidean = np.sqrt(
+        np.sum(
+            (activations.reshape(3, -1)[:, None, :] - activations.reshape(3, -1)[None, :, :]) ** 2,
+            axis=-1,
+        )
+    )
+    assert np.allclose(euclidean, expected_euclidean)
 
 
 def test_rdm_alias_matches_activation_distance_matrix_for_core_metrics() -> None:
@@ -374,7 +435,9 @@ def test_mds_evolution_single_pass_layers_annotates_and_round_trips(tmp_path: Pa
     first_key, second_key = list(coords_by_key)
     for key, coords in coords_by_key.items():
         assert coords.shape == (8, 2)
-        assert torch.equal(trace._annotation_blobs[key], torch.from_numpy(coords))
+        # Derived MDS blobs live in the ``mds:`` namespace; bare layer:/op:
+        # keys are reserved for user ``annotate(data=...)`` blobs.
+        assert torch.equal(trace._annotation_blobs[f"mds:{key}"], torch.from_numpy(coords))
 
     raw_second_distances = repgeom.activation_distance_matrix(linear_layers[1].out)
     raw_second_coords, _info = repgeom.classical_mds(raw_second_distances, min_n=8)
@@ -387,7 +450,20 @@ def test_mds_evolution_single_pass_layers_annotates_and_round_trips(tmp_path: Pa
 
     assert loaded._annotation_blobs is not None
     for key, coords in coords_by_key.items():
-        assert torch.equal(loaded._annotation_blobs[key], torch.from_numpy(coords))
+        assert torch.equal(loaded._annotation_blobs[f"mds:{key}"], torch.from_numpy(coords))
+
+
+def test_mds_evolution_returned_coords_do_not_alias_annotations() -> None:
+    """Returned MDS arrays should not share memory with stored trace annotations."""
+
+    trace = _mds_trace(_MDSClassifier(), tl.func("linear"))
+    coords_by_key = repgeom.mds_evolution(trace, save=tl.func("linear"), min_n=8)
+    first_key = next(iter(coords_by_key))
+    before = float(trace._annotation_blobs[f"mds:{first_key}"][0, 0].item())
+
+    coords_by_key[first_key][0, 0] = 999.0
+
+    assert float(trace._annotation_blobs[f"mds:{first_key}"][0, 0].item()) == before
 
 
 def test_rdm_evolution_single_pass_layers_annotates_and_round_trips(tmp_path: Path) -> None:
@@ -414,6 +490,19 @@ def test_rdm_evolution_single_pass_layers_annotates_and_round_trips(tmp_path: Pa
         assert torch.equal(loaded._annotation_blobs[f"rdm:{key}"], torch.from_numpy(matrix))
 
 
+def test_rdm_evolution_returned_matrices_do_not_alias_annotations() -> None:
+    """Returned RDM arrays should not share memory with stored trace annotations."""
+
+    trace = _mds_trace(_MDSClassifier(), tl.func("linear"))
+    matrices_by_key = repgeom.rdm_evolution(trace, save=tl.func("linear"), min_n=8)
+    first_key = next(iter(matrices_by_key))
+    before = float(trace._annotation_blobs[f"rdm:{first_key}"][0, 1].item())
+
+    matrices_by_key[first_key][0, 1] = 999.0
+
+    assert float(trace._annotation_blobs[f"rdm:{first_key}"][0, 1].item()) == before
+
+
 def test_scree_and_effective_dimensionality_low_rank_fixture() -> None:
     """Scree helpers should recover a sorted non-negative low-rank spectrum."""
 
@@ -432,6 +521,31 @@ def test_scree_and_effective_dimensionality_low_rank_fixture() -> None:
     assert np.array_equal(info["eigenvalues"], eigenvalues)
     assert np.isclose(np.sum(info["variance_explained"]), 1.0)
     assert np.all(np.diff(info["cumulative_variance"]) >= -1e-12)
+
+
+def test_effective_dimensionality_caps_components_at_spectrum_length() -> None:
+    """Variance-threshold component counts should never exceed the spectrum length.
+
+    A ``variance_threshold`` of 1.0 is the worst case for the cap: the cumulative
+    curve only reaches 1.0 at (or just past, in floating point) its final entry,
+    so an uncapped ``searchsorted`` count would run one past the spectrum. The
+    exact count is BLAS-dependent -- an equilateral 3-point spectrum is
+    ``[1, 1, 0]`` and whether ``cumulative[1]`` lands on exactly 1.0 or a hair
+    below decides between 2 and 3 -- so assert the contract (capped, and the
+    smallest count that reaches the threshold) rather than a pinned integer.
+    """
+
+    info = repgeom.effective_dimensionality(
+        np.eye(3, dtype=np.float64), min_n=3, variance_threshold=1.0
+    )
+
+    n_components = info["n_components_for_threshold"]
+    spectrum_length = info["eigenvalues"].size
+    assert spectrum_length == 3
+    assert 1 <= n_components <= spectrum_length
+    assert info["cumulative_variance"][n_components - 1] >= 1.0 - 1e-12
+    if n_components > 1:
+        assert info["cumulative_variance"][n_components - 2] < 1.0
 
 
 def test_effective_dimensionality_all_zero_fixture_is_safe() -> None:
@@ -489,7 +603,8 @@ def test_mds_scatter_node_spec_sets_draw_time_image_for_annotated_layer() -> Non
     assert result.image is not None
     assert Path(result.image).is_file()
     assert result.image.endswith(".png")
-    image_module = pytest.importorskip("PIL.Image")
+    from PIL import Image as image_module
+
     with image_module.open(result.image) as rendered:
         assert rendered.mode == "RGB"
         assert rendered.size == (420, 420)
@@ -516,7 +631,8 @@ def test_rdm_node_spec_sets_one_draw_time_heatmap_for_annotated_layer() -> None:
     assert result.image is not None
     assert Path(result.image).is_file()
     assert result.image.endswith(".png")
-    image_module = pytest.importorskip("PIL.Image")
+    from PIL import Image as image_module
+
     with image_module.open(result.image) as rendered:
         assert rendered.mode == "RGB"
         assert rendered.size == (360, 360)
@@ -544,7 +660,8 @@ def test_scree_node_spec_sets_one_draw_time_image_for_annotated_layer() -> None:
     assert result.image is not None
     assert Path(result.image).is_file()
     assert result.image.endswith(".png")
-    image_module = pytest.importorskip("PIL.Image")
+    from PIL import Image as image_module
+
     with image_module.open(result.image) as rendered:
         assert rendered.mode == "RGB"
         assert rendered.size == (320, 214)
@@ -757,7 +874,8 @@ def test_mds_scatter_fallback_renders_points_without_raw_images() -> None:
     assert result is not None
     assert result.image is not None
     assert Path(result.image).is_file()
-    image_module = pytest.importorskip("PIL.Image")
+    from PIL import Image as image_module
+
     with image_module.open(result.image) as rendered:
         assert rendered.mode == "RGB"
         assert rendered.size == (420, 420)
@@ -822,6 +940,15 @@ def test_mds_evolution_recurrent_aggregate_requires_pass_selection() -> None:
         repgeom.mds_evolution(trace, save=tl.func("linear"), min_n=8)
 
 
+def test_mds_evolution_default_recurrent_saved_layer_requires_pass_selection() -> None:
+    """Default recurrent selection should not silently omit saved recurrent layers."""
+
+    trace = _mds_trace(_RecurrentMDS(), tl.func("linear"))
+
+    with pytest.raises(ValueError, match="select a pass \\(layer is recurrent\\)"):
+        repgeom.mds_evolution(trace, min_n=8)
+
+
 def test_mds_evolution_recurrent_pass_qualified_selector_uses_op_key() -> None:
     """A single recurrent pass selection should read op.out and store op coords."""
 
@@ -836,7 +963,7 @@ def test_mds_evolution_recurrent_pass_qualified_selector_uses_op_key() -> None:
     assert list(coords_by_key) == [key]
     assert coords_by_key[key].shape == (8, 2)
     assert trace._annotation_blobs is not None
-    assert torch.equal(trace._annotation_blobs[key], torch.from_numpy(coords_by_key[key]))
+    assert torch.equal(trace._annotation_blobs[f"mds:{key}"], torch.from_numpy(coords_by_key[key]))
 
 
 def test_rdm_evolution_recurrent_aggregate_requires_pass_selection() -> None:
@@ -846,6 +973,15 @@ def test_rdm_evolution_recurrent_aggregate_requires_pass_selection() -> None:
 
     with pytest.raises(ValueError, match="select a pass \\(layer is recurrent\\)"):
         repgeom.rdm_evolution(trace, save=tl.func("linear"), min_n=8)
+
+
+def test_rdm_evolution_default_recurrent_saved_layer_requires_pass_selection() -> None:
+    """Default recurrent RDM selection should not silently omit saved passes."""
+
+    trace = _mds_trace(_RecurrentMDS(), tl.func("linear"))
+
+    with pytest.raises(ValueError, match="select a pass \\(layer is recurrent\\)"):
+        repgeom.rdm_evolution(trace, min_n=8)
 
 
 def test_rdm_evolution_recurrent_pass_qualified_selector_uses_op_key() -> None:
@@ -892,6 +1028,15 @@ def test_scree_evolution_recurrent_pass_qualified_selector_uses_op_key(tmp_path:
     assert torch.equal(
         loaded._annotation_blobs[f"scree:{key}"], torch.from_numpy(spectra_by_key[key])
     )
+
+
+def test_scree_evolution_default_recurrent_saved_layer_requires_pass_selection() -> None:
+    """Default recurrent scree selection should not silently omit saved passes."""
+
+    trace = _mds_trace(_RecurrentMDS(), tl.func("linear"))
+
+    with pytest.raises(ValueError, match="select a pass \\(layer is recurrent\\)"):
+        repgeom.scree_evolution(trace, min_n=8)
 
 
 def test_mds_evolution_unsaved_activation_raises_capture_guidance() -> None:

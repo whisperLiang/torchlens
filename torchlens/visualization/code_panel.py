@@ -9,13 +9,17 @@ import re
 import textwrap
 import weakref
 from collections.abc import Callable
+from pathlib import PurePath
 from types import SimpleNamespace
 from typing import Any, Literal, TypeAlias, cast
 
 import graphviz
 from torch import nn
 
+from .._errors import ArgumentTypeError, InvalidArgumentError, RecordBindingError
 from .._source_links import file_line_text
+from . import _render_utils
+from ._render_utils import RENDER_TIMEOUT_SECONDS
 
 CodePanelMode: TypeAlias = Literal["forward", "class", "init+forward"]
 CodePanelOption: TypeAlias = bool | CodePanelMode | Callable[[nn.Module], str]
@@ -52,6 +56,17 @@ _CODE_PANEL_WRAP_INDENT = "    "
 # pathologically deep indents fall back to a shallow hanging indent instead.
 _CODE_PANEL_MIN_WRAP_CONTENT_CHARS = 16
 
+# Memo for captured source text, keyed on the *resolved* class/function object
+# that ``inspect`` actually reads (see ``_source_memo_key``). Source capture is
+# a pure function of that object -- ``inspect.getsourcelines`` reads the file
+# and tokenizes to find the object's extent, which costs ~1.7ms for a small
+# model and ~22ms for a torchvision class, paid again on every trace of the
+# same class. Keys are held weakly so locally-defined classes (tests, REPLs)
+# evict with their definition and the memo stays bounded by the set of live
+# model classes. Empty (introspection-failed) results are memoized too, since
+# the failure is equally class-pure and equally repeated.
+_SOURCE_MEMO: weakref.WeakKeyDictionary[Any, str] = weakref.WeakKeyDictionary()
+
 
 class SourceText(str):
     """Source text with optional file-line metadata for clickable renderers."""
@@ -65,7 +80,7 @@ class SourceText(str):
         *,
         file_path: str | None = None,
         line_number: int | None = None,
-    ) -> "SourceText":
+    ) -> SourceText:
         """Create a source string carrying optional file-line metadata.
 
         Parameters
@@ -185,14 +200,24 @@ def resolve_code_panel_source(
     if callable(code_panel):
         model = model_ref() if model_ref is not None else None
         if model is None:
-            raise RuntimeError(
-                "Callable code_panel options require the original model object to "
-                "still be alive. Use a built-in code_panel mode for saved Trace "
-                "rendering."
+            raise RecordBindingError(
+                "Callable code_panel options require the original model object to still be alive",
+                code="code_panel_model_collected",
+                remedy="use a built-in code_panel mode for saved Trace rendering",
             )
         source_text = code_panel(model)
         if not isinstance(source_text, str):
-            raise TypeError("Callable code_panel options must return a string.")
+            # Distinct code from the ValueError-lineage bad-mode-literal door
+            # below: a caller branching on the code must be able to tell "my
+            # callable is broken" (render-time) from "my option string is
+            # wrong" (config-time).
+            raise ArgumentTypeError(
+                f"Callable code_panel options must return a string; "
+                f"returned {type(source_text).__name__}",
+                code="code_panel_callable_return_invalid",
+                remedy="return the panel text as a string from the code_panel callable",
+                argument="code_panel",
+            )
         return source_text
     mode: CodePanelMode
     if code_panel is True:
@@ -200,8 +225,12 @@ def resolve_code_panel_source(
     elif code_panel in {"forward", "class", "init+forward"}:
         mode = code_panel
     else:
-        raise ValueError(
-            "code_panel must be False, True, 'forward', 'class', 'init+forward', or a callable."
+        raise InvalidArgumentError(
+            "code_panel must be False, True, 'forward', 'class', 'init+forward', or a "
+            f"callable; received {code_panel!r}",
+            code="code_panel_option_invalid",
+            remedy="pass a documented code_panel mode or a callable",
+            argument="code_panel",
         )
     captured_source = source_code_blob.get(mode) if source_code_blob else None
     if captured_source is None:
@@ -233,7 +262,12 @@ def render_code_panel_subgraph(
     """
 
     if side not in {"right", "left"}:
-        raise ValueError("side must be either 'right' or 'left'.")
+        raise InvalidArgumentError(
+            f"side must be either 'right' or 'left'; received {side!r}",
+            code="code_panel_side_invalid",
+            remedy="pass side='right' or 'left'",
+            argument="side",
+        )
 
     label = _code_panel_label(source_text)
     # Pure Graphviz keeps graph and code in one output file. The invisible edge
@@ -326,7 +360,16 @@ def render_code_panel_svg(source_text: str) -> str:
             fontname="Courier",
             margin="0",
         )
-    return panel.pipe(format="svg").decode("utf-8")
+    # T9 (grind-p3): render through the same bounded subprocess discipline
+    # as every other Graphviz invocation (timeout + process-group teardown)
+    # instead of graphviz-python's unbounded ``pipe()``, which can hang the
+    # caller forever and leave orphaned dot processes behind.
+    completed = _render_utils.run_bounded_subprocess(
+        [panel.engine, "-Tsvg"],
+        input=panel.source.encode("utf-8"),
+        timeout=RENDER_TIMEOUT_SECONDS,
+    )
+    return completed.stdout.decode("utf-8")
 
 
 def _parse_svg_geometry(svg: str) -> SimpleNamespace:
@@ -427,15 +470,49 @@ def compose_graph_with_code_panel(
     """
 
     if side not in {"right", "left"}:
-        raise ValueError("side must be either 'right' or 'left'.")
+        raise InvalidArgumentError(
+            f"side must be either 'right' or 'left'; received {side!r}",
+            code="code_panel_side_invalid",
+            remedy="pass side='right' or 'left'",
+            argument="side",
+        )
     code_svg = render_code_panel_svg(source_text)
     if side == "right":
         return compose_svgs_horizontally(graph_svg, code_svg)
     return compose_svgs_horizontally(code_svg, graph_svg)
 
 
+def _source_memo_key(obj: object) -> Any:
+    """Return the canonical object whose source ``obj`` resolves to.
+
+    ``inspect.getsourcelines`` unwraps ``functools.wraps`` chains and reads a
+    bound method's underlying function, so a bound method, that same method
+    wrapped by TorchLens' forward decorator, and the plain class function all
+    produce byte-identical source. Collapsing them to one key means repeated
+    instances of a class -- decorated or not -- share a single memo entry
+    instead of one per instance.
+
+    Parameters
+    ----------
+    obj:
+        Object about to be passed to ``inspect``.
+
+    Returns
+    -------
+    Any
+        Unwrapped function or class object to key the memo on.
+    """
+
+    unwrapped = inspect.unwrap(cast(Any, obj))
+    return getattr(unwrapped, "__func__", unwrapped)
+
+
 def _get_source_or_empty(obj: object) -> str:
     """Return inspect source text for an object or an empty string.
+
+    The result is memoized per resolved class/function object (see
+    ``_source_memo_key``); captured source is a pure function of that object
+    and does not change within a process.
 
     Parameters
     ----------
@@ -449,15 +526,30 @@ def _get_source_or_empty(obj: object) -> str:
     """
 
     try:
+        key = _source_memo_key(obj)
+        cached = _SOURCE_MEMO.get(key)
+    except (TypeError, ValueError):
+        # Unhashable / non-weak-referenceable target, or a ``__wrapped__`` loop:
+        # capture without memoizing so ``inspect`` raises exactly as it always did.
+        key = None
+        cached = None
+    if cached is not None:
+        return cached
+
+    try:
         source_lines, line_number = inspect.getsourcelines(cast(Any, obj))
         source = textwrap.dedent("".join(source_lines)).rstrip()
-        return SourceText(
+        captured: str = SourceText(
             source,
             file_path=inspect.getsourcefile(cast(Any, obj)),
             line_number=line_number,
         )
     except (OSError, TypeError):
-        return ""
+        captured = ""
+
+    if key is not None:
+        _SOURCE_MEMO[key] = captured
+    return captured
 
 
 def _wrap_source_line(line: str, max_chars: int = MAX_CODE_PANEL_LINE_CHARS) -> list[str]:
@@ -576,7 +668,14 @@ def _source_text_to_html_rows(source_text: str, displayed_lines: list[str]) -> l
             else f"vscode://file/{file_path}",
             quote=True,
         )
-        tooltip = html.escape(file_line_text(str(file_path), line_number), quote=True)
+        # Tooltip shows the basename only: rendered SVGs are shareable, and the
+        # visible tooltip should not surface the absolute (username-bearing)
+        # host path (hunt-6 R62-2). The HREF keeps the absolute path -- local
+        # editor clickability is the feature -- and limitations.md discloses
+        # that code_panel output embeds local source paths.
+        tooltip = html.escape(
+            file_line_text(PurePath(str(file_path)).name, line_number), quote=True
+        )
         rows.append(
             f"<TR><TD ALIGN='LEFT' HREF='{href}' TOOLTIP='{tooltip}'>"
             f"<FONT FACE='Courier' COLOR='#0366D6'>{link_label}</FONT></TD></TR>"

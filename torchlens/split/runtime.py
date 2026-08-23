@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from pathlib import Path
 from hashlib import sha256
+from pathlib import Path
 from typing import Any
 
 from .adapters.base import SegmentBundle, SplitBackendAdapter
@@ -14,8 +14,7 @@ from .errors import SplitBoundaryError, SplitErrorContext
 from .graph import SplitTraceGraph
 from .ir import BoundarySchema, SplitGraphIR, SplitModelProfile, SplitPoint, SplitRequest
 from .pipeline import analyze_split_capabilities, execute_split_runtime, lower_split_program
-from .planner import SplitPlan
-from .planner import plan_split
+from .planner import SplitPlan, plan_split
 from .program import ReplayProgram, SplitCapabilityReport, ensure_capability_report_supported
 from .validation import nested_allclose
 
@@ -97,7 +96,7 @@ class SplitRuntime:
             return {}
         return self.capability_report.as_dict()
 
-    def at(self, point: SplitPoint) -> "SplitRuntime":
+    def at(self, point: SplitPoint) -> SplitRuntime:
         """Return a runtime at another boundary in the captured graph.
 
         The complete backend capture and normalized Split IR are immutable for
@@ -376,4 +375,3 @@ def _model_state_fingerprint(model: Any) -> str | None:
         except Exception:
             digest.update(repr(value).encode("utf-8"))
     return digest.hexdigest()
-

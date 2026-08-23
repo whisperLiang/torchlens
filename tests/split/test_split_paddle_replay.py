@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from _paddle_subprocess import run_paddle_subprocess
 
 

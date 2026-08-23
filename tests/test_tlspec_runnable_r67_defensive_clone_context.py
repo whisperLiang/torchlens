@@ -29,7 +29,12 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens import _runnable_execution, _runnable_state
+from torchlens import (
+    _runnable_execution,
+    _runnable_input_aliases,
+    _runnable_input_metadata,
+    _runnable_state,
+)
 from torchlens.errors import PathDivergenceError, RunPreconditionError
 from torchlens.options import CaptureOptions
 from torchlens.runnable import NumericAttestationStatus, PathFaithfulness, StateSource
@@ -76,8 +81,10 @@ _CALLER_CONTEXTS = {
 def test_r67_defensive_materialization_source_scan() -> None:
     """Every defensive phase routes through the helper; every snapshot site stays outside.
 
-    Direction 1: the five defensive phases (staging clone, cross-device staging ``.to()``,
-    random allocation/fill, runtime input mirror, second state clone) each enter
+    Direction 1: the six defensive phases (staging clone, cross-device staging ``.to()``,
+    random allocation/fill, runtime input mirror, second state clone, and the L4
+    live declared-state snapshot clone -- a PRE-EXECUTION clone taken before any
+    forward runs, so recorded execution semantics are not at stake) each enter
     ``_guarded_defensive_materialize``. Direction 2: no OTHER function in either module
     enters it -- in particular ``RunResourceCeiling.guarded_clone`` and
     ``_byte_guarded_clone`` are NOT globally neutralized, so mid-transaction op/witness/
@@ -89,6 +96,7 @@ def test_r67_defensive_materialization_source_scan() -> None:
         "_staged_state_clone": _runnable_state._staged_state_clone,
         "stage_state_to_slot_devices": _runnable_state.stage_state_to_slot_devices,
         "_initialize_slot": _runnable_state._initialize_slot,
+        "snapshot_live_declared_state": _runnable_state.snapshot_live_declared_state,
     }
     defensive_execution_functions = {
         "_runtime_mirror_clone": _runnable_execution._runtime_mirror_clone,
@@ -102,11 +110,14 @@ def test_r67_defensive_materialization_source_scan() -> None:
     # (plus the definition and the import) -- a new materialization site must be added
     # here deliberately, and no snapshot path may silently join.
     state_source = inspect.getsource(_runnable_state)
-    execution_source = inspect.getsource(_runnable_execution)
+    execution_source = "\n".join(
+        inspect.getsource(module) for module in (_runnable_input_metadata, _runnable_input_aliases)
+    )
     state_uses = state_source.count(
         f"with _state.pause_logging(), {helper}():"
     ) + state_source.count(f"with {helper}():")
-    assert state_uses == 3, state_uses  # staging clone, staging .to(), random init
+    # staging clone, staging .to(), random init, live declared-state snapshot
+    assert state_uses == 4, state_uses
     execution_uses = execution_source.count(f"with {helper}():")
     assert execution_uses == 2, execution_uses  # input mirror, second state clone
     # The snapshot primitives themselves stay un-neutralized.

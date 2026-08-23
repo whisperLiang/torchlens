@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -78,11 +79,6 @@ class PatchingToyModel(nn.Module):
         return self.block(x)
 
 
-@tl.facets.register(
-    class_name="PatchableAttention",
-    target_scope="module",
-    facets=("result", "attn_out", "n_heads", "head"),
-)
 def patchable_attention(module: Any) -> dict[str, Any]:
     """Expose writable attention-output facets for the toy module."""
 
@@ -98,17 +94,42 @@ def patchable_attention(module: Any) -> dict[str, Any]:
     }
 
 
-@tl.facets.register(
-    class_name="PatchableMLP",
-    target_scope="module",
-    facets=("output", "up_out"),
-)
 def patchable_mlp(module: Any) -> dict[str, Any]:
     """Expose writable MLP output facets for the toy module."""
 
     output_op = module.trace.ops[module.calls[0].output_ops[0]]
     spec = FacetSpec.from_home(output_op, recipe_id="patchable_mlp")
     return {"output": spec, "up_out": spec}
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _register_module_facet_recipes() -> Iterator[None]:
+    """Register this module's recipes at RUN time, restoring the registry after.
+
+    A module-level ``@tl.facets.register`` fires at import -- i.e. at pytest
+    COLLECTION -- mutating the process-global registry before any fixture can
+    isolate it, so the same trace built in a targeted run versus after full
+    collection saw different recipe/provenance state (hunt-b2-sol R76/R77).
+    """
+
+    from torchlens.semantic import facets as _facets
+
+    saved = list(_facets._REGISTRY)
+    tl.facets.register(
+        class_name="PatchableAttention",
+        target_scope="module",
+        facets=("result", "attn_out", "n_heads", "head"),
+    )(patchable_attention)
+    tl.facets.register(
+        class_name="PatchableMLP",
+        target_scope="module",
+        facets=("output", "up_out"),
+    )(patchable_mlp)
+    try:
+        yield
+    finally:
+        _facets._REGISTRY[:] = saved
+        _facets._REGISTRY_VERSION += 1
 
 
 def _metric(log: Any) -> torch.Tensor:

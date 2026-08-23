@@ -4,19 +4,20 @@ All existing validation + visualization tests migrated from test_validation_and_
 plus new API coverage tests.
 """
 
+import os
+from collections.abc import Iterator
 from os.path import join as opj
 
+import example_models
 import pytest
 import torch
 
-from conftest import VIS_OUTPUT_DIR
-
-import example_models
 from torchlens import trace
 from torchlens.io import get_model_metadata
 from torchlens.validation import validate_forward_pass
 from torchlens.visualization import show_model_graph
 
+VIS_OUTPUT_DIR = opj(os.environ["TORCHLENS_TEST_OUTPUTS_DIR"], "visualizations")
 
 # =============================================================================
 # Simple operations
@@ -1779,7 +1780,7 @@ def test_functional_after_submodule_not_box():
     A torch.relu after a nn.Linear inside a container module should not get
     box-shaped rendering (which is reserved for module outputs).
     """
-    from torchlens.visualization.rendering import _get_node_address_shape_color
+    from torchlens.visualization._render_nodes import _get_node_address_shape_color
 
     model = example_models.FunctionalAfterSubmodule()
     x = torch.rand(2, 5)
@@ -3935,14 +3936,43 @@ LOOP_COMPARISON_DIR = opj(VIS_OUTPUT_DIR, "loop-comparison")
 
 
 @pytest.fixture(autouse=True, scope="module")
-def _ensure_loop_comparison_dir():
+def _ensure_loop_comparison_dir(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[None]:
+    """Route loop-comparison artifacts to this session's private temp tree."""
+
+    global LOOP_COMPARISON_DIR
+
+    previous = LOOP_COMPARISON_DIR
+    LOOP_COMPARISON_DIR = str(tmp_path_factory.mktemp("loop-comparison"))
+    try:
+        yield
+    finally:
+        LOOP_COMPARISON_DIR = previous
+
+
+def _assert_render_pdf(stem: str) -> None:
+    """Assert a ``show_model_graph`` run wrote a fresh non-empty PDF artifact.
+
+    A no-op renderer would leave no file (or an empty one); this catches that.
+    """
     import os
 
-    os.makedirs(LOOP_COMPARISON_DIR, exist_ok=True)
+    path = opj(LOOP_COMPARISON_DIR, f"{stem}.pdf")
+    assert os.path.exists(path), f"expected visualization artifact at {path}"
+    with open(path, "rb") as fh:
+        head = fh.read(4)
+    assert head == b"%PDF", f"expected {path} to be a non-empty PDF artifact"
 
 
 def _render_both(model, x, name):
     """Render a model with and without loop detection for comparison."""
+    import os
+
+    for stem in (f"{name}_loops_on", f"{name}_loops_off", f"{name}_loops_off_unrolled"):
+        artifact = opj(LOOP_COMPARISON_DIR, f"{stem}.pdf")
+        if os.path.exists(artifact):
+            os.remove(artifact)
     show_model_graph(
         model,
         x,
@@ -3968,6 +3998,10 @@ def _render_both(model, x, name):
         vis_outpath=opj(LOOP_COMPARISON_DIR, f"{name}_loops_off_unrolled"),
         recurrence_detection=False,
     )
+    # Each of the three renders must have produced a real PDF on disk.
+    _assert_render_pdf(f"{name}_loops_on")
+    _assert_render_pdf(f"{name}_loops_off")
+    _assert_render_pdf(f"{name}_loops_off_unrolled")
 
 
 def test_loop_compare_repeated_module(vector_input):

@@ -1,15 +1,40 @@
 # postprocess/ - Implementation Guide
 
-## Critical Ordering Dependencies
-- Steps 1-3 must run before Step 5 so conditional attribution sees an orphan-free graph.
-- Module suffixes must already be present on `equivalence_class` before Step 7.
-- Step 7 must precede Step 8 because label mapping uses recurrent groups.
-- Step 9 must precede Step 11 because lookup keys depend on finalized module hierarchy info.
-- Step 10 must rename global refs before lookup-key finalization.
-- Step 15.5 must precede Step 16 because `Module.layers` points to `Layer` keys.
-- Step 16.5 computes `graph_shape_hash` before `_set_tracing_finished` changes access behavior.
-- Steps 18-19 are only for streamed out bundles.
-- Step 20 releases live parameter references after all logs and optional streams are finalized.
+## Ordering Is Derived (design-ppdag-v3)
+Step order is NOT hand-maintained. `_contracts.py` holds each step's declared
+contract (op-column `writes`/`reads`, `placeholder_probes`, `row_effects`,
+`trace_state` tokens) plus the two frozen direction authorities:
+`LEGACY_STEP_RANK` (every derived edge orients by rank, never by registry
+position) and the reason-bearing `PINNED_ORDER_PAIRS` corpus. `_executor.py`
+derives the edges (RAW/WW/WAR, two-sided row barriers, token conflicts, the
+step-17 barrier), runs rank-keyed Kahn, and refuses import when the derived
+order, registry, rank, or corpus disagree (checks R1/R2/K1 + the token
+read-before-write analogue). `tests/test_postprocess_dag.py` freezes the
+goldens (multi-writer table, probe set, rank), pins the day-1 findings by
+name, and holds K2 (every derived producer->consumer pair must be pinned
+with a reviewed reason).
+
+Reordering steps therefore requires: editing the named corpus entry (the
+semantic review), re-recording the axes matrix
+(`tests/support/postprocess_axes.py`), the byte-identity oracles, and a
+warnings/exception-order review (those are pinned only by day-1 identity).
+The historical prose invariants (1-3 before 5, 7 before 8, 9/10 before 11,
+15.5 before 16, 18/19 before 20) are corpus entries now; there is NO
+("16.5","17") pair — 16.5's pinned successors are 18, and 17 pairs with
+17.5/18 (read `PINNED_ORDER_PAIRS` in `_contracts.py` for the authority).
+
+## Executor
+`postprocess()` keeps the prologue (pre-0 + step-0 materialize block), the
+no-layers early exit, and the freeze epilogue; steps 1-20 run through
+`_executor.run_pipeline` over `STEP_REGISTRY`. Every step body resolves its
+callable through the `torchlens.postprocess` module namespace AT CALL TIME —
+monkeypatching a step function on the module still works and still trips the
+audit (the seam test proves it). Audit windows are explicit per-step
+boundaries: begin -> run -> end-in-finally -> contract check ->
+postconditions OUTSIDE any window; no window survives the loop, so the
+freeze seam runs unaudited by construction. Step 18's `should_run` IS the
+streaming snapshot point (context-writing, never trace-writing); step 19
+gates on the snapshot; `should_run` evaluates exactly once per step.
 
 ## Step 5 Conditional Branch Detection
 - Implementation is in `control_flow.py` with AST support from `ast_branches.py`.
@@ -21,8 +46,9 @@
 
 ## Module Suffixes
 Capture-time op creation appends module-address information to `equivalence_class`
-so identical ops in different modules do not get loop-grouped together. Loop
-detection still rebuilds assignments after expansion to clear stale group references.
+so identical ops in different modules do not get loop-grouped together. Step 7's
+`loop_detection.py` seam adapts Trace ops to the live backend-neutral implementation
+in `loop_grouping_adapter.py`; do not duplicate grouping logic in the Trace adapter.
 
 ## Step 11 Lookup-Key Finalization
 `_build_lookup_keys_and_finalize_retained_layers()` applies lookup-key construction while
@@ -33,15 +59,16 @@ Streaming bundle finalization and eviction live in `finalization.py`. These step
 with `_io.streaming.BundleStreamWriter` and lazy out refs. Never evict graph-connected
 training outs. Step 20 then releases live parameter references.
 
-## Fast-Mode Postprocess
-`postprocess_fast()` only copies output outs from parents, trims/renames as needed,
-refreshes saved-output summaries, undecorates tensors, builds `Layer` aggregates, and sets
-pass-finished. It intentionally skips graph traversal, conditionals, loop detection, label
-mapping, and module building.
+## Refresh Projection
+There is no `postprocess_fast()` orchestrator. Step 0 reads the sealed
+`CapturedRunCore.events` snapshot (cloned with independent mutable dict fields) when a
+`CaptureSession` is attached, `RefreshProjector` applies refreshed payloads onto the
+existing graph, and the single `postprocess()` entry point preserves the ordered
+Step 0-20 contracts. Saved-output summaries are refreshed after Step 11 finalizes the
+retained op list.
 
 ## Gotchas
 - `_build_layer_logs()` merges only selected fields across ops; most fields use first pass.
-- `_build_module_logs()` must not run in fast mode.
 - `_tracing_finished` is not reset between exhaustive and fast ops.
 - Conditional cleanup must update both primary cond-id structures and derived views.
 - Changing label formats requires checking visualization, validation, I/O, intervention, and

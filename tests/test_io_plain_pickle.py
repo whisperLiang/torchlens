@@ -136,11 +136,11 @@ def test_conditional_body_cache_survives_pickle_and_tlspec_round_trips(tmp_path:
     assert tlspec_restored[label].is_in_conditional_body is True
 
 
-def test_old_style_pickle_without_io_format_version_warns_and_remains_usable(
+def test_old_style_pickle_without_io_format_version_refuses_typed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Forged pre-sprint pickles should warn on load and keep accessors working."""
+    """Forged pre-sprint pickles refuse at the 2.33 rehydration floor."""
 
     trace = _build_trace()
     pickle_path = tmp_path / "old_style_trace.pkl"
@@ -168,14 +168,11 @@ def test_old_style_pickle_without_io_format_version_warns_and_remains_usable(
     with pickle_path.open("wb") as handle:
         pickle.dump(trace, handle)
 
-    with pytest.warns(DeprecationWarning):
-        with pickle_path.open("rb") as handle:
-            restored = pickle.load(handle)
+    from torchlens._io import ArtifactVersionBelowFloorError
 
-    assert isinstance(restored, Trace)
-    assert restored[restored.output_layers[0]].layer_label == restored.output_layers[0]
-    assert restored.layer_list[0].source_trace is restored
-    assert isinstance(_first_saved_layer(restored).out, torch.Tensor)
+    with pytest.raises(ArtifactVersionBelowFloorError, match="torchlens 2.33"):
+        with pickle_path.open("rb") as handle:
+            pickle.load(handle)
 
 
 class _TrainableModel(nn.Module):
@@ -361,23 +358,29 @@ def test_op_setstate_absent_container_fields_restore_typed() -> None:
     restored = Op.__new__(Op)
     restored.__setstate__(state)
 
-    assert isinstance(restored.input_to_module_calls, list)
-    assert isinstance(restored.parents, list)
-    assert isinstance(restored.children, list)
-    assert isinstance(restored.equivalent_ops, set)
-    assert isinstance(restored.root_ancestors, set)
-    assert isinstance(restored._param_barcodes, list)
+    assert isinstance(restored.input_to_module_calls, tuple)
+    assert isinstance(restored.parents, tuple)
+    assert isinstance(restored.children, tuple)
+    assert isinstance(restored.equivalent_ops, frozenset)
+    assert isinstance(restored.root_ancestors, frozenset)
+    assert isinstance(restored._param_barcodes, tuple)
     assert isinstance(restored.param_shapes, list)
-    assert isinstance(restored.modules, list)
+    assert isinstance(restored.modules, tuple)
     # Consumer patterns from finalization/loop_detection/invariants must work.
     assert "missing" not in restored.input_to_module_calls
     assert list(restored.input_to_module_calls) == []
 
 
-def test_backend_address_repair_only_applies_before_v5() -> None:
-    """The v5 field migration must not overwrite a current explicit ``None``."""
+def test_backend_address_none_is_preserved_and_pre_floor_refuses() -> None:
+    """Explicit ``None`` survives restore; pre-floor states refuse typed.
 
-    from torchlens._io import TLSPEC_VERSION
+    The v5 ``backend_address`` repair ladder is deleted: the 2.33 floor
+    guarantees every loadable state already carries the field, so an explicit
+    ``None`` must never be overwritten from ``address``, and a v4 state must
+    refuse instead of triggering the migration.
+    """
+
+    from torchlens._io import TLSPEC_VERSION, ArtifactVersionBelowFloorError
     from torchlens.data_classes.layer import Layer
     from torchlens.data_classes.op import Op
 
@@ -397,8 +400,8 @@ def test_backend_address_repair_only_applies_before_v5() -> None:
 
         state["tlspec_version"] = 4
         legacy = factory()
-        legacy.__setstate__(dict(state))
-        assert legacy.backend_address == "plain.attribute"
+        with pytest.raises(ArtifactVersionBelowFloorError, match="tlspec_version=4"):
+            legacy.__setstate__(dict(state))
 
 
 def test_setstate_present_but_wrong_typed_container_is_coerced() -> None:
@@ -415,8 +418,8 @@ def test_setstate_present_but_wrong_typed_container_is_coerced() -> None:
     op_state["_param_barcodes"] = {"legacy_barcode_as_set"}
     restored_op = Op.__new__(Op)
     restored_op.__setstate__(op_state)
-    assert isinstance(restored_op._param_barcodes, list)
-    assert restored_op._param_barcodes == ["legacy_barcode_as_set"]
+    assert isinstance(restored_op._param_barcodes, tuple)
+    assert restored_op._param_barcodes == ("legacy_barcode_as_set",)
 
     # Trace: `op_labels` declared as list but legacy state holds a set.
     trace_state = trace.__getstate__()
@@ -445,6 +448,13 @@ def test_all_field_order_container_defaults_are_typed() -> None:
         base_state = instance.__getstate__()
         for field_name in field_order:
             if field_name not in base_state:
+                continue
+            if field_name == "_capture_outcome":
+                # Persisted as a string-only CODEC dict but deliberately
+                # restored as the typed CaptureOutcome record (parsed against
+                # closed vocabularies); an absent key restores a DERIVED
+                # record, never None, so the typed-default invariant this
+                # guard exists for is satisfied by a non-container type.
                 continue
             live_value = base_state[field_name]
             if not isinstance(live_value, (list, dict, tuple, set)):
@@ -482,3 +492,62 @@ def test_plain_pickle_preserves_in_memory_outs(tmp_path: Path) -> None:
     assert isinstance(restored_layer.out, torch.Tensor)
     assert restored_layer.out_ref is None
     assert torch.equal(restored_layer.out, source_layer.out)
+
+
+def test_plain_pickle_survives_a_lambda_activation_transform() -> None:
+    """R10-7: a lambda transform= must not crash pickle while tl.save works.
+
+    Fail-before: ``pickle.dumps`` raised ``PicklingError: Can't pickle
+    <lambda>`` from the op/layer records; the raw callable fields now
+    serialize to the loaded-artifact form (None), like every other
+    live-user-object DROP field.
+    """
+
+    log = trace_fn(_PlainPickleModel(), torch.ones(1, 3), activation_transform=lambda t: t * 2)
+    restored = pickle.loads(pickle.dumps(log))
+    assert restored.activation_transform is None
+    assert restored.layer_list[0].activation_transform is None
+
+
+def test_plain_pickle_survives_a_lambda_input_transform() -> None:
+    """R10-7b: the MODERN ``transform=`` spelling must not crash pickle either.
+
+    Fail-before: the R10-7 fix nulled ``activation_transform``/
+    ``grad_transform``/``_output_transform`` in ``__getstate__`` but missed
+    ``_transform`` -- the field the public ``tl.trace(..., transform=...)``
+    kwarg populates -- so ``pickle.dumps`` raised ``PicklingError: Can't
+    pickle <lambda>`` while ``tl.save`` succeeded on the same trace.
+    """
+
+    log = trace_fn(_PlainPickleModel(), torch.ones(1, 3), transform=lambda a: a * 2)
+    restored = pickle.loads(pickle.dumps(log))
+    assert restored._transform is None
+
+
+def test_plain_pickle_survives_a_fast_run_session() -> None:
+    """R10-6: run(fast=True) must not make pickle/deepcopy crash on weakrefs.
+
+    Fail-before: ``__getstate__`` popped every other session workspace but
+    never ``_fast_run_session``, so ``pickle.dumps`` AND ``copy.deepcopy``
+    raised ``TypeError: cannot pickle 'weakref.ReferenceType'`` after a fast
+    run.
+    """
+
+    import copy
+
+    class _Wrapped(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = nn.Linear(3, 2)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.linear(x)
+
+    model = _Wrapped()
+    log = trace_fn(model, torch.ones(1, 3))
+    log.run(inputs=torch.ones(1, 3), fast=True)
+    assert log.__dict__.get("_fast_run_session") is not None
+
+    restored = pickle.loads(pickle.dumps(log))
+    assert restored.__dict__.get("_fast_run_session") is None
+    copy.deepcopy(log)

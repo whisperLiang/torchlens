@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 import importlib
+from collections.abc import Iterator
 
 import pytest
 import torch
 import torch.nn.functional as functional
+from support.rf_isolation import preserved_rf_registry
 from torch import nn
 
 import torchlens as tl
@@ -16,36 +17,18 @@ from torchlens.receptive_field._types import (
     ReceptiveFieldValidationStatus,
 )
 
-
 _rf_package = importlib.import_module("torchlens.receptive_field")
 _rules = importlib.import_module("torchlens.receptive_field._rules")
 setattr(_rf_package, "_rules", _rules)
 cross_validate = importlib.import_module("torchlens.receptive_field._validation").cross_validate
-_PACK: dict[str, object] | None = None
 
 
 @pytest.fixture(autouse=True)
 def built_in_rule_pack() -> Iterator[None]:
     """Install built-in RF rules while preserving registry isolation."""
 
-    global _PACK
-    original = dict(_rules._RF_RULES)
-    original_epoch = _rules._RF_RULES_EPOCH
-    _rules._RF_RULES.clear()
-    if _PACK is None:
-        module = importlib.import_module("torchlens.receptive_field.rules")
-        if not _rules._RF_RULES:
-            for name in module.__all__:
-                importlib.reload(getattr(module, name))
-        _PACK = dict(_rules._RF_RULES)
-    else:
-        _rules._RF_RULES.update(_PACK)
-    try:
+    with preserved_rf_registry(install_builtin=True):
         yield
-    finally:
-        _rules._RF_RULES.clear()
-        _rules._RF_RULES.update(original)
-        _rules._RF_RULES_EPOCH = original_epoch
 
 
 def _op(trace: object, name: str) -> object:
@@ -165,6 +148,24 @@ def test_grouped_convolution_keeps_spatial_windows_with_channel_upper_bound() ->
     assert descriptor.axes[2].size == 3
     result = target.receptive_field.check((0, 1, 2, 2))
     assert result.status is ReceptiveFieldValidationStatus.PASS
+
+
+@pytest.mark.parametrize("surface", ["check", "verify"])
+def test_poisoned_trace_refuses_receptive_field_verdicts(surface: str) -> None:
+    """RF verdict producers share the monotonic poisoned-trace refusal gate."""
+    from torchlens.errors import PoisonedRunError
+    from torchlens.runnable import PathFaithfulness, mark_trace_path_status
+
+    model = nn.Conv2d(1, 1, 3, padding=1, bias=False)
+    trace = _trace(model, torch.ones(1, 1, 5, 5, requires_grad=True))
+    target = _op(trace, "conv2d")
+    mark_trace_path_status(trace, PathFaithfulness.DIVERGED, None)
+
+    with pytest.raises(PoisonedRunError, match="receptive field verification"):
+        if surface == "check":
+            target.receptive_field.check((0, 0, 2, 2))
+        else:
+            tl.receptive_field.verify(trace)
 
 
 class _DistinctAttention(nn.Module):

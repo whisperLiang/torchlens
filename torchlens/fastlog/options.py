@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Callable, Final, Literal, Mapping
+from typing import Any, Final, Literal, get_args
 
 from .._deprecations import MISSING, MissingType
-from ..ir.predicate import RetroactiveCaptureDecision
+from .._errors import InvalidArgumentError
 from ..intervention.predicates import InterventionPredicate
+from ..ir.predicate import RetroactiveCaptureDecision
 from ..options import StreamingOptions
 from ..types import ActivationPostfunc, GradientPostfunc
 from .types import CaptureSpec, GradRecordContext, RecordContext
@@ -27,9 +29,16 @@ LookbackPayloadPolicy = Literal[
     "disk_spilled",
 ]
 
+LOOKBACK_PAYLOAD_POLICIES: Final[tuple[str, ...]] = get_args(LookbackPayloadPolicy)
+"""Runtime authority for the lookback payload policy vocabulary.
+
+Derived from the canonical :data:`LookbackPayloadPolicy` literal so validation
+and the literal can never drift apart; consumers import this tuple rather than
+re-spelling the policy strings.
+"""
+
 _RECORDING_FIELDS: Final[tuple[str, ...]] = (
     "keep_op",
-    "keep_module",
     "default_op",
     "default_module",
     "history_size",
@@ -70,27 +79,26 @@ def _resolve_recording_option(
 class RecordingOptions:
     """Grouped options for one fastlog predicate recording session."""
 
-    keep_op: PredicateFn | None = None
-    keep_module: PredicateFn | None = None
-    default_op: bool | CaptureSpec = False
-    default_module: bool | CaptureSpec = False
-    history_size: int = 8
-    lookback: int = 0
-    lookback_payload_policy: LookbackPayloadPolicy = "metadata_only"
-    include_source_events: bool = False
-    intervene: InterventionPredicate | None = None
-    halt: HaltPredicateFn | None = None
-    max_predicate_failures: int = 32
-    on_predicate_error: PredicateErrorMode = "auto"
-    on_forward_error: ForwardErrorMode = "raise"
-    streaming: StreamingOptions | None = None
-    random_seed: int | None = None
-    activation_transform: ActivationPostfunc | None = None
-    save_raw_activations: bool = True
-    save_grads: GradPredicateFn | bool | CaptureSpec | None = None
-    default_grad: bool | CaptureSpec = False
-    grad_transform: GradientPostfunc | None = None
-    save_raw_gradients: bool = True
+    keep_op: PredicateFn | None
+    default_op: bool | CaptureSpec
+    default_module: bool | CaptureSpec
+    history_size: int
+    lookback: int
+    lookback_payload_policy: LookbackPayloadPolicy
+    include_source_events: bool
+    intervene: InterventionPredicate | None
+    halt: HaltPredicateFn | None
+    max_predicate_failures: int
+    on_predicate_error: PredicateErrorMode
+    on_forward_error: ForwardErrorMode
+    streaming: StreamingOptions | None
+    random_seed: int | None
+    activation_transform: ActivationPostfunc | None
+    save_raw_activations: bool
+    save_grads: GradPredicateFn | bool | CaptureSpec | None
+    default_grad: bool | CaptureSpec
+    grad_transform: GradientPostfunc | None
+    save_raw_gradients: bool
     _specified_fields: frozenset[str] = field(
         default_factory=frozenset,
         init=False,
@@ -101,7 +109,6 @@ class RecordingOptions:
     def __init__(
         self,
         keep_op: PredicateFn | None | MissingType = MISSING,
-        keep_module: PredicateFn | None | MissingType = MISSING,
         default_op: bool | CaptureSpec | MissingType = MISSING,
         default_module: bool | CaptureSpec | MissingType = MISSING,
         history_size: int | MissingType = MISSING,
@@ -127,9 +134,6 @@ class RecordingOptions:
         specified_fields: set[str] = set()
         values: dict[str, Any] = {
             "keep_op": _resolve_recording_option("keep_op", keep_op, None, specified_fields),
-            "keep_module": _resolve_recording_option(
-                "keep_module", keep_module, None, specified_fields
-            ),
             "default_op": _resolve_recording_option(
                 "default_op", default_op, False, specified_fields
             ),
@@ -200,10 +204,10 @@ class RecordingOptions:
 
     @classmethod
     def from_values(
-        cls: type["RecordingOptions"],
+        cls: type[RecordingOptions],
         values: Mapping[str, Any],
         specified_fields: frozenset[str],
-    ) -> "RecordingOptions":
+    ) -> RecordingOptions:
         """Build an instance from already-resolved field values."""
 
         _validate_recording_values(values)
@@ -232,53 +236,125 @@ def _validate_recording_values(values: Mapping[str, Any]) -> None:
     grad_transform = values["grad_transform"]
     save_raw_gradients = values["save_raw_gradients"]
     if not isinstance(history_size, int) or not 0 <= history_size <= 1024:
-        raise ValueError("history_size must be an integer in [0, 1024]")
-    if not isinstance(lookback, int) or not 0 <= lookback <= 1024:
-        raise ValueError("lookback must be an integer in [0, 1024]")
-    if lookback_payload_policy not in {
-        "metadata_only",
-        "detached_raw",
-        "transformed",
-        "grad_connected",
-        "disk_spilled",
-    }:
-        raise ValueError(
-            "lookback_payload_policy must be one of 'metadata_only', 'detached_raw', "
-            "'transformed', 'grad_connected', or 'disk_spilled'"
+        raise InvalidArgumentError(
+            f"history_size must be an integer in [0, 1024]; received {history_size!r}",
+            code="history_size_invalid",
+            remedy="pass an integer history_size between 0 and 1024",
+            argument="history_size",
         )
+    if not isinstance(lookback, int) or not 0 <= lookback <= 1024:
+        raise InvalidArgumentError(
+            f"lookback must be an integer in [0, 1024]; received {lookback!r}",
+            code="lookback_invalid",
+            remedy="pass an integer lookback between 0 and 1024",
+            argument="lookback",
+        )
+    if lookback_payload_policy not in LOOKBACK_PAYLOAD_POLICIES:
+        allowed = ", ".join(repr(policy) for policy in LOOKBACK_PAYLOAD_POLICIES[:-1])
+        raise InvalidArgumentError(
+            f"lookback_payload_policy must be one of {allowed}, "
+            f"or {LOOKBACK_PAYLOAD_POLICIES[-1]!r}; "
+            f"received {lookback_payload_policy!r}",
+            code="lookback_payload_policy_invalid",
+            remedy="choose a documented lookback payload policy",
+            argument="lookback_payload_policy",
+        )
+    # R64: the record surface carries its OWN codes (recording_*) so one
+    # documented code never maps to two catchable builtins -- the tl.trace
+    # twins keep TypeError lineage under the unprefixed codes, this surface
+    # keeps its historical ValueError lineage (the F1/F3/F4 split pattern).
     if intervene is not None and not callable(intervene):
-        raise ValueError("intervene must be callable or None")
+        raise InvalidArgumentError(
+            f"intervene must be callable or None; received {type(intervene).__name__}",
+            code="recording_intervention_predicate_type_invalid",
+            remedy="pass tl.when(...), another predicate, or None",
+            argument="intervene",
+        )
     if halt is not None and not callable(halt):
-        raise ValueError("halt must be callable or None")
+        raise InvalidArgumentError(
+            f"halt must be callable or None; received {type(halt).__name__}",
+            code="recording_halt_predicate_type_invalid",
+            remedy="pass a halt predicate or None",
+            argument="halt",
+        )
     if not isinstance(max_predicate_failures, int) or max_predicate_failures < 0:
-        raise ValueError("max_predicate_failures must be a non-negative integer")
+        raise InvalidArgumentError(
+            f"max_predicate_failures must be a non-negative integer; "
+            f"received {max_predicate_failures!r}",
+            code="max_predicate_failures_invalid",
+            remedy="pass a non-negative integer max_predicate_failures",
+            argument="max_predicate_failures",
+        )
     if on_predicate_error not in {"auto", "accumulate", "fail-fast"}:
-        raise ValueError("on_predicate_error must be 'auto', 'accumulate', or 'fail-fast'")
+        raise InvalidArgumentError(
+            "on_predicate_error must be 'auto', 'accumulate', or 'fail-fast'; "
+            f"received {on_predicate_error!r}",
+            code="on_predicate_error_invalid",
+            remedy="pass on_predicate_error='auto', 'accumulate', or 'fail-fast'",
+            argument="on_predicate_error",
+        )
     if on_forward_error not in {"raise", "attach_partial", "return_partial"}:
-        raise ValueError("on_forward_error must be 'raise', 'attach_partial', or 'return_partial'")
+        raise InvalidArgumentError(
+            "on_forward_error must be 'raise', 'attach_partial', or 'return_partial'; "
+            f"received {on_forward_error!r}",
+            code="on_forward_error_invalid",
+            remedy="pass on_forward_error='raise', 'attach_partial', or 'return_partial'",
+            argument="on_forward_error",
+        )
     if activation_transform is not None and not callable(activation_transform):
-        raise ValueError("activation_transform must be callable or None")
+        raise InvalidArgumentError(
+            f"activation_transform must be callable or None; "
+            f"received {type(activation_transform).__name__}",
+            code="recording_option_type_invalid",
+            remedy="pass a callable activation_transform or None",
+            argument="activation_transform",
+        )
     if not isinstance(save_raw_activations, bool):
-        raise ValueError("save_raw_activations must be a bool")
+        raise InvalidArgumentError(
+            f"save_raw_activations must be a bool; received {type(save_raw_activations).__name__}",
+            code="recording_option_type_invalid",
+            remedy="pass save_raw_activations=True or False",
+            argument="save_raw_activations",
+        )
     if (
         save_grads is not None
         and not isinstance(save_grads, (bool, CaptureSpec))
         and not callable(save_grads)
     ):
-        raise ValueError("save_grads must be callable, bool, CaptureSpec, or None")
+        raise InvalidArgumentError(
+            f"save_grads must be callable, bool, CaptureSpec, or None; "
+            f"received {type(save_grads).__name__}",
+            code="recording_option_type_invalid",
+            remedy="pass a predicate, bool, CaptureSpec, or None as save_grads",
+            argument="save_grads",
+        )
     if not isinstance(default_grad, (bool, CaptureSpec)):
-        raise ValueError("default_grad must be bool or CaptureSpec")
+        raise InvalidArgumentError(
+            f"default_grad must be bool or CaptureSpec; received {type(default_grad).__name__}",
+            code="recording_option_type_invalid",
+            remedy="pass a bool or CaptureSpec default_grad",
+            argument="default_grad",
+        )
     if grad_transform is not None and not callable(grad_transform):
-        raise ValueError("grad_transform must be callable or None")
+        raise InvalidArgumentError(
+            f"grad_transform must be callable or None; received {type(grad_transform).__name__}",
+            code="recording_option_type_invalid",
+            remedy="pass a callable grad_transform or None",
+            argument="grad_transform",
+        )
     if not isinstance(save_raw_gradients, bool):
-        raise ValueError("save_raw_gradients must be a bool")
+        raise InvalidArgumentError(
+            f"save_raw_gradients must be a bool; received {type(save_raw_gradients).__name__}",
+            code="recording_option_type_invalid",
+            remedy="pass save_raw_gradients=True or False",
+            argument="save_raw_gradients",
+        )
 
 
 def merge_recording_options(
     *,
     recording: RecordingOptions | None,
     keep_op: PredicateFn | None | MissingType = MISSING,
-    keep_module: PredicateFn | None | MissingType = MISSING,
     default_op: bool | CaptureSpec | MissingType = MISSING,
     default_module: bool | CaptureSpec | MissingType = MISSING,
     history_size: int | MissingType = MISSING,
@@ -307,7 +383,6 @@ def merge_recording_options(
     )
     incoming = {
         "keep_op": keep_op,
-        "keep_module": keep_module,
         "default_op": default_op,
         "default_module": default_module,
         "history_size": history_size,
@@ -332,7 +407,12 @@ def merge_recording_options(
         if value is MISSING:
             continue
         if field_name in specified_fields:
-            raise ValueError(f"Recording option {field_name!r} was specified twice")
+            raise InvalidArgumentError(
+                f"Recording option {field_name!r} was specified twice",
+                code="recording_option_duplicate",
+                remedy="pass each recording option exactly once",
+                argument=field_name,
+            )
         base_values[field_name] = value
         specified_fields.add(field_name)
     return RecordingOptions.from_values(base_values, frozenset(specified_fields))

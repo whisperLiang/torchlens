@@ -7,9 +7,9 @@ Hugging Face models.
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-import tempfile
 from typing import Any
 
 import torch

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections import namedtuple
-from dataclasses import dataclass
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -486,7 +486,7 @@ def test_literal_container_spec_is_picklable() -> None:
 class _OpaqueExpr(tuple[Any, ...]):
     """Tuple-like opaque object that raises like a Narwhals/Polars expression."""
 
-    def __new__(cls) -> "_OpaqueExpr":
+    def __new__(cls) -> _OpaqueExpr:
         """Create an empty tuple payload for the opaque expression."""
 
         return super().__new__(cls, ())

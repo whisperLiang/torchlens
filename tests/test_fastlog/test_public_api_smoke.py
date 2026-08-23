@@ -47,12 +47,36 @@ def _keep_no_ops(ctx: RecordContext) -> bool:
     return False
 
 
-def test_record_keep_op_true_and_false() -> None:
+def _assert_unique_label_lookups(recording: tl.fastlog.Recording) -> None:
+    """Assert each retained record is indexed exactly once per distinct label."""
+
+    for record in recording.records:
+        label_matches = recording[record.ctx.label]
+        assert label_matches == [record]
+        raw_label = record.ctx.raw_label
+        if raw_label is not None:
+            raw_matches = recording[raw_label]
+            assert raw_matches == [record]
+
+
+def _force_legacy_capture_event_projection(recording: tl.fastlog.Recording) -> None:
+    """Reset a lazy Recording to rebuild records from legacy ``_capture_events`` only."""
+
+    assert object.__getattribute__(recording, "_capture_events") is not None
+    object.__setattr__(recording, "_captured_run_cores", ())
+    object.__getattribute__(recording, "records").clear()
+    recording.by_pass.clear()
+    recording.by_label.clear()
+    recording.by_address.clear()
+    object.__setattr__(recording, "_records_built", False)
+
+
+def test_record_save_true_and_false() -> None:
     """One-shot record honors constant true and false operation predicates."""
 
     x = torch.ones(1, 3)
-    kept = tl.fastlog.record(SimpleMlp(), x, keep_op=_keep_all_ops)
-    skipped = tl.fastlog.record(SimpleMlp(), x, keep_op=_keep_no_ops)
+    kept = tl.fastlog.record(SimpleMlp(), x, save=_keep_all_ops)
+    skipped = tl.fastlog.record(SimpleMlp(), x, save=_keep_no_ops)
 
     assert len(kept.records) > 0
     assert skipped.records == []
@@ -67,7 +91,7 @@ def test_record_multi_arg_and_kwargs_forward() -> None:
         MultiArgModel(),
         (x, y),
         {"scale": 2},
-        keep_op=_keep_all_ops,
+        save=_keep_all_ops,
     )
 
     assert len(recording.records) > 0
@@ -76,15 +100,33 @@ def test_record_multi_arg_and_kwargs_forward() -> None:
 def test_record_single_tensor_input_shorthand() -> None:
     """One-shot record treats a single tensor as one positional argument."""
 
-    recording = tl.fastlog.record(SimpleMlp(), torch.ones(1, 3), keep_op=_keep_all_ops)
+    recording = tl.fastlog.record(SimpleMlp(), torch.ones(1, 3), save=_keep_all_ops)
 
     assert len(recording.records) > 0
+
+
+def test_record_label_lookup_returns_each_record_once() -> None:
+    """Public Recording label lookup must not duplicate retained records."""
+
+    recording = tl.record(SimpleMlp(), torch.ones(1, 3), save=_keep_all_ops)
+
+    _assert_unique_label_lookups(recording)
+
+
+def test_record_label_lookup_legacy_capture_events_returns_each_record_once() -> None:
+    """Legacy ``_capture_events`` rebuild must not duplicate retained records."""
+
+    recording = tl.record(SimpleMlp(), torch.ones(1, 3), save=_keep_all_ops)
+
+    _force_legacy_capture_event_projection(recording)
+
+    _assert_unique_label_lookups(recording)
 
 
 def test_recorder_context_records_multiple_forwards() -> None:
     """Recorder accumulates explicitly logged forwards across a loop."""
 
-    with tl.fastlog.Recorder(SimpleMlp(), keep_op=_keep_all_ops) as recorder:
+    with tl.fastlog.Recorder(SimpleMlp(), save=_keep_all_ops) as recorder:
         for _ in range(5):
             recorder.log(torch.ones(1, 3))
 
@@ -111,7 +153,7 @@ def test_direct_model_call_inside_recorder_block_does_not_capture() -> None:
     """Only Recorder.log opens the capture scope."""
 
     model = SimpleMlp()
-    with tl.fastlog.Recorder(model, keep_op=_keep_all_ops) as recorder:
+    with tl.fastlog.Recorder(model, save=_keep_all_ops) as recorder:
         recorder.log(torch.ones(1, 3))
         before = len(recorder._state.recording.records)  # noqa: SLF001
         model(torch.ones(1, 3))
@@ -123,7 +165,7 @@ def test_direct_model_call_inside_recorder_block_does_not_capture() -> None:
 def test_dry_run_returns_events_without_tensor_payloads() -> None:
     """Dry-run returns event contexts and no retained tensor payloads."""
 
-    trace = tl.fastlog.dry_run(SimpleMlp(), torch.ones(1, 3), keep_op=_keep_all_ops)
+    trace = tl.fastlog.dry_run(SimpleMlp(), torch.ones(1, 3), save=_keep_all_ops)
 
     assert trace.events
     assert all(not hasattr(event, "ram_payload") for event in trace.events)
@@ -133,6 +175,6 @@ def test_dry_run_returns_events_without_tensor_payloads() -> None:
 def test_recorder_recording_before_exit_raises() -> None:
     """Recorder.recording is guarded until __exit__ finalizes."""
 
-    with tl.fastlog.Recorder(SimpleMlp(), keep_op=_keep_all_ops) as recorder:
+    with tl.fastlog.Recorder(SimpleMlp(), save=_keep_all_ops) as recorder:
         with pytest.raises(RecorderStateError):
             _ = recorder.recording

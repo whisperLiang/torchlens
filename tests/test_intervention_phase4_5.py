@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+from example_models import TinyReluAdd as _TinyShiftModel
 
 import torchlens as tl
 from torchlens import _state
@@ -36,26 +37,6 @@ class _TinyReluModel(torch.nn.Module):
 
         self.latest = torch.relu(x)
         return self.latest
-
-
-class _TinyShiftModel(torch.nn.Module):
-    """Small model that exercises input, operation, and output log fields."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply a ReLU and scalar shift.
-
-        Parameters
-        ----------
-        x:
-            Input tensor.
-
-        Returns
-        -------
-        torch.Tensor
-            Shifted ReLU out.
-        """
-
-        return torch.relu(x) + 1
 
 
 def _bad_hook(out: torch.Tensor, *, hook: tl.HookContext) -> torch.Tensor:

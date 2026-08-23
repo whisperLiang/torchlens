@@ -2,9 +2,11 @@
 
 This page is a compact map for agents writing or reviewing TorchLens code. Prefer the current
 v2 spelling: `tl.trace(..., backend=None)`, predicate `save=...`, `intervene=...`,
-`storage=...`, and `save_grads=...`.
+`storage=...`, and grouped `capture=tl.options.CaptureOptions(save_grads=...)` (the flat
+`save_grads=` kwarg is a deprecated alias that warns).
 
-Backend note: `backend=None` preserves torch eager default plus MLX module auto-routing.
+Backend note: `backend=None` preserves the torch eager default, and EVERY preview backend
+auto-routes genuine framework models (MLX, JAX, tinygrad, Paddle, TensorFlow).
 `tl.record()`/fastlog and true backward capture are torch-only in backend v1. Backend-neutral
 metadata lives on `Trace.backend`, `Trace.module_identity_mode`, `Trace.param_source`,
 `Trace.derived_grads`, `Trace.intermediate_derived_grads`, `Trace.payload_load_status`,
@@ -46,8 +48,11 @@ TensorFlow uses `backend="tf"` / `backend="tensorflow"` for the Keras-3 / TF>=2.
 `keras.backend.backend() == "tensorflow"`. Eager `op_callbacks` capture is the primary shipped
 mechanism and records real values, real taken-branch control flow, op-level records, and
 Keras/`tf.Module` module stacks. Graph-only FuncGraph fallback is the static-mode design for
-compiled/SavedModel-style entries; interventions, true backward capture, and T1/intermediate
-derived gradients are deferred.
+compiled/SavedModel-style entries. SHIPPED for eager entries: static-label `intervene=`
+(two-level writable layer, fail-closed site reachability) and leaf + exact T1 intermediate
+derived gradients via `tl.backends.tf.GradOptions`. Still deferred: `halt=`/`recipes=`, true
+backward capture, and value-dependent predicates (graph-only captures also refuse
+`grad_options` typed).
 JAX `array_payloads` saves round-trip typed PRNG keys and fully addressable single-host sharded
 arrays by value. `jax_named_sharding` metadata is a reconstructible JSON-primitive contract,
 but default load stays value-only; explicit re-sharding goes through `PayloadLoadHints` /
@@ -58,19 +63,20 @@ on the measured fixtures.
 
 ## Public surface map
 
-`torchlens.__all__` currently exposes 90 names. Group them by job:
+`torchlens.__all__` currently exposes 119 names. The most-used ones, grouped by job (this
+table is a selection, not the full list — read `torchlens.__all__` for that):
 
 | Job | Names |
 | --- | --- |
-| Capture and sparse recording | `trace`, `fastlog`, `record_span`, `tap` |
+| Capture and sparse recording | `trace`, `fastlog`, `span`, `tap` (`record_span` is a deprecated alias that warns) |
 | Persistence and bundles | `load`, `save`, `bundle`, `Bundle`; schema-v2 manifests add `backend`, `backend_runtime`, and `payload_policy` |
-| Replay and edits | `do`, `replay`, `replay_from`, `rerun` |
+| Replay and edits | `do`, `push`, `push_from`, `run` (`replay`/`replay_from`/`rerun` are deprecated aliases that warn) |
 | Data objects | `Trace`, `Layer`, `Op`, `Quantity`, `Bytes`, `Duration`, `Flops`, `Macs` |
 | Site discovery | `label`, `func`, `func_transform`, `module`, `contains`, `where`, `in_module`, `head`, `output`, `grad_fn`, `facet` |
-| Predicate composition | `followed_by`, `preceded_by`, `intervening`, `when` |
+| Predicate composition | `followed_by`, `preceded_by`, `without_op`, `when` (`intervening` is a deprecated alias that warns) |
 | Activation helpers | `zero_ablate`, `mean_ablate`, `resample_ablate`, `replace_with`, `swap_with`, `steer`, `scale`, `clamp`, `noise`, `project_onto`, `project_off`, `splice_module` |
 | Backward helpers | `bwd_hook`, `grad_zero`, `grad_scale`, `grad_clamp`, `grad_noise`, `grad_clip` |
-| Extraction and validation | `peek`, `extract`, `batched_extract`, `validate` |
+| Extraction and validation | `pluck`, `extract`, `extract_dataset`, `validate` (`peek` and `batched_extract` are deprecated aliases that warn); disk-mode `extract_dataset` writes a self-describing manifest, resumes with `resume=True`, and loads back via `torchlens.dataset_extraction.load_extraction` (DOCUMENTED-UNSTABLE spellings) |
 | Subpackages | `facets`, `fastlog` |
 
 Submodules such as `tl.report`, `tl.stats`, `tl.viz`, and `tl.compat` are available as attributes
@@ -194,6 +200,77 @@ graph = trace.draw(
 assert graph is not None
 ```
 
+## Machine-readable trace dump and budgeted reports
+
+Two agent-facing spellings (both DOCUMENTED-UNSTABLE pending the naming ratification
+sprint) describe the same surface the rest of this page drives:
+
+- `trace.to_agent_json()` returns a JSON-serializable, self-describing dump under the
+  `torchlens.agent_trace.v1` schema: capture outcome/verification honesty facts, counts,
+  execution-ordered pass-qualified op rows with graph edges, the module hierarchy, and an
+  embedded `guide` block that maps every record back to the live spelling to call next.
+  Tensor payloads are never inlined; read them as `trace[layer_label].out`. Pass
+  `max_ops=N` to cap op rows — any omission is disclosed in the `truncation` block, and
+  the `counts` block stays full-capture truth.
+- `tl.report.explain(trace, max_tokens=N)` budget-prunes the text report by whole
+  sections (low-value first), disclosing every drop in a trailing `Truncation` section.
+  The `Capture status` honesty facts and partial-capture failure evidence are never
+  dropped: a budget below that floor returns the floor plus a disclosure instead of a
+  misleading fragment. `max_tokens` refuses with `format="json"` (that schema is
+  fixed-shape and already minimal).
+
+```python
+import json
+
+import torch
+from torch import nn
+
+import torchlens as tl
+
+
+model = nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 2)).eval()
+x = torch.randn(2, 4)
+trace = tl.trace(model, x, save=tl.func("relu"))
+
+dump = trace.to_agent_json()
+assert dump["schema"] == "torchlens.agent_trace.v1"
+assert json.loads(json.dumps(dump)) == dump
+relu_row = next(row for row in dump["ops"] if row["layer_label"] == "relu_1_2")
+assert relu_row["saved"] is True
+assert trace[relu_row["layer_label"]].out.shape == (2, 4)
+
+budgeted = tl.report.explain(trace, max_tokens=120)
+assert "Capture status" in budgeted
+assert "Truncation" in budgeted  # drops are disclosed, never silent
+```
+
+## MCP server (`torchlens.bridge.mcp`)
+
+For hosts that speak the Model Context Protocol, `python -m torchlens.bridge.mcp` runs a
+local stdio server (extra: `pip install torchlens[mcp]`, requires `mcp>=2.0`;
+DOCUMENTED-UNSTABLE). It exposes read-only tools over SAVED `.tlspec` artifacts and the
+runtime environment — the same public surface as the rest of this page, never a parallel
+API, with no user-code execution and no mutation:
+
+- `torchlens_doctor` — environment health check (`tl.utils.doctor()` rows).
+- `torchlens_api_map` — machine-readable index of `torchlens.__all__` (name, kind, first
+  docstring line) plus the deliberately-unlisted submodules.
+- `torchlens_load_overview` — `tl.load(path)` + `trace.summary()` + capture honesty facts.
+- `torchlens_agent_dump` — `trace.to_agent_json(max_ops=...)` over a saved artifact.
+- `torchlens_explain` — `tl.report.explain(trace, max_tokens=..., audience=...)`.
+
+Live capture stays a Python-process concern: run `tl.trace(...)` in code, `tl.save(...)`
+the result, and point the tools at the artifact. The tool registry is importable without
+the `mcp` package for direct in-process use:
+
+```python
+import torchlens.bridge.mcp as tlmcp
+
+api_map = tlmcp.call_tool("torchlens_api_map")
+assert api_map["schema"] == "torchlens.api_map.v1"
+assert {row["name"] for row in api_map["names"]} == set(__import__("torchlens").__all__)
+```
+
 ## Anti-patterns
 
 - Do not trace `torch.compile`, `torch.jit`, or `torch.export` artifacts. Trace the original
@@ -202,7 +279,8 @@ assert graph is not None
   transform boundaries conservatively.
 - Do not call TorchLens capture from multiple threads or worker processes. Capture is single-process
   and single-threaded because it uses global toggle state.
-- Do not use deprecated `layers_to_save`, `vis_mode`, `hooks`, or `keep_op` spellings in new code
+- Do not use deprecated `layers_to_save`, `vis_mode`, or `hooks` spellings in new code
+  (`keep_op=`/`keep_module=` are fully removed and raise TypeError)
   unless you are intentionally testing compatibility.
 - Do not assume unsaved payloads can be read later. Re-trace with a wider `save=` predicate or use
   torch `tl.record(...).to_trace()` with the records you need. JAX/tinygrad/Paddle/TF `.tlspec` saves

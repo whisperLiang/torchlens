@@ -7,13 +7,17 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.backend_mlx
+
 mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 nn = pytest.importorskip("mlx.nn", exc_type=ImportError)
 
 import torchlens as tl  # noqa: E402
 from torchlens.intervention.errors import MultiMatchWarning  # noqa: E402
-from torchlens.validation import MetadataInvariantError  # noqa: E402
-from torchlens.validation import check_metadata_invariants  # noqa: E402
+from torchlens.validation import (  # noqa: E402
+    MetadataInvariantError,
+    check_metadata_invariants,
+)
 
 
 class MLXParameterless(nn.Module):
@@ -168,15 +172,15 @@ def test_mlx_nested_modules_preserve_object_module_attribution() -> None:
     trace = tl.trace(MLXNested(), _input(), backend="mlx")
 
     assert trace.module_identity_mode == "object_module"
-    assert set(module.address for module in trace.modules) == {"self", "encoder", "head"}
+    assert {module.address for module in trace.modules} == {"self", "encoder", "head"}
     assert set(trace.modules["self"].call_children) == {"encoder", "head"}
     assert {"encoder:1", "head:1"} <= set(trace.module_calls.keys())
     encoder_labels = trace.resolve_sites(tl.in_module("encoder"), max_fanout=16).labels()
     head_labels = trace.resolve_sites(tl.in_module("head"), max_fanout=16).labels()
     assert encoder_labels
     assert head_labels
-    assert all(("encoder", 1) in trace.layers[label].modules for label in encoder_labels)
-    assert all(("head", 1) in trace.layers[label].modules for label in head_labels)
+    assert all("encoder:1" in trace.layers[label].modules for label in encoder_labels)
+    assert all("head:1" in trace.layers[label].modules for label in head_labels)
     assert trace.modules["head"].params
     assert check_metadata_invariants(trace) is True
 
@@ -195,8 +199,8 @@ def test_mlx_shared_submodule_aliases_use_primary_address() -> None:
     assert shared.call_labels == ["left:1", "left:2"]
     with pytest.warns(MultiMatchWarning, match="matched 2 sites"):
         left_labels = trace.resolve_sites(tl.in_module("left"), max_fanout=32).labels()
-    assert any(("left", 1) in trace.layers[label].modules for label in left_labels)
-    assert any(("left", 2) in trace.layers[label].modules for label in left_labels)
+    assert any("left:1" in trace.layers[label].modules for label in left_labels)
+    assert any("left:2" in trace.layers[label].modules for label in left_labels)
     assert {tuple(param.all_module_addresses) for param in shared.params} == {("left", "right")}
     assert check_metadata_invariants(trace) is True
 

@@ -325,7 +325,8 @@ class _Scale(nn.Module):
 def test_numpy_float64_literal_identical_verifies_changed_diverges(tmp_path: Path) -> None:
     """A ``numpy.float64`` op literal must save, load, and verify normally."""
 
-    np = pytest.importorskip("numpy")
+    import numpy as np
+
     model = _Scale()
     t = torch.tensor([1.0, 2.0, 3.0, 4.0])
     path = _save_runnable(model, [t, np.float64(2.0)], tmp_path / "np_scalar.tlspec")
@@ -369,7 +370,8 @@ class _IntegerControlBranch(nn.Module):
 def test_numpy_scalar_control_input_diverges_like_python_int(tmp_path: Path) -> None:
     """Changed NumPy integer controls must diverge rather than become unverifiable."""
 
-    np = pytest.importorskip("numpy")
+    import numpy as np
+
     value = torch.tensor([2.0, 3.0])
     path = _save_runnable(
         _IntegerControlBranch(),

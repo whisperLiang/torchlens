@@ -27,13 +27,23 @@ Accessors (`LayerAccessor`, `ModuleAccessor`, `ParamAccessor`, `BufferAccessor`,
 | `_accessor_base.py` | Shared ordered dict-like accessor base |
 | `trace.py` | `Trace`, conditional event records, save/load/intervention/summary helpers |
 | `_trace_accessors.py` | Trace-level typed accessor construction |
-| `_trace_export.py` | Trace tabular export and decoded-output helpers |
-| `_trace_intervention.py` | Trace intervention, fork, replay, and rerun helpers |
+| `_trace_export.py` | Trace tabular export, decoded-output helpers, and the `to_agent_json()` agent dump entry point |
+| `_trace_intervention.py` | Trace intervention surface; fork dispatch, replay, and rerun helpers |
+| `_trace_fork.py` | M11 copy-on-write fork builder (COW shells over `OpStoreView`s) |
+| `_compaction.py` | Freeze-seam Op metadata pooling (M11 fold) + M14 duplicate/empty container-cell pooling (`PooledCell`, hydrate-on-read) + singleton label-list compaction (bare str + identity-gated store registry, kind tables only) |
+| `_layer_spec.py` | `_LAYER_MIRROR_SPEC` and the Layer mirror-field spec (split out of `layer.py`) |
+| `_schema_bindings.py` | GENERATED per-field `StorageBinding` axes — DO NOT EDIT; regenerate with `tools/generate_record_schema.py` |
+| `_trace_components.py` | Declared `TRACE_FIELD_OWNERSHIP` component map — 316 entries, pinned equal to the `FIELD_POLICY` key set (the 220-name `MODEL_LOG_FIELD_ORDER` is a strict subset) |
+| `_trace_stack.py` | Order-aligned activation stacking for completed traces |
+| `_trace_rehydrate.py` | Load-side Trace rehydration |
+| `_backend_capability_guards.py` | Backend capability guard helpers |
+| `_nonfinite.py` | Nonfinite scan/abort helpers |
+| `prehook.py` | Pre-hook effect records |
 | `_trace_profile.py` | Trace profiling and timing helpers |
 | `_trace_stats.py` | Trace aggregate stats and backward-pass projections |
 | `_trace_validation.py` | Trace validation and log-entry removal helpers |
 | `_trace_viz.py` | Trace visualization entrypoints |
-| `op.py` | `Op`, `TensorLog` alias, tensor save and per-pass fields |
+| `op.py` | `Op` two-word row facade (`_core`/`_row` over `_trace_core`), `TensorLog` alias, tensor save, per-pass fields |
 | `layer.py` | `Layer` aggregate, pass delegation, graph unions |
 | `buffer.py` | `Buffer` and `BufferAccessor` |
 | `module.py` | `ModuleCall`, `Module`, `ModuleAccessor` |
@@ -50,7 +60,7 @@ Accessors (`LayerAccessor`, `ModuleAccessor`, `ParamAccessor`, `BufferAccessor`,
 | `_module_role_hints.py` | Module input/output role hint helpers |
 | `_repr.py` | Shared formatting helpers for user-facing reprs |
 | `_runtime_handles.py` | Runtime object handle resolution helpers |
-| `_state_adapter.py` | Trace build-state iteration and deletion adapters |
+| `_state_adapter.py` | Class-agnostic live-state enumeration/restore adapters (`state_items`/`state_new`/`state_restore`; the flat build-state they once adapted dissolved in M10) |
 | `_summary.py` | Small formatting helpers for summaries |
 | `internal_types.py` | Internal dataclasses such as `FuncExecutionContext` |
 | `cleanup.py` | Cycle breaking and field scrubbing after layer removal |
@@ -62,8 +72,11 @@ Single-pass layers delegate unknown attrs to `ops[0]`. Multi-pass per-pass field
 `ValueError`, not `AttributeError`, to avoid Python falling through to `__getattr__`.
 
 ### Trace Surface
-`Trace` owns more than storage: lookup, `draw`, `show_graph`, `save`,
-`load`, `find_sites`, `resolve_sites`, `fork`, `rerun`, `replay`, `summary`,
+`Trace` owns more than storage: lookup, `draw`, `save`,
+`find_sites`, `resolve_sites`, `fork`, `run`, `push`, `summary`,
+(loading is module-level `tl.load`, never `trace.load`; there is no
+`Trace.show_graph` — use `draw` or `torchlens.visualization.show_model_graph`;
+`rerun`/`replay` are deprecated aliases of `run`/`push` that warn),
 `preview_fastlog`, and validation convenience custom_methods all live here or are attached via
 helper modules.
 
@@ -73,13 +86,46 @@ Primary structures are dense-id based: `conditional_records`, `conditional_arm_e
 fields are derived views for compatibility and rendering.
 
 ### Portable I/O
-`Trace.save()` and `Trace.load()` delegate to `_io.bundle`. Loaded logs can contain
+`Trace.save()` and module-level `tl.load()` delegate to `_io.bundle`. Loaded logs can contain
 lazy out refs that materialize on access. `cleanup.py` must preserve manifest and
 conditional consistency when removing entries.
 
 ### Layer Building
 `_build_layer_logs()` merges multiple `Op` entries into one aggregate. Most fields
 use first-pass values; only selected graph/role fields are merged across ops.
+Since M8, `Layer` no longer COPIES the first-pass fields: they are mirror
+descriptors reading through to `ops[0]` on demand, with per-layer `__dict__`
+shadows for merged/overwritten values (`_LAYER_MIRROR_SPEC` in `_layer_spec.py`;
+`layer.py` imports it).
+`in_conditionals`/`terminal_bool_for` remain build-time snapshots because
+`_build_conditional_records` rebinds them on the OPS after layers are built.
+
+### M8 record facades (Param/Buffer/FuncCallLocation/ModuleCall/Module)
+These classes are row facades over per-trace kind tables
+(`_trace_core/record_rows.py`): declared stored fields are row-cell
+descriptors; the instance `__dict__` keeps only the store binding, user
+extras (JMT-FORK-7), and the few names whose properties hardcode `__dict__`
+access (template/source-trace/facets slots). Torch build passes adopt records
+into `TraceCore.kind_rows`; direct construction, preview backends, pickle
+restore, and fork shells stay detached single-row stores.
+
+### M11 COW fork
+`Trace.fork()` builds copy-on-write forks (`_trace_fork.build_fork`): fork
+`Op`s and record facades are fresh two-word shells bound to per-fork
+`OpStoreView`s at the SAME rows; only `Layer` shadow dicts, record instance
+extras, and the policy-driven trace-side field remainder are copied (one
+shared-memo deepcopy over small trace-side data). Views isolate every
+mutation surface: fork writes/deletes land in the view overlay, mutable
+builtin containers are eagerly copied into the fork overlay at fork time
+(`OpStoreView.isolate_mutable_cells`, a sparse sweep over the base store's
+cached mutable-cell index; tensors/callables inside stay shared
+by identity), `GroupRef` cells translate to per-fork cloned group tables,
+and cell-held records/accessors translate to fork facades. Traces without
+a sealed core-backed op store (loaded analysis traces, failed partials)
+take the detached fallback (per-record single-row duplication). Mutation
+isolation holds in BOTH directions at fork time (deepcopy snapshot
+semantics); the one shared residual is mutables nested inside non-builtin
+custom objects.
 
 ### Module / ModuleCall Fields
 `Module.training` mirrors `nn.Module.training`; `Module.layer_labels` stores Layer
@@ -98,13 +144,34 @@ Transform boundary ops carry `is_transform`, `transform_kind`, `transform_chain`
 `unattributed_tensor_args`. Synthetic output ops should clear transform/provenance
 role fields so `Trace.transforms` only reports real transform boundary nodes.
 
-## Circular References
+## Back-References
 
 ```
-Trace -> Op -> source_trace -> Trace
-Trace -> Module -> _source_trace -> Trace
+Trace -> Op -> source_trace -> Trace          (weakref: Op._source_trace_ref)
+Trace -> Module -> _source_trace -> Trace     (weakref: Module._source_trace_ref)
 Param -> _param_ref -> nn.Parameter
 ```
 
-These rely on cyclic GC. Use `Trace.cleanup()` when retaining many logs or after
+(The two rows above are representative, not exhaustive: `Op`, `Module`,
+`Param`, `Buffer`, `GradFn`, and their call-record kinds all carry a
+`_source_trace_ref`/`_source_ref` weak back-reference of the same shape.)
+
+The Trace back-references are stored as `weakref.ref` in `_source_trace_ref` slots
+(`FieldPolicy.WEAKREF_STRIP`), so these back-references themselves do NOT form strong
+cycles; reading one after the Trace dies yields `None` (and consumers that need it, such
+as `ModuleCall.module`, raise). Other strong reference cycles remain (core/facade
+reference tables and similar internal structure), so a dropped Trace is reclaimed by the
+CYCLIC collector, not by refcounting alone: measured on a live capture, `del trace` with
+`gc` disabled leaves the object alive until `gc.collect()` runs, with or without a prior
+`Trace.cleanup()`. Still call `Trace.cleanup()` when retaining many logs or after
 visualization-only workflows.
+
+Retained-Op payload lifetime (fix/fork F4): an `Op` kept past its Trace's death no longer
+pins every captured activation. Each owning `TraceCore` (the capture's core plus one per
+fork core sharing the sealed base) registers a `weakref.finalize` on the op store; when
+the LAST owner is garbage-collected the store evicts top-level tensor cells (and the
+snapshot surfaces of surviving fork `OpStoreView`s), so payload reads on the retained
+facade return the payload-absent spelling while metadata stays readable. Keep the Trace
+alive (or clone the tensor) to keep payloads. Fork views hold the fork's record
+translator weakly (anchored on the fork core) so a retained fork Op cannot root the
+whole fork graph.

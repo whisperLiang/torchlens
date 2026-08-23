@@ -2,21 +2,24 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Iterable, Mapping
-from dataclasses import asdict, dataclass
-from enum import Enum
 import json
 import os
-from pathlib import Path
 import shutil
 import uuid
 import warnings
+from collections.abc import Callable, Collection, Iterable, Mapping
+from dataclasses import asdict, dataclass, fields as dataclass_fields
+from enum import Enum
+from pathlib import Path
 from typing import Any, Literal
 
 import torch
 from safetensors.torch import load_file, save_file
 
+from .._errors import InvalidArgumentError
+from .._io._json import read_bounded
 from .._io.manifest import TensorEntry, sha256_of_file
+from .._io.paths import reject_symlink_path
 from .._io.tensor_policy import Ok, is_supported_for_save
 from .._io.tlspec import _TlSpecWriter
 from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
@@ -49,6 +52,19 @@ from .types import (
     TargetValueSpec,
     TensorSliceSpec,
 )
+
+
+def _reject_symlink_path(path: Path, *, context: str) -> None:
+    """Reject symlink paths using the intervention replay error contract."""
+
+    reject_symlink_path(
+        path,
+        context=context,
+        exc_type=ReplayPreconditionError,
+        message_prefix="Refusing to use symlink",
+        trailing_period=False,
+    )
+
 
 TLSPEC_FORMAT_VERSION = "2"
 SUPPORTED_TLSPEC_FORMAT_VERSIONS = {"1", TLSPEC_FORMAT_VERSION}
@@ -214,6 +230,7 @@ def save_intervention(
     target_path = Path(path)
     _reject_symlink_path(target_path, context="intervention spec target")
     tmp_path = target_path.parent / f"tmp.{uuid.uuid4().hex}"
+    backup_path: Path | None = None
     tensor_entries: list[TensorEntry] = []
     state = _SerializedState(tensor_entries=tensor_entries, tensor_refs={})
 
@@ -256,14 +273,45 @@ def save_intervention(
             save_level=save_level.value,
         )
         _write_text_file(tmp_path / _README_FILE, _readme_text(spec_json, tensor_entries))
+        # Blob file data is fsynced at write time (_fsync_file), but directory
+        # ENTRIES must be flushed bottom-up: without fsyncing tensors/ first, a
+        # power crash just after publish can leave a durable spec.json whose
+        # tensors/*.safetensors entries were lost (R59; siblings use fsync_tree).
+        _fsync_directory(tmp_path / _TENSOR_DIR)
         _fsync_directory(tmp_path)
         if target_path.exists():
-            shutil.rmtree(target_path)
+            # Re-check overwrite at swap time, not just at save start (R59
+            # TOCTOU): a concurrent writer could have created ``target_path``
+            # after the start-of-save check, and the unconditional swap below
+            # would back it aside and then destroy it (the backup is rmtree'd
+            # on success). Refuse instead of live-destroying it.
+            if not overwrite:
+                raise FileExistsError(f"Intervention spec path already exists: {target_path}")
+            backup_path = target_path.parent / f"{target_path.name}.bak.{uuid.uuid4().hex}"
+            os.rename(target_path, backup_path)
         os.rename(tmp_path, target_path)
         _fsync_directory(target_path.parent)
-    except Exception:
+        if backup_path is not None:
+            shutil.rmtree(backup_path, ignore_errors=True)
+    except BaseException:
         if tmp_path.exists():
             shutil.rmtree(tmp_path, ignore_errors=True)
+        if backup_path is not None and not target_path.exists() and backup_path.exists():
+            try:
+                os.rename(backup_path, target_path)
+            except OSError as restore_exc:
+                # Double fault: the save failed AND the restore failed, so the prior
+                # spec is gone from its canonical path but still exists under the
+                # backup name. Disclose it so it is recoverable rather than silently
+                # stranded (no behavior change on the single-fault restore path).
+                warnings.warn(
+                    f"Could not restore the previous intervention spec from its backup "
+                    f"after a failed save ({restore_exc}). Your prior spec is NOT lost: "
+                    f"it remains at {backup_path}. Move it back to {target_path} to "
+                    "recover it.",
+                    UserWarning,
+                    stacklevel=2,
+                )
         raise
 
 
@@ -350,9 +398,12 @@ def _validate_format_version(format_version: Any) -> None:
 
     if str(format_version) not in SUPPORTED_TLSPEC_FORMAT_VERSIONS:
         supported = ", ".join(sorted(SUPPORTED_TLSPEC_FORMAT_VERSIONS))
-        raise ValueError(
+        raise InvalidArgumentError(
             f"Unsupported intervention .tlspec format_version={format_version!r}; "
-            f"expected one of {supported}."
+            f"expected one of {supported}",
+            code="spec_format_version_unsupported",
+            remedy=f"use a supported intervention format version ({supported})",
+            format_version=str(format_version),
         )
 
 
@@ -416,7 +467,14 @@ def check_spec_compat(spec: InterventionSpec, new_log: Any) -> SpecCompat:
         if saved_hash != graph_hash:
             graph_matches = False
         try:
-            resolved_labels = list(resolve_sites(new_log, selector, strict=True).labels())
+            resolved_labels = list(
+                resolve_sites(
+                    new_log,
+                    selector,
+                    strict=True,
+                    max_fanout=_resolution_fanout_bound(new_log, min_required=len(saved_labels)),
+                ).labels()
+            )
         except SiteResolutionError as exc:
             selector_diffs[selector_key] = {
                 "selector": entry["selector"],
@@ -454,12 +512,46 @@ def check_spec_compat(spec: InterventionSpec, new_log: Any) -> SpecCompat:
     else:
         outcome = "FAIL"
 
+    # A graph_shape_hash mismatch alone cannot distinguish a genuinely different
+    # target graph from mere cross-version hash drift on the SAME graph (an older
+    # torchlens computes a different hash for identical topology; the v2.16 backcompat
+    # fixtures encode exactly this and resolve to identical labels). Refusing at
+    # compat-preview time on any mismatch would break every cross-version executable
+    # spec reuse. ``COMPATIBLE_WITH_CONFIRMATION`` is the honest preview verdict here --
+    # it flags the shape difference and defers to explicit confirmation. The genuine
+    # "wrong graph" tripwire lives at REPLAY time (see torchlens/intervention/replay.py
+    # _warn_if_unexpected_parent / _check_edge_expectations), which compares actual
+    # parent/edge topology and raises ControlFlowDivergenceError under strict replay --
+    # a version-stable structural check, not a coarse hash string. The narrow existing
+    # refusal below stays: an executable spec whose targets cannot even resolve on a
+    # mismatched graph is a hard GraphShapeMismatchError.
     if outcome == "FAIL" and bool(spec.metadata.get("executable", False)) and not graph_matches:
         raise GraphShapeMismatchError(
             "Saved spec's graph_shape_hash doesn't match target log; refusing to apply at "
             "executable level."
         )
     return SpecCompat(outcome, diff, targets_identical)
+
+
+def _resolution_fanout_bound(log: Any, *, min_required: int = 1) -> int:
+    """Return the strict resolver fanout bound for persistence workflows.
+
+    Parameters
+    ----------
+    log:
+        Trace-like object used for resolution.
+    min_required:
+        Minimum bound required by already-validated saved labels.
+
+    Returns
+    -------
+    int
+        Explicit resolver fanout bound.
+    """
+
+    layer_list = getattr(log, "layer_list", None)
+    layer_count = len(layer_list) if layer_list is not None else len(getattr(log, "layer_logs", {}))
+    return max(1, int(min_required), int(layer_count))
 
 
 def _coerce_save_level(level: str | SaveLevel) -> SaveLevel:
@@ -477,21 +569,6 @@ def _coerce_save_level(level: str | SaveLevel) -> SaveLevel:
     """
 
     return level if isinstance(level, SaveLevel) else SaveLevel(level)
-
-
-def _reject_symlink_path(path: Path, *, context: str) -> None:
-    """Reject symlink paths before reading or writing specs.
-
-    Parameters
-    ----------
-    path:
-        Path to inspect.
-    context:
-        Human-readable path role.
-    """
-
-    if path.is_symlink():
-        raise ReplayPreconditionError(f"Refusing to use symlink {context}: {path}")
 
 
 def _resolve_intervention_tensor_path(spec_path: Path, relative_path: str) -> Path:
@@ -784,7 +861,12 @@ def _serialize_fire_record(
         JSON-safe fire-record payload.
     """
 
-    data = asdict(record)
+    # R10-14: ``dataclasses.asdict`` deep-copies every field value first, so a
+    # graph-connected helper tensor arg raised torch's deepcopy error at save
+    # time for an intermediate about to be overwritten anyway. Build the
+    # payload shallowly: the two structured fields are serialized below and
+    # every other FireRecord field is a scalar/string.
+    data = {field.name: getattr(record, field.name) for field in dataclass_fields(record)}
     data["helper"] = _serialize_value(record.helper, save_level, state)
     data["container_path"] = _serialize_value(record.container_path, save_level, state)
     return data
@@ -841,6 +923,20 @@ def _serialize_hook_spec(
         JSON-safe payload.
     """
 
+    if hook_spec.metadata.get("facet_write") and save_level is not SaveLevel.AUDIT:
+        # A facet-slice hook fires through a capture-bound scatter wrapper that closes
+        # over the resolved FacetSpec; only the raw helper would survive serialization,
+        # and a loaded spec would then apply that helper to the WHOLE home tensor
+        # instead of the selected facet slice. Refuse rather than persist a spec whose
+        # replay semantics silently differ from what was attached.
+        facet_name = hook_spec.metadata.get("facet_name", "<unknown>")
+        raise OpaqueCallableInExecutableSaveError(
+            f"Cannot save a facet-slice hook (facet {facet_name!r}) at "
+            f"save_level={save_level.value!r}: the slice-scatter wrapper is bound to the "
+            "captured trace and cannot round-trip through a spec file. Save at "
+            "level='audit' for inspection, or re-attach the facet intervention on the "
+            "loaded trace."
+        )
     helper = hook_spec.helper if hook_spec.helper is not None else None
     hook_value = helper if helper is not None else hook_spec.hook
     return {
@@ -1099,6 +1195,23 @@ def _serialize_callable(value: Callable[..., Any], save_level: SaveLevel) -> dic
         Callable payload.
     """
 
+    if isinstance(value, LazyImportRef):
+        # R10-12: load->resave round-trip. The loader mints LazyImportRef for
+        # import-ref callables precisely so execution-time trust gating can
+        # defer the import; the instance exposes no __module__/__qualname__,
+        # so the generic path below read None and refused a spec that
+        # legitimately saved executable. The ref IS its own import path --
+        # resolving it here would perform the import the laziness exists to
+        # avoid.
+        if save_level == SaveLevel.PORTABLE:
+            raise OpaqueCallableInExecutableSaveError(
+                f"Portable intervention specs cannot save import-ref callable {value.import_path}."
+            )
+        return {
+            "portability": "import_ref",
+            "import_path": value.import_path,
+            "repr": repr(value),
+        }
     import_path = _import_path_for_callable(value)
     if import_path is not None and _callable_round_trips(value, import_path):
         if save_level == SaveLevel.PORTABLE:
@@ -1336,7 +1449,6 @@ def _deserialize_value(
         # import a foreign module under the default untrusted load.
         return helper_from_serialized(
             value["__helper__"],
-            tensor_loader=lambda tensor_id: tensors[tensor_id],
             import_resolver=_trusted_import_resolver,
             value_decoder=_decode,
         )
@@ -1608,7 +1720,12 @@ def _build_target_manifest(
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", MultiMatchWarning)
-                resolved = resolve_sites(log, target, strict=True)
+                resolved = resolve_sites(
+                    log,
+                    target,
+                    strict=True,
+                    max_fanout=_resolution_fanout_bound(log),
+                )
         except SiteResolutionError as exc:
             if "Backward selectors require log_backward()" not in str(
                 exc
@@ -1773,7 +1890,12 @@ def _write_tensor_sidecars(
     for tensor_id, tensor in tensor_refs.items():
         decision = is_supported_for_save(tensor, strict=True)
         if not isinstance(decision, Ok):
-            raise ValueError(f"Unsupported tensor for intervention save {tensor_id}: {decision}")
+            raise InvalidArgumentError(
+                f"Unsupported tensor for intervention save {tensor_id}: {decision}",
+                code="intervention_tensor_unsupported",
+                remedy="use dense, codec-supported tensors in the intervention spec",
+                tensor_id=str(tensor_id),
+            )
         tensor_entries.append(
             writer(
                 tmp_path=tmp_path,
@@ -2081,7 +2203,15 @@ def _write_text_file(path: Path, text: str) -> None:
 
 
 def _read_json_file(path: Path) -> dict[str, Any]:
-    """Read JSON object data.
+    """Read JSON object data from an UNTRUSTED intervention-spec directory.
+
+    A loaded spec directory is attacker-controlled input on the same footing as a
+    ``.tlspec`` bundle, so this routes through the ONE bounded reader
+    (:mod:`torchlens._io._json`: byte ceiling + non-recursive depth prescan) rather
+    than stdlib ``json.load``. Stdlib ``json`` answered a 10,000-deep nested array
+    with an untyped ``RecursionError`` escaping ``load_intervention_spec``; the
+    bounded reader refuses at the depth boundary and is re-raised here as the
+    already-documented typed ``ReplayPreconditionError``.
 
     Parameters
     ----------
@@ -2092,10 +2222,17 @@ def _read_json_file(path: Path) -> dict[str, Any]:
     -------
     dict[str, Any]
         Decoded JSON object.
+
+    Raises
+    ------
+    ReplayPreconditionError
+        When the payload is over-size, over-nested, malformed, or not an object.
     """
 
-    with path.open(encoding="utf-8") as handle:
-        data = json.load(handle)
+    try:
+        data = read_bounded(path)
+    except json.JSONDecodeError as exc:
+        raise ReplayPreconditionError(f"{path} is not parsable JSON ({exc})") from exc
     if not isinstance(data, dict):
         raise ReplayPreconditionError(f"{path} must contain a JSON object")
     return data

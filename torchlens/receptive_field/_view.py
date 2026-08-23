@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from fractions import Fraction
 from importlib import import_module
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Literal, Mapping, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
-from ._errors import AmbiguousInputError, ReceptiveFieldError, ReceptiveFieldUnavailableError
+from ._errors import (
+    AmbiguousInputError,
+    AmbiguousTargetError,
+    ReceptiveFieldError,
+    ReceptiveFieldUnavailableError,
+)
 from ._types import (
     GradientReceptiveField,
     GridLayout,
@@ -19,7 +24,6 @@ from ._types import (
     ReceptiveFieldValidation,
 )
 
-
 if TYPE_CHECKING:
     from PIL import Image
 
@@ -28,8 +32,8 @@ if TYPE_CHECKING:
     from ._engine_forward import _ProjectiveFieldSolution
 
 
-def _optional_callable(module_name: str, function_name: str, task: str) -> Any:
-    """Load an optional later-phase receptive-field callable.
+def _optional_callable(module_name: str, function_name: str, feature: str) -> Any:
+    """Load an optional receptive-field callable.
 
     Parameters
     ----------
@@ -37,8 +41,8 @@ def _optional_callable(module_name: str, function_name: str, task: str) -> Any:
         Receptive-field module containing the callable.
     function_name:
         Callable name within the module.
-    task:
-        Feature phase used in the unavailable diagnostic.
+    feature:
+        Human-readable capability name used in the unavailable diagnostic.
 
     Returns
     -------
@@ -48,7 +52,7 @@ def _optional_callable(module_name: str, function_name: str, task: str) -> Any:
     Raises
     ------
     ReceptiveFieldUnavailableError
-        If the backing feature phase has not landed.
+        If the backing capability is not importable in this installation.
     """
 
     try:
@@ -56,7 +60,7 @@ def _optional_callable(module_name: str, function_name: str, task: str) -> Any:
         return getattr(module, function_name)
     except (AttributeError, ImportError) as exc:
         raise ReceptiveFieldUnavailableError(
-            f"This receptive-field method is not available until {task} is installed."
+            f"Receptive-field {feature} is not available in this installation."
         ) from exc
 
 
@@ -87,7 +91,7 @@ class ReceptiveFieldView:
         self.per_input: Mapping[str, ReceptiveField] = solution.per_op.get(op.label, {})
 
     @classmethod
-    def projective(cls, op: Op) -> "ReceptiveFieldView":
+    def projective(cls, op: Op) -> ReceptiveFieldView:
         """Build the source-anchored projective sibling view.
 
         Parameters
@@ -164,7 +168,7 @@ class ReceptiveFieldView:
         Parameters
         ----------
         input:
-            Optional exact IO role or model-input operation.
+            Optional exact IO role or graph endpoint operation.
 
         Returns
         -------
@@ -174,19 +178,33 @@ class ReceptiveFieldView:
         Raises
         ------
         AmbiguousInputError
-            If no input is selected and several are reachable.
+            If this is a receptive view, no input is selected, and several
+            are reachable.
+        AmbiguousTargetError
+            If this is a projective view, no target is selected, and several
+            are reachable.
         ReceptiveFieldError
-            If no input is reachable or the requested input is not reachable.
+            If no endpoint is reachable or the requested one is not reachable.
         """
 
+        projective = self._direction is ReceptiveFieldDirection.PROJECTIVE
         if input is None:
             if len(self.per_input) > 1:
                 roles = ", ".join(self.per_input)
+                if projective:
+                    raise AmbiguousTargetError(
+                        f"Source {self._op.label!r} has multiple reachable targets: "
+                        f"{roles}. Select one with view[target_op] or target=<io_role>."
+                    )
                 raise AmbiguousInputError(
                     f"Target {self._op.label!r} has multiple reachable inputs: {roles}. "
                     "Select one with view[input_op] or input=<io_role>."
                 )
             if not self.per_input:
+                if projective:
+                    raise ReceptiveFieldError(
+                        f"Source {self._op.label!r} has no reachable model output."
+                    )
                 raise ReceptiveFieldError(
                     f"Target {self._op.label!r} has no reachable model input."
                 )
@@ -195,6 +213,10 @@ class ReceptiveFieldView:
             return self[input]
         except KeyError as exc:
             identity = input if isinstance(input, str) else input.label
+            if projective:
+                raise ReceptiveFieldError(
+                    f"Target {identity!r} is not reachable from source {self._op.label!r}."
+                ) from exc
             raise ReceptiveFieldError(
                 f"Input {identity!r} is not reachable from target {self._op.label!r}."
             ) from exc
@@ -235,6 +257,22 @@ class ReceptiveFieldView:
 
         return self._descriptor().layout
 
+    def _center_unit(self, descriptor: ReceptiveField) -> tuple[int, ...]:
+        """Return windowed-axis midpoint coordinates for the ``"center"`` selector.
+
+        The midpoint is taken in this view operation's own output grid, which is
+        the coordinate space that ``unit`` addresses for both receptive and
+        projective queries. Shared by both directions so ``"center"`` is honored
+        identically wherever ``at`` accepts it.
+        """
+
+        if descriptor.axes is None:
+            raise ReceptiveFieldError("Geometric axes are unavailable; use .gradient() instead.")
+        output_axes = sorted(
+            cast(int, axis.output_axis) for axis in descriptor.axes if axis.kind == "windowed"
+        )
+        return tuple(int(self._op.shape[axis]) // 2 for axis in output_axes)
+
     def at(
         self,
         unit: tuple[int, ...] | Literal["center"],
@@ -251,11 +289,19 @@ class ReceptiveFieldView:
         ----------
         unit:
             Windowed-axis coordinates, or ``"center"`` for their midpoint.
+            Coordinates must be non-negative and in range; unlike ``.gradient()``
+            and ``.check()``, negative indices are rejected rather than wrapped.
         input:
             Optional exact IO role or model-input operation.
         source:
-            Optional ancestor graph point. The returned box is in this operation's
-            output-grid coordinate space.
+            Optional ancestor graph point. When given, the returned box is in the
+            SOURCE operation's output-grid coordinate space (not this operation's).
+        direction:
+            Optional per-call receptive/projective direction override. ``None``
+            uses the view's bound direction.
+        target:
+            Optional descendant graph point selecting the far endpoint of a
+            projective query. Not permitted together with ``source``.
         clip:
             Whether bounds are clipped to captured input extents.
 
@@ -271,12 +317,26 @@ class ReceptiveFieldView:
         if resolved_direction is ReceptiveFieldDirection.PROJECTIVE:
             if input is not None or source is not None:
                 raise TypeError("Projective queries select their far endpoint with target=.")
-            from ._forward_query import box_for_source_unit
+            from ._forward_query import _select_target_descriptor, box_for_source_unit
 
+            projective_solution = self._projective_solution(target)
+            source_unit: Sequence[int]
+            if unit == "center":
+                descriptors = projective_solution.per_op.get(self._op.label)
+                if not descriptors:
+                    raise ReceptiveFieldError(
+                        f"No projective-field solution is available from source {self._op.label!r}."
+                    )
+                proj_descriptor = _select_target_descriptor(
+                    descriptors, cast("Op | str | None", target)
+                )
+                source_unit = self._center_unit(proj_descriptor)
+            else:
+                source_unit = cast(Sequence[int], unit)
             return box_for_source_unit(
-                self._projective_solution(target),
+                projective_solution,
                 self._op,
-                cast(Sequence[int], unit),
+                source_unit,
                 target=cast("Op | str | None", target),
                 clip=clip,
             )
@@ -321,14 +381,7 @@ class ReceptiveFieldView:
                 raise ReceptiveFieldError(
                     f"Source {source_op.label!r} is not reachable from target {self._op.label!r}."
                 )
-            if descriptor.axes is None:
-                raise ReceptiveFieldError(
-                    "Geometric axes are unavailable; use .gradient() instead."
-                )
-            output_axes = tuple(
-                cast(int, axis.output_axis) for axis in descriptor.axes if axis.kind == "windowed"
-            )
-            selected = tuple(int(self._op.shape[axis]) // 2 for axis in output_axes)
+            selected = self._center_unit(descriptor)
         else:
             selected = unit
         return box_for_unit(
@@ -362,6 +415,12 @@ class ReceptiveFieldView:
             Optional exact IO role or model-input operation.
         source:
             Reserved ancestor graph point for layer-to-layer receptive probes.
+        direction:
+            Optional per-call receptive/projective direction override. ``None``
+            uses the view's bound direction.
+        target:
+            Optional descendant graph point selecting the far endpoint of a
+            projective query. Not permitted together with ``source``.
         atol, rtol:
             Non-negative gradient support thresholds.
         retain_graph:
@@ -381,7 +440,7 @@ class ReceptiveFieldView:
             if input is not None or source is not None:
                 raise TypeError("Projective queries select their far endpoint with target=.")
             projective_gradient = _optional_callable(
-                "._gradient_forward", "projective_gradient_for_unit", "Task T19"
+                "._gradient_forward", "projective_gradient_for_unit", "projective gradient support"
             )
             return cast(
                 GradientReceptiveField | Mapping[str, GradientReceptiveField],
@@ -426,6 +485,7 @@ class ReceptiveFieldView:
         target: object | None = None,
         atol: float = 0.0,
         rtol: float = 0.0,
+        retain_graph: bool = False,
     ) -> ReceptiveFieldValidation:
         """Cross-check geometry against gradients for one complete output index.
 
@@ -444,6 +504,12 @@ class ReceptiveFieldView:
         atol, rtol:
             Accepted for compatibility and ignored. Validation always uses exact
             finite nonzero gradient support.
+        retain_graph:
+            Keep the armed autograd graph alive after the check. The default
+            ``False`` FREES the graph, exactly like ``gradient()``'s default:
+            call with ``retain_graph=True`` (or re-capture) when a later
+            ``gradient(..., retain_graph=True)`` or second check must run on
+            the same armed capture.
 
         Returns
         -------
@@ -454,7 +520,7 @@ class ReceptiveFieldView:
         resolved_direction = self._direction_for(direction)
         if input is not None and source is not None:
             raise TypeError("input and source cannot be supplied together.")
-        check_for_unit = _optional_callable("._validation", "check_for_unit", "Task T20")
+        check_for_unit = _optional_callable("._validation", "check_for_unit", "validation")
         return cast(
             ReceptiveFieldValidation,
             check_for_unit(
@@ -466,6 +532,7 @@ class ReceptiveFieldView:
                 target=target,
                 atol=atol,
                 rtol=rtol,
+                retain_graph=retain_graph,
             ),
         )
 
@@ -532,6 +599,7 @@ class ReceptiveFieldView:
         target: object | None = None,
         image: object | None = None,
         gradient: bool = False,
+        retain_graph: bool = False,
         slice: object | None = None,
         box_color: str = "#FF3B30",
         alpha: float = 0.6,
@@ -545,10 +613,20 @@ class ReceptiveFieldView:
             Optional complete target output-element index.
         input:
             Optional exact IO role or model-input operation.
+        direction:
+            Optional per-call receptive/projective direction override. ``None``
+            uses the view's bound direction.
+        target:
+            Optional descendant graph point selecting the far endpoint of a
+            projective overlay.
         image:
             Optional source image override.
         gradient:
             Whether to include empirical gradient magnitude.
+        retain_graph:
+            Whether the empirical gradient probe retains autograd buffers, so
+            repeated ``show(gradient=True)`` or later ``gradient()`` calls over
+            the same captured graph stay possible.
         slice:
             Required plane selector for three-dimensional inputs.
         box_color:
@@ -564,7 +642,7 @@ class ReceptiveFieldView:
             Rendered input-space overlay.
         """
 
-        show = _optional_callable("._viz", "show", "Task T10")
+        show = _optional_callable("._viz", "show", "visualization")
 
         return cast(
             "Image.Image",
@@ -576,6 +654,7 @@ class ReceptiveFieldView:
                 target=target,
                 image=cast("Image.Image | None", image),
                 gradient=gradient,
+                retain_graph=retain_graph,
                 slice=cast("tuple[int, int] | None", slice),
                 box_color=box_color,
                 alpha=alpha,

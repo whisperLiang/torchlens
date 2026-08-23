@@ -80,3 +80,38 @@ def test_rerun_preserves_predicate_save_subset() -> None:
     assert saved_before
     assert _saved_op_labels(log) == saved_before
     assert len(saved_before) < num_ops_before
+
+
+def test_rerun_save_scope_reads_lookback_payload_policy_directly() -> None:
+    """``_rerun_save_scope`` must not silently default a renamed options field.
+
+    R47-11: the lookback payload policy used to be read with
+    ``getattr(..., "metadata_only")``, so a ``RecordingOptions`` field rename
+    would silently fall back instead of raising. Direct attribute access makes
+    drift raise ``AttributeError``.
+    """
+
+    from types import SimpleNamespace
+
+    import pytest
+
+    from torchlens.intervention.rerun import _rerun_save_scope
+
+    drifted_options = SimpleNamespace(keep_op=lambda ctx: True, lookback=2)
+    drifted_log = SimpleNamespace(_predicate_save_options=drifted_options)
+
+    with pytest.raises(AttributeError, match="lookback_payload_policy"):
+        _rerun_save_scope(drifted_log)  # type: ignore[arg-type]
+
+    intact_options = SimpleNamespace(
+        keep_op=lambda ctx: True, lookback=2, lookback_payload_policy="detached_raw"
+    )
+    intact_log = SimpleNamespace(_predicate_save_options=intact_options)
+
+    layers_to_save, predicate, lookback, payload_policy = _rerun_save_scope(
+        intact_log  # type: ignore[arg-type]
+    )
+    assert layers_to_save == "all"
+    assert predicate is intact_options.keep_op
+    assert lookback == 2
+    assert payload_policy == "detached_raw"

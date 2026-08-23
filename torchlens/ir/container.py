@@ -2,20 +2,23 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Sequence
 import dataclasses
-from dataclasses import dataclass
 import inspect
 import sys
+import threading
 import types
+from collections import OrderedDict, defaultdict
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any, ClassVar, Literal, TypeAlias, cast
 
+from .._errors import _actionable_message, _ActionableErrorMixin
 from .._io import FieldPolicy
+from ..errors._base import TorchLensError
 
-# ``defaultdict`` factory callables restorable on load WITHOUT importing an
-# arbitrary callable. Mirrors ``torchlens.backends.torch.ops._SAFE_DEFAULT_FACTORIES``;
-# a factory outside this allowlist is recorded opaque at capture, never here.
+# Canonical ``defaultdict`` factory callables restorable on load WITHOUT importing
+# an arbitrary callable. Capture imports this SAME mapping; a factory outside the
+# allowlist is recorded opaque and can never enter the reconstruction path.
 _SAFE_DEFAULT_FACTORIES: dict[str, Any] = {
     "list": list,
     "dict": dict,
@@ -32,7 +35,7 @@ _SAFE_DEFAULT_FACTORIES: dict[str, Any] = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TupleIndex:
     """Index component for tuple/list output paths."""
 
@@ -41,7 +44,7 @@ class TupleIndex:
     index: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DictKey:
     """Key component for dict output paths."""
 
@@ -50,7 +53,7 @@ class DictKey:
     key: Any
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class NamedField:
     """Field-name component for namedtuple output paths."""
 
@@ -59,7 +62,7 @@ class NamedField:
     name: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DataclassField:
     """Field-name component for dataclass output paths."""
 
@@ -68,7 +71,7 @@ class DataclassField:
     name: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class HFKey:
     """Key component for HuggingFace ``ModelOutput`` output paths."""
 
@@ -115,7 +118,7 @@ class ContainerSpec:
     fields: tuple[str, ...] = ()
     type_module: str | None = None
     type_qualname: str | None = None
-    child_specs: tuple[tuple[OutputPathComponent, "ContainerSpec"], ...] = ()
+    child_specs: tuple[tuple[OutputPathComponent, ContainerSpec], ...] = ()
     literal_value: Any = None
     aux_data: Any = None
     lossy_reconstruction: bool = False
@@ -142,6 +145,7 @@ def rebuild_container_from_spec(spec: ContainerSpec, leaves: list[Any] | tuple[A
         If the number of leaves does not match the container specification.
     """
 
+    _validate_container_spec(spec)
     leaf_iter = iter(leaves)
     rebuilt = _rebuild_container_from_spec(spec, leaf_iter)
     sentinel = object()
@@ -176,8 +180,7 @@ def reorder_container_leaves(
     """
 
     values_by_path = {
-        tuple(_raw_path_component(component) for component in path): value
-        for path, value in leaves
+        tuple(_raw_path_component(component) for component in path): value for path, value in leaves
     }
     expected_paths = _container_spec_leaf_paths(spec)
     if len(values_by_path) != len(expected_paths) or any(
@@ -232,6 +235,80 @@ def _raw_path_component(component: OutputPathComponent) -> Any:
     if isinstance(component, (DictKey, HFKey)):
         return component.key
     return component
+
+
+def _validate_container_spec(spec: ContainerSpec) -> None:
+    """Reject a structurally malformed spec BEFORE any leaf is consumed (fail-closed).
+
+    ``rebuild_container_from_spec`` previously NORMALIZED corrupt facts instead of rejecting
+    them: a negative ``length`` became an empty container (``range(-4 or 0)``), a
+    ``length``/``keys`` disagreement was silently ignored, and an out-of-range child
+    component was dropped without error. Reconstruction is a validation tripwire, so a spec
+    whose declared shape cannot be honored is a typed refusal, never a coerced "valid" value.
+
+    Tighten-only: every check holds for every spec :func:`_build_container_spec` produces, so
+    no faithful capture is newly rejected -- only tampered / corrupt specs are refused. The
+    walk is recursive so nested corruption is caught up front.
+
+    Raises
+    ------
+    ContainerReconstructionError
+        If ``spec`` (or any nested child spec) declares a structure that cannot be rebuilt.
+    """
+
+    kind = spec.kind
+    length = spec.length
+    if length is not None and length < 0:
+        raise ContainerReconstructionError(
+            f"ContainerSpec.length must be non-negative, got {length}."
+        )
+    components = [component for component, _child in spec.child_specs]
+    if len(components) != len(set(components)):
+        raise ContainerReconstructionError(
+            "ContainerSpec has duplicate child path components; the spec is corrupt."
+        )
+    # Only the structural facts each reconstruction path actually consumes are validated
+    # here (kept strictly tighten-only: every spec ``_build_container_spec`` emits passes).
+    # Redundant/unused fields on a spec are left untouched -- the goal is to refuse a spec
+    # whose declared shape ``_rebuild_container_from_spec`` would silently normalize, not to
+    # police cosmetic field hygiene.
+    if kind in {"tuple", "list", "registered"}:
+        if length is not None:
+            for component in components:
+                if not isinstance(component, TupleIndex) or not 0 <= component.index < length:
+                    raise ContainerReconstructionError(
+                        f"ContainerSpec kind {kind!r} child component {component!r} is out of "
+                        f"domain for length {length}."
+                    )
+    elif kind in {"dict", "hf_model_output"}:
+        if length is not None and length != len(spec.keys):
+            raise ContainerReconstructionError(
+                f"ContainerSpec kind {kind!r} length {length} disagrees with {len(spec.keys)} keys."
+            )
+        key_component = DictKey if kind == "dict" else HFKey
+        for component in components:
+            if not isinstance(component, key_component) or component.key not in spec.keys:
+                raise ContainerReconstructionError(
+                    f"ContainerSpec kind {kind!r} child component {component!r} is not among "
+                    "the declared keys."
+                )
+    elif kind in {"namedtuple", "dataclass"}:
+        if length is not None and length != len(spec.fields):
+            raise ContainerReconstructionError(
+                f"ContainerSpec kind {kind!r} length {length} disagrees with "
+                f"{len(spec.fields)} fields."
+            )
+        field_component = NamedField if kind == "namedtuple" else DataclassField
+        for component in components:
+            if not isinstance(component, field_component) or component.name not in spec.fields:
+                raise ContainerReconstructionError(
+                    f"ContainerSpec kind {kind!r} child component {component!r} is not among "
+                    "the declared fields."
+                )
+    elif kind not in {"literal", "opaque"}:
+        raise ContainerReconstructionError(f"Unsupported ContainerSpec kind {kind!r}.")
+    for _component, child in spec.child_specs:
+        _validate_container_spec(child)
 
 
 def _rebuild_container_from_spec(spec: ContainerSpec, leaf_iter: Any) -> Any:
@@ -706,6 +783,8 @@ def _generated_dataclass_init_marker() -> str | None:
 
     @dataclasses.dataclass
     class _Probe:
+        """Throwaway dataclass whose generated ``__init__`` supplies the marker."""
+
         _x: int
 
     for klass in _Probe.__mro__:
@@ -783,7 +862,7 @@ _TRUSTED_MODEL_OUTPUT_INIT_BASES: tuple[type[Any], ...] = (object, dict, Ordered
 
 
 def _is_trusted_transformers_output_type(
-    container_type: type[Any], spec: "ContainerSpec | None"
+    container_type: type[Any], spec: ContainerSpec | None
 ) -> bool:
     """Return whether ``container_type`` is a genuine ``transformers`` output by resolution authority.
 
@@ -817,7 +896,7 @@ def _is_trusted_transformers_output_type(
 
 
 def _model_output_has_foreign_init(
-    container_type: type[Any], spec: "ContainerSpec | None" = None
+    container_type: type[Any], spec: ContainerSpec | None = None
 ) -> bool:
     """Return whether an ``hf_model_output`` type's own ``__init__`` is an untrusted constructor.
 
@@ -870,7 +949,7 @@ def _reconstruction_would_substitute_plain(
     container_type: type[Any],
     kind: str,
     names: tuple[Any, ...],
-    spec: "ContainerSpec | None",
+    spec: ContainerSpec | None,
 ) -> bool:
     """Return whether ``_rebuild_container_from_spec`` would substitute a PLAIN container (r49 secB_1).
 
@@ -912,7 +991,7 @@ def reconstruction_is_lossy_by_type(
     container_type: type[Any],
     captured_names: tuple[Any, ...],
     kind: str,
-    spec: "ContainerSpec | None" = None,
+    spec: ContainerSpec | None = None,
 ) -> bool:
     """Recompute reconstruction lossiness from the RESOLVED type at LOAD time.
 
@@ -997,9 +1076,7 @@ def reconstruction_is_lossy_by_type(
     # ``__new__`` is not an inert allocator, or its fields are not inertly settable), the
     # recorded type and any ``__new__``-computed state are dropped -- treat it as lossy,
     # mirroring reconstruction exactly through the shared predicate.
-    if _reconstruction_would_substitute_plain(container_type, kind, captured_names, spec):
-        return True
-    return False
+    return bool(_reconstruction_would_substitute_plain(container_type, kind, captured_names, spec))
 
 
 def _construct_dataclass_without_init(
@@ -1115,7 +1192,7 @@ def _rebuild_child_or_leaf(
         raise ValueError("Not enough leaves supplied for ContainerSpec.") from exc
 
 
-class ContainerReconstructionError(ValueError):
+class ContainerReconstructionError(_ActionableErrorMixin, TorchLensError, ValueError):
     """Raised when an output-container spec names a type that is not admissible.
 
     The output ``ContainerSpec`` is portable, attacker-influenceable data. Its
@@ -1124,7 +1201,46 @@ class ContainerReconstructionError(ValueError):
     benign container allowlist for its ``kind`` is refused BEFORE any construction,
     mirroring the safe-unpickler's global denial. Subclasses ``ValueError`` so the
     runnable run wrapper reports it as a typed ``RunPreconditionError`` denial.
+
+    r3 b1-opus R64-3: the class also escapes RAW from the PUBLIC documented
+    ``Op.multi_output_type`` property, so it is a user-catchable typed refusal,
+    not only an internal codec error: it resolves from ``torchlens.errors``,
+    carries ``fields["code"] == "container_spec_inadmissible"`` plus a remedy,
+    and rows in ``docs/reference/error_refusal_contract.md``.
     """
+
+    def __init__(
+        self,
+        problem: str,
+        *,
+        code: str = "container_spec_inadmissible",
+        remedy: str = (
+            "Re-save the artifact from a trusted capture; the recorded "
+            "output-container spec is corrupt, tampered, or names an "
+            "inadmissible type."
+        ),
+        **context: object,
+    ) -> None:
+        """Initialize the typed default-deny container-spec refusal.
+
+        Parameters
+        ----------
+        problem:
+            Description of the inadmissible spec fact.
+        code:
+            Stable machine-readable refusal code.
+        remedy:
+            Concrete caller action that resolves the refusal.
+        **context:
+            Structured, non-authoritative diagnostic context.
+        """
+
+        super().__init__(
+            _actionable_message(problem, remedy),
+            code=code,
+            remedy=remedy,
+            **cast("dict[str, Any]", context),
+        )
 
 
 # ``dict``-subtype output containers are only ever recorded for the two mapping
@@ -1333,6 +1449,17 @@ class RegisteredContainer:
 
 _CONTAINER_REGISTRY: dict[type[Any], RegisteredContainer] = {}
 
+_CONTAINER_REGISTRY_LOCK = threading.Lock()
+"""Serializes registry writes against reader snapshots (r7 b2-sol R54).
+
+``register_container`` is public API callable from any thread; the lookup
+used to iterate the live dict, so a registration racing a capture's walk
+raised ``RuntimeError: dictionary changed size during iteration`` mid-forward.
+Writers mutate under the lock and readers snapshot under it; ``issubclass``
+resolution (which can invoke user ``__subclasshook__`` code) runs OUTSIDE the
+lock on the snapshot.
+"""
+
 
 def register_container(
     container_type: type[Any],
@@ -1357,9 +1484,10 @@ def register_container(
         extra ``__dict__`` state instead of dropping it silently on replay.
     """
 
-    _CONTAINER_REGISTRY[container_type] = RegisteredContainer(
-        flatten, unflatten, state_complete=state_complete
-    )
+    with _CONTAINER_REGISTRY_LOCK:
+        _CONTAINER_REGISTRY[container_type] = RegisteredContainer(
+            flatten, unflatten, state_complete=state_complete
+        )
 
 
 def get_registered_container(container_type: type[Any]) -> RegisteredContainer | None:
@@ -1374,12 +1502,31 @@ def get_registered_container(container_type: type[Any]) -> RegisteredContainer |
     -------
     RegisteredContainer | None
         Registered hook pair or ``None``.
+
+    Notes
+    -----
+    When both a base class and one of its subclasses are registered, the MOST-DERIVED
+    matching registration wins regardless of insertion order. The prior implementation
+    returned the FIRST ``issubclass`` match by dict-insertion order, so a subclass registered
+    after its base silently inherited the base's (wrong) ``flatten``/``unflatten`` hooks and
+    ``aux_data``. ``issubclass`` (not ``__mro__``) still selects candidates so ABC virtual
+    subclass registrations keep matching; among candidates the one that is a subclass of all
+    other matches is chosen, falling back to insertion order only for unrelated matches.
     """
 
-    for registered_type, registration in _CONTAINER_REGISTRY.items():
-        if issubclass(container_type, registered_type):
-            return registration
-    return None
+    best_type: type[Any] | None = None
+    best_registration: RegisteredContainer | None = None
+    with _CONTAINER_REGISTRY_LOCK:
+        registry_snapshot = list(_CONTAINER_REGISTRY.items())
+    for registered_type, registration in registry_snapshot:
+        if not issubclass(container_type, registered_type):
+            continue
+        if best_type is None or (
+            issubclass(registered_type, best_type) and registered_type is not best_type
+        ):
+            best_type = registered_type
+            best_registration = registration
+    return best_registration
 
 
 def namedtuple_extra_instance_state(value: Any) -> bool:

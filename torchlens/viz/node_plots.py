@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from typing import Any, TypeAlias, cast
 
@@ -88,7 +89,8 @@ def render_heatmap(
     Raises
     ------
     ValueError
-        If inputs have invalid shape, size, cap, or colormap.
+        If inputs have invalid shape, size, cap, or colormap, or if explicit
+        ``vmin``/``vmax`` bounds are non-finite or reversed (``vmax < vmin``).
     """
 
     _validate_size(width, height)
@@ -223,18 +225,25 @@ def render_lineplot(
     if values.ndim != 2 or values.shape[1] == 0:
         raise ValueError("render_lineplot expects shape [K] or [S, K] with K > 0.")
     n_series, n_points = values.shape
-    xs: np.ndarray[Any, Any] = np.arange(n_points, dtype=np.float64)
+    xs: np.ndarray[Any, np.dtype[np.float64]] = np.arange(n_points, dtype=np.float64)
     if x_values is not None:
         xs = np.asarray(_as_numpy(x_values), dtype=np.float64)
         if xs.ndim != 1 or xs.shape[0] != n_points:
             raise ValueError("x_values must have shape [K].")
 
-    finite_y = values[np.isfinite(values)]
-    finite_x = xs[np.isfinite(xs)]
-    if finite_y.size == 0 or finite_x.size == 0:
-        raise ValueError("render_lineplot requires at least one finite point.")
-    low_y = float(np.min(finite_y)) if y_min is None else float(y_min)
-    high_y = float(np.max(finite_y)) if y_max is None else float(y_max)
+    # A point is drawable only when BOTH its x and y are finite. Checking the
+    # two axes independently accepted inputs with finite y's and finite x's at
+    # DISJOINT indices -- zero drawable pairs -- and then rendered a blank plot.
+    finite_x_mask = np.isfinite(xs)
+    finite_x = xs[finite_x_mask]
+    finite_pairs = np.isfinite(values) & finite_x_mask[np.newaxis, :]
+    if not np.any(finite_pairs):
+        raise ValueError("render_lineplot requires at least one finite (x, y) point.")
+    # The auto y-range must reflect only points that will actually be drawn, so
+    # a y-value sitting at a non-finite x column does not stretch the axis.
+    plotted_y = values[finite_pairs]
+    low_y = float(np.min(plotted_y)) if y_min is None else float(y_min)
+    high_y = float(np.max(plotted_y)) if y_max is None else float(y_max)
     if not np.isfinite(low_y) or not np.isfinite(high_y):
         raise ValueError("y_min and y_max must be finite when provided.")
     if high_y < low_y:
@@ -362,7 +371,9 @@ def render_image_scatter(
     canvas_size:
         Width and height of the square output image.
     min_distance:
-        Optional minimum center-to-center distance in pixels.
+        Optional minimum center-to-center distance in pixels. Pass ``0`` to
+        disable overlap-avoidance and draw every item at its exact
+        projected coordinate.
     show_axes:
         Whether to draw faint central guide axes.
     background:
@@ -371,7 +382,11 @@ def render_image_scatter(
     Returns
     -------
     Image.Image
-        RGB scatter image of exactly ``(canvas_size, canvas_size)``.
+        RGB scatter image of exactly ``(canvas_size, canvas_size)``. Close
+        centers are deterministically spread apart for legibility; whenever
+        any item is moved off its true projected coordinate, the image
+        carries a quantified ``spread <=Npx`` marker in the lower-left
+        corner.
 
     Raises
     ------
@@ -397,12 +412,23 @@ def render_image_scatter(
 
     shown_count = min(max_items, array.shape[0])
     margin = thumbnail_size / 2.0 + _SCATTER_CAPTION_RESERVE
-    centers = _coords_to_pixel_centers(array[:shown_count], canvas_size=canvas_size, margin=margin)
+    true_centers = _coords_to_pixel_centers(
+        array[:shown_count], canvas_size=canvas_size, margin=margin
+    )
     spacing = (
         min_distance if min_distance is not None else (float(thumbnail_size) if images else 14.0)
     )
     centers = _spread_close_centers(
-        centers, canvas_size=canvas_size, margin=margin, min_distance=spacing
+        true_centers, canvas_size=canvas_size, margin=margin, min_distance=spacing
+    )
+    # Position is the datum in a scatter: when overlap-avoidance moves any
+    # item off its true projected coordinate, the image itself must say so.
+    max_displacement = max(
+        (
+            math.hypot(moved[0] - original[0], moved[1] - original[1])
+            for original, moved in zip(true_centers, centers)
+        ),
+        default=0.0,
     )
     canvas = Image.new("RGB", (canvas_size, canvas_size), background)
     draw = ImageDraw.Draw(canvas)
@@ -420,6 +446,12 @@ def render_image_scatter(
     more_count = array.shape[0] - shown_count
     if more_count > 0:
         _draw_more_indicator(draw, canvas_size=canvas_size, text=f"+{more_count} more")
+    if max_displacement > 0.5:
+        _draw_spread_indicator(
+            draw,
+            canvas_size=canvas_size,
+            text=f"spread <={max(1, int(math.ceil(max_displacement)))}px",
+        )
     return canvas
 
 
@@ -482,7 +514,9 @@ def _normalize_finite(array: np.ndarray, vmin: float | None, vmax: float | None)
     Raises
     ------
     ValueError
-        If explicit bounds are not finite or are reversed.
+        If explicit bounds are not finite, or are reversed (``vmax < vmin``).
+        Degenerate equal explicit bounds (``vmax == vmin``) are not an error and
+        yield an all-zero (uniform) array, matching an empty value range.
     """
 
     finite = np.isfinite(array)
@@ -493,7 +527,13 @@ def _normalize_finite(array: np.ndarray, vmin: float | None, vmax: float | None)
     high = float(np.max(array[finite])) if vmax is None else float(vmax)
     if not np.isfinite(low) or not np.isfinite(high):
         raise ValueError("vmin and vmax must be finite when provided.")
-    if high <= low:
+    # Reversed explicit bounds are a caller error and were silently swallowed
+    # here (returning a uniform array), contradicting this function's documented
+    # contract. Surface it. Data-derived bounds (vmin/vmax=None) are always
+    # ordered, so this can only trip on explicit reversed vmin/vmax.
+    if high < low:
+        raise ValueError("vmax must be greater than or equal to vmin.")
+    if high == low:
         return normalized
     normalized[finite] = np.clip((array[finite] - low) / (high - low), 0.0, 1.0)
     return normalized
@@ -1218,6 +1258,12 @@ def _lineplot_point(
     y_frac = (y_value - low_y) / (high_y - low_y)
     x = plot_left + x_frac * (plot_right - plot_left)
     y = plot_bottom - y_frac * (plot_bottom - plot_top)
+    # Clamp to the plot rectangle. Values outside the (possibly caller-set)
+    # y_min/y_max or x range would otherwise be drawn on top of the axes,
+    # labels, and title. The rectangle is convex, so clamping both endpoints
+    # keeps every drawn segment inside the plot area.
+    x = min(max(x, float(plot_left)), float(plot_right))
+    y = min(max(y, float(plot_top)), float(plot_bottom))
     return x, y
 
 
@@ -1878,6 +1924,33 @@ def _draw_more_indicator(draw: ImageDraw.ImageDraw, *, canvas_size: int, text: s
     x0 = canvas_size - text_width - 2 * pad - 8
     y0 = canvas_size - text_height - 2 * pad - 8
     x1 = canvas_size - 8
+    y1 = canvas_size - 8
+    draw.rectangle(
+        [(x0, y0), (x1, y1)],
+        fill=_MORE_FILL,
+        outline=_MORE_OUTLINE,
+    )
+    _draw_text(draw, (x0 + pad, y0 + pad), text, fill=_TEXT_COLOR)
+
+
+def _draw_spread_indicator(draw: ImageDraw.ImageDraw, *, canvas_size: int, text: str) -> None:
+    """Draw the displacement disclosure in the scatter's lower-left corner.
+
+    Parameters
+    ----------
+    draw:
+        PIL drawing context.
+    canvas_size:
+        Output image side length.
+    text:
+        Quantified displacement text (e.g. ``"spread <=24px"``).
+    """
+
+    text_width, text_height = _measure_text(draw, text)
+    pad = 6
+    x0 = 8
+    y0 = canvas_size - text_height - 2 * pad - 8
+    x1 = 8 + text_width + 2 * pad
     y1 = canvas_size - 8
     draw.rectangle(
         [(x0, y0), (x1, y1)],

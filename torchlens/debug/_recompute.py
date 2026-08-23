@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -13,7 +12,7 @@ if TYPE_CHECKING:
 from ._common import _compute_ops, _op_label, _require_pandas
 
 
-def recompute_candidates(trace: Trace, *, budget_gb: float | None = None) -> "pd.DataFrame":
+def recompute_candidates(trace: Trace, *, budget_gb: float | None = None) -> pd.DataFrame:
     """Rank ops by activation memory per forward FLOP.
 
     Parameters

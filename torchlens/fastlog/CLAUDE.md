@@ -3,8 +3,8 @@
 ## What This Does
 `torchlens.fastlog` records a predicate-selected subset of forward-pass events. It is a
 sibling path to `trace()`: the same decorated wrappers fire, but fastlog builds
-lightweight `RecordContext` values and stores only records selected by `keep_op` or
-`keep_module` predicates.
+lightweight `RecordContext` values and stores only records selected by the `save=`
+predicate (plus `default_op=`/`default_module=` defaults).
 
 ## Public Surface
 - `record()` - one-shot sparse recording.
@@ -15,6 +15,8 @@ lightweight `RecordContext` values and stores only records selected by `keep_op`
 - `dry_run()` - predicate trace without payload retention.
 - `preview()` - visualization overlay from `visualization.fastlog_preview`.
 - `load()`, `recover()`, `cleanup_partial()` - disk bundle management.
+- `halt()` / `HaltSignal` - user-invoked early-stop from inside a predicate
+  (defined in `_halt.py`, surfaced top-level as `tl.halt`).
 
 ## Files
 
@@ -25,7 +27,7 @@ lightweight `RecordContext` values and stores only records selected by `keep_op`
 | `_record_one_shot.py` | Public `record()` implementation |
 | `_recorder.py` | Public `Recorder` context manager and repeated rollout orchestration |
 | `_storage_resolver.py` | Tensor copy/detach/RAM/disk routing |
-| `_halt.py` | Halt outcome helpers shared by one-shot and repeated recording |
+| `_halt.py` | The public `halt()` entry point + `HaltSignal`, plus halt outcome helpers shared by one-shot and repeated recording |
 | `_indexes.py` | Recording index helpers |
 | `_validation.py` | Option validation |
 | `storage_ram.py` | In-memory backend |
@@ -77,4 +79,6 @@ copies.
 ## Future Work
 - Async disk drain once benchmarks support it.
 - True distributed capture semantics.
-- Narrow sparse-to-Trace conversion only if it can preserve `Trace` invariants.
+(Sparse-to-Trace conversion SHIPPED as `Recording.to_trace()` — see above; it
+cooks the event stream into a full-structure `Trace` with unsaved payload
+reads rejected explicitly.)

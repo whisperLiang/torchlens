@@ -295,6 +295,10 @@ def test_forward_peak_memory_ignores_pre_existing_external_tracemalloc_peak() ->
     an unrelated historical peak with nothing to do with this forward pass. Two
     unrelated small-model traces would both silently report that same stale,
     foreign peak.
+
+    The Python-allocation probe is opt-in (the allocator hook costs 1.7x-2.5x
+    total capture time), so this test enables it explicitly: with the probe off
+    there is no tracemalloc read to scope and the regression cannot be observed.
     """
 
     started_here = not tracemalloc.is_tracing()
@@ -310,8 +314,9 @@ def test_forward_peak_memory_ignores_pre_existing_external_tracemalloc_peak() ->
 
         model = nn.Linear(10, 10)
         x = torch.randn(1, 10)
-        log1 = tl.trace(model, x)
-        log2 = tl.trace(model, x)
+        probe = tl.options.CaptureOptions(measure_python_peak_memory=True)
+        log1 = tl.trace(model, x, capture=probe)
+        log2 = tl.trace(model, x, capture=probe)
     finally:
         if started_here:
             tracemalloc.stop()

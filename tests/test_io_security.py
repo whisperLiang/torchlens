@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
+import safetensors  # noqa: F401
 import torch
-import torchlens as tl
 from torch import nn
 
-pytest.importorskip("safetensors")
-
+import torchlens as tl
 from torchlens import load, save
 from torchlens._io import TorchLensIOError
 

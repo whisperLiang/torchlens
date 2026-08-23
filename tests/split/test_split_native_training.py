@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from v2_helpers import split_request
-
 import os
 import subprocess
 import sys
@@ -13,11 +11,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _paddle_subprocess import run_paddle_subprocess
+from v2_helpers import split_request
 
 import torchlens as tl
 from torchlens.split.errors import SplitUnsupportedError
-
-from _paddle_subprocess import run_paddle_subprocess
 
 
 def _run_tinygrad_subprocess(code: str) -> None:

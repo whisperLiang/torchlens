@@ -10,24 +10,24 @@ from typing import TYPE_CHECKING, Any, cast
 
 from . import _engine
 from ._engine_forward import _ProjectiveFieldSolution
-from ._engine_geometry import _Affine, _Mapped, _as_tuple, _select_full_axes, _transpose_mapped
+from ._engine_geometry import _Affine, _as_tuple, _Mapped, _select_full_axes, _transpose_mapped
 from ._errors import AmbiguousTargetError, ReceptiveFieldError
 from ._path import forward_index_image
 from ._query import (
     _AxisSets,
-    _IndexSet,
-    _TerminalState,
     _build_box,
     _call_index_callback,
     _call_interval_callback,
+    _distinct_terminals,
+    _IndexSet,
     _initial_axis_sets,
     _normalize_unit,
+    _TerminalState,
     _validate_descriptor_for_query,
     map_transposed_convolution_index_set,
 )
 from ._rules import _RuleResult
 from ._types import ReceptiveField, ReceptiveFieldBox, ReceptiveFieldDirection
-
 
 if TYPE_CHECKING:
     from ..data_classes.op import Op
@@ -86,7 +86,11 @@ def box_for_source_unit(
     }
     target_label = descriptor.input_op_label
     active = _labels_to_target(op.label, target_label, operations, by_reference)
-    terminals = _walk_to_target(op, initial, target_label, active, by_reference, True)
+    # The walk enumerates paths, so it revisits each operation once per path
+    # through it, re-deriving per-operation facts that are linear in that
+    # operation's parents. Memoize them for this one query.
+    with _engine._geometry_memo():
+        terminals = _walk_to_target(op, initial, target_label, active, by_reference, True, {})
     if not terminals:
         raise ReceptiveFieldError(
             f"Source {op.label!r} has no live path to target {target_label!r}."
@@ -148,8 +152,37 @@ def _walk_to_target(
     active: frozenset[str],
     by_reference: Mapping[str, Op],
     exact: bool,
+    memo: dict[tuple[str, _AxisSets, bool], tuple[_TerminalState, ...]],
 ) -> tuple[_TerminalState, ...]:
-    """Recursively transpose a joint axis-set state toward one target."""
+    """Recursively transpose a joint axis-set state toward one target.
+
+    ``memo`` collapses the path enumeration to distinct
+    ``(operation, axis-set state)`` states for the duration of one query. It is
+    plain memoization of a pure function, so the cached tuple is exactly what
+    the recursion would rebuild; see ``_query._walk_to_input``.
+    """
+
+    key = (op.label, input_sets, exact)
+    cached = memo.get(key)
+    if cached is not None:
+        return cached
+    terminals_for_key = _walk_target_body(
+        op, input_sets, target_label, active, by_reference, exact, memo
+    )
+    memo[key] = terminals_for_key
+    return terminals_for_key
+
+
+def _walk_target_body(
+    op: Op,
+    input_sets: _AxisSets,
+    target_label: str,
+    active: frozenset[str],
+    by_reference: Mapping[str, Op],
+    exact: bool,
+    memo: dict[tuple[str, _AxisSets, bool], tuple[_TerminalState, ...]],
+) -> tuple[_TerminalState, ...]:
+    """Transpose one joint axis-set state across a single forward hop."""
 
     if op.label == target_label:
         clipped = tuple(
@@ -187,9 +220,10 @@ def _walk_to_target(
                 active,
                 by_reference,
                 exact and hop_exact and all(item is None or item.exact for item in child_sets),
+                memo,
             )
         )
-    return tuple(terminals)
+    return _distinct_terminals(terminals)
 
 
 def _map_to_child(
@@ -214,7 +248,7 @@ def _map_to_child(
     if result.kind == "full":
         return _map_full_forward(parent, child, parent_sets, result)
     if result.kind == "axis_map":
-        return _map_axis_forward(parent, child, parent_sets, result), True
+        return _map_axis_forward(parent, child, parent_sets, result)
     if result.kind == "passthrough":
         return _map_passthrough_forward(parent, child, parent_sets, result), True
     _ = rule_name
@@ -322,11 +356,9 @@ def _map_window_edges_forward(
                 source_set, child_start + local_axis, child, result, mapping, local_axis
             )
         else:
-            image = _candidate_envelope(
+            image, callback_exact = _affine_membership_image(
                 source_set, mapping, int(child.shape[child_start + local_axis])
             )
-            callback_exact = bool(result.values.get("exact", False)) and mapping.exact
-            image = _IndexSet(image.progressions, image.exact and callback_exact)
         mapped[child_start + local_axis] = image
         exact = exact and callback_exact and image.exact
     return tuple(mapped), exact
@@ -353,6 +385,57 @@ def _membership_image(
             return _call_index_callback(result.map_index_set, local_axis, candidate_set)
         assert result.map_interval is not None
         return _call_interval_callback(result.map_interval, local_axis, candidate_set)
+
+    return forward_index_image(source_set, candidates, backward_map)
+
+
+def _affine_membership_image(
+    source_set: _IndexSet, mapping: _Mapped, child_extent: int
+) -> tuple[_IndexSet, bool]:
+    """Transpose a callback-free two-edge window by exact integer membership.
+
+    The affine candidate envelope alone loses lattice structure: a point-edge
+    map such as a step-2 slice admits at most one child per source index, yet
+    interval inversion plus floor/ceil widening reports a nonempty child range
+    for off-lattice sources. Every candidate is therefore tested against the
+    window's own integer backward relation (``ceil(lo(c)) <= s <= floor(hi(c))``)
+    so the image contains exactly the children whose windows reach the source
+    set. Over-budget candidate ranges fall back to the inexact envelope.
+
+    Parameters
+    ----------
+    source_set:
+        Parent indices whose forward image is requested.
+    mapping:
+        Sealed backward affine edge map for this axis.
+    child_extent:
+        Child-axis extent used for clipping.
+
+    Returns
+    -------
+    tuple[_IndexSet, bool]
+        Membership-proven child indices and the hop's exactness.
+    """
+
+    candidates = _candidate_envelope(source_set, mapping, child_extent)
+    if _index_set_size(candidates) > _TRANSPOSE_CANDIDATE_BUDGET:
+        return _IndexSet(candidates.progressions, exact=False), False
+
+    def backward_map(candidate_set: _IndexSet) -> tuple[_IndexSet, bool]:
+        """Return the integer taps of each candidate child's affine window."""
+
+        intervals: list[_IndexSet] = []
+        for candidate in candidate_set.values():
+            bounds = sorted(
+                (
+                    mapping.lo.a * candidate + mapping.lo.b,
+                    mapping.hi.a * candidate + mapping.hi.b,
+                )
+            )
+            start = ceil(bounds[0])
+            stop = floor(bounds[1])
+            intervals.append(_IndexSet.empty() if start > stop else _IndexSet.interval(start, stop))
+        return _IndexSet.union(intervals), mapping.exact
 
     return forward_index_image(source_set, candidates, backward_map)
 
@@ -438,18 +521,66 @@ def _map_passthrough_forward(
 
 def _map_axis_forward(
     parent: Op, child: Op, parent_sets: _AxisSets, result: _RuleResult
-) -> _AxisSets:
-    """Transpose an explicit child-axis to parent-axis mapping."""
+) -> tuple[_AxisSets, bool]:
+    """Transpose an explicit child-axis to parent-axis mapping.
+
+    Surviving sliced axes apply the inverse of their recorded exact affine
+    (``child = (parent - start) / step``, dropping coordinates off the slice
+    lattice); a scalar-selected parent axis whose constrained source set
+    excludes the recorded index prunes the whole forward influence to empty.
+    Both were silently ignored before (disputed-r2 b6/R20-2/R20-3), so a
+    projective query through a rank-changing getitem served unshifted,
+    over-covering images.
+    """
 
     raw = result.values.get("out_to_parent_axis", {})
     if not isinstance(raw, Mapping):
-        return _whole_child_envelope(child, parent_sets)
+        return _whole_child_envelope(child, parent_sets), True
+    raw_edges = result.values.get("out_axis_edges", {})
+    edges = raw_edges if isinstance(raw_edges, Mapping) else {}
+    raw_indices = result.values.get("selected_parent_indices", {})
+    selected_indices = raw_indices if isinstance(raw_indices, Mapping) else {}
+    raw_selected = result.values.get("selected_parent_axes", ())
+    selected_axes = (
+        tuple(int(axis) for axis in raw_selected)
+        if isinstance(raw_selected, Sequence) and not isinstance(raw_selected, (str, bytes))
+        else ()
+    )
     mapped: list[_IndexSet | None] = [None] * len(child.shape)
+    exact = True
     for child_axis, parent_axis in raw.items():
         if isinstance(child_axis, int) and isinstance(parent_axis, int):
             if 0 <= child_axis < len(mapped) and 0 <= parent_axis < len(parent_sets):
-                mapped[child_axis] = parent_sets[parent_axis]
-    return tuple(mapped)
+                source_set = parent_sets[parent_axis]
+                edge = edges.get(child_axis)
+                if source_set is not None and edge is not None:
+                    step, start = int(edge[0]), int(edge[1])
+                    source_set = _IndexSet.from_values(
+                        (
+                            (value - start) // step
+                            for value in source_set.values()
+                            if (value - start) % step == 0 and value >= start
+                        ),
+                        exact=source_set.exact,
+                    )
+                mapped[child_axis] = source_set
+    for parent_axis in selected_axes:
+        if not 0 <= parent_axis < len(parent_sets):
+            continue
+        source_set = parent_sets[parent_axis]
+        if source_set is None:
+            continue
+        index = selected_indices.get(parent_axis)
+        if isinstance(index, int):
+            if index not in set(source_set.values()):
+                # The constrained source coordinates never take the selected
+                # index: nothing flows through this getitem at all.
+                return tuple(_IndexSet.empty() for _ in child.shape), exact
+        else:
+            # Unknown selected index over a constrained axis: the forward
+            # image may be empty, so the non-pruned claim is an upper bound.
+            exact = False
+    return tuple(mapped), exact
 
 
 def _map_full_forward(

@@ -13,19 +13,10 @@ import torch.nn as nn
 
 from torchlens import trace as trace_fn
 from torchlens.backends.torch._tl import get_tensor_label, set_tensor_label
-from torchlens.utils.tensor_utils import (
-    get_memory_amount,
-    get_memory_amount_from_metadata,
-    print_override,
-    safe_copy,
-    safe_to,
-)
-from torchlens.utils.arg_handling import _safe_copy_arg
 
 # ---------------------------------------------------------------------------
 # FIELD_ORDER sync tests
 # ---------------------------------------------------------------------------
-
 from torchlens.constants import (
     BUFFER_LOG_FIELD_ORDER,
     FUNC_CALL_LOCATION_FIELD_ORDER,
@@ -34,6 +25,14 @@ from torchlens.constants import (
     MODULE_LOG_FIELD_ORDER,
     MODULE_PASS_LOG_FIELD_ORDER,
     PARAM_LOG_FIELD_ORDER,
+)
+from torchlens.utils.arg_handling import _safe_copy_arg
+from torchlens.utils.tensor_utils import (
+    get_memory_amount,
+    get_memory_amount_from_metadata,
+    print_override,
+    safe_copy,
+    safe_to,
 )
 
 
@@ -86,15 +85,61 @@ class TestFieldOrderSync:
             )
 
     def test_trace_field_order_covers_init(self):
-        """MODEL_LOG_FIELD_ORDER should cover all public self.X assignments in Trace.__init__."""
+        """Every public Trace init attr is declared, and user-facing ones are ordered.
+
+        A public NAME does not imply a user-facing FIELD. ``FIELD_POLICY`` is the
+        source of truth (``MODEL_LOG_FIELD_ORDER`` is generated from it -- see
+        ``test_record_field_policy.py::test_record_field_policy_is_field_order_source``),
+        and a session-time knob may be public-named yet deliberately non-user-facing:
+        ``measure_python_peak_memory`` is ``FieldPolicy.DROP`` and intentionally absent
+        from ``MODEL_LOG_FIELD_ORDER`` because it does not survive save/load.
+
+        So the check is split rather than relaxed. Requiring a DECLARATION for every
+        public init attr is strictly stronger than the previous name heuristic: a field
+        that is simply forgotten is undeclared and still fails here, while a field that
+        is declared non-user-facing on purpose is provably outside the ordering contract.
+        """
+        from torchlens._io import FieldPolicy
         from torchlens.data_classes.trace import Trace
 
         init_attrs = self._init_assigned_attrs(Trace)
-        order_set = set(MODEL_LOG_FIELD_ORDER)
-        # Every non-private init attr should be in FIELD_ORDER
         public_attrs = {a for a in init_attrs if not a.startswith("_")}
-        missing = public_attrs - order_set
-        assert not missing, f"Trace public fields missing from FIELD_ORDER: {missing}"
+
+        undeclared = public_attrs - set(Trace.FIELD_POLICY)
+        assert not undeclared, f"Trace public fields absent from FIELD_POLICY: {undeclared}"
+
+        user_facing = {a for a in public_attrs if Trace.FIELD_POLICY[a].user_facing}
+        missing = user_facing - set(MODEL_LOG_FIELD_ORDER)
+        assert not missing, f"Trace user-facing fields missing from FIELD_ORDER: {missing}"
+        non_user_facing = public_attrs - user_facing
+        # The declared inventory of public-named fields outside the ordering
+        # contract, in two classes with different persistence guarantees.
+        # (``save_budget`` was already DROP when this assertion listed only
+        # ``measure_python_peak_memory``; that was a stale pin, red on the
+        # producer baseline, corrected here. The tlspec v8 bump then added the
+        # two L9 portable markers; the pin went stale the same way again. The
+        # nonfinite lane's ``track_nonfinite`` is the fourth session knob:
+        # DROP, unordered, load restores the default.)
+        session_knobs = {
+            "measure_python_peak_memory",
+            "save_budget",
+            "distributed_witness",
+            "track_nonfinite",
+        }
+        portable_unordered = {
+            "checkpoint_invocation_witness",
+            "grad_fn_timing_provenance",
+        }
+        assert non_user_facing == session_knobs | portable_unordered, (
+            f"Trace public fields classified as non-user-facing changed: {non_user_facing}"
+        )
+        # Session-time knobs stay FieldPolicy.DROP (never survive save/load);
+        # the L9 markers are KEEP-but-unordered per the v8 bump ruling (the
+        # portable_only_fields ledger in test_field_order_contract.py).
+        for name in session_knobs:
+            assert Trace.FIELD_POLICY[name].portable_policy is FieldPolicy.DROP, name
+        for name in portable_unordered:
+            assert Trace.FIELD_POLICY[name].portable_policy is FieldPolicy.KEEP, name
 
     def test_module_call_log_field_order_covers_init(self):
         from torchlens.data_classes.module import ModuleCall
@@ -137,7 +182,7 @@ class TestConstantsCrawl:
         assert len(OVERRIDABLE_FUNCS) > 100
 
     def test_orig_torch_funcs_includes_ignored(self):
-        from torchlens.constants import ORIG_TORCH_FUNCS, IGNORED_FUNCS
+        from torchlens.constants import IGNORED_FUNCS, ORIG_TORCH_FUNCS
 
         ignored_set = set(IGNORED_FUNCS)
         orig_set = set(ORIG_TORCH_FUNCS)
@@ -316,8 +361,11 @@ class TestGetTensorMemory:
 
         assert get_memory_amount_from_metadata(t, tuple(t.shape), t.dtype) == 48
 
-    def test_metadata_memory_uses_sparse_fallback(self) -> None:
-        """Sparse metadata memory should preserve non-zero-value accounting.
+    def test_metadata_memory_counts_sparse_index_storage(self) -> None:
+        """Sparse metadata memory counts index AND values storage.
+
+        The values-only figure ledgered this 3-nnz COO tensor as 12 bytes
+        while its int64 index storage alone holds 48 physical bytes.
 
         Returns
         -------
@@ -329,7 +377,65 @@ class TestGetTensorMemory:
         values = torch.tensor([3.0, 4.0, 5.0])
         sparse = torch.sparse_coo_tensor(indices, values, (2, 3))
 
-        assert get_memory_amount_from_metadata(sparse, tuple(sparse.shape), sparse.dtype) == 12
+        # 3 float32 values (12) + 2x3 int64 indices (48).
+        assert get_memory_amount_from_metadata(sparse, tuple(sparse.shape), sparse.dtype) == 60
+        assert get_memory_amount(sparse) == 60
+
+    def test_compressed_sparse_memory_is_physical_not_logical(self) -> None:
+        """Compressed sparse layouts bill component bytes, not shape * itemsize.
+
+        The dense fallback billed a CSR tensor at its LOGICAL shape
+        (``prod(shape) * itemsize``); the physical footprint is
+        crow_indices + col_indices + values.
+
+        Returns
+        -------
+        None
+            Assertion-only regression test.
+        """
+
+        coo = torch.sparse_coo_tensor(
+            torch.tensor([[0], [0]]), torch.tensor([1.0]), (4, 4)
+        ).coalesce()
+        csr = coo.to_sparse_csr()
+
+        expected = sum(
+            component.numel() * component.element_size()
+            for component in (csr.crow_indices(), csr.col_indices(), csr.values())
+        )
+        assert get_memory_amount(csr) == expected
+        assert get_memory_amount_from_metadata(csr, tuple(csr.shape), csr.dtype) == expected
+        # The logical-dense figure the bug produced.
+        assert expected != 16 * csr.dtype.itemsize
+
+    def test_save_budget_identity_charges_sparse_components(self) -> None:
+        """The budget's storage identity charges sparse index + values bytes.
+
+        The generic fallback billed sparse payloads at LOGICAL dense bytes
+        under an id-based identity: index storage unledgered, values
+        overcounted at dense shape, and no alias dedup across payloads
+        sharing the same components.
+
+        Returns
+        -------
+        None
+            Assertion-only regression test.
+        """
+
+        from torchlens._save_budget import _retained_storage_identity
+
+        coo = torch.sparse_coo_tensor(torch.tensor([[0], [0]]), torch.tensor([1.0]), (4, 4))
+        identity, num_bytes = _retained_storage_identity(coo)
+
+        physical = sum(
+            int(component.untyped_storage().nbytes())
+            for component in (coo._indices(), coo._values())
+        )
+        assert num_bytes == physical
+        assert num_bytes != coo.numel() * coo.element_size()  # not logical dense
+        # Identity is component-storage-based and stable across reads.
+        assert identity == _retained_storage_identity(coo)[0]
+        assert "tensor" not in identity  # never the id-based fallback
 
 
 # ---------------------------------------------------------------------------
@@ -665,7 +771,7 @@ class TestDisplayLargeTensor:
 
 
 class TestDisplayUsesLoggedShape:
-    def test_shape_matches_capture_time(self):
+    def test_shape_matches_capture_time(self) -> None:
         """shape should reflect capture-time shape."""
         model = _SimpleLinear()
         x = torch.randn(2, 10)
@@ -673,4 +779,218 @@ class TestDisplayUsesLoggedShape:
         for label in log.layer_labels:
             entry = log[label]
             if entry.out is not None:
-                assert entry.shape is not None
+                assert tuple(entry.out.shape) == tuple(entry.shape)
+
+
+class TestDeferredRegistryPruneAmortization:
+    def test_prune_backs_off_when_registry_is_live(self) -> None:
+        """A live registry past the threshold must not re-sweep per arming.
+
+        The fixed threshold alone was quadratic on large captures: once the
+        LIVE pending population crossed 2048 keys, EVERY per-op window arming
+        swept the whole registry and removed nothing (the dominant measured
+        term at 4k ops). The watermark now doubles away from the live
+        population after each sweep, so repeated armings stop paying it.
+        """
+
+        import weakref
+        from types import SimpleNamespace
+
+        from torchlens.utils import tensor_utils as tu
+
+        class _Referent:
+            """Weak-referenceable stand-in for a pending alias."""
+
+        keepalive = [_Referent() for _ in range(3000)]
+        saved_pending = dict(tu._DEFER_PENDING)
+        saved_watermark = tu._defer_prune_watermark
+        saved_prune = tu.prune_dead_deferred_entries
+        calls = {"n": 0}
+
+        def counting_prune() -> None:
+            calls["n"] += 1
+            saved_prune()
+
+        try:
+            tu._DEFER_PENDING.clear()
+            for index, obj in enumerate(keepalive):
+                tu._DEFER_PENDING[("test", index)] = [SimpleNamespace(ref=weakref.ref(obj))]
+            tu._defer_prune_watermark = tu._DEFER_PRUNE_THRESHOLD
+            tu.prune_dead_deferred_entries = counting_prune
+            for _ in range(10):
+                tu.arm_deferred_payload_window(frozenset())
+                tu.disarm_deferred_payload_window()
+            # One sweep, then the watermark (2 * 3000 live keys) suppresses
+            # the rest. The historical behavior swept all 10 times.
+            assert calls["n"] == 1
+            assert tu._defer_prune_watermark == 6000
+            # Growth past the watermark prunes again, and a mostly-dead
+            # registry resets the watermark back to the floor.
+            keepalive.clear()
+            del obj  # the population loop variable pins the last referent
+            for index in range(3500):
+                dead = _Referent()
+                tu._DEFER_PENDING[("dead", index)] = [SimpleNamespace(ref=weakref.ref(dead))]
+                del dead
+            tu.arm_deferred_payload_window(frozenset())
+            tu.disarm_deferred_payload_window()
+            assert calls["n"] == 2
+            assert len(tu._DEFER_PENDING) == 0
+            assert tu._defer_prune_watermark == tu._DEFER_PRUNE_THRESHOLD
+        finally:
+            tu.prune_dead_deferred_entries = saved_prune
+            tu._DEFER_PENDING.clear()
+            tu._DEFER_PENDING.update(saved_pending)
+            tu._defer_prune_watermark = saved_watermark
+
+    def test_dead_entries_force_prune_below_watermark(self) -> None:
+        """A mostly-dead registry BELOW the doubled watermark must still sweep.
+
+        r3 bounds gap in the doubling watermark: after one large capture
+        pushed the watermark up, a registry whose aliases then all died sat
+        below the doubled key-count watermark forever -- the dead entries
+        (and their key tuples) stayed pinned indefinitely because nothing
+        ever decayed the watermark. Alias deaths are now counted O(1) by
+        weakref callback and crossing the threshold forces a sweep.
+        """
+
+        import gc
+        import weakref
+        from types import SimpleNamespace
+
+        from torchlens.utils import tensor_utils as tu
+
+        class _Referent:
+            """Weak-referenceable stand-in for a pending alias."""
+
+        saved_pending = dict(tu._DEFER_PENDING)
+        saved_watermark = tu._defer_prune_watermark
+        saved_dead = tu._defer_dead_alias_count
+        try:
+            tu._DEFER_PENDING.clear()
+            tu._defer_dead_alias_count = 0
+            # Simulate the post-large-capture state: watermark doubled high.
+            tu._defer_prune_watermark = 100_000
+            for index in range(tu._DEFER_PRUNE_THRESHOLD + 10):
+                dead = _Referent()
+                tu._DEFER_PENDING[("dead", index)] = [
+                    SimpleNamespace(ref=weakref.ref(dead, tu._note_dead_deferred_alias))
+                ]
+                del dead
+            gc.collect()
+            assert tu._defer_dead_alias_count > tu._DEFER_PRUNE_THRESHOLD
+            tu.arm_deferred_payload_window(frozenset())
+            tu.disarm_deferred_payload_window()
+            # RED before the fix: the doubled watermark suppressed the sweep.
+            assert len(tu._DEFER_PENDING) == 0
+            assert tu._defer_dead_alias_count == 0
+            # And the watermark decayed back to the floor for the now-empty
+            # registry.
+            assert tu._defer_prune_watermark == tu._DEFER_PRUNE_THRESHOLD
+        finally:
+            tu._DEFER_PENDING.clear()
+            tu._DEFER_PENDING.update(saved_pending)
+            tu._defer_prune_watermark = saved_watermark
+            tu._defer_dead_alias_count = saved_dead
+
+    def test_real_registration_counts_alias_death(self) -> None:
+        """The production registration path wires the death callback."""
+
+        import torch as _torch
+
+        from torchlens.utils import tensor_utils as tu
+
+        saved_pending = dict(tu._DEFER_PENDING)
+        saved_dead = tu._defer_dead_alias_count
+        try:
+            tu._DEFER_PENDING.clear()
+            tu.arm_deferred_payload_window(frozenset())
+            try:
+                source = _torch.ones(4)
+                alias = tu._try_defer_payload_alias(source)
+                assert alias is not None
+                before = tu._defer_dead_alias_count
+                del alias
+                assert tu._defer_dead_alias_count == before + 1
+            finally:
+                tu.disarm_deferred_payload_window()
+        finally:
+            tu._DEFER_PENDING.clear()
+            tu._DEFER_PENDING.update(saved_pending)
+            tu._defer_dead_alias_count = saved_dead
+
+
+class TestAliasContractPositionScan:
+    def test_contract_lookup_semantics_unchanged(self) -> None:
+        """Contract coverage keys on contract positions, not a full arg scan.
+
+        The full scan cost O(fan_in) per parent — O(fan_in^2) per op for
+        variadic ops like a 4k-arg ``stack`` — with the common EMPTY contract.
+        """
+
+        from torchlens.backends.torch.aliasing import parent_label_has_alias_contract
+
+        positions = {
+            "args": {i: f"parent_{i}" for i in range(50)},
+            "kwargs": {"out": "parent_out"},
+        }
+        # Empty contract: never covered.
+        assert not parent_label_has_alias_contract("parent_3", positions, ())
+        # Covered arg position.
+        assert parent_label_has_alias_contract("parent_3", positions, (3,))
+        # Covered kwargs position.
+        assert parent_label_has_alias_contract("parent_out", positions, ("out",))
+        # Contract position exists but holds a different parent.
+        assert not parent_label_has_alias_contract("parent_3", positions, (4,))
+        # Parent present only at a non-contract position.
+        assert not parent_label_has_alias_contract("parent_7", positions, (3, "out"))
+
+
+class TestStorageAliasBucketLayout:
+    """SF-52: the per-storage alias index single-alias fast path."""
+
+    def test_single_alias_is_one_weakref_and_upgrades_on_second(self) -> None:
+        """One labeled tensor per storage stores a bare ref; two upgrade.
+
+        A full WeakIdKeyDictionary per bucket cost ~6 marginal objects per op
+        (measured -6.95 obj/op on the pinned linear602 census after this
+        change). Candidate reads must be identical across both layouts.
+        """
+
+        import weakref
+
+        from torch.utils.weak import WeakIdKeyDictionary
+
+        from torchlens.backends.torch import _tl
+
+        session = _tl._LabelSession(token=1)
+        t1 = torch.randn(4)
+        t2 = t1.view(2, 2)  # distinct object, same storage
+        ptr = t1.untyped_storage().data_ptr()
+
+        _tl._register_storage_alias(session, ptr, t1)
+        assert isinstance(session.by_storage_ptr[ptr], weakref.ref)
+        # Idempotent re-registration keeps the slim layout.
+        _tl._register_storage_alias(session, ptr, t1)
+        assert isinstance(session.by_storage_ptr[ptr], weakref.ref)
+
+        saved_session = _tl._ACTIVE_LABEL_SESSION
+        try:
+            _tl._ACTIVE_LABEL_SESSION = session
+            assert _tl.session_storage_alias_candidates(ptr) == [t1]
+
+            # Second live distinct alias upgrades in place.
+            _tl._register_storage_alias(session, ptr, t2)
+            assert isinstance(session.by_storage_ptr[ptr], WeakIdKeyDictionary)
+            candidates = _tl.session_storage_alias_candidates(ptr)
+            assert {id(c) for c in candidates} == {id(t1), id(t2)}
+
+            # A dead single-alias entry reads as no candidates and is
+            # replaced by the next registration.
+            t3 = torch.randn(4)
+            ptr3 = t3.untyped_storage().data_ptr()
+            _tl._register_storage_alias(session, ptr3, t3)
+            del t3
+            assert _tl.session_storage_alias_candidates(ptr3) == []
+        finally:
+            _tl._ACTIVE_LABEL_SESSION = saved_session

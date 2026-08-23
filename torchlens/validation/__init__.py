@@ -8,21 +8,24 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ..intervention.save import check_spec_compat
+from .._io import _json
 from ..intervention.resolver import resolve_sites
+from ..intervention.save import check_spec_compat
 from ..user_funcs import (
     validate_backward_pass,
     validate_batch_of_models_and_inputs,
     validate_forward_pass,
     validate_saved_outs,
 )
-from .core import validate_saved_outs as validate_trace_saved_outs
 from .consolidated import InterventionValidationReport, validate
+from .core import validate_saved_outs as validate_trace_saved_outs
 from .diagnostics import (
     ValidationDiagnostic,
     ValidationFailure,
     get_validation_diagnostics,
     get_validation_failure,
+    last_validation_failure,
+    last_validation_peak_memory,
 )
 from .invariants import MetadataInvariantError, check_metadata_invariants
 from .status import ValidationReplayState, ValidationReplayStatus
@@ -37,8 +40,11 @@ def validate_tlspec(
 ) -> None:
     """Validate a unified ``.tlspec`` manifest against its manifest schema.
 
-    Legacy TorchLens 2.16 formats are intentionally accepted without schema
-    validation so old artifacts remain loadable.
+    Legacy TorchLens 2.16 intervention formats are intentionally accepted
+    without schema validation so old intervention specs remain loadable.
+    Legacy 2.16 model-log bundles are below the torchlens 2.33
+    (``tlspec_version=6``) rehydration floor and refuse here with the same
+    typed error the loader raises.
 
     Parameters
     ----------
@@ -55,6 +61,8 @@ def validate_tlspec(
         If a unified manifest violates the v1 schema.
     FileNotFoundError
         If a unified manifest file is missing.
+    torchlens.errors.ArtifactVersionBelowFloorError
+        If the artifact is a pre-floor (pre-2.33) model-log bundle.
     """
 
     from ..io import detect_tlspec_format, inspect_tlspec
@@ -67,9 +75,12 @@ def validate_tlspec(
 
     manifest_path = tlspec_path / "manifest.json"
     if manifest_path.exists():
+        # Same untrusted artifact as ``tl.load(path)``, different door: route the
+        # manifest read through the ONE bounded reader (byte ceiling + depth
+        # prescan) so a hostile depth-900 manifest refuses typed here too instead
+        # of escaping as an uncaught RecursionError from stdlib ``json.load``.
         try:
-            with manifest_path.open("r", encoding="utf-8") as handle:
-                manifest_value = json.load(handle)
+            manifest_value = _json.read_bounded(manifest_path)
         except json.JSONDecodeError as exc:
             raise ValueError(f"Failed to parse .tlspec manifest JSON at {manifest_path}.") from exc
         if not isinstance(manifest_value, dict):
@@ -79,9 +90,22 @@ def validate_tlspec(
     if tlspec_format in {
         "v2.16_intervention_with_kind",
         "v2.16_intervention",
-        "v2.16_modellog_portable",
     }:
         return
+    if tlspec_format == "v2.16_modellog_portable":
+        from .._io import (
+            MIN_TLSPEC_VERSION,
+            MIN_TORCHLENS_VERSION_TEXT,
+            ArtifactVersionBelowFloorError as _BelowFloor,
+        )
+
+        raise _BelowFloor(
+            f"Model-log bundle at {tlspec_path} uses the TorchLens 2.16 portable "
+            f"format, below the supported rehydration floor tlspec_version="
+            f"{MIN_TLSPEC_VERSION} (torchlens {MIN_TORCHLENS_VERSION_TEXT}). Load "
+            f"and re-save the artifact with a torchlens release >= "
+            f"{MIN_TORCHLENS_VERSION_TEXT} that still reads it."
+        )
     if tlspec_format != "v2.0_unified":
         raise ValueError(f"Unrecognized TorchLens .tlspec format at {tlspec_path}.")
 
@@ -141,8 +165,9 @@ def _load_tlspec_manifest_schema(schema_version: int) -> dict[str, Any]:
     schema_path = (
         Path(__file__).resolve().parents[1] / "schemas" / f"tlspec_manifest_v{schema_version}.json"
     )
-    with schema_path.open("r", encoding="utf-8") as handle:
-        schema = json.load(handle)
+    # First-party shipped data, not an attacker boundary -- but routed through the
+    # same bounded reader so the package-wide gate needs no exemption here.
+    schema = _json.read_bounded(schema_path)
     if not isinstance(schema, dict):
         raise ValueError(f"TorchLens schema at {schema_path} is not a JSON object.")
     return schema
@@ -312,8 +337,8 @@ def _validate_sparse_run_descriptor(
     from ..runnable import (
         LEGACY_RUNNABLE_TLSPEC_SCHEMA_VERSIONS,
         RUNNABLE_ACTIVATION_PAYLOAD_SCHEMA_VERSION,
-        RUNNABLE_CALLABLE_REF_SCHEMA_VERSION,
         RUNNABLE_CALL_RECIPE_VERSION,
+        RUNNABLE_CALLABLE_REF_SCHEMA_VERSION,
         RUNNABLE_INITIALIZER_POLICY_VERSION,
         RUNNABLE_TLSPEC_SCHEMA_VERSION,
     )
@@ -479,6 +504,35 @@ def _validate_runnable_payload_entries(manifest: dict[str, Any]) -> None:
         if label in labels:
             raise ValueError(f"Runnable weight payload repeats canonical state name {label!r}.")
         labels.add(label)
+    # r6 M3: the weights branch used to be ONE-DIRECTIONAL -- it rejected blobs without the
+    # flag but ACCEPTED ``weights.present=true`` with a MISSING or WRONG blob set, and never
+    # cross-checked weight LABELS against the descriptor's own declared state names. Deleting
+    # both ``runnable_weight`` entries (plus their body_index rows, blobs and
+    # ``n_auxiliary_blobs``) left ``present=true`` and ``validate_tlspec()`` returned clean,
+    # while ``.run()`` then failed with ``StateBindingError`` -- the gate users are told to run
+    # CERTIFIED an artifact the strict binder cannot bind. Close it with the same bidirectional
+    # cross-check the non-persistent-buffer branch below already performs.
+    #
+    # The buffer branch's literal shape (``present == bool(names)``) is NOT the right mirror
+    # here, and adopting it would over-block honest artifacts. Non-persistent buffers are a
+    # REQUIRED family, so their ``present`` tracks EXISTENCE; the weights layer is gated on the
+    # optional ``include_weights=`` save flag, so its ``present`` tracks the FLAG. Two honest
+    # shapes prove the difference: a params-bearing model saved at the DEFAULT
+    # ``include_weights=False`` has ``present=false`` with a NON-empty declared state, and a
+    # no-state model saved with ``include_weights=True`` has ``present=true`` with an EMPTY
+    # one. The invariant that holds on every honest shape -- and still refuses the repro -- is
+    # SET EQUALITY of the shipped labels against the declared persistent state whenever the
+    # layer is present (the flagless direction is already covered above).
+    persistent_names = {
+        binding.get("state_dict_name")
+        for slot in run.get("tensor_slots", [])
+        if isinstance(slot, dict)
+        and isinstance((binding := slot.get("state_binding")), dict)
+        and binding.get("persistent") is True
+        and isinstance(binding.get("state_dict_name"), str)
+    }
+    if weights_present and labels != persistent_names:
+        raise ValueError("Runnable weight entries disagree with tensor slots.")
     nonpersistent_buffer_entries = [
         entry
         for entry in tensors
@@ -644,20 +698,32 @@ def _validate_tlspec_version_ceiling(tlspec_version: int) -> None:
         )
 
 
-# JSON Schema keywords enforced by ``_validate_schema_properties``. This is a
-# deliberately narrow subset -- only the keywords the shipped
-# ``schemas/tlspec_manifest_v*.json`` files actually use for scalar/array
-# constraints (``type``, ``enum``, ``const``, ``minimum``, ``minLength``,
-# ``pattern``, ``uniqueItems``, ``items``, ``properties``, ``required``).
-# ``format`` is intentionally NOT enforced: JSON Schema draft 2020-12
-# treats ``format`` as annotation-only unless the format-assertion
-# vocabulary is explicitly enabled, and enforcing it here would exceed what
-# the schema's own ``$schema`` declaration promises. ``additionalProperties``
-# and ``allOf``/``if``/``then`` are also intentionally out of scope: the
-# hand-written field validators above already enforce the conditional
-# ``kind``-dependent rules the one ``allOf`` block encodes, and adding a
-# generic ``additionalProperties: false`` check risks rejecting
-# forward-compatible manifests the hand-written checks currently accept.
+# JSON Schema keywords supported by ``_validate_schema_properties``. Annotation
+# keywords are recognized but intentionally non-asserting; JSON Schema draft
+# 2020-12 treats ``format`` as annotation-only unless the format-assertion
+# vocabulary is explicitly enabled.
+_SUPPORTED_JSON_SCHEMA_KEYWORDS = frozenset(
+    {
+        "$id",
+        "$schema",
+        "additionalProperties",
+        "allOf",
+        "const",
+        "enum",
+        "format",
+        "if",
+        "items",
+        "minLength",
+        "minimum",
+        "pattern",
+        "properties",
+        "required",
+        "then",
+        "title",
+        "type",
+        "uniqueItems",
+    }
+)
 _JSON_SCHEMA_TYPE_MAP: dict[str, type | tuple[type, ...]] = {
     "object": dict,
     "array": list,
@@ -682,9 +748,8 @@ def _validate_schema_properties(value: Any, schema: Any, *, path: str) -> None:
     Raises
     ------
     ValueError
-        If ``value`` violates a ``type``, ``enum``, ``const``, ``minimum``,
-        ``minLength``, ``pattern``, ``uniqueItems``, nested ``properties``,
-        nested ``required``, or ``items`` constraint declared in ``schema``.
+        If ``value`` violates a supported assertion keyword declared in
+        ``schema``.
     """
 
     if not isinstance(schema, dict):
@@ -720,6 +785,17 @@ def _validate_schema_properties(value: Any, schema: Any, *, path: str) -> None:
                 raise ValueError(f"{path} must have unique items; duplicate {item!r}.")
             seen.append(item)
 
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list):
+        for index, sub_schema in enumerate(all_of):
+            _validate_schema_properties(value, sub_schema, path=f"{path}.allOf[{index}]")
+
+    conditional = schema.get("if")
+    if isinstance(conditional, dict) and _schema_fragment_matches(value, conditional, path=path):
+        then_schema = schema.get("then")
+        if isinstance(then_schema, dict):
+            _validate_schema_properties(value, then_schema, path=path)
+
     if isinstance(value, dict):
         properties = schema.get("properties")
         if isinstance(properties, dict):
@@ -731,11 +807,49 @@ def _validate_schema_properties(value: Any, schema: Any, *, path: str) -> None:
             nested_missing = [field for field in nested_required if field not in value]
             if nested_missing:
                 raise ValueError(f"{path} missing required fields: {nested_missing}.")
+        if "additionalProperties" in schema:
+            additional_properties = schema["additionalProperties"]
+            known_properties = set(properties) if isinstance(properties, dict) else set()
+            extra_properties = sorted(set(value) - known_properties)
+            if additional_properties is False and extra_properties:
+                raise ValueError(f"{path} has unsupported fields: {extra_properties}.")
+            if isinstance(additional_properties, dict):
+                for key in extra_properties:
+                    _validate_schema_properties(
+                        value[key],
+                        additional_properties,
+                        path=f"{path}.{key}",
+                    )
     elif isinstance(value, list):
         items_schema = schema.get("items")
         if isinstance(items_schema, dict):
             for index, item in enumerate(value):
                 _validate_schema_properties(item, items_schema, path=f"{path}[{index}]")
+
+
+def _schema_fragment_matches(value: Any, schema: dict[str, Any], *, path: str) -> bool:
+    """Return whether ``value`` satisfies a conditional schema fragment.
+
+    Parameters
+    ----------
+    value:
+        Decoded manifest value under conditional validation.
+    schema:
+        JSON Schema fragment from an ``if`` keyword.
+    path:
+        Manifest path used only for internal validation diagnostics.
+
+    Returns
+    -------
+    bool
+        True when the fragment validates, otherwise False.
+    """
+
+    try:
+        _validate_schema_properties(value, schema, path=path)
+    except ValueError:
+        return False
+    return True
 
 
 def _check_json_schema_type(value: Any, schema_type: Any, *, path: str) -> None:
@@ -939,6 +1053,7 @@ def _validate_body_index(value: Any, *, schema_version: int) -> None:
         "grad_fn_grad",
         "module_arg",
         "module_meta",
+        "edge_substitution",
         "orphan_payload",
         "out",
         "pre_hook_input",
@@ -1175,6 +1290,8 @@ __all__ = [
     "ValidationReplayStatus",
     "get_validation_failure",
     "get_validation_diagnostics",
+    "last_validation_failure",
+    "last_validation_peak_memory",
     "validate_backward_pass",
     "validate_batch_of_models_and_inputs",
     "validate",

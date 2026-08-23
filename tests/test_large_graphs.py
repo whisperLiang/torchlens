@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 import torch
+from example_models import RandomGraphModel
 from torch import nn
 
 from torchlens import trace as trace_fn
@@ -26,11 +27,13 @@ from torchlens.visualization._rank_layout_internal.layout import (
     get_node_placement_engine,
 )
 
-from example_models import RandomGraphModel
-
+# Session-private output root (conftest exports it before collection); the
+# repo-local fallback raced across parallel worktree lanes (b2p2 R77).
 VIS_OUTPUT_DIR = os.path.join(
-    os.path.dirname(__file__),
-    "generated_outputs",
+    os.environ.get(
+        "TORCHLENS_TEST_OUTPUTS_DIR",
+        os.path.join(os.path.dirname(__file__), "generated_outputs"),
+    ),
     "visualizations",
     "large",
 )
@@ -463,14 +466,17 @@ class TestRankEngineRendering:
         monkeypatch.setattr(rank_layout, "RANK_LAYOUT_COST_THRESHOLD", 0)
         monkeypatch.setattr(rank_layout, "render_rank_layout", fail_render_rank_layout)
         model = RandomGraphModel(target_nodes=60, seed=42)
-        source = _draw_model(
-            model,
-            torch.randn(2, 64),
-            vis_node_placement="dot",
-            vis_save_only=True,
-            vis_fileformat="svg",
-            vis_outpath=str(tmp_path / "manual_dot"),
-        )
+        # A zero threshold also prices sibling-order verification out of budget,
+        # so explicit dot skips that post-pass with its documented notice.
+        with pytest.warns(UserWarning, match="skipped sibling-order verification"):
+            source = _draw_model(
+                model,
+                torch.randn(2, 64),
+                vis_node_placement="dot",
+                vis_save_only=True,
+                vis_fileformat="svg",
+                vis_outpath=str(tmp_path / "manual_dot"),
+            )
         assert "digraph" in source
 
     def test_manual_rank_forces_rank(
@@ -654,6 +660,7 @@ class TestDotThresholdBenchmark:
 
         import time
 
+        failures: list[str] = []
         for target in [500, 1000, 2000, 3000, 3500, 4000]:
             model = RandomGraphModel(target_nodes=target, seed=42)
             x = torch.randn(2, 64)
@@ -671,8 +678,10 @@ class TestDotThresholdBenchmark:
                 print(f"  {target} target ({actual_nodes} actual): {elapsed:.1f}s")
             except Exception as exc:
                 elapsed = time.time() - start
+                failures.append(f"{target} target ({actual_nodes} actual): {exc}")
                 print(
                     f"  {target} target ({actual_nodes} actual): FAILED "
                     f"after {elapsed:.1f}s - {exc}"
                 )
             trace.cleanup()
+        assert failures == [], f"dot benchmark render failures: {failures}"

@@ -69,8 +69,8 @@ gelu_site = trace.find_sites(tl.func("gelu")).first()
 assert gelu_site.out.shape == (2, 4)
 ```
 
-`tl.record(save=...)` is the canonical torch sparse-capture spelling. `record(keep_op=...)` and
-`record(keep_module=...)` remain deprecated aliases for older code.
+`tl.record(save=...)` is the only torch sparse-capture spelling; the old
+`keep_op=`/`keep_module=` alias kwargs are removed.
 
 When a fastlog forward raises, the default remains `on_forward_error="raise"`. Opt into
 `on_forward_error="attach_partial"` to attach `exc.partial_recording` and re-raise, or
@@ -79,7 +79,10 @@ returns `(None, partial)`). Failed partials set `status="partial_error"`, `faile
 string-only error metadata, `n_ops_completed`, and best-effort `last_event_*` fields. user-op
 failures exclude the failing call; TL-side capture failures may include a skipped/partial
 current-call event. Failed partials cannot be converted with `Recording.to_trace()` or used with
-`Recording.log_backward()`. Full `tl.trace(...)` failures expose `exc.partial_log`, recoverable
+`Recording.log_backward()`. `MemoryError` is swallowed like any other forward exception under
+`"return_partial"`/`"attach_partial"`, and materializing the partial allocates *more* memory
+inside an already-exhausted heap — under genuine memory pressure keep the default
+`on_forward_error="raise"`. Full `tl.trace(...)` failures expose `exc.partial_log`, recoverable
 with `tl.partial.from_failed_capture(exc)`.
 
 ## Speed knobs
@@ -90,29 +93,32 @@ with `tl.partial.from_failed_capture(exc)`.
 | Source text | `capture=CaptureOptions(save_code_context=False)` | File/line identity remains, but source text is not loaded. |
 | Window payloads | `lookback_payload_policy="metadata_only"` | `tl.followed_by(...)` can select metadata without retaining raw tensors. |
 | Retroactive payloads | `lookback_payload_policy="detached_raw"` | Enables payload recovery for recent matched ops at bounded memory cost. |
-| Disk storage | `storage=tl.to_disk(path)` | Reduces RAM pressure; disk I/O becomes part of capture cost. |
-| Gradients | `save_grads=False` unless needed | Backward-ready captures preserve more state and hooks. |
+| Disk storage | `storage=tl.to_disk(path)` | Reduces RAM pressure. Blob writes overlap capture on a bounded async pipeline by default; `max_pending_bytes` (256 MiB default) caps the RAM pending writes may hold, and a disk slower than capture blocks the forward instead of accumulating memory. `async_writes=False` restores synchronous per-blob writes. |
+| Gradients | `capture=CaptureOptions(save_grads=False)` (the default) unless needed | Backward-ready captures preserve more state and hooks. |
 | Forward-only autograd | `inference_only=True` | Runs forward capture under `torch.no_grad()`; incompatible with backward capture. |
 | Forward chunking | `chunk_size=N` | Reduces forward-pass peak memory for single-batch tensor inputs; final saved activations are still accumulated in memory. |
+| Recurrence detection | `capture=CaptureOptions(recurrence_detection=False)` | Measured 39-42% of capture time off models with thousands of repeated ops (hand-rolled top-level loops, unrolled decodes). Repeated ops stay separate layers instead of rolling into one multi-pass layer, so a 6-iteration loop yields `relu_1_2 ... relu_6_7` (each `num_passes=1`) instead of one `relu_1_2` with `num_passes=6`. `is_recurrent` and `max_layer_op_count` are still reported. It is a TIME knob only: retained activation bytes are unchanged. |
 | Visualization | Call `trace.draw()` after capture, not during hot loops | Rendering is separate from activation collection. |
 
-### Scoped detached-reference diagnostics
+### Escape diagnostics
 
-`tl.wrap_torch(patch_policy="scoped")` reduces the foreign modules that receive class/default
-introspection. The callable detector is a separate, opt-in diagnostic cost:
+The sys.modules crawler is deleted (replaced by the rescue re-run + the
+mechanical belt), so the default capture pays no crawl cost. The callable
+detector is a separate, opt-in diagnostic cost:
 
 ```python
 import torch
 from torch import nn
 import torchlens as tl
+from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
 
 
 model = nn.ReLU()
 x = torch.randn(4)
-tl.wrap_torch(patch_policy="scoped", escape_detector="shadow")
+wrap_torch(escape_detector="shadow")
 trace = tl.trace(model, x)
 print(trace.escape_detector_event_count, trace.escape_detector_callback_ns)
-tl.unwrap_torch()
+unwrap_torch()
 ```
 
 The independent aten-level completeness witness is also opt-in and can run alone or alongside the
@@ -122,19 +128,19 @@ callable detector:
 import torch
 from torch import nn
 import torchlens as tl
+from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
 
 
 model = nn.ReLU()
 x = torch.randn(4)
-tl.wrap_torch(
-    patch_policy="scoped",
+wrap_torch(
     escape_detector="shadow",
     completeness_witness=True,
 )
 trace = tl.trace(model, x)
 print(trace.completeness_witness_verified)
 print(trace.completeness_witness_unaccounted_count)
-tl.unwrap_torch()
+unwrap_torch()
 ```
 
 The witness attaches each aten dispatch to the live wrapper token, `func_call_id`, and leaf barcode;
@@ -155,10 +161,12 @@ the census result `True` while setting `capture_verified=False` with
 `capture_verification_reason="transform_call_route_unverified"`. `escape_detector_verified=True` makes
 the separate claim that the callable detector saw no observable raw-call escape. `capture_verified=True`
 is the combined result only when the enabled census/detector checks pass, no raw-transform escape was
-detected, and the owner-thread qualification remains valid.
+detected, and the owner-thread qualification remains valid. A bypassed `torch.compile` region reports
+the more specific `capture_verification_reason="dynamo_region_not_logged"` in preference to any of the
+above, since Dynamo's compile threads and unaccounted aten dispatches are symptoms of that one region.
 
 The honest rollout comparison is **legacy with no guard** versus **scoped with the requested
-guard**, not crawl time in isolation. On Python 3.9–3.11, shadow mode uses `sys.setprofile` and can
+guard**, not crawl time in isolation. On Python 3.10–3.11, shadow mode uses `sys.setprofile` and can
 be expensive for Python-call-heavy models: a representative call-heavy 16-layer MLP measurement on
 Python 3.11 was **+371%** versus the unguarded capture. Treat shadow as an expensive, diagnostic-only
 soak tool, not a production capture setting. On Python 3.12+ it prefers local Python-start monitoring
@@ -233,9 +241,14 @@ tables. The memory contract is forward-pass peak only: final saved activations a
 and retained according to `save=`, and preprocessing still sees the full batch if `transform=`
 materializes it. Disk-backed chunk accumulation is a future item.
 
-For activation extraction without a `Trace`, use `tl.batched_extract(...)`; that path returns
+For activation extraction without a `Trace`, use `tl.extract_dataset(...)` (the old
+`tl.batched_extract` spelling is a deprecated alias that warns); that path returns
 tensors or `.pt` files rather than accumulated graph metadata. `chunk_size=` covers the remaining
-"dataloader wrapper" case for stacked multi-pass trace capture.
+"dataloader wrapper" case for stacked multi-pass trace capture. Disk mode (`output_dir=`) writes
+atomic shards plus a self-describing `manifest.json` (site identity, stimulus provenance, axis
+semantics, dtypes); an interrupted long extraction continues from its last completed shard with
+`resume=True`, and `torchlens.dataset_extraction.load_extraction(...)` reads the artifact back
+with its metadata (both spellings DOCUMENTED-UNSTABLE).
 
 ## Windowed and disk-backed capture
 
@@ -265,6 +278,12 @@ assert trace.find_sites(tl.func("conv2d")).first().out.shape == (1, 2, 3, 3)
 ```
 
 Use disk-backed storage for selected payloads that are too large or numerous to keep in memory.
+Trace repr, notebook HTML, and JSON explanation do not materialize lazy disk payloads for their
+NaN/Inf summary; those refs are reported as unexamined until you call ``op.materialize_out()``.
+This exemption applies to predicate-selected disk-only payloads. Exhaustive saving
+(``layers_to_save="all"``, the default) keeps RAM copies until postprocess, so combine a narrower
+``save=`` with disk streaming to reduce peak retained memory. Note that ``save=`` itself takes a
+predicate, selector, or ``SaveOptions`` — never the string ``"all"``.
 Portable `.tlspec/` bundles store manifest data plus tensor sidecars when the backend supports
 materialized payloads; executable Python callables are not portable. Backend-aware manifest schema
 v2 adds `backend`, `backend_runtime`, nullable torch-specific fields, and `payload_policy`.
@@ -352,3 +371,9 @@ python -m benchmarks.generate_perf_numbers benchmarks/perf_baselines/<host>-<dev
 
 On the canonical host, drop the `-provisional` filename suffix; `--baseline-status canonical`
 requires a full non-smoke, non-addendum run and emits generated speed headlines.
+
+The gate judges TorchLens-owned rows on process-CPU statistics (`cpu_median_ms`/`cpu_iqr_ms`);
+the wall-clock fallback for pre-CPU-metric payloads is **not authoritative** — a TorchLens row
+judged on wall clock fails the gate by default (the committed 2026-06-16 `linux-cpu.json`
+baseline predates the CPU metrics, so comparisons against it need either a rebaseline on the
+canonical host or the explicit, disclosed `--allow-wall-clock-only` legacy opt-out).

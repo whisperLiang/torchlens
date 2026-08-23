@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
-from typing import NamedTuple
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
 import torch
@@ -13,6 +13,8 @@ from torch import nn
 
 import torchlens as tl
 from torchlens import _state
+from torchlens._errors import TorchLensCaptureGapWarning
+from torchlens._runnable_execution import _fresh_bare_tensor_root
 from torchlens._runnable_state import prepare_runnable_state
 from torchlens.errors import (
     PathDivergenceError,
@@ -30,6 +32,15 @@ from torchlens.runnable import (
     StateSource,
     WitnessCompleteness,
 )
+
+
+def test_fresh_bare_tensor_root_fails_closed_for_duck_trace() -> None:
+    """A duck trace without runnable state must fail closed instead of raising."""
+
+    class _DuckTrace:
+        """Minimal dict-backed trace stand-in without runnable state."""
+
+    assert _fresh_bare_tensor_root(_DuckTrace()) is False
 
 
 class RunnableExecutionModel(nn.Module):
@@ -61,6 +72,15 @@ class HonestyControlModel(nn.Module):
         return value
 
 
+class RandomExecutionModel(nn.Module):
+    """Static graph that consumes the seeded PyTorch generator."""
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Add one seeded random draw to the input."""
+
+        return value + torch.rand_like(value)
+
+
 class InplaceActivationModel(nn.Module):
     """Graph whose later in-place call must not rewrite staged activations."""
 
@@ -71,6 +91,71 @@ class InplaceActivationModel(nn.Module):
         preserved = activated + 1
         activated.mul_(0)
         return preserved + activated
+
+
+class InplaceInputModel(nn.Module):
+    """Graph that mutates its model-input tensor directly."""
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Increment the input in place before returning a derived result."""
+
+        value.add_(2)
+        return value * 3
+
+
+class AliasedViewStateMutationModel(nn.Module):
+    """Graph that mutates declared state through a storage-sharing view."""
+
+    def __init__(self) -> None:
+        """Register one buffer whose view is mutated during the forward pass."""
+
+        super().__init__()
+        self.register_buffer("offset", torch.arange(4.0).reshape(2, 2))
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Mutate a flattened state view before consuming the base buffer."""
+
+        flattened = self.offset.view(-1)
+        flattened.add_(1)
+        return value + self.offset
+
+
+class FunctionalBatchNormStateMutationModel(nn.Module):
+    """Counter-free functional BatchNorm with direct or view-fed running state."""
+
+    def __init__(self, *, composed_views: bool) -> None:
+        """Register running statistics in direct or composed-view form.
+
+        Parameters
+        ----------
+        composed_views:
+            Whether one buffer should provide sliced running-stat views.
+        """
+
+        super().__init__()
+        self.composed_views = composed_views
+        if composed_views:
+            self.register_buffer("stats", torch.stack((torch.zeros(3), torch.ones(3))))
+        else:
+            self.register_buffer("running_mean", torch.zeros(3))
+            self.register_buffer("running_var", torch.ones(3))
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Update running statistics through functional BatchNorm."""
+
+        if self.composed_views:
+            running_mean = self.stats[0]
+            running_var = self.stats[1]
+        else:
+            running_mean = self.running_mean
+            running_var = self.running_var
+        normalized = torch.nn.functional.batch_norm(
+            value,
+            running_mean,
+            running_var,
+            training=True,
+        )
+        return normalized + running_var
 
 
 class FailingLiveRunModel(nn.Module):
@@ -99,6 +184,34 @@ class FailingLiveRunModel(nn.Module):
         if bool(value.sum() < 0):
             raise RuntimeError("intentional live rerun failure")
         return staged * 2
+
+
+class MultipassFunctionalFastModel(nn.Module):
+    """Repeat one functional site enough times for recurrent grouping."""
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Apply four value-changing passes through one functional ReLU site."""
+
+        for _ in range(4):
+            value = torch.relu(value + 1)
+        return value
+
+
+class MultipassModuleFastModel(nn.Module):
+    """Repeat one module instance enough times for recurrent grouping."""
+
+    def __init__(self) -> None:
+        """Initialize the shared atomic module."""
+
+        super().__init__()
+        self.shared = nn.ReLU()
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Apply four value-changing passes through the shared module."""
+
+        for _ in range(4):
+            value = self.shared(value + 1)
+        return value
 
 
 class RunnableNamedOutput(NamedTuple):
@@ -204,7 +317,7 @@ class SingleTensorContainerOutputModel(nn.Module):
 @pytest.fixture(scope="module")
 def runnable_execution_artifact(
     tmp_path_factory: pytest.TempPathFactory,
-) -> tuple[Path, RunnableExecutionModel, tl.Trace]:
+) -> Iterator[tuple[Path, RunnableExecutionModel, tl.Trace]]:
     """Build one reusable sparse artifact and its independent live oracle."""
 
     torch.manual_seed(11)
@@ -220,11 +333,14 @@ def runnable_execution_artifact(
     )
     path = tmp_path_factory.mktemp("runnable-execution") / "model.tlspec"
     trace.save(path, level="runnable")
-    return path, model, trace
+    try:
+        yield path, model, trace
+    finally:
+        trace.cleanup()
 
 
 @pytest.fixture(scope="module")
-def honesty_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def honesty_artifact(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
     """Build a sparse artifact carrying complete control witnesses."""
 
     trace = tl.trace(
@@ -238,7 +354,10 @@ def honesty_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
     )
     path = tmp_path_factory.mktemp("runnable-honesty") / "control.tlspec"
     trace.save(path, level="runnable")
-    return path
+    try:
+        yield path
+    finally:
+        trace.cleanup()
 
 
 @pytest.mark.smoke
@@ -306,6 +425,287 @@ def test_loaded_sparse_sequential_runs_have_unique_fork_labels(
     assert first.trace.trace_label != second.trace.trace_label
 
 
+@pytest.mark.smoke
+def test_loaded_sparse_fast_run_verifies_once_then_reuses_compiled_result_trace(
+    runnable_execution_artifact: tuple[Path, RunnableExecutionModel, tl.Trace],
+) -> None:
+    """Keep default verification on the first call and reuse one guarded result thereafter."""
+
+    path, model, _ = runnable_execution_artifact
+    loaded = tl.load(path)
+    loaded.load_state_dict(model.state_dict())
+    first_inputs = torch.tensor([[2.0, -1.0, 0.5], [-3.0, 0.25, 4.0]])
+    second_inputs = torch.tensor([[0.5, 1.0, -2.0], [1.25, -0.75, 3.0]])
+
+    first = loaded.run(inputs=first_inputs, seed=73, fast=True)
+    second = loaded.run(inputs=second_inputs, seed=73, fast=True)
+
+    assert first.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert second.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert second.trace is first.trace
+    assert second.trace is not loaded
+    assert torch.equal(second.output, model(second_inputs))
+    assert loaded.__dict__["_fast_run_session"].prepared_state is not None
+
+
+def test_loaded_sparse_fast_run_refuses_seed_drift(
+    runnable_execution_artifact: tuple[Path, RunnableExecutionModel, tl.Trace],
+) -> None:
+    """Pin verify-once evidence to the seed that initialized its cached state."""
+
+    path, model, _ = runnable_execution_artifact
+    loaded = tl.load(path)
+    loaded.load_state_dict(model.state_dict())
+    loaded.run(inputs=torch.ones(2, 3), seed=5, fast=True)
+
+    with pytest.raises(RunCapabilityUnavailableError, match="pins the seed"):
+        loaded.run(inputs=torch.ones(2, 3), seed=6, fast=True)
+
+
+def test_loaded_sparse_fast_run_reseeds_rng_after_verify_once(tmp_path: Path) -> None:
+    """Reproduce seeded random calls on every compiled trusted iteration."""
+
+    inputs = torch.ones(2, 3)
+    captured = tl.trace(
+        RandomExecutionModel(),
+        inputs,
+        capture=CaptureOptions(
+            intervention_ready=True,
+            capture_container_structure=True,
+            cache=False,
+            random_seed=31,
+        ),
+    )
+    path = tmp_path / "random-fast.tlspec"
+    captured.save(path, level="runnable")
+    loaded = tl.load(path)
+
+    verified = loaded.run(inputs=inputs, seed=31, fast=True)
+    repeated = loaded.run(inputs=inputs, seed=31, fast=True)
+
+    assert verified.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert repeated.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert torch.equal(repeated.output, verified.output)
+
+
+def test_loaded_sparse_fast_run_refuses_training_batchnorm_state_drift(
+    tmp_path: Path,
+) -> None:
+    """Refuse cached execution when BatchNorm functionally updates running stats."""
+
+    model = nn.BatchNorm1d(3).train()
+    inputs = torch.randn(4, 3)
+    captured = tl.trace(
+        model,
+        inputs,
+        capture=CaptureOptions(
+            intervention_ready=True,
+            capture_container_structure=True,
+            cache=False,
+        ),
+    )
+    path = tmp_path / "training-batchnorm-fast.tlspec"
+    captured.save(path, level="runnable", include_weights=True)
+
+    oracle = tl.load(path).run(inputs=inputs)
+    assert oracle.report.path_faithfulness is PathFaithfulness.VERIFIED
+    loaded = tl.load(path)
+    for _ in range(4):
+        with pytest.raises(
+            RunCapabilityUnavailableError,
+            match="may update or mutate declared state",
+        ):
+            loaded.run(inputs=inputs, fast=True)
+
+
+@pytest.mark.parametrize("composed_views", [False, True], ids=["direct", "composed-view-fed"])
+def test_loaded_sparse_fast_run_refuses_counter_free_functional_batchnorm_state_drift(
+    tmp_path: Path,
+    *,
+    composed_views: bool,
+) -> None:
+    """Refuse counter-free functional BatchNorm updates, including through state views."""
+
+    inputs = torch.randn(4, 3)
+    captured = tl.trace(
+        FunctionalBatchNormStateMutationModel(composed_views=composed_views),
+        inputs,
+        capture=CaptureOptions(
+            intervention_ready=True,
+            capture_container_structure=True,
+            cache=False,
+        ),
+    )
+    path = tmp_path / f"functional-batchnorm-{composed_views}-fast.tlspec"
+    captured.save(path, level="runnable", include_weights=True)
+
+    oracle = tl.load(path).run(inputs=inputs)
+    assert oracle.report.path_faithfulness is PathFaithfulness.VERIFIED
+    with pytest.raises(
+        RunCapabilityUnavailableError,
+        match="may update or mutate declared state",
+    ):
+        tl.load(path).run(inputs=inputs, fast=True)
+
+
+def test_loaded_sparse_fast_run_keeps_eval_batchnorm_static_path(tmp_path: Path) -> None:
+    """Keep eval-mode BatchNorm eligible when its running stats are read-only."""
+
+    model = nn.BatchNorm1d(3).eval()
+    inputs = torch.randn(4, 3)
+    captured = tl.trace(
+        model,
+        inputs,
+        capture=CaptureOptions(
+            intervention_ready=True,
+            capture_container_structure=True,
+            cache=False,
+        ),
+    )
+    path = tmp_path / "eval-batchnorm-fast.tlspec"
+    captured.save(path, level="runnable", include_weights=True)
+
+    oracle = tl.load(path).run(inputs=inputs)
+    loaded = tl.load(path)
+    first = loaded.run(inputs=inputs, fast=True)
+    second = loaded.run(inputs=inputs, fast=True)
+
+    assert first.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert second.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert torch.equal(first.output, oracle.output)
+    assert torch.equal(second.output, oracle.output)
+
+
+def test_loaded_sparse_fast_run_refuses_state_view_inplace_mutation(
+    tmp_path: Path,
+) -> None:
+    """Refuse cached execution when an in-place target aliases declared state."""
+
+    model = AliasedViewStateMutationModel().eval()
+    inputs = torch.ones(2, 2)
+    captured = tl.trace(
+        model,
+        inputs,
+        capture=CaptureOptions(
+            intervention_ready=True,
+            capture_container_structure=True,
+            cache=False,
+        ),
+    )
+    path = tmp_path / "state-view-inplace-fast.tlspec"
+    captured.save(path, level="runnable", include_weights=True)
+
+    oracle = tl.load(path).run(inputs=inputs)
+    assert oracle.report.path_faithfulness is PathFaithfulness.VERIFIED
+    with pytest.raises(
+        RunCapabilityUnavailableError,
+        match="may update or mutate declared state",
+    ):
+        tl.load(path).run(inputs=inputs, fast=True)
+
+
+def test_loaded_sparse_fast_run_does_not_mutate_caller_input(tmp_path: Path) -> None:
+    """Mirror runtime inputs before compiled in-place recipes execute."""
+
+    inputs = torch.arange(4.0)
+    captured = tl.trace(
+        InplaceInputModel(),
+        inputs,
+        capture=CaptureOptions(
+            intervention_ready=True,
+            capture_container_structure=True,
+            cache=False,
+        ),
+    )
+    path = tmp_path / "inplace-input-fast.tlspec"
+    captured.save(path, level="runnable")
+    loaded = tl.load(path)
+
+    first_input = torch.arange(4.0)
+    expected_first = (first_input + 2) * 3
+    first = loaded.run(inputs=first_input, fast=True)
+    second_input = torch.arange(4.0, 8.0)
+    expected_second = (second_input + 2) * 3
+    second = loaded.run(inputs=second_input, fast=True)
+
+    assert torch.equal(first_input, torch.arange(4.0))
+    assert torch.equal(second_input, torch.arange(4.0, 8.0))
+    assert torch.equal(first.output, expected_first)
+    assert torch.equal(second.output, expected_second)
+    assert second.report.path_faithfulness is PathFaithfulness.VERIFIED
+
+
+def test_live_fast_run_refuses_same_shape_function_path_divergence() -> None:
+    """Never relabel a changed same-shape functional branch as the captured static site."""
+
+    class BranchingFunctionModel(nn.Module):
+        """Choose between two same-shape activation functions from tensor data."""
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            """Apply the branch selected by the runtime sum."""
+
+            if bool((value.sum() > 0).item()):
+                return torch.relu(value)
+            return torch.sigmoid(value)
+
+    model = BranchingFunctionModel().eval()
+    captured = tl.trace(model, torch.ones(2), save=tl.func("relu"))
+
+    with pytest.raises(PathDivergenceError):
+        captured.run(inputs=-torch.ones(2), fast=True)
+
+
+@pytest.mark.parametrize("plan_kind", ["functional", "module"])
+def test_live_fast_run_refreshes_every_multipass_activation(plan_kind: str) -> None:
+    """Refresh each pass distinctly in both functional and module fast plans."""
+
+    model: nn.Module
+    save: Any
+    if plan_kind == "functional":
+        model = MultipassFunctionalFastModel()
+        save = tl.func("relu")
+    else:
+        model = MultipassModuleFastModel()
+        save = tl.module("shared")
+    captured = tl.trace(model, torch.tensor([-5.0, 1.0]), save=save)
+    selected = [
+        op for op in captured.layer_list if op.has_saved_activation and op.func_name == "relu"
+    ]
+    captured_first = selected[0].out.clone()
+
+    runtime_input = torch.tensor([-2.0, 3.0])
+    expected_passes = []
+    expected = runtime_input
+    for _ in range(4):
+        expected = torch.relu(expected + 1)
+        expected_passes.append(expected.clone())
+
+    result = captured.run(inputs=runtime_input, fast=True)
+    refreshed = [
+        op for op in result.trace.layer_list if op.has_saved_activation and op.func_name == "relu"
+    ]
+
+    assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert len(refreshed) == 4
+    assert len({op.layer_label for op in refreshed}) == 1
+    assert not torch.equal(refreshed[0].out, captured_first)
+    assert all(
+        torch.equal(op.out, expected_value)
+        for op, expected_value in zip(refreshed, expected_passes, strict=True)
+    )
+
+
+def test_loaded_sparse_fast_run_keeps_control_witness_guard(honesty_artifact: Path) -> None:
+    """Evaluate recorded control witnesses on every trusted compiled iteration."""
+
+    loaded = tl.load(honesty_artifact)
+    verified = loaded.run(inputs=torch.ones(2), seed=19, fast=True)
+    assert verified.report.path_faithfulness is PathFaithfulness.VERIFIED
+
+    with pytest.raises(PathDivergenceError):
+        loaded.run(inputs=-torch.ones(2), seed=19, fast=True)
+
+
 def test_loaded_sparse_execution_pauses_recursive_capture(
     runnable_execution_artifact: tuple[Path, RunnableExecutionModel, tl.Trace],
 ) -> None:
@@ -314,7 +714,7 @@ def test_loaded_sparse_execution_pauses_recursive_capture(
     path, model, _ = runnable_execution_artifact
     loaded = tl.load(path)
     loaded.load_state_dict(model.state_dict())
-    attached = loaded.__dict__["_runnable_callables_by_call_id"]
+    attached = loaded._runnable.callables_by_call_id
     observed: list[bool] = []
     for call_id, original in tuple(attached.items()):
         attached[call_id] = _logging_probe(original, observed)
@@ -570,7 +970,7 @@ def test_loaded_sparse_preserves_torch_structseq_outputs(
     assert type(result.output) is type(expected)
     assert [
         slot.output_path
-        for slot in loaded._runnable_descriptor.tensor_slots
+        for slot in loaded._runnable.descriptor.tensor_slots
         if slot.role.value == "output"
     ] == [
         ("values",),
@@ -647,7 +1047,7 @@ def test_loaded_sparse_still_diverges_for_a_genuinely_changed_output_structure(
     path = tmp_path / "changed-structseq-output.tlspec"
     trace.save(path, level="runnable")
     loaded = tl.load(path)
-    loaded.__dict__["_runnable_callables_by_call_id"]["call:1"] = _return_positional_pair
+    loaded._runnable.callables_by_call_id["call:1"] = _return_positional_pair
 
     with pytest.raises(PathDivergenceError):
         loaded.run(inputs=inputs.clone())
@@ -740,7 +1140,7 @@ def test_witness_divergence_raises_and_rolls_back_by_default(honesty_artifact: P
     assert mismatch.code.value == "loop_predicate_divergence"
     assert mismatch.affected_op_labels
     _assert_outs_equal(loaded, source_outs)
-    assert not bool(loaded.__dict__.get("_runnable_poisoned", False))
+    assert not bool(loaded._runnable.poisoned)
 
 
 def test_shape_divergence_return_mode_finishes_and_poison_marks_result(
@@ -761,8 +1161,8 @@ def test_shape_divergence_return_mode_finishes_and_poison_marks_result(
     assert result.report.poisoned
     assert result.report.first_mismatch is not None
     assert result.report.first_mismatch.code.value == "input_shape_mismatch"
-    assert result.trace.__dict__["_runnable_poisoned"] is True
-    assert result.trace.__dict__["_runnable_path_faithfulness"] is PathFaithfulness.DIVERGED
+    assert result.trace._runnable.poisoned is True
+    assert result.trace._runnable.path_faithfulness is PathFaithfulness.DIVERGED
     _assert_outs_equal(loaded, source_outs)
 
 
@@ -842,7 +1242,7 @@ def test_incomplete_witness_coverage_is_unverifiable_and_poisoned(
     )
 
     loaded = tl.load(honesty_artifact)
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     gap_spec = WITNESS_GAP_REGISTRY[WitnessGapKind.RNG_MONITOR_UNCERTAIN]
     gap = WitnessCoverageGap(
         gap_kind=WitnessGapKind.RNG_MONITOR_UNCERTAIN,
@@ -851,7 +1251,7 @@ def test_incomplete_witness_coverage_is_unverifiable_and_poisoned(
         order=0,
         resulting_completeness=gap_spec.resulting_completeness,
     )
-    loaded.__dict__["_runnable_descriptor"] = replace(
+    loaded._runnable.descriptor = replace(
         descriptor,
         coverage_gaps=(gap,),
         witness_completeness=gap_spec.resulting_completeness,
@@ -863,13 +1263,13 @@ def test_incomplete_witness_coverage_is_unverifiable_and_poisoned(
     assert result.report.first_mismatch is None
     assert result.report.poisoned
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
-    assert result.trace.__dict__["_runnable_poisoned"] is True
+    assert result.trace._runnable.poisoned is True
 
     # Summary-only flip (no gap): internally contradictory -> typed refusal, never
     # a silently trusted summary in EITHER direction.
     contradictory = tl.load(honesty_artifact)
-    contradictory.__dict__["_runnable_descriptor"] = replace(
-        contradictory.__dict__["_runnable_descriptor"],
+    contradictory._runnable.descriptor = replace(
+        contradictory._runnable.descriptor,
         witness_completeness=WitnessCompleteness.INCOMPLETE_UNOBSERVED_PREDICATE,
     )
     with pytest.raises(RunPreconditionError):
@@ -965,12 +1365,10 @@ def test_c1_value_at_path_mapping_and_index_paths_unaffected() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# r27-H3: torch capture DE-ALIASES model inputs (each leaf is cloned before the
-# forward). A runtime call whose inputs ALIAS (same object, or distinct views
-# sharing storage) while an in-place op mutates a model input is NOT reproducible
-# against that de-aliased capture: a fresh model on the aliased inputs propagates
-# the mutation between sites, the de-aliased replay does not. Such a run must fail
-# closed (DIVERGED / NOT_APPLICABLE), never a false VERIFIED.
+# R1-B C1: capture preserves model-input identity/storage semantics. The sparse
+# runnable descriptor still cannot encode aliases between distinct model-input
+# sites, so an alias-bearing runnable capture is explicitly UNVERIFIABLE rather
+# than silently serializing a weaker all-distinct input contract.
 # --------------------------------------------------------------------------- #
 
 
@@ -984,34 +1382,45 @@ class _AliasInplaceModel(nn.Module):
         return b * 2.0
 
 
-def _save_alias_runnable(path: Path) -> Path:
-    """Capture and save the in-place two-input alias model as a runnable artifact."""
+def _save_alias_runnable(path: Path, *, aliased_capture: bool = True) -> Path:
+    """Capture and save the in-place model with aliased or distinct input sites."""
 
     t = torch.tensor([1.0, 2.0])
-    trace = tl.trace(
-        _AliasInplaceModel(),
-        [t, t],
-        capture=CaptureOptions(
-            intervention_ready=True, capture_container_structure=True, cache=False
-        ),
-    )
+    inputs = [t, t] if aliased_capture else [t, t.clone()]
+
+    def capture_call() -> tl.Trace:
+        """Capture the prepared alias topology."""
+
+        return tl.trace(
+            _AliasInplaceModel(),
+            inputs,
+            capture=CaptureOptions(
+                intervention_ready=True, capture_container_structure=True, cache=False
+            ),
+        )
+
+    if aliased_capture:
+        with pytest.warns(TorchLensCaptureGapWarning, match="sparse descriptor cannot encode"):
+            trace = capture_call()
+        assert trace.capture_verified is False
+        assert trace.capture_verification_reason == "input_boundary_unverifiable"
+    else:
+        trace = capture_call()
     trace.save(path, level="runnable", include_activations=True)
     return path
 
 
 def test_h3_same_object_aliased_input_with_inplace_fails_closed(tmp_path: Path) -> None:
-    """Runtime ``a is b`` with an in-place op on an input must not be VERIFIED."""
+    """An alias-bearing capture runs only with an UNVERIFIABLE verdict."""
 
     path = _save_alias_runnable(tmp_path / "alias_same.tlspec")
     shared = torch.tensor([1.0, 2.0])
 
-    with pytest.raises(PathDivergenceError):
-        tl.load(path).run(inputs=[shared, shared])
-    diverged = tl.load(path).run(
-        inputs=[shared, shared], on_divergence=DivergencePolicy.RETURN_DIVERGED
-    )
-    assert diverged.report.path_faithfulness is not PathFaithfulness.VERIFIED
-    assert diverged.report.numeric_attestation is not NumericAttestationStatus.ATTESTED
+    result = tl.load(path).run(inputs=[shared, shared])
+    assert result.output.tolist() == [4.0, 6.0]
+    assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+    assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
+    assert result.report.poisoned is True
 
 
 def test_h3_view_aliased_distinct_objects_with_inplace_fails_closed(tmp_path: Path) -> None:
@@ -1023,17 +1432,15 @@ def test_h3_view_aliased_distinct_objects_with_inplace_fails_closed(tmp_path: Pa
     assert base is not view
     assert base.untyped_storage().data_ptr() == view.untyped_storage().data_ptr()
 
-    diverged = tl.load(path).run(
-        inputs=[base, view], on_divergence=DivergencePolicy.RETURN_DIVERGED
-    )
-    assert diverged.report.path_faithfulness is not PathFaithfulness.VERIFIED
-    assert diverged.report.numeric_attestation is not NumericAttestationStatus.ATTESTED
+    result = tl.load(path).run(inputs=[base, view])
+    assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+    assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
 
 
 def test_h3_distinct_inputs_still_verify(tmp_path: Path) -> None:
-    """Distinct (non-aliased) runtime inputs match the de-aliased capture -> VERIFIED."""
+    """Distinct capture/runtime input sites retain the ordinary VERIFIED path."""
 
-    path = _save_alias_runnable(tmp_path / "alias_distinct.tlspec")
+    path = _save_alias_runnable(tmp_path / "alias_distinct.tlspec", aliased_capture=False)
     a = torch.tensor([1.0, 2.0])
     b = torch.tensor([1.0, 2.0])
 
@@ -1043,46 +1450,31 @@ def test_h3_distinct_inputs_still_verify(tmp_path: Path) -> None:
 
 
 def test_h3_readonly_aliased_inputs_fail_closed(tmp_path: Path) -> None:
-    """r33 F1: aliased runtime inputs fail closed; distinct inputs stay VERIFIED.
-
-    Torch capture DE-ALIASES model inputs (independent per-slot clones), so the recorded DAG
-    always reflects DISTINCT-input semantics. A runtime call whose inputs are aliased (same
-    object, ``a is b``) cannot be proven faithful against a fresh model on those aliased inputs
-    -- an ``if a is b`` / ``id()`` identity branch (self/cross-attention ``q is k``) would take
-    a different arm than the de-aliased replay, a false VERIFIED even on the original input.
-    Superseding the earlier r29 "read-only aliasing is numerically irrelevant" reasoning
-    (incomplete: it misses identity branches), any runtime aliasing now fails closed. The
-    trivial all-distinct topology (the common case) is unaffected -- no over-trigger.
-    """
+    """Read-only alias identity also ceilings sparse replay at UNVERIFIABLE."""
 
     class _ReadOnly(nn.Module):
         def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
             return a + b
 
     z = torch.tensor([3.0, 4.0])
-    trace = tl.trace(
-        _ReadOnly(),
-        [z, z],
-        capture=CaptureOptions(
-            intervention_ready=True, capture_container_structure=True, cache=False
-        ),
-    )
+    with pytest.warns(TorchLensCaptureGapWarning, match="sparse descriptor cannot encode"):
+        trace = tl.trace(
+            _ReadOnly(),
+            [z, z],
+            capture=CaptureOptions(
+                intervention_ready=True, capture_container_structure=True, cache=False
+            ),
+        )
+    assert trace.capture_verified is False
     trace.save(tmp_path / "readonly.tlspec", level="runnable", include_activations=True)
 
-    # Aliased runtime inputs (same object) -> fail closed (F1 honesty).
     shared = torch.tensor([3.0, 4.0])
-    with pytest.raises(PathDivergenceError):
-        tl.load(tmp_path / "readonly.tlspec").run(inputs=[shared, shared])
-    diverged = tl.load(tmp_path / "readonly.tlspec").run(
-        inputs=[shared, shared], on_divergence=DivergencePolicy.RETURN_DIVERGED
-    )
-    assert diverged.report.path_faithfulness is PathFaithfulness.DIVERGED
-
-    # Distinct runtime inputs match the de-aliased capture -> VERIFIED (no over-trigger).
-    verified = tl.load(tmp_path / "readonly.tlspec").run(
+    aliased = tl.load(tmp_path / "readonly.tlspec").run(inputs=[shared, shared])
+    assert aliased.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+    distinct = tl.load(tmp_path / "readonly.tlspec").run(
         inputs=[torch.tensor([3.0, 4.0]), torch.tensor([5.0, 6.0])]
     )
-    assert verified.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert distinct.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
 
 
 # --------------------------------------------------------------------------- #
@@ -1125,7 +1517,7 @@ def test_h5_batchnorm_records_mode_and_verifies(train: bool, tmp_path: Path) -> 
             intervention_ready=True, capture_container_structure=True, cache=False
         ),
     )
-    assert trace.__dict__.get("_runnable_module_training_modes") == {
+    assert trace._runnable.module_training_modes == {
         "self": train,
         "lin": train,
         "bn": train,
@@ -1156,7 +1548,7 @@ def test_h5_dropout_model_in_eval_records_mode_and_verifies(tmp_path: Path) -> N
             intervention_ready=True, capture_container_structure=True, cache=False
         ),
     )
-    assert trace.__dict__.get("_runnable_module_training_modes") == {
+    assert trace._runnable.module_training_modes == {
         "self": False,
         "lin": False,
         "drop": False,
@@ -1195,7 +1587,7 @@ def test_h5_mode_sensitive_op_without_declared_mode_is_unverifiable(
             intervention_ready=True, capture_container_structure=True, cache=False
         ),
     )
-    assert trace.__dict__.get("_runnable_module_training_modes") is None
+    assert trace._runnable.module_training_modes is None
     with pytest.raises(RunnablePreflightError) as excinfo:
         trace.save(tmp_path / "bn_nomode.tlspec", level="runnable", include_activations=True)
     assert "context_field_invalid" in str(excinfo.value.fields.get("diagnostics"))

@@ -12,7 +12,12 @@ from torchlens.intervention.resolver import SiteTable
 
 
 class M(nn.Module):
-    """Small model with a stable relu site."""
+    """Small model with a stable relu site.
+
+    Kept inline deliberately (NOT migrated to ``example_models``): the
+    auto-naming tests below derive trace names from this class's name
+    (``m_1``), so the class identity is part of the test contract.
+    """
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run relu and add one.
@@ -25,7 +30,7 @@ class M(nn.Module):
         Returns
         -------
         torch.Tensor
-            Shifted relu output.
+            Activated tensor plus one.
         """
 
         return torch.relu(x) + 1

@@ -12,9 +12,9 @@ from ..boundary import ReplayBoundary
 from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
 from ..graph import SplitTraceGraph, SplitTraceNode
+from ..ir import SplitRequest
 from ..planner import SplitPlan
 from ..shape_program import ShapeBinding
-from ..ir import SplitRequest
 from .base import SegmentBundle, SplitPolicyMixin, boundary_overlay
 
 
@@ -302,9 +302,7 @@ class TfGeneratedPrefix(_TfGeneratedSegmentBase):
             )
         tape = None
         if detach_boundary:
-            overlay = {
-                node_id: value for node_id, value in zip(self.graph.input_node_ids, input_leaves)
-            }
+            overlay = dict(zip(self.graph.input_node_ids, input_leaves))
             self._execute_nodes(overlay)
         else:
             tape = tf.GradientTape(persistent=True)
@@ -314,10 +312,7 @@ class TfGeneratedPrefix(_TfGeneratedSegmentBase):
                         tape.watch(value)
                 for value in self._trainable_param_handles(self.plan.prefix_node_ids):
                     tape.watch(_tf_gradient_source(value))
-                overlay = {
-                    node_id: value
-                    for node_id, value in zip(self.graph.input_node_ids, input_leaves)
-                }
+                overlay = dict(zip(self.graph.input_node_ids, input_leaves))
                 self._execute_nodes(overlay)
         boundary_tensors: dict[str, Any] = {}
         prefix_tensors: dict[str, Any] = {}

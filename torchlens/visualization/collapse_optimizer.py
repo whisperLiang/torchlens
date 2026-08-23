@@ -1,15 +1,37 @@
-"""Tree-cut dynamic-programming optimizer for v2 auto collapse."""
+"""Bounded beam-search tree-cut optimizer for v2 auto collapse.
+
+The selection is a memoized tree cut with a deterministic, bounded frontier,
+not an exact optimizer:
+
+- every frontier merge keeps at most one point per rendered node count and at
+  most ``FRONTIER_CAP`` node-count buckets, so reachable counts can be pruned
+  (a beam, with classic beam suboptimality);
+- per-count pruning minimizes the additive sum of box costs, while the global
+  objective (:func:`_global_q` / :func:`_global_max_q`) also adds a
+  non-additive ``w_max * max(box_costs)`` term, so a same-count point that
+  wins globally can be pruned locally;
+- subtrees larger than ``K_CAP`` rendered nodes are dropped from frontiers
+  entirely.
+
+The result is a deterministic approximation of the stated objective. "DP" and
+"frontier" in the helper names refer to the memoized structure, not to an
+optimality guarantee.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import math
 import time
+import warnings
 import weakref
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from .._errors import InvalidArgumentError
+from ..errors._base import TorchLensWarning
+from ..utils.display import user_stacklevel
 from .auto_collapse import (
     GENERIC_CONTAINER_CLASSES,
     RUN_FOLD_MIN_LENGTH,
@@ -17,25 +39,27 @@ from .auto_collapse import (
     CollapseAnalysis,
     ModuleCollapseSignals,
     ModuleRepeatFold,
+    _collapse_graph_revision,
     _flow_ordered_child_addresses,
     _is_trunk_collapse,
     _make_run_fold,
-    _module_output_shapes_equal,
+    _module_output_shape_tuple,
+    _paired_external_connector,
     _readable_band_high,
     _rendered_module_hidden_counts,
-    _run_fold_hidden_members_uniform,
     _run_fold_is_chain_interval,
     _run_fold_is_legal,
-    _run_span_allows_fold,
+    _run_fold_members_uniform,
     _shape_channel_dim,
     _shape_spatial_dims,
     analyze_collapse,
 )
 from .collapse_plan import (
     ChildSegment,
+    CollapsePlan,
     CollapseSchedule,
     CollapseScheduleStep,
-    CollapsePlan,
+    EllipsisNode,
     ModuleBox,
     OpSegment,
     PlanNode,
@@ -43,21 +67,35 @@ from .collapse_plan import (
     RenderContext,
     RepeatFold,
     SegmentDescriptor,
-    count,
+    collapse_plan_for_source_graph,
     collapse_plan_for_trace,
+    count,
 )
-from .collapse_plan import EllipsisNode
 
 if TYPE_CHECKING:
     from ..data_classes.module import Module
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace
     from .auto_collapse import ChildCondensedFlowGraph
+    from .source_graph import SourceGraph
 
 
 K_CAP = 64
 FRONTIER_CAP = 32
 MAX_SALIENCE_FLOOR = 0.75
+
+#: Preflight compute ceiling for the v2 collapse selection (b8 R60). The
+#: frontier DP is measured superlinear (~n^1.75) in rendered op count with no
+#: internal time budget, so above this many ops the optimizer DECLINES with a
+#: disclosed warning instead of silently burning CPU-hours: ``draw`` renders
+#: uncollapsed, ``Trace.collapse_plan()`` refuses typed
+#: (``collapse_plan_unavailable``), and the schedule degrades to its single
+#: full-graph step. Calibration: the largest shipped-suite models
+#: (densenet201 at 1,517 ops, maxvit_t at 1,307) must stay admitted -- their
+#: schedules are the suite's slow cells at tens of seconds -- while the
+#: extrapolated multi-thousand-op cost (an hour-class compute at ~5,000 ops)
+#: is exactly what the ceiling exists to refuse.
+COLLAPSE_OPTIMIZER_MAX_OPS = 2000
 
 
 @dataclass(frozen=True)
@@ -154,6 +192,48 @@ class OptimizerResult:
     segments: Mapping[str, SegmentDescriptor] | None = None
     level: str | None = None
 
+    def __post_init__(self) -> None:
+        """Refuse construction when segment descriptors were dropped.
+
+        The renderer materializes segment boxes from ``segments``, not from
+        the plan nodes, so a segmented ``plan`` published with a smaller
+        descriptor mapping silently renders more nodes than ``visible_count``
+        claims. Every construction site (including ``dataclasses.replace``)
+        must therefore keep descriptor cardinality equal to the number of
+        segment nodes in the plan.
+        """
+
+        segment_nodes = sum(isinstance(node, (ChildSegment, OpSegment)) for node in self.plan.nodes)
+        descriptor_count = len(self.segments or {})
+        # r-b7 R24-2: a raise, not an assert — this guards the label-honesty
+        # contract on the DEFAULT draw(collapse=) path, and `python -O` strips
+        # asserts, which would let segment boxes under-report hidden calls.
+        if descriptor_count != segment_nodes:
+            raise RuntimeError(
+                f"OptimizerResult segment descriptor cardinality {descriptor_count} != "
+                f"plan segment nodes {segment_nodes}; publishing this result would "
+                "silently render hidden structure"
+            )
+
+
+def _assert_visible_plan(visible_count: int, origin: str) -> None:
+    """Raise when a collapse plan about to be published has no visible nodes.
+
+    T9 (grind-p3): a raise, not an assert — these guards run on the DEFAULT
+    ``draw(collapse=)`` path and ``python -O`` strips asserts, which would
+    let an empty plan render a blank graph with no diagnosis.
+
+    Parameters
+    ----------
+    visible_count:
+        Visible node count of the plan being published.
+    origin:
+        Human-readable name of the publishing path, used in the error.
+    """
+
+    if visible_count <= 0:
+        raise RuntimeError(f"{origin} produced no visible nodes")
+
 
 @dataclass(frozen=True)
 class _FrontierPoint:
@@ -183,14 +263,14 @@ class _ModuleDecision:
     """Memoized module-level choice."""
 
     kind: Literal["box", "expand"]
-    segments: tuple["_SegmentDecision", ...] = ()
+    segments: tuple[_SegmentDecision, ...] = ()
 
 
 @dataclass(frozen=True)
 class _SegmentDecision:
     """Memoized choices for one segmented child sequence."""
 
-    components: tuple["_ComponentDecision", ...]
+    components: tuple[_ComponentDecision, ...]
 
 
 @dataclass(frozen=True)
@@ -206,7 +286,7 @@ class _ComponentDecision:
 class _OptimizerState:
     """Immutable shared state for one g-star DP run."""
 
-    trace: "Trace"
+    trace: Trace
     context: RenderContext
     analysis: CollapseAnalysis
     child_addresses: Mapping[str, tuple[str, ...]]
@@ -214,13 +294,14 @@ class _OptimizerState:
     structural_digests: Mapping[str, str]
     expanded_cache: dict[
         str,
-        tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]],
+        tuple[ChildCondensedFlowGraph | None, tuple[str, ...], tuple[str, ...]],
     ]
     role_components_cache: dict[tuple[str, tuple[str, ...]], tuple[RoleComponent, ...]]
     child_segments_cache: dict[tuple[str, ...], tuple[tuple[str, ...], ...]]
     single_member_expanded_cache: dict[_MemoKey, tuple[_DecisionPoint, ...]]
     box_cost_cache: dict[str, float]
     branch_salience_cache: dict[str, float]
+    output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None]
     weights: OptimizerWeights
     g_star: float
     total_ops: int
@@ -242,18 +323,35 @@ class _MemoKey:
 
 
 _RESULT_CACHE: weakref.WeakKeyDictionary[
-    object, dict[tuple[RenderContext, str], OptimizerResult]
+    object,
+    tuple[
+        tuple[object, ...],
+        dict[tuple[RenderContext, str, OptimizerWeights], OptimizerResult],
+    ],
 ] = weakref.WeakKeyDictionary()
-_SCHEDULE_CACHE: weakref.WeakKeyDictionary[object, dict[RenderContext, CollapseSchedule]] = (
-    weakref.WeakKeyDictionary()
-)
+#: Traces whose over-ceiling decline already warned (r8 R60-13: declined
+#: results skip the result cache -- the revision snapshot that keyed it is
+#: itself the O(N) cost being avoided -- so warn-once rides its own set).
+_CEILING_WARNED_TRACES: weakref.WeakSet = weakref.WeakSet()
+_SCHEDULE_CACHE: weakref.WeakKeyDictionary[
+    object,
+    tuple[tuple[object, ...], dict[RenderContext, CollapseSchedule]],
+] = weakref.WeakKeyDictionary()
+_BOX_UNITS_CACHE: weakref.WeakKeyDictionary[
+    object,
+    tuple[
+        tuple[object, ...],
+        dict[RenderContext, Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]]],
+    ],
+] = weakref.WeakKeyDictionary()
 
 
 def select_collapse_plan(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     weights: OptimizerWeights | None = None,
     mode: Literal["auto", "max"] = "auto",
+    source_graph: SourceGraph | None = None,
 ) -> OptimizerResult:
     """Return the v2 auto-collapse plan for ``trace``.
 
@@ -267,6 +365,8 @@ def select_collapse_plan(
         Optional optimizer weights.
     mode:
         Collapse policy to select.
+    source_graph:
+        Optional schedule-local normalized source graph.
 
     Returns
     -------
@@ -274,16 +374,73 @@ def select_collapse_plan(
         Selected collapse result, or a declined result when unsupported.
     """
 
-    cache_key = (context, mode)
-    cached_by_context = _RESULT_CACHE.setdefault(trace, {})
+    resolved_weights = OptimizerWeights() if weights is None else weights
+    # Ceiling check FIRST (r8 R60-13): ``_collapse_graph_revision`` is an
+    # uncached O(N) deep snapshot (per-op label/parents/children/module
+    # tuples), so computing it before the ceiling allocated ~100k nested
+    # tuples on a 100k-op trace only to decline ten lines later. Over-ceiling
+    # traces never reach the revision snapshot or the result cache; the
+    # decline warning dedupes per trace instead of per cached revision.
+    op_count = len(trace.ops)
+    if op_count > COLLAPSE_OPTIMIZER_MAX_OPS:
+        # Preflight compute ceiling (b8 R60): the frontier selection is
+        # measured superlinear (~n^1.75) in op count with no internal budget,
+        # so one draw(collapse="auto"|"max") on a several-thousand-op model
+        # burned CPU-hours before returning anything. Decline DISCLOSED:
+        # draw() renders uncollapsed, Trace.collapse_plan() refuses typed
+        # (collapse_plan_unavailable), and the schedule degrades to its
+        # single full-graph step.
+        if source_graph is None:
+            from .source_graph import build_source_graph
+
+            source_graph = build_source_graph(trace, context)
+        full_plan = collapse_plan_for_source_graph(source_graph, None, None)
+        if trace not in _CEILING_WARNED_TRACES:
+            _CEILING_WARNED_TRACES.add(trace)
+            warnings.warn(
+                f"TorchLens is skipping smart collapse: this trace has {op_count} "
+                f"ops, above the collapse optimizer's compute ceiling "
+                f"COLLAPSE_OPTIMIZER_MAX_OPS={COLLAPSE_OPTIMIZER_MAX_OPS} (its "
+                "selection cost grows superlinearly and would dominate the "
+                "render). The graph renders uncollapsed; reduce the rendered "
+                "graph first with module= focus, vis_call_depth, or rolled mode.",
+                TorchLensWarning,
+                # r7 R19 (opus b6 LOW): a fixed stacklevel resolved to TorchLens's
+                # own _trace_stats caller; blame the user's draw()/collapse_plan()
+                # line instead (the entry depth differs per public spelling).
+                stacklevel=user_stacklevel(),
+            )
+        return OptimizerResult(
+            selected=frozenset(),
+            repeat_folds={},
+            plan=full_plan,
+            visible_count=count(full_plan),
+            analyze_ms=0.0,
+            select_ms=0.0,
+            g_star=None,
+            declined=True,
+            reason=(
+                f"collapse_ops_ceiling: {op_count} ops exceed "
+                f"COLLAPSE_OPTIMIZER_MAX_OPS={COLLAPSE_OPTIMIZER_MAX_OPS}"
+            ),
+        )
+    # Weights are part of the cache identity: a weighted result must never be
+    # served for a differently weighted call (stale-cache defect class).
+    cache_key = (context, mode, resolved_weights)
+    revision = _collapse_graph_revision(trace)
+    cache_entry = _RESULT_CACHE.get(trace)
+    if cache_entry is None or cache_entry[0] != revision:
+        cached_by_context: dict[tuple[RenderContext, str, OptimizerWeights], OptimizerResult] = {}
+        _RESULT_CACHE[trace] = (revision, cached_by_context)
+    else:
+        cached_by_context = cache_entry[1]
     cached = cached_by_context.get(cache_key)
     if cached is not None:
         return cached
     if mode == "max":
-        result = _select_max_plan(trace, context, weights)
+        result = _select_max_plan(trace, context, weights, source_graph)
         cached_by_context[cache_key] = result
         return result
-    resolved_weights = OptimizerWeights() if weights is None else weights
     analysis = analyze_collapse(trace)
     start = time.perf_counter()
     hidden_counts = _rendered_module_hidden_counts(trace, context)
@@ -291,8 +448,9 @@ def select_collapse_plan(
     structural_digests = _structural_digest_map(trace, child_addresses, analysis)
     expanded_cache: dict[
         str,
-        tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]],
+        tuple[ChildCondensedFlowGraph | None, tuple[str, ...], tuple[str, ...]],
     ] = {}
+    output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None] = {}
     best = _select_best_decision(
         trace=trace,
         context=context,
@@ -301,6 +459,7 @@ def select_collapse_plan(
         hidden_counts=hidden_counts,
         structural_digests=structural_digests,
         expanded_cache=expanded_cache,
+        output_shape_cache=output_shape_cache,
         weights=resolved_weights,
         allow_folds=False,
     )
@@ -315,7 +474,9 @@ def select_collapse_plan(
             hidden_counts=hidden_counts,
             structural_digests=structural_digests,
             expanded_cache=expanded_cache,
+            output_shape_cache=output_shape_cache,
             best=best,
+            source_graph=source_graph,
         )
     if first_pass_plan is None or count(first_pass_plan) > _readable_band_high(trace):
         best = _select_best_decision(
@@ -326,13 +487,14 @@ def select_collapse_plan(
             hidden_counts=hidden_counts,
             structural_digests=structural_digests,
             expanded_cache=expanded_cache,
+            output_shape_cache=output_shape_cache,
             weights=replace(resolved_weights, fold_intrinsic=0.05),
             allow_folds=True,
         )
         first_pass_point = None
         first_pass_plan = None
     if best is None:
-        selected, plan = _floor_fallback_selection(trace, context)
+        selected, plan = _floor_fallback_selection(trace, context, source_graph)
         result = OptimizerResult(
             selected=selected,
             repeat_folds={},
@@ -354,7 +516,9 @@ def select_collapse_plan(
             hidden_counts=hidden_counts,
             structural_digests=structural_digests,
             expanded_cache=expanded_cache,
+            output_shape_cache=output_shape_cache,
             best=best,
+            source_graph=source_graph,
         )
     else:
         instantiated_point = first_pass_point
@@ -374,8 +538,10 @@ def select_collapse_plan(
             hidden_counts=hidden_counts,
             structural_digests=structural_digests,
             expanded_cache=expanded_cache,
+            output_shape_cache=output_shape_cache,
             weights=replace(resolved_weights, fold_intrinsic=0.05),
             band_high=band_high,
+            source_graph=source_graph,
         )
     ):
         segmented_plan, segments = _condense_plan_with_child_segments(
@@ -400,7 +566,7 @@ def select_collapse_plan(
             segments = {}
     else:
         segments = {}
-    assert count(plan) > 0, "v2 collapse plan produced no visible nodes"
+    _assert_visible_plan(count(plan), "v2 collapse plan")
     result = OptimizerResult(
         selected=instantiated_point.selected,
         repeat_folds=repeat_folds,
@@ -416,7 +582,7 @@ def select_collapse_plan(
 
 
 def select_collapse_level(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     t: float,
     weights: OptimizerWeights | None = None,
@@ -447,7 +613,12 @@ def select_collapse_level(
     """
 
     if not 0.0 <= t <= 1.0:
-        raise ValueError("collapse float level must be in [0.0, 1.0].")
+        raise InvalidArgumentError(
+            f"collapse float level must be in [0.0, 1.0]; received {t!r}",
+            code="collapse_level_invalid",
+            remedy="pass a collapse level between 0.0 and 1.0",
+            argument="t",
+        )
     if t == 1.0:
         return select_collapse_plan(trace, context, weights, mode="max")
     schedule = collapse_schedule(trace, context, weights)
@@ -472,7 +643,7 @@ def select_collapse_level(
 
 
 def collapse_schedule(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     weights: OptimizerWeights | None = None,
 ) -> CollapseSchedule:
@@ -485,7 +656,9 @@ def collapse_schedule(
     context:
         Rendering context.
     weights:
-        Optional optimizer weights.
+        Accepted for signature compatibility and ignored: the public float
+        schedule is weight-independent and always derives from the
+        default-weight max plan, so caching by context alone is sound.
 
     Returns
     -------
@@ -494,13 +667,54 @@ def collapse_schedule(
     """
 
     _ = weights
-    cached_by_context = _SCHEDULE_CACHE.setdefault(trace, {})
+    if len(trace.ops) > COLLAPSE_OPTIMIZER_MAX_OPS:
+        # Ceiling check FIRST (r8 R60-13): the revision snapshot below is an
+        # uncached O(N) deep walk, pointless when the optimizer will decline.
+        # The degraded single full-graph step is built directly (the decline
+        # inside select_collapse_plan warns once per trace).
+        from .source_graph import build_source_graph
+
+        over_source_graph = build_source_graph(trace, context)
+        over_full_plan = collapse_plan_for_source_graph(over_source_graph, None, None)
+        over_full_count = count(over_full_plan)
+        select_collapse_plan(trace, context, mode="max", source_graph=over_source_graph)
+        return CollapseSchedule(
+            (
+                CollapseScheduleStep(
+                    t=0.0,
+                    target_count=over_full_count,
+                    visible_count=over_full_count,
+                    collapsed_addresses=frozenset(),
+                    plan=over_full_plan,
+                ),
+            )
+        )
+    revision = _collapse_graph_revision(trace)
+    cache_entry = _SCHEDULE_CACHE.get(trace)
+    if cache_entry is None or cache_entry[0] != revision:
+        cached_by_context: dict[RenderContext, CollapseSchedule] = {}
+        _SCHEDULE_CACHE[trace] = (revision, cached_by_context)
+    else:
+        cached_by_context = cache_entry[1]
     cached = cached_by_context.get(context)
     if cached is not None:
         return cached
-    full_plan = collapse_plan_for_trace(trace, None, None, context)
+    from .source_graph import build_source_graph
+
+    source_graph = build_source_graph(trace, context)
+    node_pool: dict[PlanNode, PlanNode] = {}
+    full_plan = collapse_plan_for_source_graph(
+        source_graph,
+        None,
+        None,
+        node_pool=node_pool,
+    )
     full_count = count(full_plan)
-    max_result = select_collapse_plan(trace, context, mode="max")
+    max_result = select_collapse_plan(trace, context, mode="max", source_graph=source_graph)
+    max_plan = CollapsePlan(
+        nodes=tuple(node_pool.setdefault(node, node) for node in max_result.plan.nodes),
+        context=max_result.plan.context,
+    )
     if max_result.declined:
         step = CollapseScheduleStep(
             t=0.0,
@@ -521,8 +735,8 @@ def collapse_schedule(
                     1.0,
                     max_count,
                     max_count,
-                    _collapsed_addresses_for_result(max_result),
-                    max_result.plan,
+                    _reported_collapsed_addresses(max_result),
+                    max_plan,
                 ),
             )
         )
@@ -537,14 +751,22 @@ def collapse_schedule(
     for address in ordered_addresses:
         selected.add(address)
         collapse_fn = _collapse_fn_from_selected(frozenset(selected))
-        plan = collapse_plan_for_trace(trace, collapse_fn, {}, context)
+        plan = collapse_plan_for_source_graph(
+            source_graph,
+            collapse_fn,
+            {},
+            node_pool=node_pool,
+        )
         visible_count = count(plan)
         if visible_count <= previous_count:
             raw_steps.append((frozenset(selected), plan, visible_count))
             previous_count = visible_count
     max_addresses = _collapsed_addresses_for_result(max_result)
     if raw_steps[-1][2] != max_count or raw_steps[-1][0] != max_addresses:
-        raw_steps.append((max_addresses, max_result.plan, max_count))
+        # The append decision keys on the narrow module-address set (frozen
+        # schedule behavior); the appended max step reports the honest wider
+        # set including op-segment-hidden op labels.
+        raw_steps.append((_reported_collapsed_addresses(max_result), max_plan, max_count))
     denominator = max(full_count - max_count, 1)
     steps = tuple(
         CollapseScheduleStep(
@@ -614,8 +836,35 @@ def _collapsed_addresses_for_result(result: OptimizerResult) -> frozenset[str]:
     return frozenset(addresses)
 
 
+def _reported_collapsed_addresses(result: OptimizerResult) -> frozenset[str]:
+    """Return the honest public hidden set for an optimizer result.
+
+    Extends :func:`_collapsed_addresses_for_result` with the concrete op
+    labels hidden by operation segments, which hide rendered nodes without
+    collapsing any module address. This wider set is used only for public
+    schedule-step reporting; schedule construction keys on the narrow
+    module-address set to preserve the frozen schedule behavior.
+
+    Parameters
+    ----------
+    result:
+        Optimizer result to inspect.
+
+    Returns
+    -------
+    frozenset[str]
+        Collapsed module addresses plus op labels hidden by op segments.
+    """
+
+    addresses = set(_collapsed_addresses_for_result(result))
+    for segment in (result.segments or {}).values():
+        if segment.kind == "op":
+            addresses.update(str(op) for op in segment.ops)
+    return frozenset(addresses)
+
+
 def _schedule_ordered_addresses(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     max_result: OptimizerResult,
 ) -> tuple[str, ...]:
@@ -656,6 +905,7 @@ def _schedule_ordered_addresses(
         single_member_expanded_cache={},
         box_cost_cache={},
         branch_salience_cache={},
+        output_shape_cache={},
         weights=OptimizerWeights(),
         g_star=max_result.g_star or 1.0,
         total_ops=_optimizer_total_units(trace, context),
@@ -675,9 +925,10 @@ def _schedule_ordered_addresses(
 
 
 def _select_max_plan(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     weights: OptimizerWeights | None,
+    source_graph: SourceGraph | None = None,
 ) -> OptimizerResult:
     """Return the max-mode v2 plan by condensing legal auto-plan intervals.
 
@@ -689,6 +940,8 @@ def _select_max_plan(
         Rendering context.
     weights:
         Optional optimizer weights forwarded to the auto selector.
+    source_graph:
+        Optional schedule-local normalized source graph.
 
     Returns
     -------
@@ -696,7 +949,13 @@ def _select_max_plan(
         Max-mode result with segment descriptors, or an L3 auto fallback.
     """
 
-    auto = select_collapse_plan(trace, context, weights, mode="auto")
+    auto = select_collapse_plan(
+        trace,
+        context,
+        weights,
+        mode="auto",
+        source_graph=source_graph,
+    )
     if auto.declined:
         return auto
     analysis = analyze_collapse(trace)
@@ -705,8 +964,9 @@ def _select_max_plan(
     structural_digests = _structural_digest_map(trace, child_addresses, analysis)
     expanded_cache: dict[
         str,
-        tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]],
+        tuple[ChildCondensedFlowGraph | None, tuple[str, ...], tuple[str, ...]],
     ] = {}
+    output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None] = {}
     total_ops = _optimizer_total_units(trace, context)
     auto_count = count(auto.plan)
     levels = (
@@ -728,6 +988,7 @@ def _select_max_plan(
             hidden_counts=hidden_counts,
             structural_digests=structural_digests,
             expanded_cache=expanded_cache,
+            output_shape_cache=output_shape_cache,
             weights=replace(resolved_weights, fold_intrinsic=0.05),
             allow_folds=True,
             allow_segments=True,
@@ -745,8 +1006,10 @@ def _select_max_plan(
                 hidden_counts=hidden_counts,
                 structural_digests=structural_digests,
                 expanded_cache=expanded_cache,
+                output_shape_cache=output_shape_cache,
                 best=best,
                 prefer_instantiated_nodes=True,
+                source_graph=source_graph,
             )
             point, plan = _repair_max_salience_floor(
                 trace=trace,
@@ -755,9 +1018,11 @@ def _select_max_plan(
                 child_addresses=child_addresses,
                 hidden_counts=hidden_counts,
                 structural_digests=structural_digests,
+                output_shape_cache=output_shape_cache,
                 weights=replace(resolved_weights, fold_intrinsic=0.05),
                 g_star=best[1],
                 point=point,
+                source_graph=source_graph,
             )
             segments = _segments_from_plan_nodes(trace, context, analysis, plan)
             plan_count = count(plan)
@@ -827,26 +1092,62 @@ def _select_max_plan(
                 level=level,
                 reason=None,
             )
+    # The auto fallback must keep auto's own segment descriptors: auto's
+    # band-pressure branch can legitimately return a segmented plan, and
+    # stripping ``segments`` here would publish segment plan nodes the
+    # renderer cannot materialize (descriptor-loss honesty gap).
     return replace(
         auto,
-        segments={},
         level="L3",
         reason=f"fallback_to_auto: no legal max plan in [3,{min(20, auto_count)}]",
     )
 
 
 def _repair_max_salience_floor(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     analysis: CollapseAnalysis,
     child_addresses: Mapping[str, tuple[str, ...]],
     hidden_counts: Mapping[str, int],
     structural_digests: Mapping[str, str],
+    output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None],
     weights: OptimizerWeights,
     g_star: float,
     point: _FrontierPoint,
+    source_graph: SourceGraph | None = None,
 ) -> tuple[_FrontierPoint, CollapsePlan]:
-    """Expand selected max boxes that hide unique wide parallel fans."""
+    """Expand selected max boxes that hide unique wide parallel fans.
+
+    Parameters
+    ----------
+    trace:
+        Trace being optimized.
+    context:
+        Rendering context.
+    analysis:
+        Shared collapse analysis.
+    child_addresses:
+        Renderer-tree child addresses.
+    hidden_counts:
+        Renderer-faithful hidden counts.
+    structural_digests:
+        Structural memo digests.
+    output_shape_cache:
+        Plan-local cache shared by optimizer states.
+    weights:
+        Optimizer weights for the repair pass.
+    g_star:
+        Winning target hidden-mass grain.
+    point:
+        Instantiated max-plan frontier point.
+    source_graph:
+        Optional schedule-local normalized source graph.
+
+    Returns
+    -------
+    tuple[_FrontierPoint, CollapsePlan]
+        Repaired point and its renderer-faithful plan.
+    """
 
     state = _OptimizerState(
         trace=trace,
@@ -861,6 +1162,7 @@ def _repair_max_salience_floor(
         single_member_expanded_cache={},
         box_cost_cache={},
         branch_salience_cache={},
+        output_shape_cache=output_shape_cache,
         weights=weights,
         g_star=g_star,
         total_ops=_optimizer_total_units(trace, context),
@@ -896,11 +1198,12 @@ def _repair_max_salience_floor(
         box_costs.extend(replacement.box_costs)
     if not changed:
         return point, CollapsePlan(nodes=point.nodes, context=context)
-    rendered_plan = collapse_plan_for_trace(
+    rendered_plan = _collapse_plan_for_source_or_trace(
         trace,
         _collapse_fn_from_selected(frozenset(selected)),
         _fold_mapping(folds),
         context,
+        source_graph,
     )
     rendered_plan, _ = _condense_plan_with_child_segments(
         trace,
@@ -953,7 +1256,7 @@ def _max_salience_floor_replacement(
 
 
 def _condense_plan_with_child_segments(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     analysis: CollapseAnalysis,
     plan: CollapsePlan,
@@ -994,21 +1297,48 @@ def _condense_plan_with_child_segments(
     nodes: list[PlanNode] = []
     segments: dict[str, SegmentDescriptor] = {}
     hidden_raw_ops: set[str] = set()
+    concrete_raw_labels, concrete_segment_ops = _concrete_plan_op_labels(trace, plan.nodes)
+    box_owned_labels = _plan_box_owned_surfaced_labels(trace, context, plan.nodes)
     index = 0
     while index < len(plan.nodes):
         node = plan.nodes[index]
         if isinstance(node, RawOp) and isinstance(node.op, str) and node.op in hidden_raw_ops:
             index += 1
             continue
+        if isinstance(node, (OpSegment, ChildSegment)):
+            # The input plan may already be segmented (auto's band-pressure
+            # branch re-condensed by the max ladder). Pass such nodes through
+            # verbatim and rebuild their descriptors so the published mapping
+            # stays in lockstep with the plan; dropping them here is exactly
+            # the descriptor-loss class the parity tripwire guards against.
+            if isinstance(node, OpSegment):
+                concrete = concrete_segment_ops.get(index, tuple(node.ops))
+                descriptor = _make_op_segment_descriptor(trace, context, node.ops, concrete)
+            else:
+                covered_ops = _child_segment_covered_ops(analysis, node.members)
+                descriptor = _make_child_segment_descriptor(
+                    trace, context, node.members, covered_ops
+                )
+            segments[descriptor.name] = descriptor
+            nodes.append(node)
+            index += 1
+            continue
         op_run = _legal_plan_op_segment_run(
             trace,
+            context,
             plan.nodes,
             index,
             total_ops,
             dominance_limit=dominance_limit,
+            concrete_labels=concrete_raw_labels,
+            box_owned_labels=box_owned_labels,
         )
         if op_run:
-            descriptor = _make_op_segment_descriptor(trace, context, op_run)
+            concrete_run = tuple(
+                concrete_raw_labels.get(index + offset, label)
+                for offset, label in enumerate(op_run)
+            )
+            descriptor = _make_op_segment_descriptor(trace, context, op_run, concrete_run)
             segments[descriptor.name] = descriptor
             nodes.append(OpSegment(op_run))
             index += len(op_run)
@@ -1027,17 +1357,18 @@ def _condense_plan_with_child_segments(
             covered_ops = _child_segment_covered_ops(analysis, run)
             descriptor = _make_child_segment_descriptor(trace, context, run, covered_ops)
             segments[descriptor.name] = descriptor
-            hidden_raw_ops.update(covered_ops)
+            hidden_raw_ops.update(str(label).rsplit(":", 1)[0] for label in covered_ops)
             nodes.append(ChildSegment(run))
             index += len(run)
             continue
         nodes.append(node)
         index += 1
+    _assert_segment_descriptor_parity(nodes, segments)
     return CollapsePlan(nodes=tuple(nodes), context=context), segments
 
 
 def _segments_from_plan_nodes(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     analysis: CollapseAnalysis,
     plan: CollapsePlan,
@@ -1062,19 +1393,22 @@ def _segments_from_plan_nodes(
     """
 
     segments: dict[str, SegmentDescriptor] = {}
-    for node in plan.nodes:
+    _, concrete_segment_ops = _concrete_plan_op_labels(trace, plan.nodes)
+    for index, node in enumerate(plan.nodes):
         if isinstance(node, ChildSegment):
             covered_ops = _child_segment_covered_ops(analysis, node.members)
             descriptor = _make_child_segment_descriptor(trace, context, node.members, covered_ops)
             segments[descriptor.name] = descriptor
         elif isinstance(node, OpSegment):
-            descriptor = _make_op_segment_descriptor(trace, context, node.ops)
+            concrete = concrete_segment_ops.get(index, tuple(node.ops))
+            descriptor = _make_op_segment_descriptor(trace, context, node.ops, concrete)
             segments[descriptor.name] = descriptor
+    _assert_segment_descriptor_parity(plan.nodes, segments)
     return segments
 
 
 def _plan_respects_max_dominance(
-    trace: "Trace",
+    trace: Trace,
     analysis: CollapseAnalysis,
     plan: CollapsePlan,
     segments: Mapping[str, SegmentDescriptor],
@@ -1085,34 +1419,105 @@ def _plan_respects_max_dominance(
     total_ops = _optimizer_total_units(trace, plan.context)
     if total_ops <= 0:
         return True
-    segment_by_member = {
-        tuple(segment.members if segment.kind == "child" else segment.ops): segment
-        for segment in segments.values()
-    }
+    # Descriptors are built in plan order, so pair each segment plan node with
+    # its descriptor positionally; identity keys such as member tuples are not
+    # unique under per-pass segments of reused modules.
+    ordered_segments = list(segments.values())
+    position = 0
     for node in plan.nodes:
         if isinstance(node, ModuleBox):
             address = node.call.rsplit(":", 1)[0]
             signal = analysis.signals.get(address)
             if signal is not None and signal.hidden_ops / total_ops > dominance_limit:
                 return False
-        elif isinstance(node, ChildSegment):
-            segment = segment_by_member.get(tuple(node.members))
-            if segment is not None and segment.num_ops / total_ops > dominance_limit:
-                return False
-        elif isinstance(node, OpSegment):
-            segment = segment_by_member.get(tuple(node.ops))
+        elif isinstance(node, (ChildSegment, OpSegment)):
+            segment = ordered_segments[position] if position < len(ordered_segments) else None
+            position += 1
             if segment is not None and segment.num_ops / total_ops > dominance_limit:
                 return False
     return True
 
 
+def _concrete_plan_op_labels(
+    trace: Trace,
+    nodes: Sequence[PlanNode],
+) -> tuple[dict[int, str], dict[int, tuple[str, ...]]]:
+    """Attribute pass-qualified op identity to plan nodes by occurrence order.
+
+    Plan nodes carry pass-free render labels, so an op executed on multiple
+    module passes appears several times under one base label. Rendered plans
+    enumerate ops in execution order, which makes the ``k``-th plan occurrence
+    of a base label the ``k``-th pass of that op layer.
+
+    Parameters
+    ----------
+    trace:
+        Trace being optimized.
+    nodes:
+        Plan-node sequence.
+
+    Returns
+    -------
+    tuple[dict[int, str], dict[int, tuple[str, ...]]]
+        Concrete labels for string ``RawOp`` nodes keyed by plan index, and
+        concrete member labels for ``OpSegment`` nodes keyed by plan index.
+        Entries that cannot be attributed to a concrete op are omitted from
+        the raw mapping and left pass-free in the segment mapping.
+    """
+
+    valid = {str(op.label) for op in trace.ops}
+    counts: dict[str, int] = {}
+    raw: dict[int, str] = {}
+    segment_ops: dict[int, tuple[str, ...]] = {}
+
+    def resolve(base: str) -> str | None:
+        """Return the concrete label for the next occurrence of ``base``."""
+
+        if base in valid:
+            return base
+        counts[base] = counts.get(base, 0) + 1
+        qualified = f"{base}:{counts[base]}"
+        return qualified if qualified in valid else None
+
+    for index, node in enumerate(nodes):
+        if isinstance(node, RawOp) and isinstance(node.op, str):
+            resolved = resolve(node.op)
+            if resolved is not None:
+                raw[index] = resolved
+        elif isinstance(node, OpSegment):
+            segment_ops[index] = tuple(resolve(op) or op for op in node.ops)
+    return raw, segment_ops
+
+
+def _assert_segment_descriptor_parity(
+    nodes: Sequence[PlanNode],
+    segments: Mapping[str, SegmentDescriptor],
+) -> None:
+    """Fail loudly when segment descriptors collide before renderer exposure.
+
+    r-b7 R24-2: a raise, not an assert — label honesty must survive
+    ``python -O``.
+    """
+
+    segment_nodes = sum(isinstance(node, (ChildSegment, OpSegment)) for node in nodes)
+    if len(segments) != segment_nodes:
+        raise RuntimeError(
+            f"segment descriptor cardinality {len(segments)} != plan segment "
+            f"nodes {segment_nodes}; a non-injective segment identity would "
+            "silently drop rendered structure"
+        )
+
+
 def _legal_plan_op_segment_run(
-    trace: "Trace",
+    trace: Trace,
+    context: RenderContext,
     nodes: Sequence[PlanNode],
     start: int,
     total_ops: int,
     *,
     dominance_limit: float,
+    concrete_labels: Mapping[int, str],
+    box_owned_labels: frozenset[str] = frozenset(),
 ) -> tuple[str, ...] | None:
     """Return a legal consecutive raw-op segment run at ``start``.
 
@@ -1120,6 +1525,9 @@ def _legal_plan_op_segment_run(
     ----------
     trace:
         Trace being optimized.
+    context:
+        Rendering context; its ``vis_mode`` fixes the cluster keyspace used
+        for the module-call containment boundary.
     nodes:
         Plan-node sequence.
     start:
@@ -1128,6 +1536,12 @@ def _legal_plan_op_segment_run(
         Total rendered operation units.
     dominance_limit:
         Maximum segment dominance.
+    concrete_labels:
+        Pass-qualified op labels for string ``RawOp`` nodes by plan index.
+    box_owned_labels:
+        Pass-free labels of surfaced own-output ops that plan module boxes
+        already account for in their remainder labels; a run never absorbs
+        them.
 
     Returns
     -------
@@ -1136,22 +1550,51 @@ def _legal_plan_op_segment_run(
     """
 
     labels: list[str] = []
-    op_by_label = {str(op.label).rsplit(":", 1)[0]: op for op in trace.ops}
-    op_order = {str(op.label).rsplit(":", 1)[0]: index for index, op in enumerate(trace.ops)}
+    op_order = {str(op.label): index for index, op in enumerate(trace.ops)}
     previous_index: int | None = None
-    for node in nodes[start:]:
+    previous_stack: tuple[str, ...] | None = None
+    seen_stacks: dict[tuple[str, ...], tuple[str, ...]] = {}
+    for offset, node in enumerate(nodes[start:]):
         if not isinstance(node, RawOp) or not isinstance(node.op, str):
             break
-        label = node.op
-        current_index = op_order.get(label)
+        # Label honesty (round-25): a collapsed atomic module's surfaced
+        # own-output op is the box's separate sibling node, and the box
+        # remainder label accounts for it. Absorbing it into a segment
+        # double-represents the op -- counted by the box content label AND
+        # claimed by the segment range label -- and renders structurally
+        # identical sibling blocks inconsistently. Keep it a standalone raw
+        # node exactly like its siblings' exit ops.
+        if node.op in box_owned_labels:
+            break
+        concrete = concrete_labels.get(start + offset)
+        if concrete is None:
+            break
+        current_index = op_order.get(concrete)
         if current_index is None:
             break
-        op = op_by_label[label]
+        op = trace.ops[concrete]
         if getattr(op, "is_input", False) or getattr(op, "is_output", False):
             break
+        # Module-call containment (round-24 C1): an unrolled run must never
+        # absorb two different CALLS of one reused module -- the segment
+        # renders as one node in one cluster, so crossing a reuse boundary
+        # nests later calls' work under the first call's cluster and leaves
+        # the other call clusters falsely empty. Runs across distinct
+        # single-call sibling modules stay legal: their exact call-qualified
+        # LCA owner renders the segment at the honest common ancestor.
+        # Rolled clusters merge passes per address (no call boundary to
+        # cross), so rolled runs keep their historical shape.
+        if context.vis_mode != "rolled":
+            stack = _effective_render_module_stack(op)
+            if previous_stack is not None and _crosses_module_call_boundary(previous_stack, stack):
+                break
+            pass_free = tuple(entry.rsplit(":", 1)[0] for entry in stack)
+            if seen_stacks.setdefault(pass_free, stack) != stack:
+                break
+            previous_stack = stack
         if previous_index is not None and current_index != previous_index + 1:
             break
-        labels.append(label)
+        labels.append(node.op)
         previous_index = current_index
     if len(labels) < 3:
         return None
@@ -1161,8 +1604,55 @@ def _legal_plan_op_segment_run(
     return tuple(labels) if len(labels) >= 3 else None
 
 
+def _plan_box_owned_surfaced_labels(
+    trace: Trace,
+    context: RenderContext,
+    nodes: Sequence[PlanNode],
+) -> frozenset[str]:
+    """Return surfaced own-output labels owned by module boxes in a plan.
+
+    A collapsed atomic module keeps its own output op visible while its
+    innermost box is dropped, so the op renders as the box's separate sibling
+    node and the box remainder label subtracts it. Operation-segment runs must
+    never absorb such an op: the segment range label would claim it while the
+    box content label still counts it, double-representing one op and
+    rendering structurally identical sibling blocks inconsistently
+    (round-25).
+
+    Parameters
+    ----------
+    trace:
+        Trace being optimized.
+    context:
+        Render context for the plan.
+    nodes:
+        Plan-node sequence being condensed.
+
+    Returns
+    -------
+    frozenset[str]
+        Pass-free render labels of surfaced own-output ops whose owning
+        module renders as a collapsed box (or repeat-fold representative) in
+        ``nodes``.
+    """
+
+    addresses = {node.call.rsplit(":", 1)[0] for node in nodes if isinstance(node, ModuleBox)}
+    addresses.update(
+        node.rep.call.rsplit(":", 1)[0] for node in nodes if isinstance(node, RepeatFold)
+    )
+    if not addresses:
+        return frozenset()
+    units = _module_render_box_units(trace, context)
+    labels: set[str] = set()
+    for address in addresses:
+        unit = units.get(address)
+        if unit is not None:
+            labels.update(unit[1])
+    return frozenset(labels)
+
+
 def _legal_plan_child_segment_run(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     analysis: CollapseAnalysis,
     nodes: Sequence[PlanNode],
@@ -1199,12 +1689,20 @@ def _legal_plan_child_segment_run(
         Legal run, or ``None``.
     """
 
-    _ = context
     addresses: list[str] = []
     parent: str | None = None
     for node in nodes[start:]:
         address = _plan_module_address(node)
         if address is None:
+            break
+        module = trace.modules[address] if address in trace.modules else None
+        if int(getattr(module, "num_calls", 1) or 1) > 1:
+            # Rendered segment absorption is address-global: every call of a
+            # member address is hidden by the one segment node, while this
+            # condensation only replaces the consecutive plan nodes of a
+            # single pass. Absorbing a multi-call member would therefore
+            # leave sibling-pass boxes in the plan that the renderer hides,
+            # making ``plan.total`` over-count the rendered graph.
             break
         node_parent = address.rsplit(".", 1)[0] if "." in address else "self"
         if parent is None:
@@ -1215,32 +1713,14 @@ def _legal_plan_child_segment_run(
     if len(addresses) < 2 or parent is None:
         return None
     graph = analysis.child_flow_graphs.get(parent)
-    best: tuple[str, ...] | None = None
-    for end in range(2, len(addresses) + 1):
-        candidate = tuple(addresses[:end])
-        if any(analysis.signals[address].landmark_edges >= 2 for address in candidate):
-            continue
-        if not _segment_is_legal(candidate, graph):
-            continue
-        hidden = _child_segment_hidden_units(analysis, candidate, hidden_counts)
-        if total_ops > 0 and hidden / total_ops > dominance_limit:
-            continue
-        best = candidate
-    return best
-
-
-def _child_segment_hidden_units(
-    analysis: CollapseAnalysis,
-    addresses: tuple[str, ...],
-    hidden_counts: Mapping[str, int],
-) -> int:
-    """Return rendered hidden-unit count for a candidate child segment."""
-
-    covered_ops = _child_segment_covered_ops(analysis, addresses)
-    if covered_ops:
-        return len(covered_ops)
-    return sum(
-        hidden_counts.get(address, analysis.signals[address].hidden_ops) for address in addresses
+    return _longest_legal_segment_prefix(
+        addresses,
+        graph,
+        analysis,
+        hidden_counts,
+        total_ops,
+        dominance_limit=dominance_limit,
+        vis_mode=context.vis_mode,
     )
 
 
@@ -1256,7 +1736,7 @@ def _plan_module_address(node: PlanNode) -> str | None:
 
 def _segment_is_legal(
     addresses: tuple[str, ...],
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
 ) -> bool:
     """Return whether ``addresses`` satisfy chain-interval segment legality."""
 
@@ -1265,19 +1745,257 @@ def _segment_is_legal(
     return _run_fold_is_chain_interval(addresses, graph)
 
 
+def _longest_legal_segment_prefix(
+    members: Sequence[str],
+    graph: ChildCondensedFlowGraph | None,
+    analysis: CollapseAnalysis,
+    hidden_counts: Mapping[str, int],
+    total_ops: int,
+    *,
+    dominance_limit: float,
+    vis_mode: str = "unrolled",
+) -> tuple[str, ...] | None:
+    """Return the longest prefix of ``members`` that is a legal segment run.
+
+    Selects exactly the prefix a forward ``members[:end]`` scan would keep
+    last, but reduces each gate to its cheapest exact form so the search costs
+    one linear pass plus the chain-interval probes it cannot avoid:
+
+    * a member with two or more landmark edges poisons every prefix that
+      reaches it, so one forward scan yields a hard prefix ceiling instead of
+      a rescan of the whole prefix per candidate;
+    * hidden-unit currency accumulates over prefixes, so one incremental pass
+      settles the dominance gate for every prefix length at once;
+    * only the longest passing prefix is ever returned, so the chain-interval
+      probe walks down from the longest surviving candidate and stops at the
+      first pass rather than testing every prefix;
+    * ends whose probe provably fails from prefix-independent graph facts
+      (``_segment_prefix_candidate_ends``) are pruned before probing, so an
+      all-illegal component costs one linear pass instead of one probe per end.
+
+    Parameters
+    ----------
+    members:
+        Candidate member addresses in flow order.
+    graph:
+        Child-condensed flow graph for the parent.
+    analysis:
+        Shared collapse analysis.
+    hidden_counts:
+        Renderer-faithful hidden counts.
+    total_ops:
+        Total rendered operation units.
+    dominance_limit:
+        Maximum segment dominance.
+    vis_mode:
+        Render currency for hidden-unit counting.
+
+    Returns
+    -------
+    tuple[str, ...] | None
+        Longest legal run, or ``None``.
+    """
+
+    if len(members) < 2:
+        return None
+    if graph is None or not graph.edges:
+        # Chain-interval legality demands exactly one external entry edge, so
+        # an absent or edge-less parent graph fails every candidate prefix.
+        # Returning early keeps the walk-down from probing each end of a long
+        # component against a graph that can never pass.
+        return None
+    signals = analysis.signals
+    # Landmark ceiling: ``any(...)`` over a prefix short-circuits at the first
+    # landmark member, and every longer prefix still contains it, so the first
+    # landmark index is the exclusive bound on candidate lengths.
+    limit = len(members)
+    for index, address in enumerate(members):
+        if signals[address].landmark_edges >= 2:
+            limit = index
+            break
+    if limit < 2:
+        return None
+    candidate_ends = _segment_prefix_candidate_ends(members, graph, limit)
+    if not candidate_ends:
+        return None
+    limit = candidate_ends[0]
+
+    # Dominance gate, resolved for every prefix length in one pass. Hidden
+    # units are counted in the active render currency -- concrete
+    # pass-qualified ops for unrolled graphs, deduplicated layer labels for
+    # rolled graphs -- matching the optimizer's total-unit normalization. Both
+    # that covered-op currency and the no-coverage fallback accumulate member
+    # by member, so recounting a whole prefix per candidate is redundant work
+    # over already-seen members.
+    dominant: set[int] = set()
+    if total_ops > 0:
+        rolled = vis_mode == "rolled"
+        covered: dict[str, None] = {}
+        rolled_bases: dict[str, None] = {}
+        fallback = 0
+        for end in range(1, limit + 1):
+            address = members[end - 1]
+            signal = signals[address]
+            for label in signal.subtree_ops:
+                text = str(label)
+                covered[text] = None
+                if rolled:
+                    rolled_bases[text.rsplit(":", 1)[0]] = None
+            fallback += hidden_counts.get(address, signal.hidden_ops)
+            if end < 2:
+                continue
+            if covered:
+                hidden = len(rolled_bases) if rolled else len(covered)
+            else:
+                hidden = fallback
+            if hidden / total_ops > dominance_limit:
+                dominant.add(end)
+
+    for end in candidate_ends:
+        if end in dominant:
+            continue
+        candidate = tuple(members[:end])
+        if _segment_is_legal(candidate, graph):
+            return candidate
+    return None
+
+
+def _segment_prefix_candidate_ends(
+    members: Sequence[str],
+    graph: ChildCondensedFlowGraph,
+    limit: int,
+) -> list[int]:
+    """Return candidate prefix lengths not excluded by prefix-independent facts.
+
+    Each rule prunes only candidate ends whose from-scratch chain-interval
+    probe provably returns False, so the walk-down still reaches the exact
+    prefix the naive forward scan would keep. The connector-facing rules lean
+    on one containment fact: for every prefix, ``_chain_connector_nodes`` only
+    ever admits out-neighbors of members and their external source/sink
+    counterparts, so a node outside that superset can never be hidden as a
+    connector.
+
+    * A member-to-member edge that is not one forward step is an internal edge
+      no expected set contains, poisoning every prefix that includes both
+      endpoints.
+    * An entry edge into an interior member from a never-connector external
+      source makes the single-entry check fail for every prefix that includes
+      the target; two such edges into the first member fail every prefix.
+    * An exit edge to a never-connector external node is legal only while its
+      source member is the prefix's last member.
+    * A prefix with no potential entry edge at all (or none from later members)
+      fails the exactly-one-entry check; likewise for exits. Potential coverage
+      deliberately overcounts -- connector concealment is ignored -- so only
+      provably empty ends are pruned.
+
+    Parameters
+    ----------
+    members:
+        Candidate member addresses in flow order.
+    graph:
+        Child-condensed flow graph for the parent.
+    limit:
+        Exclusive bound on candidate prefix lengths from the landmark scan.
+
+    Returns
+    -------
+    list[int]
+        Surviving candidate ends in descending order.
+    """
+
+    positions = {address: index for index, address in enumerate(members[:limit])}
+    edges = set(graph.edges)
+    possible_connectors: set[str] = set()
+    for source, target in edges:
+        if source in positions and target not in positions:
+            possible_connectors.add(target)
+            paired = _paired_external_connector(target)
+            if paired is not None:
+                possible_connectors.add(paired)
+    first = members[0]
+    first_entry_edges = 0
+    entry_cover = [0] * (limit + 2)
+    exit_cover = [0] * (limit + 2)
+
+    def cover(diff: list[int], low: int, high: int) -> None:
+        """Add one clamped ``[low, high]`` interval to a difference array."""
+
+        low = max(low, 2)
+        high = min(high, limit)
+        if low <= high:
+            diff[low] += 1
+            diff[high + 1] -= 1
+
+    for source, target in edges:
+        source_pos = positions.get(source)
+        target_pos = positions.get(target)
+        if source_pos is not None and target_pos is not None:
+            if source != target and target_pos != source_pos + 1:
+                limit = min(limit, max(source_pos, target_pos))
+            if source_pos > target_pos:
+                cover(entry_cover, target_pos + 1, source_pos)
+            elif target_pos > source_pos:
+                cover(exit_cover, source_pos + 1, target_pos)
+            continue
+        if target_pos is not None:
+            cover(entry_cover, target_pos + 1, limit)
+            if source not in possible_connectors:
+                if target == first:
+                    first_entry_edges += 1
+                    if first_entry_edges >= 2:
+                        return []
+                else:
+                    limit = min(limit, target_pos)
+        elif source_pos is not None:
+            cover(exit_cover, source_pos + 1, limit)
+            if target not in possible_connectors:
+                limit = min(limit, source_pos + 1)
+    candidates: list[int] = []
+    entries_available = 0
+    exits_available = 0
+    for end in range(2, limit + 1):
+        entries_available += entry_cover[end]
+        exits_available += exit_cover[end]
+        if entries_available > 0 and exits_available > 0:
+            candidates.append(end)
+    candidates.reverse()
+    return candidates
+
+
+def _encode_segment_address(address: str) -> str:
+    """Return an injective Graphviz-safe encoding of one module address.
+
+    Escaping literal underscores before mapping dots keeps distinct addresses
+    distinct: ``a.b0`` becomes ``a_b0`` while ``a_b0`` becomes ``a__b0``.
+    """
+
+    return address.replace("_", "__").replace(".", "_")
+
+
 def _make_child_segment_descriptor(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     addresses: tuple[str, ...],
     covered_ops: tuple[str, ...],
 ) -> SegmentDescriptor:
     """Build a renderer descriptor for one child segment."""
 
-    _ = context
     if covered_ops:
-        covered_entries = tuple(_trace_op_for_render_label(trace, label) for label in covered_ops)
-        num_layers = len(covered_entries)
-        num_buffers = sum(bool(entry.is_buffer) for entry in covered_entries)
+        covered_entries = tuple(_trace_op_for_concrete_label(trace, label) for label in covered_ops)
+        if context.vis_mode == "rolled":
+            seen_bases: set[str] = set()
+            num_layers = 0
+            num_buffers = 0
+            for label, entry in zip(covered_ops, covered_entries, strict=True):
+                base = str(label).rsplit(":", 1)[0]
+                if base in seen_bases:
+                    continue
+                seen_bases.add(base)
+                num_layers += 1
+                num_buffers += bool(entry.is_buffer)
+        else:
+            num_layers = len(covered_entries)
+            num_buffers = sum(bool(entry.is_buffer) for entry in covered_entries)
     else:
         num_layers = sum(
             int(getattr(trace.modules[address], "num_layers", 0) or 0) for address in addresses
@@ -1292,9 +2010,12 @@ def _make_child_segment_descriptor(
     num_params = sum(
         int(getattr(trace.modules[address], "num_params", 0) or 0) for address in addresses
     )
-    owner = _segment_owner_key(trace, addresses)
+    owner = _segment_owner_key(trace, addresses, context.vis_mode)
     label = _child_segment_label(addresses, num_layers, num_buffers, num_params)
-    name = f"{addresses[0].replace('.', '_')}__segment__{addresses[-1].replace('.', '_')}pass1"
+    name = (
+        f"{_encode_segment_address(addresses[0])}__segment__"
+        f"{_encode_segment_address(addresses[-1])}pass1"
+    )
     return SegmentDescriptor(
         name=name,
         kind="child",
@@ -1312,61 +2033,135 @@ def _child_segment_covered_ops(
     analysis: CollapseAnalysis,
     addresses: tuple[str, ...],
 ) -> tuple[str, ...]:
-    """Return pass-free raw op labels covered by a child segment."""
+    """Return concrete pass-qualified op labels covered by a child segment."""
 
     labels: list[str] = []
     for address in addresses:
         signal = analysis.signals.get(address)
         if signal is None:
             continue
-        labels.extend(str(label).rsplit(":", 1)[0] for label in signal.subtree_ops)
+        labels.extend(str(label) for label in signal.subtree_ops)
     return tuple(dict.fromkeys(labels))
 
 
 def _make_op_segment_descriptor(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     labels: tuple[str, ...],
+    concrete: tuple[str, ...] | None = None,
 ) -> SegmentDescriptor:
-    """Build a renderer descriptor for one operation segment."""
+    """Build a renderer descriptor for one operation segment.
 
-    _ = context
-    owner = _op_segment_owner_key(trace, labels)
-    label = _op_segment_label(labels)
-    name = f"{labels[0].replace(':', 'pass')}__segment__{labels[-1].replace(':', 'pass')}pass1"
+    Parameters
+    ----------
+    trace:
+        Trace being optimized.
+    context:
+        Rendering context.
+    labels:
+        Pass-free plan labels in segment order.
+    concrete:
+        Pass-qualified op labels matching ``labels``. Falls back to the plan
+        labels when concrete attribution is unavailable.
+    """
+
+    resolved = tuple(concrete) if concrete else tuple(labels)
+    owner = _op_segment_owner_key(trace, resolved, context.vis_mode)
+    label = _op_segment_label(trace, labels, resolved)
+    spanned = _op_segment_spanned_modules(trace, resolved, owner, context.vis_mode)
+    if spanned:
+        # r-b6 R19-5: a segment placed above its ops' module homes (top level
+        # or a shared ancestor) must DISCLOSE the modules it spans — the box
+        # otherwise silently strips module containment from every hidden op.
+        shown = ", ".join(f"@{module}" for module in spanned[:3])
+        if len(spanned) > 3:
+            shown += f", +{len(spanned) - 3} more"
+        label = f"{label} -- spans {shown}"
+    name = f"{resolved[0].replace(':', 'pass')}__segment__{resolved[-1].replace(':', 'pass')}"
     return SegmentDescriptor(
         name=name,
         kind="op",
         label=label,
-        ops=labels,
+        ops=resolved,
         owner=owner,
-        num_ops=len(labels),
+        num_ops=len(resolved),
         num_params=0,
     )
 
 
-def _op_segment_owner_key(trace: "Trace", labels: tuple[str, ...]) -> str | None:
-    """Return the lowest common rendered module cluster for operation labels."""
+def _effective_render_module_stack(op: Op) -> tuple[str, ...]:
+    """Return the call-qualified module stack that clusters a visible op.
 
-    module_stacks: list[list[str]] = []
+    Mirrors the renderer's ``_raw_render_node_owner_key``: an atomic module's
+    own exit op stays visible while its innermost atomic box is dropped, so
+    that op clusters under the atomic module's parent call.
+    """
+
+    modules = [str(module) for module in getattr(op, "modules", ()) or ()]
+    if getattr(op, "is_atomic_module", False) and modules:
+        modules = modules[:-1]
+    return tuple(modules)
+
+
+def _crosses_module_call_boundary(
+    previous: tuple[str, ...],
+    current: tuple[str, ...],
+) -> bool:
+    """Return whether two adjacent rendered stacks cross a module-CALL reuse boundary.
+
+    A boundary is crossed exactly when some shared stack level holds two
+    different CALLS of the same module address (``core:1`` -> ``core:2``).
+    Levels holding genuinely different sibling modules are not boundaries:
+    merging across siblings is honest because the segment then owns their
+    exact call-qualified LCA.
+    """
+
+    for prev_entry, entry in zip(previous, current):
+        if prev_entry == entry:
+            continue
+        if prev_entry.rsplit(":", 1)[0] == entry.rsplit(":", 1)[0]:
+            return True
+    return False
+
+
+def _op_segment_owner_key(
+    trace: Trace,
+    labels: tuple[str, ...],
+    vis_mode: str = "unrolled",
+) -> str | None:
+    """Return the lowest common rendered module cluster for operation labels.
+
+    Unrolled clusters are per module CALL, so commonality is exact
+    call-qualified stack equality: a segment whose ops span several calls of
+    one reused module has no common call-level entry and owns the honest LCA
+    (the shared parent call, or ``None`` for top level) instead of falsely
+    claiming the first call (round-24 C1). Rolled clusters merge passes per
+    address, so rolled commonality stays pass-free AND the returned owner
+    must be the pass-free address itself: the rolled cluster flush drains
+    buckets by pass-free address, so a pass-qualified owner posts the labeled
+    segment node into a bucket no rolled cluster ever drains and Graphviz
+    materializes an unlabeled default ellipse instead (round-27).
+    """
+
+    module_stacks: list[tuple[str, ...]] = []
     for label in labels:
-        op = _trace_op_for_render_label(trace, label)
-        modules = [str(module) for module in getattr(op, "modules", ()) or ()]
-        if getattr(op, "is_atomic_module", False) and modules:
-            modules = modules[:-1]
-        module_stacks.append(modules)
+        op = _trace_op_for_concrete_label(trace, label)
+        module_stacks.append(_effective_render_module_stack(op))
     if not module_stacks or any(not stack for stack in module_stacks):
         return None
     common: str | None = None
     for values in zip(*module_stacks, strict=False):
-        pass_free = {value.rsplit(":", 1)[0] for value in values}
-        if len(pass_free) != 1:
+        if vis_mode == "rolled":
+            keys = {value.rsplit(":", 1)[0] for value in values}
+        else:
+            keys = set(values)
+        if len(keys) != 1:
             break
-        common = values[0]
+        common = next(iter(keys))
     return common
 
 
-def _trace_op_for_render_label(trace: "Trace", label: str) -> "Op":
+def _trace_op_for_render_label(trace: Trace, label: str) -> Op:
     """Return the trace op for a pass-free rendered label."""
 
     try:
@@ -1375,20 +2170,175 @@ def _trace_op_for_render_label(trace: "Trace", label: str) -> "Op":
         return trace.ops[label]
 
 
-def _op_segment_label(labels: tuple[str, ...]) -> str:
-    """Return a class-free range label for an operation segment."""
+def _op_segment_spanned_modules(
+    trace: Trace,
+    labels: tuple[str, ...],
+    owner: str | None,
+    vis_mode: str,
+) -> list[str]:
+    """Return the distinct module homes an op segment spans below its owner.
 
-    return f"{labels[0]} ... {labels[-1]} -- {len(labels)} ops"
+    r-b6 R19-5: an op segment owns the honest LCA of its members, which can
+    sit ABOVE the modules the ops actually live in (top level when the
+    members straddle sibling modules). The rendered box then carries no
+    module containment at all, so the label must name the spanned modules.
+    Returns the ordered distinct immediate homes below ``owner`` when the
+    placement actually loses containment information, else ``[]``.
+
+    T9 (grind-p3): the walk reads the op's FULL module stack, not the
+    renderer's effective stack. The effective stack drops an atomic
+    module's own innermost level — a presentation choice (the renderer
+    keeps the op and drops the box) — and inheriting that drop here made
+    the disclosure silently omit hidden atomic module calls from the
+    ``spans @...`` list.
+    """
+
+    homes: list[str] = []
+    has_direct_member = False
+    for label in labels:
+        op = _trace_op_for_concrete_label(trace, label)
+        stack: tuple[str, ...] = tuple(str(module) for module in getattr(op, "modules", ()) or ())
+        if vis_mode == "rolled":
+            stack = tuple(value.rsplit(":", 1)[0] for value in stack)
+        if owner is None or owner not in stack:
+            home = stack[0] if stack else None
+        else:
+            owner_depth = stack.index(owner)
+            home = stack[owner_depth + 1] if owner_depth + 1 < len(stack) else None
+        if home is None:
+            has_direct_member = True
+        elif home not in homes:
+            homes.append(home)
+    if not homes:
+        return []
+    if len(homes) > 1 or owner is None or has_direct_member:
+        return homes
+    return []
 
 
-def _segment_owner_key(trace: "Trace", addresses: tuple[str, ...]) -> str | None:
-    """Return the lowest rendered module cluster that owns ``addresses``."""
+def _trace_op_for_concrete_label(trace: Trace, label: str) -> Op:
+    """Return the trace op for a concrete or legacy pass-free label.
+
+    Pass-qualified labels are exact accessor keys and resolve without any
+    fuzzy lookup; legacy pass-free labels fall back to the render-label
+    helper.
+    """
+
+    if ":" in label:
+        return trace.ops[label]
+    return _trace_op_for_render_label(trace, label)
+
+
+def _op_segment_label(
+    trace: Trace,
+    labels: tuple[str, ...],
+    concrete: tuple[str, ...],
+) -> str:
+    """Return a class-free range label for an operation segment.
+
+    Endpoints stay pass-free for single-pass layers and show the concrete
+    pass-qualified label when the layer runs multiple passes, so two per-pass
+    segments of a reused block are visually distinguishable and each label
+    stands for exactly its own hidden ops.
+    """
+
+    # Exact-key membership only: probing missing keys through the public
+    # accessor would enter fuzzy lookup, which canonical collapse work must
+    # never do.
+    valid = {str(op.label) for op in trace.ops}
+
+    def endpoint(base: str, resolved: str) -> str:
+        """Render a range endpoint, keeping its pass suffix only for a multi-pass label."""
+
+        multipass = f"{base}:2" in valid
+        return resolved if ":" in resolved and multipass else base
+
+    first = endpoint(labels[0], concrete[0])
+    last = endpoint(labels[-1], concrete[-1])
+    return f"{first} ... {last} -- {len(labels)} ops"
+
+
+def _segment_owner_key(
+    trace: Trace,
+    addresses: tuple[str, ...],
+    vis_mode: str = "unrolled",
+) -> str | None:
+    """Return the lowest rendered module cluster that owns ``addresses``.
+
+    Child segments replace consecutive single-call child BOXES (multi-call
+    members are refused at run construction), and the renderer places those
+    boxes with the lexical parent plus the member's own call index
+    (``_collapsed_module_owner_key``) -- always ``parent:1`` here. The
+    segment owner mirrors that exact box rule so a segment always renders in
+    the same cluster the boxes it replaces would have; deriving it from call
+    nesting instead would split a segment from its unabsorbed sibling boxes.
+
+    Rolled clusters are keyed by pass-FREE address (mirroring
+    ``_collapsed_module_owner_key``'s rolled branch), so the rolled owner is
+    the bare parent address: a pass-qualified owner lands in a bucket the
+    rolled cluster flush never drains and the labeled segment node is
+    silently dropped (round-27).
+    """
 
     parent = addresses[0].rsplit(".", 1)[0] if "." in addresses[0] else "self"
     if parent == "self" or parent not in trace.modules:
         return None
+    if vis_mode == "rolled":
+        return parent
     parent_key = f"{parent}:1"
     return parent_key if parent_key in trace.modules else parent
+
+
+def _members_are_name_consecutive(addresses: tuple[str, ...]) -> bool:
+    """Return whether member leaf names form an ascending consecutive range.
+
+    Segment legality is flow-based, so members can be name-noncontiguous or
+    name-descending; a ``first-last`` interval label is only honest when the
+    leaf names share one parent and one stem and count up by exactly one.
+    """
+
+    parents = {address.rsplit(".", 1)[0] if "." in address else "" for address in addresses}
+    if len(parents) != 1:
+        return False
+    stems: list[str] = []
+    values: list[int] = []
+    for address in addresses:
+        leaf = address.rsplit(".", 1)[-1]
+        # Manual trailing-digit split, equivalent to
+        # ``re.fullmatch(r"(.*?)(\d+)", leaf)`` (lazy stem = maximal digit
+        # suffix): that pattern backtracks QUADRATICALLY on
+        # artifact-supplied leaves like "9"*n + "x" (measured 9s at 40k
+        # chars). ``str.isdecimal`` is exactly the ``\d`` character class.
+        cut = len(leaf)
+        while cut > 0 and leaf[cut - 1].isdecimal():
+            cut -= 1
+        if cut == len(leaf):
+            return False
+        stems.append(leaf[:cut])
+        values.append(int(leaf[cut:]))
+    if len(set(stems)) != 1:
+        return False
+    return all(right == left + 1 for left, right in zip(values, values[1:]))
+
+
+def _child_segment_range_text(addresses: tuple[str, ...]) -> str:
+    """Return an honest member summary for a child-segment label.
+
+    Name-consecutive runs keep the compact ``prefix.first-last`` interval.
+    Flow-legal but name-noncontiguous runs enumerate their members IN FULL,
+    regardless of count (R19): an elided ``first, second, ..., last`` reads
+    as a complete interval and overstates hidden membership whenever the
+    run skips names that render as separate visible boxes.
+    """
+
+    first = addresses[0]
+    prefix = first.rsplit(".", 1)[0] if "." in first else ""
+    leaves = [address.rsplit(".", 1)[-1] for address in addresses]
+    if _members_are_name_consecutive(addresses):
+        range_text = f"{leaves[0]}-{leaves[-1]}"
+        return f"{prefix}.{range_text}" if prefix else range_text
+    listed = ", ".join(leaves)
+    return f"{prefix}.{{{listed}}}" if prefix else f"{{{listed}}}"
 
 
 def _child_segment_label(
@@ -1401,12 +2351,7 @@ def _child_segment_label(
 
     from ._render_common import format_collapsed_module_contents
 
-    first = addresses[0]
-    last = addresses[-1]
-    prefix = first.rsplit(".", 1)[0] if "." in first else ""
-    first_leaf = first.rsplit(".", 1)[-1]
-    last_leaf = last.rsplit(".", 1)[-1]
-    range_text = f"{prefix}.{first_leaf}-{last_leaf}" if prefix else f"{first_leaf}-{last_leaf}"
+    range_text = _child_segment_range_text(addresses)
     contents = format_collapsed_module_contents(num_layers, num_buffers)
     return (
         f"{range_text} -- {len(addresses)} blocks, {contents}, "
@@ -1425,7 +2370,7 @@ def _format_param_count(value: int) -> str:
 
 
 def _instantiate_best_point(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     analysis: CollapseAnalysis,
     child_addresses: Mapping[str, tuple[str, ...]],
@@ -1433,8 +2378,9 @@ def _instantiate_best_point(
     structural_digests: Mapping[str, str],
     expanded_cache: dict[
         str,
-        tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]],
+        tuple[ChildCondensedFlowGraph | None, tuple[str, ...], tuple[str, ...]],
     ],
+    output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None],
     best: tuple[
         float,
         float,
@@ -1445,6 +2391,7 @@ def _instantiate_best_point(
         bool,
     ],
     prefer_instantiated_nodes: bool = False,
+    source_graph: SourceGraph | None = None,
 ) -> tuple[_FrontierPoint, CollapsePlan]:
     """Instantiate a winning DP point and its renderer-faithful plan.
 
@@ -1464,8 +2411,14 @@ def _instantiate_best_point(
         Structural memo digests.
     expanded_cache:
         Shared expanded-structure cache.
+    output_shape_cache:
+        Plan-local cache shared by optimizer states.
     best:
         Winner tuple from :func:`_select_best_decision`.
+    prefer_instantiated_nodes:
+        Whether to use decision nodes directly instead of renderer planning.
+    source_graph:
+        Optional schedule-local normalized source graph.
 
     Returns
     -------
@@ -1488,6 +2441,7 @@ def _instantiate_best_point(
         single_member_expanded_cache={},
         box_cost_cache={},
         branch_salience_cache={},
+        output_shape_cache=output_shape_cache,
         weights=winning_weights,
         g_star=winning_g,
         total_ops=_optimizer_total_units(trace, context),
@@ -1502,14 +2456,53 @@ def _instantiate_best_point(
     if prefer_instantiated_nodes:
         plan = CollapsePlan(nodes=instantiated_point.nodes, context=context)
     else:
-        plan = collapse_plan_for_trace(trace, collapse_fn, repeat_folds, context)
+        plan = _collapse_plan_for_source_or_trace(
+            trace,
+            collapse_fn,
+            repeat_folds,
+            context,
+            source_graph,
+        )
     return instantiated_point, plan
 
 
-def _collapse_fn_from_selected(selected: frozenset[str]) -> Callable[["Module"], bool]:
+def _collapse_plan_for_source_or_trace(
+    trace: Trace,
+    collapse_fn: Callable[[Module], bool] | None,
+    repeat_folds: Mapping[str, ModuleRepeatFold] | None,
+    context: RenderContext,
+    source_graph: SourceGraph | None,
+) -> CollapsePlan:
+    """Build a plan from a shared source graph when one is available.
+
+    Parameters
+    ----------
+    trace:
+        Trace being projected.
+    collapse_fn:
+        Active collapse predicate.
+    repeat_folds:
+        Active repeat-fold mapping.
+    context:
+        Resolved rendering context.
+    source_graph:
+        Optional schedule-local normalized source graph.
+
+    Returns
+    -------
+    CollapsePlan
+        Renderer-faithful structural plan.
+    """
+
+    if source_graph is None:
+        return collapse_plan_for_trace(trace, collapse_fn, repeat_folds, context)
+    return collapse_plan_for_source_graph(source_graph, collapse_fn, repeat_folds)
+
+
+def _collapse_fn_from_selected(selected: frozenset[str]) -> Callable[[Module], bool]:
     """Return a module-collapse predicate for selected addresses."""
 
-    def collapse_fn(module: "Module") -> bool:
+    def collapse_fn(module: Module) -> bool:
         """Return whether ``module`` is selected."""
 
         return module.address in selected
@@ -1518,7 +2511,7 @@ def _collapse_fn_from_selected(selected: frozenset[str]) -> Callable[["Module"],
 
 
 def _select_best_decision(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     analysis: CollapseAnalysis,
     child_addresses: Mapping[str, tuple[str, ...]],
@@ -1526,8 +2519,9 @@ def _select_best_decision(
     structural_digests: Mapping[str, str],
     expanded_cache: dict[
         str,
-        tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]],
+        tuple[ChildCondensedFlowGraph | None, tuple[str, ...], tuple[str, ...]],
     ],
+    output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None],
     weights: OptimizerWeights,
     allow_folds: bool,
     allow_segments: bool = False,
@@ -1547,7 +2541,10 @@ def _select_best_decision(
     ]
     | None
 ):
-    """Return the best global decision for one fold-gating pass.
+    """Return the best surviving global decision for one fold-gating pass.
+
+    "Best" is relative to the beam-capped frontiers described in the module
+    docstring; globally better cuts can be pruned before scoring.
 
     Parameters
     ----------
@@ -1565,6 +2562,8 @@ def _select_best_decision(
         Structural memo digests.
     expanded_cache:
         Shared expanded-structure cache.
+    output_shape_cache:
+        Plan-local cache shared by optimizer states.
     weights:
         Optimizer weights for this pass.
     allow_folds:
@@ -1604,6 +2603,7 @@ def _select_best_decision(
             single_member_expanded_cache={},
             box_cost_cache={},
             branch_salience_cache={},
+            output_shape_cache=output_shape_cache,
             weights=weights,
             g_star=g_star,
             total_ops=total_units,
@@ -1635,7 +2635,7 @@ def _select_best_decision(
 
 
 def _frontier_can_reach_band(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     analysis: CollapseAnalysis,
     child_addresses: Mapping[str, tuple[str, ...]],
@@ -1643,10 +2643,12 @@ def _frontier_can_reach_band(
     structural_digests: Mapping[str, str],
     expanded_cache: dict[
         str,
-        tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]],
+        tuple[ChildCondensedFlowGraph | None, tuple[str, ...], tuple[str, ...]],
     ],
+    output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None],
     weights: OptimizerWeights,
     band_high: int,
+    source_graph: SourceGraph | None = None,
 ) -> bool:
     """Return whether module boxes or run folds can reach the readable band.
 
@@ -1666,10 +2668,14 @@ def _frontier_can_reach_band(
         Structural memo digests.
     expanded_cache:
         Shared expanded-structure cache.
+    output_shape_cache:
+        Plan-local cache shared by optimizer states.
     weights:
         Optimizer weights for the fold-enabled pass.
     band_high:
         Maximum readable auto node count.
+    source_graph:
+        Optional schedule-local normalized source graph.
 
     Returns
     -------
@@ -1694,6 +2700,7 @@ def _frontier_can_reach_band(
             single_member_expanded_cache={},
             box_cost_cache={},
             branch_salience_cache={},
+            output_shape_cache=output_shape_cache,
             weights=weights,
             g_star=g_star,
             total_ops=total_units,
@@ -1707,11 +2714,12 @@ def _frontier_can_reach_band(
             if point.k < 1 or point.k > band_high:
                 continue
             instantiated = _instantiate_module("self", point.k, state, memo)
-            plan = collapse_plan_for_trace(
+            plan = _collapse_plan_for_source_or_trace(
                 trace,
                 _collapse_fn_from_selected(instantiated.selected),
                 _fold_mapping(instantiated.folds),
                 context,
+                source_graph,
             )
             if 1 <= count(plan) <= band_high:
                 return True
@@ -1719,7 +2727,7 @@ def _frontier_can_reach_band(
 
 
 def build_role_components(
-    trace: "Trace",
+    trace: Trace,
     parent_address: str,
     child_addresses: Sequence[str],
     analysis: CollapseAnalysis | None = None,
@@ -1748,43 +2756,36 @@ def build_role_components(
 
     resolved_analysis = analyze_collapse(trace) if analysis is None else analysis
     children = tuple(child for child in child_addresses if child in trace.modules)
-    parent_index = {child: index for index, child in enumerate(children)}
-    parent = {child: child for child in children}
-
-    def find(address: str) -> str:
-        """Return the union-find representative for ``address``."""
-
-        current = address
-        while parent[current] != current:
-            parent[current] = parent[parent[current]]
-            current = parent[current]
-        return current
-
-    def union(left: str, right: str) -> None:
-        """Union two child addresses, preserving earliest flow representative."""
-
-        left_root = find(left)
-        right_root = find(right)
-        if left_root == right_root:
-            return
-        if parent_index[left_root] <= parent_index[right_root]:
-            parent[right_root] = left_root
-        else:
-            parent[left_root] = right_root
-
-    for left_index, left in enumerate(children):
-        for right in children[left_index + 1 :]:
-            if _same_role(trace, left, right, resolved_analysis, hidden_counts or {}):
-                union(left, right)
-    grouped: dict[str, list[str]] = {}
-    for child in children:
-        grouped.setdefault(find(child), []).append(child)
-    return tuple(
-        RoleComponent(tuple(members))
-        for _, members in sorted(
-            grouped.items(),
-            key=lambda item: min(parent_index[member] for member in item[1]),
+    resolved_hidden = hidden_counts or {}
+    # The _same_role relation depends only on per-child data: same class_name
+    # and |log2(1 + n_left) - log2(1 + n_right)| <= 1.5. The connected
+    # components of a within-tolerance relation on a line are exactly the
+    # maximal sorted runs with consecutive gap <= 1.5 (IEEE subtraction is
+    # monotone, so no pair straddling a gap > 1.5 can be within tolerance),
+    # so this O(N log N) partition matches the all-pairs union sweep exactly.
+    buckets: dict[str, list[tuple[float, int]]] = {}
+    for index, child in enumerate(children):
+        module = cast("Module", trace.modules[child])
+        class_name = str(getattr(module, "class_name", ""))
+        mass = math.log2(
+            1 + _faithful_hidden_count(resolved_analysis.signals[child], resolved_hidden)
         )
+        buckets.setdefault(class_name, []).append((mass, index))
+    component_indices: list[list[int]] = []
+    for entries in buckets.values():
+        entries.sort()
+        run = [entries[0][1]]
+        previous_mass = entries[0][0]
+        for mass, index in entries[1:]:
+            if mass - previous_mass > 1.5:
+                component_indices.append(run)
+                run = []
+            run.append(index)
+            previous_mass = mass
+        component_indices.append(run)
+    return tuple(
+        RoleComponent(tuple(children[index] for index in sorted(indices)))
+        for indices in sorted(component_indices, key=min)
     )
 
 
@@ -1811,25 +2812,10 @@ def _role_components_for_children(
     return components
 
 
-def _declined_result(context: RenderContext, reason: str) -> OptimizerResult:
-    """Return a declined optimizer result."""
-
-    return OptimizerResult(
-        selected=frozenset(),
-        repeat_folds={},
-        plan=CollapsePlan(nodes=(), context=context),
-        visible_count=0,
-        analyze_ms=0.0,
-        select_ms=0.0,
-        g_star=None,
-        declined=True,
-        reason=reason,
-    )
-
-
 def _floor_fallback_selection(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
+    source_graph: SourceGraph | None = None,
 ) -> tuple[frozenset[str], CollapsePlan]:
     """Return the conservative visible plan used when the DP frontier is empty.
 
@@ -1839,6 +2825,8 @@ def _floor_fallback_selection(
         Trace being optimized.
     context:
         Rendering context.
+    source_graph:
+        Optional schedule-local normalized source graph.
 
     Returns
     -------
@@ -1848,20 +2836,24 @@ def _floor_fallback_selection(
         is the full-op renderer plan.
     """
 
-    full_plan = collapse_plan_for_trace(trace, None, None, context)
+    full_plan = _collapse_plan_for_source_or_trace(trace, None, None, context, source_graph)
     full_count = count(full_plan)
     selected = frozenset(_top_level_fallback_addresses(trace))
     if selected:
-        candidate_plan = collapse_plan_for_trace(
-            trace, _collapse_fn_from_selected(selected), None, context
+        candidate_plan = _collapse_plan_for_source_or_trace(
+            trace,
+            _collapse_fn_from_selected(selected),
+            None,
+            context,
+            source_graph,
         )
         if 0 < count(candidate_plan) < full_count:
             return selected, candidate_plan
-    assert full_count > 0, "collapse floor fallback produced no visible nodes"
+    _assert_visible_plan(full_count, "collapse floor fallback")
     return frozenset(), full_plan
 
 
-def _top_level_fallback_addresses(trace: "Trace") -> tuple[str, ...]:
+def _top_level_fallback_addresses(trace: Trace) -> tuple[str, ...]:
     """Return direct child module addresses suitable for floor fallback boxes.
 
     Parameters
@@ -1957,7 +2949,7 @@ def _expanded_points(
 def _expanded_structure(
     address: str,
     state: _OptimizerState,
-) -> tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]]:
+) -> tuple[ChildCondensedFlowGraph | None, tuple[str, ...], tuple[str, ...]]:
     """Return child-flow graph, ordered children, and own ops for expansion."""
 
     cached = state.expanded_cache.get(address)
@@ -2091,7 +3083,7 @@ def _external_endpoint_counts(
 def _sequence_points(
     parent_address: str,
     child_addresses: Sequence[str],
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
     state: _OptimizerState,
     memo: dict[_MemoKey, tuple[_DecisionPoint, ...]],
 ) -> tuple[_DecisionPoint, ...]:
@@ -2117,7 +3109,7 @@ def _sequence_points(
 
 def _component_treatment_points(
     component: RoleComponent,
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
     state: _OptimizerState,
     memo: dict[_MemoKey, tuple[_DecisionPoint, ...]],
 ) -> tuple[_DecisionPoint, ...]:
@@ -2149,18 +3141,34 @@ def _own_ops_segment_is_legal(state: _OptimizerState, own_ops: tuple[str, ...]) 
     if state.total_ops > 0 and len(own_ops) / state.total_ops > 0.75:
         return False
     op_by_label = {str(op.label): op for op in state.trace.ops}
+    previous_stack: tuple[str, ...] | None = None
+    seen_stacks: dict[tuple[str, ...], tuple[str, ...]] = {}
     for label in own_ops:
         op = op_by_label.get(label)
         if op is None:
             return False
         if getattr(op, "is_input", False) or getattr(op, "is_output", False):
             return False
+        if state.context.vis_mode != "rolled":
+            # Module-call containment (round-24 C1): a multi-call module's
+            # own ops span several rendered call clusters, so replacing them
+            # with ONE segment node would nest later calls' work under one
+            # call's cluster. Refuse reuse-crossing sequences here; the
+            # condense pass re-segments the raw ops per call where
+            # beneficial. Same rule as ``_legal_plan_op_segment_run``.
+            stack = _effective_render_module_stack(op)
+            if previous_stack is not None and _crosses_module_call_boundary(previous_stack, stack):
+                return False
+            pass_free = tuple(entry.rsplit(":", 1)[0] for entry in stack)
+            if seen_stacks.setdefault(pass_free, stack) != stack:
+                return False
+            previous_stack = stack
     return True
 
 
 def _component_segmented(
     component: RoleComponent,
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
     state: _OptimizerState,
 ) -> _DecisionPoint | None:
     """Return a first-class child segment treatment for one role component."""
@@ -2202,25 +3210,21 @@ def _segment_run_cost(run: tuple[str, ...], state: _OptimizerState) -> float:
 
 def _legal_component_segment_run(
     members: Sequence[str],
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
     state: _OptimizerState,
 ) -> tuple[str, ...] | None:
     """Return the longest legal component segment run."""
 
     if len(members) < 2 or graph is None:
         return None
-    best: tuple[str, ...] | None = None
-    for end in range(2, len(members) + 1):
-        candidate = tuple(members[:end])
-        if any(state.analysis.signals[address].landmark_edges >= 2 for address in candidate):
-            continue
-        if not _segment_is_legal(candidate, graph):
-            continue
-        hidden = _child_segment_hidden_units(state.analysis, candidate, state.hidden_counts)
-        if state.total_ops > 0 and hidden / state.total_ops > 0.75:
-            continue
-        best = candidate
-    return best
+    return _longest_legal_segment_prefix(
+        members,
+        graph,
+        state.analysis,
+        state.hidden_counts,
+        state.total_ops,
+        dominance_limit=0.75,
+    )
 
 
 def _component_boxes(component: RoleComponent, state: _OptimizerState) -> _DecisionPoint | None:
@@ -2317,7 +3321,7 @@ def _single_member_expanded(
 
 def _component_folded(
     component: RoleComponent,
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
     state: _OptimizerState,
 ) -> _DecisionPoint | None:
     """Return the maximal-run folded treatment for a component when useful."""
@@ -2364,7 +3368,7 @@ def _component_folded(
 
 def _maximal_legal_runs(
     members: Sequence[str],
-    graph: "ChildCondensedFlowGraph",
+    graph: ChildCondensedFlowGraph,
     state: _OptimizerState,
 ) -> tuple[tuple[str, ...], ...]:
     """Partition component members into maximal legal fold repeats."""
@@ -2379,14 +3383,14 @@ def _maximal_legal_runs(
                 break
             if not _eligible_module_box(state, address, state.analysis.signals[address]):
                 break
-            if candidate and not _module_output_shapes_equal(state.trace, candidate[-1], address):
+            if candidate and not _cached_module_output_shapes_equal(state, candidate[-1], address):
                 break
             candidate.append(address)
             run = tuple(candidate)
             if (
                 len(run) >= RUN_FOLD_MIN_LENGTH
                 and _run_fold_is_legal(run, graph)
-                and _run_fold_hidden_members_uniform(state.trace, run)
+                and _run_fold_members_uniform(state.trace, run)
             ):
                 best = run
         if best:
@@ -2397,8 +3401,86 @@ def _maximal_legal_runs(
     return tuple(runs)
 
 
+def _module_render_box_units(
+    trace: Trace,
+    context: RenderContext,
+) -> Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]]:
+    """Return per-call rendered collapse units for every module address.
+
+    For each pass-free module address the value is ``(box_calls, kept_ops)``:
+
+    - ``box_calls``: the pass-qualified module calls the renderer draws as one
+      collapsed box each when the address is selected. A call is included only
+      when it hides at least one rendered node, so a pure atomic module (whose
+      only content is its own atomic exit op) has no box calls at all: the
+      renderer drops the innermost atomic box and keeps the op visible.
+    - ``kept_ops``: one pass-free render label per concrete op occurrence that
+      stays visible when the address is selected, because atomic module
+      collapse drops the innermost module from the op's owner stack.
+
+    Both tuples enumerate in render order, so occurrences of one op layer
+    appear in pass order. The map is meaningful for unrolled contexts; rolled
+    selection always renders one merged box per address.
+
+    Parameters
+    ----------
+    trace:
+        Trace being optimized.
+    context:
+        Render context for the selected plan.
+
+    Returns
+    -------
+    Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]]
+        Rendered box calls and kept op occurrences keyed by module address.
+    """
+
+    revision = _collapse_graph_revision(trace)
+    cache_entry = _BOX_UNITS_CACHE.get(trace)
+    if cache_entry is None or cache_entry[0] != revision:
+        cached_by_trace: dict[
+            RenderContext,
+            Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]],
+        ] = {}
+        _BOX_UNITS_CACHE[trace] = (revision, cached_by_trace)
+    else:
+        cached_by_trace = cache_entry[1]
+    cached = cached_by_trace.get(context)
+    if cached is not None:
+        return cached
+    from ._render_common import BoundaryNode
+    from ._render_edges import _is_buffer_visible
+    from ._render_flow import _entries_to_plot_for_context
+    from ._render_nodes import _normalize_buffer_visibility
+
+    show_buffer_layers = _normalize_buffer_visibility(context.show_buffer_layers)
+    box_calls: dict[str, dict[str, None]] = {}
+    kept_ops: dict[str, list[str]] = {}
+    for node in _entries_to_plot_for_context(trace, context.vis_mode).values():
+        if isinstance(node, BoundaryNode):
+            continue
+        if node.is_buffer and not _is_buffer_visible(node, show_buffer_layers):
+            continue
+        modules = [str(module_call) for module_call in (getattr(node, "modules", ()) or ())]
+        if getattr(node, "is_atomic_module", False) and modules:
+            innermost_address = modules[-1].rsplit(":", 1)[0]
+            remaining = modules[:-1]
+            if innermost_address not in {call.rsplit(":", 1)[0] for call in remaining}:
+                base = str(node.layer_label).rsplit(":", 1)[0]
+                kept_ops.setdefault(innermost_address, []).append(base)
+            modules = remaining
+        for module_call in modules:
+            box_calls.setdefault(module_call.rsplit(":", 1)[0], {})[module_call] = None
+    units: Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+        address: (tuple(box_calls.get(address, ())), tuple(kept_ops.get(address, ())))
+        for address in set(box_calls) | set(kept_ops)
+    }
+    cached_by_trace[context] = units
+    return units
+
+
 def _module_box_plan_nodes(
-    trace: "Trace",
+    trace: Trace,
     context: RenderContext,
     address: str,
 ) -> tuple[PlanNode, ...]:
@@ -2416,29 +3498,27 @@ def _module_box_plan_nodes(
     Returns
     -------
     tuple[PlanNode, ...]
-        The module box plus raw atomic own-output ops that the renderer keeps
-        visible because atomic module collapse drops the innermost module.
+        One module box per rendered call of ``address`` plus the raw atomic
+        own-output op occurrences that the renderer keeps visible because
+        atomic module collapse drops the innermost module. Multi-call modules
+        contribute one box per call, matching the per-call render of the
+        address collapse predicate; counting them once per address is the
+        round-22 plan/schedule node-count lie.
     """
 
-    nodes: list[PlanNode] = [ModuleBox(f"{address}:1")]
     if context.vis_mode == "rolled":
-        return tuple(nodes)
-    module = trace.modules[address]
-    for label in getattr(module, "layer_labels", ()) or ():
-        op = trace.ops[label]
-        if getattr(op, "is_buffer", False):
-            continue
-        if not getattr(op, "is_atomic_module", False):
-            continue
-        modules = list(getattr(op, "modules", ()) or ())
-        if not modules:
-            continue
-        if modules[-1].rsplit(":", 1)[0] != address:
-            continue
-        remaining = [module_call.rsplit(":", 1)[0] for module_call in modules[:-1]]
-        if address in remaining:
-            continue
-        nodes.append(RawOp(str(label).rsplit(":", 1)[0]))
+        return (ModuleBox(f"{address}:1"),)
+    units = _module_render_box_units(trace, context).get(address)
+    if units is None:
+        # Address absent from the rendered universe (for example fully
+        # invisible content): preserve the legacy single-box shape rather
+        # than claiming zero rendered nodes for a selected module.
+        return (ModuleBox(f"{address}:1"),)
+    calls, kept = units
+    nodes: list[PlanNode] = [ModuleBox(module_call) for module_call in calls]
+    nodes.extend(RawOp(label) for label in kept)
+    if not nodes:
+        return (ModuleBox(f"{address}:1"),)
     return tuple(nodes)
 
 
@@ -2511,7 +3591,7 @@ def _decision_point_for_k(
 def _instantiate_segment(
     parent_address: str,
     child_addresses: Sequence[str],
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
     decision: _SegmentDecision,
     state: _OptimizerState,
     memo: dict[_MemoKey, tuple[_DecisionPoint, ...]],
@@ -2545,7 +3625,7 @@ def _instantiate_segment(
 
 def _instantiate_component(
     component: RoleComponent,
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
     decision: _ComponentDecision,
     state: _OptimizerState,
     memo: dict[_MemoKey, tuple[_DecisionPoint, ...]],
@@ -2656,7 +3736,7 @@ def _instantiate_component_expanded(
 
 def _instantiate_component_folded(
     component: RoleComponent,
-    graph: "ChildCondensedFlowGraph | None",
+    graph: ChildCondensedFlowGraph | None,
     decision: _ComponentDecision,
     state: _OptimizerState,
 ) -> _FrontierPoint:
@@ -2690,18 +3770,30 @@ def _instantiate_component_folded(
             _cached_box_cost(state.trace, state.analysis.signals[member], state) for member in run
         ]
         fold_cost = round(sum(member_costs) / len(member_costs) + state.weights.fold_intrinsic, 6)
+        # The renderer folds hidden members on every pass but still draws the
+        # representative once per call: pass 1 renders as the fold (box plus
+        # one ellipsis) and every later pass renders a plain module box.
+        # Charging a flat 2 regardless of the representative's call count is
+        # the round-22 fold leg of the plan/schedule node-count lie.
+        rep_plan_nodes = _module_box_plan_nodes(state.trace, state.context, fold.representative)
+        rep_boxes = [node for node in rep_plan_nodes if isinstance(node, ModuleBox)]
+        rep_kept = [node for node in rep_plan_nodes if isinstance(node, RawOp)]
+        if not rep_boxes:
+            rep_boxes = [ModuleBox(f"{fold.representative}:1")]
         nodes.append(
             RepeatFold(
-                rep=ModuleBox(f"{fold.representative}:1"),
+                rep=rep_boxes[0],
                 members=fold.addresses,
                 ellipsis=EllipsisNode(fold.addresses[1:]),
             )
         )
+        nodes.extend(rep_boxes[1:])
+        nodes.extend(rep_kept)
         selected.update(run)
         folds.append(fold)
         box_costs.append(fold_cost)
         total_cost += fold_cost
-        total_k += 2
+        total_k += 1 + len(rep_boxes) + len(rep_kept)
         skipped.update(indices)
     return _FrontierPoint(
         k=total_k,
@@ -2711,32 +3803,6 @@ def _instantiate_component_folded(
         folds=tuple(folds),
         box_costs=tuple(box_costs),
     )
-
-
-def _merge_frontiers(
-    left_points: Sequence[_FrontierPoint],
-    right_points: Sequence[_FrontierPoint],
-) -> tuple[_FrontierPoint, ...]:
-    """Merge two frontier sequences by standard node-count knapsack."""
-
-    best_by_count: dict[
-        int, tuple[_FrontierPoint, tuple[float, int, tuple[Any, ...], tuple[Any, ...]]]
-    ] = {}
-    for left in left_points:
-        for right in right_points:
-            k = left.k + right.k
-            if k > K_CAP:
-                continue
-            point = _FrontierPoint(
-                k=k,
-                cost=round(left.cost + right.cost, 6),
-                nodes=(*left.nodes, *right.nodes),
-                selected=frozenset((*left.selected, *right.selected)),
-                folds=(*left.folds, *right.folds),
-                box_costs=(*left.box_costs, *right.box_costs),
-            )
-            _retain_best_frontier_point(best_by_count, point)
-    return _frontier_from_best_by_count(best_by_count)
 
 
 def _retain_best_frontier_point(
@@ -2754,7 +3820,11 @@ def _retain_best_frontier_point(
 def _frontier_from_best_by_count(
     best_by_count: Mapping[int, tuple[Any, tuple[float, int, tuple[Any, ...], tuple[Any, ...]]]],
 ) -> tuple[Any, ...]:
-    """Return the capped deterministic frontier from per-count best points."""
+    """Return the beam-capped deterministic frontier from per-count bests.
+
+    Dropping node-count buckets beyond ``FRONTIER_CAP`` is the beam bound
+    described in the module docstring.
+    """
 
     ordered = sorted(best_by_count.values(), key=lambda item: item[1])
     return tuple(sorted((item[0] for item in ordered[:FRONTIER_CAP]), key=lambda point: point.k))
@@ -2889,7 +3959,7 @@ def _merge_component_member_frontiers(
 
 
 def _prune_frontier(points: Sequence[Any]) -> tuple[Any, ...]:
-    """Keep deterministic Pareto frontier points, capped for R3a."""
+    """Keep per-count best points under the deterministic beam cap."""
 
     best_by_count: dict[int, tuple[Any, tuple[float, int, tuple[Any, ...], tuple[Any, ...]]]] = {}
     for point in points:
@@ -2908,7 +3978,7 @@ def _point_sort_key(point: Any) -> tuple[float, int, tuple[Any, ...], tuple[Any,
     return (point.cost, point.k, tuple(sorted(point.selected)), fold_addresses)
 
 
-def _eligible_box(trace: "Trace", address: str, signal: ModuleCollapseSignals) -> bool:
+def _eligible_box(trace: Trace, address: str, signal: ModuleCollapseSignals) -> bool:
     """Return whether a module may render as a collapsed box."""
 
     _ = trace, address
@@ -2942,7 +4012,7 @@ def _max_box_salience_score(
     return round(salience * uniqueness, 6)
 
 
-def _box_cost(trace: "Trace", signal: ModuleCollapseSignals, state: _OptimizerState) -> float:
+def _box_cost(trace: Trace, signal: ModuleCollapseSignals, state: _OptimizerState) -> float:
     """Return normalized v2 box cost for one module."""
 
     n = _faithful_hidden_count(signal, state.hidden_counts)
@@ -2967,7 +4037,7 @@ def _box_cost(trace: "Trace", signal: ModuleCollapseSignals, state: _OptimizerSt
 
 
 def _cached_box_cost(
-    trace: "Trace",
+    trace: Trace,
     signal: ModuleCollapseSignals,
     state: _OptimizerState,
 ) -> float:
@@ -3041,14 +4111,13 @@ def _parallel_flow_width(graph: ChildCondensedFlowGraph) -> int:
     """
 
     child_set = set(graph.flow_children)
-    child_edges = {
-        (source, target)
-        for source, target in graph.edges
-        if source in child_set and target in child_set
-    }
+    neighbors: dict[str, set[str]] = {child: set() for child in graph.flow_children}
     upstreams: dict[str, set[str]] = {child: set() for child in graph.flow_children}
     downstreams: dict[str, set[str]] = {child: set() for child in graph.flow_children}
     for source, target in graph.edges:
+        if source in child_set and target in child_set:
+            neighbors[source].add(target)
+            neighbors[target].add(source)
         if target in child_set and source not in child_set:
             upstreams[target].add(source)
         if source in child_set and target not in child_set:
@@ -3059,13 +4128,14 @@ def _parallel_flow_width(graph: ChildCondensedFlowGraph) -> int:
         groups.setdefault(signature, []).append(child)
     max_width = 1 if graph.flow_children else 0
     for members in groups.values():
-        independent: list[str] = []
+        # Greedy scan in member order; a candidate joins when no already-kept
+        # member is a flow neighbor. Checking the candidate's neighbor set
+        # against the kept set reproduces the pairwise edge test exactly while
+        # costing degree instead of kept-set size per candidate.
+        independent: set[str] = set()
         for child in members:
-            if all(
-                (child, other) not in child_edges and (other, child) not in child_edges
-                for other in independent
-            ):
-                independent.append(child)
+            if not (neighbors[child] & independent):
+                independent.add(child)
         max_width = max(max_width, len(independent))
     return max(max_width, _parent_owned_merge_width(graph))
 
@@ -3094,7 +4164,7 @@ def _faithful_hidden_count(
 
 
 def _global_q(
-    point: _DecisionPoint | _FrontierPoint, trace: "Trace", weights: OptimizerWeights
+    point: _DecisionPoint | _FrontierPoint, trace: Trace, weights: OptimizerWeights
 ) -> float:
     """Return global selection objective for one realized cut."""
 
@@ -3131,7 +4201,7 @@ def _global_max_q(point: _DecisionPoint | _FrontierPoint, weights: OptimizerWeig
     return round(mean_cost + weights.w_max * max_cost + 0.01 * point.k, 6)
 
 
-def _k_preference(k: int, trace: "Trace") -> float:
+def _k_preference(k: int, trace: Trace) -> float:
     """Return linear node-count preference normalized to the readable band."""
 
     lo = 8
@@ -3139,7 +4209,7 @@ def _k_preference(k: int, trace: "Trace") -> float:
     return (k - lo) / max(hi - lo, 1)
 
 
-def _band_cost(k: int, trace: "Trace") -> float:
+def _band_cost(k: int, trace: Trace) -> float:
     """Return quadratic node-band cost for auto mode."""
 
     lo = 8
@@ -3151,7 +4221,7 @@ def _band_cost(k: int, trace: "Trace") -> float:
 
 
 def _g_star_candidates(
-    trace: "Trace",
+    trace: Trace,
     analysis: CollapseAnalysis,
     context: RenderContext,
     hidden_counts: Mapping[str, int],
@@ -3196,7 +4266,7 @@ def _g_star_candidates(
 
 
 def _same_role(
-    trace: "Trace",
+    trace: Trace,
     left: str,
     right: str,
     analysis: CollapseAnalysis,
@@ -3213,7 +4283,7 @@ def _same_role(
     return abs(math.log2(1 + left_n) - math.log2(1 + right_n)) <= 1.5
 
 
-def _optimizer_total_units(trace: "Trace", context: RenderContext) -> int:
+def _optimizer_total_units(trace: Trace, context: RenderContext) -> int:
     """Return the raw rendered universe size used for optimizer normalization."""
 
     if context.vis_mode != "rolled":
@@ -3221,7 +4291,7 @@ def _optimizer_total_units(trace: "Trace", context: RenderContext) -> int:
     return max(count(collapse_plan_for_trace(trace, None, None, context)), 1)
 
 
-def _child_address_map(trace: "Trace") -> dict[str, tuple[str, ...]]:
+def _child_address_map(trace: Trace) -> dict[str, tuple[str, ...]]:
     """Return optimizer child addresses for every recorded module."""
 
     children_by_parent: dict[str, list[str]] = {
@@ -3245,7 +4315,7 @@ def _child_address_map(trace: "Trace") -> dict[str, tuple[str, ...]]:
     }
 
 
-def _rendered_own_unit_map(trace: "Trace", context: RenderContext) -> dict[str, tuple[str, ...]]:
+def _rendered_own_unit_map(trace: Trace, context: RenderContext) -> dict[str, tuple[str, ...]]:
     """Return rendered raw units owned directly by each optimizer module.
 
     Parameters
@@ -3282,7 +4352,7 @@ def _rendered_own_unit_map(trace: "Trace", context: RenderContext) -> dict[str, 
 
 
 def _structural_digest_map(
-    trace: "Trace",
+    trace: Trace,
     child_addresses: Mapping[str, tuple[str, ...]],
     analysis: CollapseAnalysis,
 ) -> dict[str, str]:
@@ -3308,7 +4378,7 @@ def _structural_digest_map(
     return digests
 
 
-def _nearest_recorded_parent(trace: "Trace", address: str) -> str | None:
+def _nearest_recorded_parent(trace: Trace, address: str) -> str | None:
     """Return the nearest recorded ancestor for ``address``."""
 
     parent = getattr(trace.modules[address], "address_parent", None)
@@ -3337,7 +4407,7 @@ def _child_segments_for_parent(
         return cached_segments
     segment_lists: list[list[str]] = [[]]
     for child in child_key:
-        if segment_lists[-1] and _boundary_cliff(state.trace, segment_lists[-1][-1], child):
+        if segment_lists[-1] and _boundary_cliff(state, segment_lists[-1][-1], child):
             segment_lists.append([])
         segment_lists[-1].append(child)
     result = tuple(tuple(segment) for segment in segment_lists if segment)
@@ -3345,13 +4415,111 @@ def _child_segments_for_parent(
     return result
 
 
-def _boundary_cliff(trace: "Trace", left: str, right: str) -> bool:
+def _cached_output_shape_tuple(
+    state: _OptimizerState,
+    address: str,
+    source: Literal["module", "boundary"],
+) -> tuple[int, ...] | None:
+    """Return one cached output-shape view for an optimizer run.
+
+    Parameters
+    ----------
+    state:
+        Optimizer state owning the plan-local cache.
+    address:
+        Pass-free module address.
+    source:
+        Shape metadata view required by the consuming classifier.
+
+    Returns
+    -------
+    tuple[int, ...] | None
+        Output shape as integers, or ``None`` when unavailable.
+    """
+
+    key = (source, address)
+    if key not in state.output_shape_cache:
+        shape = (
+            _module_output_shape_tuple(state.trace, address)
+            if source == "module"
+            else _output_shape_tuple_for_address(state.trace, address)
+        )
+        state.output_shape_cache[key] = shape
+    return state.output_shape_cache[key]
+
+
+def _cached_module_output_shapes_equal(
+    state: _OptimizerState,
+    left: str,
+    right: str,
+) -> bool:
+    """Return whether two cached primary module output shapes are equal.
+
+    Parameters
+    ----------
+    state:
+        Optimizer state owning the plan-local cache.
+    left:
+        First module address.
+    right:
+        Second module address.
+
+    Returns
+    -------
+    bool
+        True only when both shapes are known and exactly equal.
+    """
+
+    left_shape = _cached_output_shape_tuple(state, left, "module")
+    right_shape = _cached_output_shape_tuple(state, right, "module")
+    return left_shape is not None and left_shape == right_shape
+
+
+def _cached_run_span_allows_fold(
+    state: _OptimizerState,
+    addresses: tuple[str, ...],
+) -> bool:
+    """Return whether a cached first-to-last shape span is safe to fold.
+
+    Parameters
+    ----------
+    state:
+        Optimizer state owning the plan-local cache.
+    addresses:
+        Consecutive sibling addresses in the candidate run.
+
+    Returns
+    -------
+    bool
+        True when the run preserves the existing shape-span constraints.
+    """
+
+    first = _cached_output_shape_tuple(state, addresses[0], "module")
+    last = _cached_output_shape_tuple(state, addresses[-1], "module")
+    if first is None or last is None:
+        return True
+    if len(first) != len(last):
+        return False
+    first_spatial = _shape_spatial_dims(first)
+    last_spatial = _shape_spatial_dims(last)
+    if first_spatial is not None and last_spatial is not None and first_spatial != last_spatial:
+        return False
+    first_channels = _shape_channel_dim(first)
+    last_channels = _shape_channel_dim(last)
+    if first_channels is None or last_channels is None:
+        return True
+    smaller = min(first_channels, last_channels)
+    larger = max(first_channels, last_channels)
+    return smaller > 0 and larger <= smaller * 2
+
+
+def _boundary_cliff(state: _OptimizerState, left: str, right: str) -> bool:
     """Return whether adjacent children should split a long-parent segment."""
 
-    if not _run_span_allows_fold(trace, (left, right)):
+    if not _cached_run_span_allows_fold(state, (left, right)):
         return True
-    left_shape = _output_shape_tuple_for_address(trace, left)
-    right_shape = _output_shape_tuple_for_address(trace, right)
+    left_shape = _cached_output_shape_tuple(state, left, "boundary")
+    right_shape = _cached_output_shape_tuple(state, right, "boundary")
     if left_shape is None or right_shape is None:
         return False
     left_spatial = _shape_spatial_dims(left_shape)
@@ -3367,7 +4535,7 @@ def _boundary_cliff(trace: "Trace", left: str, right: str) -> bool:
     return smaller <= 0 or larger / smaller >= 2.0
 
 
-def _output_shape_tuple_for_address(trace: "Trace", address: str) -> tuple[int, ...] | None:
+def _output_shape_tuple_for_address(trace: Trace, address: str) -> tuple[int, ...] | None:
     """Return module output shape tuple for long-parent boundary splitting."""
 
     pass_address = f"{address}:1"
@@ -3386,7 +4554,7 @@ def _output_shape_tuple_for_address(trace: "Trace", address: str) -> tuple[int, 
 def _flow_adjacent(
     left: str,
     right: str,
-    graph: "ChildCondensedFlowGraph",
+    graph: ChildCondensedFlowGraph,
 ) -> bool:
     """Return whether two addresses are adjacent in parent flow order."""
 

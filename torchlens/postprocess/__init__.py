@@ -16,36 +16,72 @@ stable contract steps 0-20, split into thematic submodules:
   finalize any streamed bundle, optionally evict in-memory outs, and release
   live parameter references.
 
-Step ordering invariants:
-- Steps 1-3 MUST precede Step 5 (conditional branch detection needs orphan-free graph).
-- Module suffixes must be present on equivalence_class before Step 7 loop detection.
-- Step 7 MUST precede Step 8 (label generation needs recurrent_ops).
-- Step 8 MUST precede Step 9 (final info logging uses finalized labels).
-- Step 9 MUST precede Step 11 (lookup key generation needs module hierarchy data
-  populated in Step 9).
-- Step 10 (rename) MUST precede Step 11 (lookup keys use renamed labels).
-- Step 15.5 (_build_layer_logs) MUST precede Step 16 (_build_module_logs) because
-  Module.layers references Layer keys.
+Step ordering is DERIVED, not hand-maintained (design-ppdag-v3): each step's
+``PostprocessStepContract`` (``_contracts.py``) declares op-column
+writes/reads, placeholder probes, row effects, and trace-state tokens; the
+derivation (``_executor.py``) orients every conflict by the frozen
+``LEGACY_STEP_RANK`` and reproduces the registry order exactly (import
+checks R1/R2). The semantic direction authority is the reason-bearing
+``PINNED_ORDER_PAIRS`` corpus (import check K1; test-side K2 in
+``tests/test_postprocess_dag.py``) — the historical prose invariants
+("1-3 precede 5", "7 precedes 8", "15.5 precedes 16", ...) live there as
+machine-checked entries. Reordering steps requires editing the named corpus
+entry, re-recording the axes matrix, and the byte-identity oracles;
+warnings and first-exception order are pinned solely by day-1 order
+identity (a reorder adds a review gate for them).
+
+The read-triggers-write class: exactly one member is live inside steps
+1-20 — reading ``op.arg_expressions`` writes ``_arg_expressions_cache``.
+A write-audit trip on a ``*_cache`` column from a read site is
+ROOT-CAUSED, never widened away. Out-of-model, disclosed: deferred
+gradient streaming re-runs step-18/19-equivalent code after backward,
+outside the pipeline and its windows.
 
 """
 
-from dataclasses import dataclass
 import os
-from typing import TYPE_CHECKING, List
-
 import time
-import torch
 import warnings
+from typing import TYPE_CHECKING
 
+import torch
+
+from .._errors import InvalidArgumentError
+from .._trace_core.relation_views import freeze_trace_relation_views as _freeze_relation_views
+from ..backends.torch.ops import _compact_ancestor_sets
 from ..capture.session import capture_session_for_events
-from ..capture.projectors import TraceProjector
-from ..utils.tensor_utils import _is_cuda_available
+from ..data_classes._compaction import compact_op_metadata as _compact_op_metadata
+from ..ir.capture_events import _clone_op_event_for_replay
 from ..utils.hashing import (
     compute_graph_shape_hash,
     compute_raw_event_shape_hash,
     populate_normalized_layer_addresses,
 )
+from ..utils.tensor_utils import _is_cuda_available
+from . import ast_branches
 
+# Historical import surface: the contract artifacts live in _contracts.py
+# and the derivation in _executor.py (import-cycle hygiene);
+# torchlens.postprocess remains their public address. Importing _executor
+# here runs the 7.1-family structural checks on every torchlens import.
+from ._contracts import (
+    CAPTURE_BASELINE_TOKENS as CAPTURE_BASELINE_TOKENS,
+    LEGACY_STEP_RANK as LEGACY_STEP_RANK,
+    PINNED_ORDER_PAIRS as PINNED_ORDER_PAIRS,
+    POSTPROCESS_STEP_CONTRACTS as POSTPROCESS_STEP_CONTRACTS,
+    PinnedPair as PinnedPair,
+    PostprocessStepContract as PostprocessStepContract,
+    tokens as tokens,
+)
+from ._executor import (
+    REGISTRY_ORDER as REGISTRY_ORDER,
+    StepContext,
+    execution_order as execution_order,
+    run_pipeline,
+)
+from ._materialize import materialize_from_events
+from ._primitive_profile import _finalize_forward_primitive_profile
+from .ast_branches import resolve_var_names
 from .control_flow import (
     _fix_buffer_layers,
     _mark_conditional_branches,
@@ -54,8 +90,8 @@ from .finalization import (
     _build_layer_logs,
     _build_module_logs,
     _evict_streamed_outs,
-    _finalize_streamed_bundle,
     _finalize_param_logs,
+    _finalize_streamed_bundle,
     _log_time_elapsed,
     _set_tracing_finished,
     _undecorate_all_saved_tensors,
@@ -68,9 +104,9 @@ from .graph_traversal import (
     _resolve_output_parent_labels,
 )
 from .labeling import (
+    _build_lookup_keys_and_finalize_retained_layers,
     _log_final_info_for_layers,
     _map_raw_labels_to_final_labels,
-    _build_lookup_keys_and_finalize_retained_layers,
     _rename_model_history_layer_names,
 )
 from .loop_detection import _detect_and_label_loops, _group_by_shared_params
@@ -81,10 +117,9 @@ from .loop_grouping_adapter import (
     group_recurrent_nodes,
 )
 from .saved_summary import refresh_saved_module_call_count
-from ._materialize import materialize_from_events
-from .ast_branches import resolve_var_names
 
 if TYPE_CHECKING:
+    from .._trace_core.op_store import StepAuditResult
     from ..data_classes.trace import Trace
 
 from ..quantities import Bytes
@@ -96,184 +131,314 @@ __all__ = [
     "group_recurrent_nodes",
     "postprocess",
 ]
-from ..utils.display import _vprint, _vtimed
-from ..captured_run import remember_event_stream
+from ..utils.display import _vprint, _vtimed, user_stacklevel
+
+#: The executor resolves every step callable through THIS module namespace
+#: at call time (late binding, design-ppdag-v3 §5.2) — the names below are
+#: consumed via getattr, not textual reference, and several are load-bearing
+#: monkeypatch seams (tests patch torchlens.postprocess._add_output_layers,
+#: _rename_model_history_layer_names, _find_output_ancestors, ...).
+_EXECUTOR_STEP_NAMESPACE: tuple[object, ...] = (
+    _add_output_layers,
+    _find_output_ancestors,
+    _remove_orphan_nodes,
+    _mark_layer_depths,
+    _mark_conditional_branches,
+    _fix_buffer_layers,
+    _detect_and_label_loops,
+    _group_by_shared_params,
+    _map_raw_labels_to_final_labels,
+    _log_final_info_for_layers,
+    _rename_model_history_layer_names,
+    _build_lookup_keys_and_finalize_retained_layers,
+    _undecorate_all_saved_tensors,
+    _is_cuda_available,
+    _log_time_elapsed,
+    _finalize_param_logs,
+    _build_layer_logs,
+    _build_module_logs,
+    refresh_saved_module_call_count,
+    populate_normalized_layer_addresses,
+    compute_graph_shape_hash,
+    _finalize_streamed_bundle,
+    _evict_streamed_outs,
+)
 
 
 _POSTPROCESS_ASSERT_ENV = "TORCHLENS_POSTPROCESS_ASSERTIONS"
-_materialize_refresh_events = materialize_from_events
-
-
-@dataclass(frozen=True)
-class PostprocessStepContract:
-    """Declared contract for one postprocess pipeline step.
-
-    Parameters
-    ----------
-    step:
-        Stable step identifier used by the pipeline.
-    name:
-        Human-readable step name.
-    contract:
-        Short consumes/produces/mutation contract.
-    """
-
-    step: str
-    name: str
-    contract: str
-
-
-POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
-    "0": PostprocessStepContract(
-        "0",
-        "Materialize capture events",
-        "Consumes capture events; rebuilds raw Op state; mutates Trace in place.",
-    ),
-    "1": PostprocessStepContract(
-        "1",
-        "Add output layers",
-        "Consumes model outputs and parent labels; produces output Ops in raw state.",
-    ),
-    "2": PostprocessStepContract(
-        "2",
-        "Trace output ancestors",
-        "Consumes raw graph links; mutates output-descendant ancestry flags in place.",
-    ),
-    "3": PostprocessStepContract(
-        "3",
-        "Remove orphan nodes",
-        "Consumes ancestry flags; removes or records orphan raw Ops in place.",
-    ),
-    "4": PostprocessStepContract(
-        "4",
-        "Input/output distances",
-        "Consumes orphan-free graph; mutates distance fields in place.",
-    ),
-    "5": PostprocessStepContract(
-        "5",
-        "Mark conditional branches",
-        "Consumes orphan-free graph; mutates conditional metadata in place.",
-    ),
-    "6": PostprocessStepContract(
-        "6",
-        "Fix buffer layers",
-        "Consumes buffer events and graph links; mutates buffer metadata in place.",
-    ),
-    "7": PostprocessStepContract(
-        "7",
-        "Loop detection",
-        "Consumes final raw graph structure; mutates recurrence/equivalence metadata.",
-    ),
-    "8": PostprocessStepContract(
-        "8",
-        "Map labels",
-        "Consumes raw labels and recurrence metadata; produces raw-to-final maps.",
-    ),
-    "9": PostprocessStepContract(
-        "9",
-        "Log final info",
-        "Consumes mapped labels; mutates final Op metadata and module build data.",
-    ),
-    "10": PostprocessStepContract(
-        "10",
-        "Rename labels",
-        "Consumes raw-to-final maps; mutates graph references to final labels.",
-    ),
-    "11": PostprocessStepContract(
-        "11",
-        "Build lookup keys",
-        "Consumes final labels; rebuilds final lookup containers in place.",
-    ),
-    "11.5": PostprocessStepContract(
-        "11.5",
-        "Populate source var names",
-        "Consumes code context; mutates Op var_names in place.",
-    ),
-    "12": PostprocessStepContract(
-        "12",
-        "Undecorate tensors",
-        "Consumes saved tensors; mutates payload wrappers in place.",
-    ),
-    "13": PostprocessStepContract(
-        "13",
-        "Clear CUDA cache",
-        "Runs optional CUDA allocator cleanup; leaves Trace metadata unchanged.",
-    ),
-    "14": PostprocessStepContract(
-        "14",
-        "Log timing",
-        "Consumes capture timestamps; mutates duration fields in place.",
-    ),
-    "15": PostprocessStepContract(
-        "15",
-        "Finalize params",
-        "Consumes Op param references; mutates Param reverse mappings.",
-    ),
-    "15.5": PostprocessStepContract(
-        "15.5",
-        "Build layer logs",
-        "Consumes final Op list; rebuilds aggregate Layer logs and pass index.",
-    ),
-    "16": PostprocessStepContract(
-        "16",
-        "Build module logs",
-        "Consumes module build data and layer logs; rebuilds Module/ModuleCall logs.",
-    ),
-    "16.5": PostprocessStepContract(
-        "16.5",
-        "Graph shape hash",
-        "Consumes final graph; mutates normalized addresses and graph hash.",
-    ),
-    "17": PostprocessStepContract(
-        "17",
-        "Mark pass finished",
-        "Consumes finalized containers; mutates Trace to user-facing finished state.",
-    ),
-    "18": PostprocessStepContract(
-        "18",
-        "Finalize streamed bundle",
-        "Consumes stream writer state; finalizes bundle metadata in place.",
-    ),
-    "19": PostprocessStepContract(
-        "19",
-        "Evict streamed outs",
-        "Consumes finalized stream state; drops in-memory output payloads.",
-    ),
-    "20": PostprocessStepContract(
-        "20",
-        "Release param refs",
-        "Consumes finalized Param logs; drops live parameter references in place.",
-    ),
-}
 
 
 def _postprocess_assertions_enabled() -> bool:
     """Return whether postprocess boundary assertions are enabled.
 
+    Refuses under ``python -O``. Every check in this audit -- undeclared column
+    writes, unsanctioned row releases, out-of-contract reads -- is spelled as an
+    ``assert``, and ``-O`` strips all of them. An audit that runs its windows,
+    checks nothing, and reports clean is worse than one that does not run: it
+    reads as evidence. So arming it in an environment that cannot execute it is a
+    hard error rather than a silent no-op.
+
     Returns
     -------
     bool
         ``True`` when ``TORCHLENS_POSTPROCESS_ASSERTIONS`` is set to a truthy value.
+
+    Raises
+    ------
+    InvalidArgumentError
+        When the value is unrecognized (``postprocess_audit_env_invalid``) or
+        the audit is armed with assertions disabled under ``-O`` / ``-OO``
+        (``postprocess_audit_asserts_stripped``).
     """
 
-    return os.environ.get(_POSTPROCESS_ASSERT_ENV, "").lower() in {"1", "true", "yes", "on"}
+    raw = os.environ.get(_POSTPROCESS_ASSERT_ENV, "")
+    value = raw.lower()
+    if value not in {"", "0", "1", "false", "true", "no", "yes", "off", "on"}:
+        # Closed vocabulary (grind b7 R47-3): an audit knob whose typo turns
+        # the audit OFF is a disarmed tripwire. Unset/empty is the only
+        # implicit off; anything unrecognized refuses instead of silently
+        # capturing without the audit.
+        raise InvalidArgumentError(
+            f"{_POSTPROCESS_ASSERT_ENV}={raw!r} is not a recognized value",
+            code="postprocess_audit_env_invalid",
+            remedy=(
+                "use '1'/'true'/'yes'/'on' to arm the audit, '0'/'false'/'no'/'off' "
+                "to disarm it explicitly, or unset the variable"
+            ),
+            argument=_POSTPROCESS_ASSERT_ENV,
+        )
+    enabled = value in {"1", "true", "yes", "on"}
+    if enabled and not __debug__:
+        raise InvalidArgumentError(
+            f"{_POSTPROCESS_ASSERT_ENV} is set but Python assertions are disabled "
+            "(-O / -OO), so every postprocess contract check would be stripped and "
+            "the audit would report clean without verifying anything",
+            code="postprocess_audit_asserts_stripped",
+            remedy="re-run without -O, or unset the variable to capture without the audit",
+            argument=_POSTPROCESS_ASSERT_ENV,
+        )
+    return enabled
+
+
+_WRITE_AUDIT_RECORD_ENV = "TORCHLENS_POSTPROCESS_WRITE_AUDIT"
+_READ_AUDIT_ENV = "TORCHLENS_POSTPROCESS_READ_AUDIT"
+
+#: Recording-mode sink: step id -> union of observed written column names
+#: across every audited postprocess run in this process. Read by the
+#: declaration-generation tooling; never consulted in enforcement mode.
+RECORDED_STEP_WRITES: dict[str, set[str]] = {}
+
+#: Read-audit recording sinks (design-ppdag-v3 §2.4/§2.5): per step, the
+#: union of observed read columns, row-clone-scope read columns, and
+#: content-effective write columns across every audited run in this
+#: process. Inputs to the declaration seeding and the four-category
+#: findings classification; never consulted in enforcement mode.
+RECORDED_STEP_READS: dict[str, set[str]] = {}
+RECORDED_STEP_CLONE_READS: dict[str, set[str]] = {}
+RECORDED_STEP_EFFECTIVE_WRITES: dict[str, set[str]] = {}
+
+
+def _write_audit_record_mode() -> bool:
+    """Return whether the write audit RECORDS instead of enforcing.
+
+    Closed vocabulary (grind b7 R47-3): the historical ``== "record"``
+    comparison meant a typo (``recrod``) silently selected ENFORCE and any
+    other junk silently selected the default — a config knob that reroutes on
+    typos. Unrecognized values now refuse.
+    """
+
+    raw = os.environ.get(_WRITE_AUDIT_RECORD_ENV, "")
+    value = raw.lower()
+    if value not in {"", "record"}:
+        raise InvalidArgumentError(
+            f"{_WRITE_AUDIT_RECORD_ENV}={raw!r} is not a recognized value",
+            code="postprocess_audit_env_invalid",
+            remedy="use 'record' for recording mode or unset the variable for enforcement mode",
+            argument=_WRITE_AUDIT_RECORD_ENV,
+        )
+    return value == "record"
+
+
+def _read_audit_mode() -> str:
+    """Return the read-audit mode: '' (off), 'record', or 'enforce'.
+
+    Closed vocabulary (grind b7 R47-3): the historical parser mapped every
+    unrecognized value — a typo, ``1``, ``true``, a trailing space — to OFF
+    with no diagnostic, silently disarming the read audit. Unset/empty is the
+    only implicit off; anything else must be a recognized mode.
+
+    The read audit only runs inside the assertion-armed audit windows;
+    requesting a mode without ``TORCHLENS_POSTPROCESS_ASSERTIONS`` armed
+    refuses at postprocess entry (``_require_read_audit_armable``, r7 R04-1)
+    instead of being silently inert (grind b7 R47-6).
+    """
+
+    raw = os.environ.get(_READ_AUDIT_ENV, "")
+    mode = raw.lower()
+    if mode not in {"", "record", "enforce"}:
+        raise InvalidArgumentError(
+            f"{_READ_AUDIT_ENV}={raw!r} is not a recognized value",
+            code="postprocess_audit_env_invalid",
+            remedy=("use 'record' or 'enforce', or unset the variable to leave the read audit off"),
+            argument=_READ_AUDIT_ENV,
+        )
+    return mode
+
+
+def _require_read_audit_armable() -> None:
+    """Refuse a requested read audit that cannot actually run (r7 R04-1).
+
+    The read audit acts only inside the assertion-armed audit windows, so
+    ``TORCHLENS_POSTPROCESS_READ_AUDIT=enforce`` with
+    ``TORCHLENS_POSTPROCESS_ASSERTIONS`` unset was silently inert: a CI leg or
+    agent lane exporting only the read knob got a green run and reported
+    read-contract enforcement while a genuine undeclared read sailed through
+    (demonstrated live on the step-16 R04-2 finding). The sibling
+    ``_postprocess_assertions_enabled`` already HARD-ERRORS when armed under
+    ``python -O`` for exactly this vacuous-audit reason; requesting a read
+    audit without the windows it runs in is the same class and refuses the
+    same way.
+    """
+
+    if _read_audit_mode() and not _postprocess_assertions_enabled():
+        raise InvalidArgumentError(
+            f"{_READ_AUDIT_ENV} is set but {_POSTPROCESS_ASSERT_ENV} is not: the read "
+            "audit only acts inside the assertion-armed audit windows, so this "
+            "configuration checks nothing while reading as enforcement",
+            code="postprocess_audit_env_invalid",
+            remedy=(f"also set {_POSTPROCESS_ASSERT_ENV}=1, or unset {_READ_AUDIT_ENV}"),
+            argument=_READ_AUDIT_ENV,
+        )
+
+
+def _open_step_write_audit(self: "Trace") -> None:
+    """Start the op-store column audit for the next step window."""
+
+    core = self.__dict__.get("_trace_core")
+    if core is None or core.ops is None:
+        return
+    from .._trace_core.op_store import begin_cell_write_audit
+
+    begin_cell_write_audit(core.ops, record_reads=bool(_read_audit_mode()))
+
+
+def _close_step_write_audit(self: "Trace") -> "StepAuditResult | None":
+    """Stop the audit; return the window's ``StepAuditResult``.
+
+    ``None`` when unarmed (no core-backed store yet).
+    """
+
+    core = self.__dict__.get("_trace_core")
+    if core is None or core.ops is None:
+        return None
+    from .._trace_core.op_store import end_cell_write_audit
+
+    return end_cell_write_audit(core.ops)
+
+
+def _assert_no_open_window(self: "Trace") -> None:
+    """Assert the executor left no audit window armed past step 20.
+
+    Review note N11: this replaces the historical trailing-window discard —
+    the freeze seam after step 20 legitimately rewrites relation cells
+    wholesale and must run UNAUDITED by construction, not by a
+    discard-and-hope.
+
+    The ``assert`` spelling is deliberate and safe here, unlike the
+    import-time structural checks the executor header bans it for (B1-23a,
+    reviewed and left as-is): this whole audit family is assert-based by
+    design, and ``_postprocess_assertions_enabled`` HARD-ERRORS when the audit
+    is armed under ``python -O``. Assertions-off therefore means the audit
+    never runs and this function is never called -- it cannot be silently
+    stripped mid-audit. Pinned by
+    ``tests/test_postprocess_retention_epilogue.py``.
+    """
+
+    core = self.__dict__.get("_trace_core")
+    if core is None or core.ops is None:
+        return
+    from .._trace_core.op_store import _AUDIT_COLLECTORS
+
+    assert id(core.ops) not in _AUDIT_COLLECTORS, (
+        "postprocess left an audit window open past step 20; the freeze "
+        "seam would trip it on its wholesale relation rewrites."
+    )
 
 
 def _assert_postprocess_contract(self: "Trace", step: str) -> None:
-    """Assert cheap postconditions for one completed postprocess step.
+    """Close the current window and check one completed step's contract.
 
-    Parameters
-    ----------
-    self:
-        Trace being postprocessed.
-    step:
-        Step identifier from ``POSTPROCESS_STEP_CONTRACTS``.
+    Kept for the step-0 prologue (whose store is born mid-window and closes
+    unarmed); steps 1-20 run through the executor loop, which owns the
+    begin/end boundaries explicitly.
     """
 
     if not _postprocess_assertions_enabled():
         return
+    audit_result = _close_step_write_audit(self)
+    _check_postprocess_contract(self, step, audit_result)
+
+
+def _check_postprocess_contract(
+    self: "Trace", step: str, audit_result: "StepAuditResult | None"
+) -> None:
+    """Check a closed window against the step contract, then postconditions.
+
+    Postconditions run OUTSIDE any window (the executor opens the next
+    window only before the next step body): with reads audited, the
+    historical order — open next window, then run postcondition reads —
+    would attribute step N's assert reads to step N+1 as phantom reads
+    (review note N10).
+    """
+
+    contract = POSTPROCESS_STEP_CONTRACTS.get(step)
+    assert contract is not None, f"Unknown postprocess step contract: {step!r}"
+    if audit_result is not None:
+        observed_writes = audit_result.written_columns
+        released_rows = audit_result.released_rows
+        assert not released_rows or "deletes" in contract.row_effects, (
+            f"Step {step} ({contract.name}) released {released_rows} whole op "
+            "row(s) without a 'deletes' row_effects sanction in "
+            "POSTPROCESS_STEP_CONTRACTS; declaring row removal is a reviewed "
+            "contract diff, never a silent drift."
+        )
+        if _write_audit_record_mode():
+            RECORDED_STEP_WRITES.setdefault(step, set()).update(observed_writes)
+        else:
+            undeclared_writes = observed_writes - contract.writes
+            assert not undeclared_writes, (
+                f"Step {step} ({contract.name}) wrote undeclared op-store "
+                f"columns {sorted(undeclared_writes)}; widen the declared "
+                "write set in POSTPROCESS_STEP_CONTRACTS as a reviewed "
+                "schema-contract diff if the writes are intended."
+            )
+        read_mode = _read_audit_mode()
+        if read_mode == "record":
+            RECORDED_STEP_READS.setdefault(step, set()).update(audit_result.read_columns)
+            RECORDED_STEP_CLONE_READS.setdefault(step, set()).update(
+                audit_result.clone_read_columns
+            )
+            RECORDED_STEP_EFFECTIVE_WRITES.setdefault(step, set()).update(
+                audit_result.effective_write_columns
+            )
+        elif read_mode == "enforce":
+            undeclared_reads = audit_result.read_columns - (
+                contract.reads | contract.placeholder_probes
+            )
+            assert not undeclared_reads, (
+                f"Step {step} ({contract.name}) read undeclared op-store "
+                f"columns {sorted(undeclared_reads)}; declared reads are the "
+                "derivation authority — root-cause the dependency and land it "
+                "as a reviewed contract diff, never a silent widen."
+            )
+            assert not audit_result.clone_read_columns or "creates" in contract.row_effects, (
+                f"Step {step} ({contract.name}) performed row-clone reads "
+                "without a 'creates' row_effects sanction; cloning is only "
+                "legal as part of row creation (design-ppdag-v3 §2.4d)."
+            )
+    step_name = f"Step {contract.step} ({contract.name})"
     if step == "1":
-        assert self.output_layers, "Step 1 must register output layers"
+        assert self.output_layers, f"{step_name} must register output layers"
     elif step == "8":
         assert self._raw_to_final_layer_labels, "Step 8 must build raw-to-final layer labels"
         assert self._raw_to_final_op_labels, "Step 8 must build raw-to-final op labels"
@@ -283,7 +448,15 @@ def _assert_postprocess_contract(self: "Trace", step: str) -> None:
             assert op.layer_label, f"Step 11 left {op!r} without a final layer label"
             assert op.lookup_keys, f"Step 11 left {op.label} without lookup keys"
             assert self.layer_dict_all_keys[op.label] is op
-            assert self.layer_dict_all_keys[op.layer_label] is op
+            # The bare layer label resolves to ONE pass of that layer (the
+            # public lookup contract keeps the LAST pass for multi-pass
+            # layers), never to a foreign layer's op. The former exact
+            # `is op` form was wrong by construction for every recurrent
+            # model and unreachable outside the debug env flag.
+            resolved = self.layer_dict_all_keys[op.layer_label]
+            assert resolved.layer_label == op.layer_label, (
+                f"Step 11 mapped layer label {op.layer_label!r} to a foreign op {resolved.label!r}"
+            )
     elif step == "15.5":
         assert self.layer_logs, "Step 15.5 must build aggregate layer logs"
         assert len(self.layer_logs) == len(self.layer_labels)
@@ -319,8 +492,19 @@ def _warn_unattributed_tensor_args(self: "Trace") -> None:
             continue
         label = getattr(op, "label", None) or getattr(op, "layer_label", None) or op._label_raw
         offenders.append(f"{label} ({', '.join(positions)})")
+    # R16: module-entry adoptions of untagged tensors (outside disclosed
+    # transform/dynamo regions) are the module-consumed twin of the
+    # unattributed-args case; without this fold, a stale-ref escape whose
+    # output was first consumed by a MODULE was laundered into a clean
+    # ``internalsource`` node -- no warning, no rescue,
+    # consumption-order-dependent disclosure.
+    for label, module_address in self.__dict__.pop("_module_entry_adoptions", None) or ():
+        offenders.append(f"{label} (adopted at module entry {module_address})")
     if not offenders:
         return
+    # Session-time escape signal: the capture entry reads this flag to decide
+    # whether a rescue re-run (TorchFunctionMode net) should be attempted.
+    self._had_unattributed_tensor_args = True
     warnings.warn(
         "TorchLens found tensor arguments with no graph/source provenance. "
         "These are usually tensors captured from outside the traced model; "
@@ -367,15 +551,34 @@ def _drop_transient_capture_state(self: "Trace") -> None:
         and self.__dict__.get("_out_writer") is not None
     )
     keep_selective_sink = self.__dict__.get("_out_sink") is not None
-    build_state = self.__dict__.get("_build_state")
-    if build_state is not None:
-        registry = getattr(build_state, "container_registry", None)
+    wrapper_ws = self.__dict__.get("_wrapper_runtime_ws")
+    if wrapper_ws is not None:
+        registry = getattr(wrapper_ws, "container_registry", None)
         if registry is not None:
             registry.clear_live_state()
     field_names = [
-        "_build_state",
+        "_raw_graph_ws",
+        "_module_capture_ws",
+        "_wrapper_runtime_ws",
         "capture_events",
         "_output_container_specs_by_raw_label",
+        # B1-02: session-time semantic-output scratch. Two of the four pin live
+        # user objects (an HF tokenizer, a model-derived metadata key), so this
+        # seam is the postprocess-side belt for the capture-boundary drop in
+        # ``capture/trace.py`` -- including the halted postprocess, which
+        # reaches here through ``_finalize_halted_trace``.
+        "_output_style",
+        "_output_head",
+        "_output_tokenizer",
+        "_semantic_output_metadata",
+        # B1-17 companion (INTERVENED axis): capture-time dedup caches for the
+        # predicate-intervention spec/target mirrors. `..._target_keys` holds a
+        # STRONG reference to the live intervention spec plus a frozen-target
+        # set, so leaving it on the finished product retains capture-time
+        # objects for no reason. Cleaned centrally here rather than in
+        # `backends/torch/_ops_interventions.py` (another lane's file).
+        "_tl_predicate_intervention_spec_keys",
+        "_tl_predicate_intervention_target_keys",
     ]
     if not keep_deferred_streaming and not keep_selective_sink:
         field_names.extend(
@@ -403,10 +606,10 @@ def _drop_transient_capture_state(self: "Trace") -> None:
 
 
 def _refresh_fast_saved_summary(self: "Trace") -> None:
-    """Refresh saved-output counters after a fast replay pass.
+    """Refresh saved-output counters after retained layers are finalized.
 
     Args:
-        self: Trace whose final layer entries were updated in fast mode.
+        self: Trace whose final retained layer entries were updated.
 
     Returns:
         None. Mutates aggregate saved-output fields on ``self``.
@@ -427,12 +630,21 @@ def _refresh_fast_saved_summary(self: "Trace") -> None:
 
 
 def postprocess(
-    self: "Trace", output_tensors: List[torch.Tensor], output_tensor_addresses: List[str]
+    self: "Trace", output_tensors: list[torch.Tensor], output_tensor_addresses: list[str]
 ) -> None:
-    """Run the full postprocessing pipeline in exhaustive mode.
+    """Run the full postprocessing pipeline, with a TOTAL retention epilogue.
 
     Transforms the raw Trace captured during the forward pass into its
     final user-facing form.
+
+    B1-18: the H2 hot-AST release used to be a success-path epilogue
+    statement, so a postprocess failure -- and the zero-layer early return --
+    left the process-wide file cache holding parsed ASTs, parent maps, and line
+    splits for whole torch-library files. Distinct failing files accumulate up
+    to the 256-file cache bound, which resurrects exactly the multi-megabyte
+    retention class the seal exists to close. The release is a pure
+    process-wide cache drop (spans and retained source survive; an unprojected
+    scope re-parses), so it is safe on every exit and belongs in ``finally``.
 
     Parameters
     ----------
@@ -442,6 +654,29 @@ def postprocess(
         Hierarchical address strings for each output, for example ``"0.1"``
         for nested tuple outputs.
     """
+
+    try:
+        _postprocess_body(self, output_tensors, output_tensor_addresses)
+    finally:
+        ast_branches.release_parsed_asts()
+
+
+def _postprocess_body(
+    self: "Trace", output_tensors: list[torch.Tensor], output_tensor_addresses: list[str]
+) -> None:
+    """Run steps 0-20 and the core freeze (see :func:`postprocess`).
+
+    Parameters
+    ----------
+    output_tensors:
+        Actual output tensors returned by the model's forward call.
+    output_tensor_addresses:
+        Hierarchical address strings for each output.
+    """
+
+    # r7 R04-1: a requested-but-unarmable read audit refuses HERE, before any
+    # step window, so the knob can never be silently inert for a whole run.
+    _require_read_audit_armable()
     capture_events = getattr(self, "capture_events", None)
     capture_session = None
     # Resolve each output tensor's graph parent BEFORE materializing events:
@@ -451,207 +686,127 @@ def postprocess(
     output_parent_labels = _resolve_output_parent_labels(self, output_tensors)
     if capture_events is not None:
         self._raw_event_shape_hash = compute_raw_event_shape_hash(capture_events)
-        remember_event_stream(self, capture_events)
         capture_session = capture_session_for_events(capture_events)
+        # Both branches read the AMENDED fold (never the raw list): the seal
+        # folds via the reducer, and a session-detached journal (cooked
+        # fastlog projection) folds directly. Seeding the working copy through
+        # ``projected_op_events`` also filters the carried amendment lane to
+        # seq > the seal watermark, so seal-folded knowledge cannot apply
+        # twice while genuinely-new pre-0 amendments keep riding the copy.
         sealed_op_events = (
-            list(TraceProjector(capture_session.seal()).events())
+            [_clone_op_event_for_replay(event) for event in capture_session.seal().events]
             if capture_session is not None
-            else list(capture_events.op_events)
+            else list(capture_events.amended_op_records())
         )
-        working_events = capture_events.copy_for_replay()
-        working_events.op_events = sealed_op_events
-        working_events.op_event_by_label_raw = {
-            event.label_raw: event for event in sealed_op_events
-        }
-        working_events.op_event_index_by_label_raw = {
-            event.label_raw: index for index, event in enumerate(sealed_op_events)
-        }
+        working_events = capture_events.copy_for_replay(projected_op_events=sealed_op_events)
         self._capture_events = working_events
         with _vtimed(self, "  Step 0: Materialize capture events"):
-            materializer = (
-                _materialize_refresh_events
-                if getattr(self, "_refresh_projection_capture", False)
-                else materialize_from_events
-            )
-            materializer(self, working_events)
+            materialize_from_events(self, working_events)
         working_events.release_working_projection()
         _assert_postprocess_contract(self, "0")
         delattr(self, "capture_events")
 
     # Guard: if the model produced no logged layers, skip postprocessing (#153)
-    if len(self._raw_layer_labels_list) == 0:
+    if len(self._raw_graph_ws.raw_layer_labels_list) == 0:
         import warnings
 
-        warnings.warn("No layers were logged during the forward pass; skipping postprocessing.")
+        # This is about the user's model, so blame the user's line, not this one.
+        warnings.warn(
+            "No layers were logged during the forward pass; skipping postprocessing.",
+            stacklevel=user_stacklevel(),
+        )
         _set_tracing_finished(self)
         _drop_transient_capture_state(self)
         if capture_events is not None:
             capture_events.release_runtime_sidecars()
-            self.__dict__.pop("_capture_events", None)
+            # The trace is the sole strong owner of its (sidecar-released)
+            # event stream; the former _EVENT_STREAMS weak registry is gone.
+            self.__dict__["_capture_events"] = capture_events
         return
 
     _vprint(
         self,
-        f"Postprocessing {len(self._raw_layer_labels_list):,} layers "
+        f"Postprocessing {len(self._raw_graph_ws.raw_layer_labels_list):,} layers "
         f"({len(self.buffer_layers):,} buffers)...",
     )
     _post_t0 = time.time() if getattr(self, "verbose", False) else 0
 
-    # Step 1: Add dedicated output nodes
-    with _vtimed(self, "  Step 1: Add output layers"):
-        _add_output_layers(self, output_tensors, output_tensor_addresses, output_parent_labels)
-    _assert_postprocess_contract(self, "1")
-
-    # Step 2: Trace which nodes are ancestors of output nodes
-    with _vtimed(self, "  Step 2: Trace output ancestors"):
-        _find_output_ancestors(self)
-    _assert_postprocess_contract(self, "2")
-
-    # Step 3: Remove orphan nodes, find nodes that don't terminate in output node
-    with _vtimed(self, "  Step 3: Remove orphan nodes"):
-        _remove_orphan_nodes(self)
-    _assert_postprocess_contract(self, "3")
-
-    # Step 4: Find min/max distance from input and output nodes.
-    # Conditional: only runs when the user requested distance metadata.
-    if self.mark_layer_depths:
-        with _vtimed(self, "  Step 4: Input/output distances"):
-            _mark_layer_depths(self)
-        _assert_postprocess_contract(self, "4")
-
-    # Step 5: Starting from terminal single boolean tensors, mark the conditional branches.
-    with _vtimed(self, "  Step 5: Mark conditional branches"):
-        _mark_conditional_branches(self)
-    _assert_postprocess_contract(self, "5")
-
-    # Step 6: Fix the buffer ops and parent information.
-    with _vtimed(self, "  Step 6: Fix buffer layers"):
-        _fix_buffer_layers(self)
-    _assert_postprocess_contract(self, "6")
-
-    # Step 7: Identify all loops, mark repeated layers.
-    loop_desc = (
-        "  Step 7: Loop detection (full)"
-        if self.recurrence_detection
-        else "  Step 7: Loop detection (params only)"
+    # Steps 1-20 run through the derived-order executor (_executor.py): the
+    # registry mirrors the historical hand order (R2 pins them equal), each
+    # step body resolves its callable through this module's namespace at
+    # call time, and the audit windows are explicit per-step boundaries
+    # with postconditions outside any window. No window survives the loop,
+    # so the freeze seam below runs unaudited by construction.
+    run_pipeline(
+        StepContext(
+            trace=self,
+            output_tensors=list(output_tensors),
+            output_tensor_addresses=list(output_tensor_addresses),
+            output_parent_labels=output_parent_labels,
+            capture_session=capture_session,
+        )
     )
-    with _vtimed(self, loop_desc):
-        if self.recurrence_detection:
-            _detect_and_label_loops(self)
-        else:
-            _group_by_shared_params(self)
-    _assert_postprocess_contract(self, "7")
 
-    # Step 8: Go down tensor list, get the mapping from raw tensor names to final tensor names.
-    with _vtimed(self, "  Step 8: Map labels"):
-        _map_raw_labels_to_final_labels(self)
-    _assert_postprocess_contract(self, "8")
+    # The compaction passes belong to the freeze (M11 fold): ancestor
+    # closures intern into shared bitmaps and repeated immutable Op metadata
+    # pools onto shared instances, right before the physical seal.
+    _compact_ancestor_sets(self)
+    _compact_op_metadata(self)
+    _finalize_forward_primitive_profile(self)
 
-    # Step 9: Log final info for all layers
-    with _vtimed(self, "  Step 9: Log final info"):
-        _log_final_info_for_layers(self)
-    _assert_postprocess_contract(self, "9")
+    # The core freeze point (trace_core_design.md section 3.3): forward
+    # topology froze logically at step 17, the payload plane settled through
+    # step 20, and the ancestor closures were just interned. The M6 relation
+    # conversion runs here — parents/children project into the core's
+    # canonical dataflow edge table (differentially verified before the
+    # staging cells die) and the remaining relation families become interned
+    # immutable views — the M7 group and shared-fact conversions follow
+    # (equivalence/recurrence GroupRefs, FunctionCall/ParamAlias fact
+    # blocks) — then the Op row store seals (columnar transpose on large
+    # traces). Later public writes land in the store's sparse overlay;
+    # facade behavior is otherwise unchanged.
+    _core = self.__dict__.get("_trace_core")
+    if _core is not None and _core.ops is not None:
+        _freeze_relation_views(self)
+        _core.ops.freeze()
+        # Payload-lifetime owner (fix/fork F4): when the LAST owning core
+        # (this one plus any fork cores viewing the sealed base) is
+        # garbage-collected, the store evicts tensor payload cells so a
+        # retained Op facade stops pinning every captured activation.
+        _core.ops.adopt_payload_owner(_core)
+        # Adopt the trace-scoped FuncCallLocation records (cached per call
+        # site in _code_context_cache) into their kind table before sealing.
+        # Cache entries mix FuncCallLocation records with plain metadata, so
+        # filter by type.
+        from ..data_classes.func_call_location import FuncCallLocation as _FCL
 
-    # Step 10: Rename all raw labels to final labels
-    with _vtimed(self, "  Step 10: Rename labels"):
-        _rename_model_history_layer_names(self)
-    _assert_postprocess_contract(self, "10")
+        _fcl_seen: dict[int, object] = {}
+        for _fcl_group in (self.__dict__.get("_code_context_cache") or {}).values():
+            for _fcl in _fcl_group or ():
+                if isinstance(_fcl, _FCL):
+                    _fcl_seen.setdefault(id(_fcl), _fcl)
+        if _fcl_seen:
+            from .._trace_core.record_rows import adopt_records
 
-    # Step 11: Build lookup keys and finalize retained layer lists
-    with _vtimed(self, "  Step 11: Build lookup keys"):
-        _build_lookup_keys_and_finalize_retained_layers(self)
-        _warn_unattributed_tensor_args(self)
-    _assert_postprocess_contract(self, "11")
+            adopt_records(_core, "func_call_location", _fcl_seen.values())
+        # The M8 non-Op kind tables (param/module/module_call/buffer/
+        # func_call_location) seal with the same lifecycle: appends stop,
+        # later writes keep landing in row cells via the sealed-store path.
+        for _kind_store in _core.kind_rows.values():
+            _kind_store.freeze()
 
-    # Step 11.5: Populate source assignment names from full-file AST context.
-    with _vtimed(self, "  Step 11.5: Populate source var names"):
-        _populate_var_names(self)
-    _assert_postprocess_contract(self, "11.5")
-
-    if capture_session is not None:
-        with _vtimed(self, "  Step 11.75: Resolve deferred retention"):
-            capture_session.resolve_deferred_retention(self, list(output_tensors))
-
-    # Step 12: Undecorate all saved tensors and remove saved grad_fns.
-    with _vtimed(self, "  Step 12: Undecorate tensors"):
-        _undecorate_all_saved_tensors(self)
-    _assert_postprocess_contract(self, "12")
-
-    # Step 13: Clear the cache after any tensor deletions for garbage collection purposes.
-    # Gated behind cached cuda.is_available() so CPU-only runs don't pay the
-    # CUDA driver / NVML probe cost (per profiling audit 2026-04-27 finding #4).
-    if _is_cuda_available():
-        torch.cuda.empty_cache()
-    _assert_postprocess_contract(self, "13")
-
-    # Step 14: Log time elapsed.
-    with _vtimed(self, "  Step 14: Log timing"):
-        _log_time_elapsed(self)
-    _assert_postprocess_contract(self, "14")
-
-    # Step 15: Populate Param reverse mappings, linked params, num_calls, and grad metadata.
-    with _vtimed(self, "  Step 15: Finalize params"):
-        _finalize_param_logs(self)
-    _assert_postprocess_contract(self, "15")
-
-    # Step 15.5: Build aggregate Layer objects from per-pass Op entries.
-    with _vtimed(self, "  Step 15.5: Build layer logs"):
-        _build_layer_logs(self)
-        self.by_pass = {}
-        for index, op in enumerate(self.layer_list):
-            pass_index = getattr(op, "pass_index", None)
-            if pass_index is not None:
-                self.by_pass.setdefault(pass_index, []).append(index)
-    _assert_postprocess_contract(self, "15.5")
-
-    # Step 16: Build structured Module objects from raw module_* dicts.
-    with _vtimed(self, "  Step 16: Build module logs"):
-        _build_module_logs(self)
-        refresh_saved_module_call_count(self)
-    _assert_postprocess_contract(self, "16")
-
-    # Step 16.5: Compute graph shape hash before _set_tracing_finished changes access behavior.
-    with _vtimed(self, "  Step 16.5: Graph shape hash"):
-        populate_normalized_layer_addresses(self)
-        self.graph_shape_hash = compute_graph_shape_hash(self)
-    _assert_postprocess_contract(self, "16.5")
-
-    # Step 17: log the pass as finished, changing the Trace behavior to its user-facing version.
-    with _vtimed(self, "  Step 17: Mark pass finished"):
-        _set_tracing_finished(self)
-    _assert_postprocess_contract(self, "17")
-
-    build_state = self.__dict__.get("_build_state")
-    if build_state is not None:
-        registry = getattr(build_state, "container_registry", None)
-        if registry is not None:
-            if registry.records:
-                self.__dict__["_containers"] = dict(registry.records)
-            registry.clear_live_state()
-
-    for field_name in ("_build_state", "capture_events", "_output_container_specs_by_raw_label"):
-        self.__dict__.pop(field_name, None)
-
-    should_finalize_streaming = getattr(self, "_out_writer", None) is not None and not getattr(
-        self, "_defer_streaming_bundle_finalization", False
-    )
-    if should_finalize_streaming:
-        with _vtimed(self, "  Step 18: Finalize streamed bundle"):
-            _finalize_streamed_bundle(self)
-        _assert_postprocess_contract(self, "18")
-
-    if should_finalize_streaming and not self._keep_outs_in_memory:
-        with _vtimed(self, "  Step 19: Evict streamed outs"):
-            _evict_streamed_outs(self)
-        _assert_postprocess_contract(self, "19")
-
-    with _vtimed(self, "  Step 20: Release param refs"):
-        self.release_param_refs(allow_iter_rehydrate=True)
-    _assert_postprocess_contract(self, "20")
-
-    if getattr(self, "verbose", False):
-        print(f"[torchlens] Postprocessing complete ({time.time() - _post_t0:.2f}s)")
+    _vprint(self, f"Postprocessing complete ({time.time() - _post_t0:.2f}s)")
     _drop_transient_capture_state(self)
     if capture_events is not None:
         capture_events.release_runtime_sidecars()
-        self.__dict__.pop("_capture_events", None)
+        # The trace is the sole strong owner of its (sidecar-released) event
+        # stream; the former _EVENT_STREAMS weak registry is gone. Sidecar
+        # release already stripped payloads, native handles, and the
+        # source_trace backrefs, so this strong edge closes no new cycle.
+        self.__dict__["_capture_events"] = capture_events
+    # H2 retention seal: steps 5/11.5 are done with the parsed ASTs. The drop
+    # itself now lives in `postprocess`'s `finally` (B1-18) so a failing
+    # pipeline and the zero-layer early return release it too; span data and
+    # projected calls survive, so lazy post-capture queries
+    # (Op.arg_expressions) stay re-parse-free in the common case and re-parse
+    # from retained source otherwise.

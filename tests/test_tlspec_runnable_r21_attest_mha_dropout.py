@@ -323,7 +323,7 @@ def test_tampered_activation_archive_still_raises(tmp_path: Path) -> None:
     )
 
     loaded = tl.load(path)
-    archive = loaded.__dict__["_runnable_archived_activations"]
+    archive = loaded._runnable.archived_activations
     key = next(iter(archive))
     record = archive[key]
     archive[key] = dataclasses.replace(record, value=record.value + 1.0)
@@ -350,7 +350,7 @@ def test_large_blas_slot_corruption_is_not_masked_by_fallback(tmp_path: Path) ->
     )
 
     loaded = tl.load(path)
-    archive = loaded.__dict__["_runnable_archived_activations"]
+    archive = loaded._runnable.archived_activations
     linear_keys = [key for key in archive if key.startswith("slot:linear_1_2:1")]
     assert linear_keys, "expected an archived in-proj linear slot"
     record = archive[linear_keys[0]]

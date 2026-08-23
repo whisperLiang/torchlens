@@ -31,6 +31,15 @@ class TupleOutputModel(nn.Module):
         return tuple(x + index for index in range(4))
 
 
+class WideTupleOutputModel(nn.Module):
+    """Return a 16-leaf homogeneous tuple (over the inline collapse cap)."""
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        """Run the model."""
+
+        return tuple(x + float(index) for index in range(16))
+
+
 class MixedShapeTupleModel(nn.Module):
     """Return a tuple whose leaf shapes differ."""
 
@@ -204,6 +213,48 @@ def test_show_containers_nodes_adds_midgraph_member_ties(tmp_path: Path) -> None
     assert "container_node_" in source
 
 
+def test_show_containers_nodes_homogeneous_collapse_is_coherent(tmp_path: Path) -> None:
+    """Node mode suppresses collapsed leaves instead of orphaning them.
+
+    Homogeneous-container collapse applies in ``"nodes"`` mode too
+    (``docs/containers.md``), and the edge pass already reroutes every leaf
+    edge to the summary box. The leaf-suppression gates must agree: drawing
+    the leaves anyway produces N orphaned nodes with zero inbound edges
+    beside a summary box that stole their edges.
+    """
+
+    import re
+
+    trace = tl.trace(
+        WideTupleOutputModel(),
+        torch.ones(2, 4),
+        capture_container_structure=True,
+    )
+    source = trace.draw(
+        show_containers="nodes",
+        vis_save_only=True,
+        vis_fileformat="dot",
+        vis_outpath=str(tmp_path / "nodes_wide"),
+    )
+
+    declared = set(re.findall(r'^\s*"?([\w.:\-+@]+)"? \[', source, re.MULTILINE))
+    endpoints: set[str] = set()
+    for tail, head in re.findall(r'"?([\w.:+\-]+)"? -> "?([\w.:+\-]+)"?', source):
+        endpoints.add(tail)
+        endpoints.add(head)
+
+    # The collapse summary box is present and owns the leaf edges.
+    assert "container_final_output_0_tuple" in declared
+    assert "container_final_output_0_tuple" in endpoints
+    # The 16 collapsed output leaves are suppressed, exactly as in
+    # "collapsed"/"auto" mode -- never drawn as edgeless orphans.
+    leaf_declarations = {name for name in declared if name.startswith("output_")}
+    assert leaf_declarations == set()
+    # No declared node is an orphan (graphviz "graph"/"node" defaults aside).
+    orphan_declarations = declared - endpoints - {"graph", "node"}
+    assert orphan_declarations == set()
+
+
 def test_show_containers_nodes_draw_then_save_round_trips(tmp_path: Path) -> None:
     """Node-mode rendering leaves no runtime-only state in saved traces."""
 
@@ -237,3 +288,67 @@ def test_dagua_graph_carries_container_semantic_attrs() -> None:
     assert "dict" in graph.container_kind
     assert "a" in graph.container_role
     assert "b" in graph.edge_container_role
+
+
+class RecurrentDictOutputModel(nn.Module):
+    """Run a layer three times, returning a dict output (multi-pass layers)."""
+
+    def __init__(self) -> None:
+        """Initialize the recurrent layer."""
+
+        super().__init__()
+        self.lin = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Apply the layer three times and return a container output."""
+
+        for _ in range(3):
+            x = torch.relu(self.lin(x))
+        return {"out": x, "double": x * 2}
+
+
+@pytest.mark.parametrize("vis_mode", ["rolled", "unrolled"])
+@pytest.mark.parametrize("show_containers", ["labels", "cluster", "collapsed", "auto", "nodes"])
+def test_show_containers_survives_multipass_layers(
+    tmp_path: Path, vis_mode: str, show_containers: str
+) -> None:
+    """Container modes never leak the multi-pass tripwire on recurrent traces.
+
+    Regression: ``_container_edge_label`` (and its group/role siblings) read
+    ``container_path`` with a plain ``getattr`` default, which swallows only
+    ``AttributeError``; on a rolled multi-pass Layer the deliberate
+    ``layer_pass_ambiguous`` ValueError escaped and crashed ``draw()``.
+    Container metadata is per-pass, so the rolled aggregate explicitly
+    degrades to no container decoration instead.
+    """
+
+    trace = tl.trace(RecurrentDictOutputModel(), torch.randn(2, 4))
+    trace.draw(
+        vis_mode=vis_mode,
+        show_containers=show_containers,
+        vis_save_only=True,
+        vis_fileformat="dot",
+        vis_outpath=str(tmp_path / f"{vis_mode}_{show_containers}"),
+    )
+
+
+def test_dagua_container_semantics_survive_multipass_layers() -> None:
+    """The dagua bridge degrades per-pass container reads on rolled Layers.
+
+    Exercises the bridge helper directly so the regression is covered even
+    without the optional dagua runtime installed.
+    """
+
+    from torchlens.experimental.dagua._bridge import _container_semantic_attrs
+
+    trace = tl.trace(RecurrentDictOutputModel(), torch.randn(2, 4))
+    multipass_layer = trace.layers["relu_1_2"]
+    assert multipass_layer.num_passes > 1
+
+    attrs = _container_semantic_attrs(multipass_layer)
+
+    assert attrs == {
+        "container_group": None,
+        "container_kind": None,
+        "container_role": None,
+    }

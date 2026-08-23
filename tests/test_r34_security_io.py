@@ -156,7 +156,8 @@ def _png_bytes(width: int, height: int) -> bytes:
 def test_secF1_malformed_raw_image_degrades_without_raising() -> None:
     """Malformed sentinel bytes degrade to the inert dict instead of crashing load."""
 
-    pytest.importorskip("PIL.Image")
+    import PIL.Image  # noqa: F401
+
     bad = {_RAW_IMAGE_SENTINEL: True, "data": b"\x89PNG\r\n\x1a\n" + b"\x00" * 40}
     assert _rehydrate_small_raw_images(bad) is bad
 
@@ -165,7 +166,8 @@ def test_secF1_malformed_raw_image_degrades_without_raising() -> None:
 def test_secF1_decompression_bomb_rejected() -> None:
     """A tiny blob declaring huge dimensions is refused before ``.load()`` allocates."""
 
-    pytest.importorskip("PIL.Image")
+    import PIL.Image  # noqa: F401
+
     bomb = {_RAW_IMAGE_SENTINEL: True, "data": _png_bytes(60000, 60000)}
     assert _rehydrate_small_raw_images(bomb) is bomb
 
@@ -174,7 +176,8 @@ def test_secF1_decompression_bomb_rejected() -> None:
 def test_secF1_oversized_bytes_rejected() -> None:
     """Bytes over the canonical save-time cap never reach the decoder."""
 
-    pytest.importorskip("PIL.Image")
+    import PIL.Image  # noqa: F401
+
     huge = {
         _RAW_IMAGE_SENTINEL: True,
         "data": b"\x89PNG\r\n\x1a\n" + b"\x00" * (_RAW_INPUT_IMAGE_BYTES_LIMIT + 1),
@@ -186,7 +189,8 @@ def test_secF1_oversized_bytes_rejected() -> None:
 def test_secF1_oversized_declared_dimensions_rejected() -> None:
     """A declared edge over the save-time max is refused (even within the byte cap)."""
 
-    pytest.importorskip("PIL.Image")
+    import PIL.Image  # noqa: F401
+
     oversized = {
         _RAW_IMAGE_SENTINEL: True,
         "data": _png_bytes(_RAW_INPUT_IMAGE_MAX_EDGE + 1, 8),
@@ -198,7 +202,8 @@ def test_secF1_oversized_declared_dimensions_rejected() -> None:
 def test_secF1_legit_small_image_still_decodes() -> None:
     """A genuine small image within bounds still decodes to a PIL image."""
 
-    image_mod = pytest.importorskip("PIL.Image")
+    from PIL import Image as image_mod
+
     buf = io.BytesIO()
     image_mod.new("RGB", (16, 16), color=(1, 2, 3)).save(buf, format="PNG")
     record = {_RAW_IMAGE_SENTINEL: True, "data": buf.getvalue()}

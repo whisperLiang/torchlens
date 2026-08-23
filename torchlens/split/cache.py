@@ -13,7 +13,6 @@ from .boundary import ReplayBoundary
 from .errors import SplitBoundaryError, SplitErrorContext, SplitUnsupportedError
 from .ir import BoundarySchema
 
-
 _CACHE_METADATA_KEYS = (
     "split_id",
     "graph_shape_hash",
@@ -107,9 +106,7 @@ def save_boundary(
         "graph_shape_hash": cache_boundary.metadata.get("graph_shape_hash"),
         "runtime_batch_size": cache_boundary.metadata.get("runtime_batch_size"),
         "shape_program_hash": cache_boundary.metadata.get("shape_program_hash"),
-        "boundary_spec": {
-            key: _spec_to_json(item) for key, item in cache_boundary.spec.items()
-        },
+        "boundary_spec": {key: _spec_to_json(item) for key, item in cache_boundary.spec.items()},
         "tensor_ids": list(cache_boundary.tensors),
         "payload_format": "pickle",
     }

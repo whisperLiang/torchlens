@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import warnings
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -17,11 +18,13 @@ from torchlens.backends.torch.backward import (
     _make_grad_fn_prehook,
 )
 from torchlens.data_classes.grad_fn import GradFn
-from torchlens.intervention.errors import HelperMountError, SelectorCompositionError
+from torchlens.intervention.errors import HelperMountError, HookValueError, SelectorCompositionError
 from torchlens.intervention.helpers import _helper_spec
-from torchlens.intervention.hooks import _selector_from_target_spec, normalize_hook_plan
-from torchlens.intervention.resolver import _selector_from_spec, _selector_resolution_direction
+from torchlens.intervention.hooks import normalize_hook_plan
+from torchlens.intervention.resolver import _selector_resolution_direction
 from torchlens.intervention.types import FireRecord, InterventionSpec, TargetSpec
+from torchlens.ir import CaptureEvents
+from torchlens.ir.selector_eval import selector_from_spec
 
 
 class _EncoderModel(nn.Module):
@@ -75,6 +78,9 @@ class _TraceStub:
     grad_fn_logs: dict[int, GradFn]
     _grad_op_nums_to_save: str = "all"
     last_run: dict[str, Any] | None = None
+    # A live trace always owns its capture event stream; hooks refuse typed
+    # when it is absent, so the stub must model ownership explicitly.
+    _capture_events: CaptureEvents = field(default_factory=CaptureEvents)
 
 
 @pytest.fixture(autouse=True)
@@ -252,6 +258,77 @@ def test_grad_fn_hook_records_backward_fire() -> None:
     assert record.replaced is True
 
 
+def test_grad_fn_hook_inplace_mutation_records_replaced() -> None:
+    """A backward hook mutating a grad slot in place must not record replaced=False.
+
+    ``replaced`` derived from tuple-slot identity alone, so a hook editing
+    ``grad_input[0]`` in place and returning ``None`` was a genuine gradient
+    change recorded with zero replacement evidence.
+    """
+
+    trace_stub, grad_fn_handle = _hook_trace()
+
+    def mutate_in_place(
+        grad_input: tuple[torch.Tensor, ...],
+        *,
+        grad_output: tuple[torch.Tensor, ...],
+        grad_fn_handle: object,
+        call_index: int,
+        run_ctx: object,
+    ) -> None:
+        """Zero the first grad slot in place, returning nothing."""
+
+        del grad_output, grad_fn_handle, call_index, run_ctx
+        grad_input[0].mul_(0)
+        return None
+
+    mutate_in_place.direction = "backward"
+    _state._active_hook_plan = normalize_hook_plan(tl.grad_fn(type="relu"), mutate_in_place)
+    hook = _make_grad_fn_hook(trace_stub, 1)
+
+    hook((torch.ones(1),), (torch.ones(1),))
+
+    record = grad_fn_handle.calls[0].intervention_fire_ref
+    assert isinstance(record, FireRecord)
+    assert record.replaced is True
+
+
+def test_grad_fn_hook_data_alias_mutation_records_replaced() -> None:
+    """A backward hook mutating a grad slot through ``.data`` records replaced.
+
+    grind-p5 rollup (incomplete 2289e56c): ``.data`` mints a storage-sharing
+    alias with a FRESH version counter, so the tuple-version witness read a
+    ``grad_input[0].data.mul_(0)`` edit as "no mutation" -- the same false
+    no-replacement claim the counter fix closed for direct in-place edits.
+    """
+
+    trace_stub, grad_fn_handle = _hook_trace()
+
+    def mutate_via_data_alias(
+        grad_input: tuple[torch.Tensor, ...],
+        *,
+        grad_output: tuple[torch.Tensor, ...],
+        grad_fn_handle: object,
+        call_index: int,
+        run_ctx: object,
+    ) -> None:
+        """Zero the first grad slot through the ``.data`` channel."""
+
+        del grad_output, grad_fn_handle, call_index, run_ctx
+        grad_input[0].data.mul_(0)
+        return None
+
+    mutate_via_data_alias.direction = "backward"
+    _state._active_hook_plan = normalize_hook_plan(tl.grad_fn(type="relu"), mutate_via_data_alias)
+    hook = _make_grad_fn_hook(trace_stub, 1)
+
+    hook((torch.ones(1),), (torch.ones(1),))
+
+    record = grad_fn_handle.calls[0].intervention_fire_ref
+    assert isinstance(record, FireRecord)
+    assert record.replaced is True
+
+
 def test_composite_backward_target_specs_match_live_hooks() -> None:
     """Composite selector target specs reconstruct recursively for live hooks."""
 
@@ -422,6 +499,46 @@ def test_backward_none_return_helper_records_non_replacing_fire() -> None:
     assert spec.records == [record]
 
 
+def test_backward_invalid_replacement_tuple_raises_before_recording_success() -> None:
+    """Invalid backward replacement tuples fail before a success record is attached."""
+
+    trace_stub, grad_fn_handle = _hook_trace()
+    spec = InterventionSpec()
+
+    def factory() -> Any:
+        """Return a helper with a shape-invalid replacement tuple."""
+
+        def helper(
+            grad_input: tuple[torch.Tensor | None, ...],
+            *,
+            grad_output: tuple[torch.Tensor | None, ...] | None,
+            grad_fn_handle: GradFn,
+            call_index: int,
+            run_ctx: dict[str, Any],
+        ) -> tuple[torch.Tensor | None, ...]:
+            """Return a same-arity tuple with an invalid tensor shape."""
+
+            del grad_output, grad_fn_handle, call_index, run_ctx
+            return (torch.ones(2),)
+
+        return helper
+
+    _state._active_intervention_spec = spec
+    _state._active_hook_plan = normalize_hook_plan(
+        tl.grad_fn(type="relu"),
+        _helper_spec(
+            "bad_shape", kind="backward", factory=factory, metadata={"mount_shape": "tuple"}
+        ),
+    )
+    hook = _make_grad_fn_hook(trace_stub, 1)
+
+    with pytest.raises(HookValueError, match="shape"):
+        hook((torch.ones(1),), (torch.ones(1),))
+
+    assert grad_fn_handle.calls[0].intervention_fire_ref is None
+    assert spec.records == []
+
+
 def test_backward_in_place_none_return_helper_records_gradient_effect() -> None:
     """In-place gradient mutation returning None is audited and affects gradients."""
 
@@ -461,7 +578,11 @@ def test_backward_in_place_none_return_helper_records_gradient_effect() -> None:
     ]
     assert records
     assert isinstance(records[0], FireRecord)
-    assert records[0].replaced is False
+    # Round-3 semantics: an in-place mutation IS a genuine gradient change and
+    # must carry replacement evidence (version-counter witnessed). The old
+    # identity-only derivation recorded replaced=False here -- a real value
+    # change with zero replacement evidence.
+    assert records[0].replaced is True
 
 
 def test_grad_fn_hook_call_index_targeting() -> None:
@@ -856,6 +977,42 @@ def test_forward_helper_on_backward_selector_warns() -> None:
         )
 
 
+@pytest.mark.parametrize("direction", ["backward", "both"])
+def test_backward_zero_match_selector_warns_after_backward(direction: str) -> None:
+    """Unmatched backward selectors report instead of silently no-oping."""
+    x = torch.ones(1, 3, requires_grad=True)
+    trace = tl.trace(
+        _IdentityReluModel(),
+        x,
+        capture=tl.options.CaptureOptions(backward_ready=True, save_grads=True),
+        intervene=tl.when(
+            tl.grad_fn(type="NoSuchGradFnClassZZZ"),
+            tl.grad_zero(),
+            direction=direction,
+        ),
+    )
+
+    with pytest.warns(UserWarning, match="matched zero sites; no intervention fired"):
+        trace.log_backward(trace[trace.output_layers[0]].out)
+
+
+def test_matching_backward_selector_does_not_warn_zero_match() -> None:
+    """The deferred selector ledger records a real GradFn intervention fire."""
+    x = torch.ones(1, 3, requires_grad=True)
+    trace = tl.trace(
+        _IdentityReluModel(),
+        x,
+        capture=tl.options.CaptureOptions(backward_ready=True, save_grads=True),
+        intervene=tl.when(tl.grad_fn(type="relu"), tl.grad_zero()),
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        trace.log_backward(trace[trace.output_layers[0]].out)
+
+    assert not any("matched zero sites" in str(item.message) for item in caught)
+
+
 @pytest.mark.parametrize("selector", [tl.func("relu"), tl.grad_fn(type="relu")])
 def test_bwd_hook_fires_and_can_replace_gradient(selector: Any) -> None:
     """bwd_hook calls user code and mutates the gradient through both selectors."""
@@ -885,12 +1042,18 @@ def test_backward_selector_target_spec_round_trip(selector: Any) -> None:
 
     target = selector.to_target_spec()
     frozen = target.freeze()
-    rebuilt_resolver = _selector_from_spec(
+    rebuilt_resolver = selector_from_spec(
         frozen.selector_kind,
         frozen.selector_value,
         dict(frozen.metadata),
+        lifecycle="site",
     )
-    rebuilt_hook = _selector_from_target_spec(target)
+    rebuilt_hook = selector_from_spec(
+        target.selector_kind,
+        target.selector_value,
+        target.metadata,
+        lifecycle="live",
+    )
     assert rebuilt_resolver.selector_kind == selector.selector_kind
     assert rebuilt_resolver.selector_value == selector.selector_value
     assert rebuilt_hook.selector_kind == selector.selector_kind
@@ -931,3 +1094,100 @@ def test_grad_clamp_helper_elementwise() -> None:
         run_ctx={},
     )
     assert torch.equal(result[0], torch.tensor([-0.5, 0.0, 0.5]))
+
+
+class _GuidedCNN(nn.Module):
+    """Two-ReLU CNN used by the guided-backprop recipe acceptance tests."""
+
+    def __init__(self, inplace: bool) -> None:
+        """Initialize the model.
+
+        Parameters
+        ----------
+        inplace:
+            Whether the ReLU activations run in-place (the ResNet idiom).
+        """
+
+        super().__init__()
+        self.c1 = nn.Conv2d(3, 8, 3, padding=1)
+        self.r1 = nn.ReLU(inplace=inplace)
+        self.c2 = nn.Conv2d(8, 8, 3, padding=1)
+        self.r2 = nn.ReLU(inplace=inplace)
+        self.pool = nn.AdaptiveAvgPool2d(2)
+        self.fc = nn.Linear(32, 5)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the forward pass."""
+
+        h = self.r1(self.c1(x))
+        h = self.r2(self.c2(h))
+        return self.fc(torch.flatten(self.pool(h), 1))
+
+
+def _guided_backprop_via_torchlens(model: nn.Module, x: torch.Tensor, target: int) -> torch.Tensor:
+    """Return the guided-backprop input gradient using the one-off recipe."""
+
+    guided = tl.when(tl.func("relu"), tl.bwd_hook(lambda g, *, hook: g.clamp(min=0)))
+    trace = tl.trace(
+        model,
+        x.clone().requires_grad_(True),
+        capture=tl.options.CaptureOptions(backward_ready=True, save_grads=True),
+        intervene=guided,
+        save_mode="reference",
+    )
+    out = trace[trace.output_layers[0]].out
+    trace.backward(out[:, target].sum(), retain_graph=True)
+    return trace[trace.input_layers[0]].grad
+
+
+def _guided_backprop_reference(model: nn.Module, x: torch.Tensor, target: int) -> torch.Tensor:
+    """Return the classic module-hook guided-backprop gradient (non-inplace only)."""
+
+    handles = [
+        module.register_full_backward_hook(
+            lambda mod, gin, gout: tuple(g.clamp(min=0) for g in gin)
+        )
+        for module in model.modules()
+        if isinstance(module, nn.ReLU)
+    ]
+    leaf = x.clone().requires_grad_(True)
+    model(leaf)[:, target].sum().backward()
+    for handle in handles:
+        handle.remove()
+    return leaf.grad
+
+
+def test_guided_backprop_recipe_matches_module_hook_reference() -> None:
+    """The one-off guided-backprop recipe reproduces the classic hook recipe exactly."""
+
+    torch.manual_seed(0)
+    model = _GuidedCNN(inplace=False).eval()
+    x = torch.randn(2, 3, 8, 8)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        grad = _guided_backprop_via_torchlens(model, x, target=3)
+    reference = _guided_backprop_reference(model, x, target=3)
+    assert torch.equal(grad, reference)
+    plain_leaf = x.clone().requires_grad_(True)
+    model(plain_leaf)[:, 3].sum().backward()
+    assert not torch.allclose(grad, plain_leaf.grad)
+
+
+def test_guided_backprop_recipe_works_on_inplace_relu() -> None:
+    """The recipe handles in-place ReLU models the classic hook recipe cannot.
+
+    ``register_full_backward_hook`` + in-place ReLU raises torch's
+    view-inplace ``BackwardHookFunction`` error, so the reference gradient is
+    computed on a non-inplace twin sharing the same parameters.
+    """
+
+    torch.manual_seed(0)
+    model = _GuidedCNN(inplace=True).eval()
+    x = torch.randn(2, 3, 8, 8)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        grad = _guided_backprop_via_torchlens(model, x, target=1)
+    twin = _GuidedCNN(inplace=False).eval()
+    twin.load_state_dict(model.state_dict())
+    reference = _guided_backprop_reference(twin, x, target=1)
+    assert torch.equal(grad, reference)

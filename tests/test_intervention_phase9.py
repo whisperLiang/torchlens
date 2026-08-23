@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+from example_models import TinyReluAdd as _ReluModel
 from torch import nn
 
 import torchlens as tl
@@ -13,26 +14,6 @@ from torchlens.intervention.errors import (
     BundleRelationshipError,
 )
 from torchlens.intervention.types import Relationship
-
-
-class _ReluModel(nn.Module):
-    """Small model with one relu site."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run the model.
-
-        Parameters
-        ----------
-        x:
-            Input tensor.
-
-        Returns
-        -------
-        torch.Tensor
-            Output tensor.
-        """
-
-        return torch.relu(x) + 1
 
 
 class _TanhModel(nn.Module):

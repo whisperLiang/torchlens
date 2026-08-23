@@ -42,7 +42,7 @@ from torchlens.options import CaptureOptions
 from torchlens.runnable import NumericAttestationStatus, PathFaithfulness
 
 
-def _capture(model: nn.Module, x: torch.Tensor) -> "tl.Trace":
+def _capture(model: nn.Module, x: torch.Tensor) -> tl.Trace:
     """Capture one runnable-ready trace."""
 
     return tl.trace(
@@ -364,7 +364,7 @@ def test_r75_storage_identity_rung_resolves_when_ledger_missing(tmp_path: Path) 
     x = _nchw()
     path = _save(LedgerEvictedDataBranch().eval(), x, tmp_path / "storage.tlspec")
 
-    descriptor = tl.load(path).__dict__["_runnable_descriptor"]
+    descriptor = tl.load(path)._runnable.descriptor
     reads = [
         name
         for site in descriptor.input_boundary

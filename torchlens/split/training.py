@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from .boundary import ReplayBoundary
 from .errors import SplitErrorContext, SplitUnsupportedError
@@ -317,9 +318,7 @@ def _train_suffix_tf(
     root_values = list(root_tensors.values())
     root_grads = tape.gradient(loss, root_values) if root_values else []
     gradients = {
-        key: grad
-        for key, grad in zip(root_tensors, root_grads, strict=False)
-        if grad is not None
+        key: grad for key, grad in zip(root_tensors, root_grads, strict=False) if grad is not None
     }
     optimizer_applied = False
     if optimizer is not None and suffix_vars:
@@ -428,6 +427,7 @@ def _default_jax_loss(output: Any, targets: Any) -> Any:
     """Compute a default JAX split-training loss."""
 
     import jax.numpy as jnp
+
     target_dtype = getattr(getattr(targets, "dtype", None), "kind", None)
     if target_dtype in {"i", "u"} and len(output.shape) >= 2:
         if len(targets.shape) == len(output.shape) - 1:
@@ -461,7 +461,7 @@ def _train_suffix_jax(
 
     def suffix_loss(*roots: Any) -> Any:
         tensors = dict(boundary.tensors)
-        tensors.update({key: root for key, root in zip(keys, roots, strict=False)})
+        tensors.update(dict(zip(keys, roots, strict=False)))
         replay_boundary = ReplayBoundary(
             backend=boundary.backend,
             tensors=tensors,
@@ -590,9 +590,7 @@ def _train_suffix_tinygrad(
     _tinygrad_optimizer_step(runtime, optimizer, before=True)
     output = runtime.run_suffix(replay_boundary)
     loss = (
-        loss_fn(output, targets)
-        if loss_fn is not None
-        else _default_tinygrad_loss(output, targets)
+        loss_fn(output, targets) if loss_fn is not None else _default_tinygrad_loss(output, targets)
     )
     loss.backward()
     gradients: BoundaryGradients = {}

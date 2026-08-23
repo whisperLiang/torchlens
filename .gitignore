@@ -188,3 +188,19 @@ menagerie/data/verification.db*
 
 # Menagerie crawler disposable runtime state. Canonical records and manifests stay tracked.
 /.crawl-local/
+
+# Repo-root sprint ledgers and agent result files are internal working state
+# (the no-internal-notes pre-commit hook hard-fails them as well).
+/FORKS.md
+/PROGRESS.md
+/*_RESULTS.md
+
+# Off-canonical oracle baselines recorded per-environment (tests/_oracle_env.py).
+# A recorded env-*/ dir is local working state: review it and `git add -f`
+# only when that environment should enforce byte identity going forward.
+tests/**/goldens/env-*/
+tests/golden/env-*/
+
+# Sprint lane result reports are INTERNAL notes (repo is public); never track them.
+# (The repo no-internal-notes hook is bypassed when a global core.hooksPath is set.)
+results/

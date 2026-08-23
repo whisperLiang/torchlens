@@ -13,7 +13,6 @@ import torchlens as tl
 from torchlens.options import CaptureOptions
 from torchlens.validation.status import ValidationReplayStatus
 
-
 GOLDEN_PATH = Path(__file__).with_name("validation_decisions.json")
 
 
@@ -207,6 +206,37 @@ class TinyCholesky(nn.Module):
         return torch.linalg.cholesky(x)
 
 
+class TinyStepInvalidNarrow(nn.Module):
+    """Model whose control parent admits NO valid perturbation (r29 MED).
+
+    ``narrow(0, start, x.shape[0])`` with ``start == 0`` raises for every
+    other start value, so the wide random draw AND both +-1 step retries all
+    raise on any seed -- keeping the ``perturbation_execution_exception``
+    decision category reachable after the r28 step retry soundly converted the
+    ``TinyCholesky`` vehicle to ``validated``. The start index is a model
+    INPUT (no perturbation check of its own), so no upstream op can add a
+    seed-dependent side decision.
+    """
+
+    def forward(self, x: torch.Tensor, start: torch.Tensor) -> torch.Tensor:
+        """Narrow the full length of ``x`` from a traced zero start index.
+
+        Parameters
+        ----------
+        x:
+            One-dimensional input.
+        start:
+            Zero-dimensional long start index; must be 0.
+
+        Returns
+        -------
+        torch.Tensor
+            The narrowed (full-length) input, scaled.
+        """
+
+        return x.narrow(0, start, x.shape[0]) * 1.0
+
+
 class TinySwampedAdd(nn.Module):
     """Tiny additive model whose perturbation can be hidden by fp32 spacing."""
 
@@ -245,6 +275,33 @@ class TinyMultiplyByZero(nn.Module):
         """
 
         return x * torch.zeros_like(x)
+
+
+class TinyIntMultiplyByZero(nn.Module):
+    """Tiny integer multiply-by-zero for the structural annihilator proof.
+
+    The float :class:`TinyMultiplyByZero` now validates honestly through the
+    signed-zero exact tier (the zero output's sign bits carry the perturbed
+    parent's signs), so the ``multiplicative_zero_annihilator`` category needs
+    a sign-free dtype to stay covered by the zoo.
+    """
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Multiply an integer cast by a zero tensor.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Integer zero-valued output.
+        """
+
+        cast = x.to(torch.int64)
+        return cast * torch.zeros_like(cast)
 
 
 def _trace_output(trace: Any) -> torch.Tensor:
@@ -475,6 +532,14 @@ def build_validation_decision_snapshot() -> dict[str, Any]:
         capture=full_capture,
     )
 
+    torch.manual_seed(22)
+    step_invalid = TinyStepInvalidNarrow().eval()
+    step_invalid_trace = tl.trace(
+        step_invalid,
+        [torch.tensor([-2.0, 0.5, 1.5, 2.5]), torch.tensor(0)],
+        capture=full_capture,
+    )
+
     torch.manual_seed(20)
     swamped = TinySwampedAdd().eval()
     x_swamped = torch.tensor([10000.0, 10001.0], dtype=torch.float32)
@@ -490,6 +555,15 @@ def build_validation_decision_snapshot() -> dict[str, Any]:
     multiply_zero_trace = tl.trace(
         multiply_zero,
         x_multiply_zero,
+        capture=full_capture,
+    )
+
+    torch.manual_seed(22)
+    int_multiply_zero = TinyIntMultiplyByZero().eval()
+    x_int_multiply_zero = torch.randn(2, 3)
+    int_multiply_zero_trace = tl.trace(
+        int_multiply_zero,
+        x_int_multiply_zero,
         capture=full_capture,
     )
 
@@ -521,6 +595,13 @@ def build_validation_decision_snapshot() -> dict[str, Any]:
         "tiny_cholesky": _case_summary(
             _seeded_status_for_trace(108, cholesky_trace, [_trace_output(cholesky_trace)])
         ),
+        "tiny_step_invalid_narrow": _case_summary(
+            _seeded_status_for_trace(
+                112,
+                step_invalid_trace,
+                [_trace_output(step_invalid_trace)],
+            )
+        ),
         "tiny_swamped_add": _case_summary(
             _seeded_status_for_trace(110, swamped_trace, [_trace_output(swamped_trace)])
         ),
@@ -529,6 +610,13 @@ def build_validation_decision_snapshot() -> dict[str, Any]:
                 111,
                 multiply_zero_trace,
                 [_trace_output(multiply_zero_trace)],
+            )
+        ),
+        "tiny_multiply_zero_int": _case_summary(
+            _seeded_status_for_trace(
+                112,
+                int_multiply_zero_trace,
+                [_trace_output(int_multiply_zero_trace)],
             )
         ),
     }

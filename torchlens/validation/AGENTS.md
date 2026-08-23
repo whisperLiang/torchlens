@@ -2,7 +2,7 @@
 
 ## core.py
 - `validate_saved_outs()` is the main saved-forward replay entry point.
-- `_validate_single_layer()` handles one layer's replay and perturbation.
+- `validate_parents_of_saved_layer()` handles one layer's replay and perturbation.
 - `_execute_func_with_restored_state()` restores RNG/autocast state around replay.
 - `_perturb_layer_outs()` is bounded by `MAX_PERTURB_ATTEMPTS`.
 - Validation requires saved function args for replay; check callers preserve
@@ -10,12 +10,14 @@
 
 ## backward.py
 - `validate_backward_pass()` compares TorchLens backward capture against stock autograd.
-- Keep tolerances and loss handling in sync with `capture/backward.py`.
+- Keep tolerances and loss handling in sync with `backends/torch/backward.py`.
 - Backward-specific kwargs are routed through `validate(..., scope="backward")`.
 
 ## consolidated.py
 - `validate(model, input_args, scope=...)` is the top-level 2.x dispatcher.
-- Valid scopes are `forward`, `backward`, `saved`, and `intervention`.
+- Valid scopes are `forward`, `backward`, `saved`, `intervention`, and
+  `receptive_field` (own dispatch, gate, and tri-state return; see
+  `_validate_receptive_field_scope`).
 - Reject scope-specific kwargs early when they do not apply.
 
 ## exemptions.py
@@ -31,12 +33,16 @@ inf/NaN tensors, and special-value args.
 ## invariants.py
 - `MetadataInvariantError` is the public invariant failure type.
 - `check_metadata_invariants()` should fail loudly on broken graph/log structure.
+  It is IMPLEMENTED in `_invariants_entry.py` (with the per-domain checks in
+  the sibling `_invariants_*.py` modules); `invariants.py` only REBINDS the
+  entry function — editing `invariants.py` to change check behavior is a no-op.
 - Keep invariants aligned with primary conditional fields, not only legacy THEN views.
 
 ## __init__.py Schema Checks
 - `validate_tlspec()` only validates unified `.tlspec` manifests.
 - Legacy `v2.16_*` formats return without schema validation.
-- Manifest schema lives at `torchlens/schemas/tlspec_manifest_v1.json`.
+- Manifest schemas live at `torchlens/schemas/tlspec_manifest_v{schema_version}.json`;
+  validation selects the version declared by each artifact.
 
 ## Known Limitations
 - bfloat16 tolerance remains tighter than dtype epsilon in some replay paths.

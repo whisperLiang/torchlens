@@ -7,9 +7,8 @@ from typing import Any
 
 from .adapters.base import SplitBackendAdapter
 from .errors import SplitBoundaryError, SplitErrorContext
-from .shape import validate_tensor_against_symbolic_shape
 from .ir import BoundarySchema
-
+from .shape import validate_tensor_against_symbolic_shape
 
 _COLLATE_METADATA_KEYS = (
     "split_id",
@@ -34,7 +33,7 @@ class ReplayBoundary:
     metadata: dict[str, Any]
 
     @staticmethod
-    def _collate_metadata_abi(boundary: "ReplayBoundary") -> tuple[Any, ...]:
+    def _collate_metadata_abi(boundary: ReplayBoundary) -> tuple[Any, ...]:
         """Return metadata fields that identify a compatible boundary ABI."""
 
         return tuple(boundary.metadata.get(key) for key in _COLLATE_METADATA_KEYS)
@@ -165,16 +164,15 @@ class ReplayBoundary:
                         shape_program.binding_from_batch(int(runtime_batch))
                     )
                     actual_runtime_shape = resolved_adapter.shape(value)
-                    if (
-                        actual_runtime_shape is not None
-                        and tuple(actual_runtime_shape) != tuple(expected_runtime_shape)
+                    if actual_runtime_shape is not None and tuple(actual_runtime_shape) != tuple(
+                        expected_runtime_shape
                     ):
                         raise SplitBoundaryError(
                             f"Boundary tensor {key!r} shape is {actual_runtime_shape}, "
                             f"expected solved shape {expected_runtime_shape}."
                         )
 
-    def detach(self, adapter: SplitBackendAdapter | None = None) -> "ReplayBoundary":
+    def detach(self, adapter: SplitBackendAdapter | None = None) -> ReplayBoundary:
         """Return a boundary with detached tensor values."""
 
         resolved_adapter = self._adapter(adapter)
@@ -185,7 +183,7 @@ class ReplayBoundary:
             metadata=dict(self.metadata),
         )
 
-    def clone(self, adapter: SplitBackendAdapter | None = None) -> "ReplayBoundary":
+    def clone(self, adapter: SplitBackendAdapter | None = None) -> ReplayBoundary:
         """Return a boundary with cloned tensor values."""
 
         resolved_adapter = self._adapter(adapter)
@@ -196,7 +194,7 @@ class ReplayBoundary:
             metadata=dict(self.metadata),
         )
 
-    def to(self, device: Any, adapter: SplitBackendAdapter | None = None) -> "ReplayBoundary":
+    def to(self, device: Any, adapter: SplitBackendAdapter | None = None) -> ReplayBoundary:
         """Return a boundary with tensors moved to ``device``."""
 
         resolved_adapter = self._adapter(adapter)
@@ -210,12 +208,12 @@ class ReplayBoundary:
             metadata=dict(self.metadata),
         )
 
-    def cpu(self, adapter: SplitBackendAdapter | None = None) -> "ReplayBoundary":
+    def cpu(self, adapter: SplitBackendAdapter | None = None) -> ReplayBoundary:
         """Return a CPU boundary."""
 
         return self.to("cpu", adapter=adapter)
 
-    def cuda(self, adapter: SplitBackendAdapter | None = None) -> "ReplayBoundary":
+    def cuda(self, adapter: SplitBackendAdapter | None = None) -> ReplayBoundary:
         """Return a CUDA boundary."""
 
         return self.to("cuda", adapter=adapter)
@@ -223,9 +221,9 @@ class ReplayBoundary:
     @classmethod
     def collate(
         cls,
-        boundaries: list["ReplayBoundary"],
+        boundaries: list[ReplayBoundary],
         adapter: SplitBackendAdapter | None = None,
-    ) -> "ReplayBoundary":
+    ) -> ReplayBoundary:
         """Collate a list of same-spec boundaries by tensor key."""
 
         if not boundaries:

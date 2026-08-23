@@ -37,6 +37,7 @@ from torchlens._input_walk import (
 from torchlens._io import runnable_load
 from torchlens.errors import (
     PathDivergenceError,
+    RunCapabilityUnavailableError,
     RunnablePreflightError,
     RunPreconditionError,
 )
@@ -247,18 +248,47 @@ class _RegBoxB:
         self.t = t
 
 
-register_container(
-    _RegBox,
-    lambda box: ([box.t], None),
-    lambda aux, children: _RegBox(children[0]),
-    state_complete=True,
-)
-register_container(
-    _RegBoxB,
-    lambda box: ([box.t], None),
-    lambda aux, children: _RegBoxB(children[0]),
-    state_complete=True,
-)
+class _StatefulReg:
+    def __init__(self, t: torch.Tensor) -> None:
+        self.t = t
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _registered_test_containers():
+    """Register this module's container fixtures and restore on teardown.
+
+    These registrations used to run at MODULE level, mutating the
+    process-global container registry at pytest collection time -- a full
+    collection carried them for the whole session while a targeted run did
+    not (the exact order-dependence class
+    ``test_no_module_level_registry_mutation_in_tests`` lints for).
+    """
+
+    from torchlens.ir.container import _CONTAINER_REGISTRY
+
+    register_container(
+        _RegBox,
+        lambda box: ([box.t], None),
+        lambda aux, children: _RegBox(children[0]),
+        state_complete=True,
+    )
+    register_container(
+        _RegBoxB,
+        lambda box: ([box.t], None),
+        lambda aux, children: _RegBoxB(children[0]),
+        state_complete=True,
+    )
+    register_container(
+        _StatefulReg,
+        lambda box: ([box.t], None),
+        lambda aux, children: _StatefulReg(children[0]),
+        state_complete=False,
+    )
+    try:
+        yield
+    finally:
+        for registered_type in (_RegBox, _RegBoxB, _StatefulReg):
+            _CONTAINER_REGISTRY.pop(registered_type, None)
 
 
 class _RegModel(nn.Module):
@@ -279,19 +309,6 @@ def test_r67_registered_container_round_trips_verified(tmp_path: Path) -> None:
     assert torch.equal(rerun.output, twin * 3.0)
     # Exact-class fence: a different registered class with identical schema diverges.
     _assert_diverges(path, _RegBoxB(x.clone()))
-
-
-class _StatefulReg:
-    def __init__(self, t: torch.Tensor) -> None:
-        self.t = t
-
-
-register_container(
-    _StatefulReg,
-    lambda box: ([box.t], None),
-    lambda aux, children: _StatefulReg(children[0]),
-    state_complete=False,
-)
 
 
 def test_r67_registered_without_state_complete_refuses_extra_state(tmp_path: Path) -> None:
@@ -351,7 +368,7 @@ def test_r67_runtime_added_instance_state_diverges(tmp_path: Path) -> None:
 
 def _structure_witnesses_of(path: Path):
     loaded = tl.load(path)
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     return [
         witness
         for witness in descriptor.control_witnesses
@@ -1072,13 +1089,16 @@ def _assert_context_field_invalid(path: Path, run_inputs) -> None:
     """Analysis load survives; readiness UNAVAILABLE with context_field_invalid; no run."""
 
     loaded = tl.load(path)
-    readiness = loaded.__dict__.get("_runnable_readiness")
+    readiness = loaded._runnable.readiness
     assert readiness is not None
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     codes = {diagnostic.code.value for diagnostic in readiness.diagnostics}
     assert "context_field_invalid" in codes, codes
-    with pytest.raises(Exception):
+    # An analysis-only load must refuse to run with the SPECIFIC typed capability error,
+    # not merely "some exception" (a generic pytest.raises here is vacuous).
+    with pytest.raises(RunCapabilityUnavailableError) as excinfo:
         loaded.run(inputs=run_inputs)
+    assert excinfo.value.fields.get("code") == "run_capability_unavailable"
 
 
 def _heal_capture_state(source_path: Path, run_inputs) -> None:
@@ -1114,7 +1134,7 @@ def test_r69_inventory_is_authored_for_every_registry_family(tmp_path: Path) -> 
 
     x = torch.randn(3)
     path = _save(_trace(_RichFamilies(), [x, 1]), tmp_path / "families.tlspec")
-    descriptor = tl.load(path).__dict__["_runnable_descriptor"]
+    descriptor = tl.load(path)._runnable.descriptor
     inventory = descriptor.required_witness_inventory
     assert inventory.registry_version == WITNESS_FAMILY_REGISTRY_VERSION
     rows = {row.family: row for row in inventory.families}
@@ -1380,7 +1400,7 @@ def test_r69_emission_meta_test_every_prefix_is_registered(tmp_path: Path) -> No
 
     x = torch.randn(3)
     path = _save(_trace(_RichFamilies(), [x, 1]), tmp_path / "emit.tlspec")
-    descriptor = tl.load(path).__dict__["_runnable_descriptor"]
+    descriptor = tl.load(path)._runnable.descriptor
     for witness in descriptor.control_witnesses:
         family = io_runnable.witness_family_of_witness(witness)
         assert family is not None, witness.site_label

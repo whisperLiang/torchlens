@@ -7,6 +7,7 @@ import weakref
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
 import torch
 from torch import nn
 
@@ -128,6 +129,7 @@ def test_container_registry_identity_guard_handles_reused_id_slot() -> None:
     assert registry.id_to_entry[id(second)].obj is second
 
 
+@pytest.mark.heavy
 def test_no_live_container_registry_state_survives_final_streamed_or_cached_trace(
     tmp_path: Path,
 ) -> None:

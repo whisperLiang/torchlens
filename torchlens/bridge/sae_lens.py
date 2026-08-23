@@ -47,4 +47,44 @@ def encode(log: Any, site: Any, sae: Any) -> Any:
     raise TypeError("SAE Lens bridge expected an SAE with encode(...) or a callable SAE.")
 
 
-__all__ = ["encode"]
+def decode(log: Any, site: Any, sae: Any) -> Any:
+    """Decode a TorchLens out with an SAE Lens-compatible SAE.
+
+    Parameters
+    ----------
+    log:
+        TorchLens ``Trace`` containing saved outs.
+    site:
+        Layer label, selector, or layer object to decode.
+    sae:
+        SAE object exposing ``decode`` or a callable SAE.
+
+    Returns
+    -------
+    Any
+        Decoded out returned by the SAE.
+
+    Raises
+    ------
+    ImportError
+        If SAE Lens is unavailable.
+    TypeError
+        If ``sae`` cannot decode an out.
+    """
+
+    try:
+        import sae_lens  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "SAE Lens bridge requires the `sae` extra: install torchlens[sae]."
+        ) from exc
+
+    out = out_at(log, site)
+    if hasattr(sae, "decode"):
+        return sae.decode(out)
+    if callable(sae):
+        return sae(out)
+    raise TypeError("SAE Lens bridge expected an SAE with decode(...) or a callable SAE.")
+
+
+__all__ = ["decode", "encode"]

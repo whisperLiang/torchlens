@@ -10,7 +10,7 @@ import subprocess
 import sys
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from hashlib import sha256
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -305,7 +305,7 @@ def utc_now() -> str:
         Current UTC timestamp with second precision.
     """
 
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def python_version() -> str:

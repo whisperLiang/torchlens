@@ -34,7 +34,7 @@ class _ImageLike:
     mode = "RGB"
     size = (8, 8)
 
-    def copy(self) -> "_ImageLike":
+    def copy(self) -> _ImageLike:
         """Return a shallow image-like copy.
 
         Returns

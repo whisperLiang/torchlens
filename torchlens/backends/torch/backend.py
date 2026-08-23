@@ -2,42 +2,47 @@
 
 from __future__ import annotations
 
-import dataclasses
 import contextlib
+import dataclasses
 import inspect
+import warnings
+from collections.abc import Iterator
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any, Iterator, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
 from ... import _state
-from ...data_classes.internal_types import FuncExecutionContext
+from ..._errors import TorchLensCaptureGapWarning
 from ..._io import BlobRef as PortableBlobRef
 from ...capture.session import capture_session_for
+from ...data_classes.internal_types import FuncExecutionContext
 from ...fastlog.types import CaptureSpec, ModuleStackFrame, StorageIntent
-from ...ir import replace_op_event
-from ...ir.events import OpEvent
-from ...ir.intervention import FireResult, FunctionEventInput
 from ...ir.container import ContainerSpec, OutputPathComponent
 from ...ir.container_registry import ContainerLeafOccurrence, ModelSite, Phase, Role
+from ...ir.events import OpEvent, OutputRef
+from ...ir.intervention import FireResult, FunctionEventInput
+from ...ir.op_record import amend_output_parent_promotion
 from ...ir.predicate import RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
-from ...ir.trace_build_state import TraceBuildState
+from ...ir.workspaces import RawGraphWorkspace
 from ...utils.arg_handling import (
     INPUT_WAS_PARAMETER_ATTR,
     normalize_input_args,
-    safe_copy_args,
-    safe_copy_kwargs,
+    safe_copy_input_tree,
 )
-from ...utils.introspection import get_vars_of_type_from_obj, nested_assign
-from ...utils.rng import log_current_rng_states, set_random_seed
-from ...utils.rng import set_rng_from_saved_states
+from ...utils.introspection import (
+    INPUT_SEARCH_DEPTH_LIMIT,
+    get_vars_of_type_from_obj,
+    nested_assign,
+)
+from ...utils.rng import log_current_rng_states, set_random_seed, set_rng_from_saved_states
 from ...utils.tensor_utils import _is_cuda_available, safe_copy
 from . import _tl
 from .aliasing import detect_torch_alias_contract
 from .buffer_writes import reconcile_buffer_writes, uninstall_buffer_write_tracker
-from .completeness_witness import capture_completeness_witness
+from .completeness_witness import capture_completeness_witness, capture_scalar_escape_warning
 from .escape_detection import capture_escape_guard
 from .model_prep import (
     _cleanup_model_session,
@@ -52,10 +57,56 @@ from .ops import (
     runnable_output_losslessness,
 )
 from .sources import log_source_tensor as _log_source_tensor
+from .structure_only_belt import structure_only_escape_belt
 from .wrappers import unwrap_torch, wrap_torch
 
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace
+
+
+def _record_input_semantics_gaps(
+    session: object,
+    gaps: list[str] | tuple[str, ...],
+    *,
+    reason: str,
+) -> None:
+    """Record and warn about input-boundary semantics that cannot be verified.
+
+    Parameters
+    ----------
+    session:
+        Active capture session receiving private witness diagnostics.
+    gaps:
+        Human-readable input paths or copy failures.
+    reason:
+        Stable internal reason identifying the failed input-boundary proof.
+
+    Returns
+    -------
+    None
+        Appends fail-closed witness diagnostics and emits one visible warning.
+    """
+
+    if not gaps:
+        return
+    reports = session.__dict__.setdefault("completeness_diagnostics", [])
+    for gap in gaps:
+        reports.append(
+            {
+                "operator": None,
+                "reason": reason,
+                "input_path": gap,
+                "scope": "input_boundary",
+                "enforced": False,
+            }
+        )
+    warnings.warn(
+        "TorchLens cannot verify the captured model-input semantics "
+        f"({reason}); affected path(s): {', '.join(gaps)}. The completeness "
+        "verdict is ceilinged at capture_verified=False.",
+        TorchLensCaptureGapWarning,
+        stacklevel=3,
+    )
 
 
 def _get_input_arg_names(model: torch.nn.Module, input_args: list[Any]) -> list[str]:
@@ -108,7 +159,7 @@ def _tensor_memory_bytes(tensor: torch.Tensor) -> int:
 
 
 def _write_output_parent_blob(
-    trace: "Trace",
+    trace: Trace,
     label_raw: str,
     payload: torch.Tensor | None,
     kind: str,
@@ -137,16 +188,16 @@ def _write_output_parent_blob(
     if writer is None or payload is None:
         return None
     blob_id = writer.next_blob_id()
-    writer.write_blob(blob_id, payload, kind=kind, label=label_raw)
+    writer.submit_blob(blob_id, payload, kind=kind, label=label_raw)
     return PortableBlobRef(blob_id=blob_id, kind=kind)
 
 
 def _promote_layers_to_save_output_parent(
-    trace: "Trace",
+    trace: Trace,
     event: OpEvent,
     tensor: torch.Tensor,
-) -> OpEvent:
-    """Attach a saved payload to an absorbed ``layers_to_save`` output parent.
+) -> tuple[OutputRef, CapturePolicy, bool, object]:
+    """Resolve the ``output_parent_promotion`` amendment values for one output.
 
     Parameters
     ----------
@@ -160,9 +211,12 @@ def _promote_layers_to_save_output_parent(
 
     Returns
     -------
-    OpEvent
-        Event updated with output-parent state and, when required, saved payload
-        references.
+    tuple[OutputRef, CapturePolicy, bool, object]
+        ``(output, policy, predicate_matched, capture_spec)`` for the caller's
+        ``amend_output_parent_promotion`` — the event's current values when no
+        payload retention is required, otherwise the saved-payload rebinds.
+        The computed record context is deliberately NOT returned: the family
+        schema preserves the documented legacy quirk of dropping it.
     """
 
     if (
@@ -170,7 +224,7 @@ def _promote_layers_to_save_output_parent(
         or getattr(trace, "_predicate_save_options", None) is None
         or event.output.has_saved_activation
     ):
-        return dataclasses.replace(event, is_output_parent=True)
+        return event.output, event.policy, event.predicate_matched, event.capture_spec
 
     from ...capture.projections import _record_context_from_event
     from ...fastlog._storage_resolver import _resolve_storage
@@ -192,6 +246,22 @@ def _promote_layers_to_save_output_parent(
         device=output_device,
         save_mode=cast(Any, getattr(trace, "save_mode", "copy")),
     )
+    # Output-parent promotion retains real payloads and must be visible to
+    # the save-budget accountant like every other RAM retention: this path
+    # kept ram/transformed payloads with no admit/commit, silently
+    # undercounting on every selective capture whose outputs were not
+    # selected (grind-r6 b5 R34-N2). Admit BEFORE the copy allocates;
+    # disk-only routes stay exempt like the other predicate disk saves.
+    budget = getattr(trace, "_save_budget_accountant", None)
+    reservation = None
+    if budget is not None and intent.in_ram:
+        target_device = torch.device(output_device) if output_device is not None else tensor.device
+        reservation = budget.admit(
+            str(event.label_raw),
+            target_device,
+            int(tensor.nelement() * tensor.element_size()),
+            site="primary",
+        )
     ram_payload, disk_payload, transformed_ram_payload, transformed_disk_payload = _resolve_storage(
         tensor,
         spec,
@@ -201,6 +271,8 @@ def _promote_layers_to_save_output_parent(
         ctx=ctx,
         kind="activation",
     )
+    if budget is not None and reservation is not None:
+        budget.commit(reservation, (ram_payload, transformed_ram_payload))
     raw_blob_ref = _write_output_parent_blob(trace, event.label_raw, disk_payload, "out")
     transformed_blob_ref = _write_output_parent_blob(
         trace,
@@ -244,15 +316,7 @@ def _promote_layers_to_save_output_parent(
         has_saved_activation=True,
     )
     policy = dataclasses.replace(event.policy, save_payload=True)
-    return dataclasses.replace(
-        event,
-        output=output_ref,
-        policy=policy,
-        predicate_matched=True,
-        is_output_parent=True,
-        capture_spec=spec,
-        record_context=ctx,
-    )
+    return output_ref, policy, True, spec
 
 
 class TorchBackend:
@@ -334,9 +398,40 @@ class TorchBackend:
             """Enter detector state before enabling wrapper logging."""
 
             trace = cast("Trace", session)
-            with capture_escape_guard(trace):
-                with capture_completeness_witness(trace):
-                    with _state.active_logging(trace):
+            with capture_escape_guard(trace), capture_completeness_witness(trace):
+                # L7a Layer-1 mode belt: escalated device-neutral escape
+                # refusals for structure_only=True sessions; a no-op context
+                # on the default path (zero-diff). The plain scalar-escape
+                # warning belt hands off to it in-mode (its module notes why).
+                with structure_only_escape_belt(trace), capture_scalar_escape_warning(trace):
+                    # Plane-W completion authority (merge-ranks C2): a no-op
+                    # for unarmed captures; for armed captures it installs the
+                    # capture-scoped funcol wait interposition and settles
+                    # every funcol boundary's completion evidence on exit.
+                    from .funcol import distributed_recording_session
+
+                    with distributed_recording_session(trace), _state.active_logging(trace):
+                        # R54 wrapped-epoch check: model prep wrapped torch
+                        # BEFORE admission, so a concurrent unwrap_torch()
+                        # completing in between (it now holds the admission
+                        # lock through teardown) leaves this capture admitted
+                        # into an UNWRAPPED process -- the forward would run
+                        # with zero logging and return a silently empty Trace.
+                        # Refuse loudly instead.
+                        if not _state._is_decorated:
+                            from ..._errors import CaptureContextError
+
+                            raise CaptureContextError(
+                                "torch wrappers were removed between model "
+                                "preparation and capture admission (a "
+                                "concurrent unwrap_torch() call)",
+                                code="wrappers_removed_before_capture",
+                                remedy=(
+                                    "do not call unwrap_torch() concurrently "
+                                    "with capture entry; re-run tl.trace -- "
+                                    "the next capture re-installs the wrappers"
+                                ),
+                            )
                         yield
 
         return guarded_logging()
@@ -380,9 +475,10 @@ class TorchBackend:
              by inspecting the model's forward() signature.
           3. ``safe_copy_args/kwargs``: clone tensors so in-place device moves
              (in ``fetch_label_move_input_tensors``) don't mutate the caller's data.
-          4. Detect model device from first param or buffer (for auto-moving inputs).
+          4. Detect model device from first param or buffer (for auto-moving
+             inputs). A model with neither pins no device: ``model_device`` is
+             ``None`` and inputs are never moved.
         """
-        del session
         torch_model = cast(torch.nn.Module, model)
         if isinstance(torch_model, torch.nn.DataParallel):
             torch_model = torch_model.module
@@ -394,20 +490,36 @@ class TorchBackend:
         if not input_kwargs:
             input_kwargs = {}
 
-        # Detect device from first param or buffer; fall back to CPU for param-free models.
+        # Detect device from first param or buffer. A model with NO parameters
+        # and NO buffers pins no device: eager execution runs each op on its
+        # operands' devices, so the inputs must stay exactly where the caller
+        # put them (``None`` = no move). The historical ``"cpu"`` fallback
+        # silently dragged CUDA inputs to the CPU and computed the whole
+        # forward there -- first observed on real H200 hardware when the
+        # CUPTI correlation matrix came back empty because the "CUDA" capture
+        # had launched zero kernels.
         first_param = next(torch_model.parameters(), None)
         first_buffer = next(torch_model.buffers(), None)
         if first_param is not None:
-            model_device: object = first_param.device
+            model_device: object | None = first_param.device
         elif first_buffer is not None:
             model_device = first_buffer.device
         else:
-            model_device = "cpu"
+            model_device = None
 
-        # Clone tensors to protect user's originals from in-place device moves.
-        input_args = safe_copy_args(input_args)
+        # Copy args and kwargs as ONE graph so repeated tensor identity, shared
+        # storage, view geometry, strides, and offsets survive caller protection.
+        input_args, input_kwargs, input_copy_gaps = safe_copy_input_tree(
+            input_args,
+            input_kwargs,
+            require_distinct_tensor_sites=bool(getattr(session, "intervention_ready", False)),
+        )
+        _record_input_semantics_gaps(
+            session,
+            input_copy_gaps,
+            reason="input_copy_semantics_unverifiable",
+        )
         input_arg_names = _get_input_arg_names(torch_model, input_args)
-        input_kwargs = safe_copy_kwargs(input_kwargs)
 
         return input_args, input_kwargs, input_arg_names, model_device
 
@@ -432,7 +544,9 @@ class TorchBackend:
         input_kwargs:
             Copied keyword inputs that may be mutated for internal device moves.
         model_device:
-            Device selected by :meth:`setup_inputs_and_device`.
+            Device selected by :meth:`setup_inputs_and_device`, or ``None``
+            for a device-less (parameter- and buffer-free) model whose inputs
+            must stay on their own devices.
 
         Returns
         -------
@@ -441,19 +555,47 @@ class TorchBackend:
 
         Notes
         -----
-        Handles nested structures (lists, tuples, dicts) up to ``search_depth=5``.
+        Handles nested structures (lists, tuples, dicts) up to
+        ``INPUT_SEARCH_DEPTH_LIMIT`` with cycle-safe traversal. Reaching that explicit
+        limit records the unresolved path and fails the completeness witness closed.
         Each tensor gets a hierarchical address string like ``"input.x"`` or
         ``"input.x.0.nested"`` that is stored as its ``io_role``.
         """
-        del session
-        input_arg_tensors = [
-            get_vars_of_type_from_obj(arg, torch.Tensor, search_depth=5, return_addresses=True)
-            for arg in input_args
-        ]
-        input_kwarg_tensors = [
-            get_vars_of_type_from_obj(kwarg, torch.Tensor, search_depth=5, return_addresses=True)
-            for kwarg in input_kwargs.values()
-        ]
+        input_arg_tensors = []
+        input_kwarg_tensors = []
+        traversal_gaps: list[str] = []
+        for arg_index, arg in enumerate(input_args):
+            unresolved: list[str] = []
+            input_arg_tensors.append(
+                get_vars_of_type_from_obj(
+                    arg,
+                    torch.Tensor,
+                    search_depth=INPUT_SEARCH_DEPTH_LIMIT,
+                    return_addresses=True,
+                    depth_exceeded_paths=unresolved,
+                )
+            )
+            arg_name = input_arg_names[arg_index]
+            traversal_gaps.extend(
+                f"input.{arg_name}{f'.{path}' if path else ''}" for path in unresolved
+            )
+        for key, kwarg in input_kwargs.items():
+            unresolved = []
+            input_kwarg_tensors.append(
+                get_vars_of_type_from_obj(
+                    kwarg,
+                    torch.Tensor,
+                    search_depth=INPUT_SEARCH_DEPTH_LIMIT,
+                    return_addresses=True,
+                    depth_exceeded_paths=unresolved,
+                )
+            )
+            traversal_gaps.extend(f"input.{key}{f'.{path}' if path else ''}" for path in unresolved)
+        _record_input_semantics_gaps(
+            session,
+            traversal_gaps,
+            reason="input_traversal_depth_exceeded",
+        )
         # Move each tensor to model device.  Plain tuples must be temporarily
         # converted to lists for item assignment, then converted back to
         # preserve type.  This roundtrip only applies to *exact* ``tuple``
@@ -465,12 +607,19 @@ class TorchBackend:
         # silently discard its identity and break downstream named-field
         # access (``batch.edge_features``); ``_assign_nested_input_value``
         # already knows how to mutate those in place via ``attr`` addressing.
+        moved_tensors_by_id: dict[int, torch.Tensor] = {}
         for arg_idx, arg in enumerate(input_args):
             was_tuple = type(arg) is tuple
             if was_tuple:
                 input_args[arg_idx] = list(arg)
             for tensor_idx, (tensor, addr, addr_full) in enumerate(input_arg_tensors[arg_idx]):
-                moved_tensor = tensor.to(model_device)
+                moved_tensor = moved_tensors_by_id.get(id(tensor))
+                if moved_tensor is None:
+                    # ``model_device is None`` = the model pins no device
+                    # (no parameters or buffers); inputs stay on their own
+                    # devices, matching eager semantics.
+                    moved_tensor = tensor if model_device is None else tensor.to(model_device)
+                    moved_tensors_by_id[id(tensor)] = moved_tensor
                 if bool(getattr(tensor, INPUT_WAS_PARAMETER_ATTR, False)):
                     setattr(moved_tensor, INPUT_WAS_PARAMETER_ATTR, True)
                 input_arg_tensors[arg_idx][tensor_idx] = (moved_tensor, addr, addr_full)
@@ -483,9 +632,12 @@ class TorchBackend:
             if was_tuple and isinstance(input_args[arg_idx], list):
                 input_args[arg_idx] = tuple(input_args[arg_idx])
 
-        for kwarg_idx, (key, val) in enumerate(input_kwargs.items()):
+        for kwarg_idx, (key, _val) in enumerate(input_kwargs.items()):
             for tensor_idx, (tensor, addr, addr_full) in enumerate(input_kwarg_tensors[kwarg_idx]):
-                moved_tensor = tensor.to(model_device)
+                moved_tensor = moved_tensors_by_id.get(id(tensor))
+                if moved_tensor is None:
+                    moved_tensor = tensor if model_device is None else tensor.to(model_device)
+                    moved_tensors_by_id[id(tensor)] = moved_tensor
                 if bool(getattr(tensor, INPUT_WAS_PARAMETER_ATTR, False)):
                     setattr(moved_tensor, INPUT_WAS_PARAMETER_ATTR, True)
                 input_kwarg_tensors[kwarg_idx][tensor_idx] = (moved_tensor, addr, addr_full)
@@ -500,8 +652,12 @@ class TorchBackend:
         # Address format: "input.<argname>" or "input.<argname>.<nested_path>"
         input_tensors = []
         input_tensor_addresses = []
+        seen_tensor_ids: set[int] = set()
         for arg_idx, arg_tensors in enumerate(input_arg_tensors):
             for tensor, addr, addr_full in arg_tensors:
+                if id(tensor) in seen_tensor_ids:
+                    continue
+                seen_tensor_ids.add(id(tensor))
                 input_tensors.append(tensor)
                 tensor_addr = f"input.{input_arg_names[arg_idx]}"
                 if addr != "":
@@ -510,6 +666,9 @@ class TorchBackend:
 
         for arg_idx, kwarg_tensors in enumerate(input_kwarg_tensors):
             for tensor, addr, addr_full in kwarg_tensors:
+                if id(tensor) in seen_tensor_ids:
+                    continue
+                seen_tensor_ids.add(id(tensor))
                 input_tensors.append(tensor)
                 tensor_addr = f"input.{list(input_kwargs.keys())[arg_idx]}"
                 if addr != "":
@@ -689,10 +848,8 @@ class TorchBackend:
         # cardinality/depth: bare one-tensor sets, nested sets, opaque tensor
         # holders, set subclasses, and multi-tensor collapses alike. Ordinary
         # analysis capture is unaffected by the stamp.
-        setattr(
-            self_trace,
-            "_runnable_output_losslessness",
-            runnable_output_losslessness(outputs, output_entries),
+        self_trace._runnable.output_losslessness = runnable_output_losslessness(
+            outputs, output_entries
         )
         # The container_spec is only user-facing metadata when explicitly opted
         # into via capture_container_structure (or implied by intervention_ready);
@@ -729,17 +886,9 @@ class TorchBackend:
                 return_addresses=True,
                 allow_repeats=True,
             )
-        # Remove duplicate structural output addresses.
-        addresses_seen = set()
-        output_tensors_w_addresses = []
-        for entry in output_tensors_w_addresses_all:
-            if entry[1] in addresses_seen:
-                continue
-            output_tensors_w_addresses.append(entry)
-            addresses_seen.add(entry[1])
-
-        output_tensors = [t for t, _, _ in output_tensors_w_addresses]
-        output_tensor_addresses = [addr for _, addr, _ in output_tensors_w_addresses]
+        output_tensors, output_tensor_addresses = _dedupe_output_addresses(
+            output_tensors_w_addresses_all
+        )
 
         attributable_output_tensors: list[torch.Tensor] = []
         attributable_output_tensor_addresses: list[str] = []
@@ -756,13 +905,49 @@ class TorchBackend:
             if _label_raw is None:
                 if getattr(self_trace, "_raw_transform_escape_detected", False):
                     continue
-                raise RuntimeError(
+                from ..._errors import OutputAttributionError
+
+                try:
+                    shape_text = str(tuple(t.shape))
+                except RuntimeError:
+                    # Nested tensors raise from ``.shape``; the refusal must
+                    # stay typed instead of crashing on its own message (R65).
+                    shape_text = "<unavailable: nested>" if t.is_nested else "<unavailable>"
+                if getattr(t, "is_nested", False):
+                    # An unlabeled NESTED output is an unsupported tensor
+                    # variant constructed inside forward (protocol-invisible
+                    # constructors like torch.nested.nested_tensor are never
+                    # logged), NOT a pre-bound-function escape -- the escape
+                    # remedy can never fix it (R65: typed-misdiagnosis
+                    # successor of the round-4 raw crash).
+                    raise OutputAttributionError(
+                        "TorchLens could not attribute a model output tensor to any "
+                        f"traced op (output address {output_address!r}, "
+                        f"shape={shape_text}, dtype={t.dtype}): the output is a NESTED "
+                        "tensor constructed inside forward(), an unsupported tensor "
+                        "variant TorchLens cannot log. Remedy: build the nested tensor "
+                        "outside the traced region, or pad to a dense tensor before "
+                        "the ops you want captured.",
+                        code="output_unsupported_tensor_variant",
+                        remedy=(
+                            "build the nested tensor outside the traced region, or "
+                            "pad to a dense tensor before the ops you want captured"
+                        ),
+                        output_address=output_address,
+                    )
+                raise OutputAttributionError(
                     "TorchLens could not attribute a model output tensor to any traced op "
                     f"(output address {output_address!r}, "
-                    f"shape={tuple(t.shape)}, dtype={t.dtype}). This may indicate an opaque "
+                    f"shape={shape_text}, dtype={t.dtype}). This may indicate an opaque "
                     "execution boundary or a pre-bound torch function that escaped wrapping. "
                     "Use ordinary torch module attributes during forward, or bind/import torch "
-                    "functions after TorchLens has wrapped torch."
+                    "functions after TorchLens has wrapped torch.",
+                    code="output_attribution_failed",
+                    remedy=(
+                        "use ordinary torch module attributes during forward, or "
+                        "bind/import torch functions after TorchLens has wrapped torch"
+                    ),
+                    output_address=output_address,
                 )
             attributable_output_tensors.append(t)
             attributable_output_tensor_addresses.append(output_address)
@@ -770,19 +955,23 @@ class TorchBackend:
                 self_trace.output_layers.append(_label_raw)
                 event = self_trace.capture_events.op_event_by_label_raw.get(_label_raw)
                 if event is not None:
-                    updated_event = _promote_layers_to_save_output_parent(
-                        self_trace,
-                        event,
-                        t,
+                    promoted_output, promoted_policy, promoted_matched, promoted_spec = (
+                        _promote_layers_to_save_output_parent(
+                            self_trace,
+                            event,
+                            t,
+                        )
                     )
-                    replace_op_event(
-                        self_trace,
-                        _label_raw,
-                        is_output_parent=True,
-                        output=updated_event.output,
-                        policy=updated_event.policy,
-                        predicate_matched=updated_event.predicate_matched,
-                        capture_spec=updated_event.capture_spec,
+                    self_trace.capture_events.append_amendment(
+                        amend_output_parent_promotion(
+                            event.seq,
+                            _label_raw,
+                            is_output_parent=True,
+                            output=promoted_output,
+                            policy=promoted_policy,
+                            predicate_matched=promoted_matched,
+                            capture_spec=promoted_spec,
+                        )
                     )
 
         return attributable_output_tensors, attributable_output_tensor_addresses
@@ -952,20 +1141,52 @@ class TorchBackend:
     def finalize_forward_session(
         self,
         session: object,
-        trace_state: TraceBuildState | None = None,
+        trace_state: RawGraphWorkspace,
     ) -> None:
         """Run torch post-forward reconciliation before output extraction."""
-        del trace_state
-        reconcile_buffer_writes(cast("Trace", session))
+        reconcile_buffer_writes(cast("Trace", session), trace_state)
 
     def cleanup_halted_forward_session(self, session: object, prepared_model: object) -> None:
         """Clean up torch metadata after a halted forward capture."""
         self.cleanup_model_session(session, prepared_model)
-        raw_layer_dict = getattr(session, "_raw_layer_dict", {})
+        # F5: the raw-graph workspace may already be gone when the halt fired
+        # around a postprocess-tail boundary; a missing workspace must degrade
+        # gracefully instead of masking the in-flight signal with
+        # AttributeError.
+        raw_graph_ws = getattr(session, "__dict__", {}).get("_raw_graph_ws")
+        if raw_graph_ws is None:
+            return
+        raw_layer_dict = raw_graph_ws.raw_layer_dict
         for label in list(raw_layer_dict.keys()):
             entry = raw_layer_dict.get(label)
             if entry is not None and hasattr(entry, "out") and entry.out is not None:
                 _tl.clear_meta(entry.out)
+
+    @staticmethod
+    def _warn_without_masking(
+        exc: BaseException,
+        message: str,
+        category: type[Warning],
+        stacklevel: int,
+    ) -> None:
+        """Emit one failure-path advisory without ever masking ``exc``.
+
+        A warnings-as-error filter raises the advisory AT THE WARN SITE;
+        letting that escape the failed-capture cleanup would REPLACE the
+        user's real forward exception -- and with it the ``exc.partial_log``
+        recovery the advisory's own text advertises (b3-opus-R07-1). The
+        advisory degrades to an exception note instead; the user's exception
+        stays the one that propagates.
+        """
+
+        try:
+            warnings.warn(message, category, stacklevel=stacklevel + 1)
+        except Exception as advisory_error:
+            with contextlib.suppress(Exception):
+                exc.add_note(
+                    "TorchLens advisory suppressed (a warnings filter raised it "
+                    f"as {type(advisory_error).__name__}): {message}"
+                )
 
     def cleanup_failed_forward_session(
         self,
@@ -977,35 +1198,127 @@ class TorchBackend:
         # active_logging's __exit__ already turned off the toggle.
         # Clean up model session state and strip TorchLens metadata from any
         # partially-constructed tensor entries to avoid stale references (#110).
-        from ...partial import PartialTrace
+        from ...partial import PartialTrace, _register_failed_capture
+
+        # Stamp the failed forward's ACTUAL buffer-write record (value-changing
+        # journal events) on the exception while the journal is still live —
+        # ``cleanup_model_session`` below clears ``capture_events``, and the
+        # rescue driver needs this record to refuse a double-forward re-run
+        # after an output-attribution failure (R16-2 for the failed-primary
+        # trigger). Only an exhaustive session arms the tracker, so only there
+        # is an empty journal proof of "no writes".
+        if getattr(session, "capture_mode", None) == "exhaustive":
+            events = getattr(getattr(session, "capture_events", None), "buffer_write_events", None)
+            if events is not None:
+                with contextlib.suppress(Exception):
+                    exc._torchlens_actual_buffer_writes = tuple(  # type: ignore[attr-defined]
+                        str(getattr(event, "address", None) or "?")
+                        for event in events
+                        if getattr(event, "value_changed", None) is not False
+                    )
 
         if getattr(session, "capture_mode", None) == "predicate":
             from ...ir import CaptureEvents
 
             events = getattr(session, "capture_events", None)
             if events is not None:
+                # Snapshot the failing pass through the sanctioned merge path:
+                # concat clones and re-stamps every mergeable lane under the
+                # declared merge law, keeping the snapshot's counter coherent
+                # with its seq values (a direct lane splice preserved source
+                # seqs that collided with the re-stamped op lane).
                 failed_fastlog_events = CaptureEvents()
-                failed_fastlog_events.extend(list(getattr(events, "op_events", ())))
-                failed_fastlog_events.module_prep_events.extend(events.module_prep_events)
-                failed_fastlog_events.module_enter_events.extend(events.module_enter_events)
-                failed_fastlog_events.module_exit_events.extend(events.module_exit_events)
-                failed_fastlog_events.pre_hook_events.extend(events.pre_hook_events)
+                failed_fastlog_events.concat(events)
                 setattr(session, "_failed_fastlog_capture_events", failed_fastlog_events)
+        # Partial diagnostics are BEST EFFORT; the model-session teardown is not.
+        # The arms below catch ``Exception``, so an interruption (KeyboardInterrupt,
+        # SystemExit) raised while building or attaching the partial trace used to
+        # escape straight past ``cleanup_model_session`` -- leaving the user's model
+        # with TorchLens-forced ``requires_grad``, ``tl_*`` metadata and an
+        # installed buffer tracker. The ``finally`` guarantees teardown without
+        # swallowing the interruption.
         try:
-            exc.partial_log = PartialTrace.from_trace(  # type: ignore[attr-defined]
-                cast("Trace", session),
-                exc,
-            )
-        except Exception:
-            pass
-        self.cleanup_model_session(session, prepared_model)
-        raw_layer_dict = getattr(session, "_raw_layer_dict", {})
-        for label in list(raw_layer_dict.keys()):
-            entry = raw_layer_dict.get(label)
-            if entry is not None and hasattr(entry, "out") and entry.out is not None:
-                _tl.clear_meta(entry.out)
-        print(
-            "************\nFeature extraction failed; returning model and environment to normal\n*************"
+            try:
+                partial_log = PartialTrace.from_trace(cast("Trace", session), exc)
+            except Exception as construction_error:
+                self._warn_without_masking(
+                    exc,
+                    "TorchLens could not construct partial-trace recovery after the "
+                    f"forward failed: {type(construction_error).__name__}: "
+                    f"{construction_error}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                with contextlib.suppress(Exception):
+                    exc.add_note(
+                        "TorchLens partial-trace construction also failed: "
+                        f"{type(construction_error).__name__}: {construction_error}"
+                    )
+            else:
+                try:
+                    exc.partial_log = partial_log  # type: ignore[attr-defined]
+                    # B8-45: the SUCCESS path must tell the user the recovery
+                    # exists too -- only the two attachment-FAILURE arms did.
+                    with contextlib.suppress(Exception):
+                        exc.add_note(
+                            "TorchLens attached partial capture diagnostics: inspect "
+                            "exc.partial_log, or recover it with "
+                            "torchlens.partial.from_failed_capture(exception)."
+                        )
+                except Exception as attachment_error:
+                    _register_failed_capture(exc, partial_log)
+                    self._warn_without_masking(
+                        exc,
+                        "The forward exception rejected TorchLens partial_log attachment; "
+                        "recovery remains available through "
+                        "torchlens.partial.from_failed_capture(exception). "
+                        f"Attachment error: {type(attachment_error).__name__}: "
+                        f"{attachment_error}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    with contextlib.suppress(Exception):
+                        exc.add_note(
+                            "TorchLens retained partial capture recovery in its bounded "
+                            "exception-identity registry; call "
+                            "torchlens.partial.from_failed_capture(exception)."
+                        )
+        finally:
+            self.cleanup_model_session(session, prepared_model)
+        # F5: a postprocess-tail failure (step 18-20 or the relation freeze)
+        # arrives here AFTER the transient-state seam popped the raw-graph
+        # workspace. The unguarded read used to double-fault with
+        # AttributeError, MASKING the original exception (it survived only as
+        # __context__) and losing partial diagnostics; degrade gracefully so
+        # the original failure propagates.
+        raw_graph_ws = getattr(session, "__dict__", {}).get("_raw_graph_ws")
+        if raw_graph_ws is not None:
+            raw_layer_dict = raw_graph_ws.raw_layer_dict
+            for label in list(raw_layer_dict.keys()):
+                entry = raw_layer_dict.get(label)
+                if entry is not None and hasattr(entry, "out") and entry.out is not None:
+                    _tl.clear_meta(entry.out)
+        # B8-35/B8-44: the historical unconditional stdout banner ("Feature
+        # extraction failed; returning model and environment to normal") was
+        # factually false on rescue-recovered captures and supported
+        # return_partial flows, corrupted machine-readable stdout, and was
+        # unfilterable. One accurate ROUTED warning replaces it, naming what
+        # actually happened and where the diagnostics live; stacklevel targets
+        # the user's tl.trace call through the driver frames. The dedicated
+        # category (a RuntimeWarning subclass, so user filters keep matching)
+        # lets the rescue driver defer it while a rescue re-run can still
+        # swallow this failure — a successful rescue drops the advisory
+        # instead of pointing users at an exception they never receive.
+        from .rescue import CaptureAttemptFailedWarning
+
+        self._warn_without_masking(
+            exc,
+            "TorchLens capture attempt failed "
+            f"({type(exc).__name__}); the model and torch environment were "
+            "restored. Partial diagnostics ride the exception (exc.partial_log "
+            "/ torchlens.partial.from_failed_capture).",
+            CaptureAttemptFailedWarning,
+            stacklevel=4,
         )
 
     def cleanup_forward_memory(self, session: object) -> None:
@@ -1014,21 +1327,53 @@ class TorchBackend:
         Parameters
         ----------
         session:
-            Active trace session, unused by torch CUDA cache cleanup.
+            Active trace session, consulted for the capture-touched-CUDA
+            predicate before clearing the allocator cache.
 
         Returns
         -------
         None
-            CUDA allocator cache is cleared when CUDA is available.
+            CUDA allocator cache is cleared when this capture touched CUDA.
         """
 
-        del session
-        if _is_cuda_available():
+        # R16-4b: an unconditional empty_cache() stalled EVERY capture teardown
+        # on CUDA hosts (synchronizes the device and drops the warm allocator
+        # arena) even for pure-CPU captures. Gate on the capture-touched-CUDA
+        # predicate, matching the postprocess executor site.
+        from ...utils.tensor_utils import capture_touched_cuda
+
+        if _is_cuda_available() and capture_touched_cuda(session):
             torch.cuda.empty_cache()
 
 
+def _dedupe_output_addresses(
+    entries: list[tuple[torch.Tensor, str, Any]],
+) -> tuple[list[torch.Tensor], list[str]]:
+    """Drop entries repeating an already-seen structural output address.
+
+    Parameters
+    ----------
+    entries:
+        ``(tensor, address, container_spec)`` output entries in walk order.
+
+    Returns
+    -------
+    tuple[list[torch.Tensor], list[str]]
+        First-occurrence output tensors and their display addresses.
+    """
+
+    addresses_seen: set[str] = set()
+    deduped = []
+    for entry in entries:
+        if entry[1] in addresses_seen:
+            continue
+        deduped.append(entry)
+        addresses_seen.add(entry[1])
+    return [t for t, _, _ in deduped], [addr for _, addr, _ in deduped]
+
+
 def _register_model_output_container_snapshot(
-    trace: "Trace",
+    trace: Trace,
     output: object,
     output_entries: list[
         tuple[torch.Tensor, tuple[OutputPathComponent, ...], ContainerSpec | None]
@@ -1065,13 +1410,13 @@ def _register_model_output_container_snapshot(
                 occ_index=occ_index,
             )
         )
-    registry = trace._ensure_build_state().container_registry
+    registry = trace._wrapper_runtime_ws.container_registry
     registry.register_snapshot(
         output,
         site=ModelSite(model_ref="self:1", position="return"),
         role=Role.MODEL_OUTPUT,
         phase=Phase.POST_CALL,
-        observed_at_event_index=int(getattr(trace, "_layer_counter", 0)),
+        observed_at_event_index=trace._raw_graph_ws.layer_counter,
         spec=spec,
         leaf_occurrences=tuple(occurrences),
         reconstructable=reconstructable,
@@ -1081,14 +1426,14 @@ def _register_model_output_container_snapshot(
         site=ModelSite(model_ref="self:1", position="return"),
         role=Role.CALL_OUTPUT,
         phase=Phase.POST_CALL,
-        observed_at_event_index=int(getattr(trace, "_layer_counter", 0)),
+        observed_at_event_index=trace._raw_graph_ws.layer_counter,
         spec=spec,
         leaf_occurrences=tuple(occurrences),
         reconstructable=reconstructable,
     )
 
 
-def _is_direct_registered_buffer_output(trace: "Trace", tensor: torch.Tensor) -> bool:
+def _is_direct_registered_buffer_output(trace: Trace, tensor: torch.Tensor) -> bool:
     """Return whether an unlabeled output is a registered source-model buffer.
 
     Parameters
@@ -1113,7 +1458,7 @@ def _is_direct_registered_buffer_output(trace: "Trace", tensor: torch.Tensor) ->
     return any(tensor is buffer for _address, buffer in model.named_buffers())
 
 
-def _model_input_output_label(trace: "Trace", tensor: torch.Tensor) -> str | None:
+def _model_input_output_label(trace: Trace, tensor: torch.Tensor) -> str | None:
     """Return the input-source label when an unlabeled output is a model input.
 
     Parameters
@@ -1167,13 +1512,16 @@ def _same_tensor_storage_identity(left: torch.Tensor, right: torch.Tensor) -> bo
         return True
     if left.dtype != right.dtype or left.device != right.device:
         return False
-    if tuple(left.shape) != tuple(right.shape) or tuple(left.stride()) != tuple(right.stride()):
-        return False
-    if left.storage_offset() != right.storage_offset():
-        return False
     try:
+        if tuple(left.shape) != tuple(right.shape) or tuple(left.stride()) != tuple(right.stride()):
+            return False
+        if left.storage_offset() != right.storage_offset():
+            return False
         return left.untyped_storage().data_ptr() == right.untyped_storage().data_ptr()
     except RuntimeError:
+        # Nested tensors raise from shape/stride/storage reads; a tensor whose
+        # layout metadata is unreadable cannot be structurally proven to be a
+        # marked input, so identity attribution conservatively says no (R65).
         return False
 
 

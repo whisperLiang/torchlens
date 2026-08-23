@@ -38,6 +38,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens._io._safe_unpickle import SafeBundleUnpickler, _safe_getattr
+from torchlens.errors import RunCapabilityUnavailableError
 from torchlens.intervention.errors import UntrustedCallableError
 from torchlens.intervention.resolver import resolve_function_registry_key
 from torchlens.intervention.types import FunctionRegistryKey
@@ -281,7 +282,10 @@ def test_runnable_load_blocks_from_file_creation(tmp_path: Path) -> None:
     manifest_path.write_text(json.dumps(manifest))
 
     loaded = tl.load(evil)
-    with pytest.raises(Exception):
+    with pytest.raises(
+        RunCapabilityUnavailableError,
+        match="analysis-only and has no sparse run descriptor",
+    ):
         loaded.run(inputs=torch.ones(1, 4))
     assert not target.exists(), "from_file created a file during run()"
 

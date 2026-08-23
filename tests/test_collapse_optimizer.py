@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
 import multiprocessing
 import os
-from pathlib import Path
 import queue
+import random
 import time
-from types import ModuleType
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,30 +17,39 @@ import torch
 
 import torchlens as tl
 import torchlens.visualization.auto_collapse as auto_collapse
+import torchlens.visualization.collapse_optimizer as collapse_optimizer
+import torchlens.visualization.source_graph as source_graph_module
 from torchlens.data_classes._trace_accessors import TraceOpAccessor
+from torchlens.visualization._render_common import format_collapsed_module_contents
 from torchlens.visualization.auto_collapse import (
+    _condensed_owner_for_op,
+    _condensed_owner_map,
     _resolve_relationship_op,
     analyze_collapse,
     resolve_collapse_fn,
     resolve_repeat_folds,
 )
 from torchlens.visualization.collapse_optimizer import (
+    _RESULT_CACHE,
+    _SCHEDULE_CACHE,
     K_CAP,
     MAX_SALIENCE_FLOOR,
     OptimizerWeights,
-    _FrontierPoint,
-    _OptimizerState,
-    _RESULT_CACHE,
-    _SCHEDULE_CACHE,
+    RoleComponent,
     _branch_salience,
     _child_address_map,
+    _child_segment_covered_ops,
     _eligible_module_box,
+    _FrontierPoint,
     _max_box_salience_score,
     _optimizer_total_units,
+    _OptimizerState,
     _plan_respects_max_dominance,
     _prune_frontier,
-    _rendered_own_unit_map,
     _rendered_module_hidden_counts,
+    _rendered_own_unit_map,
+    _same_role,
+    _segment_is_legal,
     _structural_digest_map,
     build_role_components,
     collapse_schedule,
@@ -55,7 +65,6 @@ from torchlens.visualization.collapse_plan import (
     collapse_plan_for_trace,
     count,
 )
-from torchlens.visualization._render_common import format_collapsed_module_contents
 
 tvm = pytest.importorskip("torchvision.models")
 
@@ -513,6 +522,7 @@ def _optimizer_state_for_floor(trace: tl.Trace, context: RenderContext) -> _Opti
         single_member_expanded_cache={},
         box_cost_cache={},
         branch_salience_cache={},
+        output_shape_cache={},
         weights=OptimizerWeights(),
         g_star=1.0,
         total_ops=_optimizer_total_units(trace, context),
@@ -640,18 +650,22 @@ def test_collapse_adjacency_index_build_and_visit_bound(
     original_resolver = auto_collapse._resolve_relationship_op
     counts = {"index_builds": 0, "relationship_visits": 0}
 
-    def counted_index(target: tl.Trace) -> Mapping[str, str]:
+    def counted_index(
+        target: tl.Trace, revision: tuple[object, ...] | None = None
+    ) -> Mapping[str, str]:
         """Count cache-miss index constructions."""
 
         if target not in auto_collapse._OP_ADJACENCY_INDEX_CACHE:
             counts["index_builds"] += 1
-        return original_index(target)
+        return original_index(target, revision)
 
-    def counted_resolver(target: tl.Trace, label: str) -> Any:
+    def counted_resolver(
+        target: tl.Trace, label: str, revision: tuple[object, ...] | None = None
+    ) -> Any:
         """Count relationship-resolution visits."""
 
         counts["relationship_visits"] += 1
-        return original_resolver(target, label)
+        return original_resolver(target, label, revision)
 
     def reject_fuzzy_lookup(self: TraceOpAccessor, key: str) -> Any:
         """Fail if an ordinary relationship label requires fuzzy lookup."""
@@ -717,7 +731,20 @@ def test_recurrent_relationship_fallback_is_bounded_and_equivalent(
 
 
 def test_relationship_resolver_preserves_ambiguity_error() -> None:
-    """A genuinely ambiguous recurrent relationship keeps the accessor error."""
+    """A genuinely ambiguous recurrent relationship keeps the accessor error.
+
+    Vehicle rebuilt for the immutable relation views (finding B1-19a). The plant
+    used to be ``relationship_owner.children[0] = <ambiguous label>``, which the
+    M6 type break turned into ``TypeError: 'tuple' object does not support item
+    assignment`` -- a DEAD plant, i.e. a silently disarmed tripwire, not a fixed
+    bug. Whole-sequence ASSIGNMENT is still the sanctioned mutation on a finished
+    trace, so the plant now goes through that (and the raw tuple normalizes back
+    to the view type), keeping the property under test intact: the internal
+    relationship resolver must raise the SAME ambiguity error the public
+    accessor raises, never silently pick one of the candidates.
+    """
+
+    from torchlens._errors import AmbiguousOpLookupError
 
     trace = _trace(UnevenReusedSiblings(), torch.randn(2, 4))
     try:
@@ -725,13 +752,24 @@ def test_relationship_resolver_preserves_ambiguity_error() -> None:
             op for op in trace.ops if len(trace.ops.resolve_all(op.layer_label)) > 1
         )
         relationship_owner = next(op for op in trace.ops if op.children)
-        original_child = relationship_owner.children[0]
-        relationship_owner.children[0] = recurrent_op.layer_label
+        original_children = tuple(relationship_owner.children)
+        # Pre-flight: the plant must really BE ambiguous, or every assertion
+        # below would pass vacuously on a resolvable label.
+        with pytest.raises(AmbiguousOpLookupError):
+            trace.ops[recurrent_op.layer_label]
+
+        relationship_owner.children = (recurrent_op.layer_label, *original_children[1:])
+        assert relationship_owner.children[0] == recurrent_op.layer_label
         auto_collapse._OP_ADJACENCY_INDEX_CACHE.pop(trace, None)
 
+        # Explicit, non-vacuous form of the property: the resolver refuses the
+        # planted ambiguous label rather than silently picking a pass.
+        with pytest.raises(AmbiguousOpLookupError):
+            _resolve_relationship_op(trace, recurrent_op.layer_label)
         _assert_relationship_resolution_matches_accessor(trace)
 
-        relationship_owner.children[0] = original_child
+        relationship_owner.children = original_children
+        assert tuple(relationship_owner.children) == original_children
     finally:
         trace.cleanup()
 
@@ -802,6 +840,108 @@ def test_role_components_split_heterogeneous_same_class_sequentials() -> None:
         trace.cleanup()
 
 
+def _pairwise_role_components(
+    trace: Any,
+    child_addresses: tuple[str, ...],
+    analysis: Any,
+    hidden_counts: Mapping[str, int] | None,
+) -> tuple[RoleComponent, ...]:
+    """Reference all-pairs union-find role partition driven by ``_same_role``."""
+
+    children = tuple(child for child in child_addresses if child in trace.modules)
+    parent_index = {child: index for index, child in enumerate(children)}
+    parent = {child: child for child in children}
+
+    def find(address: str) -> str:
+        current = address
+        while parent[current] != current:
+            parent[current] = parent[parent[current]]
+            current = parent[current]
+        return current
+
+    def union(left: str, right: str) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root == right_root:
+            return
+        if parent_index[left_root] <= parent_index[right_root]:
+            parent[right_root] = left_root
+        else:
+            parent[left_root] = right_root
+
+    for left_index, left in enumerate(children):
+        for right in children[left_index + 1 :]:
+            if _same_role(trace, left, right, analysis, hidden_counts or {}):
+                union(left, right)
+    grouped: dict[str, list[str]] = {}
+    for child in children:
+        grouped.setdefault(find(child), []).append(child)
+    return tuple(
+        RoleComponent(tuple(members))
+        for _, members in sorted(
+            grouped.items(),
+            key=lambda item: min(parent_index[member] for member in item[1]),
+        )
+    )
+
+
+def _role_stub_inputs(
+    labeled_counts: Mapping[str, tuple[str, int]],
+) -> tuple[Any, Any]:
+    """Return (trace, analysis) stubs for role-component inputs."""
+
+    modules = {
+        address: SimpleNamespace(class_name=class_name)
+        for address, (class_name, _) in labeled_counts.items()
+    }
+    signals = {
+        address: SimpleNamespace(address=address, hidden_ops=hidden_ops)
+        for address, (_, hidden_ops) in labeled_counts.items()
+    }
+    return SimpleNamespace(modules=modules), SimpleNamespace(signals=signals)
+
+
+@pytest.mark.smoke
+def test_role_components_match_pairwise_union_property() -> None:
+    """Sorted-run role components byte-match the all-pairs ``_same_role`` union."""
+
+    for trial in range(200):
+        rng = random.Random(trial)
+        n_children = rng.randint(0, 32)
+        labels = ["Block", "Stage", "Head", "Stem"][: rng.randint(1, 4)]
+        scale = rng.choice([3, 40, 500, 100_000])
+        labeled_counts = {
+            f"m{index}": (rng.choice(labels), rng.randint(0, scale)) for index in range(n_children)
+        }
+        trace, analysis = _role_stub_inputs(labeled_counts)
+        children = list(labeled_counts)
+        rng.shuffle(children)
+        # Unknown addresses must be filtered out identically by both paths.
+        children.insert(rng.randint(0, len(children) or 1), "not_a_module")
+        hidden_counts: Mapping[str, int] | None = None
+        if rng.random() < 0.5:
+            hidden_counts = {
+                address: rng.randint(-2, scale) for address in labeled_counts if rng.random() < 0.5
+            }
+        fast = build_role_components(trace, "self", tuple(children), analysis, hidden_counts)
+        reference = _pairwise_role_components(trace, tuple(children), analysis, hidden_counts)
+        assert fast == reference, f"trial={trial}"
+
+
+@pytest.mark.smoke
+def test_role_components_chain_connects_beyond_tolerance() -> None:
+    """Adjacent-in-mass siblings chain one component past the 1.5 pair tolerance."""
+
+    # Masses log2(1+n) = 0,1,2,3,4: each adjacent gap is 1.0 <= 1.5, but the
+    # extremes differ by 4.0, so connectivity must come from chaining.
+    labeled_counts = {f"m{index}": ("Block", 2**index - 1) for index in range(5)}
+    trace, analysis = _role_stub_inputs(labeled_counts)
+    children = tuple(labeled_counts)
+    fast = build_role_components(trace, "self", children, analysis)
+    assert fast == _pairwise_role_components(trace, children, analysis, None)
+    assert fast == (RoleComponent(children),)
+
+
 def test_default_routes_v2_and_rolled_auto() -> None:
     """The default auto/max and rolled collapse paths use v2."""
 
@@ -863,21 +1003,151 @@ def test_float_collapse_level_is_deterministic() -> None:
         trace.cleanup()
 
 
+def test_float_collapse_schedule_reuses_source_graph_and_plan_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold float schedule shares one source graph and equal immutable plan nodes."""
+
+    trace = _trace(UniformStack(depth=8), torch.randn(2, 8))
+    context = RenderContext()
+    original_build_source_graph = source_graph_module.build_source_graph
+    source_graph_calls = 0
+
+    def counted_build_source_graph(
+        candidate_trace: tl.Trace,
+        request: Any,
+    ) -> Any:
+        """Count normalized source-graph builds while preserving their result.
+
+        Parameters
+        ----------
+        candidate_trace:
+            Trace being normalized.
+        request:
+            Resolved rendering request.
+
+        Returns
+        -------
+        Any
+            Normalized source graph returned by the production builder.
+        """
+
+        nonlocal source_graph_calls
+        source_graph_calls += 1
+        return original_build_source_graph(candidate_trace, request)
+
+    monkeypatch.setattr(source_graph_module, "build_source_graph", counted_build_source_graph)
+    try:
+        _clear_collapse_caches(trace)
+        schedule = collapse_schedule(trace, context)
+
+        assert source_graph_calls == 1
+        canonical_nodes: dict[Any, Any] = {}
+        reused_values = 0
+        for step in schedule.steps:
+            for node in step.plan.nodes:
+                if node in canonical_nodes:
+                    reused_values += 1
+                    assert canonical_nodes[node] is node
+                else:
+                    canonical_nodes[node] = node
+        assert reused_values > 0
+    finally:
+        trace.cleanup()
+
+
+def test_condensed_owner_map_is_first_wins_and_built_once() -> None:
+    """The condensed owner inversion reads each child set once and preserves flow priority."""
+
+    class CountingChildSets(dict[str, set[str]]):
+        """Child-set mapping that counts indexed reads."""
+
+        reads = 0
+
+        def __getitem__(self, key: str) -> set[str]:
+            """Return one child set and count the indexed read.
+
+            Parameters
+            ----------
+            key:
+                Child address to read.
+
+            Returns
+            -------
+            set[str]
+                Operation labels in the requested child subtree.
+            """
+
+            type(self).reads += 1
+            return super().__getitem__(key)
+
+    flow_children = ("first", "second", "third")
+    child_sets = CountingChildSets(
+        {
+            "first": {"shared", "first_only"},
+            "second": {"shared", "second_only"},
+            "third": {"third_only"},
+        }
+    )
+    owner_by_op = _condensed_owner_map(flow_children, child_sets)
+
+    assert CountingChildSets.reads == len(flow_children)
+    for _ in range(50):
+        assert _condensed_owner_for_op("shared", owner_by_op) == "first"
+        assert _condensed_owner_for_op("second_only", owner_by_op) == "second"
+        assert _condensed_owner_for_op("parent_owned", owner_by_op) == "parent_owned"
+    assert CountingChildSets.reads == len(flow_children)
+
+
+@pytest.fixture
+def _restore_torch_num_threads() -> Iterator[None]:
+    """Snapshot and restore torch's process-global thread count around a test.
+
+    This test pins ``torch.set_num_threads(4)``; without restoration that value leaks
+    into torch's global state for the rest of the pytest process (observed leak:
+    baseline 10 -> 4), making later tests order-dependent. The fixture captures the
+    count before the test and restores it in ``finally``. (The subprocess-scoped
+    ``set_num_threads(2)`` elsewhere in this file is process-contained and needs no
+    restoration.)
+    """
+
+    original = torch.get_num_threads()
+    try:
+        yield
+    finally:
+        torch.set_num_threads(original)
+
+
 @pytest.mark.heavy
 @pytest.mark.parametrize(
     ("name", "builder", "x"),
     [
         ("resnet50", lambda: tvm.resnet50(weights=None), torch.randn(1, 3, 224, 224)),
         ("vit_b_16", lambda: tvm.vit_b_16(weights=None), torch.randn(1, 3, 224, 224)),
-        ("maxvit_t", lambda: tvm.maxvit_t(weights=None), torch.randn(1, 3, 224, 224)),
+        # slow cell (r3settle2 budget lint): the nested-schedule sweep on
+        # maxvit_t measures far beyond heavy's 20s ceiling.
+        pytest.param(
+            "maxvit_t",
+            lambda: tvm.maxvit_t(weights=None),
+            torch.randn(1, 3, 224, 224),
+            marks=pytest.mark.slow,
+        ),
         ("mobilenet_v2", lambda: tvm.mobilenet_v2(weights=None), torch.randn(1, 3, 224, 224)),
-        ("densenet201", lambda: tvm.densenet201(weights=None), torch.randn(1, 3, 224, 224)),
+        # slow cell (r3settle2 budget lint): densenet201's deep module tree
+        # measures minutes under the schedule sweep.
+        pytest.param(
+            "densenet201",
+            lambda: tvm.densenet201(weights=None),
+            torch.randn(1, 3, 224, 224),
+            marks=pytest.mark.slow,
+        ),
     ],
 )
 def test_float_collapse_schedule_monotone_and_nested(
     name: str,
     builder: Callable[[], torch.nn.Module],
     x: torch.Tensor,
+    _restore_torch_num_threads: None,
 ) -> None:
     """Float collapse schedule is monotone and nesting-coherent on requested models."""
 
@@ -973,6 +1243,18 @@ def test_bert_and_distilbert_small_config_auto_cuts_stay_pinned() -> None:
     """BERT-family small-config cuts do not move while freeing GPT-2 blocks."""
 
     transformers = _require_transformers()
+    # The pinned visible counts (BERT 23, DistilBERT 18) are calibrated for the DECLARED
+    # supported Transformers range (transformers~=4.45, i.e. >=4.45,<5.0). Transformers v5's
+    # "Bert-based Models Attention Refactor" (HF commit 155f7e2e / #38301, 2025-09-19) changed
+    # the BERT/DistilBERT program graph, legitimately shifting the honest collapse cut (BERT ->
+    # 21). That is an upstream model-graph change, NOT a TorchLens collapse regression (renders
+    # verified honest at both counts), so this version-sensitive golden is scoped to the
+    # supported range rather than rebaselined.
+    if int(transformers.__version__.split(".")[0]) >= 5:
+        pytest.skip(
+            f"BERT/DistilBERT collapse pins are calibrated for transformers<5.0; installed "
+            f"{transformers.__version__} changes the upstream model graph (HF #38301)."
+        )
     bert_config = transformers.BertConfig(
         num_hidden_layers=2,
         hidden_size=16,
@@ -1277,7 +1559,7 @@ def test_auto_plan_unaffected_by_max_salience_floor(
             "torchlens.visualization.collapse_optimizer.MAX_SALIENCE_FLOOR",
             0.0,
         )
-        _RESULT_CACHE[trace].pop((context, "auto"), None)
+        _RESULT_CACHE.pop(trace, None)
         auto_collapse_result = select_collapse_plan(trace, context, mode="auto")
 
         assert _plan_signature(auto_collapse_result.plan) == _plan_signature(baseline)
@@ -1300,3 +1582,419 @@ def test_v2_selection_latency_smoke() -> None:
         assert elapsed_ms < 2000.0 * budget_factor
     finally:
         trace.cleanup()
+
+
+def _reference_longest_legal_segment_prefix(
+    members: Sequence[str],
+    graph: Any,
+    analysis: Any,
+    hidden_counts: Mapping[str, int],
+    total_ops: int,
+    *,
+    dominance_limit: float,
+    vis_mode: str = "unrolled",
+) -> tuple[str, ...] | None:
+    """Naive forward prefix scan the optimized segment-run search must match.
+
+    This is the pre-optimization algorithm, kept verbatim as the differential
+    oracle: rescan the whole prefix for landmark members, probe chain-interval
+    legality for every prefix, recount hidden units from scratch, and keep the
+    last prefix that passed all three gates.
+    """
+
+    def hidden_units(addresses: tuple[str, ...]) -> int:
+        covered_ops = _child_segment_covered_ops(analysis, addresses)
+        if covered_ops:
+            if vis_mode == "rolled":
+                return len({str(label).rsplit(":", 1)[0] for label in covered_ops})
+            return len(covered_ops)
+        return sum(
+            hidden_counts.get(address, analysis.signals[address].hidden_ops)
+            for address in addresses
+        )
+
+    best: tuple[str, ...] | None = None
+    for end in range(2, len(members) + 1):
+        candidate = tuple(members[:end])
+        if any(analysis.signals[address].landmark_edges >= 2 for address in candidate):
+            continue
+        if not _segment_is_legal(candidate, graph):
+            continue
+        hidden = hidden_units(candidate)
+        if total_ops > 0 and hidden / total_ops > dominance_limit:
+            continue
+        best = candidate
+    return best
+
+
+class _SegmentPrefixProbe:
+    """Differential + call-count probe around the segment-run prefix search."""
+
+    def __init__(self) -> None:
+        """Start an empty probe."""
+
+        self.calls = 0
+        self.candidates = 0
+        self.legality_probes = 0
+        self.hidden_recounts = 0
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Patch the optimizer to cross-check every prefix search."""
+
+        module = "torchlens.visualization.collapse_optimizer"
+        real_prefix = collapse_optimizer._longest_legal_segment_prefix
+        real_legal = collapse_optimizer._segment_is_legal
+        real_covered = collapse_optimizer._child_segment_covered_ops
+
+        def counting_segment_is_legal(addresses: tuple[str, ...], graph: Any) -> bool:
+            self.legality_probes += 1
+            return real_legal(addresses, graph)
+
+        def counting_covered_ops(analysis: Any, addresses: tuple[str, ...]) -> tuple[str, ...]:
+            self.hidden_recounts += 1
+            return real_covered(analysis, addresses)
+
+        def checked_prefix(
+            members: Sequence[str],
+            graph: Any,
+            analysis: Any,
+            hidden_counts: Mapping[str, int],
+            total_ops: int,
+            **kwargs: Any,
+        ) -> tuple[str, ...] | None:
+            self.calls += 1
+            self.candidates += max(len(members) - 1, 0)
+            fast = real_prefix(members, graph, analysis, hidden_counts, total_ops, **kwargs)
+            slow = _reference_longest_legal_segment_prefix(
+                members, graph, analysis, hidden_counts, total_ops, **kwargs
+            )
+            assert fast == slow, (
+                f"segment-run prefix diverged for {len(members)} members: {fast!r} != {slow!r}"
+            )
+            return fast
+
+        monkeypatch.setattr(f"{module}._segment_is_legal", counting_segment_is_legal)
+        monkeypatch.setattr(f"{module}._child_segment_covered_ops", counting_covered_ops)
+        monkeypatch.setattr(f"{module}._longest_legal_segment_prefix", checked_prefix)
+
+
+def _exercise_collapse_surfaces(
+    model: torch.nn.Module,
+    x: torch.Tensor,
+    modes: tuple[str | float, ...] = ("auto", "max", 0.0, 0.25, 0.5, 0.75, 1.0),
+) -> None:
+    """Drive every collapse-planning surface that runs a segment-run search."""
+
+    trace = _trace(model, x)
+    try:
+        for mode in modes:
+            for vis_mode in ("unrolled", "rolled"):
+                select_collapse_plan(trace, RenderContext(vis_mode=vis_mode), mode=mode)
+        collapse_schedule(trace, RenderContext())
+    finally:
+        trace.cleanup()
+
+
+@pytest.mark.heavy
+@pytest.mark.parametrize(
+    ("factory", "shape"),
+    [
+        (lambda: UniformStack(depth=24), (2, 8)),
+        (lambda: UniqueWideFanModel(), (1, 4, 8, 8)),
+        (lambda: SequentialEncoderHead(), (2, 4)),
+        (lambda: SegmentPrefixTail(), (2, 8)),
+        (lambda: UnevenReusedSiblings(), (2, 4)),
+    ],
+)
+def test_segment_run_prefix_matches_naive_prefix_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: Callable[[], torch.nn.Module],
+    shape: tuple[int, ...],
+) -> None:
+    """The linearized segment-run search returns the naive scan's exact answer."""
+
+    probe = _SegmentPrefixProbe()
+    probe.install(monkeypatch)
+    _exercise_collapse_surfaces(factory(), torch.randn(*shape))
+
+    assert probe.calls > 0, "probe never fired; the differential check was vacuous"
+
+
+class FlatLinearChain(torch.nn.Module):
+    """Long chain of sibling linears -- the worst case for segment-run search."""
+
+    def __init__(self, depth: int = 64, width: int = 8) -> None:
+        """Initialize the chain."""
+
+        super().__init__()
+        self.layers = torch.nn.Sequential(*[torch.nn.Linear(width, width) for _ in range(depth)])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the chain."""
+
+        return self.layers(x)
+
+
+@pytest.mark.heavy
+@pytest.mark.serial
+def test_segment_run_prefix_work_does_not_grow_with_component_size() -> None:
+    """One long role component costs a bounded search, not one probe per prefix.
+
+    A flat sibling chain puts every member in one role component, so the naive
+    forward scan spent one chain-interval probe and one hidden-unit recount on
+    every prefix -- quadratic in the chain length. The linearized search settles
+    the landmark and dominance gates in one pass and probes down from the
+    longest surviving candidate, so its work must stay flat as the chain grows.
+    """
+
+    counts: dict[int, tuple[int, int, int]] = {}
+    for depth in (64, 128, 256):
+        probe = _SegmentPrefixProbe()
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            probe.install(monkeypatch)
+            _exercise_collapse_surfaces(
+                FlatLinearChain(depth=depth), torch.randn(1, 8), modes=("max",)
+            )
+        counts[depth] = (probe.candidates, probe.legality_probes, probe.hidden_recounts)
+
+    for depth, (candidates, probes, recounts) in counts.items():
+        assert probes <= candidates, f"depth {depth}: {probes} probes for {candidates} candidates"
+        assert recounts <= candidates, f"depth {depth}: {recounts} recounts for {candidates}"
+    assert counts[256][0] > 2 * counts[64][0], "the chain component never grew"
+    assert counts[256][1] <= 2 * counts[64][1], (
+        f"legality probes grew with component size: {counts[64][1]} -> {counts[256][1]}"
+    )
+    assert counts[256][2] <= 2 * counts[64][2] + 8, (
+        f"hidden-unit recounts grew with component size: {counts[64][2]} -> {counts[256][2]}"
+    )
+    assert counts[256][1] * 10 < counts[256][0], (
+        "probes did not fall far below the naive one-per-prefix count: "
+        f"{counts[256][1]} probes for {counts[256][0]} candidate prefixes"
+    )
+
+
+def test_segment_descriptor_parity_guard_survives_python_O() -> None:
+    """The label-honesty cardinality guards raise, not assert (r-b7 R24-2).
+
+    ``python -O`` strips asserts; these two guards defend the segment-box /
+    ``(xN)`` / ellipsis honesty contract on the DEFAULT ``draw(collapse=)``
+    path, so they must fire with assertions disabled too.
+    """
+
+    from torchlens.visualization.collapse_optimizer import (
+        _assert_segment_descriptor_parity,
+    )
+
+    with pytest.raises(RuntimeError, match="segment descriptor cardinality"):
+        _assert_segment_descriptor_parity((), {"phantom": object()})  # type: ignore[arg-type]
+
+
+def test_visible_plan_guards_survive_python_O() -> None:
+    """The empty-plan honesty guards raise, not assert (T9, grind-p3).
+
+    ``python -O`` strips asserts; the v2 select path and the floor fallback
+    both publish plans on the DEFAULT ``draw(collapse=)`` path, so an empty
+    plan must fail loudly with assertions disabled too.
+    """
+
+    from torchlens.visualization.collapse_optimizer import _assert_visible_plan
+
+    _assert_visible_plan(1, "v2 collapse plan")
+    with pytest.raises(RuntimeError, match="v2 collapse plan produced no visible nodes"):
+        _assert_visible_plan(0, "v2 collapse plan")
+    with pytest.raises(RuntimeError, match="collapse floor fallback produced no visible nodes"):
+        _assert_visible_plan(0, "collapse floor fallback")
+
+
+def test_rank_group_parity_guard_survives_python_O() -> None:
+    """The sibling rank-group emission guard raises, not asserts (T9, grind-p3).
+
+    ``python -O`` strips asserts; the queued-vs-emitted parity check runs on
+    the DEFAULT ``draw()`` path, so a dropped sibling rank group must fail
+    loudly with assertions disabled too.
+    """
+
+    # Moved out of _render_dot by 1876dde2 (renderer thinning) into the region
+    # emitter that actually calls it; the guard itself is unchanged.
+    from torchlens.visualization._render_regions import _assert_rank_group_parity
+
+    _assert_rank_group_parity(3, 3)
+    with pytest.raises(RuntimeError, match="sibling rank-group emission mismatch"):
+        _assert_rank_group_parity(3, 2)
+
+
+def test_collapse_optimizer_ops_ceiling_declines_disclosed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Above the ops ceiling the optimizer declines DISCLOSED, never computes.
+
+    b8-sol R60: the frontier selection is superlinear (~n^1.75) with no
+    preflight node ceiling, time budget, or typed refusal, so one
+    ``draw(collapse="auto"|"max")`` on a several-thousand-op model burned
+    CPU-hours. The ceiling must (a) warn and render uncollapsed on the draw
+    path, (b) refuse typed from ``Trace.collapse_plan()``, and (c) degrade
+    the schedule to its single full-graph step -- while sub-ceiling traces
+    are untouched.
+    """
+
+    import warnings as warnings_module
+
+    from torch import nn
+
+    from torchlens._errors import InvalidArgumentError
+    from torchlens.visualization import collapse_optimizer as optimizer_module
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 4), nn.ReLU())
+    trace = tl.trace(model, torch.randn(2, 4))
+
+    # Sub-ceiling: the real ceiling admits this trace and produces a plan.
+    assert trace.collapse_plan(mode="max") is not None
+
+    monkeypatch.setattr(optimizer_module, "COLLAPSE_OPTIMIZER_MAX_OPS", 2)
+    fresh = tl.trace(model, torch.randn(2, 4))
+
+    with pytest.warns(UserWarning, match="skipping smart collapse"):
+        dot = fresh.draw(
+            collapse="max",
+            vis_save_only=True,
+            vis_fileformat="dot",
+            order_siblings=False,
+        )
+    assert dot  # uncollapsed render still ships
+
+    with warnings_module.catch_warnings():
+        warnings_module.simplefilter("ignore", UserWarning)
+        with pytest.raises(InvalidArgumentError) as exc_info:
+            fresh.collapse_plan(mode="auto")
+    assert exc_info.value.fields["code"] == "collapse_plan_unavailable"
+    assert "collapse_ops_ceiling" in exc_info.value.fields["reason"]
+
+    with warnings_module.catch_warnings():
+        warnings_module.simplefilter("ignore")
+        schedule = fresh.collapse_schedule()
+    assert len(schedule.steps) == 1
+
+
+def test_collapse_ceiling_warning_category_and_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ceiling-decline warning is a TorchLensWarning attributed to the caller.
+
+    R19 (hunt-6): the decline advisory was a bare ``UserWarning`` with
+    ``stacklevel=2``, which (a) could not be filtered/promoted via the
+    ``TorchLensWarning`` taxonomy and (b) blamed an internal torchlens frame
+    (``_trace_stats.py``) instead of the user's ``draw()`` call site.
+    """
+
+    import warnings as warnings_module
+
+    from torchlens.errors import TorchLensWarning
+
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.ReLU())
+    monkeypatch.setattr(collapse_optimizer, "COLLAPSE_OPTIMIZER_MAX_OPS", 2)
+    fresh = tl.trace(model, torch.randn(2, 4))
+
+    with warnings_module.catch_warnings(record=True) as caught:
+        warnings_module.simplefilter("always")
+        fresh.draw(
+            collapse="max",
+            vis_save_only=True,
+            vis_fileformat="dot",
+            order_siblings=False,
+        )
+    declines = [w for w in caught if "skipping smart collapse" in str(w.message)]
+    assert len(declines) == 1
+    decline = declines[0]
+    # Selectable via the package taxonomy, not just blanket UserWarning.
+    assert issubclass(decline.category, TorchLensWarning)
+    # Names the governing constant so users can see the threshold they crossed.
+    assert "COLLAPSE_OPTIMIZER_MAX_OPS" in str(decline.message)
+    # Attributed to the caller's frame (this file), not a torchlens internal.
+    assert decline.filename == __file__
+
+
+def test_collapse_ceiling_documented_lockstep() -> None:
+    """The compute ceiling must stay documented everywhere user-facing (R19).
+
+    The 0957027b ceiling changed the documented behaviour of
+    ``collapse="auto"|"max"``, ``Trace.collapse_plan()`` and
+    ``Trace.collapse_schedule()`` for large traces; per the LOCKED docs rule the
+    constant (and its current value) must appear in the user-facing collapse
+    docs, the limitations catalog, the glossary, and both agent guides.
+    """
+
+    from torchlens.visualization.collapse_optimizer import COLLAPSE_OPTIMIZER_MAX_OPS
+
+    repo_root = Path(__file__).resolve().parents[1]
+    doc_pages = [
+        repo_root / "docs" / "reference" / "collapse.md",
+        repo_root / "docs" / "reference" / "limitations.md",
+        repo_root / "docs" / "reference" / "glossary.md",
+        repo_root / "CLAUDE.md",
+        repo_root / "AGENTS.md",
+    ]
+    for page in doc_pages:
+        text = page.read_text(encoding="utf-8")
+        assert "COLLAPSE_OPTIMIZER_MAX_OPS" in text, f"{page.name} misses the ceiling constant"
+        assert str(COLLAPSE_OPTIMIZER_MAX_OPS) in text, (
+            f"{page.name} misses the ceiling value {COLLAPSE_OPTIMIZER_MAX_OPS}"
+        )
+
+
+def test_repeat_fold_discovery_scans_module_table_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Descendant-aware fold discovery must not rescan ``trace.modules`` per child.
+
+    Hunt-6 R29-3: ``_iter_collapsible_runs(allow_selected_descendant=True)``
+    called ``_selected_descendants`` once per child and
+    ``_iter_collapsible_child_path_runs`` once per sibling, and each call
+    iterated EVERY ``trace.modules`` facade -- Theta(S*M) module visits before
+    fold legality was even considered. Each discovery pass now builds one
+    shared sorted index, so the module table is iterated a constant number of
+    times per pass regardless of sibling count.
+    """
+
+    from torch import nn
+
+    from torchlens.data_classes._accessor_base import Accessor
+
+    model = nn.Sequential(*[nn.Sequential(nn.Linear(4, 4), nn.ReLU()) for _ in range(6)])
+    trace = tl.trace(model, torch.randn(2, 4))
+    children = [m.address for m in trace.modules if m.address.isdigit()]
+    assert len(children) == 6
+
+    def collapse_fn(module: Any) -> bool:
+        """Select Linear leaves so children are only descendant-selected."""
+
+        return str(getattr(module, "class_name", "")) == "Linear"
+
+    scans = {"n": 0}
+    original_iter = Accessor.__iter__
+
+    def counting_iter(self: Any) -> Any:
+        """Count full accessor iterations."""
+
+        if self is trace.modules:
+            scans["n"] += 1
+        return original_iter(self)
+
+    monkeypatch.setattr(Accessor, "__iter__", counting_iter)
+
+    scans["n"] = 0
+    list(
+        auto_collapse._iter_collapsible_runs(
+            trace, children, collapse_fn, allow_selected_descendant=True
+        )
+    )
+    assert scans["n"] <= 2, (
+        f"descendant-aware run discovery iterated trace.modules {scans['n']} times "
+        f"for {len(children)} children -- the per-child full scan is back"
+    )
+
+    scans["n"] = 0
+    list(auto_collapse._iter_collapsible_child_path_runs(trace, children, collapse_fn))
+    assert scans["n"] <= 2, (
+        f"child-path discovery iterated trace.modules {scans['n']} times "
+        f"for {len(children)} siblings -- the per-sibling full scan is back"
+    )

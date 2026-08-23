@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import example_models
 import pytest
 import torch
 import torch.nn as nn
 
-import example_models
 import torchlens as tl
 from torchlens.options import CaptureOptions
 from torchlens.validation import validate_forward_pass
@@ -107,7 +107,7 @@ def test_phase1_event_materializer_recurrent_params() -> None:
     assert validate_forward_pass(model, x)
 
 
-@pytest.mark.smoke
+@pytest.mark.heavy
 def test_phase1_event_materializer_buffers_and_conditionals() -> None:
     """Trace buffer and conditional models through event materialization."""
 

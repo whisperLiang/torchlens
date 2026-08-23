@@ -347,7 +347,7 @@ def test_untainted_archived_mismatch_still_raises(tmp_path: Path) -> None:
     path = tmp_path / "tripwire.tlspec"
     trace.save(path, level="runnable", include_weights=True, include_activations=True)
     loaded = tl.load(path)
-    archive = loaded.__dict__["_runnable_archived_activations"]
+    archive = loaded._runnable.archived_activations
     victim = next(key for key in archive if "linear" in key)
     record = archive[victim]
     archive[victim] = dataclasses.replace(record, value=record.value + 0.5)
@@ -388,6 +388,9 @@ def test_resize_grow_branch_never_false_verified(tmp_path: Path) -> None:
         assert report is not None
         assert report.path_faithfulness is not PathFaithfulness.VERIFIED
         assert report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
+    else:
+        assert disposition == "refused"
+        assert report is None
 
 
 def test_resize_shrink_declares_no_uninit_source(tmp_path: Path) -> None:
@@ -400,6 +403,30 @@ def test_resize_shrink_declares_no_uninit_source(tmp_path: Path) -> None:
     if disposition == "ran":
         assert report is not None
         assert "uninitialized_alloc" not in report.nondeterministic_sources
+    else:
+        assert disposition == "refused"
+        assert report is None
+
+
+def _materialized_aten_op_names() -> set[str]:
+    """Return the complete live ATen packet namespace after eager materialization.
+
+    Returns
+    -------
+    set[str]
+        Names exposed by ``torch.ops.aten`` after every dispatcher-registered
+        ATen base name has been resolved once.
+    """
+
+    dispatch_names = getattr(torch._C, "_dispatch_get_all_op_names")()
+    aten_base_names = {
+        name.removeprefix("aten::").split(".", maxsplit=1)[0]
+        for name in dispatch_names
+        if name.startswith("aten::")
+    }
+    for name in aten_base_names:
+        getattr(torch.ops.aten, name)
+    return set(dir(torch.ops.aten))
 
 
 def test_uninit_family_table_matches_live_aten_registry() -> None:
@@ -416,16 +443,24 @@ def test_uninit_family_table_matches_live_aten_registry() -> None:
     # Justified NON-family names matching the patterns:
     # - ``_resize_output``/``_resize_output_``: internal ``out=`` plumbing whose
     #   destination is always fully overwritten by the kernel (out= sanitizer).
-    # - sparse resizes: sparse layout metadata growth materializes implicit
-    #   zeros (``and_clear_`` zeroes), never dense stale bytes.
+    # - ``_copy_from_and_resize``: internal copy plumbing that resizes only to
+    #   copy the complete source value; it does not expose the destination tail.
+    # - sparse resizes (functional packet and in-place spellings): they mutate
+    #   sparse sizes/indices metadata; stored values remain explicit, absent
+    #   coordinates are implicit zeros, and ``and_clear`` removes stored values.
+    #   None exposes newly allocated dense bytes as tensor values.
     allowlist = {
+        "_copy_from_and_resize",
         "_resize_output",
         "_resize_output_",
+        "sparse_resize",
         "sparse_resize_",
+        "sparse_resize_and_clear",
         "sparse_resize_and_clear_",
+        "resize_as_sparse",
         "resize_as_sparse_",
     }
-    aten_names = set(dir(torch.ops.aten))
+    aten_names = _materialized_aten_op_names()
     empty_pattern = {
         name
         for name in aten_names
@@ -600,9 +635,8 @@ def test_single_classifier_owns_qualname_derivation() -> None:
     re-derives uninit nondeterminism from the family predicates and trips this
     tripwire (the r52 raise-vs-not_applicable inconsistency class)."""
 
-    source = (
-        Path(__file__).resolve().parents[1] / "torchlens" / "_runnable_execution.py"
-    ).read_text()
+    package_root = Path(__file__).resolve().parents[1] / "torchlens"
+    source = "\n".join(path.read_text() for path in sorted(package_root.glob("_runnable_*.py")))
     functions = re.split(r"(?m)^def ", source)
     predicates = (
         "qualname_is_uninitialized_alloc(",
@@ -638,6 +672,11 @@ def test_nondeterministic_sources_field_vocabulary(tmp_path: Path) -> None:
     assert report.nondeterministic_sources == ("seeded_rng",)
     assert set(report.nondeterministic_sources) <= NONDETERMINISTIC_SOURCE_VOCABULARY
 
-    live_trace = tl.trace(nn.Linear(4, 3).eval(), x.clone(), capture=_CAPTURE)
+    # Bind the model to a NAME: a live Trace holds its source model only weakly, so an
+    # inline-constructed model is collected at the first gc pass after capture and `.run()`
+    # then refuses RunCapabilityUnavailableError. This passed by luck until the
+    # collection-finish gc.freeze changed when automatic collections land.
+    live_model = nn.Linear(4, 3).eval()
+    live_trace = tl.trace(live_model, x.clone(), capture=_CAPTURE)
     live_report = live_trace.run(inputs=x.clone()).report
     assert live_report.nondeterministic_sources == ()

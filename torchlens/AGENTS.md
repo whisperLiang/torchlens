@@ -2,17 +2,23 @@
 
 ## Files in This Directory
 
+KEY files only, NOT exhaustive (the package holds ~48 top-level modules; notable
+omissions include `runnable.py` — home of the 7 frozen runnable enums cited
+below — `captured_run.py`, `hash.py`, `facets.py`, `_capture_fingerprint.py`,
+and the 16-file `_runnable_*` execution seam). `ls torchlens/*.py` is the
+authority.
+
 | File | Purpose |
 |------|---------|
 | `__init__.py` | Public API exports, moved-name deprecation shims, `peek`, `extract`, `batched_extract`, validation aliases |
-| `_state.py` | Global toggle, active log, decoration maps, prepared model registry; must not import torchlens modules |
+| `_state.py` | Global toggle, active log, decoration maps, prepared model registry; no torchlens imports except the sanctioned `errors._base` leaf |
 | `_trace_state.py` | Runtime state enum surfaced through `torchlens.io` |
 | `_errors.py`, `_robustness.py`, `_training_validation.py` | Legacy/public error and compatibility helpers |
 | `_literals.py` | Shared literal types for options and modes |
 | `_source_links.py` | Source-link helpers used by reports/visualization |
 | `constants.py` | FIELD_ORDER tuples and decorated torch function discovery |
 | `options.py` | Immutable grouped options and flat-argument merge helpers |
-| `observers.py` | `tap`, `record_span`, and active span state |
+| `observers.py` | `tap`, `span` (canonical; `record_span` is a deprecated warning alias), and active span state |
 | `types.py` | Moved public type aliases not kept in top-level `__all__` |
 | `user_funcs.py` | Main capture, summary, visualization, validation, and bundle graph entry points |
 
@@ -24,7 +30,7 @@
 - `_raw_` prefix for pre-postprocessing state; `_final_` for post-processed state.
 
 ## Public Surface
-`torchlens.__all__` is intentionally small and currently has 90 names. New user-facing
+`torchlens.__all__` is intentionally small and currently has 119 names. New user-facing
 objects should usually live under submodules (`torchlens.io`, `torchlens.options`,
 `torchlens.bridge`, `torchlens.errors`, etc.) with moved-name shims only when compatibility
 requires them.
@@ -126,14 +132,18 @@ image_trace.draw(node_spec_fn=tl.repgeom.scree_node_spec())
 
 Sprint B annotation/MDS names are provisional until review-day signoff. `Trace.model_profile`
 is computed, not persisted. `tl.repgeom.mds_evolution(...)` requires the target batch
-activations to have been saved at capture time; use a curated `save=` subset, not `save="all"`,
+activations to have been saved at capture time; use a curated `save=` subset, not exhaustive
+`layers_to_save="all"`,
 for image batches. `Trace._annotation_blobs` is public-provisional only for render-time
 annotation payloads and compatibility review.
 Sprint C RDM, feature-map, and scree node visuals are PIL-only render-time images composed
 from `tl.viz.render_*` primitives and are provisional until review-day signoff.
 
-`record(keep_op=...)` and `record(keep_module=...)` are deprecated compatibility aliases for
-`record(save=...)`. `layers_to_save=[...]` still exists as the final-label two-pass path; an
+`record(keep_op=...)` and `record(keep_module=...)` are removed and raise `TypeError`.
+`record(save=...)` is the only selective-capture spelling. `layers_to_save=[...]` still exists
+as the deprecated flat alias for final-label selection; it is NOT two-pass-only —
+`_trace_selector_helpers.py` builds a live single-pass predicate whenever early labels
+suffice, falling back to two-pass resolution otherwise. An
 unqualified recurrent layer label saves all passes, while `"label:2"` saves only pass 2.
 
 Current 2.x backend surface: torch eager is the stable default; MLX, JAX, tinygrad, Paddle, and
@@ -142,8 +152,13 @@ TensorFlow are technical previews behind `BackendSpec`. Paddle M3 is dygraph/eag
 payloads through the Paddle codec, and does not provide true backward capture.
 TensorFlow preview targets Keras 3 on TF>=2.16 with
 `keras.backend.backend() == "tensorflow"`; its shipped primary path is eager live capture via
-`op_callbacks` with real values/control flow/op-level records/module stacks, while graph-only
-FuncGraph fallback, interventions, true backward capture, and T1 derived gradients are deferred.
+`op_callbacks` with real values/control flow/op-level records/module stacks. The graph-only
+FuncGraph static path is implemented for compiled/SavedModel entries (opaque regions stay
+honestly unverified). Static-label `intervene=` SHIPS for eager entries (two-level writable
+layer, fail-closed site reachability), and T1 derived gradients SHIP for eager entries via
+`tl.backends.tf.GradOptions` (graph-only captures refuse `grad_options` typed; `intervene=`
+cannot combine with `grad_options=`). Deferred: `halt=`/`recipes=`, true backward capture,
+and value-dependent predicates.
 
 ## Constants as Ordering Spec
 FIELD_ORDER tuples define canonical serialized and display field sets. When adding a field,
@@ -151,17 +166,32 @@ update the class definition, the appropriate FIELD_ORDER constant, metadata test
 `to_pandas()`/summary surface that should expose it.
 
 ## Critical Invariants
-1. `_state.py` has no outgoing torchlens imports.
+1. `_state.py` has no outgoing torchlens imports except the sanctioned `errors._base`
+   leaf — a RUNTIME import (its classes are base classes, e.g. `ReentrantTraceError`);
+   only the TYPE_CHECKING block below it is typing-only (cycle-safe by construction;
+   documented in `_state.py`).
 2. `_ensure_model_prepared()` is the lazy wrapping chokepoint; do not reintroduce import-time
    torch namespace mutation.
 3. RNG state capture/restore must happen before `active_logging()`.
 4. Internal torch ops during capture must be wrapped in `pause_logging()`.
 5. Module suffixes are appended to `equivalence_class` at op creation before loop detection.
-6. `postprocess_fast()` must not call `_build_module_logs()`.
+6. There is no `postprocess_fast()` orchestrator; refresh captures run the full `postprocess()`
+   entry point (see `postprocess/CLAUDE.md`, "Refresh Projection").
 7. `backward_ready=True` must preserve user `requires_grad` and reject detach/disk conflicts.
 8. Portable I/O must reject unsafe paths/symlinks and unsupported tensor variants.
 
 ## Newer 2.x Subsystems
+- `_trace_core/`: private columnar store substrate (typed columns, per-trace intern
+  pools, canonical edge-occurrence table + CSR, identity-preserving payload arena,
+  sparse overlays, `TraceCore` with COW fork). The M5 Op seam is LIVE: `Op` is a
+  `(_core, _row)` facade with one generated data descriptor per stored field; captured
+  ops share the per-trace `OpRowStore` (`trace._trace_core`, `FieldPolicy.DROP`,
+  sealed after the final postprocess step, key `20`), while copy/pickle/fork/preview paths use detached
+  single-row stores. Architecture of record in
+  `docs/reference/trace_core_design.md`. The declared
+  record schema carries `StorageBinding` axes (`data_classes/_schema_bindings.py`,
+  regenerated by `tools/generate_record_schema.py`), and Trace fields have a declared
+  component ownership map (`data_classes/_trace_components.py`).
 - `_io/` and `io/`: portable save/load, `.tlspec` manifests, lazy out refs, rehydration.
 - `intervention/`: Bundle, sites/selectors, hooks, helpers, replay/rerun/fork/save.
 - `fastlog/`: sparse `Recording` path, predicate normalization, RAM/disk storage.

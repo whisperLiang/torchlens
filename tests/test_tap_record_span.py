@@ -59,3 +59,69 @@ def test_record_span_and_log_value_metadata() -> None:
     assert log.observer_spans[0]["end"] is not None
     assert log.annotations["logged_values"]["out_sum"] == 2.0
     assert not hasattr(log, "report_values")
+
+
+def test_record_spans_are_context_local_across_threads() -> None:
+    """One thread's active span must never annotate another thread's reads (R54).
+
+    ``_state._active_record_spans`` was a plain process-global list: a
+    two-thread barrier probe produced ``right=('left', 'right')`` -- one
+    thread observed the other's active span, so interleaved captures/taps
+    received foreign annotations. The registry is now a context-local
+    ContextVar; each thread sees exactly its own spans.
+    """
+
+    import threading
+
+    from torchlens import observers
+
+    results: dict[str, tuple[str, ...]] = {}
+    barrier = threading.Barrier(2, timeout=10)
+
+    def worker(name: str) -> None:
+        with observers.span(name):
+            barrier.wait()
+            results[name] = tuple(str(record["name"]) for record in observers.active_span_records())
+            barrier.wait()
+
+    threads = [threading.Thread(target=worker, args=(side,)) for side in ("left", "right")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert results["left"] == ("left",)
+    assert results["right"] == ("right",)
+    assert observers.active_span_records() == []
+
+
+def test_pause_logging_exit_never_blinds_a_newly_published_capture() -> None:
+    """A stale pause restore must not disable another thread's live capture (R54/b2:A2).
+
+    Interleaving: analysis thread B reads owner=None an instant before
+    capture thread A's locked publication enables logging; B's __exit__ then
+    restored its stale pre-pause value and silently blinded the remainder of
+    A's forward (ops dropped, no error). The restore now re-checks ownership.
+    """
+
+    import threading
+
+    from torchlens import _state
+
+    saved_owner = _state._active_owner_thread_id
+    saved_enabled = _state._logging_enabled
+    try:
+        # B enters pause_logging with no owner published yet.
+        _state._active_owner_thread_id = None
+        _state._logging_enabled = False
+        pause = _state.pause_logging()
+        pause.__enter__()
+        # A's atomic publication lands between B's enter and exit.
+        _state._active_owner_thread_id = threading.get_ident() + 1
+        _state._logging_enabled = True
+        pause.__exit__(None, None, None)
+        assert _state._logging_enabled is True, (
+            "a non-owner pause restore blinded the newly published capture"
+        )
+    finally:
+        _state._active_owner_thread_id = saved_owner
+        _state._logging_enabled = saved_enabled

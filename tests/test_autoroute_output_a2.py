@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -362,3 +363,58 @@ print({name: name in sys.modules for name in ['transformers', 'timm']})
     )
 
     assert result.stdout.strip() == "{'transformers': False, 'timm': False}"
+
+
+class _NestedTensorOutput(nn.Module):
+    """Model whose forward returns a strided nested tensor (shape reads raise)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lin = nn.Linear(3, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.lin(x)
+        return torch.nested.nested_tensor([y[0], y[1]])
+
+
+def test_nested_tensor_output_never_aborts_capture_with_raw_torch_error() -> None:
+    """A nested-tensor model output surfaces typed, never a raw torch error.
+
+    Fail-before (R65): the opportunistic output sniffer read ``.shape`` on the
+    nested output and ``tl.trace`` died with torch's internal ``RuntimeError:
+    NestedTensorImpl doesn't support sizes`` -- a raw abort blaming a TorchLens
+    internal on the user. The detector must treat unreadable-layout tensors as
+    "not logits", and any refusal on the output path must stay typed.
+    """
+
+    from torchlens.errors import TorchLensError
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            trace = tl.trace(_NestedTensorOutput().eval(), torch.randn(2, 3))
+        except Exception as exc:
+            assert isinstance(exc, TorchLensError), (
+                "nested-tensor output aborted capture with a raw non-TorchLens "
+                f"error: {type(exc).__name__}: {exc}"
+            )
+        else:
+            assert trace is not None
+
+
+def test_detector_exception_degrades_to_disclosed_warning_not_abort() -> None:
+    """A raising registered detector is disclosed and skipped, never fatal."""
+
+    from torchlens.autoroute import output as autoroute_output
+    from torchlens.errors import TorchLensWarning
+
+    @autoroute_output.register(name="raising_probe_detector", priority=5)
+    def _raising_detector(outputs: Any, meta: dict[str, Any]) -> None:
+        raise RuntimeError("detector blew up")
+
+    try:
+        with pytest.warns(TorchLensWarning, match="Semantic output decode skipped"):
+            trace = tl.trace(nn.Linear(3, 3).eval(), torch.randn(2, 3))
+        assert trace.decoded_output is None
+    finally:
+        autoroute_output.unregister("raising_probe_detector")

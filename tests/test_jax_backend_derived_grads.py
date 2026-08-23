@@ -10,9 +10,9 @@ import torchlens as tl
 from torchlens.backends import BackendUnsupportedError
 from torchlens.backends.jax import GradOptions
 from torchlens.backends.jax.backend import (
-    _JaxIntermediateTapSpec,
     _experimental_per_op_boundary_vjp_oracle,
     _jax_intermediate_oracle_passes,
+    _JaxIntermediateTapSpec,
 )
 from torchlens.backends.jax.jaxpr import _jax_zero_tap
 from torchlens.data_classes.derived_grad import (

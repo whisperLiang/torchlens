@@ -6,7 +6,7 @@ import os
 import re
 import time
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -14,8 +14,11 @@ import pytest
 import torch
 
 import torchlens as tl
+import torchlens.visualization._condensed_flow as condensed_flow
 import torchlens.visualization.auto_collapse as auto_collapse
 import torchlens.visualization.collapse_optimizer as collapse_optimizer
+from torchlens.visualization._render_common import format_collapsed_module_contents
+from torchlens.visualization._render_edges import _collapsed_module_should_show_remainder
 from torchlens.visualization.auto_collapse import (
     _assert_plan_count,
     _child_condensed_flow_graphs,
@@ -36,8 +39,6 @@ from torchlens.visualization.collapse_plan import (
     collapse_plan_for_trace,
     count,
 )
-from torchlens.visualization._render_edges import _collapsed_module_should_show_remainder
-from torchlens.visualization._render_common import format_collapsed_module_contents
 
 tvm = pytest.importorskip("torchvision.models")
 tvs = pytest.importorskip("torchvision.models.segmentation")
@@ -1018,13 +1019,104 @@ def _clear_collapse_caches(trace: tl.Trace) -> None:
     collapse_optimizer._SCHEDULE_CACHE.pop(trace, None)
 
 
-def _empty_op_adjacency_index(trace: tl.Trace) -> Mapping[str, str]:
+def _reference_flow_interval_flags(
+    trace: tl.Trace,
+    flow_children: tuple[str, ...],
+    child_sets: Mapping[str, set[str]],
+    edges: tuple[tuple[str, str], ...],
+) -> dict[tuple[str, str], auto_collapse.FlowIntervalFlags]:
+    """Return the pre-optimization interval flags for equality checks.
+
+    Parameters
+    ----------
+    trace:
+        Trace owning the operation graph.
+    flow_children:
+        Direct children in flow order.
+    child_sets:
+        Child subtree operation labels.
+    edges:
+        Condensed graph edges.
+
+    Returns
+    -------
+    dict[tuple[str, str], FlowIntervalFlags]
+        Reference flags keyed by adjacent child pairs.
+    """
+
+    if len(flow_children) < 2:
+        return {}
+    child_index = {child: index for index, child in enumerate(flow_children)}
+    edge_set = set(edges)
+    flags: dict[tuple[str, str], auto_collapse.FlowIntervalFlags] = {}
+    for left, right in zip(flow_children[:-1], flow_children[1:], strict=True):
+        left_index = child_index[left]
+        right_index = child_index[right]
+        crossing_edges = [
+            edge
+            for edge in edge_set
+            if edge[0] in child_index
+            and edge[1] in child_index
+            and child_index[edge[0]] <= left_index
+            and child_index[edge[1]] >= right_index
+        ]
+        passthrough = any(
+            (edge[0] not in child_index or edge[1] not in child_index)
+            and (
+                child_index.get(edge[0]) in {left_index, right_index}
+                or child_index.get(edge[1]) in {left_index, right_index}
+            )
+            for edge in edge_set
+        )
+        landmark = any(
+            condensed_flow._child_has_junction_op(trace, child_sets.get(child, set()))
+            for child in flow_children[left_index : right_index + 1]
+        ) or bool(crossing_edges)
+        flags[(left, right)] = auto_collapse.FlowIntervalFlags(
+            landmark=landmark,
+            passthrough=passthrough,
+        )
+    return flags
+
+
+def _uncached_output_shape_tuple(
+    state: Any,
+    address: str,
+    source: str,
+) -> tuple[int, ...] | None:
+    """Return the historical uncached optimizer shape lookup.
+
+    Parameters
+    ----------
+    state:
+        Optimizer state containing the trace.
+    address:
+        Pass-free module address.
+    source:
+        Shape metadata view required by the caller.
+
+    Returns
+    -------
+    tuple[int, ...] | None
+        Historical shape result without memoization.
+    """
+
+    if source == "module":
+        return collapse_optimizer._module_output_shape_tuple(state.trace, address)
+    return collapse_optimizer._output_shape_tuple_for_address(state.trace, address)
+
+
+def _empty_op_adjacency_index(
+    trace: tl.Trace, revision: tuple[object, ...] | None = None
+) -> Mapping[str, str]:
     """Return an empty index to force the pre-optimization accessor path.
 
     Parameters
     ----------
     trace:
         Trace deliberately ignored by the reference path.
+    revision:
+        Precomputed fingerprint deliberately ignored by the reference path.
 
     Returns
     -------
@@ -1033,6 +1125,7 @@ def _empty_op_adjacency_index(trace: tl.Trace) -> Mapping[str, str]:
     """
 
     _ = trace
+    _ = revision
     return {}
 
 
@@ -1154,6 +1247,34 @@ def _collapse_artifact_snapshot(trace: tl.Trace, tmp_path: Path, stem: str) -> t
         auto_dot,
         max_dot,
     )
+
+
+def _all_mode_collapse_snapshot(trace: tl.Trace, tmp_path: Path, stem: str) -> tuple[Any, ...]:
+    """Return collapse-plan and DOT bytes for every frozen public mode.
+
+    Parameters
+    ----------
+    trace:
+        Trace to plan and render.
+    tmp_path:
+        Directory for Graphviz outputs.
+    stem:
+        Unique output-file stem.
+
+    Returns
+    -------
+    tuple[Any, ...]
+        Plans and DOT bytes for ``none``, ``auto``, ``max``, and ``0.5``.
+    """
+
+    modes: tuple[Any, ...] = ("none", "auto", "max", 0.5)
+    _clear_collapse_caches(trace)
+    plans = (
+        collapse_plan_for_trace(trace, None, None, RenderContext()),
+        *(trace.collapse_plan(mode=mode) for mode in modes[1:]),
+    )
+    dots = tuple(_draw_source(trace, tmp_path, f"{stem}_{mode}", mode).encode() for mode in modes)
+    return plans, dots
 
 
 def _add_reference_fallback_collision(trace: tl.Trace) -> str:
@@ -1655,6 +1776,110 @@ def test_collapse_plan_parity_fast_synthetic_models(tmp_path: Path) -> None:
             trace.cleanup()
 
 
+def test_flow_interval_flags_match_reference_with_linear_helper_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Interval flags preserve directed semantics while visiting each child once."""
+
+    trace = _trace(torch.nn.Identity(), torch.randn(1, 4))
+    children = tuple(f"child_{index}" for index in range(80))
+    child_sets = {child: {child} for child in children}
+    edges = (
+        (children[0], children[50]),
+        (children[70], children[10]),
+        ("external_source:input", children[7]),
+        (children[8], "external_sink:output"),
+        ("external_source:a", "external_sink:b"),
+    )
+    junction_calls = 0
+
+    def no_junction(_trace: tl.Trace, _op_labels: set[str]) -> bool:
+        """Count junction classifications while returning a fixed result."""
+
+        nonlocal junction_calls
+        junction_calls += 1
+        return False
+
+    # _flow_interval_flags lives in _condensed_flow (R43 split); patch its home
+    # module so the function's own globals see the counter.
+    monkeypatch.setattr(condensed_flow, "_child_has_junction_op", no_junction)
+    try:
+        optimized = auto_collapse._flow_interval_flags(trace, children, child_sets, edges)
+        assert junction_calls == len(children)
+        reference_start = junction_calls
+        reference = _reference_flow_interval_flags(trace, children, child_sets, edges)
+        assert junction_calls - reference_start == 2 * (len(children) - 1)
+        assert optimized == reference
+    finally:
+        trace.cleanup()
+
+
+def test_optimizer_shape_lookup_runs_once_per_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One cold auto plan computes each optimizer module shape at most once."""
+
+    model = torch.nn.Sequential(*(torch.nn.ReLU() for _ in range(80)))
+    trace = _trace(model, torch.randn(2, 8))
+    original = collapse_optimizer._module_output_shape_tuple
+    calls: dict[str, int] = {}
+
+    def counted_shape(trace_arg: tl.Trace, address: str) -> tuple[int, ...] | None:
+        """Count and delegate one module output-shape lookup."""
+
+        calls[address] = calls.get(address, 0) + 1
+        return original(trace_arg, address)
+
+    monkeypatch.setattr(collapse_optimizer, "_module_output_shape_tuple", counted_shape)
+    try:
+        _clear_collapse_caches(trace)
+        select_collapse_plan(trace, RenderContext(), mode="auto")
+        assert calls
+        assert max(calls.values()) == 1
+        optimized_calls = sum(calls.values())
+
+        calls.clear()
+        monkeypatch.setattr(
+            collapse_optimizer,
+            "_cached_output_shape_tuple",
+            _uncached_output_shape_tuple,
+        )
+        _clear_collapse_caches(trace)
+        select_collapse_plan(trace, RenderContext(), mode="auto")
+        assert sum(calls.values()) > optimized_calls
+    finally:
+        trace.cleanup()
+
+
+def test_cold_collapse_optimizations_are_byte_identical_across_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Linear interval flags and shape caching preserve every public mode byte-for-byte."""
+
+    trace = _trace(RepeatedResidual(depth=8), torch.randn(2, 8))
+    try:
+        optimized = _all_mode_collapse_snapshot(trace, tmp_path, "optimized")
+        with monkeypatch.context() as reference_patch:
+            # Patch the _condensed_flow home (R43 split): both the moved
+            # _compute_child_condensed_flow_graphs and auto_collapse's
+            # synthetic builder resolve the flags through that module.
+            reference_patch.setattr(
+                condensed_flow,
+                "_flow_interval_flags",
+                _reference_flow_interval_flags,
+            )
+            reference_patch.setattr(
+                collapse_optimizer,
+                "_cached_output_shape_tuple",
+                _uncached_output_shape_tuple,
+            )
+            reference = _all_mode_collapse_snapshot(trace, tmp_path, "reference")
+        assert optimized == reference
+    finally:
+        trace.cleanup()
+
+
 @pytest.mark.parametrize(
     ("case_name", "builder", "x"),
     (
@@ -1803,7 +2028,14 @@ def test_child_condensed_flow_graph_mobilenet_v2_features_exact_chain() -> None:
     [
         ("resnet50", lambda: tvm.resnet50(weights=None), torch.randn(1, 3, 224, 224)),
         ("vit_b_16", lambda: tvm.vit_b_16(weights=None), torch.randn(1, 3, 224, 224)),
-        ("swin_s", lambda: tvm.swin_s(weights=None), torch.randn(1, 3, 224, 224)),
+        # slow cell (r3settle2 budget lint): swin_s plan/SVG parity measures
+        # far beyond heavy's 20s ceiling.
+        pytest.param(
+            "swin_s",
+            lambda: tvm.swin_s(weights=None),
+            torch.randn(1, 3, 224, 224),
+            marks=pytest.mark.slow,
+        ),
         ("mobilenet_v2", lambda: tvm.mobilenet_v2(weights=None), torch.randn(1, 3, 224, 224)),
         (
             "deeplabv3_resnet50",
@@ -2089,22 +2321,31 @@ def test_auto_collapse_run_fold_splits_same_spatial_channel_steps(tmp_path: Path
 
 
 def test_auto_collapse_run_fold_folds_mobilenet_channel_plateaus() -> None:
-    """MobileNetV2-style same-class plateaus fold and channel transitions split."""
+    """MobileNetV2-style same-class plateaus fold and channel transitions split.
+
+    REVIEWED rebaseline (T9, grind-p3): ``features.3`` (the channel
+    transition, 29 layers / 7296 params) previously folded as the visible
+    representative of the ``features.3-6`` run even though every hidden
+    member (30 layers / 9344 params, residual join) differs from it — the
+    "+3 more" ellipsis claimed a sameness the render could not prove. The
+    uniformity check now spans the representative too, so the transition
+    stays visible on its own and the plateau folds from ``features.4``.
+    """
 
     trace = _trace(MobileNetPlateauStack(), torch.randn(1, 3, 16, 16))
     try:
         folds = resolve_repeat_folds(trace, _select_features_child)
 
         assert folds["features.0"].addresses == ("features.0", "features.1", "features.2")
-        assert folds["features.3"].addresses == (
-            "features.3",
+        assert "features.3" not in folds
+        assert folds["features.4"].addresses == (
             "features.4",
             "features.5",
             "features.6",
         )
-        assert folds["features.0"].addresses[-1] != folds["features.3"].addresses[0]
-        assert folds["features.3"].hidden_member_composition == {
-            "hidden_with_residual_join": 3,
+        assert folds["features.4"].representative == "features.4"
+        assert folds["features.4"].hidden_member_composition == {
+            "hidden_with_residual_join": 2,
             "hidden_without_residual_join": 0,
         }
     finally:
@@ -2112,37 +2353,48 @@ def test_auto_collapse_run_fold_folds_mobilenet_channel_plateaus() -> None:
 
 
 def test_auto_collapse_run_fold_folds_residual_mix_without_digest_key() -> None:
-    """Same-class equal-shape blocks fold even when residual topology differs."""
+    """Structurally uniform residual plateaus fold behind a matching representative.
+
+    REVIEWED rebaseline (T9, grind-p3): this pin previously asserted that
+    the residual-topology-DIFFERENT transition ``features.3`` folded as the
+    representative of the ``features.3-6`` run. With the all-member
+    uniformity contract the run splits and the residual plateau folds from
+    its own structurally-matching representative.
+    """
 
     trace = _trace(MobileNetPlateauStack(), torch.randn(1, 3, 16, 16))
     try:
         folds = resolve_repeat_folds(trace, _select_features_child)
 
-        assert folds["features.3"].addresses == (
-            "features.3",
+        assert folds["features.4"].addresses == (
             "features.4",
             "features.5",
             "features.6",
         )
-        assert folds["features.3"].hidden_member_composition["hidden_with_residual_join"] == 3
+        assert folds["features.4"].hidden_member_composition["hidden_with_residual_join"] == 2
     finally:
         trace.cleanup()
 
 
 def test_auto_collapse_fold_repeats_true_splits_run_around_odd_hidden_member() -> None:
-    """``fold_repeats=True`` folds the maximal legal sub-runs around an odd hidden member.
+    """``fold_repeats=True`` folds the maximal legal sub-runs around an odd member.
 
     Regression for the round-3 honesty gate's own adjacent gap: pre-fix,
     ``_iter_collapsible_runs`` (the "shared substrate" v1 grouper reachable
     via ``fold_repeats=True`` or a custom ``collapse_fn``, as opposed to the
     default v2 optimizer's ``_maximal_legal_runs``) yielded exactly one
     whole-run candidate per class/stem group with no backtracking, so
-    ``_run_fold_hidden_members_uniform`` rejecting that single candidate
+    ``_run_fold_members_uniform`` rejecting that single candidate
     (because ``blocks.3`` is structurally odd) meant *zero* folds for the
-    entire 7-block run -- even though ``(blocks.0, blocks.1, blocks.2)`` and
-    ``(blocks.3, blocks.4, blocks.5, blocks.6)`` are each independently
-    legal, hidden-uniform runs, exactly as the default v2 engine already
-    handles for the identical input.
+    entire 7-block run -- even though the uniform sub-runs around the odd
+    member are independently legal folds, exactly as the default v2 engine
+    already handles for the identical input.
+
+    REVIEWED rebaseline (T9, grind-p3): the odd ``blocks.3`` previously
+    folded as the visible representative of ``blocks.3-6`` even though every
+    hidden member differs from it. Under the all-member uniformity contract
+    it stays visible on its own and the uniform tail folds from
+    ``blocks.4``.
     """
 
     trace = _trace(OddHiddenMemberStack(total=7, odd_index=3), torch.randn(2, 8))
@@ -2150,20 +2402,23 @@ def test_auto_collapse_fold_repeats_true_splits_run_around_odd_hidden_member() -
         folds = resolve_repeat_folds(trace, _select_blocks_child, fold_repeats=True)
 
         assert folds["blocks.0"].addresses == ("blocks.0", "blocks.1", "blocks.2")
-        assert folds["blocks.3"].addresses == (
-            "blocks.3",
+        assert "blocks.3" not in folds
+        assert folds["blocks.4"].addresses == (
             "blocks.4",
             "blocks.5",
             "blocks.6",
         )
-        assert folds["blocks.3"].representative == "blocks.3"
-        # The odd block is only ever the visible representative of its own
-        # fold -- it must never appear as a *hidden* member of any fold.
-        assert all("blocks.3" not in fold.addresses[1:] for fold in folds.values())
+        assert folds["blocks.4"].representative == "blocks.4"
+        # The odd block must not appear anywhere inside any fold -- neither
+        # as a hidden member nor as a mismatching representative.
+        assert all("blocks.3" not in fold.addresses for fold in folds.values())
     finally:
         trace.cleanup()
 
 
+# slow (r3settle2 budget lint): 24-stage uneven-depth trace + fold-plan
+# derivation measures >30s.
+@pytest.mark.slow
 def test_auto_collapse_run_fold_keeps_different_depth_stages_separate(tmp_path: Path) -> None:
     """Repeat-fold does not merge same-class sibling stages with different depths."""
 
@@ -2488,8 +2743,27 @@ def test_auto_plan_remainder_honesty_does_not_require_max_level() -> None:
         trace.cleanup()
 
 
+@pytest.fixture
+def _restore_torch_num_threads() -> Iterator[None]:
+    """Snapshot and restore torch's process-global thread count around a test.
+
+    This test pins ``torch.set_num_threads(4)``; without restoration that value leaks
+    into torch's global state for the rest of the pytest process (observed leak:
+    baseline 10 -> 4), making later tests order-dependent. The fixture captures the
+    count before the test and restores it in ``finally``.
+    """
+
+    original = torch.get_num_threads()
+    try:
+        yield
+    finally:
+        torch.set_num_threads(original)
+
+
 @pytest.mark.heavy
-def test_equivalent_max_plans_render_same_collapsed_box_layer_labels(tmp_path: Path) -> None:
+def test_equivalent_max_plans_render_same_collapsed_box_layer_labels(
+    tmp_path: Path, _restore_torch_num_threads: None
+) -> None:
     """Equivalent max endpoint plans render identical collapsed-box layer labels."""
 
     torch.set_num_threads(4)
@@ -2602,6 +2876,53 @@ def test_v2_zero_frontier_falls_back_to_visible_full_plan(
         assert result.reason == "floor_fallback: no optimizer frontier was produced"
     finally:
         trace.cleanup()
+
+
+def test_strict_mode_never_keys_on_ambient_pytest_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Strictness is opt-in via the torchlens-owned knob only (r3 R47-A).
+
+    ``PYTEST_CURRENT_TEST`` is set by ANY pytest — a downstream project's
+    suite rendering a TorchLens graph must never inherit our hard-assert
+    mode from a knob it never set. RED before the fix: the ambient marker
+    alone armed strict mode.
+    """
+
+    from torchlens.visualization._render_common import strict_collapse_checks_enabled
+
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "downstream::test_case (call)")
+    monkeypatch.delenv("TORCHLENS_COLLAPSE_STRICT", raising=False)
+    assert strict_collapse_checks_enabled() is False
+    monkeypatch.setenv("TORCHLENS_COLLAPSE_STRICT", "1")
+    assert strict_collapse_checks_enabled() is True
+
+
+def test_strict_mode_env_parse_is_closed_vocabulary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FAIL-AFTER-WHERE-PASSED-BEFORE: a typo can no longer disarm strictness.
+
+    Round-7 b7 R47 (sol MED + fable LM, same site): the exact-``"1"`` parse
+    mapped ``=true`` and any typo to ``False``, silently leaving the
+    collapse/sibling-order verification tripwire OFF while the exporter
+    believed it was armed. The knob now parses a closed vocabulary and
+    REFUSES unrecognized values, matching the postprocess audit knobs.
+    """
+
+    from torchlens._errors import InvalidArgumentError
+    from torchlens.visualization._render_common import strict_collapse_checks_enabled
+
+    for spelling in ("true", "TRUE", "yes", "on", "1", " 1 "):
+        monkeypatch.setenv("TORCHLENS_COLLAPSE_STRICT", spelling)
+        assert strict_collapse_checks_enabled() is True, spelling
+    for spelling in ("0", "false", "no", "off", ""):
+        monkeypatch.setenv("TORCHLENS_COLLAPSE_STRICT", spelling)
+        assert strict_collapse_checks_enabled() is False, spelling
+    monkeypatch.setenv("TORCHLENS_COLLAPSE_STRICT", "typo")
+    with pytest.raises(InvalidArgumentError) as exc_info:
+        strict_collapse_checks_enabled()
+    assert exc_info.value.fields["code"] == "env_flag_invalid"
 
 
 def test_incremental_count_mismatch_warns_once_outside_strict(
@@ -2731,29 +3052,81 @@ def test_v2_max_op_segment_renders_dashed_box_and_contracts_edges(
         assert 'style="rounded,dashed,filled"' in source
         assert "conv2d_1_1 ... conv2d_5_8 -- 8 ops" in source
         assert "conv2d_2_2pass1 [" not in source
-        assert "input_1pass1 -> conv2d_1_1__segment__conv2d_5_8pass1" in source
-        assert "relu_4_9__segment__conv2d_7_12pass1 -> output_1pass1" in source
+        # r21: op-segment node names carry each endpoint's own pass suffix
+        # (injective identity for per-pass segments of reused blocks); for a
+        # single-pass model every endpoint is pass 1.
+        assert "input_1pass1 -> conv2d_1_1pass1__segment__conv2d_5_8pass1" in source
+        assert "relu_4_9pass1__segment__conv2d_7_12pass1 -> output_1pass1" in source
         contracted_edge = (
-            "conv2d_1_1__segment__conv2d_5_8pass1 -> relu_4_9__segment__conv2d_7_12pass1"
+            "conv2d_1_1pass1__segment__conv2d_5_8pass1 -> relu_4_9pass1__segment__conv2d_7_12pass1"
         )
-        edge_line = next(
-            index for index, line in enumerate(source.splitlines()) if contracted_edge in line
-        )
-        first_cluster_line = next(
-            index for index, line in enumerate(source.splitlines()) if "subgraph cluster_" in line
-        )
-        assert edge_line < first_cluster_line
+        assert contracted_edge in source
+        # R19-3: the segments swallow every module's ops, so no module cluster
+        # may render at all — an empty labeled husk would claim containment
+        # over nothing. (Pre-R19 this pinned edge-before-cluster ordering.)
+        assert "subgraph cluster_" not in source
+        # R19-5: a top-level segment (owner None) spanning sibling modules
+        # must disclose the module homes it strips from its hidden ops.
+        assert "-- 8 ops -- spans" in source
 
         result = select_collapse_plan(trace, RenderContext(), mode="max")
         segments = tuple((result.segments or {}).values())
         first_segment = next(
             segment for segment in segments if segment.name.startswith("conv2d_1_1")
         )
-        first_segment_members = [trace.ops[f"{label}:1"] for label in first_segment.ops]
+        # r21: descriptor ops are concrete pass-qualified labels (exact keys).
+        first_segment_members = [trace.ops[label] for label in first_segment.ops]
         assert first_segment.owner is None
-        assert any(op.is_atomic_module and op.modules == ["stem:1"] for op in first_segment_members)
+        assert any(
+            op.is_atomic_module and op.modules == ("stem:1",) for op in first_segment_members
+        )
         assert any(
             op.modules and op.modules[0].startswith("blocks:") for op in first_segment_members
+        )
+    finally:
+        trace.cleanup()
+
+
+class _AtomicGapStack(torch.nn.Module):
+    """Two-op blocks with a bare atomic activation wedged between them."""
+
+    def __init__(self) -> None:
+        """Initialize blocks around one atomic top-level child."""
+
+        super().__init__()
+        self.layers = torch.nn.Sequential(
+            SegmentToyBlock(),
+            torch.nn.ReLU(),
+            SegmentToyBlock(),
+            SegmentToyBlock(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the atomic-gap stack forward pass."""
+
+        return self.layers(x)
+
+
+def test_op_segment_span_disclosure_counts_atomic_module_members(tmp_path: Path) -> None:
+    """R19-5 span disclosure must name hidden ATOMIC module calls too.
+
+    T9 (grind-p3, MED) red pin: the spanned-homes walk used the renderer's
+    effective module stack, which drops an atomic module's own innermost
+    level (a presentation choice — the renderer keeps the op and drops the
+    box). Containment disclosure must not inherit that drop: a segment
+    hiding a bare ``nn.ReLU`` child's op silently omitted its module call
+    from the ``-- spans @...`` list, undercounting the hidden module calls.
+    """
+
+    trace = _trace(_AtomicGapStack(), torch.randn(1, 4, 8, 8))
+    try:
+        source = _draw_source(trace, tmp_path, "atomic_gap_spans", "max")
+
+        assert "-- spans" in source
+        spans_lines = [line for line in source.splitlines() if "-- spans" in line]
+        assert any("layers.1:1" in line for line in spans_lines), (
+            "the atomic nn.ReLU child's module call is missing from the "
+            f"span disclosure: {spans_lines}"
         )
     finally:
         trace.cleanup()
@@ -2778,7 +3151,8 @@ def test_max_child_segment_decomposes_ops_and_buffers(
         source = _draw_source(trace, tmp_path, f"bn_child_segments_{training}", "max", False)
 
         for segment in child_segments:
-            covered = [trace.ops[f"{label}:1"] for label in segment.ops]
+            # r21: descriptor ops are concrete pass-qualified labels (exact keys).
+            covered = [trace.ops[label] for label in segment.ops]
             expected_buffers = sum(op.is_buffer for op in covered)
             expected_ops = len(covered) - expected_buffers
             expected_contents = format_collapsed_module_contents(len(covered), expected_buffers)
@@ -2800,6 +3174,11 @@ def test_signal_tally_latency_under_budget() -> None:
 
     trace = _trace(LongFunctional(depth=1500), torch.randn(1, 8))
     try:
+        # One untimed warm-up call hydrates the per-trace op-facade cells
+        # (M5 columnar first-read cost, ~85ms for 3k ops) so the budget
+        # measures the tally algorithm itself; analyze_collapse does not
+        # cache its result, so the timed call still does the full tally.
+        analyze_collapse(trace)
         start = time.perf_counter()
         analyze_collapse(trace)
         elapsed_ms = (time.perf_counter() - start) * 1000.0

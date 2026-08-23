@@ -14,24 +14,20 @@ Exemption decisions (which ops to skip, which args are structural) are
 delegated to the registries in ``exemptions.py``.
 """
 
+import math
 from collections import Counter, defaultdict, deque
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import (
-    Optional,
-    Any,
-    Dict,
-    List,
-    Literal,
-    Sequence,
-    Set,
     TYPE_CHECKING,
+    Any,
+    Literal,
     cast,
 )
 
 import torch
 
 from ..data_classes.op import Op
-from ..ir.events import is_control_edge_use
 from ..ir.container import (
     DataclassField,
     DictKey,
@@ -40,24 +36,37 @@ from ..ir.container import (
     OutputPathComponent,
     TupleIndex,
 )
+from ..ir.events import is_control_edge_use
 
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
 
-from ..utils.rng import execute_with_restored_rng_autocast
 from ..utils.collections import assign_to_sequence_or_dict
-from ..utils.tensor_utils import tensor_nanequal, tensor_all_nan
+from ..utils.rng import execute_with_restored_rng_autocast
+from ..utils.tensor_utils import (
+    _ACCUMULATING_REPLAY_ULP_HEADROOM,
+    derive_float_tolerances,
+    fp8_safe_comparison_pair,
+    get_fp8_dtypes,
+    tensor_all_nan,
+    tensor_nanequal,
+)
+from ._edge_boundary import _check_edge_intervention_boundary
 from .exemptions import (
-    SKIP_VALIDATION_ENTIRELY,
-    SKIP_PERTURBATION_ENTIRELY,
-    STRUCTURAL_ARG_POSITIONS,
     CUSTOM_EXEMPTION_CHECKS,
+    SKIP_PERTURBATION_ENTIRELY,
+    SKIP_VALIDATION_ENTIRELY,
+    STRUCTURAL_ARG_POSITIONS,
+    index_domain_rotation_values,
     perturbed_layer_at_structural_position,
     posthoc_perturb_check,
+    uninitialized_by_design_applies,
 )
 from .status import ValidationReplayStatus
 
-ValidationDecisionKind = Literal["validated", "failed", "unverified", "exempted"]
+ValidationDecisionKind = Literal[
+    "validated", "failed", "unverified", "exempted", "edge_intervention_boundary"
+]
 ValidationDecisionPhase = Literal["ground_truth", "replay", "perturbation", "metadata"]
 
 
@@ -194,6 +203,35 @@ class ValidationDecisionRecorder:
 
         return len({item.op_label for item in self.decisions if item.decision == decision})
 
+    def replay_validated_node_count(self) -> int:
+        """Return the number of distinct op labels validated by REPLAY.
+
+        ``node_count("validated")`` is phase-blind: it also counts the
+        ground-truth output decisions and the trace-level dispatch-census
+        decision (the ``op_label=None`` bucket), so the
+        ``no_nodes_replay_validated`` guard could be satisfied with ZERO
+        interior op replays -- a trace whose every interior op was
+        individually exempted but whose outputs matched ground truth
+        reported ``passed`` with an inflated count (b1-fable round-2 F1).
+        Only labeled ``phase="replay"`` validations are replayed nodes.
+
+        Returns
+        -------
+        int
+            Number of distinct operation labels with a replay-phase
+            ``validated`` decision.
+        """
+
+        return len(
+            {
+                item.op_label
+                for item in self.decisions
+                if item.decision == "validated"
+                and item.phase == "replay"
+                and item.op_label is not None
+            }
+        )
+
     def reason_counts(self, decision: ValidationDecisionKind) -> dict[str, int]:
         """Return reason-code counts for a given decision kind.
 
@@ -231,7 +269,7 @@ class ValidationDecisionRecorder:
         return ValidationReplayStatus.from_replay_counts(
             backend=backend,
             source="live",
-            replayed_node_count=self.node_count("validated"),
+            replayed_node_count=self.replay_validated_node_count(),
             unverified_node_count=self.node_count("unverified"),
             failed_node_count=self.node_count("failed"),
             unverified_reason_counts=self.reason_counts("unverified"),
@@ -409,6 +447,17 @@ _DIM_REDUCE_FUNCS = frozenset(
     }
 )
 
+# Band-C bounds are DERIVED per op from its measured reduction depth (see
+# _deep_numeric_replay_matches_saved); the literals below are absolute
+# CEILINGS the derived bounds can never exceed, preserving the historical
+# outer envelope. Error model: reordering a depth-D accumulation perturbs the
+# result by ~sqrt(D) * eps of the ACCUMULATION dtype (random-walk round-off),
+# relative to the magnitude of the accumulated terms; low-precision storage
+# adds a few ULPs of the storage dtype for the final rounding. The base lane
+# gets 16x that sqrt(D)*eps scale (worst-case constants above the random-walk
+# std), the outlier lane 128x. The former fixed literals admitted ~4-5%
+# corruption of single elements at ANY depth (probe: depth-128 reduction, one
+# element 1.049 vs 1.0 passed all three lanes).
 DEEP_NUMERIC_REPLAY_RTOL = 1e-3
 DEEP_NUMERIC_REPLAY_ATOL = 1e-4
 DEEP_NUMERIC_REPLAY_OUTLIER_RTOL = 5e-2
@@ -416,8 +465,95 @@ DEEP_NUMERIC_REPLAY_OUTLIER_ATOL = 1e-2
 DEEP_NUMERIC_REPLAY_MAX_OUTLIER_FRACTION = 1e-4
 DEEP_NUMERIC_REPLAY_MAX_SCALED_DIFF = 5e-2
 DEEP_NUMERIC_REPLAY_MAX_MEAN_SCALED_DIFF = 1e-3
-GROUND_TRUTH_OUTPUT_RTOL = 1e-6
-GROUND_TRUTH_OUTPUT_ATOL = 1e-8
+DEEP_NUMERIC_REPLAY_BASE_SQRT_DEPTH_FACTOR = 16.0
+DEEP_NUMERIC_REPLAY_OUTLIER_SQRT_DEPTH_FACTOR = 128.0
+DEEP_NUMERIC_REPLAY_STORAGE_ULP_HEADROOM = 4.0
+# The absolute terms scale the relative bound by the tensor's max magnitude
+# (cancellation noise is proportional to the accumulated terms' scale), but
+# the max is only an honest proxy for that scale while it is representative
+# of the tensor's bulk. When max|x| exceeds this multiple of the elementwise
+# median magnitude, a single large element would launder a tensor-max atol
+# over an overwhelmingly smaller bulk (probe: ONE 1.0 element in a 100k
+# tensor of 1e-9s let 99.9% of the tensor be zeroed and pass the base lane).
+# Past the ratio the atol falls back to the median magnitude --
+# fail-toward-strict: the guarded atol is never larger than the unguarded
+# one, so nothing that used to fail can start passing.
+DEEP_NUMERIC_REPLAY_MAX_ATOL_DYNAMIC_RANGE = 1e4
+
+
+def _band_c_bounds(depth: int, payload_dtype: torch.dtype) -> tuple[float, float, float]:
+    """Return derived ``(base_rel, outlier_rel, mean_rel)`` band-C bounds.
+
+    ``payload_dtype`` is the dtype actually compared (post-fp8-widening), so
+    an fp8 payload's ``storage_term`` is DELIBERATELY fp32's, not fp8's --
+    the same strict-direction fp8 doctrine as ``fp8_safe_comparison_pair``
+    (an fp8-eps storage term of 4 x 2^-3 would dominate every bound and
+    bless multi-ULP fp8 corruption). fp16/bf16 accumulate in fp32,
+    fp64/complex128 in fp64; everything else in fp32. Each bound is capped
+    by its historical ceiling literal.
+    """
+
+    if payload_dtype in (torch.float64, torch.complex128):
+        acc_eps = float(torch.finfo(torch.float64).eps)
+    else:
+        acc_eps = float(torch.finfo(torch.float32).eps)
+    storage_eps = float(torch.finfo(payload_dtype).eps)
+    sqrt_depth = math.sqrt(max(depth, 1))
+    storage_term = DEEP_NUMERIC_REPLAY_STORAGE_ULP_HEADROOM * storage_eps
+    base_rel = min(
+        DEEP_NUMERIC_REPLAY_BASE_SQRT_DEPTH_FACTOR * sqrt_depth * acc_eps + storage_term,
+        DEEP_NUMERIC_REPLAY_RTOL,
+    )
+    outlier_rel = min(
+        DEEP_NUMERIC_REPLAY_OUTLIER_SQRT_DEPTH_FACTOR * sqrt_depth * acc_eps + 2.0 * storage_term,
+        DEEP_NUMERIC_REPLAY_OUTLIER_RTOL,
+    )
+    mean_rel = min(base_rel, DEEP_NUMERIC_REPLAY_MAX_MEAN_SCALED_DIFF)
+    return base_rel, outlier_rel, mean_rel
+
+
+# Ground-truth output tolerances are DERIVED per dtype (ULP-denominated) via
+# tensor_utils.derive_float_tolerances, replacing the former dtype-blind
+# rtol=1e-6/atol=1e-8 literals: those were ~8 fp32 ULP (fine for fp32) but
+# 2.25e9 float64 ULPs (a materially wrong fp64 output passed) and ~1/7800 of a
+# bf16 ULP (a genuine one-ULP bf16 rounding difference false-FAILED).
+#
+# Headroom model: the direct forward and the logged forward run the same eager
+# kernels in the same process, so the only legitimate divergence is inter-run
+# multi-thread reduction-order drift -- measured ~3e-7 relative (~2.5 fp32 ULP)
+# on the spectral-GCN family (see _user_public_impls.py thread-pin notes; the
+# menagerie harness retries a strict failure once under num_threads=1, where
+# the comparison goes bit-exact). 8 ULP keeps the fp32 bar at its historical
+# ~1e-6 strength with ~3x headroom over that drift. fp16/bf16 forwards
+# accumulate in fp32 and round once to storage, so their drift is
+# storage-rounding dominated: 4 ULP of the storage dtype.
+_GROUND_TRUTH_ULP_HEADROOM: dict[torch.dtype, float] = {
+    torch.float16: 4.0,
+    torch.bfloat16: 4.0,
+    torch.float32: 8.0,
+    torch.float64: 8.0,
+}
+_GROUND_TRUTH_DEFAULT_ULP_HEADROOM = 8.0
+
+
+def _ground_truth_tolerances(dtype: torch.dtype) -> tuple[float, float]:
+    """Return the derived ``(rtol, atol)`` ground-truth pair for ``dtype``.
+
+    One DELIBERATE exception to the same-strictness-in-own-ULPs model: fp8
+    payloads are widened exactly to float32 first and measured at the fp32
+    row with a zeroed absolute term (see the fp8 doctrine on
+    ``fp8_safe_comparison_pair`` and the caller) -- an own-ULP fp8 row
+    (4 x 2^-3 eps) would read a genuine one-ULP fp8 corruption as equal.
+    Strictly tighter, never looser.
+    """
+
+    headroom = _GROUND_TRUTH_ULP_HEADROOM.get(dtype, _GROUND_TRUTH_DEFAULT_ULP_HEADROOM)
+    try:
+        return derive_float_tolerances(dtype, headroom)
+    except (TypeError, ValueError):
+        # No finfo (non-float dtype): callers only reach the tolerance branch
+        # for floating payloads, but stay strict if one slips through.
+        return derive_float_tolerances(torch.float64, headroom)
 
 
 def completeness_backstop_counts(trace: "Trace") -> tuple[int, int]:
@@ -507,7 +643,7 @@ def completeness_backstop_counts(trace: "Trace") -> tuple[int, int]:
     decompositions = getattr(trace, "completeness_decompositions", ())
     diagnostics = getattr(trace, "completeness_diagnostics", ())
 
-    accounted_owner_fcids: Set[int] = {
+    accounted_owner_fcids: set[int] = {
         entry.get("owner_func_call_id")
         for entry in decompositions
         if entry.get("capture_accounted") is True
@@ -517,13 +653,13 @@ def completeness_backstop_counts(trace: "Trace") -> tuple[int, int]:
     # replacement hook: their op was orphaned out of the final trace ON PURPOSE
     # (its only consumer is the untraceable replacement tensor). Only these are
     # excused; an orphaned owner outside a replacement hook is a real silent drop.
-    replacement_hook_owner_fcids: Set[int] = {
+    replacement_hook_owner_fcids: set[int] = {
         entry.get("owner_func_call_id")
         for entry in decompositions
         if entry.get("in_replacement_hook") is True
         and isinstance(entry.get("owner_func_call_id"), int)
     }
-    captured_fcids: Set[int] = {
+    captured_fcids: set[int] = {
         op.func_call_id for op in layer_list if isinstance(getattr(op, "func_call_id", None), int)
     }
 
@@ -574,7 +710,7 @@ def completeness_backstop_counts(trace: "Trace") -> tuple[int, int]:
     # census above so they are not double-counted. An accounted owner missing from
     # the final trace that was NOT recorded as orphan-pruned stays unaccounted and
     # still trips the backstop -- a genuine silent drop is not masked.
-    orphan_pruned_fcids: Set[int] = {
+    orphan_pruned_fcids: set[int] = {
         fcid
         for fcid in getattr(trace, "_orphan_pruned_func_call_ids", ()) or ()
         if isinstance(fcid, int)
@@ -624,13 +760,17 @@ def _dispatch_op_count_matches_capture(self: "Trace") -> ValidationCheckResult:
     Returns
     -------
     ValidationCheckResult
-        A passing result when no census was supplied or both counts agree;
-        otherwise a hard completeness failure.
+        A passing result when both counts agree over a non-empty census, an
+        ``unverified`` result when no census was supplied or the census is
+        empty (which proves nothing either way), otherwise a hard completeness
+        failure.
     """
 
     dispatch_count = getattr(self, "_validation_dispatch_op_count", None)
     if dispatch_count is None:
-        return ValidationCheckResult.validated("dispatch_op_count_not_collected")
+        if int(getattr(self, "num_ops", 0)) > 0:
+            return ValidationCheckResult.unverified("dispatch_op_count_not_collected")
+        return ValidationCheckResult.validated("no_dispatchable_ops")
     captured_count = int(
         getattr(self, "_validation_captured_dispatchable_op_count", getattr(self, "num_ops", 0))
     )
@@ -642,6 +782,22 @@ def _dispatch_op_count_matches_capture(self: "Trace") -> ValidationCheckResult:
     # ``dispatched > captured + pruned + buffer-writes`` and trips the backstop.
     pruned_count = int(getattr(self, "_validation_pruned_dispatchable_op_count", 0))
     buffer_write_count = int(getattr(self, "_validation_buffer_write_dispatch_op_count", 0))
+    # Liveness floor. ``0 == 0 + 0 + 0`` is arithmetically a match but proves
+    # NOTHING: the arithmetic is identical whether every dispatch was accounted
+    # for or the witness recorded nothing at all. Do NOT claim ``matched`` for it.
+    #
+    # It is NOT reported as a failure either, and that is a measured fact rather
+    # than a concession: a capture whose only ops legitimately dispatch nothing
+    # (a same-shape ``torch.broadcast_tensors``, which returns its inputs) yields
+    # exactly ``(0, 0)`` with EMPTY ``completeness_decompositions`` and EMPTY
+    # ``completeness_diagnostics`` -- witness state byte-identical to a cleared
+    # census. Failing here would false-fail that correct capture, and no signal
+    # the witness currently emits separates the two states; distinguishing them
+    # requires the witness to record every observed wrapped call, not only the
+    # ones that owned a dispatch. ``unverified`` is the honest verdict the check
+    # vocabulary already provides, and it never reads as a pass.
+    if dispatch_count == 0 and captured_count == 0 and int(getattr(self, "num_ops", 0)) > 0:
+        return ValidationCheckResult.unverified("dispatch_op_count_witness_empty")
     if dispatch_count == captured_count + pruned_count + buffer_write_count:
         return ValidationCheckResult.validated("dispatch_op_count_matched")
     return ValidationCheckResult.failed_result("dispatch_op_count_mismatch")
@@ -687,8 +843,9 @@ def _ground_truth_output_matches_saved(
     """Return whether a saved model output matches the direct forward output.
 
     The direct output check is exact first. For floating-point outputs, it then
-    allows only sub-ULP wrapper noise, which covers models whose logged full
-    forward produces numerically equivalent logits that differ at ~1e-11 scale.
+    allows only a few ULPs of the output's own dtype (see
+    ``_GROUND_TRUTH_ULP_HEADROOM``), covering inter-run multi-thread
+    reduction-order drift between two clean forwards of the same model.
 
     Parameters
     ----------
@@ -701,7 +858,7 @@ def _ground_truth_output_matches_saved(
     -------
     bool
         True if the outputs are exactly equal or differ only by the tight
-        output-only floating-point tolerance.
+        dtype-derived output-only floating-point tolerance.
     """
     if tensor_nanequal(saved_output, ground_truth_output, allow_tolerance=False):
         return True
@@ -714,26 +871,110 @@ def _ground_truth_output_matches_saved(
 
     from .._state import pause_logging
 
+    original_dtype = saved_output.dtype
+
     with pause_logging():
+        # fp8 lacks isinf/nan_to_num/allclose kernels; widening is exact, and
+        # the tolerance below DELIBERATELY stays the float32-grade row rather
+        # than fp8's own coarse 2^-3/2^-2 epsilon (the documented fp8
+        # doctrine on fp8_safe_comparison_pair: an own-ULP row would read a
+        # genuine one-ULP fp8 corruption as equal). This is the one dtype
+        # family measured in the WIDENED dtype's ULPs by design -- strictly
+        # tighter, never looser (b4-opus F13-2a adjudication).
+        saved_output, ground_truth_output = fp8_safe_comparison_pair(
+            saved_output, ground_truth_output
+        )
         if not torch.equal(saved_output.isnan(), ground_truth_output.isnan()):
             return False
         if not torch.equal(saved_output.isinf(), ground_truth_output.isinf()):
             return False
         saved_nonan = torch.nan_to_num(saved_output, 0.7234691827346)
         ground_truth_nonan = torch.nan_to_num(ground_truth_output, 0.7234691827346)
+        rtol, atol = _ground_truth_tolerances(saved_nonan.dtype)
+        if original_dtype in get_fp8_dtypes():
+            # Mirror tensor_nanequal's rtol-only fp8 rule: even a
+            # denormal-scale float32 absolute term is measured against the
+            # wrong dtype's bottom-of-range once the payload started as fp8.
+            atol = 0.0
         return bool(
             torch.allclose(
                 saved_nonan,
                 ground_truth_nonan,
-                rtol=GROUND_TRUTH_OUTPUT_RTOL,
-                atol=GROUND_TRUTH_OUTPUT_ATOL,
+                rtol=rtol,
+                atol=atol,
             )
+        )
+
+
+def _comparator_self_test() -> None:
+    """Prove the shared replay comparator on known sentinel pairs.
+
+    ``tensor_nanequal`` is the judge for every per-op replay comparison; a
+    corrupted or monkeypatched-vacuous comparator would bless arbitrary
+    replay corruption with no other oracle in the loop. Each call is a few
+    microseconds on four-element CPU tensors.
+
+    Raises
+    ------
+    RuntimeError
+        If the comparator returns the wrong verdict on any sentinel pair.
+    """
+
+    from .._state import pause_logging
+
+    with pause_logging():
+        base = torch.tensor([1.0, -2.0, 0.0, 0.5])
+        unequal = torch.tensor([1.0, -2.0, 0.0, 0.75])
+        nan_pair = torch.tensor([float("nan"), 1.0])
+        nan_vs_number = torch.tensor([0.25, 1.0])
+        neg_zero = torch.tensor([-0.0, 1.0])
+        pos_zero = torch.tensor([0.0, 1.0])
+        # R74r6-F1: bound the EFFECTIVE fp32 band from BOTH sides, not just
+        # non-vacuity. The loosest sentinel above is a 1/3 relative gap, so
+        # any rtol below 0.333 used to pass -- a 5,461x-loosened band ran
+        # this self-test green and blessed 30% corruption of every replayed
+        # activation. The pairs below pin the band's order of magnitude: a
+        # 16x-the-shipped-512-ULP-fp32-row relative gap (~9.8e-4, formerly
+        # the independent decimal literal 1e-3, which could co-drift against
+        # the row) must read UNEQUAL, and a 1e-6 gap (well inside the row)
+        # must read EQUAL so a pathologically TIGHTENED band that would
+        # false-fail every replay is caught too. The reject sentinel is
+        # DERIVED from the PURE derivation at the shipped headroom -- never
+        # from the live _tolerances_for_dtype cache, which is exactly the
+        # surface a poisoned/corrupted band lives in and must not be able to
+        # move its own tripwire. (Headroom walk-out is pinned separately by
+        # tests/test_replay_tolerance_dtype_tripwire.py's literal pins.)
+        band_probe = torch.tensor([1.0, -1.0, 0.5, 2.0])
+        fp32_replay_rtol = derive_float_tolerances(
+            torch.float32, _ACCUMULATING_REPLAY_ULP_HEADROOM
+        )[0]
+        band_reject = band_probe * (1.0 + 16.0 * fp32_replay_rtol)
+        band_accept = band_probe * (1.0 + 1.0e-6)
+        healthy = (
+            bool(tensor_nanequal(base, base.clone(), allow_tolerance=True))
+            and not bool(tensor_nanequal(base, unequal, allow_tolerance=True))
+            and bool(tensor_nanequal(nan_pair, nan_pair.clone(), allow_tolerance=True))
+            and not bool(tensor_nanequal(nan_pair, nan_vs_number, allow_tolerance=True))
+            # Signed-zero doctrine (sol+fable r4): a -0.0/+0.0 flip is not
+            # EXACT (bit-distinct, diverges through 1/x) but sits inside the
+            # tolerance band.
+            and not bool(tensor_nanequal(neg_zero, pos_zero))
+            and bool(tensor_nanequal(neg_zero, pos_zero, allow_tolerance=True))
+            and bool(tensor_nanequal(neg_zero, neg_zero.clone()))
+            and not bool(tensor_nanequal(band_probe, band_reject, allow_tolerance=True))
+            and bool(tensor_nanequal(band_probe, band_accept, allow_tolerance=True))
+        )
+    if not healthy:
+        raise RuntimeError(
+            "TorchLens validation comparator self-test failed: tensor_nanequal "
+            "returned the wrong verdict on a known sentinel pair, so no replay "
+            "verdict from this process can be trusted. Refusing to validate."
         )
 
 
 def validate_saved_outs(
     self: "Trace",
-    ground_truth_output_tensors: List[torch.Tensor],
+    ground_truth_output_tensors: list[torch.Tensor],
     verbose: bool = False,
     validate_metadata: bool = True,
 ) -> ValidationReplayStatus:
@@ -751,20 +992,37 @@ def validate_saved_outs(
     (checks A-R in ``invariants.py``) run to verify structural/semantic
     consistency of the entire Trace.
 
-    Args:
-        ground_truth_output_tensors: Output tensors from a fresh forward pass,
-            used to confirm the logged outputs are accurate before BFS begins.
-        verbose: Whether to print warning messages on validation failure.
-        validate_metadata: Whether to run metadata invariant checks (default True).
+    Parameters
+    ----------
+    ground_truth_output_tensors:
+        Output tensors from a fresh forward pass, used to confirm the logged
+        outputs are accurate before BFS begins.
+    verbose:
+        Whether to print warning messages on validation failure.
+    validate_metadata:
+        Whether to run metadata invariant checks.
 
-    Returns:
+    Returns
+    -------
+    ValidationReplayStatus
         Aggregate replay-validation status. Fully validated pass/fail results
         remain bool-compatible through callers that unwrap completed statuses.
     """
-    from ..runnable import refuse_poisoned_trace
+    from ..runnable import refuse_collective_boundary_trace, refuse_poisoned_trace
 
     refuse_poisoned_trace(self, "validation")
+    # A collective boundary cannot be replayed single-device: re-issuing it
+    # outside its communicator hangs or fabricates values, so forward-replay
+    # validation refuses typed. Metadata invariants run in full elsewhere.
+    refuse_collective_boundary_trace(self, "forward-replay validation")
     _raise_if_portable_bundle_log(self)
+    # Judge self-test (R75-4): tensor_nanequal is the single comparator
+    # behind BOTH the per-op replay verdict here and capture-side
+    # alias/mutation bookkeeping, with no oracle above it. A degradation
+    # making it vacuously true would blind the whole tripwire while every
+    # test stays green, so the entry point proves the judge on known
+    # sentinel pairs before trusting any verdict it produces.
+    _comparator_self_test()
 
     # Diagnostics side-channel: clear any stale failure from a prior run so a
     # report reflects THIS validation only. ADD-ONLY -- never affects the result.
@@ -775,10 +1033,17 @@ def validate_saved_outs(
         ValidationFailure,
         describe_tensor_mismatch,
         record_validation_failure,
+        reset_validation_diagnostics,
         reset_validation_failure,
     )
 
     reset_validation_failure(self)
+    # THIS-run semantics for the diagnostics ledger too (b8 B8-43): only the
+    # failure slot was reset here, so diagnostics accumulated across runs.
+    reset_validation_diagnostics(self)
+    # Per-run cache for the orphan-arg sweep; stale entries from a previous
+    # validation of a since-mutated trace must never leak into this run.
+    self.__dict__.pop("_validation_orphan_candidate_index", None)
     decision_recorder = ValidationDecisionRecorder()
 
     dispatch_count_result = _dispatch_op_count_matches_capture(self)
@@ -794,7 +1059,8 @@ def validate_saved_outs(
             f"{dispatch_count} dispatched vs {captured_count} captured "
             f"+ {pruned_count} orphan-pruned + {buffer_write_count} buffer-write."
         )
-        print(message)
+        if verbose:
+            print(message)
         record_validation_failure(
             self,
             ValidationFailure(
@@ -818,6 +1084,49 @@ def validate_saved_outs(
         status = decision_recorder.as_status(backend=str(getattr(self, "backend", "torch")))
         setattr(self, "_validation_replay_status", status)
         return status
+    if dispatch_count_result.decision == "validated":
+        # Positive census coverage is part of the verdict record: a passed
+        # status now carries auditable evidence the dispatch census matched.
+        decision_recorder.record(
+            op_label=None,
+            func_name=None,
+            phase="metadata",
+            decision="validated",
+            reason=dispatch_count_result.reason,
+        )
+    elif dispatch_count_result.decision == "unverified":
+        # Round-26 W3-4a: an UNVERIFIED census result used to be silently
+        # DISCARDED, so nothing in the trace recorded that the completeness
+        # backstop never ran. It is now recorded on the add-only diagnostics
+        # side-channel so the fact is auditable per-trace. It deliberately
+        # does NOT flip the aggregate verdict: (1) ``dispatch_op_count_
+        # witness_empty`` is the documented correct-by-design carve-out for
+        # captures whose only ops legitimately dispatch nothing (see
+        # ``_dispatch_op_count_matches_capture``; hard-failing it false-fails
+        # a correct model with a locked regression test), and (2)
+        # ``dispatch_op_count_not_collected`` is every Trace-method validation
+        # of a capture that ran without the shadow witness -- flipping those
+        # to non-passed would break the method's bool contract on every
+        # correct model. The silent-drop class the census exists to catch is
+        # instead caught structurally on this path by the orphan-arg sweep
+        # (``_check_unattributed_arg_slots``) and the hardened
+        # ``graph_connectivity`` invariant; the census stays the authoritative
+        # backstop on the public ``tl.validate_forward_pass(model, x)`` path,
+        # which always collects it.
+        from .diagnostics import ValidationDiagnostic, record_validation_diagnostic
+
+        record_validation_diagnostic(
+            self,
+            ValidationDiagnostic(
+                check="completeness_census_unverified",
+                message=(
+                    "The aten dispatch census did not run for this validation "
+                    f"({dispatch_count_result.reason}); completeness is backstopped "
+                    "structurally, not by dispatch counting."
+                ),
+                extra={"reason": dispatch_count_result.reason},
+            ),
+        )
 
     # Initial check: logged outputs must match a fresh forward pass. Halted traces
     # deliberately stop at an internal frontier, so no full-model output exists.
@@ -827,7 +1136,8 @@ def validate_saved_outs(
                 "Trace output boundary count does not match ground truth: "
                 f"{len(self.output_layers)} logged vs {len(ground_truth_output_tensors)} expected."
             )
-            print(message)
+            if verbose:
+                print(message)
             record_validation_failure(
                 self,
                 ValidationFailure(
@@ -855,7 +1165,8 @@ def validate_saved_outs(
                 self, output_layer_label, output_label_counts
             )
             if output_layer.out is None:
-                print(f"The {i}th output layer, {output_layer_label}, has no saved out.")
+                if verbose:
+                    print(f"The {i}th output layer, {output_layer_label}, has no saved out.")
                 record_validation_failure(
                     self,
                     ValidationFailure(
@@ -877,9 +1188,11 @@ def validate_saved_outs(
             if not _ground_truth_output_matches_saved(
                 output_layer.out, ground_truth_output_tensors[i]
             ):
-                print(
-                    f"The {i}th output layer, {output_layer_label}, does not match the ground truth output tensor."
-                )
+                if verbose:
+                    print(
+                        f"The {i}th output layer, {output_layer_label}, does not "
+                        "match the ground truth output tensor."
+                    )
                 record_validation_failure(
                     self,
                     describe_tensor_mismatch(
@@ -913,7 +1226,7 @@ def validate_saved_outs(
     # enqueued once at least one validated child proves a path to the boundary;
     # validated_child_edges_for_each_layer records all proved child edges for
     # diagnostics and later completeness checks.
-    validated_child_edges_for_each_layer: Dict[str, Set[str]] = defaultdict(set)
+    validated_child_edges_for_each_layer: dict[str, set[str]] = defaultdict(set)
     seed_ops: dict[str, Op] = {}
     seed_output_label_counts: dict[str, int] = defaultdict(int)
     for output_layer_label in self.output_layers:
@@ -948,20 +1261,24 @@ def validate_saved_outs(
             setattr(self, "_validation_replay_status", status)
             return status
 
-    # Completeness check: BFS must visit every layer in the graph.
-    expected_layers = {layer.layer_label for layer in self.layer_list}
-    if len(validated_layers) < len(expected_layers):
-        unreached = expected_layers - validated_layers
-        print(
-            f"All saved outs were accurate, but some layers were not reached (check that "
-            f"child args logged accurately): {unreached}"
-        )
+    # Completeness check: BFS must visit every op in the graph, counted at
+    # PASS-QUALIFIED grain. Counting bare layer labels let a phantom extra
+    # pass of a legitimate multi-pass layer hide behind its reached siblings
+    # whenever the metadata invariants were skipped.
+    expected_ops = {op.label for op in self.layer_list}
+    if len(validated_op_labels) < len(expected_ops):
+        unreached = expected_ops - validated_op_labels
+        if verbose:
+            print(
+                f"All saved outs were accurate, but some ops were not reached (check "
+                f"that child args logged accurately): {unreached}"
+            )
         record_validation_failure(
             self,
             ValidationFailure(
                 check=CHECK_COMPLETENESS,
                 message=(
-                    f"BFS reached {len(validated_layers)}/{len(expected_layers)} layers; "
+                    f"BFS reached {len(validated_op_labels)}/{len(expected_ops)} ops; "
                     f"{len(unreached)} unreached (e.g. {sorted(unreached)[:3]})"
                 ),
                 extra={"n_unreached": len(unreached)},
@@ -1018,9 +1335,9 @@ def validate_saved_outs(
 def validate_parents_of_saved_layer(
     self: "Trace",
     layer_to_validate_parents_for_label: str,
-    validated_layers: Set[str],
-    validated_op_labels: Set[str],
-    validated_child_edges_for_each_layer: Dict[str, Set[str]],
+    validated_layers: set[str],
+    validated_op_labels: set[str],
+    validated_child_edges_for_each_layer: dict[str, set[str]],
     layers_to_validate_parents_for: deque[str],
     verbose: bool = False,
     decision_recorder: ValidationDecisionRecorder | None = None,
@@ -1045,17 +1362,29 @@ def validate_parents_of_saved_layer(
     validated-child-edge set is still retained for diagnostics and structural
     completeness checks.
 
-    Args:
-        layer_to_validate_parents_for_label: Label of the layer whose parent edges are being validated.
-        validated_layers: Set of layer labels already validated; mutated in-place to add newly validated layers.
-        validated_op_labels: Set of exact op labels already queued or validated; mutated in-place.
-        validated_child_edges_for_each_layer: Dict mapping each layer label to the set of its child edges
-            that have been validated so far; mutated in-place as child edges are confirmed.
-        layers_to_validate_parents_for: Work queue of layer labels still needing parent validation;
-            mutated in-place to append newly discovered layers.
-        verbose: Whether to print warning messages on validation failure.
+    Parameters
+    ----------
+    layer_to_validate_parents_for_label:
+        Label of the layer whose parent edges are being validated.
+    validated_layers:
+        Set of layer labels already validated; mutated in place to add newly
+        validated layers.
+    validated_op_labels:
+        Set of exact op labels already queued or validated; mutated in place.
+    validated_child_edges_for_each_layer:
+        Mapping from each layer label to the set of validated child edges;
+        mutated in place as edges are confirmed.
+    layers_to_validate_parents_for:
+        Work queue of layer labels still needing parent validation; mutated in
+        place to append newly discovered layers.
+    verbose:
+        Whether to print warning messages on validation failure.
+    decision_recorder:
+        Optional recorder that captures per-op replay decisions.
 
-    Returns:
+    Returns
+    -------
+    ValidationCheckResult
         Structured result for the parent-edge validation step.
     """
     layer_to_validate_parents_for = _op_for_validation_label(
@@ -1071,7 +1400,7 @@ def validate_parents_of_saved_layer(
     # Check that the arguments are logged correctly when the evidence is
     # available. Unverified evidence is recorded but does not preempt replay.
     arg_logging_result = _check_layer_arguments_logged_correctly(
-        self, layer_to_validate_parents_for_label
+        self, layer_to_validate_parents_for_label, verbose=verbose
     )
     arg_logging_result = _classify_user_excluded_replay_surface(
         self, layer_to_validate_parents_for, arg_logging_result
@@ -1101,10 +1430,12 @@ def validate_parents_of_saved_layer(
         if arg_logging_result.reason == "not_saved_by_user":
             skip_replay_after_arg_logging = True
     elif arg_logging_result.failed:
-        print(
-            f"Parent arguments for layer {layer_to_validate_parents_for_label} are not logged properly; "
-            f"either a parent wasn't logged as an argument, or was logged an extra time"
-        )
+        if verbose:
+            print(
+                f"Parent arguments for layer {layer_to_validate_parents_for_label} are "
+                "not logged properly; either a parent wasn't logged as an argument, or "
+                "was logged an extra time"
+            )
         from .diagnostics import CHECK_ARG_LOGGING, ValidationFailure, record_validation_failure
 
         record_validation_failure(
@@ -1126,10 +1457,23 @@ def validate_parents_of_saved_layer(
             )
         return arg_logging_result
 
-    ops_to_replay = _representative_ops_for_replay(self, ops_to_validate)
+    ops_to_replay = _all_ops_for_replay(self, ops_to_validate)
     if not skip_replay_after_arg_logging:
         # Forward replay: re-execute with correct parent values, expect same output.
         for target_op in ops_to_replay:
+            edge_result = _check_edge_intervention_boundary(self, target_op)
+            if edge_result is not None:
+                if decision_recorder is not None:
+                    decision_recorder.record(
+                        op_label=target_op.label,
+                        func_name=getattr(target_op, "func_name", None),
+                        phase="replay",
+                        decision=edge_result.decision,
+                        reason=edge_result.reason,
+                    )
+                if edge_result.failed:
+                    return edge_result
+                continue
             if _is_intentional_intervention_replacement(target_op):
                 if decision_recorder is not None:
                     decision_recorder.record(
@@ -1159,8 +1503,18 @@ def validate_parents_of_saved_layer(
         # Perturbation: for each parent, substitute random values and expect
         # the output to change, proving that parent genuinely influences this layer.
 
-        representative_parent_edges = _representative_parent_edges(self, ops_to_replay)
-        for target_op, perturb_layer in representative_parent_edges:
+        all_parent_edges = _all_data_parent_edges_for_replay(self, ops_to_replay)
+        for target_op, perturb_layer in all_parent_edges:
+            if getattr(target_op, "edge_substitutions", None):
+                if decision_recorder is not None:
+                    decision_recorder.record(
+                        op_label=target_op.label,
+                        func_name=getattr(target_op, "func_name", None),
+                        phase="perturbation",
+                        decision="edge_intervention_boundary",
+                        reason="edge_boundary_reexecuted",
+                    )
+                continue
             if _is_intentional_intervention_replacement(target_op):
                 if decision_recorder is not None:
                     decision_recorder.record(
@@ -1219,21 +1573,32 @@ def validate_parents_of_saved_layer(
         # checked output or internal sink. Recurrent multi-pass layers can have
         # self/side child edges that are valid but not part of the current
         # representative validation frontier.
-        if parent_op_label not in validated_op_labels:
-            validated_op_labels.add(parent_op_label)
+        # Track ops by their canonical pass-qualified label so the
+        # completeness census compares one spelling per op (parents of
+        # single-pass layers arrive as bare labels, seeds as ``label:1``).
+        if parent_op.label not in validated_op_labels:
+            validated_op_labels.add(parent_op.label)
             validated_layers.add(parent_layer_label)
             # Don't enqueue terminal seeds (inputs, parentless buffers) --
             # they have no parents to validate further.
             if (not parent_op.is_input) and not (
                 parent_op.is_buffer and (parent_op.buffer_source is None)
             ):
-                layers_to_validate_parents_for.append(parent_op_label)
+                layers_to_validate_parents_for.append(parent_op.label)
 
     return ValidationCheckResult.validated("parent_edges_validated")
 
 
 def _is_intentional_intervention_replacement(layer: "Op") -> bool:
     """Return whether a layer's out was intentionally replaced by a hook.
+
+    Round-26 W3-2 hardening: the per-op ``intervention_replaced`` /
+    ``is_internal_source`` attributes are written by the same capture machinery
+    whose failure this exemption must not mask, so they are no longer trusted
+    alone. The claim must be corroborated by the trace-level replacement-event
+    ledger (populated only at capture sites that directly observed a genuine
+    replacement); a self-claimed replacement op in a PLAIN capture now fails
+    replay instead of being exempted (2026-06-02 lesson).
 
     Parameters
     ----------
@@ -1246,10 +1611,23 @@ def _is_intentional_intervention_replacement(layer: "Op") -> bool:
         Whether validation should treat the op as an intervention boundary.
     """
 
-    return bool(
+    if not (
         getattr(layer, "intervention_replaced", False)
         and not getattr(layer, "is_internal_source", False)
+    ):
+        return False
+    has_own_live_replacement = any(
+        getattr(record, "replaced", False)
+        for record in (getattr(layer, "interventions", None) or ())
+    ) or any(
+        getattr(result, "replaced", False)
+        for result in (getattr(layer, "fire_results", None) or ())
     )
+    if getattr(layer, "func", None) is not None and not has_own_live_replacement:
+        return False
+    from .invariants import op_has_genuine_replacement_evidence
+
+    return op_has_genuine_replacement_evidence(layer)
 
 
 def _classify_user_excluded_replay_surface(
@@ -1363,16 +1741,29 @@ def _is_provable_functionless_source_or_boundary(layer: "Op") -> bool:
         return False
     if _is_intentional_intervention_replacement(layer):
         return True
-    source_category = (
-        bool(getattr(layer, "is_input", False))
-        or bool(getattr(layer, "is_output", False))
-        or bool(getattr(layer, "is_buffer", False))
-        or bool(getattr(layer, "input_was_parameter", False))
-        or bool(getattr(layer, "is_internal_source", False))
+    parents = tuple(getattr(layer, "parents", ()) or ())
+    children = tuple(getattr(layer, "children", ()) or ())
+    parent_arg_positions = getattr(layer, "parent_arg_positions", {}) or {}
+    has_parent_arg_positions = any(
+        bool(parent_arg_positions.get(arg_type)) for arg_type in ("args", "kwargs")
     )
-    if not source_category:
-        return False
-    return str(getattr(layer, "func_name", "none")) in {"none", "input", "output", "buffer"}
+    saved_args = getattr(layer, "saved_args", None)
+    has_saved_args = bool(saved_args)
+    func_call_id = getattr(layer, "func_call_id", None)
+    is_buffer_boundary = (
+        func_call_id is None
+        and bool(getattr(layer, "buffer_source", None))
+        and bool(getattr(layer, "buffer_write_kind", None))
+    )
+    if is_buffer_boundary:
+        return True
+    is_source = (
+        not parents and not has_parent_arg_positions and not has_saved_args and func_call_id is None
+    )
+    if is_source:
+        return True
+    is_output_boundary = bool(parents) and not children and has_parent_arg_positions
+    return is_output_boundary
 
 
 def _resolve_output_entry_for_index(
@@ -1431,7 +1822,7 @@ def _op_for_validation_label(self: "Trace", label: str) -> Op:
     return op_list[0]
 
 
-def _representative_ops_for_replay(self: "Trace", ops_to_validate: List[Op]) -> List[Op]:
+def _all_ops_for_replay(self: "Trace", ops_to_validate: list[Op]) -> list[Op]:
     """Return every concrete child op for forward replay validation.
 
     Parameters
@@ -1449,8 +1840,10 @@ def _representative_ops_for_replay(self: "Trace", ops_to_validate: List[Op]) -> 
     return ops_to_validate
 
 
-def _representative_parent_edges(self: "Trace", ops_to_validate: List[Op]) -> List[tuple[Op, str]]:
-    """Return one concrete op edge for each parent Layer edge.
+def _all_data_parent_edges_for_replay(
+    self: "Trace", ops_to_validate: list[Op]
+) -> list[tuple[Op, str]]:
+    """Return every concrete parent edge for perturbation validation.
 
     Parameters
     ----------
@@ -1460,15 +1853,16 @@ def _representative_parent_edges(self: "Trace", ops_to_validate: List[Op]) -> Li
     Returns
     -------
     list of tuple of Op and str
-        Pairs of child op and pass-qualified parent label to perturb.
+        Pairs of concrete child op and pass-qualified parent label to perturb,
+        including every recurrent pass.
     """
 
-    representative_edges: dict[str, tuple[Op, str]] = {}
-    for target_op in ops_to_validate:
-        for parent_label in sorted(_data_parent_labels(target_op)):
-            parent_layer_label = _op_for_validation_label(self, parent_label).layer_label
-            representative_edges.setdefault(parent_layer_label, (target_op, parent_label))
-    return list(representative_edges.values())
+    del self
+    return [
+        (target_op, parent_label)
+        for target_op in ops_to_validate
+        for parent_label in sorted(_data_parent_labels(target_op))
+    ]
 
 
 def _data_parent_labels(op: Op) -> set[str]:
@@ -1494,7 +1888,7 @@ def _data_parent_labels(op: Op) -> set[str]:
     return parents - control_parents
 
 
-def _validation_ops_for_entry(entry: Any) -> List[Op]:
+def _validation_ops_for_entry(entry: Any) -> list[Op]:
     """Return pass-specific ops that should be used for validation.
 
     Parameters
@@ -1519,22 +1913,26 @@ def _validation_ops_for_entry(entry: Any) -> List[Op]:
 
 
 def _check_layer_arguments_logged_correctly(
-    self: "Trace", target_layer_label: str
+    self: "Trace", target_layer_label: str, verbose: bool = False
 ) -> ValidationCheckResult:
     """Check whether the outs of the parent layers match the saved arguments of
     the target layer, and that the argument locations have been logged correctly.
 
-    Args:
-        target_layer_label: Layer to check
+    Parameters
+    ----------
+    target_layer_label:
+        Layer to check.
 
-    Returns:
+    Returns
+    -------
+    ValidationCheckResult
         Structured validation result for argument logging evidence.
     """
     target_entry = self.layer_logs.get(
         target_layer_label,
         _op_for_validation_label(self, target_layer_label),
     )
-    target_ops = _representative_ops_for_replay(self, _validation_ops_for_entry(target_entry))
+    target_ops = _all_ops_for_replay(self, _validation_ops_for_entry(target_entry))
 
     for target_layer in target_ops:
         # Genuine functionless ops have no torch function whose arguments could
@@ -1574,12 +1972,25 @@ def _check_layer_arguments_logged_correctly(
                 saved_values = getattr(target_layer, argtype_field)
                 if saved_values is None:
                     return ValidationCheckResult.unverified("missing_saved_args")
-                for key, val in iterfunc(saved_values):  # type: ignore[operator]
+                for key, val in iterfunc(saved_values):
                     validation_result_for_arg_and_layer = _validate_layer_against_arg(
-                        self, target_layer, parent_layer, arg_type, key, val
+                        self, target_layer, parent_layer, arg_type, key, val, verbose=verbose
                     )
                     if validation_result_for_arg_and_layer.decision != "validated":
                         return validation_result_for_arg_and_layer
+
+        # Round-26 W3-1: inverse orphan-arg check. Everything above starts
+        # from RECORDED parents, so a capture bug that drops a parent edge
+        # (removing it from BOTH ``parents`` and ``parent_arg_positions`` --
+        # the r22 argpos bug class) corrupts both sides of the set-equality
+        # check together and leaves the dropped parent's saved arg value
+        # sitting UNATTRIBUTED and uninspected. This sweep works from the
+        # saved args instead: every unattributed non-trivial tensor arg slot
+        # whose value provably matches a recorded producer in this trace is a
+        # dropped-edge failure.
+        orphan_result = _check_unattributed_arg_slots(self, target_layer, verbose=verbose)
+        if orphan_result.failed:
+            return orphan_result
     return ValidationCheckResult.validated("arg_logging_matched")
 
 
@@ -1619,27 +2030,36 @@ def _validate_layer_against_arg(
     arg_type: str,
     key: Any,
     val: Any,
+    verbose: bool = False,
 ) -> ValidationCheckResult:
-    """Validate whether a parent layer is correctly logged for a specific argument of a target layer.
+    """Validate whether a parent layer is logged correctly for one argument.
 
     Handles nested argument structures (lists, tuples, dicts) by recursing into them
     and delegating to ``_check_arglocs_correct_for_arg`` for each leaf value.
 
-    Args:
-        target_layer: The child layer whose argument log is being checked.
-        parent_layer: The parent layer being tested against the argument.
-        arg_type: Either ``"args"`` or ``"kwargs"``.
-        key: The positional index (for args) or keyword string (for kwargs) of the argument.
-        val: The saved argument value to inspect.
+    Parameters
+    ----------
+    target_layer:
+        Child layer whose argument log is being checked.
+    parent_layer:
+        Parent layer being tested against the argument.
+    arg_type:
+        Either ``"args"`` or ``"kwargs"``.
+    key:
+        Positional index or keyword string for the argument.
+    val:
+        Saved argument value to inspect.
 
-    Returns:
+    Returns
+    -------
+    ValidationCheckResult
         Structured validation result for this argument position.
     """
     if type(val) in [list, tuple]:
         for v, subval in enumerate(val):
             argloc_key = (key, v)
             validation_result_for_arg_and_layer = _check_arglocs_correct_for_arg(
-                self, target_layer, parent_layer, arg_type, argloc_key, subval
+                self, target_layer, parent_layer, arg_type, argloc_key, subval, verbose=verbose
             )
             if validation_result_for_arg_and_layer.decision != "validated":
                 return validation_result_for_arg_and_layer
@@ -1648,14 +2068,14 @@ def _validate_layer_against_arg(
         for subkey, subval in val.items():
             argloc_key = (key, subkey)
             validation_result_for_arg_and_layer = _check_arglocs_correct_for_arg(
-                self, target_layer, parent_layer, arg_type, argloc_key, subval
+                self, target_layer, parent_layer, arg_type, argloc_key, subval, verbose=verbose
             )
             if validation_result_for_arg_and_layer.decision != "validated":
                 return validation_result_for_arg_and_layer
     else:
         argloc_key = key
         validation_result_for_arg_and_layer = _check_arglocs_correct_for_arg(
-            self, target_layer, parent_layer, arg_type, argloc_key, val
+            self, target_layer, parent_layer, arg_type, argloc_key, val, verbose=verbose
         )
         if validation_result_for_arg_and_layer.decision != "validated":
             return validation_result_for_arg_and_layer
@@ -1714,6 +2134,7 @@ def _check_arglocs_correct_for_arg(
     arg_type: str,
     argloc_key: str | tuple[Any, ...],
     saved_arg_val: Any,
+    verbose: bool = False,
 ) -> ValidationCheckResult:
     """Check bidirectional consistency between a parent's tensor and a child's arg slot.
 
@@ -1727,14 +2148,22 @@ def _check_arglocs_correct_for_arg(
       for in-place RNG ops like ``bernoulli_`` that mutate after
       logging).
 
-    Args:
-        target_layer: The child layer whose argument log is being checked.
-        parent_layer: The parent layer being tested against the argument.
-        arg_type: Either ``"args"`` or ``"kwargs"``.
-        argloc_key: The position key (int, str, or tuple for nested args).
-        saved_arg_val: The saved argument value at that position.
+    Parameters
+    ----------
+    target_layer:
+        Child layer whose argument log is being checked.
+    parent_layer:
+        Parent layer being tested against the argument.
+    arg_type:
+        Either ``"args"`` or ``"kwargs"``.
+    argloc_key:
+        Position key for the argument slot.
+    saved_arg_val:
+        Saved argument value at that position.
 
-    Returns:
+    Returns
+    -------
+    ValidationCheckResult
         Structured validation result for this argument location.
     """
     target_layer_label = target_layer.layer_label
@@ -1781,51 +2210,464 @@ def _check_arglocs_correct_for_arg(
         and (not torch.all(parent_outs == 0))
         and (not torch.all(torch.abs(parent_outs) == 1))
         and not any(
-            [
-                torch.equal(parent_outs, other_parent_out)
-                for other_parent in target_layer.parents
-                if other_parent != parent_layer_label
-                and (
-                    other_parent_out := _saved_out_payload(
-                        _op_for_validation_label(self, other_parent)
-                    )
-                )
-                is not None
-            ]
+            torch.equal(parent_outs, other_parent_out)
+            for other_parent in target_layer.parents
+            if other_parent != parent_layer_label
+            and (
+                other_parent_out := _saved_out_payload(_op_for_validation_label(self, other_parent))
+            )
+            is not None
         )
     ):
-        print(
-            f"Parent {parent_layer_label} of {target_layer_label} has outs that match "
-            f"{arg_type} {argloc_key} for {target_layer_label}, but is not logged as "
-            f"such in parent_arg_positions."
-        )
+        if verbose:
+            print(
+                f"Parent {parent_layer_label} of {target_layer_label} has outs that match "
+                f"{arg_type} {argloc_key} for {target_layer_label}, but is not logged as "
+                f"such in parent_arg_positions."
+            )
         return ValidationCheckResult.failed_result("arg_logging_mismatch")
 
     # Case 2 exemption: in-place RNG ops (bernoulli_) mutate the tensor
     # AFTER it was logged as an arg, so the saved out no longer matches
-    # the saved_args snapshot.  This is expected and not a real mismatch.
+    # the saved_args snapshot. The legitimate mutation shape is an in-place
+    # RE-DRAW: both the child's snapshot and the parent's current out are
+    # same-shape, same-dtype 0/1 draws of the same storage. Requiring that
+    # structure keeps the genuine case exempt while arbitrary corrupted
+    # values fall through to the Case 3 failure (deephunt M1 companion: the
+    # bare func-name key validated ANY value mismatch under a bernoulli_
+    # parent).
     if (
         not parent_layer_matches_arg
         and parent_layerged_as_arg
         and parent_layer.func_name == "bernoulli_"
+        and isinstance(saved_arg_val, torch.Tensor)
+        and tuple(saved_arg_val.shape) == tuple(parent_outs.shape)
+        and saved_arg_val.dtype == parent_outs.dtype
+        and _tensor_is_binary_draw(parent_outs)
+        and _tensor_is_binary_draw(saved_arg_val)
     ):
         return ValidationCheckResult.validated("arg_logging_matched")
 
     # Case 3: parent is logged at this position but values don't match.
     if (not parent_layer_matches_arg) and parent_layerged_as_arg:
-        print(
-            f"Parent {parent_layer_label} of {target_layer_label} is logged as {arg_type} {argloc_key} to "
-            f"{target_layer_label}, but its saved outs don't match the saved argument."
-        )
+        if verbose:
+            print(
+                f"Parent {parent_layer_label} of {target_layer_label} is logged as "
+                f"{arg_type} {argloc_key} to {target_layer_label}, but its saved outs "
+                "don't match the saved argument."
+            )
         return ValidationCheckResult.failed_result("arg_logging_mismatch")
 
+    return ValidationCheckResult.validated("arg_logging_matched")
+
+
+def _tensor_is_binary_draw(value: torch.Tensor) -> bool:
+    """Return whether a tensor holds only 0/1 values (a bernoulli draw shape).
+
+    Parameters
+    ----------
+    value:
+        Tensor to classify.
+
+    Returns
+    -------
+    bool
+        True when every element is exactly 0 or 1 (NaN/Inf elements fail the
+        comparison, so a corrupted buffer never classifies as a draw).
+    """
+
+    if value.numel() == 0:
+        return False
+    return bool(torch.all((value == 0) | (value == 1)))
+
+
+def _tensor_arg_value_is_trivial(value: torch.Tensor) -> bool:
+    """Return whether a saved arg tensor value is too generic to attribute.
+
+    Mirrors the triviality exemptions of Case 1 in
+    ``_check_arglocs_correct_for_arg`` exactly: empty, bool, all-NaN, all-zero,
+    and all-abs-one tensors match producers coincidentally all the time, so a
+    value-identity match on them proves nothing.
+
+    Parameters
+    ----------
+    value:
+        Saved argument tensor leaf.
+
+    Returns
+    -------
+    bool
+        True when value-identity evidence on this tensor is not probative.
+    """
+
+    return bool(
+        value.numel() == 0
+        or value.dtype == torch.bool
+        or tensor_all_nan(value)
+        or torch.all(value == 0)
+        or torch.all(torch.abs(value) == 1)
+    )
+
+
+def _matches_own_parameter(target_layer: Op, value: torch.Tensor) -> bool:
+    """Return whether a saved arg value is one of the op's own parameters.
+
+    Parameters passed positionally (``F.linear(x, self.weight, self.bias)``)
+    are captured in ``saved_args`` but are deliberately NOT graph parents, so
+    their slots are legitimately unattributed.
+
+    Parameters
+    ----------
+    target_layer:
+        Operation whose arg slot is being classified.
+    value:
+        Saved argument tensor leaf at an unattributed slot.
+
+    Returns
+    -------
+    bool
+        True when the value matches one of the op's recorded parameters.
+    """
+
+    for param_log in getattr(target_layer, "_param_logs", ()) or ():
+        param_value = getattr(param_log, "value", None)
+        if (
+            isinstance(param_value, torch.Tensor)
+            and param_value.shape == value.shape
+            and param_value.dtype == value.dtype
+            and torch.equal(param_value, value)
+        ):
+            return True
+    return False
+
+
+def _orphan_candidate_index(self: "Trace") -> dict[tuple[Any, Any], list[Op]]:
+    """Return a (shape, dtype)-keyed index of candidate producer ops.
+
+    Built lazily once per validation run (``validate_saved_outs`` clears it at
+    entry) so the orphan-arg sweep costs nothing on the overwhelmingly common
+    zero-orphan-slot path and stays near-linear when a sweep is needed.
+
+    Parameters
+    ----------
+    self:
+        Trace being validated.
+
+    Returns
+    -------
+    dict
+        Mapping from ``(shape, dtype)`` to candidate producer ops.
+    """
+
+    cached = self.__dict__.get("_validation_orphan_candidate_index")
+    if cached is not None:
+        return cast(dict[tuple[Any, Any], list[Op]], cached)
+    index: dict[tuple[Any, Any], list[Op]] = {}
+    for candidate in self.layer_list:
+        if getattr(candidate, "is_output", False):
+            # Output boundary ops duplicate their producer's value; the
+            # producer itself is the meaningful candidate.
+            continue
+        payload = _saved_out_payload(candidate)
+        if payload is None:
+            continue
+        index.setdefault((tuple(payload.shape), payload.dtype), []).append(candidate)
+    self.__dict__["_validation_orphan_candidate_index"] = index
+    return index
+
+
+def _candidate_payload_for_target(candidate: Op, target_layer: Op) -> torch.Tensor | None:
+    """Return the candidate's out as the target would have consumed it.
+
+    Parameters
+    ----------
+    candidate:
+        Potential producer op.
+    target_layer:
+        Consuming op whose arg slot is being attributed.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Child-versioned snapshot when one exists, else the saved out.
+    """
+
+    versions = getattr(candidate, "out_versions_by_child", None) or {}
+    for key in (getattr(target_layer, "label", None), target_layer.layer_label):
+        if key is not None and key in versions:
+            return cast(torch.Tensor, versions[key])
+    return _saved_out_payload(candidate)
+
+
+def _foreach_sibling_attributes_slot(
+    self: "Trace",
+    target_layer: Op,
+    arg_type: str,
+    argloc_key: Any,
+) -> bool:
+    """Return whether a sibling foreach output attributes this exact zipped slot.
+
+    Narrow companion to the zipped foreach parent projection (round-31 M3):
+    for ``torch._foreach_*`` calls, each output's parents are restricted to
+    its own zipped list members, so sibling members' operands legitimately
+    appear unattributed in every other output's saved args. The exemption
+    requires ALL of: a ``_foreach_`` op, a zipped tuple slot key, and a
+    sibling output of the SAME call attributing SOME parent at the SAME slot
+    -- proof the slot is a sibling-OWNED member slot rather than a dropped
+    edge. r29 F5: the check is SLOT-keyed, not candidate-keyed. The former
+    version required the sibling's attributed label to EQUAL the value-matched
+    candidate, so an honest in-place ``_foreach_*_`` capture false-FAILED
+    whenever a zipped member's producer had a value-identical twin anywhere in
+    the trace (``clone``/``* 1.0``/``detach`` guarantee one): the sweep's
+    matched candidate was the twin ORPHAN, never the sibling's attributed
+    producer, and the exemption declined. Ownership of the slot by a sibling
+    is the honest fact; WHICH producer the sweep's value match found is noise.
+    A zipped edge dropped from every member still fails -- no sibling
+    attributes that slot, so the sweep runs and the drop is caught (pinned by
+    ``test_m3_dropped_zipped_edge_still_fails_validation``); a wrong producer
+    AT an attributed slot is the capture witness's per-slot identity job
+    (r29 F3c), not the value sweep's.
+
+    Parameters
+    ----------
+    self:
+        Trace being validated.
+    target_layer:
+        Operation whose unattributed slot matched a recorded producer.
+    arg_type:
+        ``"args"`` or ``"kwargs"``.
+    argloc_key:
+        Slot key of the matched value in the target op's saved args.
+
+    Returns
+    -------
+    bool
+        True when a same-call sibling attributes any parent at this slot.
+    """
+
+    if not str(getattr(target_layer, "func_name", "")).startswith("_foreach_"):
+        return False
+    if not (isinstance(argloc_key, tuple) and len(argloc_key) == 2):
+        return False
+    call_id = getattr(target_layer, "func_call_id", None)
+    if call_id is None:
+        return False
+    target_label = getattr(target_layer, "label", None) or target_layer.layer_label
+    for sibling in self.layer_list:
+        sibling_label = getattr(sibling, "label", None) or sibling.layer_label
+        if sibling_label == target_label:
+            continue
+        if getattr(sibling, "func_call_id", None) != call_id:
+            continue
+        sibling_positions = getattr(sibling, "parent_arg_positions", None) or {}
+        if (sibling_positions.get(arg_type) or {}).get(argloc_key) is not None:
+            return True
+    return False
+
+
+def _check_unattributed_arg_slots(
+    self: "Trace", target_layer: Op, verbose: bool = False
+) -> ValidationCheckResult:
+    """Fail when an unattributed saved tensor arg matches a recorded producer.
+
+    This is the INVERSE of Case 1 in ``_check_arglocs_correct_for_arg``:
+    Case 1 only inspects ops already recorded in ``parents``, so a dropped
+    parent edge (gone from ``parents`` AND ``parent_arg_positions`` together,
+    exactly what a capture-side attribution bug leaves behind) is never
+    examined even though its value still sits in ``saved_args``. Here every
+    unattributed tensor arg slot is checked against ALL recorded producers.
+
+    Exemptions are the exact mirror of Case 1 (trivial values, value ambiguity
+    with an attributed parent, candidate attributed at another slot) plus two
+    slot classes that are unattributed by design: the op's own parameters
+    passed positionally, and non-data-operand (size/shape/metadata) slots per
+    the ATen schema classifier. A legitimately outside tensor (module
+    attribute, closure constant) matches no recorded producer and passes.
+
+    Parameters
+    ----------
+    self:
+        Trace being validated.
+    target_layer:
+        Operation whose saved arg slots are being swept.
+
+    Returns
+    -------
+    ValidationCheckResult
+        Failed result for a provably-dropped parent edge, otherwise validated.
+    """
+
+    # Round-31 FN-1..6: the capture-time IDENTITY witness. Capture records, per
+    # arg slot, whether the live tensor had a traced producer that is absent
+    # from the recorded parent edges (``dropped_edge_tensor_args``). Unlike the
+    # value sweep below, this is blind to the slot's VALUE, so a dropped edge
+    # whose payload is trivial (bool mask, all-zero, all-abs-one) and a
+    # wrong-parent swap between value-identical producers both fail here
+    # instead of validating silently.
+    dropped_edge_positions = tuple(getattr(target_layer, "dropped_edge_tensor_args", ()) or ())
+    if dropped_edge_positions:
+        if verbose:
+            print(
+                f"Capture identity witness for {target_layer.layer_label}: tensor "
+                f"argument(s) at {', '.join(dropped_edge_positions)} have a live traced "
+                "producer that is not a recorded parent edge -- a parent edge was "
+                "dropped."
+            )
+        from .diagnostics import (
+            CHECK_ARG_LOGGING,
+            ValidationFailure,
+            record_validation_failure,
+        )
+
+        record_validation_failure(
+            self,
+            ValidationFailure(
+                check=CHECK_ARG_LOGGING,
+                op_label=getattr(target_layer, "label", target_layer.layer_label),
+                func_name=str(getattr(target_layer, "func_name", "")) or None,
+                message=(
+                    "identity witness: traced producer at "
+                    f"{', '.join(dropped_edge_positions)} is not a recorded parent edge"
+                ),
+                extra={"dropped_edge_positions": list(dropped_edge_positions)},
+            ),
+        )
+        return ValidationCheckResult.failed_result("dropped_parent_edge_witness")
+
+    argtype_sources = (
+        ("args", getattr(target_layer, "saved_args", None)),
+        ("kwargs", getattr(target_layer, "saved_kwargs", None)),
+    )
+    parent_arg_positions = getattr(target_layer, "parent_arg_positions", None) or {}
+    attributed_labels = {
+        logged_parent
+        for arg_domain in ("args", "kwargs")
+        for logged_parent in (parent_arg_positions.get(arg_domain, {}) or {}).values()
+    }
+
+    def leaf_slots(arg_type: str, container: Any) -> list[tuple[Any, str, torch.Tensor]]:
+        """Return (argloc_key, witness_path, tensor) leaf slots for a container."""
+
+        if container is None:
+            return []
+        items = enumerate(container) if arg_type == "args" else container.items()
+        prefix = "arg" if arg_type == "args" else "kw:"
+        slots: list[tuple[Any, str, torch.Tensor]] = []
+        for key, val in items:
+            if isinstance(val, torch.Tensor):
+                slots.append((key, f"{prefix}{key}", val))
+            elif type(val) in (list, tuple):
+                for sub_index, sub_val in enumerate(val):
+                    if isinstance(sub_val, torch.Tensor):
+                        slots.append(((key, sub_index), f"{prefix}{key}.{sub_index}", sub_val))
+            elif isinstance(val, dict):
+                for sub_key, sub_val in val.items():
+                    if isinstance(sub_val, torch.Tensor):
+                        slots.append(((key, sub_key), f"{prefix}{key}.{sub_key}", sub_val))
+        return slots
+
+    target_labels = {
+        getattr(target_layer, "label", None),
+        target_layer.layer_label,
+        getattr(target_layer, "_label_raw", None),
+    }
+    func_name = str(getattr(target_layer, "func_name", ""))
+    for arg_type, container in argtype_sources:
+        positions_map = parent_arg_positions.get(arg_type, {}) or {}
+        for argloc_key, _witness_path, value in leaf_slots(arg_type, container):
+            if argloc_key in positions_map:
+                continue
+            if _tensor_arg_value_is_trivial(value):
+                continue
+            if _matches_own_parameter(target_layer, value):
+                continue
+            # ``torch._foreach_*`` outputs are ZIPPED (round-31 M3): member
+            # ``i`` depends only on member ``i`` of each list operand, so a
+            # sibling member's operand legitimately sits in this op's saved
+            # list args without an edge. Exempt the slot ONLY when a SIBLING
+            # output of the SAME call attributes a parent at this exact zipped
+            # slot (slot ownership, r29 F5) -- a genuinely dropped zipped edge
+            # (nobody attributes the slot) still fails.
+            if _foreach_sibling_attributes_slot(self, target_layer, arg_type, argloc_key):
+                continue
+            # ``t.data = rhs`` (round-31 M6, r28 reconcile): the setter is
+            # captured as the canonical single-argument ``detach(rhs)`` call,
+            # so the pre-rebind receiver never appears as a recorded argument
+            # and no receiver-slot exemption is needed -- every recorded slot
+            # of a ``data`` op is the fully-swept RHS.
+            # Round-31 H2: a runtime TENSOR at any input slot -- including
+            # schema-typed ``int``/``Scalar`` control slots (``roll`` shifts,
+            # ``softmax`` dim, factory size dims) -- is a data dependency whose
+            # producer must be attributed, so the former ATen-schema
+            # metadata-slot suppression is gone; capture's runtime coverage
+            # guard parents every such slot, and an unattributed match here is
+            # a dropped edge regardless of the slot's schema type.
+            candidates = _orphan_candidate_index(self).get((tuple(value.shape), value.dtype), [])
+            for candidate in candidates:
+                candidate_labels = {
+                    getattr(candidate, "label", None),
+                    candidate.layer_label,
+                    getattr(candidate, "_label_raw", None),
+                }
+                candidate_labels.discard(None)
+                if candidate_labels & target_labels:
+                    continue
+                # Mirror of ``_parent_logged_for_any_arg_alias``: a producer
+                # attributed at ANY slot of this op is not a dropped edge.
+                if candidate_labels & attributed_labels:
+                    continue
+                payload = _candidate_payload_for_target(candidate, target_layer)
+                if payload is None or not tensor_nanequal(value, payload, allow_tolerance=False):
+                    continue
+                # Ambiguity mirror of Case 1: if an ATTRIBUTED parent carries
+                # identical values, the slot value plausibly came from it.
+                ambiguous = False
+                for attributed_label in attributed_labels:
+                    try:
+                        attributed_op = _op_for_validation_label(self, attributed_label)
+                    except (KeyError, ValueError):
+                        continue
+                    attributed_payload = _candidate_payload_for_target(attributed_op, target_layer)
+                    if attributed_payload is not None and tensor_nanequal(
+                        value, attributed_payload, allow_tolerance=False
+                    ):
+                        ambiguous = True
+                        break
+                if ambiguous:
+                    continue
+                if verbose:
+                    print(
+                        f"Saved {arg_type} {argloc_key!r} of {target_layer.layer_label} "
+                        f"matches the out of {candidate.layer_label}, but no parent is "
+                        "attributed at that position -- a parent edge was dropped."
+                    )
+                from .diagnostics import (
+                    CHECK_ARG_LOGGING,
+                    ValidationFailure,
+                    record_validation_failure,
+                )
+
+                record_validation_failure(
+                    self,
+                    ValidationFailure(
+                        check=CHECK_ARG_LOGGING,
+                        op_label=getattr(target_layer, "label", target_layer.layer_label),
+                        func_name=func_name or None,
+                        message=(
+                            f"unattributed tensor arg at {arg_type} {argloc_key!r} matches "
+                            f"recorded producer {candidate.layer_label}"
+                        ),
+                        extra={"matched_producer": candidate.layer_label},
+                    ),
+                )
+                return ValidationCheckResult.failed_result("unattributed_tensor_arg")
     return ValidationCheckResult.validated("arg_logging_matched")
 
 
 def _check_perturbation_exemptions(
     self: "Trace",
     layer: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
 ) -> bool:
     """Check whether a perturbation check should be skipped for registry-based reasons.
 
@@ -1877,7 +2719,7 @@ def _check_perturbation_exemptions(
     return False
 
 
-def _perturbed_parents_only_occupy_out_kwarg(layer: Op, layers_to_perturb: List[str]) -> bool:
+def _perturbed_parents_only_occupy_out_kwarg(layer: Op, layers_to_perturb: list[str]) -> bool:
     """Return whether every perturbed parent is purely an ``out=`` destination.
 
     Parameters
@@ -1893,8 +2735,18 @@ def _perturbed_parents_only_occupy_out_kwarg(layer: Op, layers_to_perturb: List[
         True when each perturbed parent's only recorded position on ``layer``
         is the ``out`` keyword argument (a write-only storage target under the
         torch ``out=`` convention). A parent that also occupies a positional or
-        non-``out`` keyword slot feeds real values and is NOT exempt.
+        non-``out`` keyword slot feeds real values and is NOT exempt. TUPLE
+        ``out=`` destinations (``torch.sort(x, out=(values, indices))``) record
+        each member at a nested ``("out", index)`` key; those slots are the
+        same write-only destination contract and are accepted identically.
     """
+
+    def _is_out_destination_key(key: Any) -> bool:
+        """Return whether an arg-map key addresses the ``out=`` destination."""
+
+        if key == "out":
+            return True
+        return isinstance(key, tuple) and len(key) == 2 and key[0] == "out"
 
     if not layers_to_perturb:
         return False
@@ -1907,7 +2759,9 @@ def _perturbed_parents_only_occupy_out_kwarg(layer: Op, layers_to_perturb: List[
         occupied_kwargs = {
             key for key, label in kwarg_positions.items() if label == perturbed_label
         }
-        if occupied_kwargs != {"out"}:
+        if not occupied_kwargs:
+            return False
+        if not all(_is_out_destination_key(key) for key in occupied_kwargs):
             return False
     return True
 
@@ -1915,7 +2769,7 @@ def _perturbed_parents_only_occupy_out_kwarg(layer: Op, layers_to_perturb: List[
 def _execute_func_with_restored_state(
     layer: Op,
     input_args: dict[str, Any],
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
     layer_label: str,
     verbose: bool,
 ) -> Any:
@@ -1953,8 +2807,10 @@ def _execute_func_with_restored_state(
         return None
 
     # In-place mutating ops (__setitem__, zero_, __delitem__) return None
-    # from PyTorch but the "output" is the mutated first argument.
-    if layer_func.__name__ in ("__setitem__", "zero_", "__delitem__"):
+    # from PyTorch but the "output" is the mutated first argument. Property
+    # setters (``t.real = rhs``: ``layer.func`` is the getset descriptor's
+    # ``__set__``, round-31 M6) have the same shape.
+    if layer_func.__name__ in ("__setitem__", "zero_", "__delitem__", "__set__"):
         recomputed_output = input_args["args"][0]
 
     # Multi-output functions may return typed containers; select the specific
@@ -2114,7 +2970,7 @@ def _op_reduction_depth(layer: Op) -> int:
     """
 
     saved_args: Sequence[Any] = getattr(layer, "saved_args", None) or ()
-    saved_kwargs: Dict[str, Any] = getattr(layer, "saved_kwargs", None) or {}
+    saved_kwargs: dict[str, Any] = getattr(layer, "saved_kwargs", None) or {}
     func_name = layer.func_name
 
     def _operand(index: int, *kwarg_names: str) -> Any:
@@ -2188,7 +3044,7 @@ def _op_reduction_depth(layer: Op) -> int:
             # scatter_reduce(input, dim, index, src, reduce, *, include_self): the
             # reduce mode arrives as kwarg "reduce" (TorchLens-captured form) or as
             # positional arg 4 (free-function torch.scatter_reduce(..., reduce)).
-            reduce_mode = saved_kwargs.get("reduce", None)
+            reduce_mode = saved_kwargs.get("reduce")
             if reduce_mode is None and len(saved_args) > 4:
                 reduce_mode = saved_args[4]
             if reduce_mode not in _ADDITIVE_SCATTER_REDUCE_MODES:
@@ -2200,7 +3056,7 @@ def _op_reduction_depth(layer: Op) -> int:
         tensor = _operand(0, "input")
         if not isinstance(tensor, torch.Tensor):
             return 0
-        dim = saved_kwargs.get("dim", None)
+        dim = saved_kwargs.get("dim")
         if dim is None:
             dim = _operand(1, "dim")
         # sum/mean/prod with no dim reduce over all elements; var/std/norm too.
@@ -2214,7 +3070,7 @@ def _op_reduction_depth(layer: Op) -> int:
 def _scatter_fan_in_depth(
     func_name: str,
     saved_args: Any,
-    saved_kwargs: Dict[str, Any],
+    saved_kwargs: dict[str, Any],
 ) -> int:
     """Return the max number of source elements aggregated per destination slot.
 
@@ -2253,7 +3109,7 @@ def _scatter_fan_in_depth(
         return _max_raw_index_multiplicity(index)
     if func_name == "segment_reduce":
         # segment_reduce(data, reduce, lengths=...): fan-in = max segment length.
-        lengths = saved_kwargs.get("lengths", None)
+        lengths = saved_kwargs.get("lengths")
         if isinstance(lengths, torch.Tensor) and lengths.numel() > 0:
             return int(lengths.max().item())
         return 0
@@ -2365,6 +3221,10 @@ def _deep_numeric_replay_matches_saved(
     from .._state import pause_logging
 
     with pause_logging():
+        # Same exact fp8 widening as the ground-truth comparison above; every op from
+        # here down (isinf, nan_to_num, allclose, isclose, and the scaled-diff
+        # reductions) is missing for fp8 dtypes.
+        recomputed_output, saved_output = fp8_safe_comparison_pair(recomputed_output, saved_output)
         if not torch.equal(recomputed_output.isnan(), saved_output.isnan()):
             return False
         if not torch.equal(recomputed_output.isinf(), saved_output.isinf()):
@@ -2373,30 +3233,65 @@ def _deep_numeric_replay_matches_saved(
         recomputed_nonan = torch.nan_to_num(recomputed_output, 0.7234691827346)
         saved_nonan = torch.nan_to_num(saved_output, 0.7234691827346)
 
+        if recomputed_nonan.numel() == 0:
+            # Shapes already matched: two empty tensors are equal.
+            return True
+
+        # Derived bounds (see the constants block): relative bounds scale with
+        # sqrt(depth) * accumulation-dtype eps; the absolute terms scale that
+        # same relative bound by the TENSOR's magnitude (cancellation noise in
+        # a deep reduction is proportional to the accumulated terms' scale,
+        # not to the near-zero result it lands on), each capped by its
+        # historical ceiling literal.
+        base_rel, outlier_rel, mean_rel = _band_c_bounds(depth, recomputed_nonan.dtype)
+        elementwise_scale = torch.maximum(recomputed_nonan.abs(), saved_nonan.abs())
+        out_scale = float(elementwise_scale.max().item())
+        # Tensor-max atol amplification is gated behind a dynamic-range check
+        # (see DEEP_NUMERIC_REPLAY_MAX_ATOL_DYNAMIC_RANGE): when the max is
+        # unrepresentative of the bulk, fall back to the median magnitude so
+        # the bulk is judged at (at most) its own scale. Strictly tighter --
+        # median <= max, so the guarded atol can only shrink.
+        typical_scale = float(elementwise_scale.median().item())
+        if out_scale > DEEP_NUMERIC_REPLAY_MAX_ATOL_DYNAMIC_RANGE * typical_scale:
+            atol_scale = typical_scale
+        else:
+            atol_scale = out_scale
+        base_atol = min(base_rel * atol_scale, DEEP_NUMERIC_REPLAY_ATOL)
+        outlier_atol = min(outlier_rel * atol_scale, DEEP_NUMERIC_REPLAY_OUTLIER_ATOL)
+
         if torch.allclose(
             recomputed_nonan,
             saved_nonan,
-            rtol=DEEP_NUMERIC_REPLAY_RTOL,
-            atol=DEEP_NUMERIC_REPLAY_ATOL,
+            rtol=base_rel,
+            atol=base_atol,
         ):
             return True
 
         close = torch.isclose(
             recomputed_nonan,
             saved_nonan,
-            rtol=DEEP_NUMERIC_REPLAY_OUTLIER_RTOL,
-            atol=DEEP_NUMERIC_REPLAY_OUTLIER_ATOL,
+            rtol=outlier_rel,
+            atol=outlier_atol,
         )
         outlier_fraction = (~close).sum().item() / close.numel()
         if outlier_fraction > DEEP_NUMERIC_REPLAY_MAX_OUTLIER_FRACTION:
             return False
 
         diff = (recomputed_nonan - saved_nonan).abs()
-        scale = torch.maximum(recomputed_nonan.abs(), saved_nonan.abs()) + 1e-12
+        # Division-safety floor as a dtype-derived subnormal CLAMP, not an
+        # additive term: the former ``+ 1e-12`` inflated the denominator for
+        # every sub-1e-12 element, so TOTAL destruction (zeroing, sign flip)
+        # of elements below ~1.2e-16 read as scaled_diff ~2e-5 and was
+        # blessed. Clamping at the comparison dtype's smallest normal keeps
+        # the division finite while measuring tiny elements at their own
+        # scale -- strictly tighter than the additive floor everywhere.
+        scale = torch.maximum(recomputed_nonan.abs(), saved_nonan.abs()).clamp_min(
+            torch.finfo(recomputed_nonan.dtype).tiny
+        )
         scaled_diff = diff / scale
         return bool(
-            scaled_diff.max().item() <= DEEP_NUMERIC_REPLAY_MAX_SCALED_DIFF
-            and scaled_diff.mean().item() <= DEEP_NUMERIC_REPLAY_MAX_MEAN_SCALED_DIFF
+            scaled_diff.max().item() <= min(outlier_rel, DEEP_NUMERIC_REPLAY_MAX_SCALED_DIFF)
+            and scaled_diff.mean().item() <= mean_rel
         )
 
 
@@ -2404,19 +3299,26 @@ def _check_whether_func_on_saved_parents_yields_saved_tensor(
     self: "Trace",
     layer_to_validate_parents_for_label: str,
     perturb: bool = False,
-    layers_to_perturb: Optional[List[str]] = None,
+    layers_to_perturb: list[str] | None = None,
     verbose: bool = False,
 ) -> ValidationCheckResult:
-    """Checks whether executing the saved function for a layer on the saved value of its parent layers
-    in fact yields the saved outs for that layer.
+    """Check whether replaying a layer from saved parents reproduces its output.
 
-    Args:
-        layer_to_validate_parents_for_label: label of the layer to check the saved outs
-        perturb: whether to perturb the saved outs
-        layers_to_perturb: layers for which to perturb the saved outs
+    Parameters
+    ----------
+    layer_to_validate_parents_for_label:
+        Label of the layer to replay.
+    perturb:
+        Whether to perturb one or more parent values before replay.
+    layers_to_perturb:
+        Layers whose saved outs should be perturbed.
+    verbose:
+        Whether to print replay diagnostics on failure.
 
-    Returns:
-        Structured validation decision for this replay/perturbation attempt.
+    Returns
+    -------
+    ValidationCheckResult
+        Structured validation decision for this replay or perturbation attempt.
     """
     if layers_to_perturb is None:
         layers_to_perturb = []
@@ -2432,11 +3334,16 @@ def _check_whether_func_on_saved_parents_yields_saved_tensor(
         return ValidationCheckResult.failed_result("functionless_computational_op")
 
     # Registry 1: skip ALL validation for nondeterministic ops (e.g., empty_like).
+    # Membership is proved PER CALL: Tensor.new's value-bearing overloads
+    # (new(tensor)/new(data)) are deterministic initialized calls and fall
+    # through to real replay -- exempting them blessed a wrong replay
+    # without execution (b1-sol R08-1).
     if layer.func_name in SKIP_VALIDATION_ENTIRELY:
-        return ValidationCheckResult.exempted(
-            "uninitialized_by_design",
-            justification=SKIP_VALIDATION_ENTIRELY[layer.func_name],
-        )
+        if uninitialized_by_design_applies(layer):
+            return ValidationCheckResult.exempted(
+                "uninitialized_by_design",
+                justification=SKIP_VALIDATION_ENTIRELY[layer.func_name],
+            )
 
     saved_output = _saved_out_payload(layer)
     if saved_output is None:
@@ -2455,6 +3362,29 @@ def _check_whether_func_on_saved_parents_yields_saved_tensor(
     recomputed_output = _execute_func_with_restored_state(
         layer, input_args, layers_to_perturb, layer_to_validate_parents_for_label, verbose
     )
+
+    # A perturbed execution that RAISES proves the op read the perturbed value
+    # but leaves the sensitivity check unrun. Retry with minimal deterministic
+    # step perturbations (+1/-1 for integers, one representable step for
+    # floats): domain-constrained control parents (``softmax`` dim, ``view``
+    # sizes -- round-31 H2 records them as real parents) usually admit an
+    # adjacent valid value even when the wide random draw does not. The retry
+    # result flows through the SAME pass/fail comparison as a first-try
+    # perturbation, so this can only convert ``unverified`` into an
+    # evidence-backed verdict (validated OR failed), never mask one.
+    if recomputed_output is None and perturb:
+        for retry_strategy in ("step_up", "step_down"):
+            retry_args, _retry_reason = _prepare_input_args_for_validating_layer(
+                self, layer, layers_to_perturb, perturb_strategy=retry_strategy
+            )
+            if retry_args is None:
+                break
+            recomputed_output = _execute_func_with_restored_state(
+                layer, retry_args, layers_to_perturb, layer_to_validate_parents_for_label, verbose
+            )
+            if recomputed_output is not None:
+                input_args = retry_args
+                break
 
     # None means execution raised an exception (see _execute_func_with_restored_state).
     if recomputed_output is None:
@@ -2492,13 +3422,41 @@ def _check_whether_func_on_saved_parents_yields_saved_tensor(
 
     # Forward replay failure (non-perturbed): saved outs don't match.
     if not matches_saved and not perturb:
-        # Exemption: parent is an in-place RNG op that may have mutated its
-        # tensor after the child logged it as an arg.
-        parent_has_inplace_rng = any(
-            _op_for_validation_label(self, p).func_name == "bernoulli_" for p in layer.parents
+        # Exemption candidate: a parent is an in-place RNG op that may have
+        # mutated its tensor after the child logged it as an arg. The blanket
+        # form exempted ANY mismatch here -- including one caused by a
+        # corrupted recorded func or non-tensor args on the CHILD (deephunt
+        # M1) -- so the exemption now requires a SNAPSHOT PROOF: re-replay the
+        # op keeping the child's own saved-arg snapshots (the pre-mutation
+        # values the child actually consumed) at the bernoulli-parent slots.
+        # Only when that reproduces the saved output is the mismatch proven
+        # to be the parent's post-hoc mutation; a corrupted child falls
+        # through to the failure below.
+        inplace_rng_parents = frozenset(
+            p for p in layer.parents if _op_for_validation_label(self, p).func_name == "bernoulli_"
         )
-        if parent_has_inplace_rng:
-            return ValidationCheckResult.exempted("parent_inplace_rng_bernoulli")
+        if inplace_rng_parents:
+            snapshot_args, _snapshot_reason = _prepare_input_args_for_validating_layer(
+                self,
+                layer,
+                layers_to_perturb,
+                skip_parent_swap_labels=inplace_rng_parents,
+            )
+            snapshot_output = (
+                _execute_func_with_restored_state(
+                    layer,
+                    snapshot_args,
+                    layers_to_perturb,
+                    layer_to_validate_parents_for_label,
+                    verbose,
+                )
+                if snapshot_args is not None
+                else None
+            )
+            if snapshot_output is not None and tensor_nanequal(
+                snapshot_output, saved_output, allow_tolerance=True
+            ):
+                return ValidationCheckResult.exempted("parent_inplace_rng_bernoulli")
         # Surface the computed reduction depth so a band-C miss is diagnosable:
         # depth < 64 means the op was (correctly) ineligible for the deep-numeric
         # tolerance; a large depth that still failed points at a real replay bug.
@@ -2511,10 +3469,11 @@ def _check_whether_func_on_saved_parents_yields_saved_tensor(
             if reduction_depth is not None
             else ""
         )
-        print(
-            f"Saved outs for layer {layer_to_validate_parents_for_label} do not match the "
-            f"values computed based on the parent layers {layer.parents}{depth_note}."
-        )
+        if verbose:
+            print(
+                f"Saved outs for layer {layer_to_validate_parents_for_label} do not match "
+                f"the values computed based on the parent layers {layer.parents}{depth_note}."
+            )
         from .diagnostics import (
             CHECK_REPLAY,
             describe_tensor_mismatch,
@@ -2539,6 +3498,40 @@ def _check_whether_func_on_saved_parents_yields_saved_tensor(
     # there's a valid excuse (bool output, special-value args, type cast, etc.).
     # Uses exact equality (no tolerance) since any change should be detectable.
     if perturb and tensor_nanequal(recomputed_output, layer.out, allow_tolerance=False):
+        # A wide random draw can be BEHAVIORALLY equivalent for modular /
+        # saturating control parents (``roll`` shift 7 == shift 3 mod 4) even
+        # though its value differs, which would flakily report a REAL edge as
+        # ``perturbation_insensitive``. Retry with the minimal deterministic
+        # steps first: ANY perturbation that changes the output proves the
+        # recorded edge influences the op, while a genuine spurious edge stays
+        # unchanged under every draw and still falls through to the posthoc
+        # excuses and the failure below -- the tripwire's failure condition is
+        # untouched, only its evidence collection got more attempts. The unit
+        # steps close the value-discretizing dead zone (round-34 Finding B): a
+        # near-constant float parent feeding an integer cast needs an excursion
+        # that crosses an integer boundary before truncation can transmit it.
+        # The geometric magnitude ladder (round-35 R2) extends that to dead
+        # zones WIDER than one unit -- bucketize with wide bins, round with
+        # negative decimals, and kin -- so any FINITE discretization step up to
+        # the bounded cap is eventually crossed and the real edge registers.
+        # The ladder is SCOPED to value-discretizing children: for fp-swamping
+        # cases (a large co-addend absorbing small steps in float precision)
+        # an unrealistically large step would falsely "confirm" a numerically
+        # inert edge, so those keep the plain unit steps and route to the
+        # ``ulp_swamped_perturbation`` exemption below.
+        for retry_strategy in _perturbation_retry_strategies(layer):
+            retry_args, _retry_reason = _prepare_input_args_for_validating_layer(
+                self, layer, layers_to_perturb, perturb_strategy=retry_strategy
+            )
+            if retry_args is None:
+                break
+            retry_output = _execute_func_with_restored_state(
+                layer, retry_args, layers_to_perturb, layer_to_validate_parents_for_label, verbose
+            )
+            if retry_output is not None and not tensor_nanequal(
+                retry_output, layer.out, allow_tolerance=False
+            ):
+                return ValidationCheckResult.validated("perturbation_changed")
         posthoc_decision = posthoc_perturb_check(self, layer, layers_to_perturb, verbose)
         if posthoc_decision.exempt:
             return ValidationCheckResult.exempted(
@@ -2547,37 +3540,28 @@ def _check_whether_func_on_saved_parents_yields_saved_tensor(
             )
         if _perturbation_delta_below_output_spacing(layer, layers_to_perturb, input_args):
             return ValidationCheckResult.exempted("ulp_swamped_perturbation")
-        generic_probe_matched = _generic_parent_effect_probe(
-            self, layer, layers_to_perturb, verbose
+        # A genuine perturbation-insensitivity failure: the output did not
+        # change when a parent's value was perturbed and no posthoc excuse applied.
+        from .diagnostics import (
+            CHECK_PERTURBATION,
+            ValidationFailure,
+            record_validation_failure,
         )
-        if not posthoc_decision.exempt:
-            # ADD-ONLY: a genuine perturbation-insensitivity failure (the output
-            # did not change when a parent's value was perturbed and no posthoc
-            # excuse applied). Record the structured reason -- this NEVER changes
-            # the decision posthoc_perturb_check already returned.
-            from .diagnostics import (
-                CHECK_PERTURBATION,
-                ValidationFailure,
-                record_validation_failure,
-            )
 
-            record_validation_failure(
-                self,
-                ValidationFailure(
-                    check=CHECK_PERTURBATION,
-                    op_label=layer_to_validate_parents_for_label,
-                    func_name=getattr(layer, "func_name", None),
-                    message=(
-                        "output insensitive to perturbing parent(s) "
-                        f"{layers_to_perturb}; the parent does not influence this op's value"
-                    ),
-                    extra={
-                        "perturbed_parents": list(layers_to_perturb),
-                        "generic_invariant_probe_matched": generic_probe_matched,
-                    },
+        record_validation_failure(
+            self,
+            ValidationFailure(
+                check=CHECK_PERTURBATION,
+                op_label=layer_to_validate_parents_for_label,
+                func_name=getattr(layer, "func_name", None),
+                message=(
+                    "output insensitive to perturbing parent(s) "
+                    f"{layers_to_perturb}; the parent does not influence this op's value"
                 ),
-            )
-            return ValidationCheckResult.failed_result("perturbation_insensitive")
+                extra={"perturbed_parents": list(layers_to_perturb)},
+            ),
+        )
+        return ValidationCheckResult.failed_result("perturbation_insensitive")
 
     return ValidationCheckResult.validated("perturbation_changed" if perturb else "replay_matched")
 
@@ -2794,187 +3778,6 @@ def _delta_is_broadcastable_below_spacing(
     return bool(torch.all(delta_broadcast < spacing_broadcast).item())
 
 
-def _generic_parent_effect_probe(
-    self: "Trace",
-    layer: Op,
-    layers_to_perturb: list[str],
-    verbose: bool,
-) -> bool:
-    """Probe whether a perturbed parent can affect the layer output.
-
-    Parameters
-    ----------
-    self:
-        Trace containing saved parent payloads.
-    layer:
-        Child op whose unchanged perturbation output is being classified.
-    layers_to_perturb:
-        Parent labels selected for perturbation.
-    verbose:
-        Whether replay exceptions should print diagnostics.
-
-    Returns
-    -------
-    bool
-        True only when two distinct rebuilt parent values both replay to the
-        exact saved output, proving the validation perturbation is not a
-        one-sample coincidence under the S1b probe contract.
-    """
-
-    probe_values = _generic_effect_probe_values(self, layer, layers_to_perturb)
-    if probe_values is None:
-        return False
-    for values_by_parent in probe_values:
-        input_args, unverified_reason = _prepare_input_args_for_validating_layer(self, layer, [])
-        if input_args is None:
-            if verbose:
-                print(f"Generic effect probe skipped: {unverified_reason}")
-            return False
-        if not _install_probe_parent_values(layer, layers_to_perturb, values_by_parent, input_args):
-            return False
-        recomputed = _execute_func_with_restored_state(
-            layer,
-            input_args,
-            layers_to_perturb,
-            layer.label,
-            verbose,
-        )
-        if recomputed is None or not tensor_nanequal(recomputed, layer.out, allow_tolerance=False):
-            return False
-    return True
-
-
-def _generic_effect_probe_values(
-    self: "Trace",
-    layer: Op,
-    layers_to_perturb: list[str],
-) -> list[dict[str, torch.Tensor]] | None:
-    """Build two distinct probe values for every perturbed parent.
-
-    Parameters
-    ----------
-    self:
-        Trace containing saved parent payloads.
-    layer:
-        Child op whose output scale informs floating probes.
-    layers_to_perturb:
-        Parent labels selected for perturbation.
-
-    Returns
-    -------
-    list[dict[str, torch.Tensor]] or None
-        Two parent-label-to-probe mappings, or ``None`` if probes cannot be
-        built without silently weakening validation.
-    """
-
-    first: dict[str, torch.Tensor] = {}
-    second: dict[str, torch.Tensor] = {}
-    for parent_label in layers_to_perturb:
-        parent = _op_for_validation_label(self, parent_label)
-        parent_out = getattr(parent, "out", None)
-        if not isinstance(parent_out, torch.Tensor) or parent_out.numel() == 0:
-            return None
-        parent_first, parent_second = _probe_pair_for_tensor(parent_out, layer.out)
-        if parent_first is None or parent_second is None:
-            return None
-        first[parent_label] = parent_first
-        second[parent_label] = parent_second
-    return [first, second]
-
-
-def _probe_pair_for_tensor(
-    parent_out: torch.Tensor,
-    output_out: torch.Tensor,
-) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    """Return two distinct probe tensors for one parent tensor.
-
-    Parameters
-    ----------
-    parent_out:
-        Saved parent tensor.
-    output_out:
-        Saved child output tensor used to choose a visible floating scale.
-
-    Returns
-    -------
-    tuple[torch.Tensor or None, torch.Tensor or None]
-        Two distinct tensors with the parent's dtype/device, or ``(None, None)``
-        when safe probes cannot be produced.
-    """
-
-    if parent_out.dtype == torch.bool:
-        return torch.zeros_like(parent_out), torch.ones_like(parent_out)
-    if parent_out.is_floating_point():
-        finite_output = output_out.detach().float().abs()
-        finite_output = finite_output[torch.isfinite(finite_output)]
-        scale = finite_output.max().item() if finite_output.numel() else 1.0
-        magnitude = max(2.0, float(scale) * 2.0)
-        dtype_info = torch.finfo(parent_out.dtype)
-        magnitude = min(magnitude, dtype_info.max * 0.25)
-        first = torch.zeros_like(parent_out)
-        second = torch.full_like(parent_out, magnitude)
-        if torch.equal(first, second):
-            return None, None
-        return first, second
-    if parent_out.dtype in (
-        torch.int,
-        torch.long,
-        torch.short,
-        torch.uint8,
-        torch.int8,
-        torch.int16,
-        torch.int32,
-        torch.int64,
-    ):
-        info = torch.iinfo(parent_out.dtype)
-        first_value = max(info.min, 0)
-        second_value = min(info.max, first_value + 1)
-        if first_value == second_value:
-            return None, None
-        return (
-            torch.full_like(parent_out, first_value),
-            torch.full_like(parent_out, second_value),
-        )
-    return None, None
-
-
-def _install_probe_parent_values(
-    layer: Op,
-    layers_to_perturb: list[str],
-    values_by_parent: dict[str, torch.Tensor],
-    input_args: dict[str, Any],
-) -> bool:
-    """Install probe tensors into every rebuilt arg occurrence for parents.
-
-    Parameters
-    ----------
-    layer:
-        Child op whose parent-argument map is used.
-    layers_to_perturb:
-        Parent labels selected for perturbation.
-    values_by_parent:
-        Probe tensor by parent label.
-    input_args:
-        Rebuilt replay arguments to mutate.
-
-    Returns
-    -------
-    bool
-        True when every perturbed parent participated in at least one rebuilt
-        positional or keyword argument.
-    """
-
-    seen: set[str] = set()
-    parent_arg_positions = getattr(layer, "parent_arg_positions", {}) or {}
-    for arg_domain in ("args", "kwargs"):
-        for key, parent_label in (parent_arg_positions.get(arg_domain, {}) or {}).items():
-            if parent_label not in values_by_parent:
-                continue
-            _write_replay_arg_value(input_args, arg_domain, key, values_by_parent[parent_label])
-            seen.add(parent_label)
-    return seen == set(layers_to_perturb)
-
-
 def _read_replay_arg_value(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
@@ -3028,36 +3831,6 @@ def _read_nested_value(value: Any, key: Any) -> Any:
     return value[key]
 
 
-def _write_replay_arg_value(
-    input_args: dict[str, Any],
-    arg_domain: str,
-    key: Any,
-    value: torch.Tensor,
-) -> None:
-    """Write a replay argument by TorchLens parent-argument position key.
-
-    Parameters
-    ----------
-    input_args:
-        Replay argument dictionary to mutate.
-    arg_domain:
-        Either ``"args"`` or ``"kwargs"``.
-    key:
-        Parent-argument position key, possibly nested as a tuple.
-    value:
-        Probe tensor to write.
-    """
-
-    if not isinstance(key, tuple):
-        input_args[arg_domain][key] = value
-        return
-    input_args[arg_domain][key[0]] = _write_nested_replay_arg_value(
-        input_args[arg_domain][key[0]],
-        key[1:],
-        value,
-    )
-
-
 def _write_nested_replay_arg_value(
     container: Any,
     key_path: tuple[Any, ...],
@@ -3089,7 +3862,9 @@ def _write_nested_replay_arg_value(
 def _prepare_input_args_for_validating_layer(
     self: "Trace",
     layer_to_validate_parents_for: Op,
-    layers_to_perturb: List[str],
+    layers_to_perturb: list[str],
+    perturb_strategy: str = "default",
+    skip_parent_swap_labels: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Build the input argument dict for replaying a layer's function.
 
@@ -3102,9 +3877,27 @@ def _prepare_input_args_for_validating_layer(
     ``parent_arg_positions`` key is a tuple ``(outer_key, inner_key)`` and
     ``assign_to_sequence_or_dict`` handles the nested assignment.
 
-    Args:
-        layer_to_validate_parents_for: Layer being checked.
-        layers_to_perturb: Layers for which to perturb the saved outs.
+    Parameters
+    ----------
+    layer_to_validate_parents_for:
+        Layer being checked.
+    layers_to_perturb:
+        Layers whose saved outs should be perturbed.
+    perturb_strategy:
+        ``"default"`` for the op-aware random perturbation, or
+        ``"step_up"``/``"step_down"`` for minimal deterministic step
+        perturbations used to retry after a perturbed execution exception.
+    skip_parent_swap_labels:
+        Parent labels whose saved outs must NOT be swapped in, keeping the
+        child's own saved-arg snapshot at those slots. Used by the
+        in-place-RNG snapshot proof: the snapshot holds the pre-mutation
+        values the child actually consumed.
+
+    Returns
+    -------
+    tuple[dict[str, Any] | None, str | None]
+        Replay argument dictionary, plus an optional unverified reason when the
+        replay inputs cannot be reconstructed.
 
     Returns:
         Tuple of prepared replay args and an optional unverified reason code.
@@ -3125,6 +3918,8 @@ def _prepare_input_args_for_validating_layer(
             key,
             parent_layer_arg,
         ) in layer_to_validate_parents_for.parent_arg_positions[arg_type].items():
+            if parent_layer_arg in skip_parent_swap_labels:
+                continue
             parent_layer = _op_for_validation_label(self, parent_layer_arg)
             target_op_label = getattr(layer_to_validate_parents_for, "label", None)
             if target_op_label in parent_layer.out_versions_by_child:
@@ -3153,11 +3948,16 @@ def _prepare_input_args_for_validating_layer(
             parent_values = parent_values.detach().clone()
 
             if parent_layer_arg in layers_to_perturb:
-                parent_layer_func_values = _perturb_parent_values_for_layer(
-                    layer_to_validate_parents_for,
-                    parent_layer_arg,
-                    parent_values,
-                )
+                if perturb_strategy == "default":
+                    parent_layer_func_values = _perturb_parent_values_for_layer(
+                        layer_to_validate_parents_for,
+                        parent_layer_arg,
+                        parent_values,
+                    )
+                else:
+                    parent_layer_func_values = _directional_step_perturb(
+                        parent_values, perturb_strategy
+                    )
             else:
                 parent_layer_func_values = parent_values
 
@@ -3199,6 +3999,9 @@ def _perturb_parent_values_for_layer(
     domain_values = _perturb_domain_sensitive_parent_values(layer, parent_label, parent_values)
     if domain_values is not None:
         return domain_values
+    index_values = index_domain_rotation_values(layer, parent_label, parent_values)
+    if index_values is not None:
+        return index_values
     selection_values = _perturb_selection_parent_values(layer, parent_label, parent_values)
     if selection_values is not None:
         return selection_values
@@ -3281,6 +4084,243 @@ def _floating_step_distinct_from(tensor: torch.Tensor) -> torch.Tensor:
     return torch.where(unchanged, fallback, candidate).to(tensor.dtype)
 
 
+# Geometric perturbation-magnitude ladder for the dead-zone retry (round-35
+# R2, scoped in the R2 refinement). Every value-DISCRETIZING child has a
+# FINITE quantization step -- 1 for integer casts, the bin width for
+# ``bucketize``, ``10**-decimals`` for ``round(decimals<0)`` -- so growing
+# the excursion x10 per rung crosses any such dead zone up to the bounded
+# 1e9 cap. The +-1.0 rung is the plain unit step and runs unconditionally
+# (round-34 Finding B); the larger rungs run ONLY for value-discretizing
+# children. The cap keeps the retry loop bounded; per-element steps a dtype
+# cannot represent fall back to the minimal representable step inside
+# ``_directional_step_perturb``.
+_DEAD_ZONE_RETRY_MAGNITUDES: tuple[float, ...] = (
+    10.0,
+    100.0,
+    1e3,
+    1e4,
+    1e5,
+    1e6,
+    1e7,
+    1e8,
+    1e9,
+)
+
+
+# Child ops whose output quantizes a continuous parent onto a grid with a
+# FINITE, crossable truncation boundary (the geometric ladder's legitimate
+# target). fp-SWAMPING children -- e.g. an ``add`` whose large co-addend
+# absorbs small parent steps in floating-point precision -- are deliberately
+# NOT classified here: their dead zone is a precision artifact of the actual
+# forward's magnitudes, so an unrealistically large step would "confirm"
+# influence the real computation never transmits. Those cases stay with the
+# ``ulp_swamped_perturbation`` exemption.
+_VALUE_DISCRETIZING_FUNC_NAMES: frozenset[str] = frozenset(
+    {
+        "floor",
+        "ceil",
+        "round",
+        "trunc",
+        "fix",
+        "floor_divide",
+        "bucketize",
+        "searchsorted",
+        "quantize_per_tensor",
+        "quantize_per_channel",
+    }
+)
+
+
+def _op_is_value_discretizing(layer: Op) -> bool:
+    """Return whether a child op quantizes values with crossable dead zones.
+
+    Parameters
+    ----------
+    layer:
+        Child op whose perturbed replay output stayed unchanged.
+
+    Returns
+    -------
+    bool
+        True for explicit quantizers (``floor``/``ceil``/``round``/``trunc``/
+        ``bucketize``/``searchsorted`` and kin, including in-place variants)
+        and for ops with a non-bool integer output (integer casts such as
+        ``.long()``/``.int()``). False otherwise -- in particular for float
+        arithmetic whose insensitivity is fp swamping, which must keep
+        routing to the ``ulp_swamped_perturbation`` exemption.
+    """
+
+    func_name = str(getattr(layer, "func_name", "") or "").rstrip("_")
+    if func_name in _VALUE_DISCRETIZING_FUNC_NAMES:
+        return True
+    out = getattr(layer, "out", None)
+    return (
+        isinstance(out, torch.Tensor)
+        and not out.dtype.is_floating_point
+        and not out.dtype.is_complex
+        and out.dtype is not torch.bool
+    )
+
+
+def _perturbation_retry_strategies(layer: Op) -> list[str]:
+    """Return the ordered deterministic retry strategies for perturbation.
+
+    Parameters
+    ----------
+    layer:
+        Child op being validated; gates the geometric magnitude ladder.
+
+    Returns
+    -------
+    list of str
+        Minimal representable steps first (least likely to violate a child
+        op's input domain), then the paired up/down unit steps (round-34
+        Finding B). Only when the child is a value-discretizing op does the
+        ladder continue to geometrically growing magnitudes, so any finite
+        TRUNCATION dead zone is eventually crossed while fp-swamped float
+        arithmetic keeps its realistic-step behavior and the
+        ``ulp_swamped_perturbation`` exemption. The retry loop returns on the
+        first strategy that changes the child output, so later rungs only
+        run while the edge still looks non-influential.
+    """
+
+    strategies = ["step_up", "step_down", "unit_step_up", "unit_step_down"]
+    if getattr(layer, "dtype", None) == torch.bool:
+        # R08: a bool-output child is a THRESHOLD op — small steps routinely
+        # fail to cross it, which the blanket ``discrete_bool_output``
+        # exemption then excused for the entire bool universe. Before any
+        # exemption is consulted, probe the excursions that flip real bool
+        # edges: sign flips (comparisons against symmetric thresholds, eq),
+        # zeroing (truthiness for the logical_* family), NaN injection
+        # (isnan/isfinite and ordered comparisons), and the geometric
+        # magnitude ladder (any finite comparison threshold). Any flip
+        # upgrades the verdict to validated; nothing here can mask a
+        # failure.
+        strategies.extend(["negate_values", "zero_values", "nan_values"])
+        for magnitude in _DEAD_ZONE_RETRY_MAGNITUDES:
+            strategies.append(f"unit_step_up:{magnitude:g}")
+            strategies.append(f"unit_step_down:{magnitude:g}")
+        return strategies
+    if not _op_is_value_discretizing(layer):
+        return strategies
+    for magnitude in _DEAD_ZONE_RETRY_MAGNITUDES:
+        strategies.append(f"unit_step_up:{magnitude:g}")
+        strategies.append(f"unit_step_down:{magnitude:g}")
+    return strategies
+
+
+def _directional_step_perturb(tensor: torch.Tensor, strategy: str) -> torch.Tensor:
+    """Return a minimal deterministic step perturbation of a saved parent.
+
+    Used to retry a perturbation check whose wide random draw raised inside
+    the child op (domain-constrained control parents such as a ``softmax``
+    dim or a ``view`` size): the adjacent value is the smallest excursion
+    that still guarantees a different input.
+
+    The ``unit_step_up``/``unit_step_down`` strategies move floating parents
+    by a full magnitude (default +-1.0, or ``unit_step_up:<magnitude>`` for
+    the geometric ladder) instead of one representable step. A
+    value-DISCRETIZING child (an integer cast such as ``.long()``,
+    ``floor``/``round``/``trunc``, ``bucketize``, ``round(decimals<0)``) has
+    a dead zone around every quantization point, so a near-constant parent
+    (e.g. an all-zero ``x * 0``) whose calibrated random draw and ULP steps
+    all land inside the zone reads as non-influential even though the edge is
+    real (round-34 Finding B, round-35 R2). A magnitude step is guaranteed to
+    cross the corresponding quantization boundary; elements the dtype cannot
+    move by the magnitude fall back to the minimal step. Integer parents step
+    by the integral magnitude where the dtype range permits; bool parents and
+    unrepresentable integer magnitudes delegate to the minimal strategies.
+
+    Parameters
+    ----------
+    tensor:
+        Saved parent tensor values.
+    strategy:
+        ``"step_up"``, ``"step_down"``, ``"unit_step_up"``, or
+        ``"unit_step_down"``, the latter two optionally suffixed with
+        ``:<magnitude>`` (e.g. ``"unit_step_up:100"``).
+
+    Returns
+    -------
+    torch.Tensor
+        Perturbed tensor of the same shape/dtype, every element guaranteed to
+        differ from the original where the dtype permits it.
+    """
+
+    if strategy == "negate_values":
+        # R08 bool-edge probe: crosses any sign-symmetric comparison
+        # threshold and flips eq/ne against a nonzero comparand.
+        if tensor.dtype == torch.bool:
+            return torch.logical_not(tensor)
+        if tensor.dtype == torch.uint8:
+            return _directional_step_perturb(tensor, "step_up")
+        negated = -tensor
+        if torch.equal(negated, tensor):
+            # An all-zero parent has no sign to flip; take the minimal step.
+            return _directional_step_perturb(tensor, "step_up")
+        return negated
+    if strategy == "zero_values":
+        # R08 bool-edge probe: flips truthiness for the logical_* family and
+        # any comparison whose threshold separates the values from zero.
+        zeroed = torch.zeros_like(tensor)
+        if torch.equal(zeroed, tensor):
+            return _directional_step_perturb(tensor, "step_up")
+        return zeroed
+    if strategy == "nan_values":
+        # R08 bool-edge probe: flips isnan/isfinite and every ordered
+        # comparison. Only floating parents can carry NaN.
+        if tensor.is_floating_point() or tensor.is_complex():
+            return torch.full_like(tensor, float("nan"))
+        return _directional_step_perturb(tensor, "step_up")
+
+    if strategy.startswith(("unit_step_up", "unit_step_down")):
+        base_strategy, _, magnitude_text = strategy.partition(":")
+        magnitude = float(magnitude_text) if magnitude_text else 1.0
+        step_up = base_strategy == "unit_step_up"
+        minimal_strategy = "step_up" if step_up else "step_down"
+        if tensor.dtype == torch.bool:
+            return _directional_step_perturb(tensor, minimal_strategy)
+        if tensor.is_complex():
+            return tensor + (magnitude if step_up else -magnitude)
+        if not tensor.is_floating_point():
+            info = torch.iinfo(tensor.dtype)
+            step = int(magnitude)
+            if step <= 1 or step > int(info.max):
+                return _directional_step_perturb(tensor, minimal_strategy)
+            step_values = torch.full_like(tensor, step)
+            if step_up:
+                return torch.where(
+                    tensor <= int(info.max) - step, tensor + step_values, tensor - step_values
+                ).to(tensor.dtype)
+            return torch.where(
+                tensor >= int(info.min) + step, tensor - step_values, tensor + step_values
+            ).to(tensor.dtype)
+        stepped = tensor + (magnitude if step_up else -magnitude)
+        minimal = _directional_step_perturb(tensor, minimal_strategy)
+        finite_and_moved = torch.isfinite(stepped) & (stepped != tensor)
+        return torch.where(finite_and_moved, stepped, minimal).to(tensor.dtype)
+
+    if tensor.dtype == torch.bool:
+        return torch.logical_not(tensor)
+    if not tensor.is_floating_point() and not tensor.is_complex():
+        info = torch.iinfo(tensor.dtype)
+        one = torch.ones_like(tensor)
+        if strategy == "step_up":
+            return torch.where(tensor < info.max, tensor + one, tensor - one).to(tensor.dtype)
+        return torch.where(tensor > info.min, tensor - one, tensor + one).to(tensor.dtype)
+    if tensor.is_complex():
+        offset = 1.0 if strategy == "step_up" else -1.0
+        return tensor + offset
+    if strategy == "step_up":
+        return _floating_step_distinct_from(tensor)
+    stepped_down = torch.nextafter(tensor, torch.full_like(tensor, float("-inf")))
+    finite = torch.isfinite(tensor)
+    candidate = torch.where(finite, stepped_down, torch.zeros_like(tensor))
+    unchanged = candidate == tensor
+    fallback = torch.where(tensor == 0, -torch.ones_like(tensor), torch.zeros_like(tensor))
+    return torch.where(unchanged, fallback, candidate).to(tensor.dtype)
+
+
 def _integer_step_distinct_from(tensor: torch.Tensor) -> torch.Tensor:
     """Return an integer tensor with every element stepped to a distinct value.
 
@@ -3331,6 +4371,12 @@ def _perturb_domain_sensitive_parent_values(
         return None
     if layer.func_name in {"__mul__", "mul"} and _output_is_all_inf(layer.out):
         return _finite_fill_distinct_from(parent_values, 0.0, 1.0)
+    if layer.func_name in {"bernoulli", "bernoulli_"} and _bernoulli_probability_slot_hit(
+        layer, parent_label
+    ):
+        complement = _bernoulli_complement_probabilities(layer, parent_values)
+        if complement is not None:
+            return complement
     if not _parent_label_occupies_arg_position(layer, parent_label, 0):
         return None
     if layer.func_name == "log":
@@ -3360,6 +4406,103 @@ def _perturb_domain_sensitive_parent_values(
         )
         return candidate.to(parent_values.dtype)
     return None
+
+
+def _bernoulli_has_explicit_probability(layer: Op) -> bool:
+    """Return whether a ``bernoulli_`` call carries an explicit probability arg.
+
+    ``dest.bernoulli_(p)`` supplies probabilities at positional slot 1 or the
+    ``p`` keyword; bare ``x.bernoulli_()`` / ``torch.bernoulli(x)`` draw from
+    the slot-0 tensor's own values.
+
+    Parameters
+    ----------
+    layer:
+        Captured bernoulli-family op.
+
+    Returns
+    -------
+    bool
+        True when an explicit probability argument is present.
+    """
+
+    if len(getattr(layer, "saved_args", None) or ()) > 1:
+        return True
+    return "p" in (getattr(layer, "saved_kwargs", None) or {})
+
+
+def _bernoulli_probability_slot_hit(layer: Op, parent_label: str) -> bool:
+    """Return whether the perturbed parent feeds the bernoulli PROBABILITY slot.
+
+    Parameters
+    ----------
+    layer:
+        Captured bernoulli-family op being replayed.
+    parent_label:
+        Parent label selected for perturbation.
+
+    Returns
+    -------
+    bool
+        True when the parent occupies the probability argument. Out-of-place
+        ``bernoulli`` reads probabilities from slot 0; ``bernoulli_(p)`` reads
+        them from slot 1 / ``p=`` (slot 0 is the overwritten destination).
+        Bare ``x.bernoulli_()`` has NO probability edge at all: it fills every
+        element with Bernoulli(0.5) draws and IGNORES the destination's values
+        (verified empirically -- ``zeros.bernoulli_()`` produces ones), so its
+        slot-0 parent is a pure template handled by the posthoc exemption.
+    """
+
+    if layer.func_name == "bernoulli_":
+        if not _bernoulli_has_explicit_probability(layer):
+            return False
+        kwarg_positions = (getattr(layer, "parent_arg_positions", None) or {}).get("kwargs", {})
+        return _parent_label_occupies_arg_position(layer, parent_label, 1) or (
+            kwarg_positions.get("p") == parent_label
+        )
+    return _parent_label_occupies_arg_position(layer, parent_label, 0)
+
+
+def _bernoulli_complement_probabilities(
+    layer: Op,
+    parent_values: torch.Tensor,
+) -> torch.Tensor | None:
+    """Return complement probabilities that provably flip every drawn element.
+
+    A small in-domain probability perturbation under restored RNG replays
+    IDENTICAL samples (the draw only changes where the perturbation crosses
+    the resampled uniforms), so the genuine values-as-probabilities edge
+    looked ``perturbation_insensitive`` and real bernoulli models could not
+    validate (deephunt L17). Probabilities at the deterministic extremes
+    remove the RNG from the comparison entirely: ``bernoulli(1) == 1`` and
+    ``bernoulli(0) == 0`` regardless of RNG state, so feeding
+    ``1 - saved_draw`` forces the replay output to differ from the saved draw
+    at EVERY element when the edge is live. A genuinely dropped edge still
+    replays unchanged and still fails.
+
+    Parameters
+    ----------
+    layer:
+        Captured bernoulli-family op being replayed.
+    parent_values:
+        Saved probability-parent tensor values.
+
+    Returns
+    -------
+    torch.Tensor | None
+        Complement-of-saved-draw probabilities, or ``None`` when the saved
+        output is not an elementwise 0/1 draw of the same shape (broadcast
+        probabilities keep the generic perturbation).
+    """
+
+    saved_draw = getattr(layer, "out", None)
+    if not isinstance(saved_draw, torch.Tensor) or not saved_draw.is_floating_point():
+        return None
+    if tuple(saved_draw.shape) != tuple(parent_values.shape):
+        return None
+    if not _tensor_is_binary_draw(saved_draw):
+        return None
+    return (1.0 - saved_draw.detach()).to(parent_values.dtype)
 
 
 def _sign_boundary_crossing_values(parent_values: torch.Tensor) -> torch.Tensor:
@@ -3998,14 +5141,18 @@ def _deep_clone_tensors(val: Any) -> Any:
 
 
 def _copy_validation_args(input_args: dict[str, Any]) -> dict[str, Any]:
-    """Deep-clone all tensors in the input argument dict to avoid in-place mutation during validation.
+    """Deep-clone replay arguments to avoid in-place mutation during validation.
 
-    Args:
-        input_args: Dict with ``"args"`` (list) and ``"kwargs"`` (dict) keys holding
-            the raw creation arguments for a layer.
+    Parameters
+    ----------
+    input_args:
+        Dictionary with ``"args"`` and ``"kwargs"`` entries holding replay
+        inputs for a layer.
 
-    Returns:
-        A new dict with the same structure but with every tensor replaced by a detached clone.
+    Returns
+    -------
+    dict[str, Any]
+        Structure-equivalent dictionary with tensor leaves detached and cloned.
     """
     return {
         "args": [_deep_clone_tensors(v) for v in input_args["args"]],
@@ -4030,13 +5177,17 @@ def _perturb_layer_outs(parent_outs: torch.Tensor, output_outs: torch.Tensor) ->
       whose saved values are entirely non-finite are perturbed to finite zeros
       so NaN-aware equality cannot turn the perturbation into a no-op.
 
-    Args:
-        parent_outs: The original parent tensor to perturb.
-        output_outs: The child layer's output tensor, used to calibrate
-            the perturbation scale for float types.
+    Parameters
+    ----------
+    parent_outs:
+        Original parent tensor to perturb.
+    output_outs:
+        Child layer output tensor, used to calibrate float perturbation scale.
 
-    Returns:
-        A new tensor of the same shape/dtype with perturbed values.
+    Returns
+    -------
+    torch.Tensor
+        New tensor of the same shape and dtype with perturbed values.
     """
     device = parent_outs.device
     if parent_outs.numel() == 0:

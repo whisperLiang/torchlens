@@ -11,9 +11,9 @@ Covers:
 from __future__ import annotations
 
 import copy
+import warnings
 from collections.abc import Generator
 from pathlib import Path
-import warnings
 
 import pytest
 import torch
@@ -131,6 +131,19 @@ def test_torch_compile_top_level_unwrap_matches_eager_trace() -> None:
         op.layer_label for op in eager_trace.layer_list
     ]
     assert len(compiled_trace.modules) == len(eager_trace.modules)
+
+
+@pytest.mark.skipif(not _torch_compile_available(), reason="torch.compile not available")
+def test_double_torch_compile_callable_names_eager_module_remedy() -> None:
+    """A double-compiled plain callable gets a specific eager-module rejection."""
+    model = _Tiny()
+    compiled_once = torch.compile(model, backend="eager")
+    compiled_twice = torch.compile(compiled_once, backend="eager")
+    if isinstance(compiled_twice, nn.Module):
+        pytest.skip("this torch runtime keeps double compile as an nn.Module")
+
+    with pytest.raises(ValueError, match=r"torch\.compile.*original eager nn\.Module"):
+        tl.trace(compiled_twice, torch.randn(2, 4))  # type: ignore[arg-type]
 
 
 @pytest.mark.skipif(not _torch_compile_available(), reason="torch.compile not available")
@@ -266,11 +279,57 @@ def test_compiled_submodule_traversal_failure_restores_earlier_swaps(
     parent.bad = _WrapperWithBrokenOriginalProbe()
     monkeypatch.setattr(helpers, "get_dynamo_optimized_module_type", lambda: nn.Module)
 
-    with pytest.raises(RuntimeError, match="broken _orig_mod probe"):
-        with unwrap_compiled_submodules(parent):
-            pass
+    with (
+        pytest.raises(RuntimeError, match="broken _orig_mod probe"),
+        unwrap_compiled_submodules(parent),
+    ):
+        pass
 
     assert parent.good is good_wrapper
+
+
+class _HostileModules(dict):
+    """``_modules`` stand-in that raises on one keyed restore once armed."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self.armed_key: str | None = None
+
+    def __setitem__(self, key: str, value: object) -> None:
+        if self.armed_key == key:
+            raise RuntimeError("hostile _modules restore")
+        super().__setitem__(key, value)
+
+
+def test_compiled_submodule_unwind_completes_past_raising_restore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """b3-sol sibling of the fixed 6896e8a9 unwind cluster: one raising restore
+    in the reversed compiled-submodule unwind used to skip every REMAINING
+    swap, stranding those children in their eager form for the life of the
+    process. The unwind must complete and re-raise the first failure."""
+    import torchlens._capture_state_helpers as helpers
+
+    wrapper_a = _WrapperWithOriginal(nn.Linear(4, 4))
+    wrapper_b = _WrapperWithOriginal(nn.Linear(4, 4))
+    parent = nn.Module()
+    parent.child_a = wrapper_a
+    parent.child_b = wrapper_b
+    hostile = _HostileModules(parent._modules)
+    object.__setattr__(parent, "_modules", hostile)
+    monkeypatch.setattr(helpers, "get_dynamo_optimized_module_type", lambda: _WrapperWithOriginal)
+
+    with (
+        pytest.raises(RuntimeError, match="hostile _modules restore"),
+        unwrap_compiled_submodules(parent),
+    ):
+        assert parent._modules["child_a"] is wrapper_a._orig_mod
+        assert parent._modules["child_b"] is wrapper_b._orig_mod
+        hostile.armed_key = "child_b"
+
+    # child_b's restore raised (it honestly stays eager); child_a's restore
+    # runs anyway instead of being skipped by the propagating failure.
+    assert parent._modules["child_a"] is wrapper_a
 
 
 @pytest.mark.skipif(not _torch_compile_available(), reason="torch.compile not available")
@@ -346,16 +405,11 @@ def test_torch_export_exported_program_raises_at_entry() -> None:
     example = (torch.randn(2, 4),)
     exported = export(model, example)
 
-    with pytest.raises((RuntimeError, AttributeError, TypeError)) as excinfo:
+    # The entry guard rejects any non-``nn.Module`` input with the documented
+    # typed refusal (an ``ExportedProgram`` is not an ``nn.Module``); the old
+    # accidental AttributeError leak this test used to match was itself a bug.
+    with pytest.raises(ValueError, match="Unsupported model type"):
         tl.trace(exported, torch.randn(2, 4), layers_to_save="none")
-    # Our guard is the preferred failure path; other failures (e.g. exported
-    # program lacking .modules()) also satisfy the 'don't silently succeed'
-    # contract.
-    assert (
-        "ExportedProgram" in str(excinfo.value)
-        or "has no attribute" in str(excinfo.value)
-        or "torch.export" in str(excinfo.value)
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -387,11 +441,22 @@ def _repo_root() -> Path:
 
 
 def test_limitations_doc_exists() -> None:
-    """The limitations page ships with the repo."""
-    path = _repo_root() / "docs" / "LIMITATIONS.md"
-    assert path.is_file(), f"Expected docs/LIMITATIONS.md to exist at {path}"
-    content = path.read_text()
-    assert len(content) > 500, "LIMITATIONS.md looks suspiciously short"
+    """The limitations pages ship with the repo.
+
+    The canonical catalog moved to docs/reference/limitations.md (grind/f1-docs
+    reconcile); docs/LIMITATIONS.md remains as a compatibility redirect stub so
+    existing links do not break. Both must exist, and the canonical page must
+    carry the real content.
+    """
+    stub = _repo_root() / "docs" / "LIMITATIONS.md"
+    assert stub.is_file(), f"Expected docs/LIMITATIONS.md redirect stub at {stub}"
+    assert "reference/limitations.md" in stub.read_text(), (
+        "docs/LIMITATIONS.md must point readers at the canonical page"
+    )
+    canonical = _repo_root() / "docs" / "reference" / "limitations.md"
+    assert canonical.is_file(), f"Expected canonical doc at {canonical}"
+    content = canonical.read_text()
+    assert len(content) > 500, "docs/reference/limitations.md looks suspiciously short"
 
 
 def test_readme_links_to_limitations_doc() -> None:
@@ -410,7 +475,7 @@ def test_limitations_doc_covers_key_contexts() -> None:
     remember to document it. Conversely, if we remove a guard without
     updating this list, the test catches the stale doc.
     """
-    content = (_repo_root() / "docs" / "LIMITATIONS.md").read_text().lower()
+    content = (_repo_root() / "docs" / "reference" / "limitations.md").read_text().lower()
     must_mention = [
         "torch.compile",
         "torch.jit",
@@ -424,6 +489,6 @@ def test_limitations_doc_covers_key_contexts() -> None:
     ]
     for phrase in must_mention:
         assert phrase in content, (
-            f"docs/LIMITATIONS.md should mention '{phrase}'. "
+            f"docs/reference/limitations.md should mention '{phrase}'. "
             f"Missing phrase suggests a stale or incomplete limitations doc."
         )

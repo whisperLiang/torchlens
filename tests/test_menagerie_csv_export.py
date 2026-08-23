@@ -8,7 +8,6 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
-import pyarrow.parquet as pq
 import pytest
 
 from menagerie.catalog import CatalogRow, write_catalog
@@ -23,6 +22,8 @@ from menagerie.csv_export import (
     _is_trustworthy,
 )
 from menagerie.op_taxonomy import OP_TAXONOMY_VERSION
+
+pq = pytest.importorskip("pyarrow.parquet")
 
 SCHEMA_ARTIFACT = (
     Path(__file__).resolve().parents[1] / ".research" / "menagerie-csv-schema" / "SCHEMA_v2.md"

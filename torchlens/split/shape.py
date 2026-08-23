@@ -7,7 +7,6 @@ from typing import Any
 
 from .errors import SplitBoundaryError, SplitErrorContext
 
-
 SymbolicDim = int | str
 
 

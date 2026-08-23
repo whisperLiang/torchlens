@@ -6,16 +6,21 @@ import time
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from ..fastlog.exceptions import PredicateError
 from ..fastlog.types import CaptureSpec, ModuleStackFrame, RecordContext
 from ..intervention.predicates import as_intervention_decision
-from ..intervention.selectors import BaseSelector, CompositeSelector, FollowedBySelector
+from ..intervention.selectors import BaseSelector
 from ..intervention.types import InterventionDecision
 from ..ir.predicate import RetroactiveCaptureDecision
+from ..ir.selector_eval import (
+    contains_followed_by,
+    selector_contains_kind,
+    split_followed_by_conjunction,
+)
 
 if TYPE_CHECKING:
     from ..fastlog.options import RecordingOptions
@@ -30,7 +35,11 @@ def _coerce_default_capture_spec(default: bool | CaptureSpec) -> CaptureSpec:
         return CaptureSpec(save_out=True, save_metadata=True)
     if default is False:
         return CaptureSpec(save_out=False, save_metadata=False)
-    raise PredicateError("default capture decision must be bool or CaptureSpec")
+    raise PredicateError(
+        "default capture decision must be bool or CaptureSpec. "
+        "Remedy: pass True, False, or a CaptureSpec as the default_op/default_module value.",
+        code="predicate_default_invalid",
+    )
 
 
 def _normalize_capture_decision(
@@ -77,15 +86,17 @@ def _normalize_capture_decision(
     if isinstance(result, (CaptureSpec, RetroactiveCaptureDecision)):
         return result
     raise PredicateError(
-        "predicate must return bool, CaptureSpec, RetroactiveCaptureDecision, or None",
+        "predicate must return bool, CaptureSpec, RetroactiveCaptureDecision, or None. "
+        "Remedy: return one of those values from the save predicate.",
         ctx=ctx,
         result=result,
+        code="predicate_return_invalid",
     )
 
 
 def _evaluate_keep_op(
     ctx: RecordContext,
-    options: "RecordingOptions",
+    options: RecordingOptions,
 ) -> CaptureSpec | RetroactiveCaptureDecision:
     """Evaluate the operation/source predicate slot for one event."""
 
@@ -103,6 +114,7 @@ def _evaluate_keep_op(
             and ctx.layer_type is not None
             and ctx.type_index is not None
             and not uses_supported_followed_by
+            and _keep_op_needs_alias_retry(options.keep_op)
         ):
             alias_ctx = replace(ctx, label=f"{ctx.layer_type}_{ctx.type_index}")
             result = options.keep_op(alias_ctx)
@@ -111,9 +123,52 @@ def _evaluate_keep_op(
     return _normalize_capture_decision(result, ctx, options.default_op)
 
 
+#: Capture-time selector kinds whose short/friendly ``{layer_type}_{type_index}``
+#: label is only visible through the :func:`_evaluate_keep_op` alias retry. ``label``,
+#: ``contains``, and ``regex`` all resolve through the capture label universe in
+#: ``ir.selector_eval`` (which on the base context exposes only the raw label such as
+#: ``"conv2d_2_4_raw"``); ``predicate`` trees read ``ctx.label`` directly.
+_ALIAS_RETRY_SELECTOR_KINDS: tuple[str, ...] = ("predicate", "label", "contains", "regex")
+
+
+def _keep_op_needs_alias_retry(predicate: object | None) -> bool:
+    """Return whether a keep-op predicate still needs the alias compatibility retry.
+
+    Parameters
+    ----------
+    predicate
+        Configured keep-op predicate.
+
+    Returns
+    -------
+    bool
+        ``True`` when the predicate may still rely on the second evaluation with
+        ``ctx.label`` rewritten to the short/friendly ``"{layer_type}_{type_index}"``
+        label (e.g. ``"conv2d_2"``).
+
+    Notes
+    -----
+    The base capture-time ``RecordContext`` only carries the RAW label (such as
+    ``"conv2d_2_4_raw"``); the short/friendly label is synthesized ONLY by the alias
+    retry in :func:`_evaluate_keep_op`. Every selector that resolves through the
+    capture label universe (``label``, ``contains``, ``regex``) can therefore target a
+    short label that is invisible on the first evaluation, so those kinds need the
+    retry too -- not just bare-callable predicate trees whose inner callable observes
+    ``ctx.label`` directly. Structured selectors that match non-label fields
+    (``func``, ``module``, ``in_module``, ``output``, ...) already see everything they
+    need on the base context and are intentionally excluded. The retry fires only after
+    a first-call miss, so widening the set is purely additive: it can add a match for a
+    short-label target, never remove an existing match.
+    """
+
+    if not isinstance(predicate, BaseSelector):
+        return True
+    return any(selector_contains_kind(predicate, kind) for kind in _ALIAS_RETRY_SELECTOR_KINDS)
+
+
 def _evaluate_intervene_op(
     ctx: RecordContext,
-    options: "RecordingOptions",
+    options: RecordingOptions,
 ) -> InterventionDecision | None:
     """Evaluate the active operation intervention predicate slot.
 
@@ -137,15 +192,17 @@ def _evaluate_intervene_op(
         return as_intervention_decision(result)
     except TypeError as exc:
         raise PredicateError(
-            "intervene predicate must return InterventionDecision, HelperSpec, callable, or None",
+            "intervene predicate must return InterventionDecision, HelperSpec, callable, "
+            "or None. Remedy: return one of those values from the intervene predicate.",
             ctx=ctx,
             result=result,
+            code="predicate_return_invalid",
         ) from exc
 
 
 def _evaluate_halt(
     ctx: RecordContext,
-    options: "RecordingOptions",
+    options: RecordingOptions,
     frontier_output: Any | None = None,
 ) -> None:
     """Evaluate the halt predicate slot and raise when it matches.
@@ -173,11 +230,11 @@ def _evaluate_halt(
     StopDirective(halt_options=options).evaluate_halt(ctx, frontier_output=frontier_output)
 
 
-def _is_halt_only_capture(options: "RecordingOptions") -> bool:
+def _is_halt_only_capture(options: RecordingOptions) -> bool:
     """Return whether capture can evaluate only the halt predicate per event.
 
-    The fast path is deliberately narrow: no save predicate, no module predicate,
-    no default retention, no intervention, and no gradient capture. That preserves
+    The fast path is deliberately narrow: no save predicate, no default
+    retention, no intervention, and no gradient capture. That preserves
     the save-then-halt ordering for every configuration that can retain payloads
     or metadata.
     """
@@ -185,7 +242,6 @@ def _is_halt_only_capture(options: "RecordingOptions") -> bool:
     return (
         options.halt is not None
         and options.keep_op is None
-        and options.keep_module is None
         and options.default_op is False
         and options.default_module is False
         and options.intervene is None
@@ -196,28 +252,18 @@ def _is_halt_only_capture(options: "RecordingOptions") -> bool:
 
 def _evaluate_retroactive_followed_by(
     ctx: RecordContext,
-    options: "RecordingOptions",
+    options: RecordingOptions,
 ) -> RetroactiveCaptureDecision | None:
     """Evaluate supported ``candidate & followed_by(successor)`` predicate sugar."""
 
-    predicate = options.keep_op
-    if not isinstance(predicate, CompositeSelector) or predicate.operator != "and":
+    split = split_followed_by_conjunction(options.keep_op)
+    if split is None:
         return None
-    left, right = predicate.selectors
-    followed_selector: FollowedBySelector | None = None
-    candidate_selector: Any | None = None
-    if isinstance(right, FollowedBySelector):
-        followed_selector = right
-        candidate_selector = left
-    elif isinstance(left, FollowedBySelector):
-        followed_selector = left
-        candidate_selector = right
-    if followed_selector is None or candidate_selector is None:
-        return None
+    followed_selector, candidate_selector = split
     inner = followed_selector.inner
     if not callable(inner) or not bool(inner(ctx)):
         return None
-    target_labels = _matching_recent_parent_labels(ctx, cast(BaseSelector, candidate_selector))
+    target_labels = _matching_recent_parent_labels(ctx, candidate_selector)
     if not target_labels:
         return None
     return RetroactiveCaptureDecision(
@@ -243,15 +289,7 @@ def _is_supported_followed_by_predicate(predicate: Any) -> bool:
     selector = getattr(predicate, "selector", None)
     if selector is not None:
         return _is_supported_followed_by_predicate(selector)
-    if not isinstance(predicate, CompositeSelector) or predicate.operator != "and":
-        return False
-    left, right = predicate.selectors
-    return (
-        isinstance(right, FollowedBySelector)
-        and isinstance(left, BaseSelector)
-        or isinstance(left, FollowedBySelector)
-        and isinstance(right, BaseSelector)
-    )
+    return split_followed_by_conjunction(predicate) is not None
 
 
 def validate_followed_by_capability(
@@ -277,32 +315,22 @@ def validate_followed_by_capability(
         Raises only for unsupported ``followed_by`` usage.
     """
 
-    if not _predicate_contains_followed_by(predicate):
+    if not contains_followed_by(predicate, unwrap=True):
         return
     if not _is_supported_followed_by_predicate(predicate):
         raise PredicateError(
             "tl.followed_by(...) only supports candidate & tl.followed_by(successor); "
-            f"{api_name} received an unsupported followed_by predicate shape."
+            f"{api_name} received an unsupported followed_by predicate shape. "
+            "Remedy: compose the predicate as candidate & tl.followed_by(successor).",
+            code="followed_by_unsupported",
         )
     if not supports_retroactive:
         raise PredicateError(
             f"{api_name} does not support tl.followed_by(...) retroactive capture; "
-            "use trace(save=...) with lookback and lookback_payload_policy instead."
+            "use trace(save=...) with lookback and lookback_payload_policy instead. "
+            "Remedy: use trace(save=...) with lookback= and lookback_payload_policy=.",
+            code="followed_by_unsupported",
         )
-
-
-def _predicate_contains_followed_by(predicate: Any) -> bool:
-    """Return whether a predicate tree contains ``FollowedBySelector``."""
-
-    if isinstance(predicate, FollowedBySelector):
-        return True
-    if isinstance(predicate, CompositeSelector):
-        left, right = predicate.selectors
-        return _predicate_contains_followed_by(left) or _predicate_contains_followed_by(right)
-    selector = getattr(predicate, "selector", None)
-    if selector is not None:
-        return _predicate_contains_followed_by(selector)
-    return False
 
 
 def _matching_recent_parent_labels(
@@ -335,17 +363,14 @@ def _matching_recent_parent_labels(
     return tuple(matches)
 
 
-def _evaluate_keep_module(ctx: RecordContext, options: "RecordingOptions") -> CaptureSpec:
-    """Evaluate the module predicate slot for one event."""
+def _module_capture_spec(options: RecordingOptions) -> CaptureSpec:
+    """Return the capture policy for one module boundary event.
 
-    if options.keep_module is None:
-        result = None
-    else:
-        result = options.keep_module(ctx)
-    decision = _normalize_capture_decision(result, ctx, options.default_module)
-    if isinstance(decision, RetroactiveCaptureDecision):
-        raise PredicateError("module predicates cannot return RetroactiveCaptureDecision")
-    return decision
+    Module events have no predicate slot (predicate-gated module-event
+    selection was removed); ``default_module`` is the whole policy.
+    """
+
+    return _coerce_default_capture_spec(options.default_module)
 
 
 def build_op_record_context(

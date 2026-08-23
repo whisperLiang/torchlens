@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,14 +10,14 @@ import pytest
 
 import torchlens as tl
 from torchlens.backends import BackendUnsupportedError
-from torchlens.capture.projections import _event_from_record
+from torchlens.capture.projections import _record_from_record_context
 from torchlens.fastlog.storage_disk import _ctx_from_json, _ctx_to_json
 from torchlens.fastlog.types import CaptureSpec, RecordContext
 from torchlens.ir import (
+    _DEFERRED_VALUE,
     CaptureEvents,
     FunctionEventInput,
     MLXValueUnavailableError,
-    _DEFERRED_VALUE,
 )
 
 
@@ -64,7 +65,7 @@ def test_deferred_value_raises_on_use_but_json_round_trips() -> None:
     with pytest.raises(MLXValueUnavailableError, match="MLX lazy evaluation"):
         bool(ctx.tensor_requires_grad)
     with pytest.raises(MLXValueUnavailableError, match="MLX lazy evaluation"):
-        ctx.is_scalar_bool == "anything"
+        ctx.is_scalar_bool == "anything"  # noqa: B015 - the comparison IS the assertion
     with pytest.raises(MLXValueUnavailableError, match="MLX lazy evaluation"):
         hash(ctx.bool_value)
 
@@ -79,10 +80,32 @@ def test_deferred_value_raises_on_use_but_json_round_trips() -> None:
     assert decoded.bool_value is None
 
 
-def test_internal_projection_coerces_deferred_value_to_none() -> None:
-    """RecordContext-to-event projection never stores the sentinel in metadata."""
+def test_ctx_json_round_trip_is_stable_with_recursive_history() -> None:
+    """Fastlog context JSON should stay byte-stable after dropping recursive history."""
 
-    event = _event_from_record(
+    nested = _minimal_context(
+        label="mlx_relu_1_2_raw",
+        raw_label="mlx_relu_1_2_raw",
+        event_index=2,
+        step_index=2,
+        raw_index=2,
+        recent_events=(),
+        recent_ops=(),
+    )
+    ctx = _minimal_context(recent_events=(nested,), recent_ops=(nested,))
+
+    encoded = _ctx_to_json(ctx)
+    round_tripped = _ctx_to_json(_ctx_from_json(encoded))
+
+    assert encoded["recent_events"] == []
+    assert encoded["recent_ops"] == []
+    assert json.dumps(encoded, sort_keys=True) == json.dumps(round_tripped, sort_keys=True)
+
+
+def test_internal_projection_coerces_deferred_value_to_none() -> None:
+    """RecordContext-to-record projection never stores the sentinel in metadata."""
+
+    event = _record_from_record_context(
         _minimal_context(),
         CaptureSpec(save_out=False, save_metadata=True),
         predicate_matched=True,

@@ -252,23 +252,48 @@ class _PaddleWrapperRegistry:
         paddle, functional, tensor_cls = _import_paddle()
         wrapped: set[str] = set()
         denied: set[str] = set()
-        for owner, owner_name, name, original, action in _iter_inventory_candidates(
-            paddle, functional, tensor_cls
-        ):
-            op_name = _op_name(owner_name, name)
-            if self.wrap_attr(owner, name, backend, op_name, action=action):
-                if action == "deny":
-                    denied.add(op_name)
-                else:
-                    wrapped.add(op_name)
+        # R07 (the L4 unwind standard): the install loop mutates process-global
+        # Paddle modules and classes; a BaseException escaping mid-install used
+        # to strand every wrapper already landed (nothing called ``unwrap``
+        # because the capture-side ``finally`` had not been entered yet).
+        # ``unwrap`` restores exactly the slots registered so far.
+        try:
+            for owner, owner_name, name, _original, action in _iter_inventory_candidates(
+                paddle, functional, tensor_cls
+            ):
+                op_name = _op_name(owner_name, name)
+                if self.wrap_attr(owner, name, backend, op_name, action=action):
+                    if action == "deny":
+                        denied.add(op_name)
+                    else:
+                        wrapped.add(op_name)
+        except BaseException:
+            self.unwrap()
+            raise
         self._inventory = PaddleInventory(tuple(sorted(wrapped)), tuple(sorted(denied)))
         self._wrapped = True
 
     def unwrap(self) -> None:
-        """Restore all original Paddle callables."""
+        """Restore all original Paddle callables.
 
+        Every restore is attempted even if one raises; the first failure
+        re-raises after the sweep so a single fallible setattr cannot leave
+        the remaining process-global wrappers installed. Slots that failed
+        to restore stay registered so a retry can restore them.
+        """
+
+        first_failure: BaseException | None = None
         for (owner, name), original in list(self._originals.items()):
-            setattr(owner, name, original)
+            try:
+                setattr(owner, name, original)
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+                continue
+            self._originals.pop((owner, name), None)
+        if first_failure is not None:
+            self._wrapped = bool(self._originals)
+            raise first_failure
         self._originals.clear()
         self._wrapped = False
         self._inventory = PaddleInventory((), ())
@@ -357,8 +382,7 @@ class _PaddleWrapperRegistry:
                 trace._paddle_capture_depth = depth
             module_stack = tuple(getattr(trace, "_paddle_module_stack", ()))
             emit = getattr(backend, "emit_paddle_operation")
-            emit(trace, op_name, original, args, kwargs, output, module_stack=module_stack)
-            return output
+            return emit(trace, op_name, original, args, kwargs, output, module_stack=module_stack)
 
         setattr(owner, name, wrapper)
         return True

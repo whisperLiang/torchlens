@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import replace
 import importlib
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, Iterator, cast
+from typing import Any, cast
 
 import pytest
 import torch
@@ -29,7 +30,61 @@ from torchlens.runnable import (
     RunnableErrorCode,
     SparseRunDescriptor,
 )
-from torchlens.utils._torch_compat import resolve_runnable_torch_alias
+from torchlens.utils._torch_compat import (
+    _RUNNABLE_TORCH_ALIASES,
+    _torch_minor_version,
+    resolve_runnable_torch_alias,
+)
+
+
+def _restamp_runtime_fingerprints(run: dict) -> None:
+    """Re-derive every call's ``runtime_fingerprint`` from the (edited) manifest.
+
+    Parse now re-derives and enforces the per-call fingerprint, so a fixture
+    that edits a signature-relevant fact (e.g. the callable registry key) must
+    model a COHERENT re-authoring -- edit plus matching fingerprint -- or the
+    tamper tripwire fires before the behavior under test is reached.
+    """
+
+    from hashlib import sha256
+
+    keys_by_registry_id = {entry["registry_id"]: entry["key"] for entry in run["callable_registry"]}
+    slots_by_id = {slot["slot_id"]: slot for slot in run["tensor_slots"]}
+    for call in run["calls"]:
+        key = keys_by_registry_id[call["registry_id"]]
+        payload = {
+            "callable": {
+                "namespace": key["namespace"],
+                "qualname": key["qualname"],
+                "dispatch_kind": key["dispatch_kind"],
+                "version": key["version"],
+                "import_path": key["import_path"],
+            },
+            "argument_names": list(call["argument_names"]),
+            "num_positional_args": int(call["num_positional_args"]),
+            "num_keyword_args": int(call["num_keyword_args"]),
+            "outputs": [
+                {
+                    "shape": list(slots_by_id[slot_id]["shape"]),
+                    "dtype": slots_by_id[slot_id]["dtype"],
+                }
+                for slot_id in call["output_slot_ids"]
+            ],
+            "execution_context": {
+                "autocast": [
+                    {
+                        "device_type": entry["device_type"],
+                        "enabled": entry["enabled"],
+                        "dtype": entry.get("dtype"),
+                    }
+                    for entry in call["execution_context"]["autocast"]
+                ],
+                "grad_enabled": call["execution_context"]["grad_enabled"],
+                "inference_mode": call["execution_context"]["inference_mode"],
+            },
+        }
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        call["runtime_fingerprint"] = sha256(serialized.encode("utf-8")).hexdigest()
 
 
 class ResolverModel(nn.Module):
@@ -174,6 +229,29 @@ def test_cross_version_alias_fixture_and_bounds() -> None:
     assert resolve_runnable_torch_alias("Tensor.add", "2.13.0") is None
 
 
+def test_variable_functions_aliases_cover_running_torch_minor() -> None:
+    """Lock VariableFunctionsClass aliases open across the running torch minor."""
+
+    running_minor = _torch_minor_version(torch.__version__)
+    assert running_minor is not None
+    aliases = tuple(
+        alias for alias in _RUNNABLE_TORCH_ALIASES if "_VariableFunctionsClass" in alias.source
+    )
+    assert aliases
+    assert all(
+        alias.recorded_min_version <= running_minor
+        and (alias.recorded_max_version is None or running_minor <= alias.recorded_max_version)
+        for alias in aliases
+    )
+    assert resolve_runnable_torch_alias(
+        "torch._VariableFunctionsClass.relu", torch.__version__
+    ) == (
+        "torch",
+        "relu",
+        "private_to_public:torch._VariableFunctionsClass->torch",
+    )
+
+
 def test_resolver_namespace_table_and_exact_binding_monotonicity() -> None:
     """Cover every stock namespace and prove aliases never reinterpret exact keys."""
 
@@ -283,12 +361,13 @@ def test_safe_load_survives_unresolved_key_and_run_fails_once_with_full_report(
         "version": 1,
         "import_path": None,
     }
+    _restamp_runtime_fingerprints(manifest["run"])
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     loaded = tl.load(path)
     assert len(loaded.layer_list) == len(source.layer_list)
     assert loaded.readiness.status is ReadinessStatus.UNAVAILABLE
-    assert "_runnable_callables_by_call_id" not in loaded.__dict__
+    assert loaded._runnable.callables_by_call_id is None
     with pytest.raises(ReattachError) as captured:
         loaded.run(torch.ones(1, 3))
     assert captured.value.fields["readiness"] is loaded.readiness

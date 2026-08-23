@@ -49,7 +49,7 @@ import math
 import os
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 # ----------------------------------------------------------------------------
 # calibrated constants (LOCKED -- keep in sync with the offline audit sweep)
@@ -136,9 +136,7 @@ def segs_intersect(p1, p2, p3, p4):
         return True
     if d3 == 0 and _on_seg(p1, p2, p3):
         return True
-    if d4 == 0 and _on_seg(p1, p2, p4):
-        return True
-    return False
+    return bool(d4 == 0 and _on_seg(p1, p2, p4))
 
 
 def seg_rect_dist(a, b, r):
@@ -459,7 +457,7 @@ def audit_graph(g, pen_eps):
 
         # (a) label vs label (reported on BOTH labels of a pair; the
         # graph-level unique count de-dupes the pair)
-        for j2, (e2, lab2) in enumerate(all_labels):
+        for _j2, (e2, lab2) in enumerate(all_labels):
             if lab2 is lab:
                 continue
             sd = label_signed_to_label(lab, lab2)
@@ -616,11 +614,11 @@ class AuditResult:
             counted once even though they are recorded on both labels).
     """
 
-    labels: List[Dict[str, Any]]
+    labels: list[dict[str, Any]]
     hard_violation_count: int
 
     @property
-    def violations(self) -> List[Dict[str, Any]]:
+    def violations(self) -> list[dict[str, Any]]:
         """Flattened violation records with their label's context attached."""
         flat = []
         for rec in self.labels:
@@ -687,7 +685,7 @@ def audit_gv_source(
 # ----------------------------------------------------------------------------
 
 
-def _main(argv: Optional[List[str]] = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) != 1:
         print("usage: python label_geometry.py <dir_with_gv_files>", file=sys.stderr)

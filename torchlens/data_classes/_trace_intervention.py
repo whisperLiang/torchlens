@@ -1,14 +1,18 @@
-"""Trace intervention mixin."""
+"""Trace intervention mixin.
+
+The fork itself is the M11 copy-on-write builder in ``_trace_fork``;
+this mixin owns the public intervention surface (set/attach/detach/do/
+fork dispatch, spec management, history records).
+"""
 
 import copy
-from collections import OrderedDict
-from functools import cached_property
-from pathlib import Path
+import sys
 import time
 import uuid
-import weakref
 import warnings
-from typing import TYPE_CHECKING, Any, Set, cast
+from functools import cached_property
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from torch import nn
@@ -19,63 +23,33 @@ if TYPE_CHECKING:
     _TraceMixinBase = Trace
 else:
     _TraceMixinBase = object
-from .. import _state
 from .._deprecations import MISSING, MissingType
+from .._errors import InvalidArgumentError
 from .._trace_state import TraceState
 from ..intervention.types import (
-    ForkFieldPolicy,
     FrozenInterventionSpec,
     InterventionSpec,
-    MODEL_LOG_FIELD_FORK_POLICY,
     TargetSpec,
 )
 from ..options import InterventionOptions, ReplayOptions, merge_intervention_options
-from .layer import Layer, OpAccessor
-from .op import Op
-from ._state_adapter import state_items, state_new, state_restore
+from ._trace_fork import (
+    _STREAM_DERIVED_GUARD_FIELDS,
+    _ForkMemo,
+    _memoized_deep_copy,
+    build_fork,
+)
 
-
-def _deep_copy_fork_container(value: Any) -> Any:
-    """Deep-copy a container for a shallow fork, preserving tensor/callable identity.
-
-    Recurses through dict/list/set/tuple structures so that mutable nested
-    containers on the fork are independent of the parent, while tensors and
-    callables (the large immutable payloads the shallow-fork path exists to avoid
-    cloning) are still shared by reference.
-
-    Parameters
-    ----------
-    value:
-        Container (or leaf) value to copy.
-
-    Returns
-    -------
-    Any
-        A structurally independent copy sharing tensor/callable leaves.
-    """
-
-    if isinstance(value, torch.Tensor) or callable(value):
-        return value
-    if isinstance(value, dict):
-        return {key: _deep_copy_fork_container(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_deep_copy_fork_container(item) for item in value]
-    if isinstance(value, set):
-        return {_deep_copy_fork_container(item) for item in value}
-    if isinstance(value, tuple):
-        return tuple(_deep_copy_fork_container(item) for item in value)
-    if isinstance(value, (str, bytes, int, float, bool, type(None))):
-        return value
-    try:
-        return copy.deepcopy(value)
-    except Exception:
-        try:
-            return copy.copy(value)
-        except Exception:
-            return value
+__all__ = [
+    "_STREAM_DERIVED_GUARD_FIELDS",
+    "TraceInterventionMixin",
+    "_ForkMemo",
+    "_memoized_deep_copy",
+]
 
 
 class TraceInterventionMixin(_TraceMixinBase):
+    """``Trace`` intervention surface: spec save/load, fork, replay, and rerun."""
+
     def save_intervention(
         self: "Trace",
         path: str | Path,
@@ -123,6 +97,30 @@ class TraceInterventionMixin(_TraceMixinBase):
 
         return self._ensure_intervention_spec().freeze()
 
+    def _history_site_payload(self: "Trace", site: Any) -> Any:
+        """Return a stable site payload for ``state_history`` records.
+
+        Parameters
+        ----------
+        site:
+            Original selector-like site payload supplied to a mutator.
+
+        Returns
+        -------
+        Any
+            Plain layer labels for direct label targets, otherwise a stable
+            repr-style string for human-readable history records.
+        """
+
+        del self
+        if isinstance(site, str):
+            return site
+        selector_kind = getattr(site, "selector_kind", None)
+        selector_value = getattr(site, "selector_value", None)
+        if selector_kind == "label" and isinstance(selector_value, str):
+            return selector_value
+        return repr(site)
+
     def set(
         self: "Trace",
         site: Any,
@@ -158,7 +156,13 @@ class TraceInterventionMixin(_TraceMixinBase):
 
         self._warn_if_root_mutation(confirm_mutation=confirm_mutation)
         if direction not in {"forward", "backward", "both"}:
-            raise ValueError("set(..., direction=...) must be 'forward', 'backward', or 'both'.")
+            raise InvalidArgumentError(
+                "set(..., direction=...) must be 'forward', 'backward', or 'both'; "
+                f"received {direction!r}",
+                code="intervention_direction_invalid",
+                remedy="pass direction='forward', 'backward', or 'both'",
+                argument="direction",
+            )
         if direction in {"backward", "both"}:
 
             def _backward_set_hook(grad: torch.Tensor, *, hook: Any) -> torch.Tensor:
@@ -179,7 +183,7 @@ class TraceInterventionMixin(_TraceMixinBase):
             if direction == "backward":
                 self._record_operation(
                     "set",
-                    site=repr(site),
+                    site=self._history_site_payload(site),
                     value_kind=type(value).__name__,
                     strict=strict,
                     callable=callable(value),
@@ -220,7 +224,7 @@ class TraceInterventionMixin(_TraceMixinBase):
             )
             self._record_operation(
                 "set",
-                site=repr(site),
+                site=self._history_site_payload(site),
                 value_kind=type(value).__name__,
                 strict=strict,
                 callable=callable(value),
@@ -238,7 +242,7 @@ class TraceInterventionMixin(_TraceMixinBase):
         self._mark_intervention_spec_mutated()
         self._record_operation(
             "set",
-            site=repr(site),
+            site=self._history_site_payload(site),
             value_kind=type(value).__name__,
             strict=strict,
             callable=callable(value),
@@ -294,8 +298,12 @@ class TraceInterventionMixin(_TraceMixinBase):
         from ..intervention.hooks import normalize_hook_plan
 
         if direction is not None and direction not in {"forward", "backward", "both"}:
-            raise ValueError(
-                "attach_hooks(..., direction=...) must be 'forward', 'backward', or 'both'."
+            raise InvalidArgumentError(
+                "attach_hooks(..., direction=...) must be 'forward', 'backward', or 'both'; "
+                f"received {direction!r}",
+                code="intervention_direction_invalid",
+                remedy="pass direction='forward', 'backward', 'both', or None",
+                argument="direction",
             )
         if extra_hooks:
             if hook is None:
@@ -317,9 +325,22 @@ class TraceInterventionMixin(_TraceMixinBase):
             handle_id = f"hook-{uuid.uuid4().hex}"
             handle_ids.append(handle_id)
             metadata = dict(entry.metadata)
+            if metadata.get("facet_write"):
+                # Facet-slice entries MUST store the scatter wrapper built by
+                # expand_facet_hook_entries as the fire-time hook: storing the raw
+                # helper would drop the wrapper, and rerun normalization would then
+                # apply the helper to the whole home tensor instead of the selected
+                # facet slice. The raw helper is kept in ``helper=`` as provenance.
+                stored_hook: Any = entry.normalized_callable
+            else:
+                stored_hook = (
+                    entry.helper_spec
+                    if entry.helper_spec is not None
+                    else entry.normalized_callable
+                )
             spec.add_hook(
                 self._target_spec_from_site(entry.site_target, strict=strict),
-                entry.helper_spec if entry.helper_spec is not None else entry.normalized_callable,
+                stored_hook,
                 helper=entry.helper_spec,
                 handle=handle_id,
                 metadata=metadata,
@@ -329,7 +350,7 @@ class TraceInterventionMixin(_TraceMixinBase):
         self._record_operation(
             "attach_hooks",
             hook_count=len(entries),
-            sites=tuple(repr(entry.site_target) for entry in entries),
+            sites=tuple(self._history_site_payload(entry.site_target) for entry in entries),
             strict=strict,
             prepend=prepend,
             handles=tuple(handle_ids),
@@ -435,7 +456,7 @@ class TraceInterventionMixin(_TraceMixinBase):
             self._mark_intervention_spec_mutated()
         self._record_operation(
             "detach_hooks",
-            site=repr(site) if site is not None else None,
+            site=self._history_site_payload(site) if site is not None else None,
             handle=str(handle) if handle is not None else None,
             removed=removed,
             strict=strict,
@@ -462,6 +483,22 @@ class TraceInterventionMixin(_TraceMixinBase):
         self._mark_intervention_spec_mutated()
         self._record_operation("clear_hooks")
         return self
+
+    @property
+    def edges(self: "Trace") -> tuple[Any, ...]:
+        """Return this trace's dataflow edge family (finalized edge views).
+
+        One ``EdgeUseRecord`` per parent->child occurrence (parallel edges
+        first-class), in execution order; rows are the identity-stable
+        provenance records themselves (immutable finalized views). Requires
+        an ``intervention_ready`` capture — otherwise refuses typed
+        (``edge_provenance_unavailable``). DOCUMENTED-UNSTABLE spelling
+        pending naming-session ratification.
+        """
+
+        from ..selection import _trace_edge_records
+
+        return _trace_edge_records(self)
 
     def do(
         self: "Trace",
@@ -517,8 +554,12 @@ class TraceInterventionMixin(_TraceMixinBase):
         strict_value = intervention_options.strict
 
         if engine_value not in {"auto", "replay", "rerun", "set_only"}:
-            raise ValueError(
-                "do(..., engine=...) must be 'auto', 'replay', 'rerun', or 'set_only'."
+            raise InvalidArgumentError(
+                "do(..., engine=...) must be 'auto', 'replay', 'rerun', or 'set_only'; "
+                f"received {engine_value!r}",
+                code="intervention_engine_invalid",
+                remedy="pass engine='auto', 'replay', 'rerun', or 'set_only'",
+                argument="engine",
             )
 
         selected_engine = self._select_do_engine(engine_value, model=model, x=x)
@@ -545,6 +586,10 @@ class TraceInterventionMixin(_TraceMixinBase):
             direction=direction,
         )
 
+        if mutation_kind in ("selection_replayed", "selection_set"):
+            # Leaf-site selection edits propagate (or deliberately do not)
+            # inside the mutation step; no hook targets exist to push.
+            return self
         if selected_engine == "set_only":
             return self
         if selected_engine == "replay":
@@ -554,6 +599,14 @@ class TraceInterventionMixin(_TraceMixinBase):
 
     def fork(self: "Trace", name: str | None = None) -> "Trace":
         """Create a copy-on-write intervention fork of this log.
+
+        Tensor payloads and sealed metadata columns are SHARED with this
+        trace (the dominant bytes on real models), but the fork is not
+        near-free: isolating every mutation surface retains on the order of
+        ~60 gc-tracked objects / ~13 KB of small allocations per op
+        (measured; see ``_trace_fork``). The fork settles a DERIVED capture
+        outcome (UNATTESTED for a complete parent), never this trace's
+        attested settle stamp -- a fork is the sanctioned mutation surface.
 
         Parameters
         ----------
@@ -688,9 +741,27 @@ class TraceInterventionMixin(_TraceMixinBase):
         Returns
         -------
         str
-            ``"set"`` or ``"attach_hooks"``.
+            ``"set"``, ``"attach_hooks"``, or ``"selection_hooks"``.
         """
 
+        from ..selection import ResolvedSelection, Selection
+
+        # A TraceSlice targets its member family: lift it to the whole-site
+        # QUERY (re-resolved on THIS trace by site name, so a slice built on
+        # the source log addresses the same sites on a fork). sys.modules
+        # gate keeps ordinary do() free of any slice import.
+        slice_module = sys.modules.get("torchlens.trace_slice")
+        if slice_module is not None and isinstance(hooks_or_site, slice_module.TraceSlice):
+            hooks_or_site = hooks_or_site.__selection__()
+        if isinstance(hooks_or_site, (Selection, ResolvedSelection)):
+            self._warn_if_root_mutation(confirm_mutation=confirm_mutation)
+            return self._apply_selection_do(
+                hooks_or_site,
+                value_or_hook,
+                engine=engine,
+                strict=strict,
+                direction=direction,
+            )
         if engine == "set_only" and value_or_hook is not None:
             self.set(
                 hooks_or_site,
@@ -717,6 +788,259 @@ class TraceInterventionMixin(_TraceMixinBase):
             confirm_mutation=confirm_mutation,
         )
         return "attach_hooks"
+
+    def _apply_selection_do(
+        self: "Trace",
+        selection: Any,
+        edit: Any,
+        *,
+        engine: str,
+        strict: bool,
+        direction: str | None,
+    ) -> str:
+        """Apply a Selection-targeted edit under the mask-application contract.
+
+        The selection resolves against this trace. Interior sites (sites with
+        a replayable func) get the edit attached to the hook plan with the
+        engine-owned edit-then-scatter wrapper (element masks) or unchanged
+        (whole-site short-circuit). LEAF sites (inputs/buffers; no func to
+        replay) get the edited value computed NOW from the saved value under
+        the same scatter contract, committed transactionally, and propagated
+        with origin-preserving replay. An audit record (query repr + resolve
+        digest + per-site relations) is appended to ``intervention_audit``.
+        Empty resolutions attach nothing (emptiness is disclosure, never an
+        error).
+
+        Returns
+        -------
+        str
+            ``"selection_hooks"`` (interior sites; caller runs the engine),
+            ``"selection_replayed"`` (leaf sites already propagated), or
+            ``"selection_set"`` (leaf values committed without propagation).
+        """
+
+        from ..intervention.errors import EngineDispatchError
+        from ..intervention.selectors import label as label_selector
+        from ..selection import _lift, build_selection_do_plan
+
+        lifted = _lift(selection)
+        if lifted is not None and lifted.kind == "EDGE":
+            return self._apply_selection_edge_do(
+                selection, lifted, edit, engine=engine, strict=strict
+            )
+        if lifted is not None and lifted.kind == "PARAM":
+            return self._apply_selection_param_do(
+                selection, lifted, edit, engine=engine, strict=strict
+            )
+        resolved, plan, audit = build_selection_do_plan(self, selection, edit)
+        leaf_items = [item for item in plan if item["is_leaf"]]
+        hook_items = [item for item in plan if not item["is_leaf"]]
+        if leaf_items and hook_items:
+            raise EngineDispatchError(
+                "a selection plan mixing leaf sites (inputs/buffers) and interior "
+                "sites cannot propagate as ONE replay transaction in v1: interior "
+                "recomputation reads captured consumed values, so the leaf edit "
+                "would be silently discarded at the interior site. Split the "
+                "selection by site class."
+            )
+        if not plan:
+            self.intervention_audit.append(audit)
+            return "selection_replayed"
+        if leaf_items:
+            if engine not in ("replay", "set_only"):
+                raise EngineDispatchError(
+                    "leaf-site selection edits (inputs/buffers) ride the replay "
+                    "engine (or set_only); for rerun, pass the modified input as x=."
+                )
+            self._apply_leaf_selection_edits(leaf_items)
+            if engine == "replay":
+                from ..intervention.replay import push_from
+
+                for item in leaf_items:
+                    push_from(self, item["op"], replay=ReplayOptions(strict=strict))
+                self.intervention_audit.append(audit)
+                return "selection_replayed"
+            self.intervention_audit.append(audit)
+            return "selection_set"
+        for item in hook_items:
+            self.attach_hooks(
+                label_selector(item["op"].label),
+                item["edit"],
+                strict=strict,
+                confirm_mutation=True,
+                direction=direction,
+            )
+        self.intervention_audit.append(audit)
+        return "selection_hooks"
+
+    def _apply_selection_edge_do(
+        self: "Trace",
+        selection: Any,
+        lifted: Any,
+        edit: Any,
+        *,
+        engine: str,
+        strict: bool,
+    ) -> str:
+        """Apply one EDGE-kind selection edit through the edge-substitution path."""
+
+        from ..selection import ResolvedSelection, SelectionError
+
+        if edit is None:
+            raise ValueError(
+                "do(selection, edit) requires an edit: pass an Edit/HelperSpec, "
+                "a hook callable, or a replacement tensor."
+            )
+        if isinstance(lifted, ResolvedSelection):
+            if lifted._trace is not self:
+                raise SelectionError(
+                    "the resolved edge selection is bound to a different trace.",
+                    code="selection_trace_mismatch",
+                )
+            resolved_edges = lifted
+        else:
+            resolved_edges = lifted.resolve(self)
+        from ..intervention.edge_substitution import apply_edge_substitution_do
+
+        payload = apply_edge_substitution_do(
+            self, resolved_edges, edit, engine=engine, strict=strict
+        )
+        self.intervention_audit.append(
+            {
+                "kind": "EDGE",
+                "selection_repr": repr(selection),
+                "resolve_digest": resolved_edges.resolve_digest,
+                "edit": getattr(edit, "helper_name", getattr(edit, "__name__", "value")),
+                **payload,
+            }
+        )
+        return "selection_replayed"
+
+    def _apply_selection_param_do(
+        self: "Trace",
+        selection: Any,
+        lifted: Any,
+        edit: Any,
+        *,
+        engine: str,
+        strict: bool,
+    ) -> str:
+        """Apply one PARAM-kind selection edit through parameter substitution.
+
+        The edit is applied "as if" the parameter were changed: every
+        consumption of the parameter is substituted at its derived occurrence
+        address on the replay engine, and the live parameter object is never
+        written (JMT ruling 2026-08-17, superseding the D3 typed-refusal
+        default on the replay path; rerun/set_only keep refusing typed).
+        """
+
+        from ..selection import ResolvedSelection, SelectionError
+
+        if edit is None:
+            raise ValueError(
+                "do(selection, edit) requires an edit: pass an Edit/HelperSpec, "
+                "a hook callable, or a replacement tensor."
+            )
+        if isinstance(lifted, ResolvedSelection):
+            if lifted._trace is not self:
+                raise SelectionError(
+                    "the resolved parameter selection is bound to a different trace.",
+                    code="selection_trace_mismatch",
+                )
+            resolved_params = lifted
+        else:
+            resolved_params = lifted.resolve(self)
+        from ..intervention.param_substitution import apply_param_substitution_do
+
+        payload = apply_param_substitution_do(
+            self, resolved_params, edit, engine=engine, strict=strict
+        )
+        self.intervention_audit.append(
+            {
+                "kind": "PARAM",
+                "selection_repr": repr(selection),
+                "resolve_digest": resolved_params.resolve_digest,
+                "edit": getattr(edit, "helper_name", getattr(edit, "__name__", "value")),
+                **payload,
+            }
+        )
+        return "selection_replayed"
+
+    def _apply_leaf_selection_edits(self: "Trace", leaf_items: list[dict[str, Any]]) -> None:
+        """Compute + commit leaf-site edited values under the scatter contract.
+
+        The edit hook computes its full replacement from the SAVED leaf value
+        (helpers stay mask-oblivious); the engine wrapper scatters selected
+        elements onto a fresh tensor. Commit rides the transactional replay
+        commit helper (snapshot + rollback), minting FireRecords so
+        disclosure matches the hook path.
+        """
+
+        from ..intervention.hooks import make_hook_context
+        from ..intervention.replay import _commit_replay_updates, _replay_site_key
+        from ..intervention.types import FireRecord, HelperSpec
+        from ..selection import _apply_invalid
+
+        pending_updates: dict[str, torch.Tensor] = {}
+        pending_records: dict[str, list[Any]] = {}
+        for item in leaf_items:
+            op = item["op"]
+            derived = item["edit"]
+            saved = op.out
+            if not isinstance(saved, torch.Tensor):
+                raise _apply_invalid(
+                    "not_maskable",
+                    f"leaf site {op.label!r} has no saved tensor value to edit.",
+                    site=op.label,
+                )
+            if isinstance(derived, HelperSpec):
+                if derived.factory is None:
+                    raise _apply_invalid(
+                        "not_maskable",
+                        f"edit {derived.helper_name!r} has no runtime factory.",
+                        site=op.label,
+                    )
+                hook_callable = derived.factory()
+                helper_spec: HelperSpec | None = derived
+                helper_name = derived.helper_name
+            else:
+                hook_callable = derived
+                helper_spec = None
+                helper_name = getattr(derived, "__name__", "hook")
+            context = make_hook_context(
+                name=helper_name,
+                timing="post",
+                direction="forward",
+                layer_log=op,
+                run_ctx={},
+                args=(saved,),
+                kwargs={},
+            )
+            applied = hook_callable(saved, hook=context)
+            if not isinstance(applied, torch.Tensor):
+                raise _apply_invalid(
+                    "not_maskable",
+                    f"edit at leaf site {op.label!r} produced a non-tensor "
+                    f"({type(applied).__name__}).",
+                    site=op.label,
+                )
+            pending_updates[_replay_site_key(op)] = applied
+            pending_records[_replay_site_key(op)] = [
+                FireRecord(
+                    target_label=op.layer_label,
+                    call_label=op.label,
+                    func_call_id=op.func_call_id,
+                    container_path=tuple(op.container_path or ()),
+                    engine="replay",
+                    helper=helper_spec,
+                    site_label=op.layer_label,
+                    timing="post",
+                    direction="forward",
+                    helper_name=helper_name,
+                    replaced=applied is not saved,
+                )
+            ]
+        _commit_replay_updates(self, pending_updates, pending_records)
 
     def _validate_supplied_model_matches_capture(self: "Trace", model: nn.Module) -> None:
         """Validate rerun model evidence against the captured source model.
@@ -756,51 +1080,22 @@ class TraceInterventionMixin(_TraceMixinBase):
         self: "Trace",
         *,
         name: str | None,
-        deep_copy_layer_labels: Set[str] | None = None,
     ) -> "Trace":
-        """Build a forked Trace with policy-driven field handling.
+        """Build a copy-on-write fork of this Trace (the M11 builder).
 
         Parameters
         ----------
         name:
             Optional fork name.
-        deep_copy_layer_labels:
-            Optional layer labels that require full Op field copies. When
-            provided, other Op shells are still forked but their fields use a
-            shallow copy to avoid deep-copying untouched replay context.
 
         Returns
         -------
         Trace
-            Forked log whose mutable containers are independent.
+            Fork sharing this trace's frozen storage, with every mutation
+            surface isolated (see ``_trace_fork.build_fork``).
         """
 
-        fork = state_new(type(self))
-        fork_state = {
-            field_name: self._fork_model_field(field_name, value)
-            for field_name, value in state_items(self)
-        }
-        state_restore(fork, fork_state)
-        fork.parent_run = weakref.ref(self)
-        fork.trace_label = name or self._next_fork_name()
-        fork._intervention_spec = copy.deepcopy(self._ensure_intervention_spec())
-        fork.state_history = copy.deepcopy(self.state_history)
-        fork.relationship_evidence = copy.deepcopy(self.relationship_evidence)
-        fork._out_recipe_revision = self._out_recipe_revision
-        fork._spec_revision = self._spec_revision
-        fork.state = self.state
-        fork._warned_mutate_in_place = False
-        fork._warned_direct_write = False
-        fork.__dict__.pop("_validation_replay_status", None)
-
-        layer_map = fork._fork_layer_ops_from(
-            self,
-            deep_copy_layer_labels=deep_copy_layer_labels,
-        )
-        fork._rebuild_fork_layer_collections(self, layer_map)
-        fork._rebind_fork_owner_refs()
-        _state._register_log(fork)
-        return fork
+        return build_fork(self, name=name)
 
     def _next_fork_name(self: "Trace") -> str:
         """Return a deterministic default fork name for this parent log."""
@@ -813,177 +1108,13 @@ class TraceInterventionMixin(_TraceMixinBase):
         )
         return f"{base_name}_fork_{fork_count + 1}"
 
-    def _fork_model_field(self: "Trace", field_name: str, value: Any) -> Any:
-        """Apply the Trace fork policy to a single field.
-
-        Parameters
-        ----------
-        field_name:
-            Field being copied.
-        value:
-            Current field value.
-
-        Returns
-        -------
-        Any
-            Field value for the fork.
-        """
-
-        if field_name in {
-            "_runnable_staged_user_state",
-            "_runnable_embedded_state",
-            "_runnable_capture_state",
-        }:
-            # These bindings are immutable mapping proxies. Run execution only
-            # reads them, and mappingproxy does not implement the pickle hooks
-            # used by copy/deepcopy.
-            return value
-        policy = MODEL_LOG_FIELD_FORK_POLICY.get(field_name, self._default_fork_policy(value))
-        if policy is ForkFieldPolicy.FORK_SHARE:
-            return value
-        if policy is ForkFieldPolicy.FORK_RECONSTRUCT:
-            return None
-        return self._copy_fork_value(value)
-
-    def _fork_layer_ops_from(
-        self: "Trace",
-        parent: "Trace",
-        *,
-        deep_copy_layer_labels: Set[str] | None = None,
-    ) -> dict[int, Op]:
-        """Fork every Op and return an old-object-id map.
-
-        Parameters
-        ----------
-        parent:
-            Parent log whose layer ops are being forked.
-        deep_copy_layer_labels:
-            Optional layer labels that require normal fork policy copies. Ops
-            outside this set receive distinct shells with shallow-copied fields.
-
-        Returns
-        -------
-        dict[int, Op]
-            Mapping from ``id(parent_pass)`` to forked pass.
-        """
-
-        layer_map: dict[int, Op] = {}
-        fork_equivalent_ops = self.op_equivalence_classes
-        for parent_pass in parent.layer_list:
-            fork_pass = state_new(Op)
-            deep_copy_fields = (
-                deep_copy_layer_labels is None or parent_pass.layer_label in deep_copy_layer_labels
-            )
-            state_restore(
-                fork_pass,
-                {
-                    field_name: self._fork_layer_pass_field(
-                        field_name,
-                        value,
-                        deep_copy=deep_copy_fields,
-                    )
-                    for field_name, value in state_items(parent_pass)
-                },
-            )
-            fork_pass.source_trace = self
-            eq_type = getattr(fork_pass, "equivalence_class", None)
-            if eq_type in fork_equivalent_ops:
-                fork_pass.equivalent_ops = fork_equivalent_ops[eq_type]
-            object.__setattr__(fork_pass, "_construction_done", True)
-            layer_map[id(parent_pass)] = fork_pass
-        return layer_map
-
-    def _fork_layer_pass_field(
-        self: "Trace", field_name: str, value: Any, *, deep_copy: bool = True
-    ) -> Any:
-        """Apply the Op fork policy to a single field.
-
-        Parameters
-        ----------
-        field_name:
-            Op field being copied.
-        value:
-            Current field value.
-        deep_copy:
-            Whether to honor the normal copy policy. False shares field values
-            for untouched differentiable-replay ops while still creating a
-            distinct Op shell.
-
-        Returns
-        -------
-        Any
-            Field value for the forked pass.
-        """
-
-        if field_name == "_source_trace_ref":
-            return None
-        if not deep_copy:
-            return self._copy_shallow_fork_value(value)
-        policy = Op.FIELD_FORK_POLICY.get(field_name, self._default_fork_policy(value))
-        if policy is ForkFieldPolicy.FORK_SHARE:
-            return value
-        if policy is ForkFieldPolicy.FORK_RECONSTRUCT:
-            return None
-        return self._copy_fork_value(value)
-
-    def _rebuild_fork_layer_collections(
-        self: "Trace", parent: "Trace", layer_map: dict[int, Op]
-    ) -> None:
-        """Rebuild layer lookup containers so they point at forked ops.
-
-        Parameters
-        ----------
-        parent:
-            Parent log whose containers are being mirrored.
-        layer_map:
-            Mapping from parent pass object id to forked pass.
-        """
-
-        def remap_pass(value: Any) -> Any:
-            """Map a parent pass object to its forked counterpart.
-
-            Parameters
-            ----------
-            value:
-                Candidate parent-layer object or another value.
-
-            Returns
-            -------
-            Any
-                Forked layer pass when ``value`` is known, otherwise ``value``.
-            """
-            return layer_map.get(id(value), value)
-
-        self.layer_list = [remap_pass(layer) for layer in parent.layer_list]
-        self.layer_dict_main_keys = OrderedDict(
-            (key, remap_pass(layer)) for key, layer in parent.layer_dict_main_keys.items()
-        )
-        self.layer_dict_all_keys = OrderedDict(
-            (key, remap_pass(layer)) for key, layer in parent.layer_dict_all_keys.items()
-        )
-        fork_layer_logs: dict[str, Layer] = OrderedDict()
-        for label, parent_layer in parent.layer_logs.items():
-            fork_layer_log = state_new(type(parent_layer))
-            state_restore(
-                fork_layer_log,
-                {key: self._copy_fork_value(value) for key, value in state_items(parent_layer)},
-            )
-            fork_layer_log.source_trace = self
-            fork_layer_log.ops = OpAccessor(
-                OrderedDict(
-                    (call_index, remap_pass(layer_pass))
-                    for call_index, layer_pass in parent_layer.ops.items()
-                )
-            )
-            if getattr(fork_layer_log, "equivalence_class", None) in self.op_equivalence_classes:
-                fork_layer_log.equivalent_ops = self.op_equivalence_classes[
-                    fork_layer_log.equivalence_class
-                ]
-            fork_layer_logs[label] = fork_layer_log
-        self.layer_logs = fork_layer_logs
-
     def _rebind_fork_owner_refs(self: "Trace") -> None:
-        """Rebind weak owner references on forked child objects to this fork."""
+        """Rebind weak owner references on child objects to this trace.
+
+        Used by the fork builder and by the rerun-refresh paths, which
+        replace record state wholesale and must re-point every child's
+        owner reference (and drop stale facet caches) afterwards.
+        """
 
         for layer_pass in self.layer_list:
             layer_pass.source_trace = self
@@ -995,83 +1126,6 @@ class TraceInterventionMixin(_TraceMixinBase):
             module_log.__dict__.pop("_facets_cache", None)
             for module_call in module_log.calls.values():
                 module_call._source_trace = self
-
-    @staticmethod
-    def _copy_fork_value(value: Any) -> Any:
-        """Copy a fork field while preserving tensor and callable identity.
-
-        Parameters
-        ----------
-        value:
-            Value to copy.
-
-        Returns
-        -------
-        Any
-            Fork-safe copy.
-        """
-
-        if isinstance(value, torch.Tensor) or callable(value):
-            return value
-        try:
-            return copy.deepcopy(value)
-        except Exception:
-            return copy.copy(value)
-
-    @staticmethod
-    def _copy_shallow_fork_value(value: Any) -> Any:
-        """Shallow-copy a fork field while preserving tensor and callable identity.
-
-        Parameters
-        ----------
-        value:
-            Value to copy.
-
-        Returns
-        -------
-        Any
-            Lightweight fork-safe copy for replay-unaffected Op fields.
-        """
-
-        if isinstance(value, torch.Tensor) or callable(value):
-            return value
-        if isinstance(value, (str, bytes, int, float, bool, type(None))):
-            return value
-        # Mutable nested containers (dicts/lists/sets, or tuples that hold them --
-        # e.g. an Op's `annotations` breadcrumb dict) must NOT be shared with the
-        # parent: a post-fork mutation on the fork (`fork.annotate(...)`) would
-        # otherwise land on the parent's Op too, silently corrupting it. `copy.copy`
-        # is shallow, so it only rebinds the outermost container and still aliases
-        # every nested value. Deep-copy the container structure instead, but keep
-        # tensor/callable identity so the perf intent of shallow fork -- not cloning
-        # large immutable payloads -- is preserved.
-        if isinstance(value, (dict, list, set, tuple)):
-            return _deep_copy_fork_container(value)
-        try:
-            return copy.copy(value)
-        except Exception:
-            return value
-
-    @staticmethod
-    def _default_fork_policy(value: Any) -> ForkFieldPolicy:
-        """Choose a conservative fork policy for fields outside policy tables.
-
-        Parameters
-        ----------
-        value:
-            Field value without an explicit policy.
-
-        Returns
-        -------
-        ForkFieldPolicy
-            Default share/copy decision.
-        """
-
-        if isinstance(value, (str, bytes, int, float, bool, type(None), tuple)):
-            return ForkFieldPolicy.FORK_SHARE
-        if isinstance(value, torch.Tensor) or callable(value):
-            return ForkFieldPolicy.FORK_SHARE
-        return ForkFieldPolicy.FORK_COPY
 
     def _recipe_is_clean(self: "Trace") -> bool:
         """Return whether propagated outs match the current spec revision.
@@ -1129,12 +1183,16 @@ class TraceInterventionMixin(_TraceMixinBase):
             Raises when the site cannot resolve.
         """
 
+        from ..intervention.errors import SiteResolutionError
         from ..intervention.resolver import _selector_resolution_direction
 
+        # L1 narrowing (r3): only a typed direction-classification refusal may
+        # fall through to the strict forward resolution below (which raises its
+        # own typed refusal); any other exception is a bug and propagates.
         try:
             if _selector_resolution_direction(site) == "backward":
                 return
-        except Exception:
+        except SiteResolutionError:
             pass
         max_fanout = max(1, len(self.layer_list))
         self.resolve_sites(site, strict=strict, max_fanout=max_fanout)

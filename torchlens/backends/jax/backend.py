@@ -10,25 +10,34 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from functools import reduce
-from operator import mul
 from typing import Any, Final, cast
 
 from ..._deprecations import MISSING, MissingType
-from ...backends import BackendName, BackendUnsupportedError
-from ...data_classes.layer import Layer
+from ..._trace_core.relation_views import freeze_trace_relation_views
+from ...backends import BackendName, BackendUnsupportedError, get_backend_spec
+from ...backends._finalize import (
+    attach_function_root_module,
+    mirror_param_derived_grads,
+    new_preview_function_trace,
+    normalize_op_module_calls,
+    numel_from_shape as _numel,
+    session_callable_identity as _callable_identity,
+    value_nbytes as _nbytes,
+)
+from ...capture.outcome import stamp_backend_finalized
+from ...data_classes._compaction import compact_op_metadata
 from ...data_classes.derived_grad import (
     DerivedGradAccessor,
     DerivedGradRecord,
     IntermediateDerivedGradAccessor,
     IntermediateDerivedGradRecord,
 )
-from ...data_classes.module import ModuleAccessor
+from ...data_classes.layer import Layer
 from ...data_classes.param import Param, ParamAccessor
-from ...data_classes.trace import Trace
-from ...data_classes.trace import _init_module_hierarchy_data
+from ...data_classes.trace import Trace, _init_module_hierarchy_data
 from ...fastlog.types import CaptureSpec
 from ...ir.capture_events import CaptureEvents
+from ...ir.container import ContainerSpec, DictKey, OutputPathComponent, TupleIndex
 from ...ir.events import (
     ArgTemplateRef,
     FunctionCallRef,
@@ -36,14 +45,14 @@ from ...ir.events import (
     OpEvent,
     OutputRef,
     ParentEdge,
+    is_control_edge_use,
 )
-from ...ir.events import is_control_edge_use
-from ...ir.container import ContainerSpec, DictKey, OutputPathComponent, TupleIndex
+from ...ir.op_record import amend_preview_output_parent_rebind
 from ...ir.predicate import RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
+from ...postprocess._grouping_stamp import build_grouping_policy_stamp
 from ...postprocess._materialize import materialize_from_events
-from ...postprocess.finalization import _build_root_module_log
 from ...postprocess.finalization import _build_module_logs
 from ...postprocess.loop_grouping_adapter import (
     RecurrenceAssignment,
@@ -61,12 +70,17 @@ from ...validation.status import (
     ValidationReplayStatus,
     count_importer_region_annotations,
 )
-from .._options import JAX_EXTRA_KWARG_POLICY, JAX_PREVIEW_TRACE_OPTION_POLICY
-from .._options import default_if_missing as _default_if_missing
-from .._options import is_missing as _is_missing
-from .._options import reject_extra_trace_kwargs, reject_unsupported_trace_options
-from .._selective_save import apply_static_label_save_policy
-from .._selective_save import pop_static_label_save_predicate
+from .._options import (
+    JAX_EXTRA_KWARG_POLICY,
+    JAX_PREVIEW_TRACE_OPTION_POLICY,
+    default_if_missing as _default_if_missing,
+    is_missing as _is_missing,
+    reject_extra_trace_kwargs,
+    reject_unsupported_trace_options,
+)
+from .._selective_save import apply_static_label_save_policy, pop_static_label_save_predicate
+from .._validation_shared import float_replay_tolerances
+from ._site_dialect import jax_site_keys
 from .jaxpr import (
     ALL_JAX_EQUATION_KINDS,
     JaxCaptureResult,
@@ -77,8 +91,8 @@ from .jaxpr import (
     flatten_dynamic_args,
     interpret_closed_jaxpr_with_inlining,
     jax_equivalence_key,
-    reject_undeclared_consts,
     reject_attributed_module_strict_control_flow,
+    reject_undeclared_consts,
     replay_equation,
 )
 from .modules import (
@@ -120,6 +134,10 @@ class GradOptions:
     loss_fn: Callable[[Any], Any] | None = None
     input_grad_argnums: tuple[int, ...] = ()
     intermediate_grads: bool = False
+    # DELIBERATELY lower than the 64 default of the other four previews: the
+    # JAX intermediate producer runs a zero-tap AD replay whose cost scales
+    # with the boundary cap, and control-flow unrolling multiplies JAX
+    # boundary counts. Raise explicitly per call when more are needed.
     max_intermediate_grads: int = 8
 
     def __init__(
@@ -250,6 +268,7 @@ class JAXBackend:
         save_code_context: bool | MissingType = MISSING,
         save_rng_states: bool | MissingType = MISSING,
         recurrence_detection: bool | MissingType = MISSING,
+        compute_input_output_distances: bool | MissingType = MISSING,
         verbose: bool | MissingType = MISSING,
         backward_ready: bool | MissingType = MISSING,
         name: str | None | MissingType = MISSING,
@@ -379,6 +398,8 @@ class JAXBackend:
         save_code_context = _default_if_missing(save_code_context, False)
         save_rng_states = _default_if_missing(save_rng_states, False)
         recurrence_detection = _default_if_missing(recurrence_detection, True)
+        # Torch-parity default: the depth flood runs unless explicitly disabled.
+        compute_input_output_distances = _default_if_missing(compute_input_output_distances, True)
         verbose = _default_if_missing(verbose, False)
         backward_ready = _default_if_missing(backward_ready, False)
         name = _default_if_missing(name, None)
@@ -444,6 +465,7 @@ class JAXBackend:
             keep_orphans=cast(bool, keep_orphans),
             num_context_lines=cast(int, num_context_lines),
             recurrence_detection=cast(bool, recurrence_detection),
+            compute_input_output_distances=cast(bool, compute_input_output_distances),
             verbose=cast(bool, verbose),
             name=cast(str | None, name),
             raw_input=raw_input,
@@ -525,6 +547,8 @@ class JAXBackend:
                 jax_control_flow=cast(str, jax_control_flow),
                 jax_max_control_flow_unroll=cast(int, jax_max_control_flow_unroll),
             )
+        freeze_trace_relation_views(trace)
+        stamp_backend_finalized(trace)
         return trace
 
     def validate_trace(
@@ -651,7 +675,9 @@ class JAXBackend:
             label: value if isinstance(value, tuple) else (value,)
             for label, value in getattr(trace, "_selective_save_hidden_payloads", {}).items()
         }
-        for capture, op in zip(captures, equation_ops):
+        # The len(captures) != len(equation_ops) guard above already returned
+        # False, so these pair exactly.
+        for capture, op in zip(captures, equation_ops, strict=True):
             if capture.kind != _jax_op_capture_kind(op):
                 return False
             inputs = _inputs_from_trace_graph(capture, op, ops_by_label, hidden_outputs_by_label)
@@ -789,78 +815,26 @@ class JAXBackend:
         batch_render: str,
         output_transform: object | None,
         save_raw_output: str | bool,
+        compute_input_output_distances: bool = True,
     ) -> Trace:
-        """Construct an empty JAX trace.
+        """Construct an empty trace shell via the shared preview constructor."""
 
-        Parameters
-        ----------
-        model
-            Captured callable.
-        keep_orphans
-            Whether orphan ops are retained.
-        num_context_lines
-            Source context line count.
-        recurrence_detection
-            Recurrence-detection setting.
-        verbose
-            Verbose flag.
-        name
-            Optional trace label.
-        raw_input
-            Original user input.
-        save_raw_input
-            Raw-input save policy.
-        batch_render
-            Raw-input render policy.
-        output_transform
-            Optional output transform.
-        save_raw_output
-            Raw-output save policy.
-
-        Returns
-        -------
-        Trace
-            Empty trace initialized for JAX.
-        """
-
-        trace = Trace(
-            model_class_name=getattr(model, "__name__", type(model).__name__),
-            output_device="same",
-            activation_transform=None,
-            grad_transform=None,
-            save_raw_activations=True,
-            save_raw_gradients=True,
+        return new_preview_function_trace(
+            backend_name=self.name,
+            model=model,
             keep_orphans=keep_orphans,
-            save_arg_values=False,
-            save_grads=None,
-            detach_saved_activations=False,
-            mark_layer_depths=False,
             num_context_lines=num_context_lines,
-            optimizer=None,
-            save_code_context=False,
-            save_rng_states=False,
             recurrence_detection=recurrence_detection,
             verbose=verbose,
-            backward_ready=False,
-            module_filter=None,
-            emit_nvtx=False,
-            transform=None,
+            name=name,
             raw_input=raw_input,
             save_raw_input=save_raw_input,
             batch_render=batch_render,
-            output_transform=cast("Callable[[Any], Any] | None", output_transform),
+            output_transform=output_transform,
             save_raw_output=save_raw_output,
-            layer_visualizers=None,
-            save_visualizations=False,
+            param_source="pytree-derived",
+            compute_input_output_distances=compute_input_output_distances,
         )
-        trace.trace_label = name
-        trace.backend = cast(BackendName, self.name)
-        trace.module_identity_mode = "function_root"
-        trace.param_source = "pytree-derived"
-        trace.model_label = trace.model_class_name
-        trace.model_class_qualname = getattr(model, "__qualname__", trace.model_class_name)
-        trace._pre_forward_rng_states = None
-        return trace
 
     def _emit_arg_sources(self, trace: Trace, args: Sequence[Any]) -> None:
         """Emit input source events for dynamic JAX argument leaves.
@@ -912,7 +886,7 @@ class JAXBackend:
 
         label_by_value_id: dict[int, str] = {
             id(event.output.tensor.payload): event.label_raw
-            for event in trace.capture_events.op_events
+            for event in trace.capture_events.amended_op_records()
             if event.output.tensor.payload is not None
         }
         label_by_capture_index: dict[int, str] = {}
@@ -1161,14 +1135,8 @@ class JAXBackend:
         func_call_id = trace.capture_events.func_call_id_counter + 1
         trace.capture_events.func_call_id_counter = func_call_id
         policy = CapturePolicy(
-            must_keep_topology=True,
             save_payload=True,
-            requires_isolation=False,
-            save_args=False,
-            save_code=False,
-            save_rng=False,
             save_grad=False,
-            stream=False,
         )
         tensor_ref = self._tensor_ref(output, reserved.label_raw)
         module_addresses = _jax_event_module_stack(module_stack)
@@ -1408,7 +1376,7 @@ class JAXBackend:
             for index, output in enumerate(outputs)
         }
         is_multi_output = len(outputs) > 1
-        for event in list(trace.capture_events.op_events):
+        for event in list(trace.capture_events.amended_op_records()):
             if id(event.output.tensor.payload) not in output_ids:
                 continue
             leaf_index, container_path = output_metadata_by_id.get(
@@ -1423,13 +1391,14 @@ class JAXBackend:
                 container_path=container_path,
                 container_spec=output_container_spec,
             )
-            updated = replace(event, is_output_parent=True, output=updated_output)
-            trace.capture_events.op_event_by_label_raw[event.label_raw] = updated
-            trace.capture_events.live_index.replace(updated)
-            for index, candidate in enumerate(trace.capture_events.op_events):
-                if candidate.label_raw == event.label_raw:
-                    trace.capture_events.op_events[index] = updated
-                    break
+            trace.capture_events.append_amendment(
+                amend_preview_output_parent_rebind(
+                    event.seq,
+                    event.label_raw,
+                    is_output_parent=True,
+                    output=updated_output,
+                )
+            )
 
     def _attach_params(self, trace: Trace, params_tree: object) -> None:
         """Populate ``trace.params`` from first-argument pytree leaves.
@@ -1640,7 +1609,7 @@ class JAXBackend:
 
         grad_trees = grads
         records: dict[str, DerivedGradRecord] = {}
-        for argnum, grad_tree in zip(differentiated_argnums, grad_trees):
+        for argnum, grad_tree in zip(differentiated_argnums, grad_trees, strict=True):
             records.update(
                 _records_for_grad_tree(
                     grad_tree=grad_tree,
@@ -1654,7 +1623,7 @@ class JAXBackend:
                 )
             )
         trace.derived_grads = DerivedGradAccessor(records)
-        self._mirror_param_derived_grads(trace, records)
+        mirror_param_derived_grads(trace, records)
         if grad_options.intermediate_grads:
             try:
                 trace.intermediate_derived_grads = self._derive_intermediate_grads_zero_tap(
@@ -1676,35 +1645,6 @@ class JAXBackend:
                     "status": "degraded",
                     "reason": f"producer_error:{type(exc).__name__}",
                 }
-
-    def _mirror_param_derived_grads(
-        self, trace: Trace, records: Mapping[str, DerivedGradRecord]
-    ) -> None:
-        """Mirror unambiguous param derived gradients onto param records.
-
-        Parameters
-        ----------
-        trace
-            Trace containing pytree-derived params.
-        records
-            Derived gradient records keyed by leaf path.
-
-        Returns
-        -------
-        None
-            Matching ``trace.params`` entries receive the same gradient payload.
-        """
-
-        for address, param in trace.params.items():
-            record = records.get(f"params.{address}")
-            if record is None:
-                continue
-            param._derived_grad_payload = record.grad
-            param._derived_grad_record_path = record.path
-            param.has_grad = True
-            param.grad_shape = tuple(getattr(record.grad, "shape", ()))
-            param.grad_dtype = cast(Any, str(getattr(record.grad, "dtype", "")))
-            param.gradient_memory = _nbytes(record.grad) or 0
 
     def _derive_intermediate_grads_zero_tap(
         self,
@@ -1779,7 +1719,8 @@ class JAXBackend:
             """
 
             tap_values = {
-                (spec.capture_index, spec.output_index): tap for spec, tap in zip(specs, taps)
+                (spec.capture_index, spec.output_index): tap
+                for spec, tap in zip(specs, taps, strict=True)
             }
             result = interpret_closed_jaxpr_with_inlining(
                 closed_jaxpr,
@@ -1838,7 +1779,7 @@ class JAXBackend:
 
         specs_by_label: dict[str, list[_JaxIntermediateTapSpec]] = defaultdict(list)
         passed_by_label: dict[str, list[tuple[_JaxIntermediateTapSpec, Any]]] = defaultdict(list)
-        for tap_index, (spec, grad) in enumerate(zip(specs, producer_grads)):
+        for tap_index, (spec, grad) in enumerate(zip(specs, producer_grads, strict=True)):
             specs_by_label[spec.op_label].append(spec)
             if not _jax_intermediate_oracle_passes(
                 spec=spec,
@@ -1907,7 +1848,11 @@ class JAXBackend:
         """
 
         assignments = self._jax_recurrence_assignments(trace)
-        raw_labels = tuple(trace._raw_layer_labels_list)
+        trace.grouping_policy = build_grouping_policy_stamp(
+            ran_recurrence_grouping=bool(trace.recurrence_detection),
+            requested=getattr(trace, "grouping", "structural"),
+        )
+        raw_labels = tuple(trace._raw_graph_ws.raw_layer_labels_list)
         raw_to_final_op_label: dict[str, str] = {}
 
         trace.layer_list = []
@@ -1921,7 +1866,7 @@ class JAXBackend:
         trace._layer_num_to_lookup_keys_dict.clear()
 
         for raw_index, label in enumerate(raw_labels):
-            op_log = trace._raw_layer_dict[label]
+            op_log = trace._raw_graph_ws.raw_layer_dict[label]
             assignment = assignments.get(
                 label,
                 RecurrenceAssignment(
@@ -1942,6 +1887,7 @@ class JAXBackend:
             op_log.pass_index = assignment.pass_index
             op_log.num_passes = assignment.num_passes
             op_log.equivalence_class = assignment.equivalence_key
+            op_log.site_key = assignment.site_key
             op_log.dtype_ref = DtypeRef.from_value(op_log.dtype)
             op_log.device_ref = DeviceRef.from_value(getattr(op_log.out, "device", None))
             op_log.backend_address = f"jaxpr:{label}"
@@ -1957,11 +1903,11 @@ class JAXBackend:
         }
         equivalent_labels_by_key: dict[str, set[str]] = {}
         for label in raw_labels:
-            op_log = trace._raw_layer_dict[label]
+            op_log = trace._raw_graph_ws.raw_layer_dict[label]
             equivalent_labels_by_key.setdefault(op_log.equivalence_class, set()).add(op_log.label)
 
         for raw_index, label in enumerate(raw_labels):
-            op_log = trace._raw_layer_dict[label]
+            op_log = trace._raw_graph_ws.raw_layer_dict[label]
             assignment = assignments[label]
             op_log.recurrent_ops = [
                 raw_to_final_op_label[member]
@@ -1970,7 +1916,7 @@ class JAXBackend:
             ]
             op_log.equivalent_ops = equivalent_labels_by_key.get(op_log.equivalence_class, set())
             op_log.lookup_keys = [label, op_log.label]
-            if op_log.layer_label not in trace.layer_dict_all_keys:
+            if op_log.num_passes > 1:
                 op_log.lookup_keys.append(op_log.layer_label)
             trace.layer_list.append(op_log)
             trace.layer_dict_main_keys[op_log.label] = op_log
@@ -1979,6 +1925,11 @@ class JAXBackend:
                     trace.layer_dict_all_keys[lookup_key] = op_log
                     trace._lookup_keys_to_layer_num_dict[lookup_key] = raw_index
                 trace._layer_num_to_lookup_keys_dict[raw_index].append(lookup_key)
+            if op_log.num_passes > 1:
+                # Incidental raw-index artifact, not a contract: every pass
+                # overwrites the bare layer label (last wins, torch parity).
+                trace.layer_dict_all_keys[op_log.layer_label] = op_log
+                trace._lookup_keys_to_layer_num_dict[op_log.layer_label] = raw_index
             trace.op_labels.append(op_log.label)
             if op_log.layer_label not in trace.layer_labels:
                 trace.layer_labels.append(op_log.layer_label)
@@ -2032,6 +1983,9 @@ class JAXBackend:
                 param_log_by_source_label[op_log.label] = trace.param_logs[param_address]
 
             if param_log_by_source_label:
+                from .._finalize import _attach_param_usage
+
+                usage_membership: dict[int, tuple[set[str], set[str], set[str]]] = {}
                 for op_log in trace.layer_list:
                     seen_barcodes: set[str] = set()
                     consumed_params: list[Param] = []
@@ -2056,13 +2010,9 @@ class JAXBackend:
                     op_log.param_memory = Bytes(
                         sum(int(param.param_memory) for param in consumed_params)
                     )
-                    for param in consumed_params:
-                        if op_log.label not in param.used_by_ops:
-                            param.used_by_ops.append(op_log.label)
-                        if op_log.layer_label not in param.used_by_layers:
-                            param.used_by_layers.append(op_log.layer_label)
-                        if op_log.layer_label not in trace.layers_with_params[param.barcode]:
-                            trace.layers_with_params[param.barcode].append(op_log.layer_label)
+                    # Set-memoized usage cross-links (the bare list scans were
+                    # O(m^2) for a param consumed by m ops).
+                    _attach_param_usage(trace, op_log, usage_membership)
 
             # Recompute the trace-level aggregate param counters from the
             # (now-correct) per-op attribution, deduplicating by
@@ -2092,7 +2042,9 @@ class JAXBackend:
             trace.num_params_trainable = num_params_trainable
             trace.num_params_frozen = num_params - num_params_trainable
         trace.output_layers = [
-            trace._raw_layer_dict[label].layer_label if label in trace._raw_layer_dict else label
+            trace._raw_graph_ws.raw_layer_dict[label].layer_label
+            if label in trace._raw_graph_ws.raw_layer_dict
+            else label
             for label in trace.output_layers
         ]
         trace._layers_logged = True
@@ -2102,11 +2054,22 @@ class JAXBackend:
         trace.backend = cast(BackendName, self.name)
         if module_tree is None:
             trace.module_identity_mode = "function_root"
-            self._attach_function_root_module(trace)
+            attach_function_root_module(trace)
         else:
             trace.module_identity_mode = "pytree_module"
             self._attach_pytree_module_logs(trace, module_tree)
         trace._tracing_finished = True
+        compact_op_metadata(trace)
+        # The depth flood deliberately resolves ops through its own explicit
+        # label index, NOT Trace.__getitem__ (finished-mode lookup returns
+        # Layer objects, not the ops the flood must mutate); running it after
+        # the finished flag flips is still required so relabeled child edges
+        # are present on the ops the index collects.
+        trace.mark_layer_depths = bool(getattr(trace, "mark_layer_depths", False))
+        if trace.mark_layer_depths:
+            from .._finalize import compute_preview_input_output_distances
+
+            compute_preview_input_output_distances(trace)
 
     def _attach_pytree_op_params(
         self,
@@ -2131,13 +2094,16 @@ class JAXBackend:
             Op parameter fields and reverse parameter usage lists are updated.
         """
 
+        from .._finalize import _attach_param_usage
+
         equation_labels = [
             label
-            for label in trace._raw_layer_labels_list
-            if not trace._raw_layer_dict[label].is_input
+            for label in trace._raw_graph_ws.raw_layer_labels_list
+            if not trace._raw_graph_ws.raw_layer_dict[label].is_input
         ]
+        usage_membership: dict[int, tuple[set[str], set[str], set[str]]] = {}
         for label, capture in zip(equation_labels, captures, strict=False):
-            op_log = trace._raw_layer_dict[label]
+            op_log = trace._raw_graph_ws.raw_layer_dict[label]
             param_addresses: list[str] = []
             for value in capture.input_values:
                 address = tree.param_address_by_value_id.get(id(value))
@@ -2155,13 +2121,9 @@ class JAXBackend:
             )
             op_log.num_params_frozen = op_log.num_params - op_log.num_params_trainable
             op_log.param_memory = sum(int(param.param_memory) for param in params)
-            for param in params:
-                if op_log.label not in param.used_by_ops:
-                    param.used_by_ops.append(op_log.label)
-                if op_log.layer_label not in param.used_by_layers:
-                    param.used_by_layers.append(op_log.layer_label)
-                if op_log.layer_label not in trace.layers_with_params[param.barcode]:
-                    trace.layers_with_params[param.barcode].append(op_log.layer_label)
+            # Set-memoized usage cross-links (the bare list scans were
+            # O(m^2) for a param consumed by m ops).
+            _attach_param_usage(trace, op_log, usage_membership)
         trace.num_layers_with_params = len(
             {op.layer_label for op in trace.layer_list if op.uses_params}
         )
@@ -2201,10 +2163,10 @@ class JAXBackend:
             ``trace.modules`` is populated by the shared module-log builder.
         """
 
-        trace._module_build_data = _init_module_hierarchy_data()
-        trace._module_forward_args = dict(tree.forward_args_by_call)
-        trace._module_metadata = tree.metadata
-        mbd = trace._module_build_data
+        trace._module_capture_ws.module_build_data = _init_module_hierarchy_data()
+        trace._module_capture_ws.module_forward_args = dict(tree.forward_args_by_call)
+        trace._module_capture_ws.module_metadata = tree.metadata
+        mbd = trace._module_capture_ws.module_build_data
         for address, metadata in tree.metadata.items():
             if address not in mbd["addresses"]:
                 mbd["addresses"].append(address)
@@ -2239,10 +2201,10 @@ class JAXBackend:
         Returns
         -------
         None
-            ``trace._module_build_data`` is updated in place.
+            ``trace._module_capture_ws.module_build_data`` is updated in place.
         """
 
-        mbd = trace._module_build_data
+        mbd = trace._module_capture_ws.module_build_data
         seen_layers: dict[str, set[str]] = defaultdict(set)
         seen_pass_layers: dict[str, set[str]] = defaultdict(set)
         seen_module_ops: set[str] = set()
@@ -2251,7 +2213,7 @@ class JAXBackend:
         seen_addresses = set(mbd["addresses"])
 
         for op_log in trace.layer_list:
-            normalized_calls = _jax_op_module_calls(op_log.modules)
+            normalized_calls = normalize_op_module_calls(op_log.modules)
             op_log.modules = [f"{address}:{call_index}" for address, call_index in normalized_calls]
             op_log.module = op_log.modules[-1] if op_log.modules else None
             parent_call_label: str | None = None
@@ -2299,25 +2261,43 @@ class JAXBackend:
             Recurrence assignments keyed by raw label.
         """
 
+        site_keys = self._jax_site_keys(trace)
         if not trace.recurrence_detection:
             return {
-                label: self._jax_singleton_assignment(label, op_log)
-                for label, op_log in trace._raw_layer_dict.items()
+                label: self._jax_singleton_assignment(label, op_log, site_keys.get(label))
+                for label, op_log in trace._raw_graph_ws.raw_layer_dict.items()
             }
-        graph = self._build_jax_recurrence_grouping_graph(trace)
+        graph = self._build_jax_recurrence_grouping_graph(trace, site_keys)
         assignments = group_recurrent_nodes(graph)
         return {
-            label: assignments.get(label, self._jax_singleton_assignment(label, op_log))
-            for label, op_log in trace._raw_layer_dict.items()
+            label: assignments.get(
+                label, self._jax_singleton_assignment(label, op_log, site_keys.get(label))
+            )
+            for label, op_log in trace._raw_graph_ws.raw_layer_dict.items()
         }
 
-    def _build_jax_recurrence_grouping_graph(self, trace: Trace) -> RecurrenceGroupingGraph:
+    def _jax_site_keys(self, trace: Trace) -> dict[str, str]:
+        """Mint ``site_key_v1`` per retained op via the JAX site dialect.
+
+        The dialect (iteration-stripped containing source path as the site
+        axis, iteration-qualified path as the call instance) lives in
+        :mod:`._site_dialect`.
+        """
+
+        return jax_site_keys(trace)
+
+    def _build_jax_recurrence_grouping_graph(
+        self, trace: Trace, site_keys: Mapping[str, str] | None = None
+    ) -> RecurrenceGroupingGraph:
         """Build the neutral recurrence graph from JAX materialized raw logs.
 
         Parameters
         ----------
         trace
             Trace containing materialized raw JAX ops.
+        site_keys
+            Pre-minted ``site_key_v1`` strings per retained raw label
+            (:meth:`_jax_site_keys`).
 
         Returns
         -------
@@ -2326,11 +2306,11 @@ class JAXBackend:
         """
 
         nodes: dict[str, RecurrenceNode] = {}
-        raw_labels = tuple(trace._raw_layer_labels_list)
+        raw_labels = tuple(trace._raw_graph_ws.raw_layer_labels_list)
         raw_label_set = set(raw_labels)
         data_parents_by_label = {
             label: _ordered_jax_data_parent_labels(op_log, raw_label_set)
-            for label, op_log in trace._raw_layer_dict.items()
+            for label, op_log in trace._raw_graph_ws.raw_layer_dict.items()
         }
         data_children_by_label: dict[str, list[str]] = {label: [] for label in raw_labels}
         for label, parents in data_parents_by_label.items():
@@ -2340,7 +2320,7 @@ class JAXBackend:
         eligible_labels: list[str] = []
         source_labels: list[str] = []
         for label in raw_labels:
-            op_log = trace._raw_layer_dict[label]
+            op_log = trace._raw_graph_ws.raw_layer_dict[label]
             pruned = bool(getattr(op_log, "is_orphan", False))
             retain = not pruned
             if retain:
@@ -2363,6 +2343,12 @@ class JAXBackend:
                 param_barcodes=tuple(op_log._param_barcodes),
                 retain=retain,
                 pruned=pruned,
+                output_slot=(
+                    getattr(op_log, "multi_output_index", None)
+                    if getattr(op_log, "in_multi_output", False)
+                    else None
+                ),
+                site_key=(site_keys or {}).get(label),
             )
 
         return RecurrenceGroupingGraph(
@@ -2372,7 +2358,9 @@ class JAXBackend:
             eligible_labels=tuple(eligible_labels),
         )
 
-    def _jax_singleton_assignment(self, label: str, op_log: Any) -> RecurrenceAssignment:
+    def _jax_singleton_assignment(
+        self, label: str, op_log: Any, site_key: str | None = None
+    ) -> RecurrenceAssignment:
         """Return a singleton recurrence assignment for one JAX op.
 
         Parameters
@@ -2381,6 +2369,8 @@ class JAXBackend:
             Raw operation label.
         op_log
             Materialized operation log.
+        site_key
+            Pre-minted ``site_key_v1`` string for this op, when retained.
 
         Returns
         -------
@@ -2394,6 +2384,7 @@ class JAXBackend:
             pass_index=1,
             num_passes=1,
             equivalence_key=op_log.equivalence_class or label,
+            site_key=site_key,
         )
 
     def _relabel_jax_graph_edges(self, trace: Trace, raw_to_final: Mapping[str, str]) -> None:
@@ -2413,7 +2404,7 @@ class JAXBackend:
             place.
         """
 
-        for op_log in trace._raw_layer_dict.values():
+        for op_log in trace._raw_graph_ws.raw_layer_dict.values():
             op_log.parents = [
                 raw_to_final.get(parent, parent) if isinstance(parent, str) else parent
                 for parent in op_log.parents
@@ -2430,35 +2421,6 @@ class JAXBackend:
                 "_edge_uses",
                 tuple(_relabel_jax_edge_use(edge, raw_to_final) for edge in op_log._edge_uses),
             )
-
-    def _attach_function_root_module(self, trace: Trace) -> None:
-        """Attach a function-root module accessor to ``trace``.
-
-        Parameters
-        ----------
-        trace
-            Trace receiving the root module.
-
-        Returns
-        -------
-        None
-            ``trace.modules`` is populated with ``self``.
-        """
-
-        mbd = trace._module_build_data
-        mbd["top_level_modules"] = ["self"]
-        mbd["top_level_module_ops"] = ["self:1"]
-        trace._module_metadata = {
-            "self": {
-                "cls": None,
-                "class_name": trace.model_class_name,
-                "class_qualname": trace.model_class_qualname,
-                "all_addresses": ["self"],
-                "training": False,
-            }
-        }
-        root = _build_root_module_log(trace, {}, mbd)
-        trace._module_logs = ModuleAccessor({"self": root})
 
     def _normalize_input_args(self, input_args: object) -> list[Any]:
         """Normalize public input args to a positional list.
@@ -2621,7 +2583,11 @@ class JAXBackend:
                 "JAX backend preview requires explicit PRNG keys as params/input leaves; "
                 "save_rng_states and torch-style RNG replay are unsupported."
             )
-        reject_unsupported_trace_options(options, JAX_PREVIEW_TRACE_OPTION_POLICY)
+        reject_unsupported_trace_options(
+            options,
+            JAX_PREVIEW_TRACE_OPTION_POLICY,
+            spec=get_backend_spec("jax"),
+        )
 
     def _reject_extra_kwargs(self, kwargs: Mapping[str, Any]) -> None:
         """Reject unrecognized kwargs reaching the backend.
@@ -2637,7 +2603,11 @@ class JAXBackend:
             Returns when no extras are present.
         """
 
-        reject_extra_trace_kwargs(dict(kwargs), JAX_EXTRA_KWARG_POLICY)
+        reject_extra_trace_kwargs(
+            dict(kwargs),
+            JAX_EXTRA_KWARG_POLICY,
+            spec=get_backend_spec("jax"),
+        )
 
 
 def _normalize_static_argnums(value: object, num_args: int) -> tuple[int, ...]:
@@ -2710,7 +2680,9 @@ def _resolve_jax_module_identity_mode(
     """
 
     if value not in {None, "function_root", "pytree_module"}:
-        raise ValueError(
+        # Typed like the four sibling previews: an unknown identity mode is a
+        # capability refusal, not a plain value error.
+        raise BackendUnsupportedError(
             "JAX module_identity_mode must be None, 'function_root', or 'pytree_module'."
         )
     if value == "pytree_module" and module_tree is None:
@@ -2830,35 +2802,8 @@ def _jax_event_module_call_stack(
         Module calls aligned with ``module_addresses``.
     """
 
-    call_by_address = {address: call_index for address, call_index in module_call_stack}
+    call_by_address = dict(module_call_stack)
     return tuple((address, call_by_address.get(address, 1)) for address in module_addresses)
-
-
-def _jax_op_module_calls(modules: Sequence[Any]) -> tuple[tuple[str, int], ...]:
-    """Return ``(address, call_index)`` pairs from a materialized JAX op.
-
-    Parameters
-    ----------
-    modules
-        Raw ``Op.modules`` entries, either legacy strings or event tuples.
-
-    Returns
-    -------
-    tuple[tuple[str, int], ...]
-        Normalized module-call pairs.
-    """
-
-    calls: list[tuple[str, int]] = []
-    for entry in modules:
-        if isinstance(entry, str):
-            address, separator, call_index_text = entry.partition(":")
-            call_index = int(call_index_text) if separator else 1
-            calls.append((address, call_index))
-            continue
-        address = str(entry[0])
-        call_index = int(entry[1]) if len(entry) > 1 else 1
-        calls.append((address, call_index))
-    return tuple(calls)
 
 
 def _jax_module_frame(address: str, call_index: int) -> ModuleFrame:
@@ -3020,8 +2965,8 @@ def _reject_closed_over_host_state(fn: Callable[..., Any]) -> None:
         Returns when no referenced host scalar/array globals are found.
     """
 
-    import numpy as np
     import jax
+    import numpy as np
 
     closure = inspect.getclosurevars(fn)
     candidates = {**closure.nonlocals, **closure.globals}
@@ -3131,25 +3076,6 @@ def _jax_config_fingerprint() -> dict[str, str]:
         "jax_default_prng_impl",
     )
     return {name: repr(getattr(jax.config, name, None)) for name in names}
-
-
-def _callable_identity(fn: Callable[[Any], Any] | None) -> str | None:
-    """Return a stable best-effort callable identity.
-
-    Parameters
-    ----------
-    fn
-        Callable or ``None``.
-
-    Returns
-    -------
-    str | None
-        Identity string used in provenance and fingerprints.
-    """
-
-    if fn is None:
-        return None
-    return f"{getattr(fn, '__module__', '')}.{getattr(fn, '__qualname__', repr(fn))}:{id(fn)}"
 
 
 def _is_scalar_jax_value(value: Any) -> bool:
@@ -3432,6 +3358,17 @@ def _finite_difference_directional_check(
 ) -> bool:
     """Check a gradient with a central finite difference along ``sign(grad)``.
 
+    The comparison is between the observed central loss delta and the
+    first-order prediction ``sum(grad * perturbation)``, judged against a
+    WRITTEN-DOWN error model (F13-A): the dtype replay band
+    (``float_replay_tolerances``) widened by the central-difference
+    truncation term (``~step**2`` relative, 8x headroom) plus the
+    loss-evaluation roundoff (``8 * eps * max(|L+|, |L-|)`` absolute — the
+    two loss evaluations are the quantities actually differenced). The
+    former fixed ``rtol=5e-2, atol=5e-3`` pair was dtype-blind and its
+    absolute floor blessed any tap whose true directional derivative sat
+    below 5e-3.
+
     Parameters
     ----------
     value
@@ -3444,20 +3381,60 @@ def _finite_difference_directional_check(
     Returns
     -------
     bool
-        True when finite difference agrees within dtype-scaled tolerance.
+        True when the finite-difference loss delta agrees with the gradient
+        prediction within the derived error model.
     """
 
     import jax.numpy as jnp
 
+    from .._validation_shared import float_replay_tolerances
+
     direction = jnp.sign(grad)
     if not bool(jnp.any(direction)):
         direction = jnp.ones_like(grad)
-    eps = jnp.asarray(1e-2 if value.dtype == jnp.float32 else 1e-4, dtype=value.dtype)
-    plus = scalar_loss(value + eps * direction)
-    minus = scalar_loss(value - eps * direction)
-    observed = (plus - minus) / (eps * jnp.asarray(2, dtype=value.dtype))
-    expected = jnp.sum(grad * direction)
-    return bool(jnp.allclose(observed, expected, rtol=5e-2, atol=5e-3))
+    # Dtype-derived step (r4 sweep): the former flat 1e-4 for every
+    # non-fp32 dtype sat BELOW fp16/bf16 spacing at unit scale, so
+    # ``value +/- eps`` rounded back to ``value`` and the second oracle
+    # was vacuous there. Wide dtypes keep their tuned historical steps;
+    # storage-rounding dtypes take cbrt(eps) (the central-difference
+    # optimum: ~0.1 fp16, ~0.2 bf16), which survives their spacing.
+    finfo = jnp.finfo(value.dtype)
+    eps32 = float(jnp.finfo(jnp.float32).eps)
+    if value.dtype == jnp.float32:
+        step = 1e-2
+    elif float(finfo.eps) <= eps32:
+        step = 1e-4
+    else:
+        step = float(finfo.eps) ** (1.0 / 3.0)
+    # Per-element step scaling (F13-A a): float spacing is RELATIVE while a
+    # scalar step is ABSOLUTE, so an element of magnitude ~1e6 fp32 has
+    # spacing far above the raw step and stays frozen in both probes. Scale
+    # each element's step by max(1, |value|) so every intended probe moves.
+    one = jnp.asarray(1.0, dtype=value.dtype)
+    eps = jnp.asarray(step, dtype=value.dtype) * jnp.maximum(one, jnp.abs(value))
+    perturbation = eps * direction
+    plus_input = value + perturbation
+    minus_input = value - perturbation
+    intended = direction != 0
+    frozen = (intended & (plus_input == value)) | (intended & (minus_input == value))
+    if bool(jnp.any(frozen)):
+        # An intended probe never moved its element (spacing underflow even
+        # after magnitude scaling — non-finite or extreme values): the
+        # observed delta would silently omit that element's contribution
+        # while the prediction includes it. Fail closed rather than certify
+        # a partially-probed gradient (the former all(...) and all(...)
+        # gate passed MIXED freezes).
+        return False
+    plus = scalar_loss(plus_input)
+    minus = scalar_loss(minus_input)
+    observed = (plus - minus) / jnp.asarray(2, dtype=value.dtype)
+    expected = jnp.sum(grad * perturbation)
+    rtol_repl, atol_repl = float_replay_tolerances(finfo)
+    rtol_fd = max(rtol_repl, 8.0 * step * step)
+    roundoff = 8.0 * float(finfo.eps) * float(jnp.maximum(jnp.abs(plus), jnp.abs(minus)))
+    scale = float(jnp.maximum(jnp.abs(observed), jnp.abs(expected)))
+    tolerance = rtol_fd * scale + roundoff + atol_repl
+    return bool(jnp.abs(observed - expected) <= tolerance)
 
 
 def _experimental_per_op_boundary_vjp_oracle(
@@ -3501,13 +3478,15 @@ def _experimental_per_op_boundary_vjp_oracle(
     for label, (boundary_value, suffix_fn) in boundaries.items():
         try:
 
-            def scalar_loss(replacement: Any) -> Any:
+            def scalar_loss(replacement: Any, *, suffix_fn: Any = suffix_fn) -> Any:
                 """Return scalar loss for one replacement boundary value.
 
                 Parameters
                 ----------
                 replacement
                     Replacement boundary value.
+                suffix_fn
+                    Suffix function bound at definition time (loop-safe).
 
                 Returns
                 -------
@@ -4330,48 +4309,15 @@ def _values_close(left: Any, right: Any) -> bool:
         return False
     if left_array.dtype == jnp.bool_ or jnp.issubdtype(left_array.dtype, jnp.integer):
         return bool(jnp.array_equal(left_array, right_array, equal_nan=True))
-    if jnp.issubdtype(left_array.dtype, jnp.floating):
-        return bool(jnp.allclose(left_array, right_array, rtol=1e-5, atol=1e-6, equal_nan=True))
-    if jnp.issubdtype(left_array.dtype, jnp.complexfloating):
-        return bool(jnp.allclose(left_array, right_array, rtol=1e-5, atol=1e-6, equal_nan=True))
+    if jnp.issubdtype(left_array.dtype, jnp.floating) or jnp.issubdtype(
+        left_array.dtype, jnp.complexfloating
+    ):
+        # Per-dtype ULP-derived bands (ported paddle/mlx validation-oracle
+        # derivation); ``jnp.finfo`` reports component precision for complex
+        # and covers the extended ml_dtypes floats (bfloat16, fp8).
+        rtol, atol = float_replay_tolerances(jnp.finfo(left_array.dtype))
+        return bool(jnp.allclose(left_array, right_array, rtol=rtol, atol=atol, equal_nan=True))
     return bool(jnp.array_equal(left_array, right_array))
-
-
-def _numel(shape: Sequence[int]) -> int:
-    """Return the number of elements implied by ``shape``.
-
-    Parameters
-    ----------
-    shape
-        Shape sequence.
-
-    Returns
-    -------
-    int
-        Product of dimensions.
-    """
-
-    if not shape:
-        return 1
-    return int(reduce(mul, shape, 1))
-
-
-def _nbytes(value: object) -> int | None:
-    """Return byte size for a JAX array-like value.
-
-    Parameters
-    ----------
-    value
-        Candidate array.
-
-    Returns
-    -------
-    int | None
-        Byte size when available.
-    """
-
-    nbytes = getattr(value, "nbytes", None)
-    return None if nbytes is None else int(nbytes)
 
 
 def _path_to_string(path: Sequence[Any]) -> str:

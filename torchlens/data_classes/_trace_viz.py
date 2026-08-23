@@ -1,10 +1,8 @@
 """Trace visualization mixin."""
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from html import escape
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, cast
-
-import torch
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     from ..experimental.dagua._bridge import TorchLensRenderAudit
@@ -15,7 +13,8 @@ if TYPE_CHECKING:
     _TraceMixinBase = Trace
 else:
     _TraceMixinBase = object
-from .._deprecations import MISSING, MissingType
+from .._deprecations import MISSING, MissingType, warn_deprecated_alias
+from .._errors import InvalidArgumentError
 from .._literals import (
     BufferVisibilityLiteral,
     CollapseLiteral,
@@ -29,6 +28,12 @@ from .._literals import (
 )
 from .._source_links import file_line_text, terminal_file_line_link, vscode_file_line_link
 from ..intervention.types import FireRecord
+from ._nonfinite import (
+    coverage_gap_note,
+    first_nonfinite_layer,
+    nonfinite_coverage,
+    nonfinite_op_labels,
+)
 from .module import Module
 
 
@@ -54,6 +59,8 @@ def _flatten_backward_fire_ref(value: Any) -> tuple["FireRecord", ...]:
 
 
 class TraceVisualizationMixin(_TraceMixinBase):
+    """``Trace`` visualization surface: ``draw``, ``show``, and collapse diagnostics."""
+
     def show(self: "Trace", method: str = "graph", **kwargs: Any) -> str | None:
         """Render this trace using a lightweight notebook-friendly dispatcher.
 
@@ -75,8 +82,10 @@ class TraceVisualizationMixin(_TraceMixinBase):
         """
 
         vis_opt = kwargs.pop("vis_opt", None)
-        if vis_opt is not None and "vis_mode" not in kwargs:
-            kwargs["vis_mode"] = vis_opt
+        if vis_opt is not None:
+            warn_deprecated_alias("vis_opt", "view")
+            if "vis_mode" not in kwargs:
+                kwargs["vis_mode"] = vis_opt
         if kwargs.get("vis_mode") == "none":
             return None
         if method == "repr":
@@ -96,19 +105,19 @@ class TraceVisualizationMixin(_TraceMixinBase):
         vis_mode: VisModeLiteral = "unrolled",
         vis_call_depth: int = 1000,
         vis_outpath: str = "modelgraph",
-        vis_graph_overrides: Optional[Dict[str, Any]] = None,
+        vis_graph_overrides: dict[str, Any] | None = None,
         module: "Module | str | None" = None,
         node_mode: VisNodeModeLiteral = "default",
         vis_node_mode: VisNodeModeLiteral | MissingType = MISSING,
-        node_spec_fn: Optional[Callable[..., Any]] = None,
-        collapsed_node_spec_fn: Optional[Callable[..., Any]] = None,
-        collapse_fn: Optional[Callable[..., Any]] = None,
+        node_spec_fn: Callable[..., Any] | None = None,
+        collapsed_node_spec_fn: Callable[..., Any] | None = None,
+        collapse_fn: Callable[..., Any] | None = None,
         collapse: CollapseLiteral = "none",
         fold_repeats: FoldRepeatsLiteral = None,
-        skip_fn: Optional[Callable[..., Any]] = None,
-        vis_edge_overrides: Optional[Dict[str, Any]] = None,
-        vis_grad_edge_overrides: Optional[Dict[str, Any]] = None,
-        vis_module_overrides: Optional[Dict[str, Any]] = None,
+        skip_fn: Callable[..., Any] | None = None,
+        vis_edge_overrides: dict[str, Any] | None = None,
+        vis_grad_edge_overrides: dict[str, Any] | None = None,
+        vis_module_overrides: dict[str, Any] | None = None,
         vis_save_only: bool = False,
         vis_fileformat: str = "pdf",
         vis_buffers: BufferVisibilityLiteral | bool | MissingType = MISSING,
@@ -123,7 +132,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
         code_panel: "CodePanelOption" = False,
         node_overlay: str | Mapping[str, Any] | Callable[[Any], Any] | None = None,
         node_label_fields: list[str] | None = None,
-        show_legend: bool = False,
+        show_legend: bool | None = None,
         font_size: int | None = None,
         dpi: int | None = None,
         for_paper: bool = False,
@@ -133,6 +142,13 @@ class TraceVisualizationMixin(_TraceMixinBase):
         container_max_inline: int = 12,
         show_input_transform_summary: bool = False,
         show_orphans: bool = False,  # Invariants support flipping this; owner visual review pending.
+        *,
+        color_by: str | Callable[[Any], Any] | None = None,
+        size_by: str | Callable[[Any], Any] | None = None,
+        scale: str | None = None,
+        stack_by: str | bool | Callable[[Any], Any] | None = None,
+        show_redundant_args: bool = False,
+        show_saved_for_backward: bool = False,
     ) -> Any:
         """Render the computational graph for this model log.
 
@@ -144,7 +160,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
         show_buffer_layers, direction, vis_node_placement, vis_renderer, vis_theme, \
         vis_intervention_mode, vis_show_cone, code_panel, order_siblings, show_containers,
         container_max_inline, show_input_transform_summary, show_orphans:
-            Forwarded unchanged to :func:`torchlens.visualization.rendering.draw`.
+            Forwarded unchanged to :func:`torchlens.visualization._render_dot.draw`.
             ``show_orphans=True`` renders orphan (island) ops -- captured but unreachable
             from both inputs and outputs -- as a dashed, greyed cluster of edgeless nodes,
             instead of omitting them. Orphans must have been retained at capture time
@@ -168,6 +184,82 @@ class TraceVisualizationMixin(_TraceMixinBase):
             ``"auto"``/``"max"``. ``True`` folds every eligible repeated run,
             including standalone folding with ``collapse="none"``. ``False``
             disables run folding.
+        show_legend:
+            Tri-state legend visibility. ``None`` (default) is AUTO: no
+            legend unless an encoding channel is active, in which case a
+            channel-only disclosure legend is emitted. ``True`` renders the
+            full theme legend (plus channel rows when active); ``False``
+            disables the legend even with channels active — a deliberate
+            act that leaves the encoding undisclosed.
+        color_by:
+            UNSTABLE (keyword-only; no deprecation shim owed). Encoding
+            channel value source: a Layer/Op field name (``"flops_forward"``),
+            a scalar builtin (``"time"``, ``"flops"``, ``"bytes"``,
+            ``"magnitude"``, ``"grad_norm"``), or a callable ``node ->
+            value``. Encoded nodes are filled from a colorblind-safe
+            sequential ramp normalized linear min-max over visible nodes;
+            missing/non-finite values leave nodes unencoded (disclosed in
+            the legend). Requires the Graphviz dot layout: under
+            ``layout="auto"`` an active channel forces dot; explicit
+            ``layout="rank"`` refuses. On rolled multi-pass layers, field
+            sources resolve through the rolled-aggregate allowlist —
+            per-pass-varying and first-pass-only sources stay unencoded with
+            a legend note rather than painting an unprovable uniform value.
+        size_by:
+            UNSTABLE (keyword-only; no deprecation shim owed). Size encoding
+            channel source: a Layer/Op field name, the closed ``"dims"``
+            shape token (numel of the non-batch output shape — the D4
+            default mapping, applied as default because D4 is unruled), or
+            a callable ``node -> scalar``. Encoded nodes get width/height
+            MINIMUMS (``fixedsize=false``: labels are never truncated,
+            fonts never scale) with encoded area clamped to 4x the default
+            node area. STRICTLY OPT-IN: plain ``draw()`` keeps uniform
+            boxes. On a rolled multi-pass layer a size source that cannot
+            be certified single-valued refuses typed
+            (``size_by_rolled_varying``): size has no honest "n/a"
+            rendering, so it refuses where color degrades. Callables bypass
+            the rolled table (disclosed in the legend).
+        scale:
+            UNSTABLE (keyword-only). Size-channel scale transform:
+            ``"sqrt"`` (default) or ``"linear"`` (the literal area motif).
+            Supplied without ``size_by`` it refuses
+            (``scale_requires_size_by``). Every legend drawn states the
+            active scale.
+        stack_by:
+            UNSTABLE (keyword-only). Rank encoding channel: nodes sharing an
+            annotation value pin to one Graphviz rank (column/row), the
+            classic unrolled-RNN timestep diagram. STRICTLY OPT-IN.
+            ``True``/``"auto"`` derives the annotation (``pass_index`` on
+            multi-pass ops only) under the lockstep license — the
+            multi-pass execution order must be globally monotone, else it
+            refuses (``stack_by_auto_underivable``); an explicit field name
+            or callable bypasses the license (the caption disclosed what
+            was used). Rolled graphs refuse (``stack_by_requires_unrolled``).
+            While stacking is active the sibling-ordering post-pass no-ops
+            (two rank-constraint systems would fight), and collapsed boxes/
+            fold reps stay un-annotated.
+        show_redundant_args:
+            UNSTABLE (keyword-only). Checked suppression of redundant
+            constructor-arg label rows is DEFAULT-ON: an arg such as
+            ``in_features=4`` is omitted exactly when its value provably
+            equals the captured shape dimension it duplicates on THIS
+            trace (a closed torch-module candidate table; the check is
+            data equality on records). A mismatch or unavailable shape
+            keeps the arg VISIBLE — the rule can only reveal more, never
+            hide a discrepancy. Pass ``True`` to show every captured arg.
+        show_saved_for_backward:
+            UNSTABLE (keyword-only). Saved-for-backward annotation: adds a
+            label row (``saved for backward: N tensors, X MB``) on every op
+            whose grad_fn measurably retained tensors for the backward pass,
+            from the capture-time ``num_autograd_tensors`` /
+            ``autograd_memory`` measurements — the memory autograd is
+            actually holding, made visible per node. Ops that saved nothing
+            (or whose backward graph was never built, e.g. under
+            ``torch.no_grad``) get no row: an absent row makes no claim. On
+            rolled multi-pass layers the stored measurements are cross-pass
+            sums and the row discloses ``(total across passes)``. Composes
+            with ``color_by="autograd_memory"`` for a ramp over the same
+            quantity.
 
         Returns
         -------
@@ -175,9 +267,16 @@ class TraceVisualizationMixin(_TraceMixinBase):
             Graphviz DOT source, renderer-specific output, or renderer object
             when ``return_graph=True``.
         """
-        from ..visualization.rendering import draw as _impl
+        from ..visualization._render_dot import draw as _impl
 
         if vis_opt is not MISSING:
+            # The oldest of three generations (vis_opt -> vis_mode -> view), and
+            # the whole chain warned nowhere until grind b4 (R48-1). This hop is
+            # announced because BOTH replacements are accepted by this very
+            # method and no caller inside torchlens passes vis_opt; the
+            # vis_mode -> view hop is forked (see the lane report), since draw()
+            # has no canonical spelling for most of the vis_* family yet.
+            warn_deprecated_alias("vis_opt", "view")
             vis_mode = cast(VisModeLiteral, vis_opt)
         if view is not MISSING:
             vis_mode = cast(VisModeLiteral, view)
@@ -189,11 +288,16 @@ class TraceVisualizationMixin(_TraceMixinBase):
             vis_node_placement = cast(VisNodePlacementLiteral, layout)
         if node_style is not MISSING:
             node_mode = cast(VisNodeModeLiteral, node_style)
+        # The three legacy vis_* sentinels warn like the vis_opt hop above:
+        # a silent translation is an unannounced removal hazard (R48-a).
         if vis_node_mode is not MISSING:
+            warn_deprecated_alias("vis_node_mode", "node_style")
             node_mode = cast(VisNodeModeLiteral, vis_node_mode)
         if vis_buffers is not MISSING:
+            warn_deprecated_alias("vis_buffers", "show_buffer_layers")
             show_buffer_layers = cast(BufferVisibilityLiteral | bool, vis_buffers)
         if vis_direction is not MISSING:
+            warn_deprecated_alias("vis_direction", "direction")
             direction = cast(VisDirectionLiteral, vis_direction)
         if vis_mode == "none":
             return None
@@ -237,6 +341,12 @@ class TraceVisualizationMixin(_TraceMixinBase):
             container_max_inline=container_max_inline,
             show_input_transform_summary=show_input_transform_summary,
             show_orphans=show_orphans,
+            color_by=color_by,
+            size_by=size_by,
+            scale=scale,
+            stack_by=stack_by,
+            show_redundant_args=show_redundant_args,
+            show_saved_for_backward=show_saved_for_backward,
         )
 
     def add_node_overlay(
@@ -326,6 +436,48 @@ class TraceVisualizationMixin(_TraceMixinBase):
             + "})();</script></div>"
         )
 
+    @property
+    def nonfinite_ops(self: "Trace") -> tuple[str, ...]:
+        """Return pass-qualified labels of ops whose output held NaN or Inf.
+
+        DOCUMENTED-UNSTABLE spelling (pending naming-session ratification; no
+        deprecation shim owed on rename). This is the queryable per-op record:
+        when this capture ran with ``CaptureOptions(track_nonfinite=True)`` it
+        serves the capture-time verdicts (covering ops that retained no
+        payload); otherwise it derives the answer from the memoized
+        saved-payload scan already backing ``print(trace)``, at zero
+        capture-time cost. An empty tuple is only as strong as its coverage --
+        read :attr:`nonfinite_coverage` before trusting a clean answer from a
+        capture that retained few payloads.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Pass-qualified op labels (``Op.label``) in scan order; each is a
+            valid ``trace[label]`` key.
+        """
+
+        return nonfinite_op_labels(self)
+
+    @property
+    def nonfinite_coverage(self: "Trace") -> Any:
+        """Return the evidence basis and coverage behind :attr:`nonfinite_ops`.
+
+        DOCUMENTED-UNSTABLE spelling (pending naming-session ratification; no
+        deprecation shim owed on rename). A clean :attr:`nonfinite_ops` answer
+        must not read as a whole-capture verdict when the scan could not
+        examine everything; this discloses the basis (``"capture"`` vs
+        ``"saved_payloads"``) and the checked / unchecked / unexamined counts.
+
+        Returns
+        -------
+        NonfiniteCoverage
+            Frozen coverage record (see
+            :class:`torchlens.data_classes._nonfinite.NonfiniteCoverage`).
+        """
+
+        return nonfinite_coverage(self)
+
     def first_nonfinite(
         self: "Trace", link_format: Literal["terminal", "html", "text"] = "terminal"
     ) -> str:
@@ -345,16 +497,15 @@ class TraceVisualizationMixin(_TraceMixinBase):
             module, shape, dtype, parents, and source location.
         """
 
-        for layer in getattr(self, "layer_list", []) or []:
-            out = getattr(layer, "out", None)
-            if not isinstance(out, torch.Tensor) or out.numel() == 0:
-                continue
-            try:
-                has_nonfinite = bool((~torch.isfinite(out.detach())).any().item())
-            except (RuntimeError, TypeError):
-                continue
-            if not has_nonfinite:
-                continue
+        # ``kind="saved"`` skips ops that retained no payload. The raising
+        # ``kind="trace"`` gate contradicted this method's own contract ("the first
+        # SAVED non-finite out"): on any selective-save capture it hit an unsaved op
+        # and raised ValueError, which took ``print(trace)``, ``_repr_html_``, and
+        # ``report.explain`` down with it -- in exactly the mode the performance guide
+        # recommends for large models. Skipping is honest only because the clean
+        # answer below names how many ops could not be examined.
+        layer = first_nonfinite_layer(self, kind="saved")
+        if layer is not None:
             stack = getattr(layer, "code_context", None) or []
             location = "source unavailable"
             if stack:
@@ -368,7 +519,13 @@ class TraceVisualizationMixin(_TraceMixinBase):
                 elif link_format == "text":
                     location = file_line_text(file_path, line_number)
                 else:
-                    raise ValueError("link_format must be 'terminal', 'html', or 'text'.")
+                    raise InvalidArgumentError(
+                        "link_format must be 'terminal', 'html', or 'text'; "
+                        f"received {link_format!r}",
+                        code="link_format_invalid",
+                        remedy="pass link_format='terminal', 'html', or 'text'",
+                        argument="link_format",
+                    )
             parents = ", ".join(getattr(layer, "parents", None) or []) or "none"
             module = getattr(layer, "module", None) or "no module"
             return (
@@ -378,16 +535,23 @@ class TraceVisualizationMixin(_TraceMixinBase):
                 f"dtype={getattr(layer, 'dtype', None)}, parents={parents}, "
                 f"source={location}."
             )
-        return "No non-finite tensor values found in saved outs."
+        # A scoped clean answer must not read like a whole-capture one: ops that
+        # retained no payload, and payloads whose dtype has no runnable ``isfinite``
+        # (quantized, sparse), are both named. fp8 is NOT in that class -- it is
+        # widened exactly and really is checked.
+        return (
+            "No non-finite tensor values found in saved outs"
+            f"{coverage_gap_note(self, kind='saved')}."
+        )
 
     def draw_backward(
         self: "Trace",
         vis_outpath: str = "backward_modelgraph",
-        vis_graph_overrides: Optional[Dict[str, Any]] = None,
-        node_spec_fn: Optional[Callable[..., Any]] = None,
-        collapsed_node_spec_fn: Optional[Callable[..., Any]] = None,
+        vis_graph_overrides: dict[str, Any] | None = None,
+        node_spec_fn: Callable[..., Any] | None = None,
+        collapsed_node_spec_fn: Callable[..., Any] | None = None,
         vis_node_mode: VisNodeModeLiteral = "default",
-        vis_edge_overrides: Optional[Dict[str, Any]] = None,
+        vis_edge_overrides: dict[str, Any] | None = None,
         vis_save_only: bool = False,
         vis_fileformat: str = "pdf",
         vis_direction: VisDirectionLiteral = "topdown",
@@ -403,7 +567,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
         vis_node_mode, vis_edge_overrides, vis_save_only, vis_fileformat, \
         vis_direction, code_panel, vis_mode, bwd:
             Forwarded unchanged to
-            :func:`torchlens.visualization.rendering.render_backward_graph`.
+            :func:`torchlens.visualization._render_entrypoints.render_backward_graph`.
             ``collapsed_node_spec_fn`` and ``vis_node_mode`` are accepted for
             forward-visualization API symmetry but are not applied because
             backward graphs do not render collapsed module nodes.
@@ -413,7 +577,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
         str
             Graphviz DOT source.
         """
-        from ..visualization.rendering import render_backward_graph as _impl
+        from ..visualization._render_entrypoints import render_backward_graph as _impl
 
         return _impl(
             self,
@@ -434,10 +598,10 @@ class TraceVisualizationMixin(_TraceMixinBase):
     def draw_combined(
         self: "Trace",
         vis_outpath: str = "combined_modelgraph",
-        vis_graph_overrides: Optional[Dict[str, Any]] = None,
-        node_spec_fn: Optional[Callable[..., Any]] = None,
-        backward_node_spec_fn: Optional[Callable[..., Any]] = None,
-        vis_edge_overrides: Optional[Dict[str, Any]] = None,
+        vis_graph_overrides: dict[str, Any] | None = None,
+        node_spec_fn: Callable[..., Any] | None = None,
+        backward_node_spec_fn: Callable[..., Any] | None = None,
+        vis_edge_overrides: dict[str, Any] | None = None,
         vis_save_only: bool = False,
         vis_fileformat: str = "pdf",
         vis_direction: VisDirectionLiteral = "leftright",
@@ -454,14 +618,14 @@ class TraceVisualizationMixin(_TraceMixinBase):
         vis_edge_overrides, vis_save_only, vis_fileformat, vis_direction, \
         vis_mode, intervening_cluster, show_buffer_layers, bwd:
             Forwarded unchanged to
-            :func:`torchlens.visualization.rendering.render_combined_graph`.
+            :func:`torchlens.visualization._render_entrypoints.render_combined_graph`.
 
         Returns
         -------
         str
             Graphviz DOT source.
         """
-        from ..visualization.rendering import render_combined_graph as _impl
+        from ..visualization._render_entrypoints import render_combined_graph as _impl
 
         return _impl(
             self,
@@ -481,16 +645,15 @@ class TraceVisualizationMixin(_TraceMixinBase):
 
     def preview_fastlog(
         self: "Trace",
-        predicate: Optional[Callable[..., Any]] = None,
-        keep_op: Optional[Callable[..., Any]] = None,
-        keep_module: Optional[Callable[..., Any]] = None,
+        predicate: Callable[..., Any] | None = None,
+        keep_op: Callable[..., Any] | None = None,
         **kwargs: Any,
     ) -> str:
         """Render a fastlog predicate preview for this model graph.
 
         Parameters
         ----------
-        predicate, keep_op, keep_module:
+        predicate, keep_op:
             Predicate callables that receive synthesized fastlog ``RecordContext``
             objects.
         **kwargs:
@@ -508,7 +671,6 @@ class TraceVisualizationMixin(_TraceMixinBase):
             self,
             predicate=predicate,
             keep_op=keep_op,
-            keep_module=keep_module,
             **kwargs,
         )
 
@@ -550,25 +712,17 @@ class TraceVisualizationMixin(_TraceMixinBase):
             "overview", "graph", "memory", "control_flow", "compute", "cost", "waterfall", "output"
         ] = "overview",
         *,
-        fields: Optional[List[str]] = None,
+        fields: list[str] | None = None,
         mode: Literal["auto", "rolled", "unrolled"] = "auto",
         show_ops: bool = False,
-        preset: Optional[
-            Literal[
-                "overview",
-                "graph",
-                "memory",
-                "control_flow",
-                "compute",
-                "cost",
-                "waterfall",
-                "output",
-            ]
-        ] = None,
-        columns: Optional[List[str]] = None,
-        include_ops: Optional[bool] = None,
-        max_rows: Optional[int] = 200,
-        print_to: Optional[Callable[[str], None]] = None,
+        preset: Literal[
+            "overview", "graph", "memory", "control_flow", "compute", "cost", "waterfall", "output"
+        ]
+        | None = None,
+        columns: list[str] | None = None,
+        include_ops: bool | None = None,
+        max_rows: int | None = 200,
+        print_to: Callable[[str], None] | None = None,
         count_fma_as_two: bool = False,
         show_input_preprocessing_details: bool = False,
     ) -> str:
@@ -673,7 +827,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
         vis_call_depth: int = 1000,
         show_buffer_layers: bool = False,
         direction: str = "bottomup",
-        include_grad_edges: Optional[bool] = None,
+        include_grad_edges: bool | None = None,
     ) -> Any:
         """Translate this model log into an experimental Dagua graph.
 

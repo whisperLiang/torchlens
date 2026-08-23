@@ -73,12 +73,28 @@ def _coerce_input_args(model: Any, input_args: Any) -> Any:
         # ``tuple`` instances. Reconstruct through the original type so field
         # access (``batch.some_field``) keeps working downstream instead of
         # silently degrading to a plain ``tuple`` (issue: interatomic-potential
-        # GNN inputs like orb-models' ``AtomGraphs``).
+        # GNN inputs like orb-models' ``AtomGraphs``). Reconstruction routes
+        # through the verified constructor ladder (T11.7): ``_fields`` presence
+        # is NOT proof of an *args constructor, and the historical inference
+        # crashed plain ``tl.trace`` untyped on a tuple subclass carrying a
+        # malformed ``_fields``.
         coerced_items = [_coerce_input(model, item) for item in input_args]
+        if all(new is old for new, old in zip(coerced_items, input_args, strict=True)):
+            # Nothing coerced: keep the exact original instance (type-faithful,
+            # and a fragile subclass constructor is never run needlessly).
+            return input_args
         arg_type = type(input_args)
-        if hasattr(arg_type, "_fields"):
-            return arg_type(*coerced_items)
-        return arg_type(coerced_items)
+        if arg_type is tuple:
+            return tuple(coerced_items)
+        from .utils.arg_handling import rebuild_tuple_like
+
+        rebuilt = rebuild_tuple_like(arg_type, coerced_items)
+        if rebuilt is not None:
+            return rebuilt
+        # Unreconstructable subclass: keep the original rather than crash or
+        # silently substitute a different container class; downstream coercion
+        # of its items is skipped exactly like other custom wrappers.
+        return input_args
     if isinstance(input_args, list):
         return [_coerce_input(model, item) for item in input_args]
     return _coerce_input(model, input_args)

@@ -11,14 +11,12 @@ from typing import Any
 
 import pytest
 import torch
+from example_models import TinyReluAdd as _ReluAdd
 
 import torchlens as tl
-from torchlens.io import load_intervention_spec
-from torchlens.io import list_logs
-from torchlens.io import TraceState
 from torchlens.intervention import errors as terrors
+from torchlens.io import TraceState, list_logs, load_intervention_spec
 from torchlens.validation import check_spec_compat
-
 
 SeverityClass = type[BaseException]
 WarningClass = type[Warning]
@@ -30,6 +28,7 @@ ERROR_NAMES: tuple[str, ...] = (
     "BundleRelationshipError",
     "BaselineUndeterminedError",
     "ReplayPreconditionError",
+    "SelectionError",
     "SiteResolutionError",
     "SiteAmbiguityError",
     "HookSignatureError",
@@ -68,6 +67,7 @@ CATALOG_EXERCISE_MANIFEST: dict[str, str] = {
     "ModelMismatchError": "tests/test_intervention_phase8b.py::test_do_ambiguous_dispatch_and_model_mismatch_errors",
     "BundleMemberError": "tests/test_intervention_error_catalog.py::test_bundle_member_error_raised_for_missing_bundle_site",
     "BundleRelationshipError": "tests/test_intervention_phase9.py",
+    "SelectionError": "tests/test_intervention_error_catalog.py::test_selection_error_kind_matrix_refusal",
     "BaselineUndeterminedError": "tests/test_intervention_phase9.py",
     "ReplayPreconditionError": "tests/test_intervention_phase6.py::test_replay_rejects_non_intervention_ready_logs",
     "SiteResolutionError": "tests/test_intervention_phase2.py::test_resolution_errors_strict_mode_and_warnings",
@@ -95,26 +95,6 @@ CATALOG_EXERCISE_MANIFEST: dict[str, str] = {
     "BatchNormTrainModeWarning": "tests/test_intervention_phase12.py::test_append_batchnorm_train_mode_warns",
 }
 """Manual manifest proving every catalog entry is represented in the test matrix."""
-
-
-class _ReluAdd(torch.nn.Module):
-    """Small stable model for Phase 14 cross-cutting tests."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply ReLU and a downstream add.
-
-        Parameters
-        ----------
-        x:
-            Input tensor.
-
-        Returns
-        -------
-        torch.Tensor
-            ReLU output plus one.
-        """
-
-        return torch.relu(x) + 1
 
 
 class _LinearRelu(torch.nn.Module):
@@ -363,33 +343,53 @@ def test_axis_a_public_verbs_success_paths() -> None:
 
 
 @pytest.mark.parametrize(
-    ("verb", "operation"),
+    ("verb", "operation", "expected_exc"),
     (
-        ("set", lambda log: log.set(tl.func("missing"), torch.zeros(1, 3), confirm_mutation=True)),
+        # ``expected_exc`` pins the SPECIFIC exception each failure path raises today
+        # (probed live). A generic ``pytest.raises(Exception)`` here is vacuous: it would
+        # pass even if the wrong error escaped. Each verb below asserts its cataloged typed
+        # error, EXCEPT ``rerun`` which the product currently raises as a bare builtin
+        # ``ValueError`` (untyped -- see the module TODO; do not weaken this test to hide it).
+        (
+            "set",
+            lambda log: log.set(tl.func("missing"), torch.zeros(1, 3), confirm_mutation=True),
+            terrors.SiteResolutionError,
+        ),
         (
             "attach_hooks",
             lambda log: log.attach_hooks(tl.func("missing"), _zero_hook, confirm_mutation=True),
+            terrors.SiteResolutionError,
         ),
         (
             "do",
             lambda log: log.do(
                 tl.func("relu"), _zero_hook, x=torch.zeros(1, 3), confirm_mutation=True
             ),
+            terrors.EngineDispatchError,
         ),
-        ("replay", lambda log: log.replay()),
-        ("rerun", lambda log: log.run(_ReluAdd())),
-        ("append", lambda log: log.run(_ReluAdd(), torch.ones(1, 4), append=True)),
+        ("replay", lambda log: log.replay(), terrors.ReplayPreconditionError),
+        # NOTE (untyped-error finding, follow-up): ``log.run(model)`` with no forward input
+        # raises a bare ``ValueError`` instead of a typed catalog error. Pinned to the real
+        # type so a wrong-exception mutation still fails; product raise is unchanged here.
+        ("rerun", lambda log: log.run(_ReluAdd()), ValueError),
+        (
+            "append",
+            lambda log: log.run(_ReluAdd(), torch.ones(1, 4), append=True),
+            terrors.AppendMismatchError,
+        ),
     ),
 )
 def test_axis_a_public_verbs_failure_paths(
-    verb: str, operation: Callable[[tl.Trace], object]
+    verb: str,
+    operation: Callable[[tl.Trace], object],
+    expected_exc: type[BaseException],
 ) -> None:
-    """Each public propagation verb has at least one cataloged or stable failure path."""
+    """Each public propagation verb raises its SPECIFIC cataloged/stable failure error."""
 
     log = _capture()
     if verb == "replay":
         log._intervention_spec.clear()
-    with pytest.raises(Exception) as excinfo:
+    with pytest.raises(expected_exc) as excinfo:
         operation(log)
     assert str(excinfo.value)
 
@@ -604,3 +604,18 @@ def _manifest_values() -> Iterable[str]:
     """
 
     return CATALOG_EXERCISE_MANIFEST.values()
+
+
+def test_selection_error_kind_matrix_refusal() -> None:
+    """SelectionError carries the closed selection_* codes (ACT x PARAM row).
+
+    The full algebra suite lives in tests/test_selection_algebra.py; this row
+    keeps the catalog manifest's exercise citation inside the intervention
+    test family.
+    """
+
+    act = tl.units("relu_1_2", [(0, 0, 1, 1)])
+    param = tl.params("weight")
+    with pytest.raises(terrors.SelectionError) as excinfo:
+        act & param
+    assert excinfo.value.fields["code"] == "selection_kind_incompatible"

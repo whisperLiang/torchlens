@@ -5,6 +5,11 @@ on:
     - cron: "23 5 * * 6"
   workflow_dispatch:
 
+# Default-deny token scope (grind r3, R61/b2:D1): every job in this
+# workflow only reads the repo, so the GITHUB_TOKEN gets exactly that.
+permissions:
+  contents: read
+
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: false
@@ -14,29 +19,225 @@ jobs:
     name: Slow and rare tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install graphviz and cairo
+        # libcairo2 is cairosvg's native half; without it the pixel layers
+        # of the SVG golden families import-fail (r7 R79).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphviz libcairo2
+
+      - name: Install torch and TorchLens
+        run: |
+          cat > "${{ runner.temp }}/torch-2.7-constraints.txt" <<'EOF'
+          torch==2.7.*
+          EOF
+          uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt" "torch==2.7.*" \
+            --index-url https://download.pytorch.org/whl/cpu
+          uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt" -e ".[dev,test,tabular]"
+          uv pip check
+          python -c 'import torch; assert torch.__version__.startswith("2.7."), torch.__version__; print(torch.__version__)'
+
+      - name: Install bridge adapters and cairosvg
+        # r7 R79 (fable MED, wave-introduced): this gate's comment claimed
+        # the dark families "STOP skipping here" while the job installed
+        # NONE of their dependencies -- captum, sae-lens (x2), rsatoolbox,
+        # and the whole cairosvg module still skipped behind a green
+        # aggregate floor of 5. The gate now installs exactly the deps whose
+        # families it names.
+        run: |
+          uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt" \
+            captum sae-lens rsatoolbox cairosvg
+          uv pip check
+
+      - name: Bridge adapters and cairosvg collision gate (executed floor)
+        # The whole point is that these STOP skipping here. Floors are
+        # PER FILE and exact (11 bridge tests, 4 label-geometry tests,
+        # counted 2026-08-16): the old aggregate floor of 5 stayed green
+        # with every named family skipped (r7 R79).
+        run: |
+          pytest tests/test_bridges_launch.py \
+            --junitxml="${{ runner.temp }}/bridge.junit.xml" --tb=short -q
+          pytest tests/test_label_geometry.py \
+            --junitxml="${{ runner.temp }}/labelgeom.junit.xml" --tb=short -q
+          python scripts/check_ci_executed_tests.py "${{ runner.temp }}/bridge.junit.xml" 11
+          python scripts/check_ci_executed_tests.py "${{ runner.temp }}/labelgeom.junit.xml" 4
+
+      - name: Run slow tests
+        run: |
+          pytest tests/ -m slow --tb=short \
+            --junitxml="${{ runner.temp }}/weekly-slow.junit.xml"
+
+      - name: Run rare tests
+        run: |
+          pytest tests/ -m rare --tb=short \
+            --junitxml="${{ runner.temp }}/weekly-rare.junit.xml"
+
+      - name: Fail on an under-executed slow or rare tier
+        # Executed-floor attestation for the ONLY leg that ever runs these
+        # tiers (grind r3, R82): a marker drift or importorskip cascade that
+        # hollows them out must go red, not green. Floors are roughly half
+        # the current selections (295 slow / 16 rare, counted 2026-08-15).
+        run: |
+          python scripts/check_ci_executed_tests.py "${{ runner.temp }}/weekly-slow.junit.xml" 145
+          python scripts/check_ci_executed_tests.py "${{ runner.temp }}/weekly-rare.junit.xml" 8
+
+  mutation-margin:
+    # The mutation driver's zero-survivor criterion is R74's grind-level
+    # convergence condition, but the driver was "wired into no CI leg — the
+    # margin is measured only when invoked" (b9 round 5, S HIGH + F MED):
+    # survivor discovery happened only when someone remembered. This job
+    # scores the registry, checks, corechecks, blocks, and exempt families
+    # weekly and FAILS on any survivor or scoring error (the driver exits 1).
+    # The ~161-mutant per-arm campaign runs as mutation.yml's rotating weekly
+    # shard (one arm shard per week; a full sweep is a multi-hour run), and
+    # its zero-survivor log is a required convergence artifact, not a weekly
+    # gate here.
+    name: mutation margin (${{ matrix.family }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        family: [registry, checks, corechecks, blocks, exempt, executor]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
       - name: Install graphviz
         run: |
           sudo apt-get update
           sudo apt-get install -y graphviz
 
-      - name: Install torch and TorchLens
+      - name: Install canonical CPU test environment
         run: |
-          uv pip install --system "torch==2.7.*" \
-            --index-url https://download.pytorch.org/whl/cpu
-          uv pip install --system -e ".[dev,test,tabular]"
+          uv pip install --system \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e ".[dev,test,tabular]" \
+            "torch==2.8.0+cpu" \
+            "torchvision==0.23.0+cpu"
+          uv pip check
 
-      - name: Run slow tests
+      - name: Score the ${{ matrix.family }} mutant family
         run: |
-          pytest tests/ -m slow --tb=short
+          set -o pipefail
+          python tests/support/mutation_driver.py \
+            --make-sandbox "${{ runner.temp }}/mut" \
+            --family "${{ matrix.family }}" \
+            | tee "${{ runner.temp }}/mutation-${{ matrix.family }}.log"
 
-      - name: Run rare tests
+      - name: Upload the campaign log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mutation-${{ matrix.family }}
+          path: ${{ runner.temp }}/mutation-${{ matrix.family }}.log
+
+  hook-pin-staleness:
+    # r7 R61 (opus LM + sol MED, converged): the pre-commit hook SHAs are
+    # correctly frozen but had NO refresh signal -- Dependabot has no
+    # pre-commit ecosystem, so gitleaks/detect-secrets could sit on an old
+    # security release indefinitely while dependabot.yml's header claimed
+    # every frozen pin was covered. This job is that signal: it runs
+    # `pre-commit autoupdate` on a scratch copy and surfaces the diff in the
+    # job summary + a warning annotation. ADVISORY by design (exit 0): pins
+    # move on review, and a red that fires on every routine upstream release
+    # would train everyone to ignore the job (the permanent-WARN disease).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - run: uv pip install --system "pre-commit==4.6.2"
+
+      - name: Report stale pre-commit hook pins
         run: |
-          pytest tests/ -m rare --tb=short
+          cp .pre-commit-config.yaml "${RUNNER_TEMP}/pre-commit-before.yaml"
+          pre-commit autoupdate --freeze
+          if git diff --quiet -- .pre-commit-config.yaml; then
+            echo "All pre-commit hook pins are current." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning title=Stale pre-commit hook pins::pre-commit autoupdate proposes newer hook revisions; review and bump the frozen SHAs (keep ruff-pre-commit locked to the repo ruff pin)."
+            {
+              echo "## Stale pre-commit hook pins"
+              echo '```diff'
+              git diff -- .pre-commit-config.yaml
+              echo '```'
+              echo "ruff-pre-commit is DELIBERATELY locked to the repo's ruff pin;"
+              echo "ignore its row unless the pyproject/lint.yml pins move too."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          git checkout -- .pre-commit-config.yaml
+
+  optimized-verdict-identity:
+    # r7 R24 (sol MED, 4th pass): 97 shipped asserts remain behind the
+    # shrink-only S101 ceiling, validation strips assertion checks under
+    # python -O (validation/backward.py), and NO leg proved the verdict
+    # surface survives optimized mode -- a load-bearing assert converts a
+    # FAIL verdict into silent green exactly where users run -O. This leg
+    # executes the verdict-adjacent suites (the planted-corruption corpus
+    # asserts FAIL verdicts, so an -O-stripped tripwire goes RED here) under
+    # python -O. Measured locally: 368 passed in 2m27s.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install graphviz
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphviz
+
+      - name: Install canonical CPU test environment
+        run: |
+          uv pip install --system \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e ".[dev,test,tabular]" \
+            "torch==2.8.0+cpu" \
+            "torchvision==0.23.0+cpu"
+          uv pip check
+
+      - name: Verdict identity under python -O
+        # requires_assertions-marked tests self-skip under -O (their whole
+        # point is needing `assert`); everything else must reach identical
+        # verdicts with assertions stripped.
+        run: |
+          python -O -c "assert True or False; print('assertions stripped:', not __debug__)"
+          python -O -m pytest tests/test_validation.py tests/validation_goldens/ \
+            -q --tb=short -p no:randomly

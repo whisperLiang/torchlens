@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from threading import RLock
-from typing import Iterable
 
 from .ir import SplitModelProfile
 

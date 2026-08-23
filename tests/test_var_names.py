@@ -116,6 +116,16 @@ class _NestedCalls(torch.nn.Module):
         return z
 
 
+class _SameNameNested(torch.nn.Module):
+    """Model with same-name nested calls in one assignment."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run same-name nested relu calls."""
+
+        y = torch.relu(torch.relu(x))
+        return y
+
+
 class _TwoCallsOneLine(torch.nn.Module):
     """Model with two calls on one source line."""
 
@@ -229,6 +239,24 @@ def test_var_names_inline_nested_and_same_line_calls() -> None:
     assert _first_var_names(nested, "sigmoid") == []
     assert _first_var_names(same_line, "relu") == ["a"]
     assert _first_var_names(same_line, "sigmoid") == ["b"]
+
+
+def test_var_names_same_name_nested_calls_never_name_the_inner_op() -> None:
+    """The inner call of ``y = relu(relu(x))`` never inherits the outer name.
+
+    Deep-hunt C2: candidate resolution filtered to candidates WITH assignment
+    targets, discarding candidate POSITION -- the inner nested call (which has
+    no targets) skipped through to the outer assignment and both relu ops
+    reported ``['y']``. The inner op must fail closed to no name; the outer
+    op recovers ``['y']`` only when the runtime column separates the two
+    same-name candidate calls (3.11+), and honestly stays empty otherwise.
+    """
+
+    traced = _trace(_SameNameNested())
+
+    inner_names, outer_names = _all_var_names(traced, "relu")
+    assert inner_names == []
+    assert outer_names in ([], ["y"])
 
 
 def test_var_names_adversarial_source_forms() -> None:

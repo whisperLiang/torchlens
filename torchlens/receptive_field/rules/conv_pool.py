@@ -128,10 +128,13 @@ def pool(context: ReceptiveFieldRuleContext) -> _RuleResult:
     kernel = int_tuple(raw_kernel, rank)
     stride = int_config(context, "stride", rank, default=raw_kernel)
     padding = int_config(context, "padding", rank, default=0)
-    dilation = int_config(context, "dilation", rank, default=1)
+    # Salient capture omits max-pool dilation and ceil_mode, so read the raw
+    # call arguments (position-correct) before assuming PyTorch's defaults.
+    raw_dilation = context.cfg("dilation", context.arg("dilation", None))
+    dilation = int_tuple(1 if raw_dilation is None else raw_dilation, rank)
     if kernel is None or stride is None or padding is None or dilation is None:
         return context.unknown("pooling has malformed spatial parameters")
-    ceil_mode = bool(context.cfg("ceil_mode", False))
+    ceil_mode = bool(context.cfg("ceil_mode", context.arg("ceil_mode", False)))
     return context.window(
         kernel=kernel,
         stride=stride,
@@ -171,8 +174,18 @@ def adaptive_pool(context: ReceptiveFieldRuleContext) -> _RuleResult:
             axes=tuple(range(len(context.in_shapes[0]) - rank, len(context.in_shapes[0]))),
             exact=True,
         )
+    # True bin o spans floor(o*r) .. ceil((o+1)*r) - 1 for r = in/out. Both bin
+    # boundaries have denominator dividing out, so lo = r*o - 1 lower-bounds the
+    # start and hi = r*o + r - 1/out upper-bounds the end for EVERY ratio; a
+    # constant hi intercept (the historical +1) under-covers once r > 2.
     edges = tuple(
-        ((Fraction(input_size, output_size), -1), (Fraction(input_size, output_size), 1))
+        (
+            (Fraction(input_size, output_size), -1),
+            (
+                Fraction(input_size, output_size),
+                Fraction(input_size, output_size) - Fraction(1, output_size),
+            ),
+        )
         for input_size, output_size in zip(inputs, outputs, strict=True)
     )
 

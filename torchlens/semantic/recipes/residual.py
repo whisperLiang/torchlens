@@ -14,19 +14,20 @@ from ._helpers import (
 )
 
 _RESIDUAL_FACETS = ("resid_pre", "resid_mid", "resid_post")
-_BLOCK_NAME_MARKERS = (
-    "Block",
-    "Layer",
-    "DecoderLayer",
-    "EncoderLayer",
-    "TransformerLayer",
-)
 _ATTENTION_CHILD_NAMES = ("attn", "attention", "self_attn", "self_attention")
 _MLP_CHILD_NAMES = ("mlp", "feed_forward", "ffn", "intermediate", "output")
 
 
 def _is_transformer_block(module: Any) -> bool:
-    """Return whether a module record looks like a transformer block.
+    """Return whether a module record is a genuine transformer block.
+
+    A block qualifies only on STRUCTURAL evidence: it must contain both an
+    attention child and an MLP/feed-forward child. A class-name marker alone
+    (``*Block*`` / ``*Layer*``) is neither necessary nor sufficient -- plain
+    non-transformer modules routinely carry those names (a scaling ``*Layer*``,
+    a conv ``*Block*``), so matching on the name fabricated resid_pre/mid/post
+    facets on modules that have no residual stream at all. Requiring the real
+    attention + MLP substructure keeps the recipe honest.
 
     Parameters
     ----------
@@ -39,9 +40,6 @@ def _is_transformer_block(module: Any) -> bool:
         Whether the recipe should attempt residual stream facets.
     """
 
-    class_name = str(getattr(module, "class_name", ""))
-    if any(marker in class_name for marker in _BLOCK_NAME_MARKERS):
-        return True
     children = set(getattr(module, "address_children", ()) or ())
     local_children = {str(child).rsplit(".", maxsplit=1)[-1] for child in children}
     has_attention = any(name in local_children for name in _ATTENTION_CHILD_NAMES)
@@ -74,6 +72,14 @@ def transformer_residuals(module: Any) -> dict[str, Any]:
 def _resid_mid_spec(module: Any) -> FacetSpec | AbsenceReason | None:
     """Return a spec for the post-attention residual add inside a block.
 
+    The residual midpoint is only well defined when an add op genuinely consumes
+    the block's attention output. The previous "first add op" fallback anchored
+    resid_mid to an arbitrary add when no attention-consuming add existed; on
+    single-add blocks that add is also the block output, so resid_mid collapsed
+    onto resid_post (a degenerate, meaningless midpoint). We now return absence
+    (``None``) rather than fabricate a midpoint that is not the post-attention
+    residual.
+
     Parameters
     ----------
     module:
@@ -81,43 +87,51 @@ def _resid_mid_spec(module: Any) -> FacetSpec | AbsenceReason | None:
 
     Returns
     -------
-    FacetSpec | None
-        Op-anchored spec for a real add op, when identifiable.
+    FacetSpec | AbsenceReason | None
+        Op-anchored spec for the real post-attention add, a needs-capture
+        reason when that add was not saved, or ``None`` when no such add exists.
     """
 
     trace = getattr(module, "trace", None)
     if trace is None:
         return None
-    labels = _module_op_labels(module)
-    attention_outputs = _attention_output_labels(module)
-    add_candidates: list[Any] = []
-    for label in labels:
+    attention_outputs = {_base_label(label) for label in _attention_output_labels(module)}
+    if not attention_outputs:
+        return None
+    for label in _module_op_labels(module):
         try:
             op = trace.ops[label]
         except (KeyError, TypeError):
             continue
-        if str(getattr(op, "func_name", "")) in {"add", "__add__", "add_"}:
-            add_candidates.append(op)
-    for op in add_candidates:
-        parents = set(getattr(op, "parents", ()) or ())
-        if parents.intersection(attention_outputs):
-            if not op_output_readable(op):
-                return needs_capture(
-                    f"residual midpoint op {getattr(op, 'label', '<unknown>')!r} was not saved",
-                    f"save=... including {getattr(op, 'label', 'the residual midpoint')!r}",
-                )
-            return FacetSpec.from_home(op, home_kind="op", recipe_id="transformer_residuals")
-    if add_candidates:
-        if not op_output_readable(add_candidates[0]):
+        if str(getattr(op, "func_name", "")) not in {"add", "__add__", "add_"}:
+            continue
+        parents = {_base_label(parent) for parent in (getattr(op, "parents", ()) or ())}
+        if not parents.intersection(attention_outputs):
+            continue
+        if not op_output_readable(op):
             return needs_capture(
-                f"residual midpoint op {getattr(add_candidates[0], 'label', '<unknown>')!r} "
-                "was not saved",
-                f"save=... including {getattr(add_candidates[0], 'label', 'the residual midpoint')!r}",
+                f"residual midpoint op {getattr(op, 'label', '<unknown>')!r} was not saved",
+                f"save=... including {getattr(op, 'label', 'the residual midpoint')!r}",
             )
-        return FacetSpec.from_home(
-            add_candidates[0], home_kind="op", recipe_id="transformer_residuals"
-        )
+        return FacetSpec.from_home(op, home_kind="op", recipe_id="transformer_residuals")
     return None
+
+
+def _base_label(label: Any) -> str:
+    """Return an op label with any trailing ``:<pass>`` recurrence suffix removed.
+
+    Module ``output_ops`` are pass-qualified (``"linear_1_1:1"``) while an op's
+    ``parents`` are bare (``"linear_1_1"``). Comparing them raw never matched, so
+    the post-attention add was previously only found via the removed first-add
+    fallback. Normalizing both sides to the base label makes the attention-output
+    parent match actually fire.
+    """
+
+    text = str(label)
+    base, sep, tail = text.rpartition(":")
+    if sep and tail.isdigit():
+        return base
+    return text
 
 
 def _module_op_labels(module: Any) -> list[str]:

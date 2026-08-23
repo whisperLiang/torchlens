@@ -145,7 +145,7 @@ class _MlxLinear:
 
         self.l1 = mlx_nn.Linear(4, 8)
 
-    def __call__(self, x: "mlx.core.array") -> "mlx.core.array":  # noqa: F821
+    def __call__(self, x: mlx.core.array) -> mlx.core.array:  # noqa: F821
         return self.l1(x)
 
 

@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias, overload
 
-from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
+from .._errors import ArgumentTypeError
 from .types import TargetSpec
 
 SelectorKind: TypeAlias = Literal[
@@ -27,12 +27,14 @@ SelectorKind: TypeAlias = Literal[
     "or",
     "not",
     "grad_fn",
+    "grad_fn_label",
+    "grad_kind",
+    "backward_pass",
     "intervening",
     "without_op",
     "regex",
     "followed_by",
     "preceded_by",
-    "label",
 ]
 
 
@@ -43,7 +45,7 @@ class BaseSelector:
     selector_kind: SelectorKind
     selector_value: Any
 
-    def __and__(self, other: SelectorLike) -> "CompositeSelector":
+    def __and__(self, other: SelectorLike) -> CompositeSelector:
         """Return a selector that matches the intersection of two selectors.
 
         Parameters
@@ -54,13 +56,18 @@ class BaseSelector:
         Returns
         -------
         CompositeSelector
-            Intersection selector.
+            Intersection selector. A non-selector operand that implements
+            ``__selection__`` defers to that object's reflected operator, so
+            ``selector & rf_box`` composes as a Selection; junk operands keep
+            their shipped refusals.
         """
 
+        if not isinstance(other, BaseSelector) and hasattr(other, "__selection__"):
+            return NotImplemented
         _check_composition(self, other)
-        return CompositeSelector("and", (self, other))
+        return CompositeSelector("and", _flatten_same_operator("and", self, other))
 
-    def __or__(self, other: SelectorLike) -> "CompositeSelector":
+    def __or__(self, other: SelectorLike) -> CompositeSelector:
         """Return a selector that matches the union of two selectors.
 
         Parameters
@@ -71,10 +78,15 @@ class BaseSelector:
         Returns
         -------
         CompositeSelector
-            Union selector.
+            Union selector. A non-selector operand that implements
+            ``__selection__`` defers to that object's reflected operator.
         """
 
-        if _selector_contains_followed_by(self) or _selector_contains_followed_by(other):
+        if not isinstance(other, BaseSelector) and hasattr(other, "__selection__"):
+            return NotImplemented
+        from ..ir.selector_eval import contains_followed_by
+
+        if contains_followed_by(self) or contains_followed_by(other):
             from .errors import SelectorCompositionError
 
             raise SelectorCompositionError(
@@ -82,9 +94,9 @@ class BaseSelector:
                 "OR-composed followed_by selectors cannot be evaluated safely."
             )
         _check_composition(self, other)
-        return CompositeSelector("or", (self, other))
+        return CompositeSelector("or", _flatten_same_operator("or", self, other))
 
-    def __invert__(self) -> "NotSelector":
+    def __invert__(self) -> NotSelector:
         """Return a selector that matches the complement of this selector.
 
         Returns
@@ -93,7 +105,9 @@ class BaseSelector:
             Negated selector.
         """
 
-        if _selector_contains_followed_by(self):
+        from ..ir.selector_eval import contains_followed_by
+
+        if contains_followed_by(self):
             from .errors import SelectorCompositionError
 
             raise SelectorCompositionError(
@@ -101,6 +115,57 @@ class BaseSelector:
                 "negated followed_by selectors cannot be evaluated safely."
             )
         return NotSelector(self)
+
+    def __sub__(self, other: SelectorLike) -> CompositeSelector:
+        """Return a selector matching this selector minus ``other`` (DESUGAR).
+
+        ``a - b`` desugars to ``CompositeSelector("and", (a, NotSelector(b)))``
+        — no new selector kind, no spec round-trip change. Selector evaluation
+        is a per-subject characteristic function, so difference of match-sets
+        IS ``a(x) and not b(x)``; this coincides with Selection-level ``-`` on
+        whole-site lifted terms (law-tested).
+
+        Parameters
+        ----------
+        other:
+            Selector (or predicate callable) to subtract. A non-selector
+            operand implementing ``__selection__`` defers to that object's
+            reflected operator.
+
+        Returns
+        -------
+        CompositeSelector
+            Difference selector.
+        """
+
+        if not isinstance(other, BaseSelector) and hasattr(other, "__selection__"):
+            return NotImplemented
+        if isinstance(other, BaseSelector):
+            negated: SelectorLike = ~other  # shipped guards (followed_by refusal) apply
+        elif callable(other):
+            negated = NotSelector(other)
+        else:
+            raise ArgumentTypeError(
+                f"cannot subtract {type(other).__name__} from a selector; pass a "
+                "selector or predicate callable.",
+                code="selector_subtraction_operand_invalid",
+                remedy="subtract a selector, predicate callable, or region producer",
+            )
+        _check_composition(self, negated)
+        return CompositeSelector("and", _flatten_same_operator("and", self, negated))
+
+    def __selection__(self) -> Any:
+        """Lift this selector as a Selection selector-term.
+
+        The lifted term keeps predicate meaning intact: it resolves to
+        whole-site masks over matched sites. Selection-level ``~`` is mask
+        complement — users who mean "all sites not matching s" spell ``~s``
+        BEFORE lifting (``~lift(s) != lift(~s)``, pinned non-law).
+        """
+
+        from ..selection import _selection_from_selector
+
+        return _selection_from_selector(self)
 
     def to_target_spec(self) -> TargetSpec:
         """Convert the selector to a mutable target spec.
@@ -164,7 +229,9 @@ class BaseSelector:
             Whether ``ctx`` matches this selector.
         """
 
-        return _selector_matches_record_context(self, ctx)
+        from ..ir.selector_eval import evaluate
+
+        return evaluate(self, ctx, lifecycle="capture")
 
 
 @dataclass(frozen=True, repr=False)
@@ -506,14 +573,27 @@ class FollowedBySelector(BaseSelector):
         Successor predicate that must match the current operation.
     """
 
-    inner: "SelectorLike"
+    inner: SelectorLike
 
-    def __init__(self, inner: "SelectorLike") -> None:
+    def __init__(self, inner: SelectorLike) -> None:
         """Create a retroactive successor selector."""
 
         object.__setattr__(self, "selector_kind", "followed_by")
         object.__setattr__(self, "selector_value", inner)
         object.__setattr__(self, "inner", inner)
+
+    def to_target_spec(self) -> TargetSpec:
+        """Convert the successor selector to a target spec.
+
+        Returns
+        -------
+        TargetSpec
+            Target spec with a nested selector payload, so a structural inner
+            serializes structurally instead of as an opaque callable.
+        """
+
+        nested = self.inner.to_target_spec() if isinstance(self.inner, BaseSelector) else self.inner
+        return TargetSpec(selector_kind=self.selector_kind, selector_value=nested)
 
     def __repr__(self) -> str:
         """Return a concise public representation."""
@@ -531,14 +611,27 @@ class PrecededBySelector(BaseSelector):
         Predecessor predicate evaluated over the retained lookback window.
     """
 
-    inner: "SelectorLike"
+    inner: SelectorLike
 
-    def __init__(self, inner: "SelectorLike") -> None:
+    def __init__(self, inner: SelectorLike) -> None:
         """Create a predecessor selector."""
 
         object.__setattr__(self, "selector_kind", "preceded_by")
         object.__setattr__(self, "selector_value", inner)
         object.__setattr__(self, "inner", inner)
+
+    def to_target_spec(self) -> TargetSpec:
+        """Convert the predecessor selector to a target spec.
+
+        Returns
+        -------
+        TargetSpec
+            Target spec with a nested selector payload, so a structural inner
+            serializes structurally instead of as an opaque callable.
+        """
+
+        nested = self.inner.to_target_spec() if isinstance(self.inner, BaseSelector) else self.inner
+        return TargetSpec(selector_kind=self.selector_kind, selector_value=nested)
 
     def __repr__(self) -> str:
         """Return a concise public representation."""
@@ -651,7 +744,7 @@ class FacetSelector(BaseSelector):
         object.__setattr__(self, "head_index", head_index)
         object.__setattr__(self, "module_address", module_address)
 
-    def head(self, head_index: int) -> "FacetSelector":
+    def head(self, head_index: int) -> FacetSelector:
         """Return a copy scoped to one attention head.
 
         Parameters
@@ -667,7 +760,7 @@ class FacetSelector(BaseSelector):
 
         return FacetSelector(self.name, head_index=head_index, module_address=self.module_address)
 
-    def in_module(self, address: str) -> "FacetSelector":
+    def in_module(self, address: str) -> FacetSelector:
         """Return a copy scoped to one module address.
 
         Parameters
@@ -705,7 +798,13 @@ class FacetSelector(BaseSelector):
 
 @dataclass(frozen=True, repr=False)
 class GradFnLabelSelector(BaseSelector):
-    """Backward-only selector matching a grad_fn label exactly."""
+    """Backward-only selector matching a grad_fn label exactly.
+
+    Carries its own ``"grad_fn_label"`` selector kind: the earlier ``"label"``
+    kind collided with :class:`LabelSelector`, so saving and reloading a spec
+    silently converted the selector to a forward label match and post-hoc
+    resolution never reached the backward exact-label branch.
+    """
 
     label: str
     direction: Literal["backward"] = "backward"
@@ -719,7 +818,7 @@ class GradFnLabelSelector(BaseSelector):
             GradFn label to match.
         """
 
-        object.__setattr__(self, "selector_kind", "label")
+        object.__setattr__(self, "selector_kind", "grad_fn_label")
         object.__setattr__(self, "selector_value", name)
         object.__setattr__(self, "label", name)
         object.__setattr__(self, "direction", "backward")
@@ -773,20 +872,24 @@ class BackwardPassSelector(BaseSelector):
 class CompositeSelector(BaseSelector):
     """Selector composed with ``&`` or ``|``.
 
+    ``&`` / ``|`` build nested binary composites; deserialized target specs
+    may carry a flat n-ary child tuple. Both shapes evaluate identically.
+    Degenerate arities follow the standard identity semantics in evaluation
+    and spec round-trips alike: an empty ``and`` matches everything, an empty
+    ``or`` matches nothing, and a unary composite matches like its child.
+
     Parameters
     ----------
     operator:
         ``"and"`` for intersection or ``"or"`` for union.
     selectors:
-        Pair of selectors to combine.
+        Selectors to combine.
     """
 
     operator: Literal["and", "or"]
-    selectors: tuple[SelectorLike, SelectorLike]
+    selectors: tuple[SelectorLike, ...]
 
-    def __init__(
-        self, operator: Literal["and", "or"], selectors: tuple[SelectorLike, SelectorLike]
-    ) -> None:
+    def __init__(self, operator: Literal["and", "or"], selectors: tuple[SelectorLike, ...]) -> None:
         """Create a composite selector.
 
         Parameters
@@ -794,7 +897,7 @@ class CompositeSelector(BaseSelector):
         operator:
             ``"and"`` for intersection or ``"or"`` for union.
         selectors:
-            Pair of selectors to combine.
+            Selectors to combine.
         """
 
         object.__setattr__(self, "selector_kind", operator)
@@ -827,8 +930,8 @@ class CompositeSelector(BaseSelector):
         """
 
         symbol = "&" if self.operator == "and" else "|"
-        left, right = self.selectors
-        return f"({left!r} {symbol} {right!r})"
+        joined = f" {symbol} ".join(repr(child) for child in self.selectors)
+        return f"({joined})"
 
 
 @dataclass(frozen=True, repr=False)
@@ -921,8 +1024,12 @@ def func(name: str, *, output: int | str | None = None) -> FuncSelector:
     """
 
     if not isinstance(name, str):
-        raise TypeError(
-            "func() pattern must be a string function name, for example tl.func('relu')."
+        raise ArgumentTypeError(
+            f"func() pattern has unsupported type {type(name).__name__}",
+            code="selector_function_pattern_type_invalid",
+            remedy="pass a string function name such as tl.func('relu')",
+            argument="name",
+            received_type=type(name).__name__,
         )
     return FuncSelector(name, output=output)
 
@@ -1311,309 +1418,12 @@ def in_module(address_or_layer: Any, address: str | None = None) -> InModuleSele
     if address is None:
         return InModuleSelector(str(address_or_layer))
 
+    from ..ir.selector_eval import module_address_matches
+
     modules = getattr(address_or_layer, "modules", ())
     module_ops = getattr(address_or_layer, "output_of_module_calls", ())
     candidates = tuple(modules) + tuple(module_ops)
-    return any(_module_pass_matches(candidate, address) for candidate in candidates)
-
-
-def _context_labels(ctx: Any) -> set[str]:
-    """Return all label-like strings visible on a predicate context.
-
-    Parameters
-    ----------
-    ctx:
-        Capture-time context or layer-like object.
-
-    Returns
-    -------
-    set[str]
-        Non-empty label strings available for selector matching.
-    """
-
-    labels: set[str] = set()
-    for attr in ("label", "raw_label", "label_raw", "layer_label", "layer_label_short"):
-        value = getattr(ctx, attr, None)
-        if value is not None:
-            labels.add(str(value))
-    return labels
-
-
-def _context_module_candidates(ctx: Any) -> tuple[str, ...]:
-    """Return module-address candidates from a context.
-
-    Parameters
-    ----------
-    ctx:
-        Capture-time context or layer-like object.
-
-    Returns
-    -------
-    tuple[str, ...]
-        Module addresses and pass-qualified module labels.
-    """
-
-    candidates: list[str] = []
-    address = getattr(ctx, "address", None)
-    if address is not None:
-        candidates.append(str(address))
-    source_trace = getattr(ctx, "source_trace", None)
-    if getattr(source_trace, "module_identity_mode", None) == "function_root":
-        candidates.append("self")
-        candidates.append("self:1")
-    for frame in getattr(ctx, "module_stack", ()):
-        frame_address = getattr(frame, "address", None)
-        if frame_address is None and isinstance(frame, dict):
-            frame_address = frame.get("address")
-        if frame_address is None:
-            continue
-        frame_pass = getattr(frame, "pass_index", None)
-        if frame_pass is None and isinstance(frame, dict):
-            frame_pass = frame.get("pass_index")
-        candidates.append(str(frame_address))
-        if frame_pass is not None:
-            candidates.append(f"{frame_address}:{frame_pass}")
-    modules = getattr(ctx, "modules", ())
-    module_ops = getattr(ctx, "output_of_module_calls", ())
-    candidates.extend(
-        _module_candidate_strings(candidate) for candidate in tuple(modules) + tuple(module_ops)
-    )
-    return tuple(candidates)
-
-
-def _module_candidate_strings(candidate: Any) -> str:
-    """Return a selector-compatible module candidate string.
-
-    Parameters
-    ----------
-    candidate
-        Module candidate from an op, module call, or capture context.
-
-    Returns
-    -------
-    str
-        Address or pass-qualified address suitable for ``_module_pass_matches``.
-    """
-
-    if isinstance(candidate, tuple) and candidate and isinstance(candidate[0], str):
-        if len(candidate) > 1:
-            return f"{candidate[0]}:{candidate[1]}"
-        return candidate[0]
-    return str(candidate)
-
-
-def _sanitize_transform_kind(kind: object) -> str:
-    """Return the transform-kind spelling used for labels.
-
-    Parameters
-    ----------
-    kind:
-        Transform kind or selector value.
-
-    Returns
-    -------
-    str
-        Lowercase spelling with underscores and dots removed.
-    """
-
-    return str(kind).lower().replace("_", "").replace(".", "")
-
-
-def _selector_matches_record_context(selector: BaseSelector, ctx: Any) -> bool:
-    """Evaluate a selector as a capture-time predicate.
-
-    Parameters
-    ----------
-    selector:
-        Selector to evaluate.
-    ctx:
-        Capture-time ``RecordContext`` or layer-like object.
-
-    Returns
-    -------
-    bool
-        Whether the selector matches ``ctx``.
-    """
-
-    kind = selector.selector_kind
-    if kind == "label":
-        return str(selector.selector_value) in _context_labels(ctx)
-    if kind == "contains":
-        needle = str(selector.selector_value)
-        return any(needle in label for label in _context_labels(ctx))
-    if kind == "regex":
-        pattern = str(selector.selector_value)
-        return any(_re.search(pattern, label) is not None for label in _context_labels(ctx))
-    if kind == "func":
-        value = selector.selector_value
-        if isinstance(value, dict):
-            name = value.get("name")
-            output_target = value.get("output")
-            if output_target is not None and getattr(ctx, "output_index", None) != output_target:
-                return False
-        else:
-            name = value
-        func_name = getattr(ctx, "func_name", None)
-        layer_type = getattr(ctx, "layer_type", None)
-        return str(name) in {str(func_name), str(layer_type)}
-    if kind == "func_transform":
-        if not bool(getattr(ctx, "is_transform", False)):
-            return False
-        value = selector.selector_value
-        if value is None:
-            return True
-        transform_kind = getattr(ctx, "transform_kind", None)
-        if transform_kind is None:
-            return False
-        return _sanitize_transform_kind(transform_kind) == _sanitize_transform_kind(value)
-    if kind == "module":
-        target = str(selector.selector_value)
-        return any(
-            _module_pass_matches(candidate, target) for candidate in _context_module_candidates(ctx)
-        )
-    if kind == "in_module":
-        target = str(selector.selector_value)
-        return any(
-            _module_pass_matches(candidate, target) for candidate in _context_module_candidates(ctx)
-        )
-    if kind == "output":
-        return getattr(ctx, "output_index", None) == selector.selector_value
-    if kind == "output_at":
-        return _output_path_matches(
-            tuple(getattr(ctx, "container_path", ()) or ()),
-            tuple(selector.selector_value),
-        )
-    if kind == "input_at":
-        return _input_path_matches(ctx, tuple(selector.selector_value))
-    if kind == "predicate":
-        predicate = getattr(selector, "predicate")
-        return bool(predicate(ctx))
-    if kind == "grad_kind":
-        return getattr(ctx, "grad_kind", None) == selector.selector_value
-    if kind == "backward_pass":
-        ctx_pass = getattr(ctx, "backward_pass_index", None)
-        if ctx_pass is None:
-            ctx_pass = getattr(ctx, "pass_index", None)
-        return ctx_pass == selector.selector_value
-    if kind == "preceded_by" and isinstance(selector, PrecededBySelector):
-        parent_labels = set(
-            getattr(ctx, "parent_labels_raw", ()) or getattr(ctx, "parent_labels", ())
-        )
-        recent_ops = tuple(getattr(ctx, "recent_ops", ()))
-        if parent_labels:
-            return any(
-                (recent.raw_label or recent.label) in parent_labels and bool(selector.inner(recent))  # type: ignore[operator]
-                for recent in recent_ops
-            )
-        return any(bool(selector.inner(recent)) for recent in recent_ops)  # type: ignore[operator]
-    if kind == "followed_by":
-        from .errors import SelectorCompositionError
-
-        raise SelectorCompositionError(
-            "tl.followed_by(...) only supports candidate & tl.followed_by(successor); "
-            "standalone, negated, or OR-composed followed_by selectors are unsupported."
-        )
-    if kind == "and" and isinstance(selector, CompositeSelector):
-        left, right = selector.selectors
-        return bool(left(ctx)) and bool(right(ctx))  # type: ignore[operator]
-    if kind == "or" and isinstance(selector, CompositeSelector):
-        left, right = selector.selectors
-        return bool(left(ctx)) or bool(right(ctx))  # type: ignore[operator]
-    if kind == "not" and isinstance(selector, NotSelector):
-        return not bool(selector.selector(ctx))  # type: ignore[operator]
-    return False
-
-
-def _module_pass_matches(module_pass: str, address: str) -> bool:
-    """Return whether a pass-qualified module label belongs to an address.
-
-    Parameters
-    ----------
-    module_pass:
-        Pass-qualified module label such as ``"encoder:1"``.
-    address:
-        Module address without pass qualification.
-
-    Returns
-    -------
-    bool
-        Whether the module pass belongs to the requested address.
-    """
-
-    module_address = module_pass.rsplit(":", 1)[0]
-    return module_pass == address or module_address == address
-
-
-def _output_path_matches(saved_path: tuple[Any, ...], requested_path: tuple[Any, ...]) -> bool:
-    """Return whether a captured typed path matches a user path.
-
-    Parameters
-    ----------
-    saved_path:
-        Captured output path.
-    requested_path:
-        User path.
-
-    Returns
-    -------
-    bool
-        Whether both paths address the same output.
-    """
-
-    if len(saved_path) != len(requested_path):
-        return False
-    return all(
-        _output_path_component_matches(saved_component, requested_component)
-        for saved_component, requested_component in zip(saved_path, requested_path)
-    )
-
-
-def _output_path_component_matches(saved_component: Any, requested_component: Any) -> bool:
-    """Return whether one captured path component matches a user component.
-
-    Parameters
-    ----------
-    saved_component:
-        Captured typed path component.
-    requested_component:
-        User path component.
-
-    Returns
-    -------
-    bool
-        Whether both components address the same child.
-    """
-
-    if isinstance(saved_component, TupleIndex):
-        return saved_component.index == requested_component
-    if isinstance(saved_component, (DictKey, HFKey)):
-        return saved_component.key == requested_component
-    if isinstance(saved_component, (NamedField, DataclassField)):
-        return saved_component.name == requested_component
-    return saved_component == requested_component
-
-
-def _input_path_matches(ctx: Any, requested_path: tuple[Any, ...]) -> bool:
-    """Return whether hook context belongs to an input container path.
-
-    Parameters
-    ----------
-    ctx:
-        Hook context.
-    requested_path:
-        User-facing path.
-
-    Returns
-    -------
-    bool
-        Whether the context path matches.
-    """
-
-    for container in getattr(ctx, "input_containers", ()) or ():
-        for occurrence in getattr(container, "leaf_occurrences", ()) or ():
-            if _output_path_matches(tuple(occurrence.path), requested_path):
-                return True
-    return False
+    return any(module_address_matches(candidate, address) for candidate in candidates)
 
 
 def _classify_selector_direction(
@@ -1636,7 +1446,14 @@ def _classify_selector_direction(
 
     if isinstance(sel, TargetSpec):
         kind = sel.selector_kind
-        if kind in {"grad_fn", "intervening", "without_op"}:
+        if kind in {
+            "grad_fn",
+            "grad_fn_label",
+            "grad_kind",
+            "backward_pass",
+            "intervening",
+            "without_op",
+        }:
             return "backward"
         if kind in {"func", "func_transform"}:
             return "forward"
@@ -1694,28 +1511,29 @@ def _classify_selector_direction(
     )
 
 
-def _selector_contains_followed_by(selector: SelectorLike) -> bool:
-    """Return whether ``selector`` contains a ``followed_by`` selector.
+def _flatten_same_operator(
+    operator: str, left: SelectorLike, right: SelectorLike
+) -> tuple[SelectorLike, ...]:
+    """Merge same-operator composite operands into one flat child tuple.
 
-    Parameters
-    ----------
-    selector:
-        Selector to inspect.
-
-    Returns
-    -------
-    bool
-        Whether the selector tree contains ``FollowedBySelector``.
+    r-b4 R27-6a: ``&``/``|`` used to nest one binary composite per operator, so
+    a programmatically composed predicate (``functools.reduce(operator.or_,
+    [tl.func(n) for n in names])``) built a 500-deep binary tree and blew the
+    interpreter stack at trace entry. Composites are documented n-ary with
+    identical evaluation for flat and nested shapes, so chained applications of
+    ONE operator now accumulate a flat child tuple: depth stays constant and
+    evaluation walks one level. Mixed-operator composition still nests (the
+    shape is semantic there), and existing nested trees (deserialized specs)
+    keep evaluating unchanged.
     """
 
-    if isinstance(selector, FollowedBySelector):
-        return True
-    if isinstance(selector, CompositeSelector):
-        left, right = selector.selectors
-        return _selector_contains_followed_by(left) or _selector_contains_followed_by(right)
-    if isinstance(selector, NotSelector):
-        return _selector_contains_followed_by(selector.selector)
-    return False
+    children: list[SelectorLike] = []
+    for operand in (left, right):
+        if isinstance(operand, CompositeSelector) and operand.operator == operator:
+            children.extend(operand.selectors)
+        else:
+            children.append(operand)
+    return tuple(children)
 
 
 def _check_composition(a: SelectorLike, b: SelectorLike) -> None:
@@ -1734,6 +1552,7 @@ def _check_composition(a: SelectorLike, b: SelectorLike) -> None:
         Raises when composition is invalid.
     """
 
+    from ..ir.selector_eval import contains_followed_by, flatten_and_conjuncts
     from .errors import SelectorCompositionError
 
     a_dir = _classify_selector_direction(a)
@@ -1743,13 +1562,17 @@ def _check_composition(a: SelectorLike, b: SelectorLike) -> None:
             "Cross-graph composition not supported: a forward selector and a backward "
             "selector cannot be combined. Use separate forward and backward hook sites."
         )
-    if _selector_contains_followed_by(a) or _selector_contains_followed_by(b):
-        if not (
-            isinstance(a, FollowedBySelector)
-            and not _selector_contains_followed_by(b)
-            or isinstance(b, FollowedBySelector)
-            and not _selector_contains_followed_by(a)
-        ):
+    if contains_followed_by(a) or contains_followed_by(b):
+        # `&` nests, so validate the FLAT conjunction: `a & fb & b` must pass
+        # exactly like `a & b & fb` and the flat three-child spec.
+        conjuncts = flatten_and_conjuncts((a, b))
+        direct = [c for c in conjuncts if isinstance(c, FollowedBySelector)]
+        buried = [
+            c
+            for c in conjuncts
+            if not isinstance(c, FollowedBySelector) and contains_followed_by(c)
+        ]
+        if len(direct) != 1 or buried:
             raise SelectorCompositionError(
                 "tl.followed_by(...) only supports candidate & tl.followed_by(successor); "
                 "nested or multi-followed_by compositions are unsupported."
@@ -1792,8 +1615,8 @@ __all__ = [
     "label",
     "in_module",
     "in_backward_pass",
+    "grad_fn_label",
     "head",
-    "label",
     "module",
     "output",
     "output_at",

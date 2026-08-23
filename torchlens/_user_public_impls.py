@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import random
 import warnings
@@ -13,44 +14,45 @@ from torch import nn
 from tqdm import tqdm
 
 from . import user_funcs as _user_funcs
+from ._capture_state_helpers import (
+    _clone_state_dict_with_metadata,
+    _model_for_ground_truth_validation,
+    _model_for_validation_replay,
+    _ModuleTreePlainAttrSnapshot,
+    _move_tensors_to_device,
+    _reject_opaque_wrappers,
+    _unwrap_data_parallel,
+    unwrap_compiled_model,
+)
 from ._deprecations import MISSING, MissingType, warn_deprecated_alias
 from ._input_coerce import _coerce_input_args
 from ._literals import (
     BufferVisibilityLiteral,
     CollapseLiteral,
+    FoldRepeatsLiteral,
     VisDirectionLiteral,
     VisInterventionModeLiteral,
     VisModeLiteral,
     VisNodeModeLiteral,
     VisNodePlacementLiteral,
     VisRendererLiteral,
-    FoldRepeatsLiteral,
 )
-from ._capture_state_helpers import (
-    _ModuleTreePlainAttrSnapshot,
-    _clone_state_dict_with_metadata,
-    _model_for_ground_truth_validation,
-    _model_for_validation_replay,
-    _move_tensors_to_device,
-    _reject_opaque_wrappers,
-    _unwrap_data_parallel,
-    unwrap_compiled_model,
-)
+from ._robustness import check_model_and_input_variants
 from .backends import BackendName, resolve_backend_spec
 from .data_classes.trace import Trace
 from .errors import TraceNotReproducibleWarning
 from .options import (
+    CaptureOptions,
     VisualizationOptions,
     merge_visualization_options,
     visualization_to_render_kwargs,
 )
-from .utils.arg_handling import normalize_input_args, safe_copy_args, safe_copy_kwargs
+from .utils.arg_handling import normalize_input_args, safe_copy_input_tree
 from .utils.display import warn_parallel
+from .utils.hashing import compute_graph_shape_hash
 from .utils.introspection import get_vars_of_type_from_obj
 from .utils.rng import set_random_seed
-from .utils.hashing import compute_graph_shape_hash
 from .visualization.code_panel import CodePanelOption
-from ._robustness import check_model_and_input_variants
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -61,6 +63,44 @@ trace = _user_funcs.trace
 _run_model_and_save_specified_outs = _user_funcs._run_model_and_save_specified_outs
 
 
+def release_model(model: nn.Module) -> None:
+    """Release a traced PyTorch model from persistent TorchLens preparation.
+
+    Parameters
+    ----------
+    model:
+        Model whose full module tree should be restored. The operation is safe
+        for never-traced and already-released models.
+
+    Returns
+    -------
+    None
+        The model is restored in place and may be pickled or traced again.
+
+    Notes
+    -----
+    TorchLens installs persistent, toggle-gated wrappers on non-root module
+    ``forward`` methods. Call ``release_model`` after the final trace when the
+    complete model object must be serialized with :func:`torch.save` or
+    :mod:`pickle`. Saving ``model.state_dict()`` is unaffected by preparation
+    and does not require release.
+
+    Plain module attributes holding torch function references captured in the
+    other wrap state (``self.act = F.relu`` grabbed before wrapping, pickled
+    while wrapped -- or the reverse) fail pickle's by-reference identity
+    check. ``release_model`` normalizes such attributes (including one level
+    of builtin list/tuple/dict/set nesting) to the values currently live at
+    their public torch names, so serialization succeeds at release time and a
+    fresh-process load resolves the pristine torch function. Call it again
+    after any later wrap-state change before re-serializing. References held
+    inside closures, ``functools.partial`` objects, or custom containers --
+    and bare references held outside the model -- remain outside the sweep.
+    """
+    from .backends.torch.model_prep import release_model as release_torch_model
+
+    release_torch_model(model)
+
+
 def log_model_metadata(
     model: nn.Module,
     input_args: torch.Tensor | list[Any] | tuple[Any, ...],
@@ -68,8 +108,9 @@ def log_model_metadata(
 ) -> Trace:
     """Return model metadata without saving any outs.
 
-    Equivalent to ``trace(model, input_args, input_kwargs, layers_to_save=None,
-    compute_input_output_distances=True)``.
+    Equivalent to ``trace(model, input_args, input_kwargs,
+    capture=CaptureOptions(layers_to_save=None,
+    compute_input_output_distances=True))``.
 
     Parameters
     ----------
@@ -90,8 +131,10 @@ def log_model_metadata(
         model,
         input_args,
         input_kwargs,
-        layers_to_save=None,
-        compute_input_output_distances=True,
+        capture=CaptureOptions(
+            layers_to_save=None,
+            compute_input_output_distances=True,
+        ),
     )
     return model_trace
 
@@ -165,7 +208,7 @@ def show_model_graph(
     vis_call_depth: int | MissingType = MISSING,
     vis_outpath: str | MissingType = MISSING,
     vis_graph_overrides: dict[str, Any] | None | MissingType = MISSING,
-    module: "Module | str | None" = None,
+    module: Module | str | None = None,
     vis_edge_overrides: dict[str, Any] | None | MissingType = MISSING,
     vis_grad_edge_overrides: dict[str, Any] | None | MissingType = MISSING,
     vis_module_overrides: dict[str, Any] | None | MissingType = MISSING,
@@ -265,7 +308,8 @@ def show_model_graph(
         Repeat-fold policy. ``None`` preserves the default policy. ``True`` folds
         every eligible repeated run. ``False`` disables run folding.
     random_seed:
-        Fixed RNG seed for stochastic models.
+        Fixed RNG seed for stochastic models. Reseeds the process-global RNG
+        engines without restoring them; see ``tl.trace``'s ``random_seed``.
     recurrence_detection:
         If True, run full isomorphic subgraph expansion. Set this to False when
         the forward pass has more than about 1M operations and postprocessing
@@ -320,7 +364,9 @@ def show_model_graph(
         order_siblings=order_siblings,
     )
 
-    if visualization_options.mode not in ["none", "rolled", "unrolled"]:
+    # Reads the canonical `view`, not the deprecated `mode` alias: torchlens must
+    # not consume its own deprecated spellings (grind b4, R48-3).
+    if visualization_options.view not in ["none", "rolled", "unrolled"]:
         raise ValueError("Visualization option must be either 'none', 'rolled', or 'unrolled'.")
 
     trace = _run_model_and_save_specified_outs(
@@ -429,17 +475,27 @@ def draw_backward(
         edge_overrides = visualization.edge_overrides
         node_mode = visualization.node_style
 
+    # Six of these seven flat overrides warned nowhere, so `draw_backward` was a
+    # silent-removal surface while the SAME spellings warned through
+    # `merge_visualization_options` (grind b4, R48-1). The canonical replacement
+    # exists and works here: pass `visualization=VisualizationOptions(...)`.
     if vis_outpath is not MISSING:
+        warn_deprecated_alias("vis_outpath", "visualization.container_path")
         container_path = cast(str, vis_outpath)
     if vis_save_only is not MISSING:
+        warn_deprecated_alias("vis_save_only", "visualization.save_only")
         save_only = cast(bool, vis_save_only)
     if vis_fileformat is not MISSING:
+        warn_deprecated_alias("vis_fileformat", "visualization.file_format")
         file_format = cast(str, vis_fileformat)
     if vis_direction is not MISSING:
+        warn_deprecated_alias("vis_direction", "visualization.direction")
         direction = cast(VisDirectionLiteral, vis_direction)
     if vis_graph_overrides is not MISSING:
+        warn_deprecated_alias("vis_graph_overrides", "visualization.graph_overrides")
         graph_overrides = cast(dict[str, Any] | None, vis_graph_overrides)
     if vis_edge_overrides is not MISSING:
+        warn_deprecated_alias("vis_edge_overrides", "visualization.edge_overrides")
         edge_overrides = cast(dict[str, Any] | None, vis_edge_overrides)
     if vis_node_mode is not MISSING:
         warn_deprecated_alias("vis_node_mode", "node_style")
@@ -535,17 +591,25 @@ def draw_combined(
         graph_overrides = visualization.graph_overrides
         edge_overrides = visualization.edge_overrides
 
+    # `draw_combined` warned on NOTHING at all (grind b4, R48-1); same canonical
+    # replacement as `draw_backward` above.
     if vis_outpath is not MISSING:
+        warn_deprecated_alias("vis_outpath", "visualization.container_path")
         container_path = cast(str, vis_outpath)
     if vis_save_only is not MISSING:
+        warn_deprecated_alias("vis_save_only", "visualization.save_only")
         save_only = cast(bool, vis_save_only)
     if vis_fileformat is not MISSING:
+        warn_deprecated_alias("vis_fileformat", "visualization.file_format")
         file_format = cast(str, vis_fileformat)
     if vis_direction is not MISSING:
+        warn_deprecated_alias("vis_direction", "visualization.direction")
         direction = cast(VisDirectionLiteral, vis_direction)
     if vis_graph_overrides is not MISSING:
+        warn_deprecated_alias("vis_graph_overrides", "visualization.graph_overrides")
         graph_overrides = cast(dict[str, Any] | None, vis_graph_overrides)
     if vis_edge_overrides is not MISSING:
+        warn_deprecated_alias("vis_edge_overrides", "visualization.edge_overrides")
         edge_overrides = cast(dict[str, Any] | None, vis_edge_overrides)
 
     return trace.draw_combined(
@@ -879,7 +943,8 @@ def validate_forward_pass(
     input_kwargs:
         Keyword arguments for model forward pass.
     random_seed:
-        Fixed RNG seed for reproducibility.
+        Fixed RNG seed for reproducibility. Reseeds the process-global RNG
+        engines without restoring them; see ``tl.trace``'s ``random_seed``.
     verbose:
         If True, print detailed error messages on validation failure.
     validate_metadata:
@@ -921,9 +986,12 @@ def _restore_validation_replay_state(
         Optional snapshot of plain Python attributes to restore.
     """
 
-    model.load_state_dict(state_dict)
-    if plain_attr_snapshot is not None:
-        plain_attr_snapshot.restore_changed_attrs()
+    # R07: both restores always run; a raising load_state_dict must not skip
+    # the plain-attribute restore (first failure re-raises, later ones chain).
+    with contextlib.ExitStack() as restores:
+        if plain_attr_snapshot is not None:
+            restores.callback(plain_attr_snapshot.restore_changed_attrs)
+        restores.callback(model.load_state_dict, state_dict)
 
 
 def _first_reproducibility_divergence(left: Trace, right: Trace) -> str | None:
@@ -975,7 +1043,7 @@ def _warn_if_validation_trace_not_reproducible(
     input_args: torch.Tensor | list[Any] | tuple[Any, ...],
     input_kwargs: dict[Any, Any],
     random_seed: int,
-) -> None:
+) -> Literal["matched", "mismatch", "unavailable"]:
     """Warn when a validation trace changes after one fresh re-trace.
 
     Parameters
@@ -990,6 +1058,13 @@ def _warn_if_validation_trace_not_reproducible(
         Keyword inputs for the second capture.
     random_seed:
         Seed reused for the second capture to avoid RNG-only graph drift.
+
+    Returns
+    -------
+    Literal["matched", "mismatch", "unavailable"]
+        ``"matched"`` when the fresh re-trace is structurally identical,
+        ``"mismatch"`` when the graphs diverge, and ``"unavailable"`` when the
+        fresh re-trace check itself cannot be completed.
     """
 
     second_trace: Trace | None = None
@@ -997,23 +1072,36 @@ def _warn_if_validation_trace_not_reproducible(
         # Buffer-source identity is assigned during postprocessing only when the
         # relevant activations are saved. Match the validation trace's "all"
         # selection so the structural comparison does not compare two capture modes.
-        second_trace = _run_model_and_save_specified_outs(
-            model=model,
-            input_args=input_args,
-            input_kwargs=input_kwargs,
-            layers_to_save="all",
-            activation_transform=None,
-            mark_layer_depths=False,
-            detach_saved_activations=False,
-            save_grads=False,
-            save_arg_values=False,
-            random_seed=random_seed,
-            save_rng_states=False,
-        )
+        # r33 F-2: the first trace is captured under a FORCED "shadow"
+        # completeness-witness mode (validate_forward_pass), so the re-trace
+        # must run under the same mode -- comparing a shadow capture against an
+        # ambient-mode capture is exactly the two-capture-modes comparison this
+        # check must not make, and it deterministically false-FAILED every
+        # witness-mode-sensitive model as "stateful/non-reproducible".
+        from . import _state
+
+        prior_witness_mode = _state._completeness_witness_mode
+        _state._completeness_witness_mode = "shadow"
+        try:
+            second_trace = _run_model_and_save_specified_outs(
+                model=model,
+                input_args=input_args,
+                input_kwargs=input_kwargs,
+                layers_to_save="all",
+                activation_transform=None,
+                mark_layer_depths=False,
+                detach_saved_activations=False,
+                save_grads=False,
+                save_arg_values=False,
+                random_seed=random_seed,
+                save_rng_states=False,
+            )
+        finally:
+            _state._completeness_witness_mode = prior_witness_mode
         first_hash = compute_graph_shape_hash(first_trace, include_module_address=False)
         second_hash = compute_graph_shape_hash(second_trace, include_module_address=False)
         if first_hash == second_hash:
-            return
+            return "matched"
         hint = _first_reproducibility_divergence(first_trace, second_trace)
         hint_suffix = f" ({hint})" if hint is not None else ""
         message = (
@@ -1049,6 +1137,7 @@ def _warn_if_validation_trace_not_reproducible(
             ),
             stacklevel=2,
         )
+        return "mismatch"
     except Exception as exc:
         message = (
             "TorchLens validation could not run the fresh re-trace reproducibility "
@@ -1069,9 +1158,51 @@ def _warn_if_validation_trace_not_reproducible(
             RuntimeWarning,
             stacklevel=2,
         )
+        return "unavailable"
     finally:
         if second_trace is not None:
             second_trace.cleanup()
+
+
+def _downgrade_retrace_mismatch_to_unverified(trace: Trace) -> None:
+    """Convert a replay pass into an honest unverified status after retrace drift.
+
+    Parameters
+    ----------
+    trace:
+        Validation trace whose pristine re-trace diverged structurally.
+    """
+
+    from .validation.status import ValidationReplayStatus
+
+    current_status = trace.validation_replay_status
+    unverified_reason_counts = dict(current_status.unverified_reason_counts)
+    unverified_reason_counts["trace_retrace_structure_mismatch"] = (
+        unverified_reason_counts.get("trace_retrace_structure_mismatch", 0) + 1
+    )
+    setattr(
+        trace,
+        "_validation_replay_status",
+        ValidationReplayStatus.unverified(
+            backend=current_status.backend,
+            source=current_status.source,
+            reason="trace_retrace_structure_mismatch",
+            message=(
+                "Replay validation matched the captured trace, but the pristine "
+                "re-trace diverged structurally, so the overall validation "
+                "result is unverified."
+            ),
+            replayed_node_count=current_status.replayed_node_count,
+            unverified_node_count=max(1, current_status.unverified_node_count),
+            payload_load_status=current_status.payload_load_status,
+            pure_unverified_node_count=current_status.pure_unverified_node_count,
+            effect_region_node_count=current_status.effect_region_node_count,
+            failed_node_count=current_status.failed_node_count,
+            unverified_reason_counts=unverified_reason_counts,
+            exempted_reason_counts=current_status.exempted_reason_counts,
+            decisions=current_status.decisions,
+        ),
+    )
 
 
 def _validate_forward_pass_torch(
@@ -1089,7 +1220,13 @@ def _validate_forward_pass_torch(
 
     **How it works:**
 
-    1. Run model.forward() *without* TorchLens to get ground-truth output tensors.
+    1. Run model.forward() on PRISTINE torch to get ground-truth output
+       tensors: if torchlens wrappers are installed, they are removed for
+       this one forward (restored from the pre-decoration originals ledger)
+       and reinstalled afterwards, so the ground truth never observes
+       through the wrapper layer it is meant to check (R75-1). If they
+       cannot be removed (a capture is active), validation refuses with
+       ``False`` rather than blessing a wrap-state-dependent ground truth.
     2. Run ``trace`` with ``save_arg_values=True`` and ``layers_to_save='all'``
        to capture every out and its creating function's arguments.
     3. Call ``Trace.validate_forward_pass`` which replays the forward pass
@@ -1112,7 +1249,9 @@ def _validate_forward_pass_torch(
     input_kwargs:
         Keyword arguments for model forward pass.
     random_seed:
-        Fixed RNG seed for reproducibility (auto-generated if None).
+        Fixed RNG seed for reproducibility (auto-generated if None). Reseeds
+        the process-global RNG engines without restoring them; see
+        ``tl.trace``'s ``random_seed``.
     verbose:
         If True, print detailed error messages on validation failure.
     validate_metadata:
@@ -1146,8 +1285,18 @@ def _validate_forward_pass_torch(
         input_kwargs = {}
     # Deep-copy inputs so the ground-truth forward pass doesn't mutate the
     # originals (some models modify inputs in-place).
-    input_args_copy = safe_copy_args(input_args)
-    input_kwargs_copy = safe_copy_kwargs(input_kwargs)
+    input_args_copy, input_kwargs_copy, input_copy_gaps = safe_copy_input_tree(
+        input_args,
+        input_kwargs,
+    )
+    if input_copy_gaps:
+        warnings.warn(
+            "TorchLens validation cannot reproduce the caller's input topology: "
+            f"{input_copy_gaps!r}. Returning False rather than validating altered semantics.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return False
 
     model_device = next((p.device for p in model.parameters()), None)
     if model_device is not None:
@@ -1212,14 +1361,53 @@ def _validate_forward_pass_torch(
     prior_deterministic = torch.are_deterministic_algorithms_enabled()
     prior_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
     prior_num_threads = torch.get_num_threads()
-    torch.use_deterministic_algorithms(True, warn_only=True)
-    if num_threads is not None:
-        torch.set_num_threads(num_threads)
     try:
+        # R07-2 (install-move half): both process-global installs run INSIDE
+        # the restoring try -- a raising set_num_threads used to strand the
+        # already-flipped deterministic stance for the life of the process
+        # (the finally below never ran). Restoring to the just-snapshotted
+        # priors is idempotent when an install never landed.
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        if num_threads is not None:
+            torch.set_num_threads(num_threads)
         ground_truth_model, plain_attr_snapshot = _model_for_ground_truth_validation(model)
+        if plain_attr_snapshot is not None and not plain_attr_snapshot.is_complete:
+            warnings.warn(
+                "TorchLens validation cannot prove model-state restoration after deepcopy "
+                "failed because these plain attributes are unsupported: "
+                f"{plain_attr_snapshot.unsupported_attr_paths!r}. Returning False rather "
+                "than reporting unverified success.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return False
+        from ._errors import CaptureContextError
         from .backends.torch.ops import _walk_output_tensors_with_paths
+        from .validation._pristine import pristine_torch_oracle
 
-        ground_truth_output = ground_truth_model(*input_args_copy, **input_kwargs_copy)
+        # R75-1: the phase-0 ground truth must observe through PRISTINE
+        # torch. In a wrapped process this forward used to run through the
+        # installed pass-through wrapper shells -- the same closures capture
+        # and replay observe through -- so a wrapper-layer numeric
+        # distortion validated clean whenever any capture had run earlier
+        # in the process (probe-proven). The wrappers are removed for this
+        # one forward and reinstalled after; if they cannot be removed (a
+        # capture is active), validation REFUSES rather than blessing a
+        # wrap-state-dependent ground truth.
+        try:
+            with pristine_torch_oracle():
+                ground_truth_output = ground_truth_model(*input_args_copy, **input_kwargs_copy)
+        except CaptureContextError:
+            warnings.warn(
+                "TorchLens validation could not compute a pristine-torch ground "
+                "truth (a capture is active in this process, or the unwrap "
+                "ledger is poisoned); the verdict would depend on the wrapper "
+                "installation it is meant to check. Returning False rather "
+                "than reporting unverified success.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return False
         ground_truth_output_all = [
             (tensor, tuple(path))
             for tensor, path, _container_spec in _walk_output_tensors_with_paths(
@@ -1234,6 +1422,33 @@ def _validate_forward_pass_torch(
                 return_addresses=True,
                 allow_repeats=True,
             )
+        # b9 R74/75-1: ground-truth enumeration SHARED ITS ROOT with capture
+        # (both resolve through the one backends walker), so a walker defect
+        # dropped the same output leaf from both sides and validation blessed
+        # a missing output. Cross-check the adapter's enumeration against the
+        # validation-owned independent traversal; a disagreement is a capture
+        # (or adapter) bug and must FAIL validation, never pass silently.
+        from .validation._output_walk import independent_output_tensor_ids
+
+        adapter_leaf_ids = {id(entry[0]) for entry in ground_truth_output_all}
+        independent_leaf_ids = set(independent_output_tensor_ids(ground_truth_output))
+        missed_by_adapter = independent_leaf_ids - adapter_leaf_ids
+        # Direction matters: the adapter legitimately sees MORE than the
+        # generic walk (registered custom containers, opaque structseq
+        # internals), and more-than can never hide a dropped output. Leaves
+        # the independent walk found that the adapter MISSED are exactly the
+        # dropped-output defect class.
+        if missed_by_adapter:
+            warnings.warn(
+                "TorchLens validation found a ground-truth output-enumeration "
+                f"defect: {len(missed_by_adapter)} tensor leaf(ves) reachable in "
+                "the model output are missing from the capture-side walker's "
+                "enumeration. Validation fails rather than validating against "
+                "the same defective enumeration.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return False
         # Deduplicate by structural address to match how capture/trace.py extracts
         # outputs (same tensor returned in multiple positions is counted once).
         addresses_used = []
@@ -1258,11 +1473,39 @@ def _validate_forward_pass_torch(
         validation_model, validation_plain_attr_snapshot, validation_model_copied = (
             _model_for_validation_replay(model)
         )
+        if (
+            validation_plain_attr_snapshot is not None
+            and not validation_plain_attr_snapshot.is_complete
+        ):
+            warnings.warn(
+                "TorchLens validation cannot prove replay-state restoration after deepcopy "
+                "failed because these plain attributes are unsupported: "
+                f"{validation_plain_attr_snapshot.unsupported_attr_paths!r}. Returning False "
+                "rather than reporting unverified success.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return False
         validation_state_dict = _clone_state_dict_with_metadata(validation_model)
-        validation_input_args = safe_copy_args(input_args)
-        validation_input_kwargs = safe_copy_kwargs(input_kwargs)
-        reproducibility_input_args = safe_copy_args(input_args)
-        reproducibility_input_kwargs = safe_copy_kwargs(input_kwargs)
+        (
+            validation_input_args,
+            validation_input_kwargs,
+            validation_input_gaps,
+        ) = safe_copy_input_tree(input_args, input_kwargs)
+        (
+            reproducibility_input_args,
+            reproducibility_input_kwargs,
+            reproducibility_input_gaps,
+        ) = safe_copy_input_tree(input_args, input_kwargs)
+        if validation_input_gaps or reproducibility_input_gaps:
+            copy_gaps = validation_input_gaps + reproducibility_input_gaps
+            warnings.warn(
+                "TorchLens validation cannot reproduce the caller's input topology: "
+                f"{copy_gaps!r}. Returning False rather than validating altered semantics.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return False
         if model_device is not None:
             validation_input_args = _move_tensors_to_device(validation_input_args, model_device)
             validation_input_kwargs = _move_tensors_to_device(validation_input_kwargs, model_device)
@@ -1302,8 +1545,9 @@ def _validate_forward_pass_torch(
             trace._validation_dispatch_op_count,
             trace._validation_captured_dispatchable_op_count,
         ) = completeness_backstop_counts(trace)
+        retrace_outcome: Literal["matched", "mismatch", "unavailable"] = "unavailable"
         if validation_model_copied:
-            _warn_if_validation_trace_not_reproducible(
+            retrace_outcome = _warn_if_validation_trace_not_reproducible(
                 trace,
                 validation_model,
                 reproducibility_input_args,
@@ -1330,24 +1574,53 @@ def _validate_forward_pass_torch(
             validation_plain_attr_snapshot,
         )
         # Step 3: Validate by replaying the forward pass from saved outs.
+        # validate_saved_outs resets the diagnostics ledger at entry so a
+        # DIRECT repeat call reports this-run evidence only (B8-43); the
+        # retrace diagnostics recorded above belong to THIS flow, so they are
+        # snapshotted and re-prepended after the replay run.
+        from .validation.diagnostics import (
+            MAX_VALIDATION_DIAGNOSTICS,
+            TRACE_DIAGNOSTICS_ATTR,
+            get_validation_diagnostics,
+        )
+
+        flow_diagnostics = get_validation_diagnostics(trace)
         validation_result = trace.validate_forward_pass(
             ground_truth_output_tensors, verbose, validate_metadata=validate_metadata
         )
-        if isinstance(validation_result, bool):
+        if flow_diagnostics:
+            merged = flow_diagnostics + get_validation_diagnostics(trace)
+            setattr(trace, TRACE_DIAGNOSTICS_ATTR, merged[:MAX_VALIDATION_DIAGNOSTICS])
+        if retrace_outcome == "mismatch":
+            _downgrade_retrace_mismatch_to_unverified(trace)
+            outs_are_valid = False
+        elif isinstance(validation_result, bool):
             outs_are_valid = validation_result
         else:
             outs_are_valid = bool(getattr(validation_result, "passed", False))
         if _trace_observer is not None:
             _trace_observer(trace)
     finally:
-        torch.use_deterministic_algorithms(prior_deterministic, warn_only=prior_warn_only)
-        if num_threads is not None:
-            torch.set_num_threads(prior_num_threads)
-        model.load_state_dict(state_dict)
-        if "plain_attr_snapshot" in locals() and plain_attr_snapshot is not None:
-            plain_attr_snapshot.restore_changed_attrs()
-        if trace is not None:
-            trace.cleanup()
+        # R07: per-step fenced teardown. One raising restore (determinism
+        # flag, thread count, state_dict, plain attrs, trace cleanup) must not
+        # skip the later steps -- the pre-fix straight-line block left user
+        # model params unrestored and wrapper-session state uncleaned when an
+        # early restore raised. ExitStack runs EVERY callback and re-raises
+        # the first failure (later failures chain); callbacks are pushed in
+        # reverse so execution keeps the original step order.
+        with contextlib.ExitStack() as teardown:
+            if trace is not None:
+                teardown.callback(trace.cleanup)
+            if "plain_attr_snapshot" in locals() and plain_attr_snapshot is not None:
+                teardown.callback(plain_attr_snapshot.restore_changed_attrs)
+            teardown.callback(model.load_state_dict, state_dict)
+            if num_threads is not None:
+                teardown.callback(torch.set_num_threads, prior_num_threads)
+            teardown.callback(
+                torch.use_deterministic_algorithms,
+                prior_deterministic,
+                warn_only=prior_warn_only,
+            )
     return outs_are_valid
 
 
@@ -1360,9 +1633,9 @@ def validate_backward_pass(
     perturb_saved_grads: bool = False,
     validate_metadata: bool = True,
     random_seed: int | None = None,
-    atol: float = 1e-5,
-    rtol: float = 1e-4,
-    validate_layer_grads: bool = False,
+    atol: float | None = None,
+    rtol: float | None = None,
+    validate_layer_grads: bool = True,
     layer_grad_atol: float | None = None,
     layer_grad_rtol: float | None = None,
 ) -> bool:
@@ -1384,13 +1657,19 @@ def validate_backward_pass(
     validate_metadata:
         If True, run metadata invariant checks on the captured backward trace.
     random_seed:
-        Fixed RNG seed for stock and candidate passes.
+        Fixed RNG seed for stock and candidate passes. Reseeds the
+        process-global RNG engines without restoring them; see
+        ``tl.trace``'s ``random_seed``.
     atol:
-        Absolute allclose tolerance.
+        Absolute allclose tolerance. ``None`` (default) derives the
+        tolerance per gradient dtype (R13); the historical fp32 decimal
+        pair applied to every dtype was ~4.5e11 fp64 ULPs loose and
+        false-failed fp16 grads.
     rtol:
-        Relative allclose tolerance.
+        Relative allclose tolerance. ``None`` (default) derives per
+        gradient dtype, matching ``torchlens.validation.backward``.
     validate_layer_grads:
-        If True, also validate per-module-output gradients.
+        If True (default), also validate captured per-module-output gradients.
     layer_grad_atol:
         Optional layer-gradient absolute tolerance.
     layer_grad_rtol:
@@ -1444,7 +1723,8 @@ def validate_batch_of_models_and_inputs(
     models_and_inputs_dict: dict[str, dict[str, Any]],
     out_path: str,
     redo_model_if_already_run: bool = True,
-) -> "pd.DataFrame":
+    show_progress: bool = True,
+) -> pd.DataFrame:
     """Batch-validate multiple models, writing incremental results to a CSV.
 
     For each model/input pair, calls ``validate_forward_pass`` and appends the
@@ -1460,6 +1740,9 @@ def validate_batch_of_models_and_inputs(
             - ``model_sample_inputs`` (dict[str, input]): named sample inputs.
         out_path: File path for the results CSV (created if absent, appended otherwise).
         redo_model_if_already_run: Re-validate models already present in the CSV.
+        show_progress: Show the tqdm bar and per-model status lines. Pass False
+            for quiet batch runs (b8 B8-38: the bar was ungated and a bare print
+            inside the loop corrupted the live bar).
 
     Returns
 
@@ -1485,10 +1768,12 @@ def validate_batch_of_models_and_inputs(
             }
         )
     models_already_run = current_csv["model_class_name"].unique()
-    for model_class_name, model_info in tqdm(
-        models_and_inputs_dict.items(), desc="Validating models"
-    ):
-        print(f"Validating model {model_class_name}")
+    progress = tqdm(
+        models_and_inputs_dict.items(), desc="Validating models", disable=not show_progress
+    )
+    for model_class_name, model_info in progress:
+        # Route the status line through the bar so it never corrupts it.
+        progress.set_postfix_str(model_class_name)
         if model_class_name in models_already_run and not redo_model_if_already_run:
             continue
         model_category = model_info["model_category"]

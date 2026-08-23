@@ -8,18 +8,18 @@ tests and future materialization-enabled saves.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
 import json
 import math
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, ClassVar, Protocol
 
 import numpy as np
 import torch
 
-from . import JaxPayloadLoadHint, PayloadLoadHints
-from . import _json
+from . import JaxPayloadLoadHint, PayloadLoadHints, _json
 from ._artifact_strings import _resolve_portable_device
+from .manifest import _json_ready_codec_metadata_value
 from .tensor_policy import FailReason, Ok, SkipReason, TensorPolicyDecision, is_supported_for_save
 
 
@@ -103,15 +103,36 @@ class TorchPayloadCodec:
         return is_supported_for_save(value, strict=strict)
 
     def to_numpy(self, value: Any) -> EncodedArray:
-        """Convert a PyTorch tensor to a detached CPU NumPy array."""
+        """Refuse: torch payloads never travel through the codec NumPy transport.
 
-        if not isinstance(value, torch.Tensor):
-            raise TypeError(f"torch codec expected torch.Tensor, got {type(value).__name__}.")
-        array = value.detach().cpu().numpy()
-        return EncodedArray(
-            array=array,
-            logical_dtype=str(value.dtype).replace("torch.", ""),
-            logical_device=str(value.device),
+        ``bundle.py::_write_payload_blob`` short-circuits
+        ``logical_backend == "torch" and isinstance(value, torch.Tensor)`` to
+        ``_write_tensor_blob`` BEFORE it consults a codec, and this codec is only ever
+        selected for ``logical_backend == "torch"``. The sole residual call shape --
+        ``logical_backend == "torch"`` carrying a NON-tensor value -- raised ``TypeError``
+        from the old body's own guard too, so refusing here is behavior-preserving on every
+        reachable path.
+
+        Past that guard the old body called ``.numpy()`` with NO bfloat16 handling, so had
+        it ever been reached it would have raised a raw
+        ``TypeError: Got unsupported ScalarType BFloat16`` from deep inside torch -- for a
+        dtype ``tensor_policy._SUPPORTED_DTYPES`` declares SUPPORTED (r6 M5). Rather than
+        invent untested transport semantics for a path that cannot run, the method stays
+        (the ``PayloadCodec`` protocol requires it) and fails CLOSED naming the real
+        routing. bfloat16 payloads round-trip through ``_write_tensor_blob``; that is
+        asserted in ``tests/test_io_runnable_payload_integrity.py``.
+
+        Raises
+        ------
+        TypeError
+            Always.
+        """
+
+        raise TypeError(
+            "The torch payload codec has no NumPy transport: torch tensors are written by "
+            "bundle.py::_write_tensor_blob, which short-circuits before any codec NumPy "
+            "conversion is consulted. Reaching this method means a caller bypassed that "
+            "routing."
         )
 
     def from_numpy(
@@ -123,13 +144,23 @@ class TorchPayloadCodec:
         payload_hints: PayloadLoadHints | Mapping[str, Any] | None = None,
         strict_runtime: bool = True,
     ) -> Any:
-        """Rebuild a PyTorch tensor from a NumPy array."""
+        """Refuse: see :meth:`to_numpy`. Structurally unreachable, fails closed.
 
-        del payload_hints
-        tensor = torch.from_numpy(np.ascontiguousarray(array))
-        if map_location is None:
-            return tensor
-        return tensor.to(map_location)
+        The load side never consults a codec for a torch payload at all: torch blobs are
+        read straight back through ``safetensors.torch.load_file`` in
+        ``bundle.py``. ``PayloadCodec.from_numpy`` has no production caller on any backend.
+
+        Raises
+        ------
+        TypeError
+            Always.
+        """
+
+        raise TypeError(
+            "The torch payload codec has no NumPy transport: torch blobs are read back "
+            "directly through safetensors.torch.load_file in bundle.py, with no codec "
+            "consulted. Reaching this method means a caller bypassed that routing."
+        )
 
     def manifest_fields(self, value: Any, encoded: EncodedArray) -> dict[str, Any]:
         """Return no optional fields so torch manifests stay byte-compatible."""
@@ -252,8 +283,19 @@ class JaxPayloadCodec:
             )
             return hint_result.value
 
-        dtype = getattr(jnp, logical_dtype, None)
-        value = jnp.asarray(array, dtype=dtype) if dtype is not None else jnp.asarray(array)
+        dtype_candidate = getattr(jnp, logical_dtype, None)
+        if dtype_candidate is None:
+            raise BackendRuntimeCompatibilityError(
+                f"Portable JAX payload declares unsupported logical_dtype={logical_dtype!r}."
+            )
+        try:
+            dtype = jnp.dtype(dtype_candidate)
+        except (TypeError, ValueError) as exc:
+            raise BackendRuntimeCompatibilityError(
+                f"Portable JAX payload declares unsupported logical_dtype={logical_dtype!r}."
+            ) from exc
+        value = jnp.asarray(array, dtype=dtype)
+        value = _restore_jax_scalar_semantics(jax, value, entry)
         hint_result = _apply_jax_payload_hints(
             jax,
             value,
@@ -270,8 +312,19 @@ class JaxPayloadCodec:
             return value
         try:
             return jax.device_put(value, target_device)
-        except (TypeError, ValueError, RuntimeError):
-            return value
+        except (TypeError, ValueError, RuntimeError) as exc:
+            # r6 L6: this used to swallow the failure and ``return value``, handing back an
+            # array on the WRONG device while silently dropping the caller's explicit
+            # ``map_location``. Every sibling codec raises
+            # ``BackendRuntimeCompatibilityError`` when it cannot honor a requested
+            # placement (see the tinygrad branch above), and a placement the caller ASKED
+            # for is not a detail to lose quietly. Note the two non-failure paths above are
+            # deliberately untouched: no ``map_location`` and an unresolvable device string
+            # both mean "no placement was requested", not "a requested placement failed".
+            raise BackendRuntimeCompatibilityError(
+                f"Portable JAX payload could not be placed on {target_device!r} as "
+                "requested by map_location."
+            ) from exc
 
     def manifest_fields(self, value: Any, encoded: EncodedArray) -> dict[str, Any]:
         """Return v2 manifest vocabulary for a JAX payload."""
@@ -932,7 +985,9 @@ def numpy_to_transport_tensor(array: np.ndarray) -> torch.Tensor:
     """Convert an encoded NumPy array to the CPU torch transport tensor."""
 
     _raise_for_unsupported_array_dtype(array, backend_name="transport")
-    return torch.from_numpy(np.array(array, copy=True, order="C")).contiguous()
+    # np.array(copy=True, order="C") already yields a C-contiguous buffer, so
+    # from_numpy's zero-copy wrap is contiguous by construction.
+    return torch.from_numpy(np.array(array, copy=True, order="C"))
 
 
 def materialize_transport_tensor(
@@ -1039,10 +1094,66 @@ def _entry_field(entry: Any, field_name: str) -> Any:
     return getattr(entry, field_name, None)
 
 
+def _restore_jax_scalar_semantics(jax_module: Any, value: Any, entry: Any) -> Any:
+    """Restore captured JAX weak-type and commitment semantics.
+
+    Parameters
+    ----------
+    jax_module:
+        Imported JAX module.
+    value:
+        Decoded JAX array.
+    entry:
+        Manifest entry carrying codec metadata.
+
+    Returns
+    -------
+    Any
+        JAX array with captured scalar semantics restored.
+
+    Raises
+    ------
+    BackendRuntimeCompatibilityError
+        If the installed JAX runtime cannot restore a declared semantic flag.
+    """
+
+    from ..backends.registry import BackendRuntimeCompatibilityError
+
+    metadata = _entry_field(entry, "codec_metadata")
+    if not isinstance(metadata, Mapping):
+        return value
+    if metadata.get("weak_type") is True and getattr(value, "weak_type", False) is not True:
+        try:
+            value = jax_module.lax.convert_element_type(
+                value,
+                value.dtype,
+                weak_type=True,
+            )
+        except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+            raise BackendRuntimeCompatibilityError(
+                "Portable JAX payload could not restore weak_type=True."
+            ) from exc
+    if metadata.get("committed") is True and getattr(value, "committed", False) is not True:
+        devices = list(jax_module.devices())
+        if not devices:
+            raise BackendRuntimeCompatibilityError(
+                "Portable JAX payload declared committed=True but no JAX device is available."
+            )
+        try:
+            value = jax_module.device_put(value, devices[0])
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise BackendRuntimeCompatibilityError(
+                "Portable JAX payload could not restore committed=True."
+            ) from exc
+    return value
+
+
 def _transport_tensor_to_numpy(tensor: torch.Tensor, entry: Any) -> np.ndarray:
     """Convert a torch transport tensor to host NumPy storage for a codec."""
 
-    transport = tensor.detach().cpu().contiguous()
+    from .._transport import to_cpu_contiguous
+
+    transport = to_cpu_contiguous(tensor)
     logical_dtype = str(_entry_field(entry, "logical_dtype") or "")
     if logical_dtype in {"bfloat16", "jax.numpy.bfloat16"}:
         array = transport.to(torch.float32).numpy()
@@ -1094,6 +1205,12 @@ def _logical_shape_from_metadata(codec_metadata: Any) -> tuple[int, ...] | None:
     if not isinstance(logical_shape, list):
         return None
     if not all(isinstance(dim, int) and not isinstance(dim, bool) for dim in logical_shape):
+        return None
+    # Reject negative dims (R10-8): a forged ``-1`` silently drives a
+    # ``reshape``-inferred never-declared shape (and two ``-1``s escape as a raw
+    # numpy ValueError). Real logical shapes are non-negative, matching the
+    # manifest-level dim ceilings in manifest.py.
+    if any(dim < 0 for dim in logical_shape):
         return None
     return tuple(logical_shape)
 
@@ -1632,26 +1749,13 @@ def _jax_prng_dtag_from_dtype(dtype: str) -> str | None:
 def _json_ready_mapping(values: dict[str, Any]) -> dict[str, Any]:
     """Return a mapping with only JSON-friendly values."""
 
-    cleaned: dict[str, Any] = {}
-    for key, value in values.items():
-        if value is None:
-            continue
-        cleaned[key] = _json_ready_value(value)
-    return cleaned
+    return {key: _json_ready_value(value) for key, value in values.items()}
 
 
 def _json_ready_value(value: Any) -> Any:
     """Convert one value to JSON-friendly primitives."""
 
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Mapping):
-        return {
-            str(key): _json_ready_value(item) for key, item in value.items() if item is not None
-        }
-    if isinstance(value, (list, tuple)):
-        return [_json_ready_value(item) for item in value]
-    return str(value)
+    return _json_ready_codec_metadata_value(value)
 
 
 def _jax_unaddressable_reason(value: Any) -> str | None:

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from itertools import chain
-from typing import Dict, List, Tuple
 
 import pytest
 import torch
@@ -41,6 +40,31 @@ class SimpleIfElseModel(nn.Module):
         else:
             y = torch.sigmoid(x)
         return y
+
+
+class ReturnedPredicateIfElseModel(nn.Module):
+    """Model returning the same predicate that selects its branch."""
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run one branch and expose its consumed predicate as output metadata.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            Branch-selected output and the scalar predicate tensor.
+        """
+
+        predicate = x.mean() > 0
+        if predicate:
+            y = torch.relu(x)
+        else:
+            y = torch.sigmoid(x)
+        return y, predicate
 
 
 class ElifLadderModel(nn.Module):
@@ -164,7 +188,7 @@ def _get_only_event(trace: Trace) -> ConditionalEvent:
     return trace.conditional_records[0]
 
 
-def _get_terminal_bool_layers(trace: Trace) -> List[Op]:
+def _get_terminal_bool_layers(trace: Trace) -> list[Op]:
     """Return terminal scalar bool layers from a model log.
 
     Parameters
@@ -256,8 +280,8 @@ def _assert_derived_views_consistent(trace: Trace) -> None:
                 )
             )
         )
-        expected_elif_children: Dict[int, List[str]] = {}
-        grouped_elif_children: Dict[int, set[str]] = defaultdict(set)
+        expected_elif_children: dict[int, list[str]] = {}
+        grouped_elif_children: dict[int, set[str]] = defaultdict(set)
         for branch_children in layer.conditional_arm_children.values():
             for branch_kind, child_labels in branch_children.items():
                 if not branch_kind.startswith("elif_"):
@@ -267,9 +291,9 @@ def _assert_derived_views_consistent(trace: Trace) -> None:
         for elif_index, child_labels in sorted(grouped_elif_children.items()):
             expected_elif_children[elif_index] = sorted(child_labels)
 
-        assert layer.conditional_then_children == expected_then_children
+        assert list(layer.conditional_then_children) == expected_then_children
         assert layer.conditional_elif_children == expected_elif_children
-        assert layer.conditional_else_children == expected_else_children
+        assert list(layer.conditional_else_children) == expected_else_children
 
 
 def _has_upstream_path(trace: Trace, source_label: str, target_label: str) -> bool:
@@ -318,6 +342,11 @@ def _assert_evaluation_entry_edges_are_upstream(trace: Trace) -> None:
             if arm.kind == "else":
                 assert arm.evaluation_entry_edge is None
                 continue
+            if not arm.condition_evaluated:
+                # A short-circuited then/elif test never ran, so claiming an
+                # evaluation entry edge for it would be a false runtime claim.
+                assert arm.evaluation_entry_edge is None
+                continue
             source_label, target_label = arm.evaluation_entry_edge or (None, None)
             assert source_label is not None
             assert target_label is not None
@@ -360,8 +389,8 @@ def test_simple_if_else_model_step5_pipeline() -> None:
 
     relu_layer = _find_single_layer(positive_log, "relu")
     sigmoid_layer = _find_single_layer(negative_log, "sigmoid")
-    assert relu_layer.conditional_branch_stack == [(0, "then")]
-    assert sigmoid_layer.conditional_branch_stack == [(0, "else")]
+    assert relu_layer.conditional_branch_stack == ((0, "then"),)
+    assert sigmoid_layer.conditional_branch_stack == ((0, "else"),)
 
     assert all(
         call_indexs == [1] for call_indexs in positive_log.conditional_edge_call_indices.values()
@@ -369,9 +398,21 @@ def test_simple_if_else_model_step5_pipeline() -> None:
     assert all(
         call_indexs == [1] for call_indexs in negative_log.conditional_edge_call_indices.values()
     )
-
     _assert_derived_views_consistent(positive_log)
     _assert_derived_views_consistent(negative_log)
+
+
+def test_returned_predicate_remains_a_conditional_consumer() -> None:
+    """An output child must not hide a proven tensor-to-host predicate consumer."""
+
+    trace = _log_model(ReturnedPredicateIfElseModel(), torch.ones(2, 2))
+    predicate = next(op for op in trace.ops if op.func_name == "__gt__")
+
+    assert len(trace.conditionals) == 1
+    assert trace.conditional_branch_edges
+    assert predicate.is_terminal_bool is True
+    assert predicate.is_terminal_conditional_bool is True
+    assert predicate.label in trace.internally_terminated_bool_ops
 
 
 @pytest.mark.smoke
@@ -401,7 +442,7 @@ def test_conditional_evaluation_entry_edges_are_distinct_upstream_layers(
 def test_elif_ladder_model_step5_pipeline() -> None:
     """Elif ladder materializes one event with all four arm ranges."""
 
-    branch_cases: List[Tuple[torch.Tensor, str, str]] = [
+    branch_cases: list[tuple[torch.Tensor, str, str]] = [
         (torch.full((2, 2), -1.0), "relu", "then"),
         (torch.full((2, 2), -0.25), "sigmoid", "elif_1"),
         (torch.full((2, 2), 0.25), "tanh", "elif_2"),
@@ -421,7 +462,7 @@ def test_elif_ladder_model_step5_pipeline() -> None:
         )
 
         target_layer = _find_single_layer(trace, func_name)
-        assert target_layer.conditional_branch_stack == [(0, branch_kind)]
+        assert target_layer.conditional_branch_stack == ((0, branch_kind),)
         observed_branch_kinds.add(branch_kind)
 
         _assert_derived_views_consistent(trace)
@@ -465,6 +506,93 @@ def test_save_code_context_false_still_attributes_branches() -> None:
     assert bool_layers[0].is_terminal_conditional_bool is True
     assert bool_layers[0].terminal_conditional_id == 0
     assert (0, "then") in trace.conditional_arm_entry_edges
-    assert relu_layer.conditional_branch_stack == [(0, "then")]
+    assert relu_layer.conditional_branch_stack == ((0, "then"),)
 
     _assert_derived_views_consistent(trace)
+
+
+# ---------------------------------------------------------------------------
+# Deep-hunt C3: buffer merge must REPOINT step-5 conditional edges
+# ---------------------------------------------------------------------------
+
+
+class WrittenBufferBranchModel(nn.Module):
+    """Buffer written then read, with the post-write version gating a branch."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("state", torch.zeros(2))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Write the buffer, use it on the output path, and gate on it."""
+
+        self.state.copy_(x)
+        y = x + self.state
+        gate = self.state.sum() > -100
+        if gate:
+            y = torch.relu(y)
+        return y * 2
+
+
+def test_buffer_merge_repoints_step5_conditional_edges(monkeypatch) -> None:
+    """A merged-away buffer's conditional edges repoint to the survivor.
+
+    Deep-hunt C3: step 5 records raw labels in ``conditional_branch_edges``,
+    ``conditional_arm_entry_edges``, ``conditional_edge_call_indices``, and
+    per-op conditional children BEFORE step 6's buffer dedup. The merge
+    repointed parents/children/arg-positions/buffer_source but the closing
+    ``_batch_remove_log_entries(remove_references=True)`` scrub FILTERED OUT
+    conditional edges naming the removed duplicate instead of substituting
+    the survivor: a deduped buffer that parented a branch bool silently lost
+    its conditional edge. This test drives the REAL step-6 merge machinery
+    (``_merge_buffer_entries`` + ``_finish_deferred_buffer_removals``) over a
+    real captured conditional whose branch bool is parented by the buffer
+    node being merged away, exactly as the dedup does for value-identical
+    duplicates.
+    """
+    import torchlens.postprocess as pp
+    import torchlens.postprocess.control_flow as cf
+
+    real_fix = pp._fix_buffer_layers
+    merged: dict[str, str] = {}
+
+    def fix_and_merge(trace: Trace) -> None:
+        real_fix(trace)
+        raw_dict = trace._raw_graph_ws.raw_layer_dict
+        survivor = raw_dict["buffer_1_raw"]
+        removed = raw_dict["buffer_2_raw"]
+        # Precondition: the step-5 conditional-parent role lives on the node
+        # about to be merged away.
+        assert removed.conditional_entry_children
+        assert any(parent == removed._label_raw for parent, _ in trace.conditional_branch_edges)
+        merged["survivor"] = survivor._label_raw
+        merged["bool_child"] = removed.conditional_entry_children[0]
+        deferred: dict = {}
+        cf._merge_buffer_entries(trace, survivor, removed, deferred_removals=deferred)
+        cf._finish_deferred_buffer_removals(trace, deferred)
+
+    monkeypatch.setattr(pp, "_fix_buffer_layers", fix_and_merge)
+
+    traced = trace_fn(WrittenBufferBranchModel(), torch.ones(2))
+
+    assert merged, "the merge wrapper never ran"
+    buffer_branch_edges = [
+        (parent, child)
+        for parent, child in traced.conditional_branch_edges
+        if parent.startswith("buffer")
+    ]
+    assert buffer_branch_edges, (
+        "the surviving buffer lost its step-5 conditional branch edge: "
+        f"{traced.conditional_branch_edges}"
+    )
+    surviving_buffer_labels = {
+        op.layer_label for op in traced.layer_list if getattr(op, "is_buffer", False)
+    }
+    for parent, _child in buffer_branch_edges:
+        assert parent in surviving_buffer_labels
+    entry_children = list(
+        chain.from_iterable(
+            traced[label].conditional_entry_children for label in surviving_buffer_labels
+        )
+    )
+    assert entry_children, "conditional_entry_children did not transfer to the survivor"

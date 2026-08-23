@@ -2,16 +2,20 @@
 
 ## Key Internal Functions
 
-### `draw()` in `rendering.py`
+### `draw()` in `_render_dot.py`
 Main forward graph entry point. It normalizes buffer visibility, applies module focus, skip
 and collapse decisions, builds Graphviz nodes/edges, styles modules, optionally adds legends
 and code panels, and writes/renders output.
 
-### `render_backward_graph()` in `rendering.py`
-Renders `GradFn` nodes and grad edges captured by `capture/backward.py`.
+### `render_backward_graph()` in `_render_entrypoints.py`
+Renders `GradFn` nodes and grad edges captured by `backends/torch/backward.py`.
 
 ### Collapse and Focus
-- `_should_collapse_module()` is the central collapse decision.
+- The v2 smart-collapse ENGINE behind `draw(collapse="auto"/"max")` is
+  `auto_collapse.py` + `collapse_optimizer.py` + `collapse_plan.py` (public
+  schedule via `Trace.collapse_plan()`/`collapse_schedule()`); change policy
+  THERE. `_should_collapse_module()` (`_render_leaf.py`) is only the legacy
+  per-leaf decision path.
 - `_is_collapsed_module()` protects indexing into `modules`; keep its guard strict.
 - `_build_module_focus_entries()` inserts boundary nodes for module-scoped renders.
 - Focus runs before skip/collapse.
@@ -45,17 +49,38 @@ pure-Python rank layout above 20,000 cost units.
 - `fastlog_preview.py`: overlays predicate decisions on a full log.
 - `fastlog_live.py`: live fastlog preview helpers.
 - `code_panel.py`: Graphviz code side panel.
+- `_render_common.py`: shared render types, constants, and imports for Graphviz rendering.
+- `_render_nodes.py`: node construction and raw-value helpers for Graphviz rendering.
+- `_render_edges.py`: edge and endpoint helpers for Graphviz rendering.
+- `_render_flow.py`: focus, skip, container, and sibling setup helpers.
+- `_render_ordering.py`: sibling-ordering scope decision, plain-layout verification, and the DOT rank-group post-pass.
+- `_render_regions.py`: nested module-cluster (region) subgraph emission and empty-subtree pruning.
+- `_svg_compose.py`: SVG post-processing (image inlining, viewBox normalization) and code-panel composition.
+- `_render_utils.py`: internal Graphviz helpers shared across rendering paths.
+- `_label_format.py`: node-label formatting helpers.
+- `_edge_multiplicity.py`: rendered-edge multiplicity disclosure (r19 dedupe registry).
+- `_condensed_flow.py`: child condensed-flow-graph construction for smart collapse.
+- `request.py`: resolved visualization requests and output targets.
 
 ## Gotchas
 - Graphviz render writes a DOT source file alongside rendered output.
 - Sibling ordering is intentionally scoped to forward unrolled Graphviz dot renders under
-  the node cap. Rolled, collapsed, focused, backward, conditional, rank-layout, Dagua, and
-  large graph paths should no-op.
+  the node cap. The exact in-scope predicate is `_should_order_siblings`
+  (`_render_ordering.py`): dot engine AND unrolled mode AND node count under
+  `SIBLING_ORDER_NODE_CAP` AND no `module=` focus AND
+  `vis_intervention_mode == "node_mark"` AND `vis_call_depth >= 1000` — so
+  rolled, focused, rank-layout, capped-depth, and large graphs no-op there
+  (backward/combined renders never reach it; they dispatch through
+  `_render_entrypoints.py`). It has NO collapse or conditional term:
+  `collapse_fn` is accepted but unused by the predicate.
 - The rank-layout path is a direct DOT writer rendered through `neato -n`; verify module
   clusters and edge labels after layout changes.
-- `show_model_graph()` should cleanup temporary logs in `finally`.
+- `show_model_graph()` (implemented in `torchlens/_user_public_impls.py`, not
+  package-local) should cleanup temporary logs in `finally`.
 - Buffer visibility has multiple modes; use `_normalize_buffer_visibility()`.
-- Intervention node rendering depends on `intervention_ready` metadata.
+- Intervention node rendering keys on the trace's `_intervention_spec`
+  (`node_spec.py`) and the `vis_intervention_mode` render option
+  (`_render_dot.py`) — NOT on the deprecated `intervention_ready` name.
 - Bundle diff rendering is SVG-string based; compare snapshots after visual changes.
 
 ## Tests to Run After Changes

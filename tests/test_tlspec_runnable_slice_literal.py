@@ -13,8 +13,8 @@ fail-closed for genuinely unsupported literal types.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import pytest
 import torch
@@ -22,8 +22,8 @@ from torch import nn
 
 import torchlens as tl
 from torchlens._io.runnable import (
-    _UnsupportedLiteralError,
     _encode_literal,
+    _UnsupportedLiteralError,
     build_sparse_run_descriptor,
 )
 from torchlens.errors import RunnablePreflightError

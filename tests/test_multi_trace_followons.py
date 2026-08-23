@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens.intervention._topology.topology import compare_topology
 
 
 class _ModuleModel(nn.Module):
@@ -37,6 +39,83 @@ class _ModuleModel(nn.Module):
         return torch.sigmoid(self.fc(x))
 
 
+class _ReorderedReluSigmoid(nn.Module):
+    """Apply ReLU then sigmoid."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return ``sigmoid(relu(x))``.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Reordered output.
+        """
+
+        return torch.sigmoid(torch.relu(x))
+
+
+class _ReorderedSigmoidRelu(nn.Module):
+    """Apply sigmoid then ReLU."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return ``relu(sigmoid(x))``.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Reordered output.
+        """
+
+        return torch.relu(torch.sigmoid(x))
+
+
+class _BufferParamModel(nn.Module):
+    """Small model exposing a live parameter and registered buffer."""
+
+    def __init__(self, *, scale: float, weight: float) -> None:
+        """Initialize the model with deterministic state.
+
+        Parameters
+        ----------
+        scale:
+            Buffer fill value.
+        weight:
+            Linear-weight fill value.
+        """
+
+        super().__init__()
+        self.linear = nn.Linear(3, 3, bias=False)
+        self.register_buffer("scale", torch.full((3,), scale))
+        with torch.no_grad():
+            self.linear.weight.fill_(weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the model.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Linear output shifted by the registered buffer.
+        """
+
+        return self.linear(x) + self.scale
+
+
 def _bundle() -> tl.Bundle:
     """Return a deterministic two-member bundle.
 
@@ -61,6 +140,61 @@ def test_supergraph_accessor_and_module_type_labels() -> None:
 
     assert supergraph.topological_order
     assert any(node.module_type == "Linear" for node in supergraph.nodes.values())
+
+
+def test_compare_topology_rejects_reordered_graphs() -> None:
+    """Reordered unique-fingerprint graphs are not reported identical."""
+
+    x = torch.randn(2, 3)
+    first = tl.trace(_ReorderedReluSigmoid(), x, intervention_ready=True)
+    second = tl.trace(_ReorderedSigmoidRelu(), x, intervention_ready=True)
+
+    diff = compare_topology(first, second)
+
+    assert diff.is_identical is False
+    assert diff.unmatched_a
+    assert diff.unmatched_b
+
+
+def test_supergraph_topological_order_respects_edges_after_reordered_bundle() -> None:
+    """Merged bundles with reordered graphs stay acyclic and edge-consistent."""
+
+    x = torch.randn(2, 3)
+    bundle = tl.bundle(
+        {
+            "first": tl.trace(_ReorderedReluSigmoid(), x, intervention_ready=True),
+            "second": tl.trace(_ReorderedSigmoidRelu(), x, intervention_ready=True),
+        }
+    )
+
+    supergraph = bundle.supergraph
+    positions = {name: idx for idx, name in enumerate(supergraph.topological_order)}
+
+    assert len(positions) == len(supergraph.nodes)
+    assert all(positions[parent] < positions[child] for parent, child in supergraph.edges)
+
+
+def test_super_buffer_and_param_views_use_public_live_values() -> None:
+    """Bundle super views expose live buffer values and parameter diffs."""
+
+    x = torch.randn(2, 3)
+    model_a = _BufferParamModel(scale=1.0, weight=1.0)
+    model_b = _BufferParamModel(scale=2.0, weight=3.0)
+    trace_a = tl.trace(model_a, x, intervention_ready=True)
+    trace_b = tl.trace(model_b, x, intervention_ready=True)
+    bundle = tl.bundle({"a": trace_a, "b": trace_b})
+
+    buffer_out = bundle.buffers["scale"].out
+    weight_diffs = bundle.params["linear.weight"].weight_norm_diff
+    expected_diff = float(
+        torch.linalg.vector_norm(
+            model_b.linear.weight.detach() - model_a.linear.weight.detach()
+        ).item()
+    )
+
+    assert torch.equal(buffer_out, torch.cat([model_a.scale, model_b.scale], dim=0))
+    assert math.isclose(weight_diffs["a"], 0.0)
+    assert math.isclose(weight_diffs["b"], expected_diff)
 
 
 def test_show_bundle_graph_rolled_and_backward_modes(tmp_path: Path) -> None:

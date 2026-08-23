@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 import json
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -1170,7 +1170,7 @@ def export_menagerie_csvs(
     current_version = _current_torchlens_version()
     trace_rows = _current_trace_rows(catalog_rows, raw_trace_rows, current_version)
     wave_lookup = _catalog_wave_lookup()
-    dataset_as_of_date = datetime.now(UTC).date().isoformat()
+    dataset_as_of_date = datetime.now(timezone.utc).date().isoformat()
     git_commit = _git_commit()
     flagship_rows = [
         build_flagship_row(

@@ -7,6 +7,8 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens.backends.torch.aliasing import detect_torch_alias_contract
+from torchlens.ir.intervention import FunctionEventInput
 
 
 class FastPassAliasMutationModel(nn.Module):
@@ -62,3 +64,28 @@ def test_selective_save_without_arg_values_reports_versions_incomplete() -> None
     assert all(not op.out_versions_by_child for op in trace.layer_list)
     with pytest.raises(ValueError, match="child-version snapshots"):
         trace.validate_forward_pass([model(x).detach().clone()], validate_metadata=False)
+
+
+def test_alias_contract_output_traversal_matches_nested_input_shapes() -> None:
+    """Output alias traversal follows the same nested container shapes as input traversal."""
+
+    x = torch.randn(2, 3)
+    semantics = detect_torch_alias_contract(
+        FunctionEventInput(
+            func=torch.relu,
+            func_name="probe",
+            func_qualname=None,
+            args=(x,),
+            kwargs={},
+            raw_output=({"outer": [x]},),
+            arg_copies=(x.clone(),),
+            kwarg_copies={},
+            module_stack=(),
+            is_bottom_level_func=True,
+            func_call_id=1,
+            expected_output_count=1,
+        )
+    )
+
+    assert semantics.mutated_input_positions == ()
+    assert semantics.aliased_output_inputs == (0,)

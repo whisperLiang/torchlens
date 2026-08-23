@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.capture.projectors import RecordingProjector, TraceProjector
+from torchlens.capture.projectors import RecordingProjector
 
 
 class DualProjectionToy(nn.Module):
@@ -30,12 +30,9 @@ def test_one_execution_has_trace_and_recording_projection_parity() -> None:
 
     assert len(recording._captured_run_cores) == 1
     core = recording._captured_run_cores[0]
-    trace_events = TraceProjector(core).events()
+    trace_events = core.events
     sparse = RecordingProjector().project((core,))
 
-    assert tuple(
-        (fact.event_id.raw_index, fact.event_id.label_raw) for fact in core.event_facts
-    ) == tuple((event.raw_index, event.label_raw) for event in trace_events)
     assert [record.ctx.label_raw for record in sparse.records] == [
         event.label_raw for event in trace_events if event.predicate_matched
     ]

@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import ast
 import importlib.util
-from importlib.metadata import PackageNotFoundError, version
 import linecache
 import re
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
 import pytest
 import torch
-
 
 MIGRATION_FILES = (
     "from_nnsight.md",

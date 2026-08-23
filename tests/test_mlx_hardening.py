@@ -22,14 +22,14 @@ import mlx.core as mx  # noqa: E402
 import mlx.nn as nn  # noqa: E402
 
 import torchlens as tl  # noqa: E402
+import torchlens.backends.mlx.backend as mlx_backend  # noqa: E402
+import torchlens.backends.mlx.capabilities as capabilities  # noqa: E402
 from torchlens.backends import (  # noqa: E402
     BackendRuntimeCompatibilityError,
     BackendUnsupportedError,
     get_backend_spec,
 )
 from torchlens.backends.mlx import GradOptions  # noqa: E402
-import torchlens.backends.mlx.backend as mlx_backend  # noqa: E402
-import torchlens.backends.mlx.capabilities as capabilities  # noqa: E402
 
 
 class TinyMLP(nn.Module):
@@ -226,7 +226,7 @@ def test_mlx_intervention_ready_raises() -> None:
 def test_mlx_save_grads_raises() -> None:
     """MLX capture rejects backward-gradient capture explicitly."""
 
-    with pytest.raises(BackendUnsupportedError, match="backward capture"):
+    with pytest.raises(BackendUnsupportedError, match="backward.capture"):
         tl.trace(TinyMLP(), _tiny_mlp_input(), save_grads=True)
 
 

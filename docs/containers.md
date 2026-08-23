@@ -65,6 +65,8 @@ For mid-graph containers, TorchLens does not route tensor dataflow through the c
 
 Existing modes are unchanged: `False`, `"labels"`, `"cluster"`, `"collapsed"`, and `"auto"` keep their prior rendering behavior.
 
+Container membership is a per-pass fact. On a rolled graph, a multi-pass (recurrent) layer aggregates passes that generally differ in container membership — typically only the final pass feeds the output container — so the rolled aggregate node carries no container decoration rather than projecting one pass's membership onto all of them. Unrolled per-pass nodes keep their exact labels.
+
 ## Custom Containers
 
 Register proprietary containers with `tl.register_container(type, flatten, unflatten)`.

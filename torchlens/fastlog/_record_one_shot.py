@@ -2,52 +2,36 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
-import warnings
+from typing import Any
 
 from torch import nn
 
-from .._deprecations import MISSING, MissingType
-from .._input_coerce import _coerce_input_args
 from .._capture_state_helpers import unwrap_compiled_model
-from ..backends import BackendName, BackendUnsupportedError
+from .._deprecations import MISSING, MissingType
+from .._errors import KeywordConflictError
+from .._input_coerce import _coerce_input_args
+from .._robustness import check_model_and_input_variants
+from ..backends import (
+    TORCH_BACKEND_NAME,
+    BackendName,
+    BackendUnsupportedError,
+    get_backend_spec,
+    require_capability_implementation,
+)
 from ..intervention.predicates import InterventionPredicate
 from ..options import StreamingOptions
 from ..types import ActivationPostfunc, GradientPostfunc
 from ._recorder import Recorder
 from ._validation import validate_postprocess
 from .options import (
+    ForwardErrorMode,
     GradPredicateFn,
     HaltPredicateFn,
     LookbackPayloadPolicy,
     PredicateErrorMode,
-    ForwardErrorMode,
     PredicateFn,
 )
 from .types import CaptureSpec, Recording
-
-
-def _resolve_save_alias(
-    *,
-    save: PredicateFn | None | MissingType,
-    keep_op: PredicateFn | None | MissingType,
-) -> PredicateFn | None:
-    """Resolve ``record(save=...)`` and deprecated ``keep_op=...`` spelling."""
-
-    save_supplied = not isinstance(save, MissingType)
-    keep_op_supplied = not isinstance(keep_op, MissingType)
-    if save_supplied and keep_op_supplied:
-        raise ValueError("record() received both save= and deprecated keep_op=.")
-    if keep_op_supplied:
-        warnings.warn(
-            "record(keep_op=...) is deprecated; use record(save=...) instead.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-        return cast("PredicateFn | None", keep_op)
-    if not save_supplied:
-        return None
-    return cast("PredicateFn | None", save)
 
 
 def record(
@@ -55,9 +39,7 @@ def record(
     input_args: Any,
     input_kwargs: dict[str, Any] | None = None,
     *,
-    save: PredicateFn | None | MissingType = MISSING,
-    keep_op: PredicateFn | None | MissingType = MISSING,
-    keep_module: PredicateFn | None | MissingType = MISSING,
+    save: PredicateFn | None = None,
     default_op: bool | CaptureSpec | MissingType = MISSING,
     default_module: bool | CaptureSpec | MissingType = MISSING,
     history_size: int = 8,
@@ -85,11 +67,8 @@ def record(
 ) -> Recording | tuple[Any, Recording]:
     """Record one model forward pass with capture predicates.
 
-    Migration note
-    --------------
-    ``record(save=...)`` is the canonical predicate spelling and matches
-    ``trace(save=...)``. ``keep_op=`` and ``keep_module=`` are deprecated
-    compatibility aliases; ``tl.fastlog.record`` remains a shim to this API.
+    ``record(save=...)`` is the one predicate spelling and matches
+    ``trace(save=...)``; ``tl.fastlog.record`` remains a shim to this API.
 
     Parameters
     ----------
@@ -99,8 +78,8 @@ def record(
         Tensor, list, or tuple of positional model inputs.
     input_kwargs:
         Optional keyword arguments for the model call.
-    save, keep_op, keep_module, default_op, default_module, history_size,
-    lookback, lookback_payload_policy, include_source_events, max_predicate_failures,
+    save, default_op, default_module, history_size, lookback,
+    lookback_payload_policy, include_source_events, max_predicate_failures,
     on_predicate_error, storage, streaming, random_seed:
         Fastlog recording options.
     on_forward_error:
@@ -137,28 +116,48 @@ def record(
         Fastlog recording, optionally with the model output.
     """
 
-    if backend not in (None, "torch"):
+    # The capability table gates this surface for EVERY resolution, including
+    # the default torch path: flipping torch's fastlog flag False must refuse
+    # instead of silently running the Recorder anyway.
+    backend_spec = get_backend_spec(str(backend) if backend is not None else "torch")
+    if not backend_spec.capabilities.fastlog:
+        if str(backend_spec.name) == TORCH_BACKEND_NAME:
+            raise BackendUnsupportedError(
+                "tl.record() refuses: the resolved 'torch' backend declares "
+                "capabilities.fastlog=False, and the registered capability "
+                "table is the load-bearing gate for this surface."
+            )
         raise BackendUnsupportedError(
             "tl.record() is torch-only in backend v1. Use tl.trace(..., backend='jax') "
             "for the JAX full-save preview."
         )
+    # The flag alone never opens the gate: the spec must bind the fastlog
+    # implementing surface, and this entry only runs the torch Recorder —
+    # a foreign implementation cannot be silently substituted with it.
+    fastlog_implementation = require_capability_implementation(backend_spec, "fastlog")
+    if fastlog_implementation is not Recorder:
+        raise BackendUnsupportedError(
+            f"tl.record() cannot dispatch backend {backend_spec.name!r}: its "
+            "registered fastlog implementation is not the torch one-shot "
+            "Recorder, and backend v1 record() has no non-torch dispatch path."
+        )
     model = unwrap_compiled_model(model)
     if storage is not None and streaming is not None:
-        raise TypeError("Do not pass both `storage` and `streaming`.")
-    validate_postprocess(postprocess)
-    resolved_keep_op = _resolve_save_alias(save=save, keep_op=keep_op)
-    if keep_module is not MISSING:
-        warnings.warn(
-            "record(keep_module=...) is deprecated; use record(save=...) instead.",
-            DeprecationWarning,
-            stacklevel=2,
+        raise KeywordConflictError(
+            "Do not pass both `storage` and `streaming`",
+            code="storage_argument_conflict",
+            remedy="prefer storage=, or remove one of the two arguments",
         )
+    validate_postprocess(postprocess)
     input_args = _coerce_input_args(model, input_args)
+    # Fail fast on tensor variants the logging pipeline cannot handle (meta tensors have no
+    # storage, sparse layouts break copy/print/FLOPs paths, symbolic shapes break metadata).
+    # record() shares trace()'s decorated hot path, so it must enforce the SAME up-front guard
+    # instead of crashing deep in capture with an opaque torch error.
+    check_model_and_input_variants(model, input_args, input_kwargs)
     with Recorder(
         model,
-        save=resolved_keep_op,
-        keep_op=MISSING,
-        keep_module=keep_module,
+        save=save,
         default_op=default_op,
         default_module=default_module,
         history_size=history_size,

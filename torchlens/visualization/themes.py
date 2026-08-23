@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
+from .._errors import InvalidArgumentError
 from .node_spec import NodeSpec
 
 
@@ -130,8 +130,11 @@ def resolve_theme(theme: str, *, for_paper: bool = False) -> VisualizationTheme:
     resolved_name = "paper" if for_paper else theme
     if resolved_name not in THEME_PRESETS:
         supported = ", ".join(sorted(THEME_PRESETS))
-        raise ValueError(
-            f"Unsupported visualization theme {resolved_name!r}; choose one of {supported}."
+        raise InvalidArgumentError(
+            f"Unsupported visualization theme {resolved_name!r}; choose one of {supported}",
+            code="visualization_theme_invalid",
+            remedy=f"pass one of the supported themes ({supported})",
+            argument="theme",
         )
     return THEME_PRESETS[resolved_name]
 
@@ -241,38 +244,3 @@ def theme_edge_attrs(theme: VisualizationTheme, *, font_size: int | None = None)
     if font_size is not None:
         attrs["fontsize"] = str(font_size)
     return attrs
-
-
-def legend_lines(theme: VisualizationTheme) -> list[str]:
-    """Return human-readable legend lines for ``theme``.
-
-    Parameters
-    ----------
-    theme:
-        Resolved theme preset.
-
-    Returns
-    -------
-    list[str]
-        Legend rows.
-    """
-
-    return [f"{label}: {color}" for label, color in theme.legend_items]
-
-
-def semantic_class_attrs(node_kind: str) -> dict[str, Any]:
-    """Return semantic SVG/CSS attributes for a TorchLens node kind.
-
-    Parameters
-    ----------
-    node_kind:
-        Semantic node kind.
-
-    Returns
-    -------
-    dict[str, Any]
-        Attribute mapping for exporters.
-    """
-
-    safe_kind = node_kind.replace("_", "-")
-    return {"class": f"tl-node tl-node-{safe_kind}"}

@@ -39,7 +39,7 @@ class _ValidatorAppendModel(nn.Module):
 
 
 def test_validate_backward_on_stacked_trace_warns() -> None:
-    """Existing appended traces warn and are treated as authoritative."""
+    """Existing appended traces warn and do not report a false success."""
 
     model = _ValidatorAppendModel().eval()
     trace = tl.trace(
@@ -50,7 +50,7 @@ def test_validate_backward_on_stacked_trace_warns() -> None:
     trace.run(model, torch.randn(1, 3), replay=ReplayOptions(append=True))
 
     with pytest.warns(AppendStateValidationWarning, match="stacked appended trace"):
-        assert validate_backward_pass(trace, torch.randn(1, 3)) is True
+        assert validate_backward_pass(trace, torch.randn(1, 3)) is False
 
 
 def test_validate_backward_pass_fresh_capture_only_still_works() -> None:

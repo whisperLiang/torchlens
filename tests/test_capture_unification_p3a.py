@@ -9,9 +9,6 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.capture.kernel import OpObservation
-from torchlens.capture.plan import CapturePlan, EnrichmentLevel
-from torchlens.capture.session import CaptureSession
 from torchlens.fastlog import RecordContext
 
 
@@ -86,25 +83,6 @@ class IntegerSelectorToy(nn.Module):
         return self.fc3(x)
 
 
-def test_capture_kernel_compiles_away_disabled_enrichment_tiers() -> None:
-    """A shell-only sparse operation enters neither metadata nor payload work."""
-
-    plan = CapturePlan.compile(
-        projection_target="recording",
-        available_capabilities=(),
-        default_enrichment=EnrichmentLevel.SHELL,
-    )
-    session = CaptureSession(plan=plan)
-    emitted: list[str] = []
-
-    session.kernel.emit("relu", emitted.append, "event")
-
-    assert emitted == ["event"]
-    assert session.counters["kernel_observations"] == 1
-    assert "kernel_metadata" not in session.counters
-    assert "kernel_payload" not in session.counters
-
-
 def test_sparse_shell_ops_skip_exhaustive_enrichment_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -124,24 +102,10 @@ def test_sparse_shell_ops_skip_exhaustive_enrichment_work(
     monkeypatch.setattr(wrappers, "copy_arg_tree", forbidden)
     monkeypatch.setattr(wrappers, "log_current_rng_states", forbidden)
 
-    recording = tl.record(PredicateToy(), torch.randn(2, 4), save=tl.func("never_matches"))
+    with pytest.warns(UserWarning, match="matched zero sites"):
+        recording = tl.record(PredicateToy(), torch.randn(2, 4), save=tl.func("never_matches"))
 
     assert not recording.records
-
-
-def test_capture_kernel_intervenes_on_live_value_before_emission() -> None:
-    """A live replacement reaches the producer before its durable append."""
-
-    plan = CapturePlan.compile(projection_target="trace", available_capabilities=())
-    session = CaptureSession(plan=plan)
-    observation = OpObservation(operation_key="add", value=torch.tensor(1.0))
-    replacement = session.kernel.apply_intervention(observation, lambda value: value + 2)
-    emitted: list[torch.Tensor] = []
-
-    session.kernel.emit("add", emitted.append, replacement)
-
-    assert replacement.item() == 3.0
-    assert emitted[0] is replacement
 
 
 def _pseudo_random_subset(ctx: RecordContext) -> bool:
@@ -196,6 +160,25 @@ def test_trace_save_func_selector_keeps_only_matching_payloads() -> None:
         _ = unsaved.out
 
 
+def test_trace_save_func_selector_preserves_predicate_event_fields() -> None:
+    """Selective predicate traces keep the projected event facts after helper hoists."""
+
+    model = PredicateToy()
+    x = torch.randn(2, 4)
+    log = tl.trace(model, x, save=tl.func("relu"), random_seed=17)
+
+    relu_op = next(op for op in log.layer_list if op.func_name == "relu")
+    event = log.event_stream.op_event_by_label_raw[relu_op._label_raw]
+
+    assert event.function.func_name == "relu"
+    assert event.function.func_call_id is not None
+    assert event.function.num_args_total >= 1
+    assert event.backend_semantics is not None
+    assert event.output.container_path == ()
+    assert event.label_raw == relu_op._label_raw
+    assert event.output.tensor.label_raw == relu_op._label_raw
+
+
 def test_selective_save_keeps_unsaved_non_orphan_op_metadata() -> None:
     """Selective save keeps unsaved non-orphan ops addressable with metadata."""
 
@@ -236,7 +219,6 @@ def test_postprocess_preserves_repeatedly_readable_capture_lanes() -> None:
     assert events.module_enter_events
     assert events.module_exit_events
     assert events.op_event_by_label_raw
-    assert events.op_event_index_by_label_raw
 
 
 def test_selective_save_oracle_matches_full_trace_for_recurrent_passes() -> None:

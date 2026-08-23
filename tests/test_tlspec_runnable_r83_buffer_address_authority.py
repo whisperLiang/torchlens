@@ -275,6 +275,7 @@ def test_non_registered_constant_never_replays_a_silent_wrong_verified(
 
     result = _replay_or_refuse(model, x, tmp_path / "addr.tlspec")
     if result is None:
+        assert result is None
         return  # honest save-side refusal
 
     max_diff = (result.output - oracle).abs().max().item()

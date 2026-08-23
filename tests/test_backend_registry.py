@@ -5,13 +5,15 @@ from __future__ import annotations
 import ast
 import builtins
 import inspect
-from pathlib import Path
 import sys
 import types
-from typing import Any, Iterator, cast
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 import torch
+from _source_corpus import package_ast, package_files, package_source
 from torch import nn
 
 import torchlens as tl
@@ -22,19 +24,14 @@ from torchlens.backends import (
     BackendSpec,
     BackendUnsupportedError,
     CaptureBackend,
-    UnknownBackendError,
     SerializationPolicy,
+    UnknownBackendError,
     get_backend_spec,
     register_backend_spec,
     registered_backend_specs,
     resolve_backend_spec,
     unregister_backend_spec,
 )
-from torchlens.capture.trace import _capture_backend_from_registry
-from torchlens.backends.jax import capabilities as jax_capabilities
-from torchlens.backends.mlx import capabilities as mlx_capabilities
-from torchlens.backends.paddle import capabilities as paddle_capabilities
-from torchlens.backends.tinygrad import capabilities as tinygrad_capabilities
 from torchlens.backends.default_specs import (
     _contains_other_backend_tensor,
     _jax_can_handle,
@@ -43,8 +40,13 @@ from torchlens.backends.default_specs import (
     _tf_can_handle,
     _tinygrad_can_handle,
 )
+from torchlens.backends.jax import capabilities as jax_capabilities
+from torchlens.backends.mlx import capabilities as mlx_capabilities
+from torchlens.backends.paddle import capabilities as paddle_capabilities
 from torchlens.backends.registry import _CAPTURE_BACKEND_REQUIRED_ATTRIBUTES
 from torchlens.backends.tf import TFBackend
+from torchlens.backends.tinygrad import capabilities as tinygrad_capabilities
+from torchlens.capture.trace import _capture_backend_from_registry
 from torchlens.validation import check_metadata_invariants
 from torchlens.validation.invariants import MetadataInvariantError
 
@@ -965,7 +967,7 @@ def test_public_trace_dispatches_through_backend_spec() -> None:
     assert "resolved_spec.name" not in source
 
 
-@pytest.mark.slow
+@pytest.mark.smoke
 def test_public_backend_literal_branches_stay_in_registry_or_backends() -> None:
     """Public code has no new hard-coded backend literal branches."""
 
@@ -982,27 +984,31 @@ def test_public_backend_literal_branches_stay_in_registry_or_backends() -> None:
     backend_literals = {"torch", "mlx", "jax", "tinygrad", "paddle", "fake"}
     offenders: list[str] = []
 
-    for source_path in sorted((project_root / "torchlens").rglob("*.py")):
+    for source_path in package_files():
         if any(source_path.is_relative_to(allowed_dir) for allowed_dir in allowed_dirs):
             continue
         if source_path in allowed_files:
             continue
-        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
-        source = source_path.read_text(encoding="utf-8")
+        tree = package_ast(source_path)
+        source = package_source(source_path)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Compare):
-                continue
-            expression = ast.get_source_segment(source, node) or ""
-            if "backend" not in expression:
                 continue
             compared_literals = {
                 item.value
                 for item in [node.left, *node.comparators]
                 if isinstance(item, ast.Constant) and isinstance(item.value, str)
             }
-            if compared_literals & backend_literals:
-                relpath = source_path.relative_to(project_root)
-                offenders.append(f"{relpath}:{node.lineno}: {expression}")
+            # Same conjunction as always, cheap set filter first: the
+            # per-node get_source_segment scan is what pushed the whole
+            # sweep to ~18s and out of the smoke-tier budget.
+            if not (compared_literals & backend_literals):
+                continue
+            expression = ast.get_source_segment(source, node) or ""
+            if "backend" not in expression:
+                continue
+            relpath = source_path.relative_to(project_root)
+            offenders.append(f"{relpath}:{node.lineno}: {expression}")
 
     assert offenders == []
 
@@ -1072,6 +1078,15 @@ def test_fake_backend_trace_save_load_accessors_and_invariants(tmp_path: Path) -
     ("mutate", "match"),
     [
         (lambda trace: setattr(trace, "module_identity_mode", "torch_module"), "module_identity"),
+        # R74-1 killers for the three previously-unreferenced arms of
+        # _check_backend_identity_invariants: out-of-vocabulary param_source,
+        # a backend-capability violation matched on the arm's own message, and
+        # an empty Trace.backend.
+        (lambda trace: setattr(trace, "param_source", "not-a-param-source"), "param_source"),
+        (
+            lambda trace: setattr(trace, "module_identity_mode", "unsupported_identity_mode"),
+            "is not supported by backend",
+        ),
         (lambda trace: setattr(trace, "has_backward_pass", True), "has_backward_pass"),
         (lambda trace: trace.grad_fn_logs.__setitem__(1, object()), "grad_fn_logs"),
         (lambda trace: setattr(trace[0], "resolver_status", "lost"), "resolver_status"),
@@ -1093,6 +1108,25 @@ def test_fake_backend_invariant_corruptions_fail(
             check_metadata_invariants(trace)
     finally:
         unregister_backend_spec("fake")
+
+
+@pytest.mark.parametrize("bad_backend", ["", None])
+def test_backend_identity_invariant_rejects_non_string_backend(bad_backend: Any) -> None:
+    """The non-empty-string backend arm rejects '' and None directly (R74-1).
+
+    Through the public ``check_metadata_invariants`` entry an empty backend
+    already fails EARLIER, at contract selection (``UnknownBackendError``
+    from the registry lookup), so this arm is reachable only by direct call.
+    Pin the arm itself so a silent disarm (``if False:``) cannot survive.
+    """
+
+    from torchlens.validation.invariants import _check_backend_identity_invariants
+
+    class _BadBackendStub:
+        backend = bad_backend
+
+    with pytest.raises(MetadataInvariantError, match="non-empty string"):
+        _check_backend_identity_invariants(_BadBackendStub())
 
 
 def test_backend_none_ambiguity_is_deterministic() -> None:

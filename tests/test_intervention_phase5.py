@@ -8,7 +8,7 @@ import torchlens as tl
 from torchlens.errors import MetadataInvariantError
 from torchlens.fastlog import RecordContext
 from torchlens.intervention.types import ParentRef, TupleIndex
-from torchlens.utils.hashing import compute_graph_shape_hash
+from torchlens.utils.hashing import _hashable_path_component, compute_graph_shape_hash
 from torchlens.validation import check_metadata_invariants
 from torchlens.validation.invariants import check_func_call_id_invariant
 
@@ -314,3 +314,9 @@ def test__address_normalized_strips_pass_qualifiers() -> None:
         layer._address_normalized is None or ":" not in layer._address_normalized
         for layer in linear_layers
     )
+
+
+def test_hashable_path_component_plain_str_uses_value_not_bound_method() -> None:
+    """Plain string path components must hash by value rather than ``str.index``."""
+
+    assert _hashable_path_component("logits") == {"type": "str", "value": "'logits'"}

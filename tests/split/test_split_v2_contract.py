@@ -69,13 +69,13 @@ def test_model_profile_cache_is_user_scoped(monkeypatch: pytest.MonkeyPatch, tmp
     )
 
 
-def test_jax_custom_jvp_is_captured_as_region() -> None:
-    """Custom JVP forward calls use region replay metadata, not a false exact op."""
+def test_jax_custom_jvp_pure_primal_is_inlined() -> None:
+    """Pure custom-JVP primals inherit main's exact forward inlining policy."""
 
     jax = pytest.importorskip("jax")
     jnp = pytest.importorskip("jax.numpy")
     from torchlens.backends.jax.jaxpr import (
-        JaxRegionCapture,
+        JaxEquationCapture,
         derive_closed_jaxpr,
         flatten_dynamic_args,
         interpret_closed_jaxpr_with_inlining,
@@ -96,7 +96,7 @@ def test_jax_custom_jvp_is_captured_as_region() -> None:
     flat, _ = flatten_dynamic_args((value,))
     result = interpret_closed_jaxpr_with_inlining(closed, flat)
 
-    regions = [capture for capture in result.captures if isinstance(capture, JaxRegionCapture)]
-    assert regions
-    assert regions[0].primitive == "custom_jvp_call"
-    assert regions[0].unverified_reason == "custom_jvp_call_forward_region"
+    equations = [capture for capture in result.captures if isinstance(capture, JaxEquationCapture)]
+    assert equations
+    assert "custom_jvp_call" in result.inlined_call_primitives
+    assert all(capture.inlined for capture in equations)

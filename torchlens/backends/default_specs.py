@@ -2,26 +2,25 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Any, cast
 
-from packaging.version import InvalidVersion, Version
 import torch
+from packaging.version import InvalidVersion, Version
 from torch import nn
 
 from ._protocol import CaptureBackend
 from .registry import (
-    BackendCapabilities,
-    BackendMismatchError,
-    BackendSpec,
-    BackendUnsupportedError,
     JAX_TRACE_OPTIONS,
     MLX_TRACE_OPTIONS,
     PADDLE_TRACE_OPTIONS,
-    SerializationPolicy,
     TF_TRACE_OPTIONS,
     TINYGRAD_TRACE_OPTIONS,
     TORCH_TRACE_OPTIONS,
+    BackendCapabilities,
+    BackendMismatchError,
+    BackendSpec,
+    SerializationPolicy,
     register_backend_spec,
 )
 
@@ -346,7 +345,9 @@ def _is_paddle_object_hint(value: object) -> bool:
         getattr(value, "__module__", ""),
         getattr(type(value), "__module__", ""),
     )
-    return any(module_name == "paddle" or module_name.startswith("paddle.") for module_name in module_names)
+    return any(
+        module_name == "paddle" or module_name.startswith("paddle.") for module_name in module_names
+    )
 
 
 def _contains_tf_tensor(input_args: object, input_kwargs: object, tf: object) -> bool:
@@ -370,7 +371,7 @@ def _contains_tf_tensor(input_args: object, input_kwargs: object, tf: object) ->
     tensor_type = getattr(tf, "Tensor")
     variable_type = getattr(tf, "Variable")
     return any(
-        isinstance(leaf, tensor_type) or isinstance(leaf, variable_type)
+        isinstance(leaf, (tensor_type, variable_type))
         for leaf in (*_simple_leaves(input_args), *_simple_leaves(input_kwargs))
     )
 
@@ -446,9 +447,23 @@ def _tf_runtime_supported(tf: object, keras: object) -> bool:
     Returns
     -------
     bool
-        True for Keras 3 on TensorFlow >= 2.16.
+        True for the Keras-3 multi-backend surface (TF >= 2.16 ships it).
+
+    Notes
+    -----
+    r-b4 R26-6b: feature-probed, not version-parsed. The historical
+    ``Version(...) >= 2.16 and >= 3`` gate returned ``False`` on
+    ``InvalidVersion``, so an odd/custom build string silently made
+    ``backend="tf"`` unavailable. ``keras.ops`` ships only in Keras 3 and the
+    multi-backend selector ``keras.backend.backend`` is the exact surface the
+    TF preview consumes; a parseable version pair is still honored as a
+    fallback signal when the structural probe is inconclusive.
     """
 
+    if hasattr(keras, "ops") and callable(
+        getattr(getattr(keras, "backend", None), "backend", None)
+    ):
+        return True
     try:
         tf_version = Version(str(getattr(tf, "__version__", "0")))
         keras_version = Version(str(getattr(keras, "__version__", "0")))
@@ -513,13 +528,26 @@ def _has_saved_model_signatures(value: object) -> bool:
     return isinstance(signatures, Mapping) and bool(signatures)
 
 
-def _simple_leaves(value: object) -> tuple[object, ...]:
+def _simple_leaves(
+    value: object,
+    _depth: int = 0,
+    _in_progress: set[int] | None = None,
+) -> tuple[object, ...]:
     """Return leaves from simple Python containers.
+
+    Runs at backend RESOLUTION on the raw user input, so it is the first walker a
+    hostile/degenerate input tree reaches. Depth and cycles refuse typed through
+    the shared input-boundary guard (r-b4 R27-1) instead of dying in a raw
+    ``RecursionError`` (probe: ~350 user levels crossed the interpreter limit).
 
     Parameters
     ----------
     value:
         Candidate tree.
+    _depth:
+        Internal recursion depth (callers must not supply this).
+    _in_progress:
+        Internal path-scoped container-id set (callers must not supply this).
 
     Returns
     -------
@@ -527,10 +555,50 @@ def _simple_leaves(value: object) -> tuple[object, ...]:
         Flat leaves.
     """
 
-    if isinstance(value, dict):
-        return tuple(leaf for child in value.values() for leaf in _simple_leaves(child))
-    if isinstance(value, tuple | list):
-        return tuple(leaf for child in value for leaf in _simple_leaves(child))
+    if isinstance(value, dict | tuple | list):
+        from .._input_walk import (
+            INPUT_TREE_MAX_DEPTH,
+            raise_input_tree_cycle_refusal,
+            raise_input_tree_depth_refusal,
+            raise_input_tree_stack_refusal,
+        )
+
+        if _in_progress is None:
+            # Root entry: convert stack-budget exhaustion below the depth
+            # ceiling into the shared typed refusal (T11.4).
+            try:
+                return _simple_leaves(value, _depth, set())
+            except RecursionError as exc:
+                raise_input_tree_stack_refusal(exc)
+                raise  # unreachable: the refusal always raises (narrows the set type)
+        if _depth >= INPUT_TREE_MAX_DEPTH:
+            raise_input_tree_depth_refusal(depth=_depth)
+        value_id = id(value)
+        if value_id in _in_progress:
+            raise_input_tree_cycle_refusal(
+                kind="mapping" if isinstance(value, dict) else "sequence"
+            )
+        _in_progress.add(value_id)
+        try:
+            # CONCRETE access (R12 sibling sweep): ``value.values()`` /
+            # ``for child in value`` dispatch to overridable protocol methods,
+            # so a lying subclass view could hide or substitute the leaves that
+            # steer backend resolution -- the same forgery lane the boundary
+            # walkers refuse. Read the builtin storage slots directly, like
+            # ``iter_physical_sequence``/``dict.items`` do on the witness side.
+            if isinstance(value, dict):
+                children: Iterable[object] = dict.values(value)
+            else:
+                from .._input_walk import iter_physical_sequence
+
+                children = (child for _, child in iter_physical_sequence(value))
+            return tuple(
+                leaf
+                for child in children
+                for leaf in _simple_leaves(child, _depth + 1, _in_progress)
+            )
+        finally:
+            _in_progress.discard(value_id)
     return (value,)
 
 
@@ -551,6 +619,107 @@ def _torch_capture_trace(*args: Any, **kwargs: Any) -> Any:
     from ..user_funcs import _trace_torch_model
 
     return _trace_torch_model(*args, **kwargs)
+
+
+def _torch_interventions_implementation() -> object:
+    """Resolve the torch live-intervention implementing surface.
+
+    Returns
+    -------
+    object
+        The live hook applier the torch capture hot path invokes for
+        ``trace(intervene=...)`` sites.
+    """
+
+    from .torch.ops import apply_live_hooks_to_outputs
+
+    return apply_live_hooks_to_outputs
+
+
+def _tf_interventions_implementation() -> object:
+    """Resolve the TensorFlow static-label intervention implementing surface.
+
+    Returns
+    -------
+    object
+        The writable-layer normalizer the tf capture path dispatches for
+        ``trace(intervene=...)`` sites.
+    """
+
+    from .tf.interventions import normalize_tf_interventions
+
+    return normalize_tf_interventions
+
+
+def _torch_fastlog_implementation() -> object:
+    """Resolve the torch sparse-recording implementing surface.
+
+    Returns
+    -------
+    object
+        The ``Recorder`` class ``tl.record()`` actually runs.
+    """
+
+    from ..fastlog._recorder import Recorder
+
+    return Recorder
+
+
+def _torch_structure_only_implementation() -> object:
+    """Resolve the torch structure-only capture implementing surface.
+
+    Returns
+    -------
+    object
+        The escalated escape-belt installer the torch capture path enters
+        for ``trace(structure_only=True)`` sessions.
+    """
+
+    from .torch.structure_only_belt import structure_only_escape_belt
+
+    return structure_only_escape_belt
+
+
+def _torch_streaming_implementation() -> object:
+    """Resolve the torch streaming-save implementing surface.
+
+    Returns
+    -------
+    object
+        The disk storage backend behind ``storage=`` / ``streaming=`` saves.
+    """
+
+    from ..fastlog.storage_disk import DiskStorageBackend
+
+    return DiskStorageBackend
+
+
+def _torch_backward_capture_implementation() -> object:
+    """Resolve the torch backward-capture implementing surface.
+
+    Returns
+    -------
+    object
+        The torch backward capture module.
+    """
+
+    from .torch import backward
+
+    return backward
+
+
+def _torch_rng_replay_implementation() -> object:
+    """Resolve the torch RNG snapshot/replay implementing surface.
+
+    Returns
+    -------
+    object
+        The RNG snapshot entry on the torch capture adapter.
+    """
+
+    from .torch.backend import TorchBackend
+
+    return TorchBackend.snapshot_rng
 
 
 def _torch_capture_backend() -> CaptureBackend:
@@ -582,7 +751,9 @@ def _mlx_capture_trace(*args: Any, **kwargs: Any) -> Any:
     """
 
     from ..user_funcs import _trace_mlx_model_from_public_kwargs
+    from ._options import resolve_public_depth_alias
 
+    resolve_public_depth_alias(kwargs)
     return _trace_mlx_model_from_public_kwargs(*args, **kwargs)
 
 
@@ -600,8 +771,10 @@ def _jax_capture_trace(*args: Any, **kwargs: Any) -> Any:
         Captured trace.
     """
 
+    from ._options import resolve_public_depth_alias
     from .jax import JAXBackend
 
+    resolve_public_depth_alias(kwargs)
     return JAXBackend().capture_trace(*args, **kwargs)
 
 
@@ -619,9 +792,27 @@ def _tinygrad_capture_trace(*args: Any, **kwargs: Any) -> Any:
         Captured trace.
     """
 
+    from ._options import resolve_public_depth_alias
     from .tinygrad import TinygradBackend
 
+    resolve_public_depth_alias(kwargs)
     return TinygradBackend().capture_trace(*args, **kwargs)
+
+
+def _paddle_interventions_implementation() -> object:
+    """Resolve the Paddle live-intervention implementing surface.
+
+    Returns
+    -------
+    object
+        Runtime class the Paddle capture wrapper dispatches for
+        ``trace(intervene=...)`` / ``trace(halt=...)`` sites. Import-light:
+        the module defers the paddle import to apply time.
+    """
+
+    from .paddle.interventions import PaddleInterventionRuntime
+
+    return PaddleInterventionRuntime
 
 
 def _paddle_capture_trace(*args: Any, **kwargs: Any) -> Any:
@@ -638,8 +829,10 @@ def _paddle_capture_trace(*args: Any, **kwargs: Any) -> Any:
         Captured trace.
     """
 
+    from ._options import resolve_public_depth_alias
     from .paddle import PaddleBackend
 
+    resolve_public_depth_alias(kwargs)
     return PaddleBackend().capture_trace(*args, **kwargs)
 
 
@@ -657,8 +850,10 @@ def _tf_capture_trace(*args: Any, **kwargs: Any) -> Any:
         Captured trace.
     """
 
+    from ._options import resolve_public_depth_alias
     from .tf import TFBackend
 
+    resolve_public_depth_alias(kwargs)
     return TFBackend().capture_trace(*args, **kwargs)
 
 
@@ -679,24 +874,6 @@ def _torch_validate_entry(*args: Any, **kwargs: Any) -> bool:
     from ..user_funcs import _validate_forward_pass_torch
 
     return _validate_forward_pass_torch(*args, **kwargs)
-
-
-def _unsupported_validate_entry(*args: Any, **kwargs: Any) -> bool:
-    """Raise a canonical unsupported validation error.
-
-    Parameters
-    ----------
-    *args, **kwargs:
-        Public validation arguments, unused.
-
-    Returns
-    -------
-    bool
-        Never returns.
-    """
-
-    del args, kwargs
-    raise BackendUnsupportedError("This backend does not support replay validation yet.")
 
 
 def _jax_validate_entry(*args: Any, **kwargs: Any) -> bool:
@@ -794,24 +971,6 @@ def _torch_validate_trace(*args: Any, **kwargs: Any) -> Any:
     return validate_saved_outs(*args, **kwargs)
 
 
-def _unsupported_validate_trace(*args: Any, **kwargs: Any) -> bool:
-    """Raise a canonical unsupported trace-validation error.
-
-    Parameters
-    ----------
-    *args, **kwargs:
-        Trace validation arguments, unused.
-
-    Returns
-    -------
-    bool
-        Never returns.
-    """
-
-    del args, kwargs
-    raise BackendUnsupportedError("This backend does not support trace replay validation yet.")
-
-
 def _jax_validate_trace(*args: Any, **kwargs: Any) -> Any:
     """Dispatch to JAX trace replay validation.
 
@@ -848,6 +1007,59 @@ def _tinygrad_validate_trace(*args: Any, **kwargs: Any) -> Any:
     from .tinygrad import TinygradBackend
 
     return TinygradBackend().validate_trace(*args, **kwargs)
+
+
+def _mlx_validate_entry(*args: Any, **kwargs: Any) -> bool:
+    """Dispatch to MLX capture-then-validate.
+
+    Parameters
+    ----------
+    *args, **kwargs:
+        Public validation arguments.
+
+    Returns
+    -------
+    bool
+        Validation result.
+    """
+
+    from .mlx import MLXBackend
+
+    return MLXBackend().validate_entry(*args, **kwargs)
+
+
+def _mlx_validate_trace(*args: Any, **kwargs: Any) -> Any:
+    """Dispatch to MLX trace replay validation.
+
+    Parameters
+    ----------
+    *args, **kwargs:
+        Trace validation arguments.
+
+    Returns
+    -------
+    Any
+        Validation result.
+    """
+
+    from .mlx import MLXBackend
+
+    return MLXBackend().validate_trace(*args, **kwargs)
+
+
+def _mlx_interventions_implementation() -> object:
+    """Resolve the MLX static-label intervention implementing surface.
+
+    Returns
+    -------
+    object
+        The plan resolver the MLX capture path invokes for
+        ``trace(intervene=...)`` / ``trace(halt=...)`` sites.
+    """
+
+    from .mlx.interventions import resolve_mlx_intervention_plan
+
+    return resolve_mlx_intervention_plan
 
 
 def _paddle_validate_trace(*args: Any, **kwargs: Any) -> Any:
@@ -912,13 +1124,23 @@ def register_default_backend_specs() -> None:
                 rng_replay=True,
                 payload_materialization=True,
                 streaming=True,
+                structure_only_capture=True,
                 intermediate_derived_grads=False,
                 input_container_structure="full_spec",
                 output_container_structure="full_spec",
                 module_identity_modes=("torch_module",),
+                save_levels=("audit", "executable_with_callables", "portable", "runnable"),
                 trace_options=TORCH_TRACE_OPTIONS,
             ),
             capture_backend=_torch_capture_backend,
+            capability_implementations={
+                "backward_capture": _torch_backward_capture_implementation,
+                "fastlog": _torch_fastlog_implementation,
+                "interventions": _torch_interventions_implementation,
+                "rng_replay": _torch_rng_replay_implementation,
+                "streaming": _torch_streaming_implementation,
+                "structure_only_capture": _torch_structure_only_implementation,
+            },
             serialization_policy=SerializationPolicy(
                 payload_policy="full",
                 body_format="safetensors",
@@ -934,13 +1156,13 @@ def register_default_backend_specs() -> None:
             name="mlx",
             can_handle=_mlx_can_handle,
             capture_trace=_mlx_capture_trace,
-            validate_entry=_unsupported_validate_entry,
-            validate_trace=_unsupported_validate_trace,
+            validate_entry=_mlx_validate_entry,
+            validate_trace=_mlx_validate_trace,
             capabilities=BackendCapabilities(
                 backward_capture=False,
-                validation_replay=False,
+                validation_replay=True,
                 fastlog=False,
-                interventions=False,
+                interventions=True,
                 rng_replay=False,
                 payload_materialization=True,
                 streaming=False,
@@ -950,6 +1172,9 @@ def register_default_backend_specs() -> None:
                 module_identity_modes=("function_root", "object_module"),
                 trace_options=MLX_TRACE_OPTIONS,
             ),
+            capability_implementations={
+                "interventions": _mlx_interventions_implementation,
+            },
             serialization_policy=SerializationPolicy(
                 payload_policy="array_payloads",
                 body_format="safetensors",
@@ -1034,7 +1259,7 @@ def register_default_backend_specs() -> None:
                 backward_capture=False,
                 validation_replay=True,
                 fastlog=False,
-                interventions=False,
+                interventions=True,
                 rng_replay=False,
                 payload_materialization=True,
                 streaming=False,
@@ -1044,6 +1269,9 @@ def register_default_backend_specs() -> None:
                 module_identity_modes=("function_root", "object_module"),
                 trace_options=PADDLE_TRACE_OPTIONS,
             ),
+            capability_implementations={
+                "interventions": _paddle_interventions_implementation,
+            },
             serialization_policy=SerializationPolicy(
                 payload_policy="array_payloads",
                 body_format="safetensors",
@@ -1067,16 +1295,19 @@ def register_default_backend_specs() -> None:
                 backward_capture=False,
                 validation_replay=True,
                 fastlog=False,
-                interventions=False,
+                interventions=True,
                 rng_replay=False,
                 payload_materialization=True,
                 streaming=False,
-                intermediate_derived_grads=False,
+                intermediate_derived_grads=True,
                 input_container_structure="paths_only",
                 output_container_structure="paths_only",
                 module_identity_modes=("function_root", "object_module"),
                 trace_options=TF_TRACE_OPTIONS,
             ),
+            capability_implementations={
+                "interventions": _tf_interventions_implementation,
+            },
             serialization_policy=SerializationPolicy(
                 payload_policy="array_payloads",
                 body_format="safetensors",

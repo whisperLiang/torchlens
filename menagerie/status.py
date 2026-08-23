@@ -10,7 +10,7 @@ import re
 import sqlite3
 from collections import Counter
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence, cast
 
@@ -859,7 +859,7 @@ def _default_completeness_run_dir() -> Path:
         Default run directory.
     """
 
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return DEFAULT_COMPLETENESS_ROOT / timestamp
 
 

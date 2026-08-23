@@ -11,6 +11,7 @@ import importlib
 import inspect
 import itertools
 import textwrap
+import threading
 import warnings
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -27,8 +28,8 @@ from ..ir.container import (
     OutputPathComponent,
     TupleIndex,
 )
+from ..selection import _SelectionOperand
 from ..utils._callable_safety import FACET_RECIPE_MARKER_ATTR
-
 
 RecordScope = Literal["op", "module", "any"]
 RecipeFunc = Callable[[Any], Any]
@@ -181,7 +182,7 @@ class FacetCapabilityFlags:
     portable: bool = True
     reconstructed: bool = False
 
-    def intersect(self, other: "FacetCapabilityFlags") -> "FacetCapabilityFlags":
+    def intersect(self, other: FacetCapabilityFlags) -> FacetCapabilityFlags:
         """Return the weakest-link intersection of two flag sets.
 
         Parameters
@@ -342,7 +343,7 @@ class TransformPrimitive:
 
 
 @dataclass(frozen=True)
-class FacetSpec:
+class FacetSpec(_SelectionOperand):
     """Portable ABI for one facet's home and transform chain.
 
     Parameters
@@ -400,7 +401,7 @@ class FacetSpec:
         home_kind: HomeKind = "op",
         recipe_id: str | None = None,
         recipe_version: str | None = None,
-    ) -> "FacetSpec":
+    ) -> FacetSpec:
         """Create a spec anchored to a runtime home object.
 
         Parameters
@@ -442,7 +443,7 @@ class FacetSpec:
         *,
         recipe_id: str | None = None,
         recipe_version: str | None = None,
-    ) -> "FacetSpec":
+    ) -> FacetSpec:
         """Create a read-only computed facet spec.
 
         Parameters
@@ -469,19 +470,19 @@ class FacetSpec:
             home=value_func,
         )
 
-    def __getitem__(self, key: Any) -> "FacetSpec":
+    def __getitem__(self, key: Any) -> FacetSpec:
         """Append a ``__getitem__`` selection primitive."""
 
         return self._append(TransformPrimitive("getitem", (key,), capability_class="selection"))
 
-    def heads(self, n_heads: int, d_head: int) -> "FacetSpec":
+    def heads(self, n_heads: int, d_head: int) -> FacetSpec:
         """Append a projection-to-heads reshape primitive."""
 
         return self._append(
             TransformPrimitive("heads", (n_heads, d_head), capability_class="bijective_view")
         )
 
-    def split(self, sections: int, dim: int = -1) -> tuple["FacetSpec", ...]:
+    def split(self, sections: int, dim: int = -1) -> tuple[FacetSpec, ...]:
         """Return specs for equal sections along a dimension."""
 
         return tuple(
@@ -491,19 +492,19 @@ class FacetSpec:
             for index in range(sections)
         )
 
-    def reshape(self, *shape: int) -> "FacetSpec":
+    def reshape(self, *shape: int) -> FacetSpec:
         """Append a reshape primitive."""
 
         return self._append(TransformPrimitive("reshape", shape, capability_class="bijective_view"))
 
-    def transpose(self, dim0: int, dim1: int) -> "FacetSpec":
+    def transpose(self, dim0: int, dim1: int) -> FacetSpec:
         """Append a transpose primitive."""
 
         return self._append(
             TransformPrimitive("transpose", (dim0, dim1), capability_class="bijective_view")
         )
 
-    def select(self, dim: int, index: int, *, aliasing: bool = False) -> "FacetSpec":
+    def select(self, dim: int, index: int, *, aliasing: bool = False) -> FacetSpec:
         """Append a dimension selection primitive."""
 
         capability: CapabilityClass = "aliasing_selection" if aliasing else "selection"
@@ -581,6 +582,13 @@ class FacetSpec:
         _copy_scatter_value(target, edited_slice, mode=mode)
         return updated
 
+    def __selection__(self) -> object:
+        """Lift this facet's write region as an ACT selection term."""
+
+        from ..selection import _selection_from_facet
+
+        return _selection_from_facet(self)
+
     def write_mask(self) -> torch.Tensor:
         """Return a boolean mask of home positions written by this facet.
 
@@ -605,7 +613,7 @@ class FacetSpec:
             )
         return mask
 
-    def _append(self, primitive: TransformPrimitive) -> "FacetSpec":
+    def _append(self, primitive: TransformPrimitive) -> FacetSpec:
         """Return a copy with one additional primitive."""
 
         transforms = (*self.transforms, primitive)
@@ -822,6 +830,18 @@ class MissingFacetError(KeyError):
         self.reason = reason
         super().__init__(self._message())
 
+    def __reduce__(self) -> tuple[type[MissingFacetError], tuple[FacetKey, AbsenceReason]]:
+        """Rebuild from ``(name, reason)`` — the strict constructor's signature.
+
+        The default ``Exception.__reduce__`` replays ``cls(*args)`` with the
+        one formatted message string, so pickle and deepcopy both died with
+        ``TypeError: missing 1 required positional argument: 'reason'``,
+        losing the structured payload (r3 b1-fable R64 finding 2 — the same
+        defect class as the cfdce77b strict-constructor sweep).
+        """
+
+        return (type(self), (self.name, self.reason))
+
     def _message(self) -> str:
         """Return an actionable missing-facet message."""
 
@@ -951,7 +971,7 @@ class Facet:
 class AttentionHeadView:
     """Scoped accessor for one attention head within a parent facet view."""
 
-    def __init__(self, parent: "FacetView", head_index: int) -> None:
+    def __init__(self, parent: FacetView, head_index: int) -> None:
         """Initialize a per-head attention view.
 
         Parameters
@@ -1136,7 +1156,7 @@ class FacetView(Mapping[FacetKey, Any]):
         menu: dict[FacetKey, FacetMenuItem] = {
             key: FacetMenuItem(status="available_now", recipe=None) for key in self._structural
         }
-        facet_tiers: dict[FacetKey, tuple[int, int]] = {key: (-1, -1) for key in self._structural}
+        facet_tiers: dict[FacetKey, tuple[int, int]] = dict.fromkeys(self._structural, (-1, -1))
         for recipe in sorted(self._recipes, key=lambda item: _recipe_sort_key(item, self._record)):
             raw_contribution = recipe.func(self._record)
             contribution = _normalize_contribution(raw_contribution)
@@ -1215,6 +1235,12 @@ _REGISTRY: builtins.list[_RegisteredRecipe] = []
 _BUILTIN_REGISTRY: tuple[_RegisteredRecipe, ...] = ()
 _REGISTRY_VERSION = 0
 _RECIPE_COUNTER = itertools.count()
+
+#: Serializes registry mutation (append/reset + version bump) against
+#: ``snapshot()``'s (recipes, version) read (r5 b2-sol R54): unlocked, a
+#: thread switch between either pair yielded new-recipes/old-version or
+#: old-recipes/new-version, defeating provenance identity.
+_REGISTRY_LOCK = threading.Lock()
 _CONTEXT_RECIPES: contextvars.ContextVar[tuple[_RegisteredRecipe, ...]] = contextvars.ContextVar(
     "torchlens_facets_recipes", default=()
 )
@@ -1241,9 +1267,6 @@ _TRANSFORMERLENS_ALIAS_TO_NATIVE = {
     "hook_resid_pre": "resid_pre",
     "hook_resid_mid": "resid_mid",
     "hook_resid_post": "resid_post",
-}
-_NATIVE_TO_TRANSFORMERLENS_ALIAS = {
-    native: alias for alias, native in _TRANSFORMERLENS_ALIAS_TO_NATIVE.items()
 }
 
 
@@ -1343,23 +1366,24 @@ def register(
                     setattr(_entry_point, FACET_RECIPE_MARKER_ATTR, True)
                 except (AttributeError, TypeError):
                     pass
-        _REGISTRY.append(
-            _RegisteredRecipe(
-                public=FacetRecipe(
-                    recipe_name=func.__name__,
-                    class_names=class_names,
-                    qualnames=qualnames,
-                    has_predicate=predicate is not None,
-                    target_scope=target_scope,
-                    source="user",
-                ),
-                func=func,
-                predicate=predicate,
-                declared_facets=declared,
-                order=next(_RECIPE_COUNTER),
+        with _REGISTRY_LOCK:
+            _REGISTRY.append(
+                _RegisteredRecipe(
+                    public=FacetRecipe(
+                        recipe_name=func.__name__,
+                        class_names=class_names,
+                        qualnames=qualnames,
+                        has_predicate=predicate is not None,
+                        target_scope=target_scope,
+                        source="user",
+                    ),
+                    func=func,
+                    predicate=predicate,
+                    declared_facets=declared,
+                    order=next(_RECIPE_COUNTER),
+                )
             )
-        )
-        _REGISTRY_VERSION += 1
+            _REGISTRY_VERSION += 1
         return func
 
     return decorator
@@ -1369,8 +1393,9 @@ def reset() -> None:
     """Reset the process registry to the built-in recipe set."""
 
     global _REGISTRY_VERSION
-    _REGISTRY[:] = _BUILTIN_REGISTRY
-    _REGISTRY_VERSION += 1
+    with _REGISTRY_LOCK:
+        _REGISTRY[:] = _BUILTIN_REGISTRY
+        _REGISTRY_VERSION += 1
 
 
 @contextlib.contextmanager
@@ -1461,7 +1486,13 @@ def snapshot(extra_recipes: Sequence[RecipeFunc] | None = None) -> FacetRegistry
     """
 
     extra_entries = tuple(_entry_for_recipe(func) for func in (extra_recipes or ()))
-    recipes = (*_REGISTRY, *_CONTEXT_RECIPES.get(), *extra_entries)
+    with _REGISTRY_LOCK:
+        # Atomic (recipes, version) pair: an unlocked read could pair new
+        # recipes with an old version (or vice versa) across a register()/
+        # reset() in another thread.
+        registry_entries = tuple(_REGISTRY)
+        registry_version = _REGISTRY_VERSION
+    recipes = (*registry_entries, *_CONTEXT_RECIPES.get(), *extra_entries)
     digest = hashlib.sha256()
     for recipe in recipes:
         digest.update(recipe.public.recipe_name.encode("utf-8"))
@@ -1471,7 +1502,7 @@ def snapshot(extra_recipes: Sequence[RecipeFunc] | None = None) -> FacetRegistry
         digest.update(recipe.public.target_scope.encode("utf-8"))
         digest.update(recipe.public.source.encode("utf-8"))
     return FacetRegistrySnapshot(
-        version=_REGISTRY_VERSION,
+        version=registry_version,
         provenance_id=digest.hexdigest()[:16],
         recipes=tuple(recipes),
     )
@@ -1600,9 +1631,7 @@ def _recipe_matches(recipe: _RegisteredRecipe, record: Any) -> bool:
         return False
     if recipe.public.qualnames and class_qualname not in recipe.public.qualnames:
         return False
-    if recipe.predicate is not None and not recipe.predicate(record):
-        return False
-    return True
+    return not (recipe.predicate is not None and not recipe.predicate(record))
 
 
 def _weakest_capability_class(
@@ -1852,31 +1881,6 @@ def _class_filter_matches(class_names: tuple[str, ...], class_name: str | None) 
     if not class_names:
         return False
     return builtins.any(fnmatch(name, class_name) for name in class_names)
-
-
-def _tl_alias_for_native(name: FacetKey) -> str | None:
-    """Return the TransformerLens alias for a declared native facet key.
-
-    Parameters
-    ----------
-    name:
-        Native facet key.
-
-    Returns
-    -------
-    str | None
-        Alias key when enabled and known.
-    """
-
-    if not _TRANSFORMERLENS_ALIASES_ENABLED or not isinstance(name, str):
-        return None
-    return _NATIVE_TO_TRANSFORMERLENS_ALIAS.get(name)
-
-
-def _clear_registry_for_tests() -> None:
-    """Clear all registered recipes for isolated tests."""
-
-    _REGISTRY.clear()
 
 
 __all__ = [

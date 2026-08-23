@@ -14,7 +14,6 @@ from ._errors import (
 )
 from ._types import ReceptiveFieldDirection
 
-
 if TYPE_CHECKING:
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace

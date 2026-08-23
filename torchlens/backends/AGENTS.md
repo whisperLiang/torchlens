@@ -23,8 +23,8 @@ options that the registry does not declare.
 
 ## Tier 2: Shared CaptureBackend Protocol
 
-`CaptureBackend` is the lower-level adapter used by the shared eager orchestrator in
-`capture/trace.py`. A backend should expose `BackendSpec.capture_backend` only when it
+`CaptureBackend` (defined in `backends/_protocol.py`) is the lower-level adapter used by
+the shared eager orchestrator in `capture/trace.py`. A backend should expose `BackendSpec.capture_backend` only when it
 implements the full protocol: input normalization, source logging, RNG hooks, inference
 context, output extraction, intervention hooks, cleanup hooks, and producer-policy hooks.
 
@@ -34,3 +34,23 @@ backend is static, callback-based, or otherwise owns its full capture loop, leav
 
 Torch currently implements both tiers. Preview engines may implement only Tier 1 until
 they can satisfy the shared orchestration protocol without torch assumptions.
+
+## Preview backends
+
+Five technical-preview backends live beside `torch/`, each Tier-1 standalone
+(`capture_backend=None`) with per-directory implementation guides:
+
+- `tf/` - eager op-callback live capture plus a static FuncGraph path
+  (`tf/AGENTS.md`).
+- `jax/` - jaxpr-first static capture with Equinox/Flax-NNX module helpers
+  (`jax/AGENTS.md`).
+- `mlx/` - eager wrapper capture with live per-op replay validation
+  (`mlx/AGENTS.md`).
+- `paddle/` - eager dygraph wrapper capture with live intervene=/halt=
+  (`paddle/AGENTS.md`).
+- `tinygrad/` - UOp-snapshot capture of an eager forward (`tinygrad/AGENTS.md`).
+
+Shared preview plumbing: `_finalize.py` / `_recurrence.py` (single-pass trace
+finalization and the neutral recurrence grouper), `_options.py` (per-backend
+kwarg and trace-option refusal policies), and `_selective_save.py` /
+`_validation_shared.py`.

@@ -5,8 +5,8 @@ Covers:
       silently corrupt the outer Trace.
     - Instrumented functorch / vmap / grad transforms warn at the boundary, while raw
       uninstrumented transform regions retain the one-shot warning.
-    - pyproject pins the documented ``torch>=2.1`` compatibility floor
-      and advertises Python 3.13 support.
+    - pyproject pins the documented ``torch>=2.1`` compatibility floor, advertises
+      Python 3.13 support, and never advertises a Python below the real import floor.
 """
 
 from __future__ import annotations
@@ -277,3 +277,32 @@ def test_pyproject_advertises_python_313_classifier() -> None:
 
     classifiers = data["project"]["classifiers"]
     assert "Programming Language :: Python :: 3.13" in classifiers
+
+
+def test_pyproject_python_floor_matches_the_real_import_floor() -> None:
+    """``requires-python`` must not advertise a Python that cannot import torchlens.
+
+    ``@dataclass(slots=True)`` is Python 3.10+ and the package uses it widely, so
+    ``import torchlens`` cannot succeed on 3.9. The declared floor and the classifier
+    list must both say 3.10.
+    """
+    from pathlib import Path
+
+    from packaging.specifiers import SpecifierSet
+    from packaging.version import Version
+
+    try:
+        import tomllib
+    except ImportError:
+        import tomli as tomllib  # type: ignore[import-not-found]
+
+    pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    with pyproject_path.open("rb") as f:
+        data = tomllib.load(f)
+
+    specifier = SpecifierSet(data["project"]["requires-python"])
+    assert not specifier.contains(Version("3.9")), (
+        "requires-python still admits 3.9, where dataclass(slots=True) does not exist"
+    )
+    assert specifier.contains(Version("3.10")), "3.10 is the supported floor"
+    assert "Programming Language :: Python :: 3.9" not in data["project"]["classifiers"]

@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from v2_helpers import split_request
-
 from pathlib import Path
 from typing import Any
 
 import pytest
+from v2_helpers import split_request
 
 import torchlens as tl
 from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
@@ -64,9 +63,7 @@ def test_tinygrad_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
         split_request("after:where", backend="tinygrad", dynamic_batch=(1, 4)),
     )
 
-    replay_x = tinygrad.Tensor(
-        [[-1.0, 2.0, 3.0], [4.0, -5.0, 6.0], [7.0, -8.0, 9.0]]
-    ).realize()
+    replay_x = tinygrad.Tensor([[-1.0, 2.0, 3.0], [4.0, -5.0, 6.0], [7.0, -8.0, 9.0]]).realize()
     boundary = runtime.run_prefix(replay_x)
     runtime.validate_boundary(boundary)
     assert _flatten_numbers(runtime.run_suffix(boundary).tolist()) == pytest.approx(

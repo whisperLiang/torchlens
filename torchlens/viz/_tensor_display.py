@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 import torch
 
+from ..utils._multipass_access import is_multipass_layer
+
 TensorShowMethod = Literal["auto", "heatmap", "channels", "rgb", "hist"]
 HeatmapSigns = Literal["positive", "negative", "absolute_value", "all"]
 
@@ -26,15 +28,25 @@ def _tensor_from_log(log_entry: Any) -> torch.Tensor | None:
 
     if isinstance(log_entry, torch.Tensor):
         return log_entry
+    if is_multipass_layer(log_entry):
+        # H4: a recurrent aggregate Layer has no single display tensor. Reading
+        # ``transformed_out`` would leak the multi-pass ValueError tripwire, and
+        # silently picking pass 1 (the old dead ``ops[1]`` fallback, which never
+        # ran because line-1 detonated first, and which mis-tested VALUE membership
+        # on the tuple-like OpAccessor anyway) would be dishonest. Raise a typed,
+        # documented "select a pass" error mirroring feature_map_evolution.
+        layer_label = getattr(log_entry, "layer_label", "?")
+        num_passes = int(getattr(log_entry, "num_passes", 0) or 0)
+        raise ValueError(
+            f"Layer {layer_label!r} is recurrent ({num_passes} passes); show() needs a "
+            f"single pass. Select one, for example log['{layer_label}:1'].show()."
+        )
     out = getattr(log_entry, "transformed_out", None)
     if isinstance(out, torch.Tensor):
         return out
     out = getattr(log_entry, "out", None)
     if isinstance(out, torch.Tensor):
         return out
-    ops = getattr(log_entry, "ops", None)
-    if isinstance(ops, dict) and 1 in ops:
-        return _tensor_from_log(ops[1])
     return None
 
 
@@ -231,7 +243,14 @@ def show_tensor(
         return fig
 
     if resolved_method == "channels":
-        channel_data = data if data.ndim == 3 else data.reshape(1, *tuple(_to_2d(data).shape))
+        if data.ndim >= 3:
+            # Slice leading batch-like dims (matching _to_2d semantics) down to
+            # one (C, H, W) stack; a bare reshape cannot drop those elements.
+            channel_data = data
+            while channel_data.ndim > 3:
+                channel_data = channel_data[0]
+        else:
+            channel_data = data.reshape(1, *tuple(_to_2d(data).shape))
         channels = min(int(channel_data.shape[0]), 8)
         if channels == 0:
             fig, ax = plt.subplots()

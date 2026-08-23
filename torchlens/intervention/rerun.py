@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import time
 import warnings
-from typing import TYPE_CHECKING, Any, Callable
+from collections import Counter
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
 
-from .._deprecations import MISSING, MissingType
 from .._chunking import iter_chunked_inputs, normalize_chunk_paths, plan_chunks
+from .._deprecations import MISSING, MissingType
+from .._errors import InvalidArgumentError
 from .._input_coerce import _coerce_input_args
 from .._trace_state import TraceState
 from ..options import ReplayOptions, merge_replay_options
@@ -33,7 +36,7 @@ if TYPE_CHECKING:
 
 
 def run(
-    log: "Trace",
+    log: Trace,
     model: nn.Module,
     x: Any = None,
     *,
@@ -43,7 +46,7 @@ def run(
     strict: bool | MissingType = MISSING,
     replay: ReplayOptions | None = None,
     output_transform: Any | None = None,
-) -> "Trace":
+) -> Trace:
     """Full-forward run with the active intervention spec from ``log``.
 
     Re-executes ``model`` through TorchLens decorated wrappers with the current
@@ -110,7 +113,7 @@ def run(
     _warn_if_direct_writes_will_be_overlaid(log)
 
     spec = getattr(log, "_intervention_spec", None)
-    hook_plan = normalize_hooks_from_spec(spec)
+    hook_plan = _assign_unique_plan_ids(normalize_hooks_from_spec(spec))
     started_at = time.monotonic()
     old_hash = getattr(log, "graph_shape_hash", None)
     old_raw_hash = getattr(log, "_raw_event_shape_hash", None)
@@ -125,6 +128,7 @@ def run(
             output_transform=output_transform,
         )
     new_log.facet_registry_snapshot = getattr(log, "facet_registry_snapshot", None)
+    hook_fire_count, unfired_hook_ids = _reconcile_rerun_hook_fires(new_log, hook_plan)
 
     divergence_count = _validate_rerun_result(new_log, log, strict=replay_options.strict)
     fast_refresh = False
@@ -147,6 +151,8 @@ def run(
         strict=replay_options.strict,
         divergence_count=divergence_count,
         fast_refresh=fast_refresh,
+        hook_fire_count=hook_fire_count,
+        unfired_hook_count=len(unfired_hook_ids),
     )
     log.state = TraceState.RERUN_PROPAGATED
     log.last_run = {
@@ -158,6 +164,8 @@ def run(
         "strict": replay_options.strict,
         "append": False,
         "hooks": len(hook_plan),
+        "hooks_fired": hook_fire_count,
+        "hooks_unfired": len(unfired_hook_ids),
         "divergence_count": divergence_count,
         "fast_refresh": fast_refresh,
         "old_graph_shape_hash": old_hash,
@@ -172,7 +180,7 @@ def run(
 
 
 def _chunked_rerun(
-    log: "Trace",
+    log: Trace,
     model: nn.Module,
     x: Any,
     *,
@@ -180,7 +188,7 @@ def _chunked_rerun(
     chunk_paths: Any | None,
     strict: bool,
     output_transform: Any | None,
-) -> "Trace":
+) -> Trace:
     """Rerun a trace by splitting one model-ready input tree into chunks.
 
     Parameters
@@ -271,12 +279,12 @@ def _unwrap_model_for_chunk_plan(model: nn.Module) -> nn.Module:
 
 
 def _append_rerun(
-    log: "Trace",
+    log: Trace,
     model: nn.Module,
     x: Any,
     *,
     strict: bool,
-) -> "Trace":
+) -> Trace:
     """Append a compatible fresh rerun chunk into ``log``.
 
     Parameters
@@ -306,7 +314,7 @@ def _append_rerun(
     _warn_if_batch_sensitive_train_modules(model)
 
     spec = getattr(log, "_intervention_spec", None)
-    hook_plan = normalize_hooks_from_spec(spec)
+    hook_plan = _assign_unique_plan_ids(normalize_hooks_from_spec(spec))
     _validate_append_hook_plan(log, hook_plan)
     started_at = time.monotonic()
     old_hash = getattr(log, "graph_shape_hash", None)
@@ -321,6 +329,7 @@ def _append_rerun(
             output_transform=getattr(log, "_output_transform", None),
         )
     new_log.facet_registry_snapshot = getattr(log, "facet_registry_snapshot", None)
+    hook_fire_count, unfired_hook_ids = _reconcile_rerun_hook_fires(new_log, hook_plan)
 
     _validate_append_candidate(log, new_log, hook_plan=hook_plan)
     log.append_state_from(new_log)
@@ -342,6 +351,8 @@ def _append_rerun(
         "append": True,
         "strict": False,
         "hooks": len(hook_plan),
+        "hooks_fired": hook_fire_count,
+        "hooks_unfired": len(unfired_hook_ids),
         "chunk_size": chunk_size,
         "total_batch_size": total_batch_size,
         "append_sequence_id": log._append_sequence_id,
@@ -355,6 +366,8 @@ def _append_rerun(
         started_at=started_at,
         duration_s=duration_s,
         hook_count=len(hook_plan),
+        hook_fire_count=hook_fire_count,
+        unfired_hook_count=len(unfired_hook_ids),
         chunk_size=chunk_size,
         total_batch_size=total_batch_size,
         append_sequence_id=log._append_sequence_id,
@@ -364,7 +377,7 @@ def _append_rerun(
     return log
 
 
-def _is_streaming_append_active(log: "Trace") -> bool:
+def _is_streaming_append_active(log: Trace) -> bool:
     """Return whether append would need to update active streaming state.
 
     Parameters
@@ -383,7 +396,7 @@ def _is_streaming_append_active(log: "Trace") -> bool:
     )
 
 
-def _streaming_append_error_message(log: "Trace") -> str:
+def _streaming_append_error_message(log: Trace) -> str:
     """Build a descriptive streaming append rejection message.
 
     Parameters
@@ -410,7 +423,7 @@ def _streaming_append_error_message(log: "Trace") -> str:
     )
 
 
-def _preflight_append(log: "Trace", model: nn.Module) -> None:
+def _preflight_append(log: Trace, model: nn.Module) -> None:
     """Validate append preconditions that do not require a fresh capture.
 
     Parameters
@@ -460,8 +473,8 @@ def _warn_if_batch_sensitive_train_modules(model: nn.Module) -> None:
 
 
 def _validate_append_hook_plan(
-    log: "Trace",
-    hook_plan: list["NormalizedHookEntry"],
+    log: Trace,
+    hook_plan: list[NormalizedHookEntry],
 ) -> None:
     """Reject append when active helpers are not explicitly batch-independent.
 
@@ -499,7 +512,7 @@ def _validate_append_hook_plan(
             )
 
 
-def _warn_unknown_append_helper_once(log: "Trace", helper_name: str) -> None:
+def _warn_unknown_append_helper_once(log: Trace, helper_name: str) -> None:
     """Emit a one-time warning for helpers without append-safety metadata.
 
     Parameters
@@ -524,10 +537,10 @@ def _warn_unknown_append_helper_once(log: "Trace", helper_name: str) -> None:
 
 
 def _validate_append_candidate(
-    old_log: "Trace",
-    new_log: "Trace",
+    old_log: Trace,
+    new_log: Trace,
     *,
-    hook_plan: list["NormalizedHookEntry"],
+    hook_plan: list[NormalizedHookEntry],
 ) -> None:
     """Validate a freshly captured append candidate against an existing log.
 
@@ -691,7 +704,7 @@ def _validate_append_grad_pair(
         _validate_append_tensor_pair(old_layer, new_layer, field_name)
 
 
-def _hook_plan_supports_append_grads(hook_plan: list["NormalizedHookEntry"]) -> bool:
+def _hook_plan_supports_append_grads(hook_plan: list[NormalizedHookEntry]) -> bool:
     """Return whether all active helpers opted into grad append.
 
     Parameters
@@ -743,7 +756,7 @@ def _batch_size_from_input(x: Any) -> int | None:
     return None
 
 
-def _first_saved_batch_size(log: "Trace") -> int | None:
+def _first_saved_batch_size(log: Trace) -> int | None:
     """Return the first saved out's leading dimension.
 
     Parameters
@@ -764,7 +777,7 @@ def _first_saved_batch_size(log: "Trace") -> int | None:
     return None
 
 
-def _warn_if_direct_writes_will_be_overlaid(log: "Trace") -> None:
+def _warn_if_direct_writes_will_be_overlaid(log: Trace) -> None:
     """Warn once that rerun propagation overlays direct writes.
 
     Parameters
@@ -786,7 +799,7 @@ def _warn_if_direct_writes_will_be_overlaid(log: "Trace") -> None:
     setattr(log, "_warned_direct_write_propagation", True)
 
 
-def _preflight(log: "Trace", model: nn.Module, x: Any) -> None:
+def _preflight(log: Trace, model: nn.Module, x: Any) -> None:
     """Validate rerun preconditions before any fresh capture starts.
 
     Parameters
@@ -805,9 +818,11 @@ def _preflight(log: "Trace", model: nn.Module, x: Any) -> None:
     """
 
     if x is None:
-        raise ValueError(
-            "run(..., x=None) cannot recover the original input. "
-            "Pass the forward input explicitly as log.run(model, x)."
+        raise InvalidArgumentError(
+            "run(..., x=None) cannot recover the original input",
+            code="run_input_missing",
+            remedy="pass the forward input explicitly as log.run(model, x)",
+            argument="x",
         )
     from ..user_funcs import _reject_opaque_wrappers
 
@@ -834,14 +849,14 @@ def _unwrap_compiled_model(model: nn.Module) -> nn.Module:
 
 
 def _capture_with_active_spec(
-    log: "Trace",
+    log: Trace,
     model: nn.Module,
     x: Any,
     *,
     intervention_spec: Any | None,
-    hook_plan: list["NormalizedHookEntry"],
+    hook_plan: list[NormalizedHookEntry],
     output_transform: Any | None,
-) -> "Trace":
+) -> Trace:
     """Build a fresh rerun ``Trace`` with active hooks installed.
 
     Parameters
@@ -866,7 +881,7 @@ def _capture_with_active_spec(
         Fresh log built off to the side.
     """
 
-    from ..user_funcs import (  # type: ignore[attr-defined]
+    from ..user_funcs import (
         _run_model_and_save_specified_outs,
         _unwrap_data_parallel,
         check_model_and_input_variants,
@@ -906,6 +921,10 @@ def _capture_with_active_spec(
         normalized_hook_plan=hook_plan,
         verbose=getattr(log, "verbose", False),
         backward_ready=getattr(log, "backward_ready", False),
+        # An intervention rerun retains payloads like any capture; inherit the
+        # source log's configured budget rather than silently rebudgeting at
+        # the default.
+        save_budget=getattr(log, "save_budget", "auto"),
         output_transform=output_transform,
         save_raw_output=getattr(log, "save_raw_output", "small"),
         save_predicate=save_predicate,
@@ -919,7 +938,7 @@ def _capture_with_active_spec(
     )
 
 
-def _validate_rerun_result(new_log: "Trace", old_log: "Trace", *, strict: bool) -> int:
+def _validate_rerun_result(new_log: Trace, old_log: Trace, *, strict: bool) -> int:
     """Validate a fresh rerun log before atomic state replacement.
 
     Parameters
@@ -958,7 +977,7 @@ def _validate_rerun_result(new_log: "Trace", old_log: "Trace", *, strict: bool) 
     return 1
 
 
-def _rerun_save_scope(log: "Trace") -> tuple[str | list[int | str] | None, Any | None, int, str]:
+def _rerun_save_scope(log: Trace) -> tuple[str | list[int | str] | None, Any | None, int, str]:
     """Return capture save settings that mirror the original trace scope.
 
     Parameters
@@ -981,7 +1000,10 @@ def _rerun_save_scope(log: "Trace") -> tuple[str | list[int | str] | None, Any |
                 "all",
                 keep_op,
                 int(getattr(options, "lookback", 0)),
-                str(getattr(options, "lookback_payload_policy", "metadata_only")),
+                # R47-11: direct attribute access, not getattr-with-default -- a
+                # RecordingOptions field rename must raise here, never silently
+                # fall back to "metadata_only".
+                str(options.lookback_payload_policy),
             )
     if getattr(log, "num_saved_ops", 0) == 0:
         return None, None, 0, "metadata_only"
@@ -1018,17 +1040,19 @@ def _make_raw_index_save_predicate(selected_indices: set[int]) -> Callable[[Any]
 
 
 def _build_ledger_record(
-    log: "Trace",
+    log: Trace,
     *,
     started_at: float,
     old_hash: str | None,
     new_hash: str | None,
     old_raw_hash: str | None,
     new_raw_hash: str | None,
-    hook_plan: list["NormalizedHookEntry"],
+    hook_plan: list[NormalizedHookEntry],
     strict: bool,
     divergence_count: int,
     fast_refresh: bool,
+    hook_fire_count: int,
+    unfired_hook_count: int,
 ) -> dict[str, Any]:
     """Create the append-only operation history record for a rerun.
 
@@ -1054,6 +1078,10 @@ def _build_ledger_record(
         Number of divergence events detected.
     fast_refresh:
         Whether the rerun refreshed existing graph containers in place.
+    hook_fire_count:
+        Number of live hook firings observed on the candidate capture.
+    unfired_hook_count:
+        Number of planned hook entries that fired nowhere.
 
     Returns
     -------
@@ -1068,6 +1096,8 @@ def _build_ledger_record(
         "strict": strict,
         "append": False,
         "hook_count": len(hook_plan),
+        "hook_fire_count": hook_fire_count,
+        "unfired_hook_count": unfired_hook_count,
         "divergence_count": divergence_count,
         "fast_refresh": fast_refresh,
         "old_graph_shape_hash": old_hash,
@@ -1077,8 +1107,124 @@ def _build_ledger_record(
     }
 
 
+def _assign_unique_plan_ids(hook_plan: list[NormalizedHookEntry]) -> list[NormalizedHookEntry]:
+    """Give every planned entry a unique, stable accounting identifier.
+
+    The fallback identifier ladder (plan id -> hook id -> helper name ->
+    callable qualname) can COLLIDE across entries with different targets, and
+    the fire audit compares ``Counter`` values keyed by that string: two
+    fires of one entry hid the other entry's total miss (``fired=2``,
+    ``unfired=()``), so a partially-applied plan claimed every entry fired
+    (incomplete f9f5b140). Colliding identifiers get a stable occurrence
+    suffix stamped into ``metadata["plan_id"]``, which live execution writes
+    into each ``FireResult``, so the audit is per-entry; unique identifiers
+    are preserved verbatim.
+    """
+
+    import dataclasses as _dataclasses
+
+    counts = Counter(_hook_plan_identifier(entry) for entry in hook_plan)
+    seen: Counter[str] = Counter()
+    unique_plan: list[NormalizedHookEntry] = []
+    for entry in hook_plan:
+        base = _hook_plan_identifier(entry)
+        if counts[base] > 1:
+            metadata = dict(entry.metadata)
+            metadata["plan_id"] = f"{base}#occ{seen[base]}"
+            metadata["plan_id_base"] = base
+            entry = _dataclasses.replace(entry, metadata=metadata)
+        seen[base] += 1
+        unique_plan.append(entry)
+    return unique_plan
+
+
+def _hook_plan_identifier(entry: NormalizedHookEntry) -> str:
+    """Return the identifier written into a live ``FireResult``.
+
+    Parameters
+    ----------
+    entry:
+        Planned normalized hook entry.
+
+    Returns
+    -------
+    str
+        Plan id using the same fallback order as live execution.
+    """
+
+    if "plan_id" in entry.metadata:
+        return str(entry.metadata["plan_id"])
+    if "hook_id" in entry.metadata:
+        return str(entry.metadata["hook_id"])
+    if entry.helper_spec is not None:
+        return str(entry.helper_spec.name)
+    return str(getattr(entry.normalized_callable, "__qualname__", "user_hook"))
+
+
+def _reconcile_rerun_hook_fires(
+    new_log: Trace,
+    hook_plan: list[NormalizedHookEntry],
+) -> tuple[int, tuple[str, ...]]:
+    """Warn when sticky rerun hook entries fire nowhere on new inputs.
+
+    Parameters
+    ----------
+    new_log:
+        Candidate rerun trace carrying live ``FireResult`` records.
+    hook_plan:
+        Hook entries planned for the rerun.
+
+    Returns
+    -------
+    tuple[int, tuple[str, ...]]
+        Total observed hook fires and the plan identifiers of entries with no
+        corresponding fire, retaining multiplicity for duplicate plans.
+    """
+
+    plan_ids = [_hook_plan_identifier(entry) for entry in hook_plan]
+    base_by_id = {
+        plan_id: str(entry.metadata.get("plan_id_base", plan_id))
+        for entry, plan_id in zip(hook_plan, plan_ids)
+    }
+    planned = Counter(plan_ids)
+    fired: Counter[str] = Counter()
+    # FireRecord-only ops (no FireResult) carry no plan id, only the helper
+    # NAME: those fires go into a separate base-name pool consumed AFTER the
+    # exact per-entry accounting, capped at the shortfall, so the legacy
+    # channel keeps its multiplicity semantics without letting one entry's
+    # FireResult-channel fires hide another entry's miss.
+    fallback_fired: Counter[str] = Counter()
+    for op in getattr(new_log, "layer_list", ()):
+        fire_results = tuple(getattr(op, "fire_results", None) or ())
+        if fire_results:
+            fired.update(str(result.plan_id) for result in fire_results)
+            continue
+        fallback_fired.update(
+            str(record.helper_name)
+            for record in (getattr(op, "interventions", None) or ())
+            if getattr(record, "direction", None) == "forward"
+            and getattr(record, "helper_name", None) is not None
+        )
+    total_fired = sum(fired.values()) + sum(fallback_fired.values())
+    unfired: list[str] = []
+    for plan_id, planned_count in planned.items():
+        shortfall = max(0, planned_count - fired[plan_id])
+        base = base_by_id[plan_id]
+        consumed = min(shortfall, fallback_fired[base])
+        fallback_fired[base] -= consumed
+        unfired.extend([plan_id] * (shortfall - consumed))
+    if unfired:
+        warnings.warn(
+            "Rerun hook plan entries fired at zero sites on the new inputs: "
+            f"{unfired!r}. The rerun completed, but those interventions were no-ops.",
+            UserWarning,
+            stacklevel=3,
+        )
+    return total_fired, tuple(unfired)
+
+
 def rerun(
-    log: "Trace",
+    log: Trace,
     model: nn.Module,
     x: Any = None,
     *,
@@ -1088,7 +1234,7 @@ def rerun(
     strict: bool | MissingType = MISSING,
     replay: ReplayOptions | None = None,
     output_transform: Any | None = None,
-) -> "Trace":
+) -> Trace:
     """Deprecated alias for :func:`run`.
 
     Parameters

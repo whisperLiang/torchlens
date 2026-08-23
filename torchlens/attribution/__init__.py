@@ -14,6 +14,8 @@ from torchlens.attribution._layer import (
     layer_conductance,
     layer_integrated_gradients,
 )
+from torchlens.attribution._occlusion import occlusion
+from torchlens.attribution._viz import overlay
 
 __all__ = [
     "AttributionError",
@@ -24,6 +26,8 @@ __all__ = [
     "layer_attribution",
     "layer_conductance",
     "layer_integrated_gradients",
+    "occlusion",
+    "overlay",
     "saliency",
     "smoothgrad",
 ]

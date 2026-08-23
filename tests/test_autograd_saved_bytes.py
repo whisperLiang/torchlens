@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import pytest
 import torch
@@ -76,7 +75,7 @@ def _single_layer_log_for_pass(trace: Trace, pass_log: Op) -> Layer:
     return trace.layer_logs[pass_log.layer_label]
 
 
-def _sum_layer_autograd_bytes(trace: Trace) -> Optional[int]:
+def _sum_layer_autograd_bytes(trace: Trace) -> int | None:
     """Sum non-None layer-level autograd byte values."""
     values = [
         layer.autograd_memory

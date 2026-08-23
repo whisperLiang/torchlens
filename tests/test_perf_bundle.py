@@ -33,7 +33,6 @@ import torchlens
 from torchlens.postprocess import control_flow
 from torchlens.utils import introspection
 
-
 # ---------------------------------------------------------------------------
 # Test models
 # ---------------------------------------------------------------------------
@@ -163,6 +162,32 @@ class TestColOffsetCache:
         result = introspection._get_col_offset(self._make_frame_at_offset(code, 9999))
         assert result is None
 
+    def test_stale_id_cache_entry_is_rebuilt_for_new_code_object(self) -> None:
+        """A reused ``id(code)`` must not serve another code object's offset map."""
+
+        def first() -> int:
+            return 1
+
+        def second() -> int:
+            return 2
+
+        fresh_map = {0: 456}
+        introspection._COL_OFFSET_CACHE[id(second.__code__)] = (first.__code__, {0: 123})
+
+        with mock.patch.object(
+            introspection,
+            "_build_col_offset_map",
+            autospec=True,
+            return_value=fresh_map,
+        ) as wrapped:
+            rebuilt = introspection._get_or_build_col_offset_map(second.__code__)
+
+        assert rebuilt == fresh_map
+        assert wrapped.call_count == 1
+        cached_code, cached_map = introspection._COL_OFFSET_CACHE[id(second.__code__)]
+        assert cached_code is second.__code__
+        assert cached_map == fresh_map
+
 
 # ---------------------------------------------------------------------------
 # Fix 2 -- branch attribution fast-skip
@@ -241,7 +266,7 @@ class TestBranchFastSkip:
                 return x
 
         # The postprocess pipeline already guards a zero-layer log
-        # (``len(self._raw_layer_labels_list) == 0``) and returns early.
+        # (``len(self._raw_graph_ws.raw_layer_labels_list) == 0``) and returns early.
         # We still exercise the path to confirm the fast-skip change does
         # not introduce a regression upstream of that guard.
         model = _EmptyForward()
@@ -311,7 +336,15 @@ class TestCudaProbeGating:
         reason="CUDA-only sanity check; skipped without a real CUDA device.",
     )
     def test_cuda_path_still_runs_when_available(self) -> None:
-        """On a CUDA host, ``empty_cache`` must still be invoked."""
+        """On a CUDA host, a CUDA-touching capture still flushes the allocator.
+
+        R36-3 keyed the ``empty_cache`` sites on the CAPTURE having touched
+        CUDA, not on process-wide availability. Both directions are pinned on
+        real hardware: a CUDA-homed capture flushes at least once, and a
+        pure-CPU capture on the same CUDA host must NOT flush the caller's
+        allocator (the exact regression R36-3 fixed -- a CPU-only trace inside
+        a GPU training loop dropping the warm allocator arena).
+        """
 
         from torchlens.utils import tensor_utils
 
@@ -320,11 +353,26 @@ class TestCudaProbeGating:
         with mock.patch.object(
             torch.cuda, "empty_cache", wraps=torch.cuda.empty_cache
         ) as wrapped_empty:
+            model = _NoConditionalModel().to("cuda")
+            x = torch.randn(2, 8, device="cuda")
+            torchlens.trace(model, x)
+
+        assert wrapped_empty.call_count >= 1, (
+            "a CUDA-touching capture on a CUDA host must clear the allocator "
+            f"cache; observed {wrapped_empty.call_count} empty_cache calls."
+        )
+
+        with mock.patch.object(
+            torch.cuda, "empty_cache", wraps=torch.cuda.empty_cache
+        ) as wrapped_empty:
             model = _NoConditionalModel()
             x = torch.randn(2, 8)
             torchlens.trace(model, x)
 
-        assert wrapped_empty.call_count >= 1
+        assert wrapped_empty.call_count == 0, (
+            "a pure-CPU capture on a CUDA host must not flush the caller's "
+            f"allocator (R36-3); observed {wrapped_empty.call_count} calls."
+        )
 
 
 # ---------------------------------------------------------------------------

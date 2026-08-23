@@ -11,6 +11,7 @@ import numpy as np
 
 from ... import _state
 from ...validation.status import ValidationReplaySource, ValidationReplayStatus
+from .._validation_shared import float_replay_tolerances, ops_by_label as _ops_by_label
 from .op_callback_capture import TFOpCapture
 
 TFOpClass = Literal[
@@ -185,9 +186,7 @@ def validate_tf_trace(trace: Any, *, validate_metadata: bool = True) -> Validati
         "loaded" if getattr(trace, "_loaded_from_bundle", False) else "live"
     )
     if _annotation_only_validation_passes(result):
-        annotation_count = sum(
-            op_class == "annotation" for op_class in result.classes.values()
-        )
+        annotation_count = sum(op_class == "annotation" for op_class in result.classes.values())
         status = ValidationReplayStatus.result(
             passed=True,
             backend="tf",
@@ -240,8 +239,10 @@ def _annotation_only_validation_passes(result: TFValidationResult) -> bool:
     if result.counts.pure_unverified_node_count or result.counts.effect_region_node_count:
         return False
     classes = tuple(result.classes.values())
-    return bool(classes) and "annotation" in classes and all(
-        op_class in {"source", "annotation"} for op_class in classes
+    return (
+        bool(classes)
+        and "annotation" in classes
+        and all(op_class in {"source", "annotation"} for op_class in classes)
     )
 
 
@@ -402,6 +403,22 @@ def _propagate_control_region_classes(
         Mutates ``classes`` in place.
     """
 
+    def _raw_parent_labels(op: Any) -> tuple[str, ...]:
+        """Return the op's parents resolved to raw label space.
+
+        Classes are keyed by RAW labels while grouped edges hold final
+        pass-qualified labels, so parents resolve through the op index back
+        to their raw capture identity before region membership tests.
+        """
+
+        resolved: list[str] = []
+        for parent in getattr(op, "parents", ()):
+            parent_text = str(parent)
+            parent_op = ops_by_label.get(parent_text)
+            parent_raw = getattr(parent_op, "_label_raw", None) if parent_op is not None else None
+            resolved.append(parent_raw if isinstance(parent_raw, str) else parent_text)
+        return tuple(resolved)
+
     changed = True
     while changed:
         changed = False
@@ -413,7 +430,7 @@ def _propagate_control_region_classes(
                 continue
             if classes.get(label) in {"source", "control-region"}:
                 continue
-            if any(parent in region_labels for parent in getattr(op, "parents", ())):
+            if any(parent in region_labels for parent in _raw_parent_labels(op)):
                 classes[label] = "control-region"
                 changed = True
 
@@ -530,7 +547,16 @@ def _validate_self_consistency(
         op = ops_by_label.get(capture.label_raw)
         if op is None:
             continue
-        graph_parents = set(getattr(op, "parents", ()))
+        # Capture records speak RAW label space. Recurrence grouping rewrites
+        # graph edges to final pass-qualified labels, so parents are resolved
+        # back to raw space before the conservation comparison; an
+        # unresolvable parent keeps its literal label and fails closed.
+        graph_parents: set[str] = set()
+        for parent in getattr(op, "parents", ()):
+            parent_text = str(parent)
+            parent_op = ops_by_label.get(parent_text)
+            parent_raw = getattr(parent_op, "_label_raw", None) if parent_op is not None else None
+            graph_parents.add(parent_raw if isinstance(parent_raw, str) else parent_text)
         if expected_graph_parents != graph_parents:
             failures.append(
                 f"graph_parent_edges_not_conserved:{capture.label_raw}:"
@@ -688,15 +714,11 @@ def _replay_raw_op(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
         ),
         "Tanh": lambda item, args: _raw(item).Tanh(x=args[0]),
         "Transpose": lambda item, args: _raw(item).Transpose(x=args[0], perm=args[1]),
-        "ExpandDims": lambda item, args: _raw(item).ExpandDims(
-            input=args[0], axis=args[1]
-        ),
+        "ExpandDims": lambda item, args: _raw(item).ExpandDims(input=args[0], axis=args[1]),
         "Split": lambda item, args: _raw(item).Split(
             axis=args[0], value=args[1], num_split=int(item.attrs["num_split"])
         ),
-        "Tile": lambda item, args: _raw(item).Tile(
-            input=args[0], multiples=args[1]
-        ),
+        "Tile": lambda item, args: _raw(item).Tile(input=args[0], multiples=args[1]),
     }
     replay = dispatch.get(capture.op_type)
     if replay is None:
@@ -1138,8 +1160,19 @@ def _payloads_close(left: Any, right: Any) -> bool:
         return False
     if np.issubdtype(left_array.dtype, np.bool_) or np.issubdtype(left_array.dtype, np.integer):
         return bool(np.array_equal(left_array, right_array))
-    if np.issubdtype(left_array.dtype, np.floating):
-        return bool(np.allclose(left_array, right_array, rtol=1e-5, atol=1e-6))
+    if np.issubdtype(left_array.dtype, np.floating) or np.issubdtype(
+        left_array.dtype,
+        np.complexfloating,
+    ):
+        # equal_nan matches the jax/mlx/paddle sibling oracles and torch's
+        # tensor_nanequal doctrine: an identical NaN pattern is agreement,
+        # NaN-vs-number still fails elementwise. Omitting it false-FAILED
+        # every legitimately NaN-bearing TF payload. Complex payloads take
+        # the same component-eps band as mlx/jax (R17 consistency sweep:
+        # bit-exact complex here false-failed legitimate replay jitter);
+        # ``np.finfo`` reports component precision for complex dtypes.
+        rtol, atol = float_replay_tolerances(np.finfo(left_array.dtype))
+        return bool(np.allclose(left_array, right_array, rtol=rtol, atol=atol, equal_nan=True))
     return bool(np.array_equal(left_array, right_array))
 
 
@@ -1199,32 +1232,6 @@ def _saved_payload(op: Any) -> Any:
     if not bool(getattr(op, "has_saved_activation", False)):
         raise ValueError(f"op has no saved activation: {getattr(op, 'label', op)!r}")
     return getattr(op, "out")
-
-
-def _ops_by_label(trace: Any) -> dict[str, Any]:
-    """Return materialized trace operations keyed by labels.
-
-    Parameters
-    ----------
-    trace
-        Materialized TensorFlow trace.
-
-    Returns
-    -------
-    dict[str, Any]
-        Operations keyed by raw, layer, and public labels.
-    """
-
-    result: dict[str, Any] = {}
-    for op in getattr(trace, "layer_list", ()):
-        for label in (
-            getattr(op, "_label_raw", None),
-            getattr(op, "layer_label", None),
-            getattr(op, "label", None),
-        ):
-            if isinstance(label, str):
-                result[label] = op
-    return result
 
 
 def _captures_by_label(trace: Any) -> dict[str, TFOpCapture]:

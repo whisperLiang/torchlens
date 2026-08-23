@@ -131,15 +131,15 @@ def _tamper_output_container_type(
     with open(bundle / "metadata.pkl", "rb") as handle:
         obj = pickle.load(handle)
     child = ContainerSpec(kind="literal", literal_value=["/bin/sh", "-c", f"touch {sentinel}"])
-    tampered = dict(
-        kind="namedtuple",
-        type_module=type_module,
-        type_qualname=type_qualname,
-        fields=("args",),
-        length=None,
-        keys=(),
-        child_specs=((NamedField("args"), child),),
-    )
+    tampered = {
+        "kind": "namedtuple",
+        "type_module": type_module,
+        "type_qualname": type_qualname,
+        "fields": ("args",),
+        "length": None,
+        "keys": (),
+        "child_specs": ((NamedField("args"), child),),
+    }
     for spec in _find_container_specs(obj):
         for key, value in tampered.items():
             object.__setattr__(spec, key, value)
@@ -196,6 +196,38 @@ def test_resolver_denies_loaded_non_container_type_without_construction() -> Non
     )
     with pytest.raises(ContainerReconstructionError):
         _resolve_container_type(spec)
+
+
+def test_container_tripwire_is_a_registered_typed_refusal() -> None:
+    """The default-deny tripwire is public, typed, and structured (R64-3).
+
+    It escapes users raw from the documented ``Op.multi_output_type``
+    property, so it must resolve from ``torchlens.errors``, carry the
+    contract code ``container_spec_inadmissible`` plus a remedy, and keep
+    its ``ValueError`` lineage for the runnable run wrapper. Pickle and
+    deepcopy round-trips keep the structured payload (the R64 pickle-family
+    defect class).
+    """
+
+    import copy
+
+    from torchlens import errors as tl_errors
+
+    assert tl_errors.ContainerReconstructionError is ContainerReconstructionError
+
+    spec = ContainerSpec(
+        kind="namedtuple",
+        fields=("args",),
+        type_module="subprocess",
+        type_qualname="Popen",
+    )
+    with pytest.raises(tl_errors.ContainerReconstructionError) as captured:
+        _resolve_container_type(spec)
+    assert isinstance(captured.value, ValueError)
+    assert captured.value.fields["code"] == "container_spec_inadmissible"
+    assert captured.value.fields["remedy"]
+    for clone in (pickle.loads(pickle.dumps(captured.value)), copy.deepcopy(captured.value)):
+        assert clone.fields == captured.value.fields
 
 
 def test_resolver_never_imports_an_unloaded_attacker_module() -> None:
@@ -366,6 +398,5 @@ def test_os_module_not_leaked_by_container_resolver() -> None:
             ContainerSpec(kind="namedtuple", type_module="os", type_qualname="getcwd")
         )
         is None
-        or True
-    )  # getcwd is not a type -> graceful None; never executed
+    )  # getcwd is not a type -> graceful None
     assert not os.path.exists("/tmp/__r10_should_never_exist__")

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import time
+import weakref
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Literal
+from typing import Any, Literal
 
 import torch
 
@@ -16,12 +18,17 @@ from . import _state
 class TapRecord:
     """One observed tensor value.
 
+    ``site_label`` is a resolved property, not a stored field: the tap fires
+    during capture when only the internal raw label (``relu_1_3_raw``) exists,
+    but users index the trace by the public label (``relu_1_2``). The record
+    keeps the raw label plus a weak reference to the capturing trace and resolves
+    the public label lazily through the trace's raw-to-final label map, so
+    ``record.site_label`` returns a label that actually indexes the public trace.
+
     Parameters
     ----------
     value:
         Detached tensor snapshot.
-    site_label:
-        Capture-time site label.
     span_names:
         Active span names when the tap fired.
     timestamp:
@@ -35,12 +42,35 @@ class TapRecord:
     """
 
     value: torch.Tensor
-    site_label: str | None
     span_names: tuple[str, ...]
     timestamp: float
     direction: Literal["forward", "backward"]
     grad_kind: Literal["grad_input", "grad_output"] | None = None
     backward_call_index: int | None = None
+    _raw_site_label: str | None = None
+    #: L6 stage 3: per-site selection mask stored when the tap was
+    #: created from a resolved selection (session-time disclosure).
+    selection_mask: torch.Tensor | None = None
+    _trace_ref: Callable[[], Any] | None = field(default=None, compare=False, repr=False)
+
+    @property
+    def site_label(self) -> str | None:
+        """Return the public capture-site label resolved from the raw label.
+
+        Falls back to the raw label when the capturing trace is unavailable
+        (e.g. never bound, or already garbage collected) or exposes no raw-to-
+        final label map (which is the case for backward grad_fn labels).
+        """
+
+        raw = self._raw_site_label
+        if raw is None:
+            return None
+        resolver = self._trace_ref
+        trace = resolver() if resolver is not None else None
+        mapping = getattr(trace, "_raw_to_final_layer_labels", None)
+        if isinstance(mapping, Mapping):
+            return mapping.get(raw, raw)
+        return raw
 
 
 @dataclass
@@ -77,17 +107,45 @@ class TapObserver:
 
         with _state.pause_logging():
             value = out.detach().clone()
-        span_names = tuple(str(span["name"]) for span in _state._active_record_spans)
+        span_names = _active_span_names("forward")
         self.records.append(
             TapRecord(
                 value=value,
-                site_label=_hook_layer_label(hook.layer_log),
                 span_names=span_names,
                 timestamp=time.monotonic(),
                 direction="forward",
+                _raw_site_label=_hook_layer_label(hook.layer_log),
+                _trace_ref=_active_trace_ref(),
+                selection_mask=self._selection_mask_for(hook.layer_log, value),
             )
         )
         return out
+
+    def _selection_mask_for(self, layer_log: Any, value: torch.Tensor) -> torch.Tensor | None:
+        """Return the stored per-site mask when the tap site is a resolved selection.
+
+        The Selection contributes the SITE SET; each firing record stores the
+        matching site's mask (fresh materialization). Non-selection sites and
+        unmatched/mismatched shapes store no mask.
+        """
+
+        site = self.site
+        entries = getattr(site, "__selection__", None) and getattr(site, "_entries", None)
+        if not entries:
+            return None
+        layer_label = None
+        if layer_log is not None:
+            layer_label = (
+                layer_log.get("layer_label")
+                if hasattr(layer_log, "get")
+                else getattr(layer_log, "layer_label", None)
+            )
+        for entry in entries:
+            if entry.kind == "ACT" and entry.site_key[0] == layer_label:
+                mask = entry.mask
+                if tuple(mask.shape) == tuple(value.shape):
+                    return mask
+        return None
 
     def record_backward(
         self,
@@ -127,21 +185,31 @@ class TapObserver:
             return
         with _state.pause_logging():
             value = grad_value.detach().clone()
-        span_names = tuple(str(span["name"]) for span in _state._active_record_spans)
+        span_names = _active_span_names("backward")
         self.records.append(
             TapRecord(
                 value=value,
-                site_label=getattr(grad_fn_handle, "label", None),
                 span_names=span_names,
                 timestamp=time.monotonic(),
                 direction="backward",
                 grad_kind=grad_kind,
                 backward_call_index=call_index,
+                _raw_site_label=getattr(grad_fn_handle, "label", None),
+                _trace_ref=_active_trace_ref(),
             )
         )
 
-    def values(self) -> list[torch.Tensor]:
+    def values(self, masked: bool = False) -> list[torch.Tensor]:
         """Return observed out values.
+
+        Parameters
+        ----------
+        masked:
+            ``False`` (default): the FULL snapshots, exactly the shipped
+            behavior. ``True``: each record's stored selection mask is applied
+            and fresh masked copies (the selected elements, flat) are
+            returned; records without a stored mask return the full snapshot
+            clone. Callers may not override the stored mask in v1.
 
         Returns
         -------
@@ -149,7 +217,15 @@ class TapObserver:
             Detached out snapshots in observation order.
         """
 
-        return [record.value for record in self.records]
+        if not masked:
+            return [record.value for record in self.records]
+        results: list[torch.Tensor] = []
+        for record in self.records:
+            if record.selection_mask is None:
+                results.append(record.value.clone())
+            else:
+                results.append(torch.masked_select(record.value, record.selection_mask))
+        return results
 
     def clear(self) -> None:
         """Clear previously observed records.
@@ -188,6 +264,40 @@ def _first_tensor_grad(
         if isinstance(grad, torch.Tensor):
             return grad, grad_kind
     return None, None
+
+
+def _active_trace_ref() -> Callable[[], Any] | None:
+    """Return a weak reference to the currently capturing trace, if any.
+
+    A weak reference avoids keeping the whole trace graph alive through observer
+    records; the record's ``site_label`` property falls back to the raw label if
+    the trace has since been collected.
+    """
+
+    trace = _state._active_trace
+    if trace is None:
+        return None
+    try:
+        return weakref.ref(trace)
+    except TypeError:
+        return None
+
+
+def _active_span_names(direction: Literal["forward", "backward"]) -> tuple[str, ...]:
+    """Return active span names whose declared direction includes ``direction``.
+
+    A span opened with ``direction="forward"`` scopes only forward observation and
+    a ``direction="backward"`` span only backward observation; a ``"both"`` span
+    scopes both. Enforcing this here stops a forward-only span from tagging a
+    backward tap record (and vice versa), which previously happened because every
+    active span was attached regardless of its declared direction.
+    """
+
+    return tuple(
+        str(span["name"])
+        for span in _state._active_record_spans.get()
+        if span.get("direction") in (direction, "both")
+    )
 
 
 def _hook_layer_label(layer_log: Any) -> str | None:
@@ -265,7 +375,7 @@ def span(
         "start": time.monotonic(),
         "end": None,
     }
-    _state._active_record_spans.append(span_record)
+    _state._active_record_spans.set(_state._active_record_spans.get() + (span_record,))
     trace = _state._active_trace
     if trace is not None:
         trace.observer_spans.append(span_record)
@@ -273,10 +383,13 @@ def span(
         yield span_record
     finally:
         span_record["end"] = time.monotonic()
-        if _state._active_record_spans and _state._active_record_spans[-1] is span_record:
-            _state._active_record_spans.pop()
-        elif span_record in _state._active_record_spans:
-            _state._active_record_spans.remove(span_record)
+        active = _state._active_record_spans.get()
+        if active and active[-1] is span_record:
+            _state._active_record_spans.set(active[:-1])
+        elif span_record in active:
+            _state._active_record_spans.set(
+                tuple(record for record in active if record is not span_record)
+            )
 
 
 @contextmanager
@@ -316,7 +429,7 @@ def active_span_records() -> list[dict[str, Any]]:
         Active span records.
     """
 
-    return list(_state._active_record_spans)
+    return list(_state._active_record_spans.get())
 
 
 __all__ = ["TapObserver", "TapRecord", "active_span_records", "record_span", "span", "tap"]

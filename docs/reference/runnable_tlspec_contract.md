@@ -212,7 +212,7 @@ fields.
 |---|---|
 | `capability` | `sparse_recorded_taken_path_v2` |
 | `backend` | string; only `torch` executes in rung 1 |
-| `call_recipe` | `non_tensor_args_tensor_slots_and_context_v2` |
+| `call_recipe` | `non_tensor_args_tensor_slots_context_and_obligations_v3` |
 | `callable_ref_schema` | integer `1` |
 | `state_binding` | `module_path_role_v1` |
 | `input_binding` | `model_site_io_role_v1` |
@@ -399,6 +399,10 @@ structure, re-derives, and requires exact discharge.
   `buf[:] = ...`) keeps the pointer and stays trusted (honest journaled/tracked mutation is
   untouched), while only a pointer-swapping `.data=`/`set_` rebind ceils; a same-storage rebind
   that re-strides to an input layout keeps the pointer and is caught instead by the layout net.
+  A rebind captured as an explicit `data` op (round-31 M6) re-labels the receiver with the op's
+  own fresh storage pin, so for THAT path the ceiling is carried by the storage-rebind ancestry
+  barrier instead: the swapping op's label taints layout/witness rooting exactly like an
+  unattributed break (r28 reconcile), while a pointer-preserving rebind keeps clean ancestry.
   For an honest activation the keeper is the tensor's own current storage (zero net retention,
   released with the tensor -- it never pins the activation graph, so sparse `save=` memory is
   untouched); an intervention replacement re-pins to its OWN storage while the session token
@@ -673,6 +677,14 @@ input-conditional at run time, not a static descriptor flag.
 
 ## 5. Producer preflight and no-payload invariant
 
+The producer can emit a runnable descriptor only when the source capture recorded replay-template
+metadata. Users must capture with
+`capture=tl.options.CaptureOptions(intervention_ready=True)` (or flat
+`intervention_ready=True`) before `tl.save(..., level="runnable")`. This capture flag is required
+even when the user intends replay without an intervention. Omitting it produces a typed
+`RunnablePreflightError` with the `MISSING_CALLABLE_REF` finding; analysis saves remain available,
+but save-time code never guesses or reconstructs missing call templates.
+
 ### Load-side structural integer anchoring (r53 free_1)
 
 The load-side parser anchors every persisted descriptor integer that can scale an allocation to the
@@ -805,7 +817,16 @@ under-declaration.
    semantic-typed scalar VALUE leaves (section 2, reason `semantic_scalar_type`), and
    undeclared per-instance container state REFUSE at runnable save through the EXISTING
    `missing_input_container_contract` (no new enum), with the SYMMETRIC bind-side check
-   refusing runtime-added undeclared state. Undeclared instance state is judged by ONE inert
+   refusing runtime-added undeclared state. A `dict`-backed mapping whose `items()`
+   protocol view disagrees with the physical `dict.__len__` storage (a lying
+   `items()`/`keys()` override hiding or padding entries) refuses through the same
+   disposition with reason `mapping_protocol_not_total` -- the ordered-key fact and the
+   child descent both read the protocol, so an untotal view would otherwise witness the
+   same shrunken structure identically at capture and runtime (a false-VERIFIED shape;
+   the sequence/namedtuple arms close the same forgery lane through
+   `physical_sequence_len`). Non-`dict` Mappings have no builtin-backed physical storage
+   distinct from their methods and keep the instance protocol; their hidden-state honesty
+   stays owned by the instance-state proofs. Undeclared instance state is judged by ONE inert
    inspector (r69 C; **fail-closed r71 C**): `inspect_instance_state` returns one typed result
    (`names` / `complete` / closed `reason`) -- uncertainty is NEVER an empty set. The instance
    `__dict__` descriptor is resolved by RAW-MRO class-dict lookup (NEVER a live
@@ -1107,7 +1128,56 @@ execution_context_unavailable
 context_field_invalid
 numeric_attestation_failed
 poisoned_run_refused
+collective_boundary_runnable_unsupported
+halted_capture_not_runnable
+user_intervention_not_replayable
+buffer_sink_routing_mutable
 ```
+
+`halted_capture_not_runnable` (early-stopping unification, N4) is the SAVE-time runnable
+preflight refusal for a HALTED capture: the taken-path DAG ends at the halt frontier, so a
+runnable descriptor would replay a truncated program while claiming faithfulness to the full
+forward. Analysis-level saves of halted captures remain allowed; the refusal surfaces as
+`RunnablePreflightError` at `tl.save(level="runnable")` entry.
+
+`user_intervention_not_replayable` is the SAVE-time producer refusal (stage
+`producer_user_intervention`) for a capture whose taken path carries at least one
+user-intervention-replaced op (`trace(intervene=...)`, `set`, or a raw forward hook that
+substituted a value). The replacement value has no traceable function, so a sparse runnable
+replay could only recompute the UN-intervened computation -- a different function than the
+provenance the artifact archives -- and would permanently ceiling `unverifiable`. The
+diagnostic names every replaced op label. An armed selector that fired on zero sites leaves
+the capture unreplaced and runnable; analysis-level saves of intervened captures remain
+allowed, and the intervention spec itself stays separately saveable.
+
+`buffer_sink_routing_mutable` (D18; PROVISIONAL SPELLING, documented-unstable pending
+naming ratification) is the LIVE refresh projector's mode-aware buffer-sink routing
+refusal (`BufferSinkRoutingError`, stage `refresh_buffer_sink_routing`), raised on the
+default `run()` / `save_new_outs` path by all four typed arms of one closed rule --
+refuse iff any buffer sink carries `buffer_value_changed is not False`: (1) a
+train-mode buffer WRITER (`True` = a capture-time value-changing write, e.g. BatchNorm
+running stats or a `num_batches_tracked` counter); (2) UNPROVEN write evidence
+(`None`, fail closed -- the narrowing never widens past the evidence); (3) a recorded
+mode claim (the literal `training`/`use_input_stats` argument, or the capture-recorded
+`module_training_modes` entry for the producing op's innermost module) CONTRADICTING
+the write evidence in either direction (a tampered or incoherent claim, never resolved
+permissively); (4) the refresh write tripwire -- on the newly-allowed no-write path the
+refreshed rerun's OWN buffer-write journal must also record no value-changing buffer
+write, and any target-vs-refreshed buffer-sink evidence asymmetry
+(`(raw_label, buffer_value_changed, buffer_write_kind)` tuples) refuses the same way,
+so a tampered stored bit cannot buy a pass. Eval-mode BatchNorm (all sinks `False`
+with agreeing eval claims) is refresh-eligible and runnable on the default path.
+`ValueError` stays in the error's MRO and the message keeps the pinned "computational
+graph changed" term. The generic (untyped) graph-signature arm is unchanged and
+carries no D18 obligation. The fast tier's mode-aware `fast_state_static_guard` and
+the loaded-sparse buffer-write attestation downgrade are untouched by this code.
+
+`collective_boundary_runnable_unsupported` (merge-ranks tier b) is both a SAVE-time producer
+refusal (stage `producer_collective_boundary`) and the forward-replay validation refusal
+(`CollectiveBoundaryReplayError`) for a rank-local trace whose taken path crosses a collective
+boundary node: a collective cannot be replayed single-device -- re-issuing it outside its
+communicator hangs or fabricates peer-dependent values. Metadata invariants remain available on
+such traces; cross-rank merging (merge-ranks tier c) is the supported replay story.
 
 `input_arity_extra` (r43, corr1_1) is raised when a loaded sparse `.run()` call carries MORE
 top-level positional/keyword input sites than the capture recorded: the descriptor encodes a
@@ -1117,7 +1187,11 @@ outside the recorded taken path and must never report `verified`.
 `input_alias_topology_unresolved` is an unverifiability CEILING, not a contradiction: the
 three-valued alias engine (section 11) could prove neither overlap nor disjointness for a
 same-storage input pair, so the run reports `unverifiable` with `not_applicable` attestation --
-never `diverged` by assumption and never `verified`. `execution_context_unavailable` is the typed
+never `diverged` by assumption and never `verified`. The code is observable (r25-4): the run
+report carries one PASSED disclosure row in `contract_checks` named
+`input_alias_topology_unresolved` whose diagnostic bears the code (`passed=True` because a
+ceiling is not an observed contradiction -- a failed check would classify DIVERGED).
+`execution_context_unavailable` is the typed
 refusal for a recorded execution context the producer could not capture or the runtime cannot
 enter/restore.
 
@@ -1332,9 +1406,23 @@ Exception classes are `RunnableTLSPECError(TorchLensError)`,
 `RunPreconditionError(ConfigurationError, ValueError)`,
 `RuntimeSignatureDriftError(CompatibilityError, RuntimeError)`,
 `PathDivergenceError(ValidationError, RuntimeError)`,
-`NumericAttestationError(ValidationError, RuntimeError)`, and
-`PoisonedRunError(ValidationError, RuntimeError)`. Each also subclasses `RunnableTLSPECError`. The
-machine code is in its diagnostic/report; exception text is not a compatibility surface.
+`NumericAttestationError(ValidationError, RuntimeError)`,
+`PoisonedRunError(ValidationError, RuntimeError)`, and
+`SparseCorePayloadError(ValidationError, AssertionError)`. Each also subclasses
+`RunnableTLSPECError`. The machine code is in its diagnostic/report; exception text is not a
+compatibility surface.
+
+`SparseCorePayloadError` (r25-2) is the value-free sparse-core tripwire class raised by
+`assert_sparse_core_has_no_tensor_payload` with
+`fields["code"] == "sparse_core_tensor_payload"` and the dotted payload path on
+`fields["payload_path"]`. `AssertionError` stays in its MRO deliberately: the tripwire's
+historical raise class was a bare `AssertionError`, so existing `except AssertionError`
+callers keep working while new callers branch on the stable code.
+
+`RunnablePreflightError` raised with `sparse_preflight_failed` (r25/B8-27) inlines a bounded
+summary of the FIRST producer diagnostic -- its code in brackets, text, detection stage, and
+affected ops -- into the exception message; the complete structured diagnostics remain on
+`exc.fields["diagnostics"]`, which stays the machine surface.
 
 ## 8. Readiness and result shapes
 
@@ -1374,7 +1462,55 @@ first_mismatch: RunnableDiagnostic | None
 numeric_attestation: NumericAttestationStatus
 poisoned: bool
 nondeterministic_sources: tuple[str, ...]
+state_carried: bool = False
+truncation: RunTruncation | None = None
+truncated: bool = False
+stopped_at: str | None = None
 ```
+
+`truncation` / `truncated` / `stopped_at` (L4 `until=`; [S2-PROV] spellings, documented-unstable;
+`truncated` and `stopped_at` are the S2-ratified flat reading surface) disclose a truncated run.
+Truncation is a RUN-RESULT term, NEVER a capture outcome: `CaptureStatus` keeps its six members,
+the source trace's outcome is untouched by any run, and no N-gate row branches on `until=`.
+`RunTruncation` carries the regime (`closure` | `sequential_prefix` | `live_stop_after`), the
+requested sites, executed/skipped counts, a skipped-set digest, and -- for the
+`sequential_prefix` fallback -- the cause tag (`unprovable_independence` | `coverage_gap` |
+`ancestry_break`). THE POSITIVE-CLAIM BAR: a truncated run may NEVER settle VERIFIED
+`path_faithfulness` or ATTESTED `numeric_attestation` -- the fail-closed `run_truncated` ceiling
+is threaded into the verdict derivation UPSTREAM of attestation, so the settled pair is
+regime-specific: loaded-sparse `(unverifiable, not_applicable)` (the archive is never opened),
+live `(unverifiable, not_present)`. Contradictions the executed region evidences still settle
+DIVERGED (the cap is a ceiling, never a floor), and the report finalizer keeps a redundant
+tamper assert. The executed region runs EVERY check at full strength; the skipped region is a
+disclosed set -- semantically "not-run", never "passed". Skipped sites are retained
+structure-only (value payloads cleared, never a stale capture-time tensor); the truncated
+result is poisoned at the conservative floor (S2 row-0), refuses every save at the poison
+gate, and refuses re-run typed at the run door. The full recorded input tree remains REQUIRED
+under any `until=` (require-all inputs: the closure never shrinks the input contract). The
+live regime is STOP-AFTER (the forward runs natively and halts at the first boundary after
+the last requested site; `RunResult.output` is None -- read executed-prefix values off the
+result trace); the loaded-sparse regime executes the sequential prefix through the last
+requested call, labeled `closure` only when that prefix IS the widened dependency closure
+(C1 tensor deps, C3 declared-state deps, C5 control-witness deps leave no candidate skip;
+the C4 certified-fresh vocabulary is not yet shipped, so any candidate skip discloses the
+`sequential_prefix` regime with `unprovable_independence`).
+
+`state_carried` (L4; PROVISIONAL spelling, documented-unstable pending naming ratification) is
+`True` only when a LIVE run was invoked with `carry_state=True`, deliberately leaving
+declared-state mutations on the live model. The DEFAULT live run brackets execution with a
+declared-state snapshot-restore (named parameters plus every registered buffer, one clone and
+one restore per alias group with `a is b` preserved, restore in `finally` on every path), so
+repeated `run()` calls leave the model bit-identical and report `False`. The snapshot is taken
+and validated BEFORE any forward runs: enumeration failure, an unprovable or overlapping alias
+topology, and a clone/allocation failure each refuse typed (`run_state_snapshot_unsupported`,
+fail-before-execute). A restore that fails AFTER execution poisons the transactional fork,
+stamps a session-scoped state-compromised latch on the source trace (NOT the poison bit --
+the trace's recorded path facts are not a lie; the live MODEL's state is), and raises typed
+(`run_state_restore_failed`, chaining the restore exception with the failed slot name and the
+count of alias groups restored); the latch refuses later live/fast runs while loaded-sparse
+runs of a saved artifact stay legal (staged clones never read the live model). `carry_state=`
+never touches verification: the next run from mutated state faces every gate as usual,
+including the mode-aware buffer-sink projector.
 
 `ContractCheck` is `name: str`, `passed: bool`, `diagnostic: RunnableDiagnostic | None`, ordered by
 execution. Random reports name the policy and every random-filled slot, including alias members,
@@ -1386,7 +1522,10 @@ recorded ambient context proves deterministic fill (`deterministic_algorithms` t
 `fill_uninitialized_memory` not false). `RunReport.nondeterministic_sources` is the closed,
 sorted, deduplicated declared-source vocabulary `seeded_rng | host_rng | uninitialized_alloc`,
 derived only by the single report finalizer; it distinguishes a declared-nondeterministic
-path-only `verified` from a deterministic one and never alters verdict semantics.
+path-only `verified` from a deterministic one and never alters verdict semantics. Both
+providers serve it: the live-refresh provider declares `host_rng` from the same capture-side
+host-RNG monitor evidence the sparse producer profiles, so a host-RNG-consuming model never
+presents a deterministic-looking empty tuple next to a live `verified`.
 
 ## 9. Runtime API and state lifecycle
 
@@ -1398,6 +1537,7 @@ def run(
     inputs: Any,
     *,
     seed: int | None = None,
+    fast: bool = False,
     on_divergence: DivergencePolicy = DivergencePolicy.RAISE,
 ) -> RunResult: ...
 
@@ -1412,10 +1552,49 @@ mutating the source. Analysis-only loaded Trace raises `RunCapabilityUnavailable
 `run_capability_unavailable`. This is not module/model reconstruction, source emission, or execution
 of untaken branches.
 
+The live provider holds the source model by WEAK reference (capturing never extends the model's
+lifetime), so live-run availability depends on the CALLER still holding the model: once the last
+strong reference is dropped -- including the inline `tl.trace(Model(), x)` idiom, where the trace
+is the only holder -- any garbage-collection pass makes a later `run()` refuse typed with
+`run_capability_unavailable`. This refusal is therefore gc-timing-dependent by design; keep a model
+reference, or save/load a runnable artifact, when `run()` must stay available.
+
+`fast=True` is the explicit stateful static feature-extraction loop. It never changes the
+default transaction or attestation contract. For a loaded sparse provider, the first call is an
+ordinary fully validated run and must settle `verified`; only then are staged state and compiled
+argument binders cached. Later calls skip repeated full validation and numeric attestation but
+still check the complete input contract, every produced tensor's structure/shape/dtype, and every
+recorded scalar/loop control witness before exposure. The verify-once seed is pinned. Explicit
+or implicit declared-state mutation is refused because cached state could not remain a stable
+oracle; this includes state-derived view mutation and training-mode normalization running-stat
+updates.
+
+For a live provider, `fast=True` is also the caller's explicit assertion that unsaved model internals
+remain static. It executes native `model.forward()` and saves known module-boundary sites with
+targeted forward hooks. Functional collection is scoped to function types explicitly requested by
+the original `save=` predicate. The guard checks the requested module/function-call sequences,
+input shape/dtype, and saved plus model-output structure/shape/dtype on every call. Therefore a
+change that alters the name sequence, count, shape, or dtype at a requested site cannot be silently
+relabelled as the captured activation: those mismatches raise `PathDivergenceError`. Subject to the
+caller's assertion that unsaved internals remain static, unchanged requested-site observables retain
+their captured labels. `return_diverged` is unavailable in fast mode. Fast iterations
+deliberately reuse one result Trace in place, so callers needing immutable per-example results must
+copy the selected tensors. Cleanup removes the cached hooks/session. An explicit `seed` reseeds the
+native call; omitting it leaves native ambient RNG behavior intact.
+
 For migration compatibility, the older intervention spelling `run(model, x, ...)` continues to
 return its in-place rerun Trace. New provider-neutral code uses the explicit `inputs=` keyword;
 loaded sparse traces always dispatch to the sparse provider. The live provider forks first and then
 delegates unchanged to `save_new_outs`, retaining its graph-alignment tripwire.
+
+Live-provider availability is reference-dependent by design: a Trace holds its source model only
+WEAKLY (`_source_model_ref`, never portable), so a live `run()` works exactly as long as the caller
+keeps a strong reference to the model. An inline-constructed model (`tl.trace(Model(), x)`) is
+collected at the first gc pass after capture, after which every live run refuses with the typed
+`RunCapabilityUnavailableError` -- a correct refusal, not a defect, but one whose timing follows
+the collector. Callers that need `run()` later must keep the model alive, pass it explicitly to
+the legacy `run(model, x)` surface, or save/load a runnable artifact (whose availability does not
+depend on the live object).
 
 Inputs require the recorded tree, leaf paths, shapes, and dtypes. Binding follows model site,
 container record, and path, never display order. Seeds are cloned before in-place calls. Call
@@ -1499,6 +1678,18 @@ runs in `finally` on success, divergence, callable exception, and numeric-attest
 post-run tripwire asserts CUDA initialization did not flip during a seeded run whose fork set
 excluded it. Generators this executor does not seed (MPS/XPU/other accelerators) are never
 touched by a seeded run, so no state can leak into them.
+
+Cost disclosure: the all-device fork set is a deliberate isolation-totality choice, and it is not
+free on multi-GPU hosts. When CUDA is already initialized, forking a device's generator can force
+primary-context initialization on GPUs the artifact never touches (on the order of 300-600 MB of
+device memory per visible GPU, driver/toolkit dependent), and every seeded run pays a per-device
+generator fork/restore on those unused GPUs. Pin the process to the devices you intend
+(`CUDA_VISIBLE_DEVICES`) to bound the cost. Narrowing the fork set (for example to
+descriptor-named plus current devices) is NOT a permitted maintenance edit: recipe-recorded device
+arguments such as `device="cuda"` resolve at replay time rather than being descriptor slot
+devices, so any narrowing is a later explicit design change that must carry its own sufficiency
+proof and renegotiate the pinned exact-semantics test
+(`tests/test_tlspec_runnable_r35_exact_semantics.py`) in the same change.
 
 ## 11. Honesty, divergence, poison, and exactness
 
@@ -1728,7 +1919,11 @@ seed) reports `unverifiable` + `not_applicable`:
 4. the `secrets` family (funnels through `SystemRandom` and the import-time `random._urandom`
    alias -- monitored directly because `secrets.token_bytes` bypasses the `os.urandom`
    attribute);
-5. `os.urandom` / `os.getrandom` and `uuid.uuid4` (feeds through `os.urandom`);
+5. `os.urandom` / `os.getrandom` and `uuid.uuid4` (feeds through `os.urandom`); `uuid.uuid1`
+   through BOTH resolutions: the Python fallback (feeds through getrandbits/clocks) and the
+   platform C funnels `uuid._generate_time_safe` (libuuid: wall clock + clock-seq entropy + node,
+   touching no other monitored surface) / `uuid._UuidCreate` (Windows), patched directly and
+   marked as the `uuid.uuid1` channel;
 6. the clock family (a classified bounded-namespace inventory, r39): the current-clock `time.*`
    counters (`time`, `time_ns`, `monotonic`, `monotonic_ns`, `perf_counter`, `perf_counter_ns`,
    `process_time`, `process_time_ns`, `thread_time`, `thread_time_ns`, `clock_gettime`,
@@ -1826,7 +2021,14 @@ positives mark on ANY COVERED thread (thread-independent module/class patches; t
 model-attribute generator digest; and every profile-hooked thread -- the owner plus threads
 started in-window). An IN-WINDOW cross-thread external-generator draw (hon1_1/corr2_2) is caught
 by `threading.setprofile`; an owner-thread numpy instance draw and the immutable `datetime`
-readers by `sys.setprofile`; a model-held generator on any thread by its state digest; unseeded
+readers by `sys.setprofile`; a model-held generator on any thread by its state digest; a
+generator DEEPLY reachable from any in-window profiled frame's roots -- named globals including
+foreign MODULE namespaces (`helpers.RNG`), fast locals, helper returns, behind nested plain
+holders/builtin containers/name-referenced nested modules, or as a direct class attribute -- on
+any thread by the whole-window frame-reachable deep digest (B4 -- digest at first reference, one
+compare at exit; frame-triggered and window-memoized, never a process-wide `gc` or `sys.modules`
+scan; module-namespace expansion skips stdlib and the torch/numpy/torchlens package roots; cap
+exhaustion fails closed as `deep_inventory_budget_exhausted`); unseeded
 construction and Python `random` by the construction/class patches. Held-reference spellings of
 the module-attr channels mark on the owner and every in-window hooked thread by original-builtin
 identity; module-attr patched spellings remain thread-independent. The monitor does NOT ceiling a
@@ -1840,12 +2042,82 @@ reads; (ii) ctypes / user C-extension entropy or clock reads that never cross a 
 call surface, including C-mediated indirect calls of held builtins (a
 `functools.partial(time.time)()` invoked from C emits no Python-visible call of the monitored
 builtin); (iii) legacy `RandomState()` C-level CONSTRUCTION entropy (its DRAWS stay
-digest/profile-witnessed); (iv) a generator drawn on a PRE-EXISTING
+digest/profile-witnessed); (iii-b) a BALANCED profile-slot swap performed through a PRE-WINDOW
+held reference to `sys.setprofile`/`threading.setprofile` (`from sys import setprofile` at
+model/helper import time, or any profiler/coverage library that stashed the bound C function),
+or through C-level `PyEval_SetProfile` (`cProfile.enable()`): the swap-detection wrappers live
+on the MODULE ATTRIBUTES only, so a held-ref swap opens an unwitnessed blind sub-window for the
+profile-ONLY channel class (the immutable `datetime` readers, held-ref builtin clock/entropy
+aliases, `torch.Generator` method events, numpy>=2 instance draws -- module-attr-patched
+builtins like `os.urandom` stay witnessed) and restores the monitor's own hook before the
+teardown identity checks run, so the window settles CERTAIN. No Python-level fail-closed
+spelling exists for a pre-window held slot-writer; the architectural closure is the same
+`sys.monitoring` port named below (interpreter-global, immune to profile-slot swaps);
+(iv) a generator drawn on a PRE-EXISTING
 (already-running, non-owner, non-hooked) thread -- which `threading.setprofile` cannot reach on
-Python <= 3.11 -- that is reachable only BY EXECUTING USER CODE (a property/descriptor `__get__`
-body, `__getattr__`, or a callable's return value) or held ONLY in a SHARED module-global
-namespace (the r55 C6 shared-namespace exclusion, explicit: loaded-module `__dict__` identities
-are never expanded). Every INERTLY-followable model-rooted reference edge IS
+Python <= 3.11 -- or, for the profile-silent numpy>=2 Cython method shape, on ANY thread, that is
+reachable from NO digest root except BY EXECUTING USER CODE (a property/descriptor `__get__`
+body, `__getattr__`, or a callable's return value) or through a deliberately leafed edge: a
+FUNCTION attribute (`fn.rng = gen`), a hostile builtin-container SUBCLASS's elements, a
+COMPUTED (non-constant) dynamic name (`getattr(pkg, name)` / `globals()[name]` where `name` is
+built at runtime -- the constant-string spellings ARE witnessed, r38 below), or a stash INSIDE
+a stdlib or torch/numpy/torchlens package namespace. The first clause is a THREAT-MODEL SCOPE
+STATEMENT, not an open detection gap with a cheaper fix pending: a generator reachable from no
+digest root and drawn only on a pre-existing non-hooked thread leaves NO capture-side artifact,
+so the only fail-closed spelling is a blanket "pre-existing threads exist" ceiling, which was
+built (r38 draft) and REJECTED for over-ceiling every capture running alongside a benign
+DataLoader/Jupyter/pytest background thread; the moment the owner's (or any hooked thread's)
+in-window code reaches the same generator through ANY digest root, the draw IS witnessed.
+Every C-internal holder the walks RECOGNIZE but cannot read is fail-closed, never silently
+leafed (frame-side parity, r38: a non-provably-empty opaque queue flags
+`inventory_opaque_container`; r39: a `weakref.proxy` -- which has no inert dereference and
+forwards every other read through the referent's attribute machinery -- flags the same).
+Recognition itself is the structural boundary (r39): **a numpy
+`Generator`/`BitGenerator`/`RandomState` reachable ONLY through a C-implemented holder whose
+accessor path contains no Python frame is outside the consumption witness's scope on numpy>=2 --
+on EVERY currently-supported CPython, including 3.12+ (probed: nothing 3.12-specific engages
+today; the `sys.monitoring` classifier below is what would close it there and is not
+implemented)** -- the holder kinds are an open set (arbitrary C-extension/Cython holders with
+C-level accessors), so a capture drawing through an unrecognized member of this class can report
+VERIFIED that a fresh oracle-1 run would not reproduce. This is the same threat-model-boundary
+family as the pre-existing-foreign-thread clause above, NOT a closure-by-enumeration claim: the
+bounded r39 parity branches below close the specific shapes found by executed re-attacks (three
+consecutive re-attack rounds each found new members), and the architectural closure -- a
+`sys.monitoring` (PEP 669) CALL-event receiver classifier, which fires for extension/Cython
+callables and restores per-draw receiver classification at the SOURCE so holder location no
+longer matters -- is a py>=3.12 follow-up under owner review, not implemented here.
+The shared-module-namespace clause of this residual is NARROWED to unreferenced namespaces (B4,
+active for the profile-silent numpy>=2 method shape; numpy 1.x owner/in-window-thread draws are
+already receiver-classified by `c_call`):
+numpy RNG receivers deeply reachable from any IN-WINDOW PROFILED FRAME's roots (named globals
+including foreign module namespaces, fast locals, helper returns, and -- r38 -- globals named by
+the code object's string CONSTANTS, so the `globals()["name"]` / `eval("name")` constant-name
+subscript spellings are witnessed) through exact builtin
+containers, plain-object `__dict__`/`__slots__` values, name-referenced nested modules,
+direct class attributes, and -- r38 frame-walk parity with the model-rooted sweep, closing the
+executed V6/V7/V8 + deque frame-rooted false-VERIFIEDs -- `weakref.ref` referents (one base-C
+deref), `threading.local` per-thread namespaces (`tp_traverse`; ALL threads' dicts, so a
+per-thread generator set by any thread is reached), `functools.partial` interiors
+(`func`/`args`/`keywords` through the base member descriptors), `deque` buffers (base
+`__iter__`), and -- r39 bounded C-holder parity branches, closing the executed V9a-V9f
+frame-rooted false-VERIFIEDs -- WARM `functools.lru_cache` wrappers (cache dict via
+`tp_traverse`; a warmed cache returns its generator with no Python frame),
+`types.MappingProxyType` backing mappings (`tp_traverse`, never the proxied `keys`/`values`),
+owner-thread `contextvars.ContextVar` values (base C `get`; the value lives in the per-thread
+`Context`, off the reference graph -- pre-existing OTHER threads' contexts stay in the
+foreign-thread residual above), OBJECT-dtype ndarray elements (base getsets, budget-gated;
+numpy's own parallel-streams idiom -- numeric dtypes stay hard leaves), and class-var
+resolution through the full MRO and a user METACLASS (both walks; weakref PROXIES fail closed,
+see above) are digested at first reference and compared whole-window --
+thread-independently, so a pre-existing worker's draw from a receiver the owner's in-window code
+has already referenced is witnessed (`frame_reachable_generator`; cap exhaustion flags
+`deep_inventory_budget_exhausted`, INCOMPLETE, never silent -- the r55 C6 exclusion of
+loaded-module `__dict__` identities remains in force for the MODEL-rooted `gc.get_referents`
+walk, whose explosion it prevents; a namespace NO in-window frame references stays residual; a
+stdlib-source or synthetic-source (`<string>`/fx-codegen) frame never seeds the deep inventory --
+exec'd-from-string user code remains the documented exec-namespace residual). Fast LOCALS stay
+direct-only in the per-frame digest; a receiver nested below a local is covered by the same deep
+inventory. Every INERTLY-followable model-rooted reference edge IS
 walked by the model inventory (the r55 authoritative `gc.get_referents` enumeration in item 2
 above -- CPython `tp_traverse`, complete by construction), so descriptor-held, weakref-held,
 class-attribute, closure/default/kwdefault/annotation/partial/property-interior,
@@ -1858,10 +2130,22 @@ negative. Also of this class: a bare one-shot iterator attribute, which cannot b
 without consuming it -- the same class
 as the adversarial draw+`state`-restore a cooperative model does not exercise; (v) a
 held-reference module-builtin call on a PRE-EXISTING (non-hooked) thread -- the module-attr
-patched spelling stays thread-independent; and (vi) a held-reference implicit-now converter
-explicitly passed `None` (`localtime(None)`) decodes as a one-argument transform call site (the
-patched spelling catches it). `datetime.now()` / `localtime()` are NOT residual (covered above).
-Future all-thread coverage is `sys.monitoring` (PEP 669, 3.12+, interpreter-wide).
+patched spelling stays thread-independent; and (vi) a PRE-WINDOW held reference to
+`sys.setprofile` / `threading.setprofile` (or the C-level `PyEval_SetProfile`, e.g.
+`cProfile.enable`) can balance-swap the profile hook without touching the patched module
+attributes: the swap opens an unwitnessed sub-window for the profile-ONLY channel class
+(held-alias clock/entropy builtins, `torch.Generator` methods, numpy>=2 instance draws), and both
+teardown `getprofile()` identity checks pass afterwards, so the window settles CERTAIN. The
+module-attr swap spelling IS flagged as uncertainty; only the held-alias/C-level spellings are
+residual, and the PEP-669 port below is their closure. A held-reference implicit-now converter is
+NOT residual: the decode is VALUE-resolving (constants directly; simple names from the frame's
+locals/globals, still bound at `c_call` time). A time argument resolving to `None` -- literal
+`localtime(None)` or through a bound name -- and an undecodable call site (star-call, missing
+time argument) mark fail-closed; an UNRESOLVABLE argument (attribute/expression, unbound name)
+flags monitor uncertainty -- neither a clock-draw claim nor a clean pass is provable -- and a
+value resolving non-`None` decodes as a pure transform (no over-ceiling). `datetime.now()` / `localtime()` are NOT residual
+(covered above). Future all-thread coverage is `sys.monitoring` (PEP 669, 3.12+,
+interpreter-wide).
 
 A pruned `.data`-alias BOOL control predicate whose leaf origins resolve positively (e.g.
 `bool(self.gate.data > 0.5)` -> the gate's state digest) is witnessed by that basis: the
@@ -1906,7 +2190,7 @@ only the model output leaves path faithfulness `verified` (path-only) and is dec
 as unattributable (fail-closed), like raw seeded-RNG output.
 
 No `torch.Tag` marks uninitialized allocation, so the family is a closed name table in ONE
-shared predicate block (`utils/rng.py`) consumed by all three recognition layers (the load-side
+shared predicate block (`utils/_uninit_alloc.py`; `utils/rng.py` re-exports it) consumed by all three recognition layers (the load-side
 value-source classifier, the producer origin ledger, and the pruned-orphan control walk) and
 defended over BOTH spelling surfaces by drift meta-tests (r55 hon_1): the aten-namespace test
 (a new `empty*`/`resize*` aten name that is neither tabled as family nor allowlisted as
@@ -2025,7 +2309,7 @@ exists, which a source meta-test pins.
 ### Three-valued input alias topology
 
 Runtime input aliasing against the de-aliased capture is judged by ONE shared three-valued
-touched-byte engine (`torchlens.utils.tensor_utils`, r37 INV-2): identity (`a is b`) and PROVED
+touched-byte engine (`torchlens.utils.alias_footprint`, r37 INV-2 (split out of tensor_utils in e11dd787)): identity (`a is b`) and PROVED
 overlap of recorded-disjoint inputs are observed contradictions (`diverged`); PROVED disjointness
 passes; anything unproven is `unknown`, which adds the `input_alias_topology_unresolved` ceiling
 -- `unverifiable` path, `not_applicable` attestation -- never `overlap` by assumption and never
@@ -2185,7 +2469,13 @@ byte write: a state-derived activation (or buffer) whose storage is `.data=`/`se
 foreign or input-derived storage AFTER it was captured/labeled. The label-rung storage-integrity
 belt (r85) witnesses it -- the rebound receiver no longer matches its stamp-time storage keeper, so
 it is orphaned and the run ceils / the save refuses rather than replaying the pre-rebind value as a
-same-input false `verified` (section 4). An in-place write into the object's OWN storage keeps the
+same-input false `verified` (section 4). A `.data=` rebind executed INSIDE the captured forward is
+additionally recorded as an explicit op (round-31 M6): the setter is captured as the canonical
+single-argument `detach(rhs)` call under the user-facing `data` op name (consumers of the rebound
+object thread to the RHS producer), and when the rebind SWAPS the receiver's storage object the
+op's label is registered as an ancestry BARRIER -- layout/witness attribution never roots THROUGH
+the swap, so every verdict-steering fact downstream of it fails closed to the same permanent
+ceiling as the belt (r28 reconcile). An in-place write into the object's OWN storage keeps the
 pointer and stays `verified`; only the pointer-swapping rebind ceils.
 
 State ALIAS topology is part of the declared model (r37): repeated live object identity across
@@ -2598,6 +2888,39 @@ ships the model source.
 - Function signatures and source line numbers are structural interface metadata (like a type stub)
   and are retained even when source text is stripped.
 
+### Harvested module attributes and `include_custom_attributes` (privacy disclosure)
+
+Model preparation harvests every public, non-callable module instance attribute verbatim into
+`Module.custom_attributes`, and portable saves persist the whole channel by default -- arbitrary
+user values (config scalars, but equally tokens, host paths, usernames, or large containers a
+module happens to hold as public attributes) ship in the shareable artifact.
+`include_custom_attributes: bool = True` on `tl.save`/`Trace.save` is the opt-out: `False` drops
+the entire channel from the artifact (the live `Trace` is untouched). Values are NEVER rewritten
+or partially scrubbed -- the channel ships verbatim or not at all, because a save that silently
+mutates documented metadata values is worse than the disclosure problem it would paper over.
+Every save writes a `custom_attributes_disclosure` entry in `manifest.json` naming the channel:
+the effective `included` flag, the count of modules carrying attributes, and the bounded sorted
+union of top-level key names (names only, never values). Sparse runnable cores always drop the
+field regardless of the flag (it is in the sparse DROP set), and their disclosure records
+`included: false`.
+
+### Captured pre-forward buffer values and `include_buffer_values` (privacy disclosure)
+
+When a forward pass overwrites a registered buffer (BatchNorm running statistics, step counters,
+caches), capture records the value the buffer held BEFORE the forward in
+`Trace._buffer_initial_values`, and every save level -- audit included -- shipped those tensors
+verbatim with no flag, warning, or manifest row. Buffer values are training-data-derived state,
+so the channel gets the same belt as custom attributes: `include_buffer_values: bool = True` on
+`tl.save`/`Trace.save` (and `tl.to_disk` for streaming) is the opt-out; `False` drops the entire
+channel from the artifact, values are never rewritten or partially scrubbed, and the live `Trace`
+is untouched. Every save writes a `buffer_values_disclosure` entry in `manifest.json` (the
+effective `included` flag, `buffer_count`, and the bounded sorted `buffer_names` -- names only,
+never values), and a save that actually embeds captured buffer values warns the saver. Sparse
+runnable cores always drop the field regardless of the flag; used non-persistent buffers ship
+there separately as the REQUIRED, independently disclosed `runnable_nonpersistent_buffer_v1`
+family. A dropped channel degrades `Buffer.initial_value` on the loaded trace to its
+version-node fallback; it never invents a value.
+
 The complete implementation includes `load_state_dict`, transient state sources, initializer
 reporting, `run`, `RunResult`, transactional run forks, sparse input/call/output reconstruction,
 three-state `path_faithfulness`, strict divergence rollback, monotonically poisoned opt-in results,
@@ -2610,8 +2933,11 @@ Glossary of v2 vocabulary introduced by this amendment (canonical here per the l
 
 - `sparse_recorded_taken_path_v2` -- the required capability whose context records are explicit;
   absence of a context record only ever means legacy v1 (analysis-only).
-- `non_tensor_args_tensor_slots_and_context_v2` -- the call recipe carrying the REQUIRED
-  `CallExecutionContext` per call.
+- `non_tensor_args_tensor_slots_and_context_v2` -- the call recipe introduced by this
+  amendment, carrying the REQUIRED `CallExecutionContext` per call. SUPERSEDED: the shipped
+  recipe is `non_tensor_args_tensor_slots_context_and_obligations_v3`
+  (`torchlens/runnable.py::RUNNABLE_CALL_RECIPE_VERSION`), which additionally stamps the r71
+  typed witness obligations.
 - `CallExecutionContext` / `AutocastDeviceContext` -- per-call autocast (explicit disabled) and
   grad/inference mode, entered tightly around each resolved call at replay.
 - `AmbientExecutionContext` -- the capture-scoped backend context record (defaults, matmul
@@ -2626,7 +2952,8 @@ Glossary of v2 vocabulary introduced by this amendment (canonical here per the l
   zero RNG; nonempty Kaiming requires finite positive fan-in).
 - `input_alias_topology_unresolved` -- the unverifiability ceiling for an unproven input alias
   relation (r37: absolute device-scoped byte addresses; distinct storage objects are never
-  trivially disjoint).
+  trivially disjoint); surfaced as a PASSED disclosure `contract_checks` row named after the
+  code (r25-4).
 - `execution_context_unavailable` -- the typed refusal for uncapturable/unrestorable context.
 - `state_alias_topology_unsupported` (r37) -- the save-time refusal for distinct-object
   overlapping/unprovable bound-state alias topology (section 5 rule 10).

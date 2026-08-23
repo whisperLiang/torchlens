@@ -5,26 +5,32 @@ from __future__ import annotations
 import json
 import logging
 import pickle
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import pytest
+import safetensors  # noqa: F401
 import torch
 from torch import nn
 
-pytest.importorskip("safetensors")
-
-from torchlens import Trace, load, trace as trace_fn, save
-from torchlens.io import cleanup_tmp, detect_tlspec_format
-from torchlens._io import TLSPEC_VERSION, TorchLensIOError
-from torchlens._io.paths import resolve_bundle_blob_path
+from torchlens import Trace, func, load, save, trace as trace_fn
+from torchlens._io import (
+    MIN_TLSPEC_VERSION,
+    TLSPEC_VERSION,
+    ArtifactSchemaAgeWarning,
+    TorchLensIOError,
+    bundle as bundle_io,
+)
 from torchlens._io.manifest import Manifest
+from torchlens._io.paths import resolve_bundle_blob_path
 from torchlens._io.payload_codec import (
     _raise_for_unsupported_array_dtype,
     _unsupported_array_dtype_reason,
 )
 from torchlens.data_classes.trace import ResolvedPostprocessing
+from torchlens.io import cleanup_tmp, detect_tlspec_format
 
 
 class _ConvBundleModel(nn.Module):
@@ -270,6 +276,107 @@ def _corrupt_blob_byte(blob_path: Path) -> None:
     blob_path.write_bytes(bytes(blob_bytes))
 
 
+def test_manifest_provenance_roundtrip_and_hash_determinism(tmp_path: Path) -> None:
+    """Trace saves should carry a compact, deterministic provenance certificate."""
+
+    torch.manual_seed(44)
+    model = _InputTransformModel().eval()
+    inputs = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    captured = trace_fn(model, inputs, layers_to_save="all", random_seed=44)
+    first_path = tmp_path / "first.tlspec"
+    second_path = tmp_path / "second.tlspec"
+
+    save(captured, first_path)
+    save(captured, second_path)
+    restored = load(first_path)
+    first = Manifest.read(first_path / "manifest.json")
+    second = Manifest.read(second_path / "manifest.json")
+
+    assert restored.num_ops == captured.num_ops
+    assert first.provenance is not None
+    assert second.provenance is not None
+    assert first.provenance.provenance_version == 1
+    assert first.provenance.capture_devices == ["cpu"]
+    assert first.provenance.dtype_policy["default_dtype"] == "torch.float32"
+    assert first.provenance.dtype_policy["observed_autocast"]
+    assert first.provenance.input_hash == second.provenance.input_hash
+    assert first.provenance.model_structure_hash == second.provenance.model_structure_hash
+    assert first.provenance.rng_state_digests == second.provenance.rng_state_digests
+    assert len(json.dumps(first.to_dict()["provenance"])) < 16_384
+
+
+def test_manifest_provenance_sentinel_round_trips_and_tamper_refuses(tmp_path: Path) -> None:
+    """Selective saves record the could-not-compute sentinel; tampering still refuses.
+
+    A selective ``save=`` capture discards input payloads before save time, so
+    the writer records ``unavailable:<ExceptionName>`` for ``input_hash`` by
+    design (could-not-compute stays distinguishable from does-not-apply). Load
+    must accept exactly that closed grammar -- and keep refusing any digest
+    value that is neither a SHA-256 hex digest nor the sentinel.
+    """
+
+    torch.manual_seed(45)
+    model = _ActivationPostfuncModel().eval()
+    inputs = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    captured = trace_fn(model, inputs, save=func("relu"))
+    bundle_path = tmp_path / "selective.tlspec"
+    save(captured, bundle_path)
+
+    manifest = _read_manifest(bundle_path)
+    recorded = manifest["provenance"]["input_hash"]
+    assert recorded.startswith("unavailable:")
+    assert recorded.partition(":")[2].isidentifier()
+    restored = load(bundle_path)
+    assert restored.num_ops == captured.num_ops
+
+    for forged in ("deadbeef", "unavailable:", "unavailable:not an identifier", "x" * 64):
+        manifest["provenance"]["input_hash"] = forged
+        _write_manifest(bundle_path, manifest)
+        with pytest.raises(TorchLensIOError, match="input_hash"):
+            load(bundle_path)
+
+
+def test_manifest_without_optional_provenance_still_loads(tmp_path: Path) -> None:
+    """Pre-change manifests with no provenance block should retain load compatibility."""
+
+    bundle_path, _captured = _save_bundle(tmp_path)
+    manifest = _read_manifest(bundle_path)
+    manifest.pop("provenance")
+    _write_manifest(bundle_path, manifest)
+
+    parsed = Manifest.read(bundle_path / "manifest.json")
+    restored = load(bundle_path)
+
+    assert parsed.provenance is None
+    assert restored.num_ops > 0
+
+
+def test_manifest_git_commit_is_absent_outside_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No Git hash when the TORCHLENS package dir is not a repository (R21-2).
+
+    The provenance git hash is resolved from the torchlens package directory, not
+    the working directory, so it is ``None`` for a released wheel (no ``.git``). The
+    working directory is deliberately irrelevant; only the package dir governs.
+    """
+
+    import torchlens._io.bundle as bundle_mod
+
+    non_repo = tmp_path / "not_a_repo"
+    non_repo.mkdir()
+    monkeypatch.setattr(bundle_mod, "_torchlens_package_dir", lambda: non_repo)
+    captured = trace_fn(_InputTransformModel(), torch.ones(2, 3), layers_to_save="all")
+    bundle_path = tmp_path / "outside.tlspec"
+
+    save(captured, bundle_path)
+    manifest = Manifest.read(bundle_path / "manifest.json")
+
+    assert manifest.provenance is not None
+    assert manifest.provenance.git_commit_hash is None
+
+
 def test_bundle_roundtrip_preserves_saved_outs_bit_exactly(tmp_path: Path) -> None:
     """Eager bundle load should restore all saved outs exactly."""
 
@@ -485,10 +592,16 @@ def test_bundle_save_complex64_still_round_trips(tmp_path: Path) -> None:
             str(TLSPEC_VERSION + 1),
         ),
         (
-            "io_format_older",
-            lambda manifest: manifest.__setitem__("tlspec_version", TLSPEC_VERSION - 1),
-            "deprecation_warning",
-            str(TLSPEC_VERSION - 1),
+            "io_format_below_floor",
+            lambda manifest: manifest.__setitem__("tlspec_version", MIN_TLSPEC_VERSION - 1),
+            "raise",
+            "below the supported rehydration floor",
+        ),
+        (
+            "io_format_between_floor_and_current",
+            lambda manifest: manifest.__setitem__("tlspec_version", MIN_TLSPEC_VERSION),
+            "schema_age_warning",
+            "older than runtime tlspec_version",
         ),
         (
             "io_format_equal",
@@ -515,10 +628,16 @@ def test_bundle_save_complex64_still_round_trips(tmp_path: Path) -> None:
             "999.0.0",
         ),
         (
-            "torchlens_older",
+            "torchlens_pre_floor",
             lambda manifest: manifest.__setitem__("torchlens_version", "0.0.1"),
+            "raise",
+            "below the supported rehydration floor",
+        ),
+        (
+            "torchlens_older_supported",
+            lambda manifest: manifest.__setitem__("torchlens_version", "2.33.0"),
             "info_log",
-            "0.0.1",
+            "2.33.0",
         ),
         (
             "python_major_mismatch",
@@ -570,8 +689,8 @@ def test_bundle_version_policy_rows(
             load(bundle_path)
         return
 
-    if expectation == "deprecation_warning":
-        with pytest.warns(DeprecationWarning, match=resolved_expected_text or ""):
+    if expectation == "schema_age_warning":
+        with pytest.warns(ArtifactSchemaAgeWarning, match=resolved_expected_text or ""):
             loaded = load(bundle_path)
         assert loaded.model_class_name == "_ConvBundleModel"
         return
@@ -618,7 +737,7 @@ def test_bundle_load_raises_on_corrupt_manifest(tmp_path: Path) -> None:
     bundle_path, _ = _save_bundle(tmp_path)
     (bundle_path / "manifest.json").write_text("{not valid json", encoding="utf-8")
 
-    with pytest.raises(TorchLensIOError, match="Failed to read manifest"):
+    with pytest.raises(TorchLensIOError, match="does not parse as JSON"):
         load(bundle_path)
 
 
@@ -710,10 +829,13 @@ def test_bundle_save_overwrite_typeerror_preserves_original_and_marks_partial(
     bundle_path, first_log = _save_bundle(tmp_path, seed=0)
     second_log = _build_conv_log(seed=1)
 
-    def _poisoned_pickle_dump(*_args: Any, **_kwargs: Any) -> None:
+    def _poisoned_metadata_dump(*_args: Any, **_kwargs: Any) -> None:
         raise TypeError("simulated live-resource pickling failure")
 
-    monkeypatch.setattr("torchlens._io.bundle.pickle.dump", _poisoned_pickle_dump)
+    # ``save()`` writes metadata.pkl through ``dump_canonical_metadata()``
+    # (B3R4-R21-2 canonical container bytes), which drives a ``pickle._Pickler``
+    # subclass -- patching bare ``pickle.dump`` would no longer intercept it.
+    monkeypatch.setattr("torchlens._io.bundle.dump_canonical_metadata", _poisoned_metadata_dump)
 
     with pytest.raises(TorchLensIOError) as excinfo:
         save(second_log, bundle_path, overwrite=True)
@@ -784,10 +906,12 @@ def test_bundle_save_overwrite_arbitrary_exception_preserves_original_and_marks_
     bundle_path, first_log = _save_bundle(tmp_path, seed=0)
     second_log = _build_conv_log(seed=1)
 
-    def _poisoned_pickle_dump(*_args: Any, **_kwargs: Any) -> None:
+    def _poisoned_metadata_dump(*_args: Any, **_kwargs: Any) -> None:
         raise injected_exception
 
-    monkeypatch.setattr("torchlens._io.bundle.pickle.dump", _poisoned_pickle_dump)
+    # Injected at the metadata.pkl writer (``dump_canonical_metadata()``,
+    # B3R4-R21-2): bare ``pickle.dump`` is no longer on the save path.
+    monkeypatch.setattr("torchlens._io.bundle.dump_canonical_metadata", _poisoned_metadata_dump)
 
     with pytest.raises(TorchLensIOError) as excinfo:
         save(second_log, bundle_path, overwrite=True)
@@ -1200,6 +1324,30 @@ def test_resolve_bundle_blob_path_accepts_regular_blobs_dir(tmp_path: Path) -> N
     resolved = resolve_bundle_blob_path(bundle_root, "blobs/0000000001.safetensors")
 
     assert resolved == blob_file.resolve()
+
+
+def test_eager_load_resolves_blob_containment_root_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An eager load should canonicalize its shared blob root only once."""
+
+    bundle_path, _ = _save_bundle(tmp_path)
+    original_resolver = bundle_io.resolve_bundle_blobs_dir
+    call_count = 0
+
+    def counting_resolver(bundle_root: Path) -> Path:
+        """Count canonical blob-root resolutions while preserving behavior."""
+
+        nonlocal call_count
+        call_count += 1
+        return original_resolver(bundle_root)
+
+    monkeypatch.setattr(bundle_io, "resolve_bundle_blobs_dir", counting_resolver)
+
+    load(bundle_path, lazy=False)
+
+    assert call_count == 1
 
 
 def test_bundle_loaded_log_validation_guard_raises(tmp_path: Path) -> None:

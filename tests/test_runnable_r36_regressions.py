@@ -528,10 +528,9 @@ class TestCorr24StateAliasTopology:
     def test_overlapping_nonpersistent_buffers_refuse_at_save(self, tmp_path: Path) -> None:
         x = torch.tensor([100.0, 200.0])
         trace = tl.trace(_OverlappingBuffers(), x, capture=_CAPTURE)
-        with pytest.raises(RunnablePreflightError) as excinfo:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                trace.save(tmp_path / "overlap.tlspec", level="runnable", include_weights=True)
+        with pytest.raises(RunnablePreflightError) as excinfo, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            trace.save(tmp_path / "overlap.tlspec", level="runnable", include_weights=True)
         assert "state_alias_topology_unsupported" in str(excinfo.value.fields.get("diagnostics"))
 
     def test_disjoint_views_of_one_storage_still_save_and_verify(self, tmp_path: Path) -> None:
@@ -707,7 +706,11 @@ class TestCorr25LivePoisonSpine:
 
     def test_lossy_live_output_is_poisoned(self) -> None:
         x = torch.tensor([1.0, 2.0])
-        trace = tl.trace(_LossyLiveModel(), x, capture=_CAPTURE)
+        # The live provider holds only a weakref to the source model; keep a
+        # strong ref for the run (an inline temporary survives only until the
+        # next GC pass, making the test GC-timing-dependent).
+        model = _LossyLiveModel()
+        trace = tl.trace(model, x, capture=_CAPTURE)
         result = trace.run(inputs=x, on_divergence="return_diverged")
         assert result.report.path_faithfulness is not PathFaithfulness.VERIFIED
         assert result.report.poisoned is True
@@ -716,7 +719,9 @@ class TestCorr25LivePoisonSpine:
 
     def test_faithful_live_refresh_stays_unpoisoned(self) -> None:
         x = torch.tensor([1.0, 2.0])
-        trace = tl.trace(_FaithfulLiveModel(), x, capture=_CAPTURE)
+        # Strong model ref for the live run; see test_lossy_live_output_is_poisoned.
+        model = _FaithfulLiveModel()
+        trace = tl.trace(model, x, capture=_CAPTURE)
         result = trace.run(inputs=x)
         assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
         assert result.report.poisoned is False
@@ -1044,7 +1049,7 @@ _PlainNT = namedtuple("_PlainNT", ["a", "b"])
 
 
 class _StatefulNT(_PlainNT):
-    def __new__(cls, a: torch.Tensor, b: torch.Tensor) -> "_StatefulNT":
+    def __new__(cls, a: torch.Tensor, b: torch.Tensor) -> _StatefulNT:
         self = super().__new__(cls, a, b)
         self.total = a + b
         return self
@@ -1206,6 +1211,19 @@ class TestContextFieldValidation:
 
 _COUPLED_WITNESS_EXEC_FILES = (
     "torchlens/_runnable_execution.py",
+    "torchlens/_runnable_attestation.py",
+    "torchlens/_runnable_call_arguments.py",
+    "torchlens/_runnable_call_outputs.py",
+    "torchlens/_runnable_input_aliases.py",
+    "torchlens/_runnable_input_metadata.py",
+    "torchlens/_runnable_input_sites.py",
+    "torchlens/_runnable_output_contracts.py",
+    "torchlens/_runnable_path_faithfulness.py",
+    "torchlens/_runnable_providers.py",
+    "torchlens/_runnable_state_context.py",
+    "torchlens/_runnable_transaction.py",
+    "torchlens/_runnable_verification.py",
+    "torchlens/_runnable_witness_contracts.py",
     "torchlens/_runnable_state.py",
     "torchlens/_io/runnable.py",
     "torchlens/backends/torch/completeness_witness.py",
@@ -1231,7 +1249,10 @@ class TestClassClosureMetaGates:
                 stripped = line.strip()
                 if "RunReport(" not in stripped or stripped.startswith("#"):
                     continue
-                if "return RunReport(" in stripped and path.name == "_runnable_execution.py":
+                if (
+                    "return RunReport(" in stripped
+                    and path.name == "_runnable_path_faithfulness.py"
+                ):
                     continue  # the _run_report finalizer itself
                 if "class RunReport" in stripped or "RunReport(`" in stripped:
                     continue
@@ -1417,7 +1438,7 @@ class TestAliasEngineUnit:
 
     @staticmethod
     def _relation(left: torch.Tensor, right: torch.Tensor) -> str:
-        from torchlens.utils.tensor_utils import touched_bytes_relation
+        from torchlens.utils.alias_footprint import touched_bytes_relation
 
         return touched_bytes_relation(left, right)
 
@@ -1457,7 +1478,7 @@ class TestAliasEngineUnit:
         assert self._relation(base[:0], base) == "disjoint"
 
     def test_over_cap_intersecting_is_unknown_never_disjoint(self) -> None:
-        from torchlens.utils.tensor_utils import ALIAS_ENUMERATION_ELEMENT_CAP
+        from torchlens.utils.alias_footprint import ALIAS_ENUMERATION_ELEMENT_CAP
 
         big = torch.zeros(ALIAS_ENUMERATION_ELEMENT_CAP + 2, 2)
         # Incongruent element grids inside one storage with intersecting bounds and

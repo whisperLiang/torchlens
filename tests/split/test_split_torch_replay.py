@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from v2_helpers import split_request
-
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -11,15 +9,16 @@ from typing import Any
 import pytest
 import torch
 from torch import nn
+from v2_helpers import split_request
 
 import torchlens as tl
+from torchlens.split import BoundarySchema
 from torchlens.split.adapters.torch import GeneratedSuffix, _is_template_dict
 from torchlens.split.boundary import ReplayBoundary
 from torchlens.split.errors import SplitUnsupportedError
 from torchlens.split.graph import SplitTraceGraph, SplitTraceNode
 from torchlens.split.planner import SplitPlan
 from torchlens.split.shape import SymbolicShape
-from torchlens.split import BoundarySchema
 
 
 def _assert_close(left: Any, right: Any) -> None:

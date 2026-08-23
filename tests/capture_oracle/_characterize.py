@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass, fields, is_dataclass
 import hashlib
 import importlib
 import random
@@ -11,6 +9,8 @@ import statistics
 import tempfile
 import time
 import tracemalloc
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,7 +20,6 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.fastlog import Recording
-from torchlens.ir import CaptureEvents
 from torchlens.ir.events import OpEvent
 
 from ._models import build_model_case
@@ -214,8 +213,17 @@ def _population_state(value: Any) -> str:
     return "populated"
 
 
-def _flatten_nested_population(value: Any, prefix: str, result: dict[str, str]) -> None:
+def _flatten_nested_population(
+    value: Any, prefix: str, result: dict[str, str], depth: int = 0
+) -> None:
     """Flatten selected nested dataclass population into dotted paths.
+
+    Descent is DEPTH-BOUNDED: the record decomposition introduced facets that
+    reference large producer-side object graphs (``recording.record_context``
+    reaches the whole sparse-recorder context), and an unbounded walk turned
+    the goldens into hundreds of megabytes. Three levels covers every
+    per-op capture fact shape (``facet.field``, ``list[i].field``) while
+    anything deeper collapses to its own population scalar.
 
     Parameters
     ----------
@@ -225,20 +233,23 @@ def _flatten_nested_population(value: Any, prefix: str, result: dict[str, str]) 
         Current field path.
     result:
         Destination population mapping.
+    depth:
+        Current nesting depth below the event field.
     """
 
-    if is_dataclass(value) and not isinstance(value, type):
+    if depth < 3 and is_dataclass(value) and not isinstance(value, type):
         for field_info in fields(value):
             child = getattr(value, field_info.name)
-            _flatten_nested_population(child, f"{prefix}.{field_info.name}", result)
+            _flatten_nested_population(child, f"{prefix}.{field_info.name}", result, depth + 1)
         return
     if (
-        isinstance(value, (tuple, list))
+        depth < 3
+        and isinstance(value, (tuple, list))
         and value
         and all(is_dataclass(item) and not isinstance(item, type) for item in value)
     ):
         for index, item in enumerate(value):
-            _flatten_nested_population(item, f"{prefix}[{index}]", result)
+            _flatten_nested_population(item, f"{prefix}[{index}]", result, depth + 1)
         return
     result[prefix] = _population_state(value)
 
@@ -266,13 +277,32 @@ def _event_population(event: OpEvent) -> dict[str, str]:
         "backend_semantics",
         "policy",
     }
+    # The P1/P7 record decomposition changed the storage layout twice over:
+    # facet containers became the dataclass fields (``core``, ``graph``,
+    # ``ancestry``, ...), and the seven declared nested views became
+    # facet-backed PROPERTIES that ``fields(event)`` no longer yields. Either
+    # change alone silently collapsed this oracle's population coverage
+    # (~80 paths -> ~25). Flatten EVERY dataclass-valued field generically
+    # (``_flatten_nested_population`` already classifies non-dataclass values
+    # as scalars) and read the declared nested views through ``getattr``, so
+    # the characterization keeps maximal flat coverage regardless of how the
+    # record stores its facts.
+    # Producer-side context objects whose CONTENTS are the recorder's own
+    # object graph, not per-op capture facts: characterize their presence
+    # only (unbounded descent through record_context reached megabytes of
+    # sparse-recorder internals per event).
+    opaque_fields = {"recording", "record_context"}
     result: dict[str, str] = {}
+    seen: set[str] = set()
     for field_info in fields(event):
+        seen.add(field_info.name)
         value = getattr(event, field_info.name)
-        if field_info.name in nested_fields:
-            _flatten_nested_population(value, field_info.name, result)
-        else:
+        if field_info.name in opaque_fields:
             result[field_info.name] = _population_state(value)
+        else:
+            _flatten_nested_population(value, field_info.name, result)
+    for name in sorted(nested_fields - seen):
+        _flatten_nested_population(getattr(event, name), name, result)
     for path in _GROUND_TRUTH_EXCLUDED_POPULATION_PATHS:
         result.pop(path, None)
     return dict(sorted(result.items()))
@@ -366,13 +396,14 @@ def _project_event(event: OpEvent) -> dict[str, Any]:
     }
 
 
-def _snapshot_events(events: CaptureEvents) -> list[dict[str, Any]]:
+def _snapshot_events(journal: Any) -> list[dict[str, Any]]:
     """Snapshot operation events without retaining live tensor references.
 
     Parameters
     ----------
-    events:
-        Capture event buffer about to be materialized.
+    journal:
+        The step-0 ``JournalView`` (or any object with ``op_events`` and the
+        grad-fn handle side index) about to be ingested.
 
     Returns
     -------
@@ -380,7 +411,19 @@ def _snapshot_events(events: CaptureEvents) -> list[dict[str, Any]]:
         Raw-order operation event projections.
     """
 
-    return [_project_event(event) for event in events.op_events if event.kind == "op"]
+    # Producer-unification P2/P3: every characterized record flows through the
+    # inverse oracle adapter (identity for compat OpEvents; reconstructs a
+    # genuine OpEvent for decomposed OpRecords), so the UNCHANGED
+    # characterizer and its goldens survive the record-model migration. The
+    # grad-fn handle rides the journal side index (single ownership).
+    from producer_parity._oracle_adapter import op_event_from_record
+
+    handles = getattr(journal, "grad_fn_handles_by_label_raw", {})
+    return [
+        _project_event(op_event_from_record(event, grad_fn_handle=handles.get(event.label_raw)))
+        for event in journal.op_events
+        if event.kind == "op"
+    ]
 
 
 def _install_instrumentation() -> _Instrumentation:
@@ -415,27 +458,30 @@ def _install_instrumentation() -> _Instrumentation:
 
     restore_callbacks.append(restore_policy)
 
-    postprocess_module = importlib.import_module("torchlens.postprocess")
     materialize_module = importlib.import_module("torchlens.postprocess._materialize")
-    original_public_materialize = postprocess_module.materialize_from_events
-    original_direct_materialize = materialize_module.materialize_from_events
+    original_ingest = materialize_module.ingest_op_records
 
-    def observing_materialize(trace: Any, events: CaptureEvents) -> None:
-        """Snapshot immutable field population and delegate unchanged."""
+    def observing_ingest(inputs: Any, manifest: Any) -> Any:
+        """Snapshot immutable field population and delegate unchanged.
 
-        event_snapshots.append(_snapshot_events(events))
-        original_direct_materialize(trace, events)
+        The step-0 interception seam is ``ingest_op_records(inputs, manifest)``
+        (producer unification P3): every caller — the torch orchestrator, the
+        preview backends, and partial recovery — reaches ingest through this
+        late-bound module attribute, and the folded journal view rides
+        ``inputs.journal``.
+        """
 
-    postprocess_module.materialize_from_events = observing_materialize
-    materialize_module.materialize_from_events = observing_materialize
+        event_snapshots.append(_snapshot_events(inputs.journal))
+        return original_ingest(inputs, manifest)
 
-    def restore_materialize() -> None:
-        """Restore both materialization references."""
+    materialize_module.ingest_op_records = observing_ingest
 
-        postprocess_module.materialize_from_events = original_public_materialize
-        materialize_module.materialize_from_events = original_direct_materialize
+    def restore_ingest() -> None:
+        """Restore the step-0 ingest seam."""
 
-    restore_callbacks.append(restore_materialize)
+        materialize_module.ingest_op_records = original_ingest
+
+    restore_callbacks.append(restore_ingest)
     return _Instrumentation(producer_modes, event_snapshots, restore_callbacks)
 
 
@@ -1056,8 +1102,6 @@ def _capture_once(case: CaseSpec) -> tuple[dict[str, Any], dict[str, float | int
 
     with tempfile.TemporaryDirectory(prefix="torchlens-capture-oracle-") as temp_dir:
         disk_path = Path(temp_dir) / "capture.tlspec"
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
         tracemalloc.start()
         started = time.perf_counter()
         product: Any | None = None
@@ -1165,11 +1209,11 @@ def _capture_once(case: CaseSpec) -> tuple[dict[str, Any], dict[str, float | int
             "ground_truth": ground_truth,
             "expected_to_change": expected_to_change,
         }
-        cuda_peak = int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else None
         tracking: dict[str, float | int | None] = {
             "wall_time_ms": elapsed_ms,
             "python_peak_memory_bytes": int(peak_memory),
-            "cuda_peak_memory_bytes": cuda_peak,
+            # CUDA visibility is a property of the test host, not capture behavior.
+            "cuda_peak_memory_bytes": None,
         }
         return semantics, tracking
 

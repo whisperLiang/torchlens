@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Iterator
 
 import pytest
@@ -10,12 +11,11 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.backends.tf._tf_compat import get_tf_capability_snapshot
-from torchlens.compat import CompatReport, report
+from torchlens.compat import CompatReport, _report as compat_report_module, report
 from torchlens.options import CaptureOptions
 from torchlens.utils._torch_compat import get_torch_capability_snapshot
 from torchlens.utils.rng import log_current_rng_states, set_rng_from_saved_states
 from torchlens.utils.tensor_utils import tensor_nanequal
-
 
 EXPECTED_COMPAT_ROW_KEYS = {
     "accelerate_cpu_disk_offload",
@@ -24,14 +24,20 @@ EXPECTED_COMPAT_ROW_KEYS = {
     "data_parallel",
     "deepspeed",
     "device_context_factory",
+    "device_mesh",
+    "fp8_dtype",
     "distributed_data_parallel",
+    "dtensor",
     "fsdp",
     "fx_graph_module",
     "hf_transformers",
     "lightning_training_step",
+    "mechanical_belt",
     "multi_gpu_rng",
     "quantized_tensor",
+    "pipeline_parallel",
     "single_thread_design",
+    "tensor_parallel",
     "tied_parameters",
     "torch_capabilities",
     "torch_compile",
@@ -222,6 +228,46 @@ class DeviceContextFactoryModel(nn.Module):
         return x + 1
 
 
+class FalsePositiveOptimizedModule(nn.Module):
+    """Model whose class name should not imply ``torch.compile``."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the input unchanged.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Input tensor.
+        """
+
+        return x
+
+
+def _reference_quantized_input() -> torch.Tensor:
+    """Build the quantized compatibility-report fixture under a warning filter.
+
+    Returns
+    -------
+    torch.Tensor
+        Quantized reference input.
+    """
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"torch\.quantize_per_tensor, torch\.quantize_per_channel.*deprecated",
+            category=UserWarning,
+        )
+        return torch.quantize_per_tensor(
+            torch.tensor([1.0, 2.0]), scale=0.1, zero_point=10, dtype=torch.quint8
+        )
+
+
 def _reference_models() -> Iterator[tuple[nn.Module, torch.Tensor]]:
     """Yield the required five Phase 13 reference model/input pairs.
 
@@ -233,12 +279,7 @@ def _reference_models() -> Iterator[tuple[nn.Module, torch.Tensor]]:
 
     yield SmallCnn(), torch.randn(2, 1, 4, 4)
     yield MockPreTrainedModel(), torch.randn(2, 4)
-    yield (
-        QuantizedInputModel(),
-        torch.quantize_per_tensor(
-            torch.tensor([1.0, 2.0]), scale=0.1, zero_point=10, dtype=torch.quint8
-        ),
-    )
+    yield (QuantizedInputModel(), _reference_quantized_input())
     yield MultiGpuEmulationModel(), torch.randn(2, 4)
     yield FullyShardedDataParallel(), torch.randn(2, 4)
 
@@ -271,6 +312,23 @@ def test_report_renderers_include_truth_table_rows() -> None:
     assert "Single-thread design" in text_table
     assert "| Row | Status | Severity | Detected | Details | Suggestion |" in markdown_table
     assert "`pass`" in markdown_table
+
+
+def test_torch_compile_row_uses_feature_detection_not_class_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A user class named like Dynamo's wrapper must not trip the compile row."""
+
+    monkeypatch.setattr(
+        compat_report_module,
+        "get_dynamo_optimized_module_type",
+        lambda: None,
+    )
+
+    row = report(FalsePositiveOptimizedModule(), torch.randn(1)).row("torch_compile")
+
+    assert row.detected is False
+    assert row.status == "pass"
 
 
 def test_report_surfaces_every_runtime_capability() -> None:
@@ -330,13 +388,20 @@ def test_report_quantized_row_uses_shared_cycle_safe_tensor_walker() -> None:
 
 
 def test_rng_snapshot_uses_all_cuda_devices(monkeypatch: pytest.MonkeyPatch) -> None:
-    """RNG helpers use all-device CUDA state APIs when CUDA is available."""
+    """RNG helpers use all-device CUDA state APIs when CUDA RNG state is live.
+
+    ``is_initialized`` is part of the fiction: the snapshot deliberately skips
+    CUDA entirely until this process has actually initialized it, so that a
+    CPU-only capture never force-initializes a visible device (see
+    ``torchlens/utils/rng.py::_snapshot_cuda_rng_states``).
+    """
 
     calls: list[str] = []
     fake_states = [torch.tensor([1], dtype=torch.uint8), torch.tensor([2], dtype=torch.uint8)]
 
     monkeypatch.setattr("torchlens.utils.tensor_utils._cuda_available", True)
     monkeypatch.setattr("torchlens.utils.rng._is_cuda_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.cuda, "get_rng_state_all", lambda: fake_states)
 
     def fake_set_rng_state_all(states: list[torch.Tensor]) -> None:
@@ -367,3 +432,26 @@ def test_device_context_factory_injection_during_active_logging() -> None:
     tl.trace(model, torch.randn(1), capture=CaptureOptions(layers_to_save="none"))
 
     assert model.factory_device_type == "meta"
+
+
+def test_torch_compile_row_discloses_mid_forward_creation_exception() -> None:
+    """The clean-preflight compile row must not overclaim stance coverage.
+
+    The stance engages only when Dynamo is already imported at capture entry,
+    so a compiled callable CREATED inside the forward (the process's first
+    torch._dynamo import happening mid-capture) is bypassed-and-disclosed, not
+    logged. The row's claim must carry that exception instead of stating that
+    every compiled callable "runs eager and is logged" (b6-opus R16, measured:
+    inline torch.compile interior absent while the row read pass/logged).
+    """
+
+    from torchlens.utils import _torch_compat
+
+    if not _torch_compat.HAS_SET_STANCE:
+        pytest.skip("set_stance unavailable on this torch")
+
+    row = report(SmallCnn(), torch.randn(2, 1, 4, 4)).row("torch_compile")
+
+    assert row.detected is False
+    assert "created inside the forward" in row.details.lower()
+    assert "dynamo_region_not_logged" in row.details

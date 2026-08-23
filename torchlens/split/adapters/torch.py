@@ -19,9 +19,9 @@ from ..boundary import ReplayBoundary
 from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
 from ..graph import ReplayValueRef, SplitTraceGraph, SplitTraceNode
+from ..ir import SplitRequest
 from ..planner import SplitPlan
 from ..shape_program import ShapeBinding, shape_semantic_for_node
-from ..ir import SplitRequest
 from .base import SegmentBundle, SplitPolicyMixin, boundary_overlay
 
 
@@ -469,9 +469,7 @@ class GeneratedPrefix(_GeneratedSegmentBase):
                     reason="input count mismatch",
                 ),
             )
-        overlay = {
-            node_id: value for node_id, value in zip(self.graph.input_node_ids, input_leaves)
-        }
+        overlay = dict(zip(self.graph.input_node_ids, input_leaves))
         if self.graph.shape_program is not None:
             self._shape_binding = self.graph.shape_program.bind_flat_values(
                 input_leaves,

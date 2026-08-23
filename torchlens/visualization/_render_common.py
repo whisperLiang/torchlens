@@ -10,17 +10,22 @@ import sys
 import tempfile
 import warnings
 from collections import defaultdict
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import (
+
+# UP035 rationale (suppressed on the import line below): `Dict`/`List`/`Set`/
+# `Tuple` are deliberately re-exported through this module's __all__ for the
+# sibling renderers that do `from ._render_common import *`, which still
+# annotate with them. Modernizing the alias here means modernizing every
+# star-import consumer first. (Reworded so this prose line no longer LEXES as
+# a blanket noqa directive — SF-24.)
+from typing import (  # noqa: UP035
     TYPE_CHECKING,
     Any,
-    Callable,
     Dict,
-    Literal,
     List,
-    Mapping,
+    Literal,
     Optional,
     Set,
     Tuple,
@@ -33,6 +38,7 @@ import torch
 from graphviz.quoting import quote as quote_dot_id
 from PIL import Image
 
+from .._errors import _actionable_message, _ActionableErrorMixin
 from .._literals import (
     BufferVisibilityLiteral,
     CollapseLiteral,
@@ -44,6 +50,10 @@ from .._literals import (
     VisNodePlacementLiteral,
     VisRendererLiteral,
 )
+from ..data_classes.internal_types import VisualizationOverrides
+from ..data_classes.layer import Layer
+from ..data_classes.op import Op
+from ..errors._base import CompatibilityError
 from ..ir.container import (
     ContainerSpec,
     DataclassField,
@@ -54,42 +64,23 @@ from ..ir.container import (
     TupleIndex,
 )
 from ..ir.container_registry import ContainerRecord, ContainerSnapshot, Role
-from ..data_classes.internal_types import VisualizationOverrides
-from ..data_classes.layer import Layer
-from ..data_classes.op import Op
 from ..quantities import Duration
 from ..utils.display import _timed_phase, _vprint, in_notebook, int_list_to_compact_str
-from ..viz import batch_summary
-from .modes import COLLAPSED_MODE_REGISTRY, DOMAIN_NODE_MODES, MODE_REGISTRY
+from ..utils.env_flags import closed_bool_env
 from ._label_format import (
     format_memory,
     format_module_kwargs,
     format_module_path,
     format_param_list,
     format_shape,
+    saved_for_backward_line,
 )
-from .node_spec import (
-    INTERVENTION_HOOK_BORDER_COLOR,
-    INTERVENTION_HOOK_FILL_COLOR,
-    INTERVENTION_CONE_COLOR,
-    INTERVENTION_SITE_COLOR,
-    NodeSpec,
-    graphviz_graph_overrides,
-    intervention_graph_override,
-    intervention_site_and_cone_labels,
-    make_intervention_node_spec_fn,
-    render_lines_to_html,
-)
-from .overlays import OverlayScores, overlay_border_attrs, overlay_line
-from ._render_utils import _open_file_quietly
-from .themes import (
-    VisualizationTheme,
-    apply_theme_to_spec,
-    legend_lines,
-    resolve_theme,
-    theme_edge_attrs,
-    theme_graph_attrs,
-    theme_node_attrs,
+from ._render_utils import (
+    _open_file_quietly,
+    compute_module_penwidth,
+    direction_to_rankdir,
+    make_module_cluster_attrs,
+    relativize_visualizer_image,
 )
 from .code_panel import (
     CodePanelOption,
@@ -98,7 +89,25 @@ from .code_panel import (
     resolve_code_panel_source,
 )
 from .collapse_plan import CollapsePlan, RawOp, SegmentDescriptor
-from .request import RenderContext
+from .modes import COLLAPSED_MODE_REGISTRY, DOMAIN_NODE_MODES, MODE_REGISTRY
+from .node_spec import (
+    INTERVENTION_CONE_COLOR,
+    INTERVENTION_HOOK_BORDER_COLOR,
+    INTERVENTION_HOOK_FILL_COLOR,
+    INTERVENTION_SITE_COLOR,
+    # S5 contract (C4): the three node-callback aliases have ONE declaration
+    # home (node_spec.py); this module re-exports them for internal consumers.
+    BackwardNodeSpecFn as BackwardNodeSpecFn,
+    CollapsedNodeSpecFn as CollapsedNodeSpecFn,
+    NodeSpec,
+    NodeSpecFn as NodeSpecFn,
+    graphviz_graph_overrides,
+    intervention_graph_override,
+    intervention_site_and_cone_labels,
+    make_intervention_node_spec_fn,
+    render_lines_to_html,
+)
+from .overlays import OverlayScores, overlay_border_attrs, overlay_line
 from .render_ir import (
     RenderIRDotStatement,
     RenderIROrderingConstraint,
@@ -106,11 +115,46 @@ from .render_ir import (
     finalize_forward_regions,
     projected_antiparallel_endpoint_pairs,
 )
-from ._render_utils import (
-    compute_module_penwidth,
-    direction_to_rankdir,
-    make_module_cluster_attrs,
+from .request import RenderContext
+from .themes import (
+    VisualizationTheme,
+    apply_theme_to_spec,
+    resolve_theme,
+    theme_edge_attrs,
+    theme_graph_attrs,
+    theme_node_attrs,
 )
+
+
+def strict_collapse_checks_enabled() -> bool:
+    """Return whether collapse/sibling-order verification failures should raise.
+
+    THE one parser of ``TORCHLENS_COLLAPSE_STRICT`` (r-b7 R42-9: it used to be
+    duplicated byte-for-byte in ``auto_collapse`` and ``_render_dot``, a
+    divergence hazard for a verification-arming knob).
+
+    Keyed ONLY on the torchlens-owned knob (r3 b7-opus R47-A): the old
+    ``PYTEST_CURRENT_TEST in os.environ`` arm meant a DOWNSTREAM project's
+    test suite rendering a TorchLens graph got an ``AssertionError`` on a
+    render that works in a script, from a knob it never set. The TorchLens
+    suite arms the tripwire explicitly in ``tests/conftest.py``.
+
+    Returns
+    -------
+    bool
+        True when ``TORCHLENS_COLLAPSE_STRICT`` is set to an affirmative
+        value (``1/true/yes/on``).
+
+    Raises
+    ------
+    InvalidArgumentError
+        When the variable is set to an unrecognized value (round-7 b7 R47:
+        the historical exact-``"1"`` parse silently left this
+        verification-arming tripwire OFF on ``=true`` or a typo while the
+        exporter believed it was armed).
+    """
+
+    return closed_bool_env("TORCHLENS_COLLAPSE_STRICT")
 
 
 def format_collapsed_module_contents(num_layers: int, num_buffer_layers: int) -> str:
@@ -139,7 +183,6 @@ def format_collapsed_module_contents(num_layers: int, num_buffer_layers: int) ->
 
 
 if TYPE_CHECKING:
-    from ..data_classes.grad_fn import GradFn
     from ..data_classes.module import Module
     from .auto_collapse import ModuleRepeatFold
 
@@ -246,10 +289,7 @@ class BoundaryNode:
         self.io_role = self.boundary_kind
 
 
-GraphNode = Union[BaseGraphNode, BoundaryNode, FocusNode]
-NodeSpecFn = Callable[["Layer", NodeSpec], NodeSpec | None]
-BackwardNodeSpecFn = Callable[["GradFn", NodeSpec], NodeSpec | None]
-CollapsedNodeSpecFn = Callable[["Module", NodeSpec], NodeSpec | None]
+GraphNode = BaseGraphNode | BoundaryNode | FocusNode
 CollapseFn = Callable[["Module"], bool]
 SkipFn = Callable[["Layer"], bool]
 InterveningClusterMode = Literal["upstream", "outside", "downstream", "own"]
@@ -280,11 +320,78 @@ COMMUTE_FUNCS = ["add", "mul", "cat", "eq", "ne"]
 SIBLING_ORDER_NODE_CAP = 2000
 SIBLING_ORDER_STRETCH_CAP = 4.5
 SIBLING_ORDER_EPSILON = 1e-9
+# Worst-case number of full ``dot -Tplain`` layouts the sibling-ordering
+# verifier can run on top of the final render: baseline, injected, the
+# post-filter re-layout, and up to two rejection retries.
+SIBLING_ORDER_VERIFY_LAYOUT_BUDGET = 5
+SIBLING_ORDER_COST_NOTICE = (
+    "TorchLens skipped sibling-order verification: its up-to-{budget} extra "
+    "layout passes would exceed the layout budget (estimated layout "
+    "cost={cost} x {budget} > threshold={threshold}). Siblings render in "
+    "Graphviz's default order. Reduce graph complexity with vis_call_depth, "
+    "rolled mode, or module= focus, or disable this pass explicitly with "
+    "order_siblings=False."
+)
 _SIBLING_ORDER_WARNING_EMITTED = False
 
 
-class GraphvizRenderError(RuntimeError):
-    """Raised when Graphviz fails to produce a usable rendered artifact."""
+class GraphvizRenderError(_ActionableErrorMixin, CompatibilityError, RuntimeError):
+    """Raised when Graphviz fails to produce a usable rendered artifact.
+
+    Keeps its historical ``RuntimeError`` base while joining the taxonomy
+    with a stable code and a default remedy, so single-message raise sites
+    stay valid.
+    """
+
+    code: str = "graphviz_render_failed"
+    default_remedy: str = (
+        "lower dpi, render direct SVG with vis_fileformat='svg', or reduce the "
+        "graph with a node cap such as vis_call_depth"
+    )
+
+    def __init__(
+        self,
+        problem: str,
+        *,
+        remedy: str | None = None,
+        **context: object,
+    ) -> None:
+        """Initialize an actionable Graphviz render failure.
+
+        Parameters
+        ----------
+        problem:
+            Description of the failed render and any saved DOT source path.
+        remedy:
+            Concrete caller action. The class default is used when omitted.
+        **context:
+            Structured, non-authoritative diagnostic context.
+        """
+
+        resolved_remedy = remedy or type(self).default_remedy
+        super().__init__(
+            _actionable_message(problem, resolved_remedy),
+            code=type(self).code,
+            remedy=resolved_remedy,
+            **cast(dict[str, Any], context),
+        )
+
+
+class GraphvizUnavailableError(GraphvizRenderError):
+    """Raised when the Graphviz executable cannot be found on PATH.
+
+    The most common cold-user visualization failure: the ``graphviz``
+    Python package is installed but the system binary is not, so the
+    spawn seam's ``exec`` fails. Distinct from ``graphviz_render_failed``
+    (a present binary producing no usable artifact) because the remedy is
+    installation, not render tuning.
+    """
+
+    code: str = "graphviz_binary_unavailable"
+    default_remedy: str = (
+        "install the Graphviz system package and ensure its binaries are on "
+        "PATH (Debian/Ubuntu: apt install graphviz; macOS: brew install graphviz)"
+    )
 
 
 _GRAPHVIZ_ESCAPE_HINT = (
@@ -312,7 +419,7 @@ class RenderEdge:
     """
 
     target: GraphNode
-    metadata_child: Optional[GraphNode]
+    metadata_child: GraphNode | None
     occurrence_key: tuple[Any, ...]
     argument_label: str | None = None
 
@@ -611,10 +718,25 @@ _SELF_LOOP_LABEL_HGAP = 8  # points of blank spacer left/right of a self-loop la
 # follows an oblique or bowed spline instead of clipping it.  The default
 # placement is kept for ordinary (straight) edges: explicitly setting the
 # documented "defaults" (1.0, -25) is NOT a no-op and measurably worsens them.
-# Values chosen by an offline audit-scored sweep over the 16-model rolled
-# inspection set (dot 7.0.5, 55 configs, exact per-label geometry audit):
-# each clears the listed failure class to zero hard violations while keeping
-# labels within 9pt of their endpoint node.
+# Values chosen by offline audit-scored sweeps over the 16-model rolled
+# inspection set (exact per-label geometry audit): each clears the listed
+# failure class to zero hard violations while keeping labels within 9pt of
+# their endpoint node.
+#
+# PORTABILITY WARNING: these placements are FONT-METRIC-SENSITIVE.  Graphviz
+# resolves the default serif to different fonts per platform (macOS Times,
+# Linux Liberation Serif), and sub-point glyph-width differences move the
+# label bbox enough to flip a tight clearance into a penetration.  The
+# original macOS/Times-tuned oblique pair ("2.0", "-45") had ALWAYS clipped
+# 4 of the 16 models under Linux font metrics.  Current values were re-tuned
+# 2026-08 on Linux (Liberation Serif) against dot 2.43 / 7.0.5 / 14.1
+# simultaneously, selecting for the widest worst-case margin (>=2pt to the
+# nearest spline/arrowhead/node, >=1pt of headroom under the 9pt orphan
+# band) rather than bare passes.  If a class cannot reach robust margins on
+# BOTH font stacks, do NOT re-tune it on your box (that re-breaks the other
+# platform) -- move the class to a midpoint-merged label instead, which gets
+# reserved layout space and is font-metric-independent (see the multi-step
+# skip-edge merge in ``_render_edges._label_rolled_call_indexs``).
 #
 # Heads of >=3-op cycle body edges: the cycle's merged back-edge midpoint
 # label bows the whole forward chain; labels otherwise clip their own
@@ -623,9 +745,11 @@ _ROLLED_CYCLE_HEAD_LABEL_PLACEMENT = ("1.6", "-90")
 # Heads of adjacent forward edges into a self-loop-bearing layer: the
 # self-loop arc invades the default head-label spot.
 _ROLLED_SELF_LOOP_HEAD_LABEL_PLACEMENT = ("1.6", "-65")
-# Tails of >=3-op cycle body edges, and either label of a multi-step edge
-# touching a self-loop layer (long bowed skip edges, e.g. input -> loop op).
-_ROLLED_OBLIQUE_LABEL_PLACEMENT = ("2.0", "-45")
+# Tails of >=3-op cycle body edges (heads use the steeper pair above).
+# Multi-step skip edges touching a self-loop layer used to share this pair
+# ("oblique" class); they midpoint-merge now -- no clean placement exists
+# for them across engines and font stacks.
+_ROLLED_CYCLE_TAIL_LABEL_PLACEMENT = ("2.6", "-45")
 
 __all__ = [
     "Any",
@@ -641,7 +765,6 @@ __all__ = [
     "BufferVisibilityLiteral",
     "COLLAPSED_MODE_REGISTRY",
     "COMMUTE_FUNCS",
-    "Callable",
     "CapturedForwardEdge",
     "CodePanelOption",
     "CollapseFn",
@@ -675,7 +798,6 @@ __all__ = [
     "Image",
     "InterveningClusterMode",
     "Iterable",
-    "Iterator",
     "Layer",
     "List",
     "Literal",
@@ -699,9 +821,11 @@ __all__ = [
     "RenderIROrderingConstraint",
     "Role",
     "RollingAnnotation",
+    "SIBLING_ORDER_COST_NOTICE",
     "SIBLING_ORDER_EPSILON",
     "SIBLING_ORDER_NODE_CAP",
     "SIBLING_ORDER_STRETCH_CAP",
+    "SIBLING_ORDER_VERIFY_LAYOUT_BUDGET",
     "SegmentDescriptor",
     "Sequence",
     "Set",
@@ -726,11 +850,10 @@ __all__ = [
     "_EDGE_LABEL_FONT_SIZE",
     "_EDGE_LABEL_PAD",
     "_RenderIRDecisionBuilder",
-    "_RenderIRSubgraphDecisionBuilder",
     "_GRAPHVIZ_ESCAPE_HINT",
     "_NOISE_BUFFER_NAMES",
     "_ROLLED_CYCLE_HEAD_LABEL_PLACEMENT",
-    "_ROLLED_OBLIQUE_LABEL_PLACEMENT",
+    "_ROLLED_CYCLE_TAIL_LABEL_PLACEMENT",
     "_ROLLED_SELF_LOOP_HEAD_LABEL_PLACEMENT",
     "_SELF_LOOP_LABEL_HGAP",
     "_SIBLING_ORDER_WARNING_EMITTED",
@@ -739,11 +862,11 @@ __all__ = [
     "_SVG_ROOT_RE",
     "_SVG_VIEWBOX_RE",
     "_open_file_quietly",
+    "relativize_visualizer_image",
     "_timed_phase",
     "_vprint",
     "apply_theme_to_spec",
     "base64",
-    "batch_summary",
     "build_render_ir",
     "finalize_forward_regions",
     "cast",
@@ -756,10 +879,12 @@ __all__ = [
     "field",
     "format_memory",
     "format_collapsed_module_contents",
+    "strict_collapse_checks_enabled",
     "format_module_kwargs",
     "format_module_path",
     "format_param_list",
     "format_shape",
+    "saved_for_backward_line",
     "graphviz",
     "graphviz_graph_overrides",
     "html",
@@ -767,7 +892,6 @@ __all__ = [
     "int_list_to_compact_str",
     "intervention_graph_override",
     "intervention_site_and_cone_labels",
-    "legend_lines",
     "make_intervention_node_spec_fn",
     "make_module_cluster_attrs",
     "os",

@@ -2,42 +2,46 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import time
 import traceback as traceback_module
+import warnings
+from pathlib import Path
 from types import TracebackType
 from typing import Any, cast
-import warnings
 
 import torch
 from torch import nn
 
+from .. import _state
 from .._deprecations import MISSING, MissingType
+from .._errors import CaptureContextError, KeywordConflictError
 from .._training_validation import TrainingModeConfigError, reject_compiled_model
+from ..capture.config import InternalCaptureConfig
+from ..capture.outcome import safe_exception_repr, safe_exception_str
+from ..capture.predicates import validate_followed_by_capability
 from ..capture.projections import (
     RecordingState,
     _empty_recording,
     active_recording_state,
 )
-from ..capture.predicates import validate_followed_by_capability
-from ..capture.config import InternalCaptureConfig
 from ..capture.stop import StopDirective, stop_directive_for_trace
 from ..capture.trace import _extract_and_mark_outputs
 from ..data_classes.trace import Trace
-from ..ir import CaptureEvents
 from ..intervention.predicates import InterventionPredicate
+from ..ir import CaptureEvents
 from ..options import StreamingOptions
 from ..types import ActivationPostfunc, GradientPostfunc
+from ..utils._torch_compat import get_fsdp_wrapper_type
 from ._halt import HaltSignal
 from ._validation import validate_recording_options
 from .exceptions import RecorderStateError
 from .options import (
+    ForwardErrorMode,
     GradPredicateFn,
     HaltPredicateFn,
     LookbackPayloadPolicy,
     PredicateErrorMode,
     PredicateFn,
-    ForwardErrorMode,
     merge_recording_options,
 )
 from .types import CaptureSpec, Recording, _mark_recording_halted
@@ -66,30 +70,59 @@ def _rank_prefixed_streaming_options(
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         rank = torch.distributed.get_rank()
     bundle_path = Path(streaming.bundle_path)
+    # Rewrite ONLY bundle_path: rebuilding from defaults silently dropped the
+    # R62 include_* opt-outs (and now the async-write routing) for rank-split
+    # recordings.
     return StreamingOptions(
         bundle_path=bundle_path.parent / f"rank_{rank:02d}" / bundle_path.name,
         retain_in_memory=streaming.retain_in_memory,
         out_callback=streaming.out_callback,
+        include_custom_attributes=streaming.include_custom_attributes,
+        include_buffer_values=streaming.include_buffer_values,
+        async_writes=streaming.async_writes,
+        max_pending_bytes=streaming.max_pending_bytes,
     )
 
 
-def _resolve_save_alias(
-    *,
-    save: PredicateFn | None | MissingType,
-    keep_op: PredicateFn | None | MissingType,
-) -> PredicateFn | None | MissingType:
-    """Resolve ``save=`` and deprecated ``keep_op=`` recorder predicates."""
+def _warn_zero_match_capture_selectors(state: RecordingState) -> None:
+    """Warn when sparse capture selectors matched no sites.
 
-    if save is not MISSING and keep_op is not MISSING:
-        raise ValueError("Recorder received both save= and deprecated keep_op=.")
-    if keep_op is not MISSING:
+    Parameters
+    ----------
+    state:
+        Completed recording state carrying all retained records and fire counts.
+
+    Returns
+    -------
+    None
+        Emits at most one warning for each configured selector slot.
+    """
+
+    from ..intervention.selectors import BaseSelector
+
+    save_selector = state.options.keep_op
+    if isinstance(save_selector, BaseSelector):
+        save_matched = any(bool(save_selector(record.ctx)) for record in state.recording.records)
+        if not save_matched:
+            warnings.warn(
+                f"Capture-time save selector {save_selector!r} matched zero sites; "
+                "no activations were selected by it.",
+                UserWarning,
+                stacklevel=3,
+            )
+    intervene_selector = getattr(state.options.intervene, "selector", None)
+    intervene_decision = getattr(state.options.intervene, "decision", None)
+    if (
+        isinstance(intervene_selector, BaseSelector)
+        and getattr(intervene_decision, "direction", None) == "forward"
+        and state.intervene_selector_fire_count == 0
+    ):
         warnings.warn(
-            "Recorder(keep_op=...) is deprecated; use Recorder(save=...) instead.",
-            DeprecationWarning,
+            f"Capture-time intervention selector {intervene_selector!r} matched zero sites; "
+            "no intervention fired.",
+            UserWarning,
             stacklevel=3,
         )
-        return keep_op
-    return save
 
 
 def _unwrap_ddp_for_fastlog(
@@ -111,16 +144,15 @@ def _unwrap_ddp_for_fastlog(
         The model to execute and possibly rewritten streaming options.
     """
 
-    try:
-        from torch.distributed.fsdp import FullyShardedDataParallel
-    except ImportError:
-        pass
-    else:
-        if isinstance(model, FullyShardedDataParallel):
-            raise RuntimeError(
-                "torchlens.fastlog does not support FullyShardedDataParallel (FSDP): "
-                "parameters are sharded across ranks and there is no unsharded module to log."
-            )
+    # The lazy probe never imports torch.distributed.fsdp on plain captures.
+    fsdp_wrapper_type = get_fsdp_wrapper_type()
+    if fsdp_wrapper_type is not None and isinstance(model, fsdp_wrapper_type):
+        raise CaptureContextError(
+            "torchlens.fastlog does not support FullyShardedDataParallel (FSDP): "
+            "parameters are sharded across ranks and there is no unsharded module to log",
+            code="fsdp_capture_unsupported",
+            remedy="record the unsharded module before FSDP wrapping",
+        )
 
     try:
         from torch.nn.parallel import DistributedDataParallel
@@ -151,11 +183,15 @@ def _resolve_train_mode_default(
     if value is True:
         raise TrainingModeConfigError(
             f"backward_ready=True conflicts with {field_name}=True because True uses "
-            "keep_grad=False; use CaptureSpec(keep_grad=True) or omit the default"
+            "keep_grad=False; use CaptureSpec(keep_grad=True) or omit the default. "
+            "Remedy: pass CaptureSpec(keep_grad=True) or omit the default.",
+            code="backward_ready_conflict",
         )
     if isinstance(value, CaptureSpec) and not value.keep_grad:
         raise TrainingModeConfigError(
-            f"backward_ready=True conflicts with {field_name}=CaptureSpec(keep_grad=False)"
+            f"backward_ready=True conflicts with {field_name}=CaptureSpec(keep_grad=False). "
+            "Remedy: pass CaptureSpec(keep_grad=True) or omit the default.",
+            code="backward_ready_conflict",
         )
     return value
 
@@ -168,8 +204,6 @@ class Recorder:
         model: nn.Module,
         *,
         save: PredicateFn | None | MissingType = MISSING,
-        keep_op: PredicateFn | None | MissingType = MISSING,
-        keep_module: PredicateFn | None | MissingType = MISSING,
         default_op: bool | CaptureSpec | MissingType = MISSING,
         default_module: bool | CaptureSpec | MissingType = MISSING,
         history_size: int | MissingType = MISSING,
@@ -198,7 +232,7 @@ class Recorder:
         ----------
         model:
             PyTorch module to record.
-        save, keep_op, keep_module, default_op, default_module, history_size,
+        save, default_op, default_module, history_size,
         lookback, lookback_payload_policy, include_source_events, max_predicate_failures,
         on_predicate_error, storage, streaming, random_seed:
             Fastlog recording options.
@@ -228,15 +262,12 @@ class Recorder:
         storage_supplied = storage is not MISSING and storage is not None
         streaming_supplied = streaming is not MISSING and streaming is not None
         if storage_supplied and streaming_supplied:
-            raise TypeError("Do not pass both `storage` and `streaming`.")
-        resolved_streaming = storage if storage_supplied else streaming
-        keep_op = _resolve_save_alias(save=save, keep_op=keep_op)
-        if keep_module is not MISSING:
-            warnings.warn(
-                "Recorder(keep_module=...) is deprecated; use Recorder(save=...) instead.",
-                DeprecationWarning,
-                stacklevel=2,
+            raise KeywordConflictError(
+                "Do not pass both `storage` and `streaming`",
+                code="storage_argument_conflict",
+                remedy="prefer storage=, or remove one of the two arguments",
             )
+        resolved_streaming = storage if storage_supplied else streaming
         unwrapped_model, streaming = _unwrap_ddp_for_fastlog(model, resolved_streaming)
         default_op = _resolve_train_mode_default(
             field_name="default_op",
@@ -251,8 +282,7 @@ class Recorder:
         self.model = unwrapped_model
         self.options = merge_recording_options(
             recording=None,
-            keep_op=keep_op,
-            keep_module=keep_module,
+            keep_op=save,
             default_op=default_op,
             default_module=default_module,
             history_size=history_size,
@@ -290,7 +320,7 @@ class Recorder:
         self._failed = False
         self._next_pass_index = 1
 
-    def __enter__(self) -> "Recorder":
+    def __enter__(self) -> Recorder:
         """Enter the recorder resource scope."""
 
         if self._entered or self._exited:
@@ -327,11 +357,31 @@ class Recorder:
             session.recording_state = self._state
             session.captured_run_cores = self._captured_run_cores
             self._recording = Recording.from_capture_events(session)
+            # Settle the finalized product (path 14). A construction failure
+            # above propagates productless -- the raise is the signal.
+            from ..capture.outcome import (
+                CaptureOutcome,
+                CaptureStatus,
+                stamp_recording_outcome,
+            )
+
+            if getattr(self._recording, "_outcome", None) is None:
+                recording = self._recording
+                if recording.halted:
+                    stamped = CaptureOutcome(
+                        status=CaptureStatus.HALTED,
+                        reason=recording.halt_reason,
+                        boundary_label=recording.halt_reason,
+                    )
+                else:
+                    stamped = CaptureOutcome(status=CaptureStatus.COMPLETE)
+                stamp_recording_outcome(recording, stamped)
         else:
-            self._state.abort_storage(str(exc_value))
+            self._state.abort_storage(safe_exception_str(exc_value))
         self._entered = False
         self._exited = True
         if exc_value is None:
+            _warn_zero_match_capture_selectors(self._state)
             self._state.raise_accumulated_predicate_error()
 
     def log(
@@ -407,7 +457,15 @@ class Recorder:
         self._reset_state_for_pass(sample_id=sample_id)
         self._state.recording.start_times.append(time.time())
         try:
-            with active_recording_state(self._state):
+            # The reservation must wrap the recording-state install: a refused
+            # concurrent record() used to overwrite the admitted recorder's
+            # RecordingState for the window until its inner refusal unwound,
+            # projecting the winner's events into the loser's state. The inner
+            # orchestration re-enters the reservation same-thread (passthrough).
+            with (
+                _state.capture_reservation() as reservation_token,
+                active_recording_state(self._state),
+            ):
                 output = trace._run_and_log_inputs_through_model(
                     self.model,
                     input_args,
@@ -416,13 +474,13 @@ class Recorder:
                     grad_layers_to_save=[],
                     random_seed=self.options.random_seed,
                     postprocess=False,
+                    reservation_resume=reservation_token,
                 )
         except HaltSignal as halt_exc:
             captured_run_core = trace.__dict__.pop("_fastlog_captured_run_core", None)
             if captured_run_core is not None:
                 self._captured_run_cores.append(captured_run_core)
-            self._carry_module_structure_events(trace)
-            self._capture_events.extend(trace.capture_events.op_events)
+            self._absorb_pass_events(trace)
             object.__setattr__(
                 self._state.recording,
                 "n_ops",
@@ -437,7 +495,7 @@ class Recorder:
                 self._captured_run_cores.append(captured_run_core)
             forward_disposition = stop_directive_for_trace(trace).forward_disposition(exc)
             if forward_disposition == "raise":
-                self._state.abort_storage(str(exc))
+                self._state.abort_storage(safe_exception_str(exc))
                 raise
             partial_build_failed = False
             try:
@@ -469,11 +527,13 @@ class Recorder:
             # populates these on a normal return.
             output_tensors, output_tensor_addresses = _extract_and_mark_outputs(trace, output)
         trace.__dict__.pop("_output_attribution_input_tensors", None)
-        self._carry_module_structure_events(trace)
-        self._capture_events.extend(trace.capture_events.op_events)
+        self._absorb_pass_events(trace)
         trace.capture_events = self._capture_events
         trace._capture_events = self._capture_events
         self._state.runtime_trace = trace
+        self._state.intervene_selector_fire_count += int(
+            getattr(trace, "_tl_intervene_selector_fire_count", 0)
+        )
         self._output_tensors = output_tensors
         self._output_tensor_addresses = output_tensor_addresses
         object.__setattr__(
@@ -483,31 +543,24 @@ class Recorder:
         )
         return output
 
-    def _carry_module_structure_events(self, trace: Trace) -> None:
-        """Retain the pass's module prep/enter/exit events for ``to_trace()``.
+    def _absorb_pass_events(self, trace: Trace) -> None:
+        """Fold one pass's capture stream into the recorder's journal.
 
-        The predicate-capture per-pass ``trace`` created in
-        :meth:`_run_unified_capture` owns its own ``CaptureEvents`` while the
-        forward runs: model preparation emits one ``ModulePrepEvent`` per module
-        (``backends/torch/model_prep.py``) onto it, carrying each module's real
-        ``address_children`` / source metadata. The recorder then extends only
-        ``op_events`` into its own longer-lived ``self._capture_events`` and
-        reassigns ``trace.capture_events`` away, orphaning those prep events.
+        The per-pass ``trace`` created in :meth:`_run_unified_capture` owns its
+        own ``CaptureEvents`` while the forward runs: model preparation emits
+        one ``ModulePrepEvent`` per module onto it (with each module's real
+        ``address_children`` / source metadata), the wrapper hot path emits the
+        op events, and user pre-hook provenance lands in its own lane.
+        ``Recording.to_trace()`` rebuilds a fresh ``Trace`` from exactly the
+        recorder's accumulated journal, so those structure facts must fold
+        across or ``_build_root_module_log`` degrades to an address-children
+        fallback that breaks the module-hierarchy invariant.
 
-        ``Recording.to_trace()`` rebuilds a fresh ``Trace`` from exactly
-        ``self._capture_events`` and runs the same postprocess pipeline as a live
-        capture. Without the module prep events, ``_module_metadata`` stays empty
-        and ``_build_root_module_log`` (postprocess finalization) falls back to
-        deriving the root's ``address_children`` from ``top_level_modules`` --
-        which is empty whenever every op's module stack starts at ``self`` --
-        yielding a root ``Module`` with no ``address_children`` and a
-        ``module_hierarchy`` invariant failure for any model with a submodule.
-
-        Carry the real prep (and, for symmetry, any enter/exit) events across so
-        ``to_trace()``'s materialize step applies them exactly as an exhaustive
-        capture would. Guarded on emptiness so multi-pass recordings -- which
-        re-prepare the model and re-emit identical prep events every pass -- keep
-        a single, non-duplicated set.
+        The fold is one :meth:`CaptureEvents.concat` call under the declared
+        merge law: module structure lanes are first-run-only (multi-pass
+        recordings re-emit identical prep events every pass), op and pre-hook
+        lanes append with re-stamped seq, and run-local lanes (output
+        versions, buffer writes, backward) never merge.
         """
 
         if self._capture_events is None:
@@ -515,13 +568,7 @@ class Recorder:
         source = getattr(trace, "capture_events", None)
         if source is None or source is self._capture_events:
             return
-        if not self._capture_events.module_prep_events:
-            self._capture_events.module_prep_events.extend(source.module_prep_events)
-        if not self._capture_events.module_enter_events:
-            self._capture_events.module_enter_events.extend(source.module_enter_events)
-        if not self._capture_events.module_exit_events:
-            self._capture_events.module_exit_events.extend(source.module_exit_events)
-        self._capture_events.pre_hook_events.extend(source.pre_hook_events)
+        self._capture_events.concat(source)
 
     def _mark_halted_pass(self, pass_index: int, halt_exc: HaltSignal) -> None:
         """Persist halt state for the given pass."""
@@ -529,6 +576,17 @@ class Recorder:
         if self._state is None:
             raise RecorderStateError("Recorder.log() requires an active with-block")
         _mark_recording_halted(self._state.recording, pass_index, halt_exc.reason)
+        from ..capture.outcome import CaptureOutcome, CaptureStatus, stamp_recording_outcome
+
+        stamp_recording_outcome(
+            self._state.recording,
+            CaptureOutcome(
+                status=CaptureStatus.HALTED,
+                reason=halt_exc.reason,
+                boundary_kind=getattr(halt_exc, "boundary_kind", None),
+                boundary_label=getattr(halt_exc, "boundary_label", None) or halt_exc.reason,
+            ),
+        )
 
     def _mark_recording_failed(self, trace: Trace, exc: BaseException) -> Recording:
         """Build and stamp a failed partial recording for a forward exception.
@@ -551,21 +609,19 @@ class Recorder:
 
         if self._state is None or self._capture_events is None:
             raise RecorderStateError("Recorder.log() requires an active with-block")
-        self._state.abort_storage(str(exc))
+        self._state.abort_storage(safe_exception_str(exc))
         failed_events = getattr(trace, "_failed_fastlog_capture_events", None)
         if failed_events is None:
             raise RecorderStateError(
                 "failed-capture event snapshot missing; cannot build a faithful partial"
             )
         combined_events = CaptureEvents()
-        combined_events.extend(self._capture_events.op_events)
-        combined_events.module_prep_events.extend(self._capture_events.module_prep_events)
-        combined_events.module_enter_events.extend(self._capture_events.module_enter_events)
-        combined_events.module_exit_events.extend(self._capture_events.module_exit_events)
-        combined_events.pre_hook_events.extend(self._capture_events.pre_hook_events)
+        combined_events.concat(self._capture_events)
         if failed_events is not self._capture_events:
-            combined_events.extend(failed_events.op_events)
-            combined_events.pre_hook_events.extend(failed_events.pre_hook_events)
+            # The failing pass contributes only its op and pre-hook facts;
+            # module structure from a partially-executed forward is not
+            # trusted (matching the historical recovery behavior).
+            combined_events.concat(failed_events, lanes=("op_events", "pre_hook_events"))
         self._capture_events = combined_events
         trace.capture_events = combined_events
         trace._capture_events = combined_events
@@ -585,9 +641,23 @@ class Recorder:
         """Stamp string-only failure metadata onto a frozen recording."""
 
         op_events = tuple(
-            self._capture_events.op_events if self._capture_events is not None else ()
+            self._capture_events.amended_op_records() if self._capture_events is not None else ()
         )
-        last_event = op_events[-1] if op_events else None
+        # B8-46: the exception unwind records module-exit events AFTER the
+        # failure point (a mid-forward submodule failure leaves a trailing
+        # ``boom:exit:1`` / ``root:exit:1`` run), so the raw last event names
+        # the unwind, not the failure frontier. Skip trailing module-exit
+        # events so the best-effort ``last_event_*`` metadata points at the
+        # deepest event that actually ran before the failure; if every event
+        # is a module exit, keep the raw tail rather than reporting nothing.
+        last_event = None
+        for event in reversed(op_events):
+            event_kind = getattr(getattr(event, "record_context", None), "kind", None)
+            if event_kind != "module_exit":
+                last_event = event
+                break
+        if last_event is None and op_events:
+            last_event = op_events[-1]
         last_ctx = getattr(last_event, "record_context", None)
         successful_op_labels = [
             str(getattr(event, "label_raw", getattr(event, "label", "")))
@@ -596,7 +666,7 @@ class Recorder:
         ]
         object.__setattr__(recording, "status", "partial_error")
         object.__setattr__(recording, "failed", True)
-        object.__setattr__(recording, "error_repr", repr(exc))
+        object.__setattr__(recording, "error_repr", safe_exception_repr(exc))
         object.__setattr__(
             recording,
             "error_traceback",
@@ -631,6 +701,35 @@ class Recorder:
         recoverable_path = self._recoverable_temp_bundle_path()
         if recoverable_path is not None:
             object.__setattr__(recording, "bundle_path", recoverable_path)
+        # Settle the failed product: mirror the scratch trace's settled record
+        # (the orchestrator's finally already classified phase/origin) with
+        # the recorder-level committed-op count.
+        from dataclasses import replace as dataclass_replace
+
+        from ..capture.outcome import (
+            CaptureOutcome,
+            CaptureStatus,
+            classify_failure_origin,
+            outcome_for,
+            stamp_recording_outcome,
+        )
+
+        runtime_trace = self._state.runtime_trace if self._state is not None else None
+        settled = outcome_for(runtime_trace) if runtime_trace is not None else None
+        if settled is not None and settled.status in (
+            CaptureStatus.FAILED,
+            CaptureStatus.ABORTED_NONFINITE,
+        ):
+            stamped = dataclass_replace(settled, n_ops_committed=recording.n_ops_completed)
+        else:
+            stamped = CaptureOutcome(
+                status=CaptureStatus.FAILED,
+                origin=classify_failure_origin(exc),
+                reason=safe_exception_str(exc),
+                error_type=type(exc).__name__,
+                n_ops_committed=recording.n_ops_completed,
+            )
+        stamp_recording_outcome(recording, stamped)
 
     def _recoverable_temp_bundle_path(self) -> Path | None:
         """Return the fastlog temp bundle path when it has a recoverable index."""

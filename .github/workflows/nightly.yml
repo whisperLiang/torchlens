@@ -5,22 +5,126 @@ on:
     - cron: "17 4 * * *"
   workflow_dispatch:
 
+# Default-deny token scope (grind r3, R61/b2:D1): every job in this
+# workflow only reads the repo, so the GITHUB_TOKEN gets exactly that.
+permissions:
+  contents: read
+
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: false
 
 jobs:
+  perf-gate:
+    name: Same-run performance regression gate
+    runs-on: ubuntu-24.04
+    # Scheduled/manual only: two smoke-suite runs cost several minutes and must
+    # not extend the PR-blocking path. Comparing adjacent commits on the same
+    # runner avoids treating developer-machine absolute baselines as portable.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          # Full history + tags: the cumulative leg anchors on the latest
+          # release tag, not just HEAD^ (r7 R30).
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install exact canonical CPU benchmark environment
+        run: |
+          uv venv "${{ runner.temp }}/perf-venv" --python 3.11
+          # --index-strategy unsafe-best-match rationale (R61, reviewed): both indexes are reputable and the torch pins are exact `==X+cpu` local versions only the torch index serves, so cross-index confusion cannot select a different name/version; first-index would break resolving torch's +cpu artifacts alongside PyPI deps.
+          uv pip install --python "${{ runner.temp }}/perf-venv/bin/python" \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e ".[dev,tabular]" \
+            "torch==2.8.0+cpu" \
+            "torchvision==0.23.0+cpu" \
+            numpy
+
+      - name: Prepare adjacent-commit and release-anchor baselines
+        # r7 R30 (opus MED, round-1 carry): the adjacent-commit differential
+        # alone is baselined-in by the NEXT commit (regress in C, land D
+        # before the nightly, and every future comparison is D-vs-C) and
+        # carries no cumulative ceiling (ten sequential 9% regressions pass
+        # ten nightly gates). The release tag is the fixed anchor: it moves
+        # only when a release ships, so slow drift accumulates against it
+        # instead of being re-based away nightly.
+        run: |
+          git worktree add --detach "${{ runner.temp }}/perf-base" HEAD^
+          anchor="$(git describe --tags --abbrev=0)"
+          echo "release anchor: $anchor"
+          git worktree add --detach "${{ runner.temp }}/perf-anchor" "$anchor"
+
+      - name: Measure baseline and current commit on the same runner
+        env:
+          PERF_PYTHON: ${{ runner.temp }}/perf-venv/bin/python
+        run: |
+          cd "${{ runner.temp }}/perf-base"
+          PYTHONPATH=. "$PERF_PYTHON" -m benchmarks.perf_suite \
+            --smoke --samples 10 --timeout 180 \
+            --out-json "${{ runner.temp }}/perf-base.json" \
+            --out-md "${{ runner.temp }}/perf-base.md"
+          cd "${{ runner.temp }}/perf-anchor"
+          PYTHONPATH=. "$PERF_PYTHON" -m benchmarks.perf_suite \
+            --smoke --samples 10 --timeout 180 \
+            --out-json "${{ runner.temp }}/perf-anchor.json" \
+            --out-md "${{ runner.temp }}/perf-anchor.md"
+          cd "$GITHUB_WORKSPACE"
+          PYTHONPATH=. "$PERF_PYTHON" -m benchmarks.perf_suite \
+            --smoke --samples 10 --timeout 180 \
+            --out-json "${{ runner.temp }}/perf-current.json" \
+            --out-md "${{ runner.temp }}/perf-current.md"
+
+      - name: Fail on a measured regression
+        env:
+          PERF_PYTHON: ${{ runner.temp }}/perf-venv/bin/python
+        run: |
+          PYTHONPATH=. "$PERF_PYTHON" -m benchmarks.perf_gate \
+            --baseline "${{ runner.temp }}/perf-base.json" \
+            --current "${{ runner.temp }}/perf-current.json" \
+            --out "${{ runner.temp }}/perf-comparison.json"
+          # Cumulative ceiling vs the release anchor: 25% tolerance -- wide
+          # enough for a release cycle's reviewed growth, tight enough that
+          # compounding "9% per commit" drift goes red before it doubles.
+          PYTHONPATH=. "$PERF_PYTHON" -m benchmarks.perf_gate \
+            --baseline "${{ runner.temp }}/perf-anchor.json" \
+            --current "${{ runner.temp }}/perf-current.json" \
+            --rel-tolerance 0.25 \
+            --out "${{ runner.temp }}/perf-anchor-comparison.json"
+
+      - name: Upload performance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-perf-gate
+          path: |
+            ${{ runner.temp }}/perf-base.json
+            ${{ runner.temp }}/perf-anchor.json
+            ${{ runner.temp }}/perf-current.json
+            ${{ runner.temp }}/perf-anchor-comparison.json
+            ${{ runner.temp }}/perf-comparison.json
+
   fast-tier:
     name: Full fast tier
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
       - name: Install graphviz
         run: |
@@ -29,52 +133,488 @@ jobs:
 
       - name: Install torch and TorchLens
         run: |
-          uv pip install --system "torch==2.7.*" \
+          cat > "${{ runner.temp }}/torch-2.7-constraints.txt" <<'EOF'
+          torch==2.7.*
+          EOF
+          uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt" "torch==2.7.*" \
             --index-url https://download.pytorch.org/whl/cpu
-          uv pip install --system -e ".[dev,test,tabular]"
+          uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt" -e ".[dev,test,tabular]"
+          uv pip check
+          python -c 'import torch; assert torch.__version__.startswith("2.7."), torch.__version__; print(torch.__version__)'
 
       - name: Run fast tests
         run: |
-          pytest tests/ -m "not slow" --tb=short
+          # A command-line -m REPLACES (does not intersect) the pyproject
+          # addopts "-m 'not rare'", so a bare -m "not slow" would silently
+          # re-select rare-but-not-slow tests that the `rare` marker documents as
+          # "always excluded unless explicitly requested". Conjoin `not rare` to
+          # preserve that contract.
+          pytest tests/ -m "not slow and not rare" --tb=short \
+            --junitxml="${{ runner.temp }}/fast-tier.junit.xml"
 
-  preview-backends:
-    name: Preview backend tests
+      - name: Fail on an under-executed fast tier
+        # Executed-floor attestation (grind r3, R82): the full fast tier is
+        # the widest unattended selection (12004 collected, counted
+        # 2026-08-15); the floor is roughly half so collection drift or an
+        # importorskip cascade goes red while normal churn never trips.
+        run: |
+          python scripts/check_ci_executed_tests.py "${{ runner.temp }}/fast-tier.junit.xml" 6000
+
+      - name: Record skip outcomes
+        # r7 R79: skips were invisible in CI output -- an importorskip
+        # cascade below the executed floor left no audit trail of WHAT
+        # stopped running. The junit ships as an artifact and the top skip
+        # reasons land in the job summary.
+        if: always()
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import collections
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("${{ runner.temp }}/fast-tier.junit.xml").getroot()
+          reasons = collections.Counter()
+          for case in root.iter("testcase"):
+              skipped = case.find("skipped")
+              if skipped is not None:
+                  reasons[(skipped.get("message") or "?")[:120]] += 1
+          print("## Fast-tier skip outcomes")
+          print(f"total skips: {sum(reasons.values())}")
+          for reason, count in reasons.most_common(20):
+              print(f"- {count} x {reason}")
+          PY
+
+      - name: Upload fast-tier junit (skip audit trail)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fast-tier-junit
+          path: ${{ runner.temp }}/fast-tier.junit.xml
+          retention-days: 30
+
+      - name: Fresh-seed generative property sweep
+        # r7 R73 (6th pass): TORCHLENS_FUZZ_SEED was wired into ZERO
+        # workflows, so the generative suites ran only their fixed default
+        # seed -- a regression corpus, never standing exploration. Four fresh
+        # seeds cost <1s each (opus measured, removing the flake objection);
+        # the run id makes every nightly a new seed while the failure output
+        # names the seed for deterministic local reproduction
+        # (TORCHLENS_FUZZ_SEED=<n> pytest tests/test_generative_properties_r73.py).
+        # r7 R73 (fixwave-7): the tlspec parse-fuzz sweeps joined the seeded
+        # surface (their truncation/byte-flip offsets now honor
+        # TORCHLENS_FUZZ_SEED) -- run them under the same fresh seeds so
+        # loader robustness gets standing exploration too.
+        run: |
+          for offset in 0 1 2 3; do
+            TORCHLENS_FUZZ_SEED="$(( ${{ github.run_id }} % 1000000000 + offset ))" \
+              pytest tests/test_generative_properties_r73.py tests/test_tlspec_parse_fuzz.py \
+                -m '' -q --tb=short -p no:randomly
+          done
+
+  coverage:
+    name: Coverage floor (smoke tier)
     runs-on: ubuntu-latest
+    # First measured coverage gate (grind r3, SF-19: four consecutive review
+    # passes found NO coverage job anywhere). The smoke tier under
+    # branch-coverage instrumentation measured 64% total on 2026-08-15; the
+    # floor sits at 55 so environment variance and per-version skips never
+    # trip it while a mass-hollowing regression (a subsystem's tests skipping
+    # or a package dropping out of the suite) always does. Raise the floor
+    # deliberately as coverage grows; never lower it to pass (tripwire).
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
-      - name: Install TorchLens and preview backends
+      - name: Install graphviz
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphviz
+
+      - name: Install canonical CPU test environment
+        run: |
+          # --index-strategy unsafe-best-match rationale (R61, reviewed): both indexes are reputable and the torch pins are exact `==X+cpu` local versions only the torch index serves, so cross-index confusion cannot select a different name/version; first-index would break resolving torch's +cpu artifacts alongside PyPI deps.
+          uv pip install --system \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e ".[dev,test,tabular]" \
+            "torch==2.8.0+cpu" \
+            "torchvision==0.23.0+cpu"
+          uv pip check
+
+      - name: Run the smoke tier under coverage with a floor
+        # No deselects: the duration-budget machinery itself skips recording
+        # under coverage instrumentation (tests/conftest.py, r7 R41/R72 --
+        # the old single --deselect here named a test that had been RENAMED,
+        # so it silently excluded nothing while claiming the carve-out).
+        run: |
+          pytest tests/ -m smoke --ignore-glob="*menagerie*" --ignore=tests/crawler \
+            --cov=torchlens --cov-branch \
+            --cov-report=term --cov-report=xml:"${{ runner.temp }}/coverage.xml" \
+            --cov-report=json:"${{ runner.temp }}/coverage.json" \
+            --cov-fail-under=55 \
+            --tb=short -q
+
+      - name: Enforce per-package coverage floors
+        # r7 R72 (sol MED): the aggregate floor alone let a subsystem hollow
+        # out while the total stayed above 55. Verdict-critical packages are
+        # bound individually; floors live in the script (single authority).
+        run: |
+          python scripts/check_package_coverage_floors.py "${{ runner.temp }}/coverage.json"
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-coverage
+          path: ${{ runner.temp }}/coverage.xml
+
+  capture-byte-oracle:
+    name: Capture-characterization byte oracle (torch 2.13.0, py 3.10)
+    runs-on: ubuntu-24.04
+    # The capture-characterization goldens embed raw float-byte digests, so
+    # they are enforceable only on their recording environment (py3.10 +
+    # torch 2.13.0; the version gate strips the build tag, mirroring
+    # tests/_oracle_env.py). The 31-case matrix regenerates each record in an
+    # isolated subprocess (~8 min), so it runs nightly rather than
+    # PR-blocking. The executed-floor attestation proves the suite actually
+    # ran instead of version-skipping to green (T13.2).
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.10"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install the goldens' recording-environment torch
+        run: |
+          # --index-strategy unsafe-best-match rationale (R61, reviewed): both indexes are reputable and the torch pins are exact `==X+cpu` local versions only the torch index serves, so cross-index confusion cannot select a different name/version; first-index would break resolving torch's +cpu artifacts alongside PyPI deps.
+          uv pip install --system \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e ".[dev,tabular]" \
+            "torch==2.13.0+cpu" \
+            numpy
+          uv pip check
+          python -c 'import torch; assert torch.__version__ == "2.13.0+cpu", torch.__version__'
+
+      - name: Run the slow capture-characterization matrix
+        run: |
+          pytest tests/capture_oracle/ -m slow --tb=short -q \
+            --junitxml="${{ runner.temp }}/capture-oracle.junit.xml"
+
+      - name: Fail on an under-executed capture-oracle matrix
+        # Floor at roughly half the 31-case matrix: a version-gate or golden
+        # drift that mass-skips the characterization must go red, while
+        # adding/removing individual cases does not.
+        run: |
+          python scripts/check_ci_executed_tests.py \
+            "${{ runner.temp }}/capture-oracle.junit.xml" 16
+
+  preview-backends:
+    name: Preview backend tests (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    # One framework per job: the frameworks carry conflicting pins and native
+    # runtimes that segfault when co-imported in one process (test collection
+    # imports every framework-marked module), so a combined env cannot be
+    # gated. With a single framework installed, the other suites' module-level
+    # importorskip guards skip cleanly during collection.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # executed_floor is a per-leg minimum EXECUTED (non-skipped) test
+          # count, set to roughly half each suite's current size so a mass
+          # importorskip/marker-drift regression fails the leg while normal
+          # test-count churn does not. A floor of 1 would let a 49-of-50 skip
+          # stay green.
+          - backend: tf
+            install: tensorflow-cpu
+            marker: tf_backend
+            import_check: "import tensorflow, keras"
+            executed_floor: 18
+          - backend: jax
+            install: '"jax[cpu]" equinox flax'
+            marker: backend_jax
+            import_check: "import jax, jax.numpy, equinox, flax"
+            executed_floor: 60
+          - backend: tinygrad
+            # Pinned to the exact version the backend runtime asserts. The
+            # replay/derived-grad oracles require the PYTHON device.
+            install: '"tinygrad==0.13.0"'
+            marker: backend_tinygrad
+            dev: PYTHON
+            import_check: "import tinygrad"
+            executed_floor: 25
+          - backend: paddle
+            # Pinned to the 3.3 minor stream the preview suite is validated
+            # against (paddle 3.3.x in the parity env); paddle minors have
+            # historically shifted C-extension/co-import behavior, so new
+            # minors join the matrix deliberately, not by drift.
+            install: '"paddlepaddle>=3.3,<3.4"'
+            marker: backend_paddle
+            import_check: "import paddle"
+            executed_floor: 22
+          - backend: mlx
+            # MLX ships manylinux CPU wheels, so its suite runs on Linux CI;
+            # pinned to 0.26.3 because the 0.26.5 manylinux wheel is missing
+            # libmlx.so. Metal-path coverage still needs Apple silicon.
+            install: '"mlx==0.26.3"'
+            marker: backend_mlx
+            import_check: "import mlx.core, mlx.nn"
+            executed_floor: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install TorchLens and the ${{ matrix.backend }} preview backend
         run: |
           uv pip install --system -e ".[dev,test,tabular]"
-          uv pip install --system tensorflow-cpu "jax[cpu]" equinox flax tinygrad paddlepaddle
-          # MLX is Apple-silicon-only, so it is intentionally excluded on Linux CI.
+          uv pip install --system ${{ matrix.install }}
 
-      - name: Run preview backend tests
+      - name: Verify the ${{ matrix.backend }} runtime imports
+        # A missing or import-broken framework must fail the leg here, not
+        # dissolve into importorskip-skipped tests downstream.
         run: |
-          pytest tests/ -m "(tf_backend or backend_jax or backend_tinygrad or backend_paddle) and not slow" --tb=short
+          python -c '${{ matrix.import_check }}'
+
+      - name: Run ${{ matrix.backend }} preview backend tests
+        env:
+          # MLX's CPU JIT emits _FloatNN typedefs newer g++ rejects; the
+          # uncompiled path is equivalent for capture. No-op for other legs.
+          MLX_DISABLE_COMPILE: "1"
+          TORCHLENS_RUN_UNSTABLE_MLX_TESTS: "1"
+          # tinygrad leg only; empty (unread) elsewhere.
+          DEV: ${{ matrix.dev || '' }}
+        run: |
+          pytest tests/ -m "${{ matrix.marker }} and not slow" --tb=short \
+            --junitxml="${{ runner.temp }}/preview-${{ matrix.backend }}.junit.xml"
+
+      - name: Fail on an under-executed ${{ matrix.backend }} suite
+        # Second tripwire: even with the runtime importable, a mostly-skipped
+        # suite (marker drift, collection regression, importorskip cascade)
+        # must not stay green; each leg carries its own executed-test floor.
+        run: |
+          python scripts/check_ci_executed_tests.py \
+            "${{ runner.temp }}/preview-${{ matrix.backend }}.junit.xml" \
+            "${{ matrix.executed_floor }}"
+
+  metadata-gates:
+    name: Extras resolvability and dependency floors
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Every declared extra resolves on every advertised interpreter
+        # First leg that resolves ANY extra beyond dev/test/tabular (grind r4,
+        # R83-1: `torchlens[neuro]` required a distribution that does not
+        # exist on PyPI and stayed uninstallable for every user because no CI
+        # leg ever tried to resolve it). Resolution-only -- metadata
+        # solvability across the advertised interpreter range, no installs.
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          import sys
+          import tempfile
+          import tomllib
+
+          with open("pyproject.toml", "rb") as fh:
+              extras = sorted(tomllib.load(fh)["project"]["optional-dependencies"])
+          # DISCLOSED SKIP, never silent (grind r4): all/all-stretch are
+          # KNOWN-unsatisfiable as shipped (lit-nlp~=1.3 requires shap<0.46
+          # against the shap~=0.46 pin) and their composition is a queued
+          # owner decision, so they are excluded here and reported loudly.
+          # If they start resolving, the notice below says to update this
+          # ledger.
+          known_unsatisfiable = {"all", "all-stretch"}
+          failures = []
+          fixed = []
+          with tempfile.TemporaryDirectory() as tmp:
+              lock = os.path.join(tmp, "lock.txt")
+              for python_version in ("3.10", "3.11", "3.12", "3.13"):
+                  for extra in extras:
+                      proc = subprocess.run(
+                          ["uv", "pip", "compile", "pyproject.toml",
+                           "--extra", extra, "--python-version", python_version,
+                           "--no-header", "-q", "-o", lock],
+                          capture_output=True, text=True,
+                      )
+                      ok = proc.returncode == 0
+                      if extra in known_unsatisfiable:
+                          if ok:
+                              fixed.append((python_version, extra))
+                          continue
+                      if not ok:
+                          failures.append((python_version, extra, proc.stderr.strip()))
+          for python_version, extra, err in failures:
+              print(f"UNRESOLVABLE: [{extra}] on {python_version}\n{err}\n")
+          if fixed:
+              print("NOTE: known-unsatisfiable extras now resolve; update this ledger:", fixed)
+          print(f"checked {len(extras) - len(known_unsatisfiable)} extras x 4 interpreters; "
+                f"skipped (disclosed, queued owner fork): {sorted(known_unsatisfiable)}")
+          sys.exit(1 if failures else 0)
+          PY
+
+      - name: Declared dependency floors install and import (lowest-direct)
+        # The floors declared in pyproject are EXERCISED here (grind r4,
+        # b2:B6 third round: numpy/packaging/tqdm/graphviz were bare names
+        # and no leg anywhere resolved lowest). torch is pinned to the floor
+        # leg's exact CPU build (the smoke matrix already exercises the torch
+        # floor; unpinned lowest-direct would pull the multi-GB CUDA build).
+        run: |
+          uv venv "${{ runner.temp }}/floor-venv" --python 3.10
+          # --index-strategy unsafe-best-match rationale (R61, reviewed): both indexes are reputable and the torch pins are exact `==X+cpu` local versions only the torch index serves, so cross-index confusion cannot select a different name/version; first-index would break resolving torch's +cpu artifacts alongside PyPI deps.
+          uv pip install --python "${{ runner.temp }}/floor-venv/bin/python" \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            --resolution lowest-direct \
+            -e . \
+            "torch==2.1.2+cpu"
+          "${{ runner.temp }}/floor-venv/bin/python" - <<'PY'
+          import tempfile
+          from pathlib import Path
+
+          import graphviz
+          import numpy
+          import packaging
+          import safetensors
+          import tqdm
+          import torch
+          import torchlens as tl
+          from torch import nn
+
+          print("floors:", numpy.__version__, packaging.__version__,
+                tqdm.__version__, graphviz.__version__, torch.__version__,
+                safetensors.__version__)
+          trace = tl.trace(nn.Sequential(nn.Linear(4, 3), nn.ReLU()), torch.randn(2, 4))
+          assert trace.num_ops >= 2
+          # r7 R83-3: the floors for safetensors (tlspec blobs) and pillow
+          # (drawing surfaces) resolved here but were never EXERCISED -- a
+          # floor too low to carry the API TorchLens calls still passed. One
+          # save/load round-trip plus a draw() puts both on the floor path.
+          with tempfile.TemporaryDirectory() as tmp:
+              bundle = Path(tmp) / "floor.tlspec"
+              tl.save(trace, str(bundle))
+              loaded = tl.load(str(bundle))
+              assert loaded.num_ops == trace.num_ops
+              loaded.draw(vis_save_only=True, vis_outpath=str(Path(tmp) / "floor_graph"))
+              loaded.cleanup()
+          print("floor-env capture + save/load + draw OK")
+          PY
 
   wheel:
     name: Wheel package smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
-      - name: Build wheel
+      - name: Build wheel and sdist with the release's exact builder
+        # SINGLE PIN AUTHORITY (grind r4; hash-locked in R61): the builder
+        # stack is installed hash-verified from the SAME lock the release job
+        # installs before running build_command
+        # (.github/workflows/release-requirements.txt; build_command itself
+        # installs NOTHING inside the token scope), so this gate can never
+        # silently attest a different builder than the release uses (the old
+        # lockstep was comment-only). The lockstep assertions live in
+        # tests/test_packaging_diet.py.
+        # The dirty-tree guard makes the packaging provenance explicit: an
+        # artifact must only ever attest the COMMITTED tree (grind r3, R84
+        # LOW), and any stale build/ dir is removed because bdist_wheel
+        # silently reuses build/lib and can resurrect files pruned since the
+        # last build.
         run: |
-          uv pip install --system build
-          python -m build --wheel --outdir "${{ runner.temp }}/dist"
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "refusing to package a dirty tree"
+            git status --short
+            exit 1
+          fi
+          rm -rf build
+          BUILD_PIN="$(grep -oE '^build==[0-9][0-9a-zA-Z.]*' .github/workflows/release-requirements.txt)"
+          test -n "$BUILD_PIN" || { echo "no build== pin in release-requirements.txt"; exit 1; }
+          echo "release builder: $BUILD_PIN"
+          python -m pip install --require-hashes --only-binary :all: \
+            -r .github/workflows/release-requirements.txt
+          SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
+            python -m build --no-isolation --outdir "${{ runner.temp }}/dist"
+          SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
+            python scripts/normalize_sdist.py \
+            "${{ runner.temp }}"/dist/torchlens-*.tar.gz \
+            "${{ runner.temp }}"/dist/torchlens-*.whl
+
+      - name: Fail on a non-reproducible wheel or sdist (double-build gate)
+        # Same commit + same SOURCE_DATE_EPOCH must give byte-identical
+        # artifacts (grind r3, R86: six dist-info timestamps used to differ
+        # on every wheel rebuild). The sdist joined the gate in grind r4
+        # (gzip header wall-clock mtime, builder uid/gid in tar members),
+        # and grind r5 (b10 R84-1/2) proved the same-runner rebuild held
+        # every MACHINE-dependent field constant by construction — a gate
+        # proving determinism while labelled reproducibility. The rebuild
+        # therefore runs under a DIFFERENT umask (002 vs the runner's 022)
+        # from a freshly re-checked-out tree, exercising exactly the
+        # source-file-mode leak measured across checkouts; normalize_sdist
+        # stamps modes in both artifacts so the shas must still match. The
+        # stale local build/ tree is removed first: bdist_wheel silently
+        # reuses build/lib and can resurrect files pruned since the last
+        # build.
+        run: |
+          rm -rf build
+          rebuild_src="${{ runner.temp }}/rebuild-src"
+          git worktree add --detach "$rebuild_src" HEAD
+          (
+            cd "$rebuild_src"
+            umask 002
+            chmod -R g+w .
+            SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
+              python -m build --no-isolation --outdir "${{ runner.temp }}/dist-rebuild"
+            SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
+              python scripts/normalize_sdist.py \
+              "${{ runner.temp }}"/dist-rebuild/torchlens-*.tar.gz \
+              "${{ runner.temp }}"/dist-rebuild/torchlens-*.whl
+          )
+          git worktree remove --force "$rebuild_src"
+          for kind in whl tar.gz; do
+            first="$(sha256sum "${{ runner.temp }}"/dist/torchlens-*.$kind | cut -d' ' -f1)"
+            second="$(sha256sum "${{ runner.temp }}"/dist-rebuild/torchlens-*.$kind | cut -d' ' -f1)"
+            echo "$kind build 1: $first"
+            echo "$kind build 2: $second"
+            test "$first" = "$second"
+          done
 
       - name: Install wheel in a clean venv
         run: |
@@ -86,3 +626,178 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: |
           wheel-venv/bin/python -c "import torch, torchlens as tl; from torch import nn; from torchlens.validation import validate_tlspec; path='wheel-smoke.tlspec'; trace=tl.trace(nn.Linear(2, 1), torch.randn(1, 2), layers_to_save='none'); trace.save(path); validate_tlspec(path); loaded=tl.load(path); assert loaded.num_ops == trace.num_ops"
+
+      - name: PEP 561 consumer smoke (installed wheel exposes its types)
+        # Red-capable in BOTH directions (grind r3, R84 LOW: py.typed shipped
+        # with no consumer-side proof it works): if py.typed were missing,
+        # mypy refuses the import in the well-typed consumer (import-untyped)
+        # AND stops seeing the deliberate type error in the ill-typed one.
+        # mypy version matches the dev-extra pin; --follow-imports=silent
+        # keeps third-party stub noise inside torchlens out of the verdict.
+        working-directory: ${{ runner.temp }}
+        run: |
+          wheel-venv/bin/python -m pip install "mypy==2.1.0"
+          printf 'import torchlens as tl\nx: str = tl.__version__\n' > consumer_good.py
+          printf 'import torchlens as tl\ny: int = tl.__version__\n' > consumer_bad.py
+          wheel-venv/bin/python -m mypy --follow-imports=silent consumer_good.py
+          if wheel-venv/bin/python -m mypy --follow-imports=silent consumer_bad.py; then
+            echo "mypy accepted an ill-typed consumer: the wheel's types are invisible"
+            exit 1
+          fi
+
+      - name: Run the packaging manifest tripwires
+        # The wheel-diet and sdist-governance tests are slow-marked, so the
+        # weekly slow tier was their only run and a packaging regression could
+        # ship unnoticed for up to a week. Run them nightly, where the
+        # artifacts are actually built (T13.5).
+        run: |
+          # --index-strategy unsafe-best-match rationale (R61, reviewed): both indexes are reputable and the torch pins are exact `==X+cpu` local versions only the torch index serves, so cross-index confusion cannot select a different name/version; first-index would break resolving torch's +cpu artifacts alongside PyPI deps.
+          uv pip install --system \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e ".[dev,tabular]" \
+            "torch==2.8.0+cpu"
+          pytest \
+            "tests/test_packaging_diet.py::test_built_wheel_manifest_is_diet" \
+            "tests/test_ci_packaging_gates.py::test_built_sdist_manifest_is_governed" \
+            --tb=short -q
+
+  platform-canary:
+    # macOS and Windows had ZERO controlled execution while the universal
+    # py3-none-any wheel and explicit win32/darwin code paths ship (grind r5,
+    # b10 R85-2): every core leg is Linux/CPU. This is a bounded canary — an
+    # import + capture + save/load round-trip on each OS — not a support
+    # claim; the CI-attested platform statement lives in
+    # docs/reference/limitations.md.
+    name: platform canary (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # r7 R85-2: pinned OS images, not *-latest — this canary is the SOLE
+        # evidence behind the CI-attested platform statement, its python and
+        # torch are pinned, and a floating image silently moves the one
+        # variable under test. Bump the images deliberately, with a dated
+        # note, like every other pin in this repo.
+        include:
+          - os: macos-15
+            torch-install: torch==2.13.0 torchvision==0.28.0
+          - os: windows-2025
+            torch-install: >-
+              --index-url https://download.pytorch.org/whl/cpu
+              --extra-index-url https://pypi.org/simple
+              --index-strategy unsafe-best-match
+              torch==2.13.0+cpu torchvision==0.28.0+cpu
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install torchlens + torch
+        shell: bash
+        run: uv pip install --system -e . ${{ matrix.torch-install }}
+
+      - name: Import, capture, and round-trip a trace
+        shell: bash
+        run: |
+          python - <<'PY'
+          import tempfile
+          import os
+
+          import torch
+          import torch.nn as nn
+
+          import torchlens as tl
+
+          model = nn.Sequential(nn.Conv2d(3, 4, 3), nn.ReLU(), nn.Flatten(), nn.LazyLinear(5))
+          trace = tl.trace(model, torch.randn(2, 3, 8, 8), save=tl.func("relu"))
+          assert trace.backend == "torch"
+          assert len(trace.layer_labels) > 0, "no layers captured"
+          relu = trace["relu_1_2"]
+          assert relu.out is not None
+
+          with tempfile.TemporaryDirectory() as tmp:
+              path = os.path.join(tmp, "canary.tlspec")
+              tl.save(trace, path)
+              loaded = tl.load(path)
+              assert loaded.layer_labels == trace.layer_labels
+
+          # r7 R85 (sol MED): the canary's model/input lived on the default
+          # CPU, so MPS had ZERO executable coverage while device-specific
+          # claims ship. On the Apple-silicon runner the capability assertion
+          # is HARD (it cannot vacuously skip): MPS must be available, and a
+          # capture + save/load round-trip must work on it. CUDA remains
+          # CI-dark by disclosed limitation (no GPU runners; see
+          # docs/reference/limitations.md "CI-attested platforms").
+          import platform
+
+          if platform.system() == "Darwin" and platform.machine() == "arm64":
+              assert torch.backends.mps.is_available(), (
+                  "Apple-silicon runner without MPS: the device canary would "
+                  "silently stop covering the mps path"
+              )
+              mps_model = nn.Sequential(nn.Linear(4, 4), nn.ReLU()).to("mps")
+              mps_input = torch.randn(2, 4, device="mps")
+              mps_trace = tl.trace(mps_model, mps_input, save=tl.func("relu"))
+              assert mps_trace["relu_1_2"].out.device.type == "mps"
+              with tempfile.TemporaryDirectory() as tmp:
+                  mps_path = os.path.join(tmp, "canary-mps.tlspec")
+                  tl.save(mps_trace, mps_path)
+                  mps_loaded = tl.load(mps_path)
+                  assert mps_loaded.layer_labels == mps_trace.layer_labels
+              print("mps canary OK")
+
+          print("platform canary OK:", tl.__version__)
+          PY
+
+  shuffle-stress:
+    # r7 R76 (sol b2 MED): the release-gating random-order row covers ONE
+    # time-derived seed per PR, but the isolation evidence bar is >=3 shuffle
+    # seeds -- a failure-triggering ordering could need many PR runs to
+    # surface. Three fresh run-id-derived seeds nightly over the smoke tier;
+    # each failure output names its seed for deterministic reproduction
+    # (pytest -p randomly --randomly-seed=<n>).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Install Graphviz
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphviz
+
+      - name: Install canonical CPU test environment
+        run: |
+          uv pip install --system \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e ".[dev,test,tabular]" \
+            "torch==2.8.0+cpu" \
+            "torchvision==0.23.0+cpu"
+          uv pip check
+
+      - name: Smoke tier under three fresh shuffle seeds
+        run: |
+          for offset in 1 2 3; do
+            seed="$(( ${{ github.run_id }} % 1000000000 + offset ))"
+            echo "== shuffle seed $seed =="
+            pytest tests/ -m smoke --ignore-glob="*menagerie*" --ignore=tests/crawler \
+              -p randomly --randomly-seed="$seed" --tb=short -q
+          done

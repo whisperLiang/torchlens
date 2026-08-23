@@ -8,6 +8,7 @@ from typing import Any
 
 import torch
 
+from torchlens._capture_fingerprint import _never_matching_fragment
 from torchlens.autoroute.output import register
 from torchlens.data_classes.trace import ResolvedPostprocessing, Trace
 from torchlens.ir.container_registry import _is_hf_model_output
@@ -58,6 +59,57 @@ def decode_outputs_for_trace(
     output_head:
         Optional user-requested output head name/path.
     """
+
+    try:
+        _decode_outputs_for_trace_unguarded(
+            trace, outputs, output_style=output_style, output_head=output_head
+        )
+    except Exception as exc:
+        # The output decode is an opportunistic post-capture nicety; a
+        # heuristic sniffer must never abort an otherwise-successful capture
+        # (R65: nested-tensor outputs raised raw RuntimeError from shape
+        # reads). Degrade to "no decode" -- but leave a DURABLE record, not
+        # just a warning: the warning is the most losable disclosure kind,
+        # and without the annotation a failed decode was byte-
+        # indistinguishable from "decode not applicable" on the returned AND
+        # saved Trace (grind-r5 b1 R22-2, sibling of the zero-match ledger).
+        # Roll back the partial-write window first: the unguarded body
+        # assigns decoded_output BEFORE output_postprocessor, so a raise
+        # between the two would otherwise leave a decoded output with no
+        # provenance record while the message claims none was attached.
+        import warnings
+
+        from torchlens.errors import TorchLensWarning
+
+        trace.decoded_output = None
+        trace.output_postprocessor = None
+        annotations = getattr(trace, "annotations", None)
+        if isinstance(annotations, dict):
+            annotations.setdefault("decode_skipped", []).append(
+                {
+                    "output_style": str(output_style),
+                    "output_head": str(output_head),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+        warnings.warn(
+            "Semantic output decode skipped: the output detector raised "
+            f"{type(exc).__name__}: {exc}. The capture itself is unaffected; "
+            "no decoded_output/output_postprocessor was attached "
+            "(durable record: trace.annotations['decode_skipped']).",
+            TorchLensWarning,
+            stacklevel=2,
+        )
+
+
+def _decode_outputs_for_trace_unguarded(
+    trace: Trace,
+    outputs: Any,
+    *,
+    output_style: str | None,
+    output_head: str | None,
+) -> None:
+    """Run the output decode without the capture-protecting belt."""
 
     meta = _build_output_meta(trace, output_style=output_style, output_head=output_head)
     resolved = _resolve_postprocessor(outputs, meta)
@@ -118,23 +170,31 @@ def semantic_output_cache_key(
         Stable-ish metadata that affects output auto-detection and labels.
     """
 
+    # grind-r5 b7 R22-C(a): this fingerprint participates in the capture-cache
+    # EQUALITY key (user_funcs folds it under cache=True), so a raising
+    # ``config``/``default_cfg`` getter must NOT silently drop the whole
+    # config axis -- two models differing only in config (id2label,
+    # num_labels: the axis this key exists for) would collide and the second
+    # capture would serve the FIRST's cached Trace with the first's decoded
+    # labels. A raising getter mints the never-matching token instead
+    # (false hits never; the only cost is a cache miss).
+    config_unreadable: object | None = None
     try:
         config = getattr(model, "config", None)
     except Exception:
-        # ``config`` may be a property whose getter raises for reasons unrelated to
-        # attribute existence (e.g. delegating to a submodule that only partially
-        # implements it). This cache-key fingerprint is best-effort, so a raising
-        # getter degrades to "no config metadata" rather than aborting capture.
         config = None
+        config_unreadable = _never_matching_fragment("model-config-getter-raised")
     try:
         default_cfg = getattr(model, "default_cfg", None)
     except Exception:
         default_cfg = None
+        config_unreadable = _never_matching_fragment("model-default-cfg-getter-raised")
     weights = getattr(model, "_torchlens_weights", None)
     return {
         "version": DETECTOR_VERSION,
         "output_style": output_style,
         "output_head": output_head,
+        "config_unreadable": config_unreadable,
         "config": {
             "id2label": _normalized_id2label(getattr(config, "id2label", None)),
             "label2id": _normalized_mapping(getattr(config, "label2id", None)),
@@ -200,9 +260,9 @@ def _resolve_postprocessor(outputs: Any, meta: dict[str, Any]) -> ResolvedPostpr
         Matching postprocessor, if any.
     """
 
-    from torchlens import autoroute
+    from . import output as autoroute_output
 
-    for detector in autoroute.output.iter_by_priority():
+    for detector in autoroute_output.iter_by_priority():
         resolved = detector(outputs, meta)
         if resolved is not None:
             return resolved
@@ -278,7 +338,7 @@ def imagenet_verified(outputs: Any, meta: dict[str, Any]) -> ResolvedPostprocess
     logits = _select_tensor_by_head(outputs, meta.get("output_head"))
     if logits is None and isinstance(outputs, torch.Tensor):
         logits = outputs
-    if logits is None or logits.ndim < 1 or logits.shape[-1] != 1000:
+    if logits is None or _safe_last_dim(logits) != 1000:
         return None
     metadata = meta.get("model_metadata")
     if not isinstance(metadata, dict):
@@ -451,10 +511,35 @@ def _tensor_candidates(
     else:
         iterable = []
     for name, value in iterable:
-        if isinstance(value, torch.Tensor) and value.ndim >= 2:
-            if expected_width is None or value.shape[-1] == expected_width:
-                candidates.append((value, name))
+        if not isinstance(value, torch.Tensor):
+            continue
+        try:
+            if value.is_nested or value.ndim < 2:
+                continue
+            width = int(value.shape[-1])
+        except Exception:
+            # Exotic tensor subclasses may refuse metadata reads; they are
+            # not logits candidates and must never abort the sniff (R65).
+            continue
+        if expected_width is None or width == expected_width:
+            candidates.append((value, name))
     return candidates
+
+
+def _safe_last_dim(tensor: torch.Tensor) -> int | None:
+    """Return the last-dimension size, or ``None`` when unreadable.
+
+    Nested tensors raise ``RuntimeError`` from ``.shape`` and other exotic
+    subclasses may refuse metadata reads entirely; an opportunistic output
+    sniffer treats those as "not logits" rather than aborting capture (R65).
+    """
+
+    try:
+        if tensor.is_nested or tensor.ndim < 1:
+            return None
+        return int(tensor.shape[-1])
+    except Exception:
+        return None
 
 
 def _decode_classification(

@@ -22,22 +22,47 @@ layer.ops             # dict[int, Op]
 ```
 
 ## Field Management
-- Add fields to the class definition and the matching FIELD_ORDER tuple in `constants.py`.
+- Add fields to the class definition and the matching FIELD_ORDER list in the
+  parent package's `torchlens/constants.py` (not in this directory).
 - Add tests for user-facing fields and update `to_pandas()` when the field should export.
 - Avoid ad hoc state that is not scrubbed by save/load, cleanup, and postprocess trimming.
 
 ## Trace Gotchas
 - `_tracing_finished` changes `__len__`, `__getitem__`, iteration, and display behavior.
 - Fast-pass postprocess relies on `_tracing_finished` staying true between ops.
-- Methods such as `save`, `load`, `find_sites`, `fork`, `replay`, `rerun`, `run`, and
+- Methods such as `save`, `find_sites`, `fork`, `run`, `push`, and
   `preview_fastlog` bridge into other subpackages; avoid importing them at module top if it
-  creates cycles.
+  creates cycles. There is NO `Trace.load` — loading is module-level `tl.load`
+  (see the sibling `CLAUDE.md`) — and `replay`/`rerun` are deprecated warning
+  aliases of `push`/`run`.
 - `run(inputs=...)` returns a transactional `RunResult` for live and loaded sparse providers;
   legacy `run(model, x, ...)` remains the intervention-rerun compatibility path.
 - `graph_shape_hash` is computed before `_set_tracing_finished`.
 
+## Fork (M11)
+- `Trace.fork()` is COPY-ON-WRITE (`_trace_fork.build_fork`): fork records are
+  fresh two-word shells over per-fork `OpStoreView`s at the same rows; the
+  object-graph forkcopier (typed deepcopy engine) is deleted. Fork writes land
+  in view overlays; mutable builtin containers copy on first read; GroupRefs
+  translate to cloned group tables. Modules fork as detached duplicates (their
+  cells embed trace-strong accessors); coreless traces take the detached
+  fallback. Fork->parent isolation is pinned IN BOTH DIRECTIONS: mutable
+  builtin containers are eagerly copied into the fork overlay AT FORK TIME
+  (`OpStoreView.isolate_mutable_cells`), so parent in-place container
+  mutation after the fork is NEVER visible to the fork — the historical
+  before-first-read visibility window is closed; do not weaken the eager
+  sweep to restore it.
+
 ## Op Gotchas
-- `copy()` shallow-copies selected graph/conditional fields and deep-copies the rest.
+- `Op.__slots__` is `("_core", "_row")` (M5 seam): fields are generated data
+  descriptors over the per-trace `_trace_core` row store (detached single-row store
+  for copy/pickle/fork/preview ops). `_OP_SLOT_NAMES` remains the declared stored-field
+  universe; `_slot()`, `_internal_set`, and `object.__setattr__` compose over the
+  descriptors exactly as they did over slots. Never assume per-instance storage.
+- `copy()` deep-copies graph/conditional metadata and SHARES (shallow) the
+  tensor-payload/callable set — `fields_not_to_deepcopy` in `op.py` is
+  `out`/`transformed_out`/`saved_args`/`saved_kwargs`/`func`/templates/
+  `parent_params`/... — i.e. payloads alias the source op; graph fields do not.
 - `out` for some output/getitem cases may reference parent saved data directly.
 - `grad` is a bare reference; do not mutate it in-place.
 - `var_names` records bare source assignment target names for an op when

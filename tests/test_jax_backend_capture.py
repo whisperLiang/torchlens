@@ -18,6 +18,7 @@ from torchlens.backends.jax.backend import (
     _data_parent_arg_positions,
     _data_parent_labels,
 )
+from torchlens.data_classes._compaction import _COMPACTED_TRACES
 from torchlens.intervention.types import EdgeUseRecord
 from torchlens.postprocess.graph_traversal import _remove_orphan_nodes
 from torchlens.validation.invariants import MetadataInvariantError
@@ -616,6 +617,7 @@ def test_jax_trace_captures_equation_ops_and_params() -> None:
     assert "dot_general" in primitive_names
     assert "tanh" in primitive_names
     assert all(op.has_saved_activation for op in trace.layer_list)
+    assert trace in _COMPACTED_TRACES
     assert trace.validate_forward_pass([])
 
 
@@ -824,8 +826,8 @@ def test_jax_repeated_op_block_groups_into_passes() -> None:
     assert {op.layer_label for op in add_ops} == {add_ops[0].layer_label}
     assert {op.layer_label for op in mul_ops} == {mul_ops[0].layer_label}
     assert all(op.num_passes == 2 for op in (*add_ops, *mul_ops))
-    assert add_ops[0].recurrent_ops == [op.label for op in add_ops]
-    assert mul_ops[0].recurrent_ops == [op.label for op in mul_ops]
+    assert add_ops[0].recurrent_ops == tuple(op.label for op in add_ops)
+    assert mul_ops[0].recurrent_ops == tuple(op.label for op in mul_ops)
     assert trace.layer_num_calls[add_ops[0].layer_label] == 2
     assert trace.layer_num_calls[mul_ops[0].layer_label] == 2
     assert trace.validate_forward_pass([])
@@ -917,8 +919,8 @@ def test_jax_synthetic_control_parent_is_not_a_value_replay_parent() -> None:
     mul_op = _jax_equation_op(trace, "mul")
     control_parent = next(op for op in trace.layer_list if op.is_input)
 
-    mul_op.parents.append(control_parent._label_raw)
-    control_parent.children.append(mul_op._label_raw)
+    mul_op.parents = tuple(mul_op.parents) + (control_parent._label_raw,)
+    control_parent.children = tuple(control_parent.children) + (mul_op._label_raw,)
     mul_op._internal_set(
         "_edge_uses",
         [
@@ -957,13 +959,22 @@ def test_synthetic_control_parent_is_retained_by_orphan_pruning() -> None:
                 The raw graph fields are populated in place.
             """
 
+            from torchlens.ir.workspaces import (
+                ModuleCaptureWorkspace,
+                RawGraphWorkspace,
+                WrapperRuntimeWorkspace,
+            )
+
+            self._raw_graph_ws = RawGraphWorkspace()
+            self._module_capture_ws = ModuleCaptureWorkspace()
+            self._wrapper_runtime_ws = WrapperRuntimeWorkspace()
             decision = _fake_raw_node("decision")
             child = _fake_raw_node("child", parents=["decision"], children=["output"])
             output = _fake_raw_node("output", parents=["child"], is_output=True)
             orphan = _fake_raw_node("orphan")
             decision.children.append("child")
-            self._raw_layer_labels_list = ["decision", "child", "output", "orphan"]
-            self._raw_layer_dict = OrderedDict(
+            self._raw_graph_ws.raw_layer_labels_list = ["decision", "child", "output", "orphan"]
+            self._raw_graph_ws.raw_layer_dict = OrderedDict(
                 (node._label_raw, node) for node in (decision, child, output, orphan)
             )
             self.input_layers: list[str] = []
@@ -996,7 +1007,7 @@ def test_synthetic_control_parent_is_retained_by_orphan_pruning() -> None:
 
     _remove_orphan_nodes(fake_trace)  # type: ignore[arg-type]
 
-    assert fake_trace._raw_layer_labels_list == ["decision", "child", "output"]
+    assert fake_trace._raw_graph_ws.raw_layer_labels_list == ["decision", "child", "output"]
     assert fake_trace._orphan_labels == ["orphan"]
 
 

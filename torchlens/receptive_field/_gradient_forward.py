@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import TYPE_CHECKING
-import warnings
 
 import torch
 
@@ -13,8 +13,8 @@ from ..backends import BackendUnsupportedError, get_backend_spec
 from ._engine_forward import solve_projective
 from ._errors import ReceptiveFieldUnavailableError
 from ._gradient import (
-    _GradientReceptiveFieldResult,
     _batch_semantics,
+    _GradientReceptiveFieldResult,
     _normalize_unit,
     _probe_suppressed,
     _saved_tensor,
@@ -24,7 +24,6 @@ from ._gradient import (
 from ._path import descendant_labels, require_path, resolve_graph_point
 from ._types import GradientReceptiveField, ReceptiveFieldDirection
 
-
 if TYPE_CHECKING:
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace
@@ -32,8 +31,67 @@ if TYPE_CHECKING:
 
 
 _RECAPTURE_RECIPE = (
-    "tl.trace(model, x, capture=tl.options.CaptureOptions(backward_ready=True), save=...)"
+    "tl.trace(model, x.requires_grad_(True), "
+    'capture=tl.options.CaptureOptions(backward_ready=True), save_mode="reference")'
 )
+
+
+def _no_projective_vjp_reason(source: Op, targets: Sequence[Op], trace: Trace) -> str:
+    """Return the honest reason a projective VJP came back empty.
+
+    Finding B1-19b (SF-04 class): this message used to prescribe
+    ``save_mode="reference"`` unconditionally -- including on traces already
+    captured in that exact mode, which is the shape of remedy that sends a user
+    in a circle. It also blamed a "stale saved tensor identity" for a case that
+    is neither stale nor a mode problem: when the only target is a structural
+    OUTPUT MARKER whose sole parent is the source, both payloads are independent
+    clones of the SAME captured value, so there is no autograd edge between them
+    for any VJP to traverse.
+
+    Parameters
+    ----------
+    source:
+        Source operation whose unit was probed.
+    targets:
+        Selected projective targets.
+    trace:
+        Trace both payloads were captured into.
+
+    Returns
+    -------
+    str
+        Cause-specific message; the ``save_mode`` prescription appears only when
+        that mode is NOT already in force.
+    """
+
+    marker_targets = [
+        target
+        for target in targets
+        if getattr(target, "layer_type", None) == "output"
+        and set(getattr(target, "parents", ()) or ()) == {source.layer_label}
+    ]
+    if marker_targets and len(marker_targets) == len(targets):
+        names = ", ".join(repr(target.label) for target in marker_targets)
+        return (
+            f"Projective validation is not applicable from {source.label!r} to {names}: the "
+            "target is a structural output marker whose only parent is the source, so both "
+            "saved payloads are independent clones of ONE captured value and no autograd "
+            "edge exists between them to differentiate. The projective mapping here is the "
+            "identity; probe a downstream COMPUTATIONAL op for a non-trivial projective "
+            "field, or read the receptive-direction result, which is unaffected."
+        )
+    reason = (
+        f"Source {source.label!r} is structurally reachable from the selected targets, "
+        "but autograd returned no VJP, so the saved tensor identity is not the one in the "
+        "captured graph."
+    )
+    if str(getattr(trace, "save_mode", "")) != "reference":
+        return reason + ' Recapture with save_mode="reference".'
+    return (
+        reason + ' This trace already used save_mode="reference", so the cause is not the '
+        "save mode: probe in the same process and before any in-place mutation of the saved "
+        f"payloads, recapturing with {_RECAPTURE_RECIPE} if the graph was released."
+    )
 
 
 def _target_key(target: Op) -> str:
@@ -113,7 +171,11 @@ def _projective_recapture_recipe(source: Op, targets: Sequence[Op]) -> str:
 
     labels = (source.layer_label_short, *(target.layer_label_short for target in targets))
     selectors = " | ".join(f"tl.label({label!r})" for label in labels)
-    return f"tl.trace(model, x, backward_ready=True, save={selectors})"
+    return (
+        "tl.trace(model, x.requires_grad_(True), "
+        "capture=tl.options.CaptureOptions(backward_ready=True), "
+        f'save_mode="reference", save={selectors})'
+    )
 
 
 def _source_tensor(source: Op, targets: Sequence[Op]) -> torch.Tensor:
@@ -246,12 +308,13 @@ def _build_projective_result(
     key = _target_key(target)
     descriptor = solution.per_op.get(source.label, {}).get(key)
     state = solution.states.get((source.label, key))
-    batch_support, cross_batch = _batch_semantics(support, state, unit)
+    batch_support, cross_batch = _batch_semantics(support, state, unit, projective=True)
     return _GradientReceptiveFieldResult(
         op_label=source.label,
         io_role=key,
         unit=unit,
         grad=magnitude,
+        signed_grad=column.detach(),
         support_mask=support,
         support_ranges=_support_ranges(support),
         spatial_support_mask=_spatial_support(
@@ -349,9 +412,7 @@ def projective_gradient_for_unit(
             )[0]
             if vjp is None:
                 raise ReceptiveFieldUnavailableError(
-                    f"Source {source.label!r} is structurally reachable from the selected "
-                    "targets, but autograd returned no VJP. The saved tensor identity may be "
-                    "stale or the path may have been detached."
+                    _no_projective_vjp_reason(source, targets, trace)
                 )
             columns = torch.autograd.grad(
                 vjp,

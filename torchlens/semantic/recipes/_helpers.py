@@ -32,21 +32,6 @@ def child_module(module: Any, child_name: str) -> Any | None:
         return None
 
 
-def child_out(module: Any, child_name: str) -> Any | AbsenceReason:
-    """Return a child module's first-call output when available."""
-
-    child = child_module(module, child_name)
-    if child is None:
-        return structural(f"child module {child_name!r} is absent")
-    try:
-        return child.calls[0].out
-    except (AttributeError, KeyError, IndexError, RuntimeError, ValueError):
-        return needs_capture(
-            f"child module {child_name!r} output was not captured",
-            f"save=... including child module {child_name!r}",
-        )
-
-
 def child_output_spec(module: Any, child_name: str, recipe_id: str) -> FacetSpec | AbsenceReason:
     """Return an op-anchored spec for a child module's single output."""
 

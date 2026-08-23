@@ -737,6 +737,34 @@ def _stable_repr(value: Any) -> str:
     return re.sub(r"frozenset\(\{([^{}]*)\}\)", sort_members, repr(value))
 
 
+def _normalize_version_dependent_fn(dot: str) -> str:
+    """Canonicalize the Python-version-dependent ``fn=`` node label token.
+
+    The profiling node mode renders ``fn=<call-site function name>``.  On
+    CPython 3.11+ that name is the fully qualified ``co_qualname`` (e.g.
+    ``OracleCNN.forward``); on 3.10 and earlier ``co_qualname`` does not exist,
+    so the renderer falls back to the bare ``co_name`` (``forward``).  That
+    difference is an environmental property of the running interpreter, not a
+    TorchLens rendering decision -- so, exactly like the ``func_duration = 0.0``
+    timing normalization applied before capture, it is canonicalized to the
+    version-independent trailing component before the byte-identity comparison.
+    Values without a qualifier (``fn=none``) are left unchanged.
+
+    Parameters
+    ----------
+    dot:
+        DOT source returned by the draw invocation under test.
+
+    Returns
+    -------
+    str
+        DOT source with every ``fn=`` token reduced to its final dotted
+        component.
+    """
+
+    return re.sub(r"fn=([^<\s]+)", lambda m: f"fn={m.group(1).rsplit('.', 1)[-1]}", dot)
+
+
 def _capture_case(case: OracleCase, tmp_path: Path) -> dict[str, Any]:
     """Capture all oracle layers for one deterministic matrix case.
 
@@ -792,6 +820,7 @@ def _capture_case(case: OracleCase, tmp_path: Path) -> dict[str, Any]:
             assert case.name == "none_short_circuit"
             return {"tags": list(case.tags), "dot": None, "structural": None, "callbacks": {}}
         assert isinstance(source, str)
+        source = _normalize_version_dependent_fn(source)
         if node_calls is not None:
             _assert_exactly_once(node_calls, "node_spec_fn")
         if collapsed_calls is not None:
@@ -843,7 +872,10 @@ def _capture_backward_combined(tmp_path: Path) -> dict[str, Any]:
         )
         return {
             name: {"dot": dot, "structural": _structural_digest(dot)}
-            for name, dot in {"backward": backward, "combined": combined}.items()
+            for name, dot in {
+                "backward": _normalize_version_dependent_fn(backward),
+                "combined": _normalize_version_dependent_fn(combined),
+            }.items()
         }
     finally:
         trace.cleanup()
@@ -931,6 +963,37 @@ def _digest_chunks(record: dict[str, Any]) -> list[str]:
 
 
 # Keep new module declarations below oracle models: profiling labels freeze their source lines.
+# Golden regenerated for r21 auto-collapse hardening: op-segment node names carry
+# injective per-endpoint pass suffixes, and the t=1.0 schedule step's
+# collapsed_addresses honestly reports the concrete op labels hidden by op
+# segments (previously an empty frozenset while nodes were hidden). Every
+# schedule step count, t value, node, and edge is otherwise unchanged.
+#
+# Governance adjudication (b10 R78 round-3): this family is ENVIRONMENT-
+# SENSITIVE — the record freezes raw DOT bytes plus pydot-parsed structural
+# digests, both of which depend on the `graphviz` python package (the direct
+# DOT emitter, quoting included) and `pydot` (the parser the structural digest
+# is built through), on top of python/torch. The golden therefore resolves
+# through tests/_oracle_env.py with the family-scoped fingerprint extension
+# ("graphviz", "pydot"): the canonical golden enforces only when the
+# ENV/ENV-graphviz/ENV-pydot markers in tests/golden/ all match the running
+# environment; every other environment is fail-closed env-keyed. These
+# imports live BELOW the oracle models on purpose (see the frozen-source-line
+# note above).
+import os  # noqa: E402
+
+from _oracle_env import (  # noqa: E402
+    flag_armed,
+    guard_wrap_state_for_golden_update,
+    require_env_golden,
+    require_update_reason,
+    resolve_env_golden,
+    write_provenance,
+)
+
+#: Direct byte-generators of this family's golden (see adjudication above).
+_EMITTER_PACKAGES = ("graphviz", "pydot")
+
 _BYTE_ORACLE_ENV = "TORCHLENS_RENDER_BYTE_ORACLE"
 
 
@@ -989,19 +1052,44 @@ def _environment_invariant_record(record: dict[str, Any]) -> dict[str, Any]:
     return _normalize_environment_value(invariant)
 
 
-@pytest.mark.smoke
+@pytest.mark.heavy
 def test_viz_render_identity_oracle(tmp_path: Path) -> None:
     """Characterize every draw axis with bytes and structural goldens."""
 
+    # Armed on the exact value "1" only: the historical presence check
+    # (`_UPDATE_ENV in os.environ`) armed regeneration on NAME=0 (b10 R78
+    # round-3).
+    regen = flag_armed(os.environ, _UPDATE_ENV)
+    if regen:
+        # Generation is in-process: refuse to render golden bytes on a torch
+        # already wrapped by earlier tests (SF-53), and require the WHY
+        # before any capture runs.
+        guard_wrap_state_for_golden_update(_UPDATE_ENV)
+        require_update_reason(_UPDATE_ENV)
     actual = _record(tmp_path)
     payload = {"sha256_chunks": _digest_chunks(actual), "record": actual}
-    if _UPDATE_ENV in __import__("os").environ:
-        _GOLDEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _GOLDEN_PATH.write_text(
+    if regen:
+        golden_path, _ = resolve_env_golden(
+            _GOLDEN_PATH.parent, _GOLDEN_PATH.name, _EMITTER_PACKAGES
+        )
+        golden_path.parent.mkdir(parents=True, exist_ok=True)
+        golden_path.write_text(
             json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
-    expected = json.loads(_GOLDEN_PATH.read_text(encoding="utf-8"))
-    if __import__("os").environ.get(_BYTE_ORACLE_ENV) == "1":
+        write_provenance(
+            golden_path.parent,
+            "tests/test_viz_render_identity_oracle.py",
+            _UPDATE_ENV,
+            require_update_reason(_UPDATE_ENV),
+        )
+        # Never fall through to compare against the file just written: an
+        # update run reporting green is a vacuous pass (b10 R78-8d).
+        pytest.skip(f"updated render-identity golden; re-run without {_UPDATE_ENV} to verify")
+    golden_path = require_env_golden(
+        _GOLDEN_PATH.parent, _GOLDEN_PATH.name, _UPDATE_ENV, extra_packages=_EMITTER_PACKAGES
+    )
+    expected = json.loads(golden_path.read_text(encoding="utf-8"))
+    if os.environ.get(_BYTE_ORACLE_ENV) == "1":
         assert payload == expected
     else:
         assert _environment_invariant_record(actual) == _environment_invariant_record(

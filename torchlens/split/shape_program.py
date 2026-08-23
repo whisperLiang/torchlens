@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from hashlib import sha256
-import json
 from math import prod
 from numbers import Integral
 from typing import TYPE_CHECKING, Any, Literal
@@ -115,16 +115,16 @@ class DimExpr:
 
     op: DimOp
     value: int | str | None = None
-    args: tuple["DimExpr", ...] = ()
+    args: tuple[DimExpr, ...] = ()
 
     @classmethod
-    def const(cls, value: int) -> "DimExpr":
+    def const(cls, value: int) -> DimExpr:
         """Return a constant dimension expression."""
 
         return cls("const", int(value))
 
     @classmethod
-    def symbol(cls, name: str) -> "DimExpr":
+    def symbol(cls, name: str) -> DimExpr:
         """Return a symbolic dimension expression."""
 
         return cls("symbol", str(name))
@@ -183,7 +183,7 @@ class TensorShapeIR:
     value_id: str
     dims: tuple[DimExpr, ...]
 
-    def evaluate(self, binding: "ShapeBinding") -> tuple[int, ...]:
+    def evaluate(self, binding: ShapeBinding) -> tuple[int, ...]:
         """Evaluate this shape under a runtime binding."""
 
         return tuple(dim.evaluate(binding.symbols) for dim in self.dims)
@@ -211,7 +211,7 @@ class ShapeRecipe:
     dims: tuple[DimExpr, ...]
     target: str = "shape_literal"
 
-    def evaluate(self, binding: "ShapeBinding") -> tuple[int, ...]:
+    def evaluate(self, binding: ShapeBinding) -> tuple[int, ...]:
         """Evaluate the replacement descriptor."""
 
         return tuple(dim.evaluate(binding.symbols) for dim in self.dims)
@@ -369,7 +369,7 @@ def flatten_input_leaves(
     inputs: tuple[Any, ...],
     input_kwargs: Mapping[str, Any] | None,
     *,
-    adapter: "SplitBackendAdapter",
+    adapter: SplitBackendAdapter,
 ) -> tuple[InputLeaf, ...]:
     """Flatten tensor inputs with stable JSON Pointer paths."""
 
@@ -384,12 +384,12 @@ def flatten_input_leaves(
 
 
 def compile_shape_program(
-    graph: "SplitTraceGraph",
+    graph: SplitTraceGraph,
     inputs: tuple[Any, ...],
     input_kwargs: Mapping[str, Any] | None,
-    request: "SplitRequest",
+    request: SplitRequest,
     *,
-    adapter: "SplitBackendAdapter",
+    adapter: SplitBackendAdapter,
     shape_witnesses: Mapping[int, Mapping[str, tuple[int, ...] | None]] | None = None,
 ) -> ShapeProgram | None:
     """Compile a backend-neutral dynamic-batch shape program."""
@@ -539,7 +539,7 @@ def compile_shape_program(
 def _walk_input(
     value: Any,
     path: str,
-    adapter: "SplitBackendAdapter",
+    adapter: SplitBackendAdapter,
     leaves: list[InputLeaf],
 ) -> None:
     """Walk one public input tree."""
@@ -580,8 +580,8 @@ def _normalize_axis(axis: int, shape: tuple[int, ...] | None, path: str) -> int:
 
 def _infer_batch_axes(
     leaves: Sequence[InputLeaf],
-    graph: "SplitTraceGraph",
-    adapter: "SplitBackendAdapter",
+    graph: SplitTraceGraph,
+    adapter: SplitBackendAdapter,
 ) -> dict[str, int]:
     """Infer only unambiguous top-level tensor batch inputs."""
 
@@ -609,7 +609,7 @@ def _infer_batch_axes(
 
 
 def _propagate_shapes(
-    graph: "SplitTraceGraph",
+    graph: SplitTraceGraph,
     input_axes: Mapping[str, int],
     batch_symbol: str,
     *,
@@ -764,7 +764,7 @@ def _propagate_shapes(
 
 
 def _apply_semantic_shape_expressions(
-    graph: "SplitTraceGraph",
+    graph: SplitTraceGraph,
     value_shapes: Mapping[str, TensorShapeIR],
     *,
     batch_symbol: str,
@@ -798,8 +798,8 @@ def _apply_semantic_shape_expressions(
 
 
 def _semantic_shape_candidate(
-    graph: "SplitTraceGraph",
-    node: "SplitTraceNode",
+    graph: SplitTraceGraph,
+    node: SplitTraceNode,
     value_shapes: Mapping[str, TensorShapeIR],
 ) -> TensorShapeIR | None:
     """Return an expression candidate derived from one registered operation rule."""
@@ -818,7 +818,7 @@ def _semantic_shape_candidate(
     return None
 
 
-def _captured_call_parts(node: "SplitTraceNode") -> tuple[tuple[Any, ...], dict[str, Any]]:
+def _captured_call_parts(node: SplitTraceNode) -> tuple[tuple[Any, ...], dict[str, Any]]:
     """Return normalized positional and keyword capture components for one call."""
 
     template = node.args_template
@@ -846,7 +846,7 @@ def _template_value_refs(component: Any) -> tuple[str, ...]:
 
 
 def _captured_int_argument(
-    node: "SplitTraceNode",
+    node: SplitTraceNode,
     position: int,
     keyword: str,
     default: int,
@@ -896,7 +896,7 @@ def _dim_mul(left: DimExpr, factor: int) -> DimExpr:
 
 
 def _concat_shape_candidate(
-    node: "SplitTraceNode",
+    node: SplitTraceNode,
     value_shapes: Mapping[str, TensorShapeIR],
 ) -> TensorShapeIR | None:
     """Derive concat output dimensions by summing ordered input dimensions."""
@@ -924,7 +924,7 @@ def _concat_shape_candidate(
 
 
 def _stack_shape_candidate(
-    node: "SplitTraceNode",
+    node: SplitTraceNode,
     value_shapes: Mapping[str, TensorShapeIR],
 ) -> TensorShapeIR | None:
     """Derive stack output dimensions from its first tensor and stack count."""
@@ -952,7 +952,7 @@ def _stack_shape_candidate(
 
 
 def _slice_shape_candidate(
-    node: "SplitTraceNode",
+    node: SplitTraceNode,
     value_shapes: Mapping[str, TensorShapeIR],
 ) -> TensorShapeIR | None:
     """Derive dimensions for Python basic slicing with positive strides."""
@@ -1007,11 +1007,7 @@ def _slice_shape_candidate(
             or int(start) < 0
             or (
                 stop is not None
-                and (
-                    not isinstance(stop, Integral)
-                    or isinstance(stop, bool)
-                    or int(stop) < 0
-                )
+                and (not isinstance(stop, Integral) or isinstance(stop, bool) or int(stop) < 0)
             )
         ):
             return None
@@ -1032,7 +1028,7 @@ def _slice_shape_candidate(
 
 
 def _repeat_shape_candidate(
-    node: "SplitTraceNode",
+    node: SplitTraceNode,
     value_shapes: Mapping[str, TensorShapeIR],
 ) -> TensorShapeIR | None:
     """Derive repeat/tile dimensions directly from captured repeat factors."""
@@ -1055,10 +1051,9 @@ def _repeat_shape_candidate(
     ):
         return None
     factors = tuple(int(item) for item in repeat_values)
-    padded_dims = (
-        (DimExpr.const(1),) * max(0, len(factors) - len(parent_shape.dims))
-        + parent_shape.dims
-    )
+    padded_dims = (DimExpr.const(1),) * max(
+        0, len(factors) - len(parent_shape.dims)
+    ) + parent_shape.dims
     padded_factors = (1,) * max(0, len(padded_dims) - len(factors)) + factors
     return TensorShapeIR(
         node.canonical_id,
@@ -1067,8 +1062,8 @@ def _repeat_shape_candidate(
 
 
 def _permuted_shape_candidate(
-    graph: "SplitTraceGraph",
-    node: "SplitTraceNode",
+    graph: SplitTraceGraph,
+    node: SplitTraceNode,
     value_shapes: Mapping[str, TensorShapeIR],
 ) -> TensorShapeIR | None:
     """Derive permute/transpose dimensions from the captured axis permutation."""
@@ -1091,8 +1086,8 @@ def _permuted_shape_candidate(
 
 
 def _passthrough_shape_candidate(
-    graph: "SplitTraceGraph",
-    node: "SplitTraceNode",
+    graph: SplitTraceGraph,
+    node: SplitTraceNode,
     value_shapes: Mapping[str, TensorShapeIR],
 ) -> TensorShapeIR | None:
     """Propagate arbitrary expressions through aligned shape-preserving operations."""
@@ -1154,7 +1149,7 @@ def _shape_candidate_matches_evidence(
 
 
 def _compile_recipes(
-    graph: "SplitTraceGraph",
+    graph: SplitTraceGraph,
     value_shapes: Mapping[str, TensorShapeIR],
     batch_symbol: str,
 ) -> dict[str, tuple[ShapeRecipe, ...]]:
@@ -1251,7 +1246,7 @@ def _descriptor_exprs(
     return None
 
 
-def _captured_shape_descriptors(node: "SplitTraceNode") -> set[tuple[int, ...]]:
+def _captured_shape_descriptors(node: SplitTraceNode) -> set[tuple[int, ...]]:
     """Collect backend-native shape literals attached to one audited node."""
 
     descriptors: set[tuple[int, ...]] = set()
@@ -1328,7 +1323,7 @@ def _captured_shape_descriptors(node: "SplitTraceNode") -> set[tuple[int, ...]]:
 
 
 def _unresolved_dynamic_nodes(
-    graph: "SplitTraceGraph",
+    graph: SplitTraceGraph,
     value_shapes: Mapping[str, TensorShapeIR],
     batch_symbol: str,
     *,
@@ -1456,11 +1451,11 @@ def _preserves_batch(op: str) -> bool:
 
 
 def _shape_bearing_parents(
-    graph: "SplitTraceGraph",
-    node: "SplitTraceNode",
+    graph: SplitTraceGraph,
+    node: SplitTraceNode,
     concrete: Mapping[str, tuple[int, ...] | None],
     seen: set[str] | None = None,
-) -> list["SplitTraceNode"]:
+) -> list[SplitTraceNode]:
     """Resolve transparent shapeless region nodes to shape-bearing parents."""
 
     if concrete.get(node.canonical_id) is not None:
@@ -1478,8 +1473,8 @@ def _shape_bearing_parents(
 
 
 def _is_parameter_only_reshape(
-    graph: "SplitTraceGraph",
-    node: "SplitTraceNode",
+    graph: SplitTraceGraph,
+    node: SplitTraceNode,
     concrete: Mapping[str, tuple[int, ...] | None],
     dynamic_axes: Mapping[str, set[int]],
 ) -> bool:
@@ -1503,8 +1498,8 @@ def _is_parameter_only_reshape(
 
 
 def _is_parameter_lineage(
-    graph: "SplitTraceGraph",
-    node: "SplitTraceNode",
+    graph: SplitTraceGraph,
+    node: SplitTraceNode,
     seen: set[str] | None = None,
 ) -> bool:
     """Return whether a node is derived exclusively from parameter or buffer state."""
@@ -1526,7 +1521,7 @@ def _is_parameter_lineage(
     )
 
 
-def _node_permutation(node: "SplitTraceNode", rank: int) -> tuple[int, ...] | None:
+def _node_permutation(node: SplitTraceNode, rank: int) -> tuple[int, ...] | None:
     """Return an audited output-to-input axis permutation for one node."""
 
     op = node.op_type.lower()
@@ -1601,7 +1596,7 @@ def _shape_sensitive(op: str) -> bool:
     )
 
 
-def shape_semantic_for_node(node: "SplitTraceNode") -> ShapeSemantic | None:
+def shape_semantic_for_node(node: SplitTraceNode) -> ShapeSemantic | None:
     """Return an exact semantic category from the captured function identity."""
 
     template = node.args_template
@@ -1641,7 +1636,7 @@ def _witness_scaled_axes(
 
 
 def _witness_axis_diagnostics(
-    graph: "SplitTraceGraph",
+    graph: SplitTraceGraph,
     traced_batch_size: int,
     witnesses: Mapping[int, Mapping[str, tuple[int, ...] | None]],
 ) -> dict[str, dict[str, tuple[int, ...]]]:
@@ -1679,7 +1674,7 @@ def _witness_axis_diagnostics(
 
 
 def _shape_proof_sources(
-    graph: "SplitTraceGraph",
+    graph: SplitTraceGraph,
     value_shapes: Mapping[str, TensorShapeIR],
     batch_symbol: str,
     witness_diagnostics: Mapping[str, Mapping[str, tuple[int, ...]]],

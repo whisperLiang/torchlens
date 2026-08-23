@@ -11,11 +11,10 @@ from typing import Any
 
 import pytest
 import torch
+from example_models import TinyReluAdd as _ReluModel
 from torch import nn
 
 import torchlens as tl
-from torchlens.io import load_intervention_spec
-from torchlens.ir.container import TupleIndex
 from torchlens.intervention.errors import (
     MultiMatchWarning,
     OpaqueCallableInExecutableSaveError,
@@ -23,41 +22,26 @@ from torchlens.intervention.errors import (
     UntrustedCallableError,
 )
 from torchlens.intervention.resolver import (
-    _selector_from_spec,
     function_registry_key_from_callable,
 )
-from torchlens.intervention.save import _write_tlspec_tensor_blob
-from torchlens.intervention.save import _sync_spec_records_from_log
-from torchlens.intervention.save import resolve_function_registry_key, save_intervention
+from torchlens.intervention.save import (
+    _sync_spec_records_from_log,
+    _write_tlspec_tensor_blob,
+    resolve_function_registry_key,
+    save_intervention,
+)
 from torchlens.intervention.types import (
     FireRecord,
     FunctionRegistryKey,
     HelperSpec,
     InterventionSpec,
 )
+from torchlens.io import load_intervention_spec
+from torchlens.ir.container import TupleIndex
+from torchlens.ir.selector_eval import selector_from_spec
 from torchlens.validation import check_spec_compat
 
 _INTERVENTION_RESOLVER = importlib.import_module("torchlens.intervention.resolver")
-
-
-class _ReluModel(nn.Module):
-    """Small model with a relu site."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run the model.
-
-        Parameters
-        ----------
-        x:
-            Input tensor.
-
-        Returns
-        -------
-        torch.Tensor
-            Output tensor.
-        """
-
-        return torch.relu(x) + 1
 
 
 class _TanhModel(nn.Module):
@@ -98,6 +82,29 @@ class _ChunkModel(nn.Module):
         """
 
         return torch.chunk(torch.relu(x), 2, dim=1)
+
+
+class _DeepReluStack(nn.Module):
+    """Model exposing more than eight matching ReLU sites."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply nine sequential ReLUs.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Final tensor after nine ReLUs.
+        """
+
+        out = x
+        for _index in range(9):
+            out = torch.relu(out)
+        return out
 
 
 def _log(model: nn.Module | None = None, x: torch.Tensor | None = None) -> tl.Trace:
@@ -258,7 +265,7 @@ def test_target_spec_selector_rehydration_covers_path_and_pattern_selectors() ->
     with pytest.warns(MultiMatchWarning):
         regex_labels = log.resolve_sites(tl.regex("chunk_[12]").to_target_spec()).labels()
     assert regex_labels == ("chunk_1_2", "chunk_2_3")
-    assert repr(_selector_from_spec("input_at", (0,), {})) == "tl.input_at((0,))"
+    assert repr(selector_from_spec("input_at", (0,), {})) == "tl.input_at((0,))"
 
 
 def test_loaded_forward_hook_spec_executes_on_fresh_trace(tmp_path: Path) -> None:
@@ -1019,6 +1026,41 @@ def test_target_manifest_mismatch_returns_fail(tmp_path: Path) -> None:
 
     assert compat.outcome == "FAIL"
     assert compat.diff.missing_labels
+
+
+def test_save_intervention_allows_more_than_eight_matching_sites(tmp_path: Path) -> None:
+    """Persistence reuses the validated trace fanout bound for dense selectors."""
+
+    x = torch.randn(2, 3)
+    log = _log(_DeepReluStack(), x)
+    with pytest.warns(MultiMatchWarning, match="fan out"):
+        log.attach_hooks(tl.func("relu"), tl.zero_ablate(), confirm_mutation=True)
+    path = tmp_path / "deep_relu.tlspec"
+
+    log.save_intervention(path, level="portable")
+    spec = load_intervention_spec(path)
+
+    assert spec.metadata["target_manifest"][0]["resolved_status"] == "resolved"
+    assert len(spec.metadata["target_manifest"][0]["resolved_labels"]) == 9
+
+
+def test_check_spec_compat_allows_saved_selectors_with_more_than_eight_sites(
+    tmp_path: Path,
+) -> None:
+    """Compatibility checks do not reinstate the resolver default fanout ceiling."""
+
+    x = torch.randn(2, 3)
+    log = _log(_DeepReluStack(), x)
+    with pytest.warns(MultiMatchWarning, match="fan out"):
+        log.attach_hooks(tl.func("relu"), tl.zero_ablate(), confirm_mutation=True)
+    path = tmp_path / "deep_relu_compat.tlspec"
+
+    log.save_intervention(path, level="portable")
+    spec = load_intervention_spec(path)
+    with pytest.warns(MultiMatchWarning, match="fan out"):
+        compat = check_spec_compat(spec, _log(_DeepReluStack(), x))
+
+    assert compat.outcome == "EXACT"
 
 
 @pytest.mark.smoke

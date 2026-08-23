@@ -167,3 +167,85 @@ def test_bundle_add_remove_accept_single_and_list_forms() -> None:
     bundle.add([log_b, log_c], names=["b", "c"])
     bundle.remove_except([log_a, "c"])
     assert bundle.names == ["a", "c"]
+
+
+def test_store_comparison_stamps_named_field_and_matches_delta_map() -> None:
+    """store_comparison persists delta_map's values on the supergraph nodes."""
+
+    bundle = _capture_pair(seed=4, offset=0.25)
+
+    name = bundle.store_comparison("relative_l2")
+
+    assert name == "relative_l2:out@baseline"
+    stored = bundle.stored_comparison(name)
+    assert stored == bundle.delta_map("relative_l2")
+    assert bundle.stored_comparison_names() == (name,)
+    # Queryable per node, without recomputation.
+    node_label = next(iter(stored))
+    node = bundle.supergraph.nodes[node_label]
+    assert node.comparisons[name] == stored[node_label]
+
+
+def test_store_comparison_overwrites_same_name_and_keeps_others() -> None:
+    """Restoring under one name replaces it; other names are untouched."""
+
+    bundle = _capture_pair(seed=5, offset=0.5)
+
+    out_name = bundle.store_comparison("relative_l2")
+    custom = bundle.store_comparison("relative_l2", name="custom")
+    assert set(bundle.stored_comparison_names()) == {out_name, custom}
+
+    again = bundle.store_comparison("relative_l2")
+    assert again == out_name
+    assert set(bundle.stored_comparison_names()) == {out_name, custom}
+    assert bundle.stored_comparison(out_name) == bundle.stored_comparison(custom)
+
+
+def test_store_comparison_callable_metric_requires_explicit_name() -> None:
+    """A callable metric has no derivable stable name and refuses typed."""
+
+    import pytest
+
+    from torchlens._errors import InvalidArgumentError
+
+    bundle = _capture_pair(seed=6, offset=0.25)
+
+    def metric(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        """Return the maximum absolute difference.
+
+        Parameters
+        ----------
+        a:
+            Baseline tensor.
+        b:
+            Compared tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Scalar distance.
+        """
+
+        return (a - b).abs().max()
+
+    with pytest.raises(InvalidArgumentError) as excinfo:
+        bundle.store_comparison(metric)
+    assert excinfo.value.fields["code"] == "comparison_name_required"
+
+    named = bundle.store_comparison(metric, name="max_abs")
+    assert named == "max_abs"
+    assert bundle.stored_comparison("max_abs")
+
+
+def test_stored_comparison_unknown_name_refuses_typed() -> None:
+    """Reading a never-stored name refuses typed, never an empty dict."""
+
+    import pytest
+
+    from torchlens._errors import InvalidArgumentError
+
+    bundle = _capture_pair(seed=7, offset=0.25)
+
+    with pytest.raises(InvalidArgumentError) as excinfo:
+        bundle.stored_comparison("never_stored")
+    assert excinfo.value.fields["code"] == "comparison_unknown"

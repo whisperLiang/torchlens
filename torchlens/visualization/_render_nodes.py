@@ -2,9 +2,38 @@
 
 # ruff: noqa: F403, F405
 
+import re as _re
+from collections.abc import Callable
+
+from .._errors import InvalidArgumentError
+from ._label_format import compute_selected_node_lines as _compute_selected_node_lines
 from ._render_common import *
-from ._render_leaf import *
 from ._render_edges import *
+from ._render_leaf import *
+from .modes import CollapsedModeScope
+
+# Home moved to node_spec (S5 territory) at the L5 wave-1 merge to keep this
+# file under its ratchet ceiling; re-exported here for existing importers.
+from .node_spec import _annotation_image_path_for_node
+
+_TOOLTIP_ADDRESS_PATTERN = _re.compile(r"0x[0-9a-fA-F]+")
+
+
+def _tooltip_repr(value: Any) -> str:
+    """Return a repr for a DOT tooltip with memory addresses masked.
+
+    r19 (b6-fable carried LOW): a default-repr object (or a custom Sequence
+    container with the default ``object.__repr__``) leaks ``0x...``
+    addresses into the DOT bytes, making otherwise-identical renders
+    nondeterministic across processes. Mask the addresses; an unreprable
+    value degrades to its type name, never a crash.
+    """
+
+    try:
+        text = repr(value)
+    except Exception:
+        return type(value).__name__
+    return _TOOLTIP_ADDRESS_PATTERN.sub("0xADDR", text)
 
 
 def _normalize_buffer_visibility(
@@ -34,7 +63,13 @@ def _normalize_buffer_visibility(
         return "never"
     if show_buffer_layers in {"never", "meaningful", "always"}:
         return show_buffer_layers
-    raise ValueError("show_buffer_layers must be 'never', 'meaningful', 'always', or a bool.")
+    raise InvalidArgumentError(
+        "show_buffer_layers must be 'never', 'meaningful', 'always', or a bool; "
+        f"received {show_buffer_layers!r}",
+        code="buffer_visibility_invalid",
+        remedy="pass show_buffer_layers='never', 'meaningful', 'always', or a bool",
+        argument="show_buffer_layers",
+    )
 
 
 if TYPE_CHECKING:
@@ -123,7 +158,7 @@ def _add_unrolled_backward_pass_clusters(
                 subgraph.node(**node_args)
 
     for pass_index, grad_fn_calls in calls_by_pass.items():
-        calls_for_grad_fn: dict[int, list[tuple["GradFn", Any]]] = defaultdict(list)
+        calls_for_grad_fn: dict[int, list[tuple[GradFn, Any]]] = defaultdict(list)
         for grad_fn_handle, call in grad_fn_calls:
             calls_for_grad_fn[grad_fn_handle.grad_fn_object_id].append((grad_fn_handle, call))
         for grad_fn_handle, call in grad_fn_calls:
@@ -157,7 +192,7 @@ def _visible_backward_calls_by_pass(
         Visible calls keyed by one-based backward pass number.
     """
 
-    calls_by_pass: dict[int, list[tuple["GradFn", Any]]] = defaultdict(list)
+    calls_by_pass: dict[int, list[tuple[GradFn, Any]]] = defaultdict(list)
     for grad_fn_handle in trace.grad_fns:
         for call in grad_fn_handle.calls.values():
             if not _grad_fn_call_matches_backward_filter(call, pass_filter):
@@ -365,10 +400,15 @@ def _add_node_to_graphviz(
     show_input_transform_summary: bool = False,
     repeat_folds: Mapping[str, "ModuleRepeatFold"] | None = None,
     run_fold_ellipsis_nodes: set[str] | None = None,
-    segments: Mapping[str, SegmentDescriptor] | None = None,
+    segment_lookup: _SegmentLookup | None = None,
     emitted_segment_nodes: set[str] | None = None,
     antiparallel_projected_edges: frozenset[tuple[str, str]] = frozenset(),
     node_decision: Any | None = None,
+    rolled_maps: "_RolledEdgeMaps | None" = None,
+    deduped_edge_registry: dict[tuple[Any, ...], dict[str, Any]] | None = None,
+    encoding: Any | None = None,
+    suppressed_args: Mapping[int, frozenset[str]] | None = None,
+    show_saved_for_backward: bool = False,
 ) -> None:
     """Adds a node and its relevant edges to the graphviz figure.
 
@@ -392,13 +432,14 @@ def _add_node_to_graphviz(
     fold_ancestor_address = _run_fold_ancestor_for_node(node, repeat_folds)
     if fold_ancestor_address is not None:
         collapse_address = fold_ancestor_address
-    segment = _segment_for_node(node, segments)
+    segment = _segment_for_node(node, segment_lookup)
     if segment is not None:
         _queue_segment_node(
             graphviz_graph,
             module_edge_dict,
             emitted_segment_nodes,
             segment,
+            vis_mode,
         )
     is_collapsed_module = collapse_address is not None
     is_hidden_run_member = (
@@ -452,6 +493,9 @@ def _add_node_to_graphviz(
             show_containers,
             collapsed_container_nodes,
             show_input_transform_summary,
+            encoding=encoding,
+            suppressed_args=suppressed_args,
+            show_saved_for_backward=show_saved_for_backward,
         )
 
     _add_edges_for_node(
@@ -476,9 +520,11 @@ def _add_node_to_graphviz(
         collapsed_container_nodes,
         repeat_folds,
         run_fold_ellipsis_nodes,
-        segments,
+        segment_lookup,
         segment,
         antiparallel_projected_edges,
+        rolled_maps,
+        deduped_edge_registry,
     )
 
 
@@ -498,6 +544,10 @@ def _build_layer_node(
     collapsed_container_nodes: Mapping[str, str] | None = None,
     show_input_transform_summary: bool = False,
     resolved_specs: list[NodeSpec] | None = None,
+    sibling_counts: Mapping[str, int] | None = None,
+    encoding: Any | None = None,
+    suppressed_args: Mapping[int, frozenset[str]] | None = None,
+    show_saved_for_backward: bool = False,
 ) -> str:
     """Builds and adds a standard (non-collapsed) layer node to the graphviz graph.
 
@@ -534,7 +584,7 @@ def _build_layer_node(
     # Get the address, shape, color, and line style:
 
     node_address, node_shape, node_color = _get_node_address_shape_color(
-        self, node, show_buffer_layers
+        self, node, show_buffer_layers, sibling_counts
     )
     node_bg_color = _get_node_bg_color(self, node)
 
@@ -550,6 +600,8 @@ def _build_layer_node(
             vis_mode,
             node_label_fields=node_label_fields,
             node_overlay=node_overlay,
+            suppressed_arg_keys=(suppressed_args or {}).get(id(node), frozenset()),
+            show_saved_for_backward=show_saved_for_backward,
         ),
         shape=node_shape,
         fillcolor=node_bg_color,
@@ -592,6 +644,10 @@ def _build_layer_node(
         )
     if theme is not None:
         default_spec = apply_theme_to_spec(default_spec, theme)
+    if encoding is not None:
+        from ._encoding import channel_wrapped_node_spec_fn
+
+        node_spec_fn = channel_wrapped_node_spec_fn(encoding, node, node_spec_fn)
     spec = _apply_node_spec_fn(self, node, default_spec, node_mode, node_spec_fn)
     if resolved_specs is not None:
         resolved_specs.append(spec)
@@ -614,11 +670,10 @@ def _build_layer_node(
         if raw_output_attrs is not None:
             node_args.update(raw_output_attrs)
     node_args["name"] = _render_node_label(node, vis_mode).replace(":", "pass")
-    if (
-        show_containers in {"collapsed", "auto"}
-        and collapsed_container_nodes is not None
-        and node_args["name"] in collapsed_container_nodes
-    ):
+    # Map membership is the ONE collapse predicate (the map builder owns the
+    # mode decision); the edge pass reroutes mapped leaves' edges to the
+    # summary box, so drawing a mapped leaf would orphan it.
+    if collapsed_container_nodes is not None and node_args["name"] in collapsed_container_nodes:
         return node_color
     hidden_buffer_addresses = _get_hidden_parent_buffer_addresses(self, node, show_buffer_layers)
     if hidden_buffer_addresses and not (node.is_input or node.is_output or node.is_buffer):
@@ -650,8 +705,15 @@ def _queue_segment_node(
     module_edge_dict: Dict[str, Any],
     emitted_segment_nodes: set[str] | None,
     segment: SegmentDescriptor,
+    vis_mode: str = "unrolled",
 ) -> None:
     """Queue one dashed segment node if it has not already been emitted.
+
+    The owner is projected into the active cluster keyspace before posting
+    (``_segment_owner_for_mode``): rolled clusters drain pass-free buckets,
+    so a pass-qualified owner would orphan the labeled node and Graphviz
+    would materialize an unlabeled default ellipse from its edges instead
+    (round-27).
 
     Parameters
     ----------
@@ -663,6 +725,8 @@ def _queue_segment_node(
         Mutable set of emitted segment node names.
     segment:
         Segment descriptor to render.
+    vis_mode:
+        ``"unrolled"`` or ``"rolled"`` visualization mode.
     """
 
     if emitted_segment_nodes is None:
@@ -680,10 +744,11 @@ def _queue_segment_node(
         "fontcolor": "#222222",
         "ordering": "out",
     }
-    if segment.owner is None:
+    owner = _segment_owner_for_mode(segment.owner, vis_mode)
+    if owner is None:
         graphviz_graph.node(**node_args)
     else:
-        module_edge_dict[segment.owner].setdefault("nodes", []).append(node_args)
+        module_edge_dict[owner].setdefault("nodes", []).append(node_args)
 
 
 def _render_raw_input(
@@ -736,9 +801,13 @@ def _render_raw_input(
         strings = cast(Sequence[str], sequence)
         if not include_more:
             strings = strings[:max_items]
+        # Lazy: ..viz top-imports this package, so an import-time edge back
+        # into ..viz would mint a bidirectional package cycle (b5 R51).
+        from ..viz import batch_summary
+
         return {
             "label": batch_summary.text_table(strings, max_items),
-            "tooltip": repr(strings),
+            "tooltip": _tooltip_repr(strings),
         }
     if all(isinstance(item, Image.Image) for item in sequence):
         images = cast(Sequence[Image.Image], sequence)
@@ -810,11 +879,27 @@ def _batch_render_limit(batch_render: str) -> int:
         try:
             n_items = int(raw_n)
         except ValueError as exc:
-            raise ValueError("batch_render first_n value must be an integer.") from exc
+            raise InvalidArgumentError(
+                f"batch_render first_n value must be an integer; received {raw_n!r}",
+                code="batch_render_invalid",
+                remedy="pass batch_render='first_n:<N>' with an integer N",
+                argument="batch_render",
+            ) from exc
         if n_items < 1:
-            raise ValueError("batch_render first_n value must be at least 1.")
+            raise InvalidArgumentError(
+                f"batch_render first_n value must be at least 1; received {n_items}",
+                code="batch_render_invalid",
+                remedy="pass batch_render='first_n:<N>' with N >= 1",
+                argument="batch_render",
+            )
         return min(n_items, 16)
-    raise ValueError("batch_render must be 'auto', 'all', 'first', 'first_n:<N>', or 'shape_only'.")
+    raise InvalidArgumentError(
+        "batch_render must be 'auto', 'all', 'first', 'first_n:<N>', or 'shape_only'; "
+        f"received {batch_render!r}",
+        code="batch_render_invalid",
+        remedy="pass a documented batch_render policy",
+        argument="batch_render",
+    )
 
 
 def _raw_input_sequence(value: Any) -> Sequence[Any] | None:
@@ -913,6 +998,9 @@ def _render_raw_input_image_batch(
     more_count = total - min(total, max_items)
     if more_count > 0:
         label_lines.append(f"+{more_count} more")
+    # Lazy for the same package-cycle reason as the text-table branch above.
+    from ..viz import batch_summary
+
     try:
         montage = batch_summary.montage(images, max_items)
         montage.save(image_path)
@@ -925,7 +1013,8 @@ def _render_raw_input_image_batch(
     width_in = max(width_px / 96.0, 0.1)
     height_in = max((height_px + 24 * len(label_lines)) / 96.0, 0.1)
     return {
-        "image": str(image_path),
+        # r-b6 R19-6: relative to the visualizer root (graph-level imagepath).
+        "image": relativize_visualizer_image(str(image_path)),
         "imagescale": "true",
         "fixedsize": "true",
         "width": f"{width_in:.3f}",
@@ -952,11 +1041,9 @@ def _raw_input_visualizer_dir(trace: "Trace") -> Path:
         Directory where image artifacts can be written.
     """
 
-    output_dir = getattr(trace, "_visualizer_dir", None)
-    if output_dir is None:
-        output_dir = tempfile.mkdtemp(prefix="torchlens_visualizers_")
-        trace._visualizer_dir = str(output_dir)
-    input_dir = Path(output_dir) / "raw_inputs"
+    from ..utils.display import ensure_trace_visualizer_dir
+
+    input_dir = ensure_trace_visualizer_dir(trace) / "raw_inputs"
     input_dir.mkdir(parents=True, exist_ok=True)
     return input_dir
 
@@ -1003,16 +1090,25 @@ def _normalize_image_tensor(tensor: torch.Tensor) -> torch.Tensor:
     Returns
     -------
     torch.Tensor
-        Float tensor clipped or min-max normalized to ``[0, 1]``.
+        Float tensor clipped or min-max normalized to ``[0, 1]``. The scale
+        comes from FINITE values only (one NaN/Inf pixel must not black out
+        the whole tile); non-finite pixels render as 0. A constant or
+        all-non-finite image renders as uniform mid-gray, distinguishable
+        from a genuine black image.
     """
 
-    if float(tensor.min()) >= 0.0 and float(tensor.max()) <= 1.0:
-        return tensor.clamp(0.0, 1.0)
-    min_value = tensor.min()
-    max_value = tensor.max()
+    finite_mask = torch.isfinite(tensor)
+    if not bool(finite_mask.any()):
+        return torch.full_like(tensor, 0.5)
+    finite_values = tensor[finite_mask]
+    min_value = finite_values.min()
+    max_value = finite_values.max()
+    if float(min_value) >= 0.0 and float(max_value) <= 1.0:
+        return torch.nan_to_num(tensor, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
     if bool(torch.isclose(max_value, min_value)):
-        return torch.zeros_like(tensor)
-    return ((tensor - min_value) / (max_value - min_value)).clamp(0.0, 1.0)
+        return torch.full_like(tensor, 0.5)
+    normalized = (tensor - min_value) / (max_value - min_value)
+    return torch.nan_to_num(normalized, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
 
 
 def _render_raw_output(value: Any) -> dict[str, str] | None:
@@ -1042,13 +1138,13 @@ def _render_raw_output(value: Any) -> dict[str, str] | None:
         lines = ["output", *[_format_label_score_row(label, score) for label, score in value]]
         return {
             "label": render_lines_to_html(lines),
-            "tooltip": repr(value),
+            "tooltip": _tooltip_repr(value),
         }
     if _is_batch_topk_output(value):
         lines = _format_batch_topk_output_lines(value)
         return {
             "label": render_lines_to_html(lines),
-            "tooltip": repr(value),
+            "tooltip": _tooltip_repr(value),
         }
     if isinstance(value, Mapping):
         rows = list(value.items())[:5]
@@ -1058,7 +1154,7 @@ def _render_raw_output(value: Any) -> dict[str, str] | None:
         ]
         return {
             "label": render_lines_to_html(lines),
-            "tooltip": repr(value),
+            "tooltip": _tooltip_repr(value),
         }
     return None
 
@@ -1188,6 +1284,50 @@ def _truncate_raw_input_text(text: str, *, limit: int) -> str:
     return text[: max(0, limit - 3)] + "..."
 
 
+def _rolled_multicall_shape_note(
+    trace: "Trace",
+    address: str,
+    num_calls: int,
+) -> str | None:
+    """Return a shape-variation disclosure line for a rolled multi-call box.
+
+    Parameters
+    ----------
+    trace:
+        Trace owning the module calls.
+    address:
+        Pass-free module address rendered as one rolled box.
+    num_calls:
+        Number of calls the box represents.
+
+    Returns
+    -------
+    str | None
+        ``"shapes A->B"`` when the call sites' output shapes differ
+        (first-to-last, matching the fold disclosure idiom), a generic
+        variation note when first and last agree but an interior call
+        differs, or ``None`` when every call outputs one shape.
+    """
+
+    shapes: list[tuple[Any, ...]] = []
+    for call_index in range(1, num_calls + 1):
+        try:
+            module_call = trace.module_calls[f"{address}:{call_index}"]
+            output_op = trace.ops[module_call.output_ops[-1]]
+        except (KeyError, IndexError):
+            return None
+        shape = getattr(output_op, "shape", None)
+        if shape is None:
+            shape = getattr(output_op, "out_shape", None)
+        shapes.append(tuple(shape or ()))
+    if len(set(shapes)) <= 1:
+        return None
+    first, last = shapes[0], shapes[-1]
+    if first != last:
+        return f"shapes {format_shape(first)}->{format_shape(last)}"
+    return "shapes vary across calls"
+
+
 def _build_collapsed_module_node(
     self: "Trace",
     node: GraphNode,
@@ -1242,39 +1382,96 @@ def _build_collapsed_module_node(
         address_w_pass = f"{address}:{call_index}" if vis_mode == "unrolled" else address
         module_tuple = address_w_pass.rsplit(":", 1)
     ml = self.modules[address]
-    module_type = ml.class_name  # type: ignore[union-attr]
-    module_num_calls = ml.num_calls  # type: ignore[union-attr]
-    module_nparams = ml.num_params  # type: ignore[union-attr]
-    module_nparams_trainable = ml.num_params_trainable  # type: ignore[union-attr]
-    module_nparams_frozen = ml.num_params_frozen  # type: ignore[union-attr]
+    module_type = ml.class_name
+    module_num_calls = ml.num_calls
+    module_nparams = ml.num_params
+    module_nparams_trainable = ml.num_params_trainable
+    module_nparams_frozen = ml.num_params_frozen
 
     # In unrolled mode, each pass of a module is a separate collapsed node
     # (e.g., "encoder.layer.0pass1").  In rolled mode, all ops share one
     # node (e.g., "encoder.layer.0").
     if vis_mode == "unrolled":
         graph_node_label = "pass".join(module_tuple)
-        module_call = ml.ops[int(call_index) - 1]  # type: ignore[index]
+        module_call = ml.ops[int(call_index) - 1]
+        # Mode presets aggregate over exactly the calls this box represents:
+        # this ONE call for an unrolled per-call box.
+        scope_op_labels = tuple(module_call.ops)
         module_num_tensors = module_call.num_layers
         module_num_buffers = sum(self[layer].is_buffer for layer in module_call.ops)
         module_has_input_ancestor = any(self[layer].has_input_ancestor for layer in module_call.ops)
         if (
-            _collapsed_module_should_show_remainder(self, address, module_call.ops, collapse_fn)
+            _collapsed_module_should_show_remainder(
+                self,
+                address,
+                module_call.ops,
+                collapse_fn,
+                vis_mode=vis_mode,
+                max_module_depth=vis_call_depth,
+            )
             and fold is None
         ):
             remainder_stats = _collapsed_module_remainder_stats(self, address, module_call.ops)
-            module_num_tensors = remainder_stats["num_layers"]
-            module_num_buffers -= sum(
-                layer.is_buffer
-                for layer in _surfaced_own_output_ops(self, address, module_call.ops)
-            )
+            surfaced_call_ops = _surfaced_own_output_ops(self, address, module_call.ops)
+            # Per-call boxes count in per-call currency: subtract this call's
+            # surfaced ops from THIS call's op count. The module-currency
+            # remainder (num_layers over all passes) overstated every
+            # multi-call box.
+            module_num_tensors = max(0, module_num_tensors - len(surfaced_call_ops))
+            module_num_buffers -= sum(layer.is_buffer for layer in surfaced_call_ops)
             module_nparams = remainder_stats["num_params"]
             module_nparams_trainable = remainder_stats["num_params_trainable"]
             module_nparams_frozen = remainder_stats["num_params_frozen"]
+            # Surfaced ops render as their own nodes with their own rows;
+            # keeping them in the box scope would double-count them and
+            # contradict the box's remainder tensor-count line.
+            surfaced_labels = {str(op.layer_label) for op in surfaced_call_ops}
+            scope_op_labels = tuple(
+                label for label in scope_op_labels if label not in surfaced_labels
+            )
     else:
         graph_node_label = module_tuple[0]
+        # A rolled box stands for every call of the module, so the mode
+        # presets aggregate per-pass op records across all calls.
+        scope_op_labels = tuple(op_label for call in ml.ops.values() for op_label in call.ops)
         module_num_tensors = ml.num_layers
         module_num_buffers = sum(self[layer].is_buffer for layer in ml.layer_labels)
-        module_has_input_ancestor = any(self[layer].has_input_ancestor for layer in ml.layer_labels)  # type: ignore[union-attr]
+        module_has_input_ancestor = any(self[layer].has_input_ancestor for layer in ml.layer_labels)
+        # Rolled boxes need the same surfaced-exit remainder belt as the
+        # unrolled branch (round-25): the atomic-exit drop in
+        # ``_collapse_address_for_node`` is vis_mode-independent, so the exit
+        # op renders separately in rolled mode too and counting it inside the
+        # box double-represents it (round-27). ``ml.layer_labels`` is already
+        # in pass-free layer currency, matching ``ml.num_layers``.
+        if (
+            _collapsed_module_should_show_remainder(
+                self,
+                address,
+                ml.layer_labels,
+                collapse_fn,
+                vis_mode=vis_mode,
+                max_module_depth=vis_call_depth,
+            )
+            and fold is None
+        ):
+            remainder_stats = _collapsed_module_remainder_stats(self, address, ml.layer_labels)
+            module_num_tensors = remainder_stats["num_layers"]
+            module_nparams = remainder_stats["num_params"]
+            module_nparams_trainable = remainder_stats["num_params_trainable"]
+            module_nparams_frozen = remainder_stats["num_params_frozen"]
+            # The surfaced-exit predicate is a per-layer invariant, so every
+            # pass of a surfaced layer renders outside the rolled box; drop
+            # the whole layer base from the mode-preset scope to match the
+            # remainder tensor count.
+            surfaced_bases = {
+                str(op.layer_label).rsplit(":", 1)[0]
+                for op in _surfaced_own_output_ops(self, address, ml.layer_labels)
+            }
+            scope_op_labels = tuple(
+                op_label
+                for op_label in scope_op_labels
+                if op_label.rsplit(":", 1)[0] not in surfaced_bases
+            )
 
     # Deduplicate: multiple layers in the same collapsed module will each
     # trigger this function, but the node should only be added once.
@@ -1328,6 +1525,14 @@ def _build_collapsed_module_node(
     ]
     if fold is not None and fold.shape_summary is not None:
         lines.append(f"shapes {fold.shape_summary}")
+    elif vis_mode == "rolled" and module_num_calls > 1:
+        # A rolled multi-call box shows ONE output shape (resolved from one
+        # call) for every call site; when the sites output different shapes
+        # that line is false for some of them, so disclose the variation the
+        # same way folds do.
+        shape_note = _rolled_multicall_shape_note(self, address, module_num_calls)
+        if shape_note is not None:
+            lines.append(shape_note)
     lines.extend(
         [format_collapsed_module_contents(module_num_tensors, module_num_buffers), param_detail]
     )
@@ -1342,11 +1547,20 @@ def _build_collapsed_module_node(
     )
     if theme is not None:
         default_spec = apply_theme_to_spec(default_spec, theme)
+    # A fold-representative box stands for a whole run of siblings while
+    # its op inventory covers only the representative; the note keeps any
+    # aggregate row honest about that narrower scope.
+    scope_note = None
+    if fold is not None:
+        scope_note = (
+            f"@{address}:{call_index} only" if vis_mode == "unrolled" else f"@{address} only"
+        )
+    mode_scope = CollapsedModeScope(op_labels=scope_op_labels, note=scope_note)
     mode_fn = COLLAPSED_MODE_REGISTRY[node_mode]
-    mode_result = mode_fn(ml, default_spec)  # type: ignore[arg-type]
+    mode_result = mode_fn(ml, default_spec, mode_scope)
     mode_spec = default_spec if mode_result is None else mode_result
     if collapsed_node_spec_fn is not None:
-        result = collapsed_node_spec_fn(ml, mode_spec)  # type: ignore[arg-type]
+        result = collapsed_node_spec_fn(ml, mode_spec)
         spec = mode_spec if result is None else result
     else:
         spec = mode_spec
@@ -1366,7 +1580,36 @@ def _build_collapsed_module_node(
     collapsed_modules.add(graph_node_label)
 
 
-def _atomic_module_split_range(trace: "Trace", layer_log: GraphNode, address: str) -> str:
+def _atomic_module_sibling_counts(trace: "Trace") -> dict[str, int]:
+    """Count rolled atomic-module layers per module address in one pass.
+
+    Parameters
+    ----------
+    trace:
+        Owning trace.
+
+    Returns
+    -------
+    dict[str, int]
+        Mapping from module address to the number of atomic-module ``Layer``
+        nodes whose innermost module is that address. Addresses with no such
+        layers are absent.
+    """
+
+    counts: dict[str, int] = {}
+    for other in trace.layer_logs.values():
+        if isinstance(other, Layer) and getattr(other, "is_atomic_module", False) and other.modules:
+            other_address = other.modules[-1].rsplit(":", 1)[0]
+            counts[other_address] = counts.get(other_address, 0) + 1
+    return counts
+
+
+def _atomic_module_split_range(
+    trace: "Trace",
+    layer_log: GraphNode,
+    address: str,
+    sibling_counts: Mapping[str, int] | None = None,
+) -> str:
     """Return the call-range an atomic module rectangle should mark, or ``""``.
 
     An atomic (single-op) module renders as a rectangle per call site. When the
@@ -1384,6 +1627,9 @@ def _atomic_module_split_range(trace: "Trace", layer_log: GraphNode, address: st
         Atomic module layer being rendered.
     address:
         The atomic module's address.
+    sibling_counts:
+        Optional per-draw ``_atomic_module_sibling_counts`` result; recomputed
+        from ``trace`` when absent.
 
     Returns
     -------
@@ -1396,14 +1642,9 @@ def _atomic_module_split_range(trace: "Trace", layer_log: GraphNode, address: st
     groups = _call_groups_for_layer(layer_log)
     if groups:
         return _format_call_groups(groups)
-    sibling_atomic_layers = sum(
-        1
-        for other in trace.layer_logs.values()
-        if isinstance(other, Layer)
-        and getattr(other, "is_atomic_module", False)
-        and other.modules
-        and other.modules[-1].rsplit(":", 1)[0] == address
-    )
+    if sibling_counts is None:
+        sibling_counts = _atomic_module_sibling_counts(trace)
+    sibling_atomic_layers = sibling_counts.get(address, 0)
     if sibling_atomic_layers > 1:
         calls = _common_module_call_indices(layer_log).get(address, [])
         if calls:
@@ -1483,11 +1724,13 @@ def _get_node_address_shape_color(
     self: "Trace",
     node: GraphNode,
     show_buffer_layers: BufferVisibilityLiteral | bool,
+    sibling_counts: Mapping[str, int] | None = None,
 ) -> Tuple[str, str, str]:
     """Gets the node shape, address, and color for the graphviz figure.
 
     Args:
         node: node to add
+        sibling_counts: optional per-draw atomic-module sibling counts
 
     Returns:
         node_address: address of the node
@@ -1507,14 +1750,14 @@ def _get_node_address_shape_color(
         if isinstance(source_node, Op):
             module_pass_exited = node.modules[-1]
             module, _ = module_pass_exited.split(":")
-            if self.modules[module].num_calls == 1:  # type: ignore[union-attr]
+            if self.modules[module].num_calls == 1:
                 node_address = module
             else:
                 node_address = module_pass_exited
         else:
             sample_module_pass = node.modules[-1]
             module = sample_module_pass.split(":")[0]
-            split_range = _atomic_module_split_range(self, source_node, module)
+            split_range = _atomic_module_split_range(self, source_node, module, sibling_counts)
             node_address = f"{module}:{split_range}" if split_range else module
 
         node_address = "<br/>@" + node_address
@@ -1648,7 +1891,9 @@ def _apply_node_spec_fn(
         Preset to apply before the optional user callback.
     node_spec_fn:
         Optional user callback. Unrolled nodes are represented to the callback
-        by their parent Layer.
+        by their parent Layer. Encoding channels ride this slot as a per-node
+        wrapper (``_encoding.channel_wrapped_node_spec_fn``; C3 order:
+        preset -> channel -> user).
 
     Returns
     -------
@@ -1657,49 +1902,22 @@ def _apply_node_spec_fn(
     """
 
     layer_log = _layer_log_for_node(trace, node)
+    # Mode presets get the per-pass Op on unrolled nodes: routing them
+    # through the aggregate Layer tripped the multi-pass per-pass-field
+    # refusal, which the preset degrades to omitted rows — the exact
+    # per-pass values were sitting unused on the Op. The user callback
+    # below keeps its documented parent-Layer contract.
+    unwrapped = _unwrap_focus_node(node)
+    # _layer_log_for_node already rejected BoundaryNode, and the unwrap
+    # resolved any FocusNode, so the non-Layer case is a per-pass Op.
+    mode_target = layer_log if isinstance(unwrapped, Layer) else cast("Op", unwrapped)
     mode_fn = MODE_REGISTRY[node_mode]
-    mode_result = mode_fn(layer_log, default_spec)
+    mode_result = mode_fn(mode_target, default_spec)
     mode_spec = default_spec if mode_result is None else mode_result
     if node_spec_fn is None:
         return mode_spec
     result = node_spec_fn(layer_log, mode_spec)
     return mode_spec if result is None else result
-
-
-def _annotation_image_path_for_node(trace: "Trace", node: GraphNode) -> str | None:
-    """Return a user annotation image path for a rendered node.
-
-    Parameters
-    ----------
-    trace:
-        Owning Trace.
-    node:
-        Rendered Op or Layer.
-
-    Returns
-    -------
-    str | None
-        Image path stored in ``annotations["user"]["image"]``, if present.
-    """
-
-    if isinstance(node, BoundaryNode):
-        return None
-    candidates: list[Any] = [node]
-    try:
-        candidates.append(_layer_log_for_node(trace, node))
-    except ValueError:
-        pass
-    for candidate in candidates:
-        annotations = getattr(candidate, "annotations", None)
-        if not isinstance(annotations, dict):
-            continue
-        user_annotations = annotations.get("user")
-        if not isinstance(user_annotations, dict):
-            continue
-        image = user_annotations.get("image")
-        if isinstance(image, str) and image:
-            return image
-    return None
 
 
 def _layer_log_for_node(trace: "Trace", node: GraphNode) -> "Layer":
@@ -1733,6 +1951,8 @@ def compute_default_node_lines(
     *,
     node_label_fields: list[str] | None = None,
     node_overlay: str | OverlayScores | Callable[[Any], Any] | None = None,
+    suppressed_arg_keys: frozenset[str] = frozenset(),
+    show_saved_for_backward: bool = False,
 ) -> list[str]:
     """Build default plain-text rows for a layer node.
 
@@ -1748,6 +1968,12 @@ def compute_default_node_lines(
         Optional label fields to render instead of the default field set.
     node_overlay:
         Optional overlay to append as an additional label row.
+    suppressed_arg_keys:
+        Checked-suppression keys (default empty: every arg visible — the
+        detached-record degrade rule).
+    show_saved_for_backward:
+        Whether to append the saved-for-backward disclosure row on ops whose
+        grad_fn measurably retained tensors.
 
     Returns
     -------
@@ -1789,7 +2015,14 @@ def compute_default_node_lines(
     else:
         call_label = ""
 
-    if layer_log.layer_type in ["input", "output", "buffer"]:
+    if (layer_log.num_passes > 1) and (vis_mode == "unrolled"):
+        # F2: show the RESOLVABLE trace identity ``layer_label:pass`` (== op.label,
+        # e.g. linear_1_1:2) instead of ``{type}_{type_index}_{step_index}:{pass}``.
+        # The latter renumbers the ordinal from this pass's step_index and yields an
+        # un-lookup-able label (linear_1_3:2 for what is really linear_1_1:2), so
+        # users copying the displayed name got a "not found" ValueError.
+        title = f"{layer_log.layer_label}:{layer_log.pass_index}"
+    elif layer_log.layer_type in ["input", "output", "buffer"]:
         title = f"{layer_log.layer_type}_{layer_log.type_index}{call_label}"
     else:
         title = f"{layer_log.layer_type}_{layer_log.type_index}_{layer_log.step_index}{call_label}"
@@ -1798,9 +2031,17 @@ def compute_default_node_lines(
     if layer_log.is_terminal_bool:
         lines.append(str(layer_log.bool_value).upper())
     lines.append(title)
+    # L1's across-pass shape summary (rolled multi-pass Layers only; plain
+    # data, escaped like every row by the S5 choke point).
+    shape_summary = getattr(layer_log, "shape_summary", None)
+    if isinstance(shape_summary, str) and shape_summary:
+        lines.append(shape_summary)
     lines.append(f"{format_shape(layer_log.shape)}, {format_memory(layer_log.activation_memory)}")
 
-    module_kwargs = format_module_kwargs(layer_log)
+    if show_saved_for_backward and (saved := saved_for_backward_line(layer_log, vis_mode)):
+        lines.append(saved)
+
+    module_kwargs = format_module_kwargs(layer_log, suppressed_keys=suppressed_arg_keys)
     if module_kwargs is not None:
         lines.append(module_kwargs)
 
@@ -1811,73 +2052,9 @@ def compute_default_node_lines(
     address_line = format_module_path(node_address)
     if address_line is not None:
         lines.append(address_line)
-    overlay = overlay_line(layer_log, node_overlay)
-    if overlay is not None:
+    if (overlay := overlay_line(layer_log, node_overlay)) is not None:
         lines.append(overlay)
     return lines
-
-
-def _compute_selected_node_lines(
-    layer_log: GraphNode,
-    node_address: str,
-    vis_mode: str,
-    node_label_fields: list[str],
-) -> list[str]:
-    """Build node-label rows from an explicit field picker.
-
-    Parameters
-    ----------
-    layer_log:
-        Op or Layer to render.
-    node_address:
-        Existing address suffix from TorchLens node address logic.
-    vis_mode:
-        ``"unrolled"`` or ``"rolled"``.
-    node_label_fields:
-        Requested field names.
-
-    Returns
-    -------
-    list[str]
-        Selected label rows.
-
-    Raises
-    ------
-    ValueError
-        If an unknown field is requested.
-    """
-
-    rows: list[str] = []
-    for field_name in node_label_fields:
-        if field_name in {"label", "name"}:
-            rows.append(str(getattr(layer_log, "layer_label", "")))
-        elif field_name in {"type", "op", "operation"}:
-            rows.append(str(getattr(layer_log, "func_name", None) or layer_log.layer_type))
-        elif field_name == "shape":
-            rows.append(format_shape(layer_log.shape))
-        elif field_name in {"memory", "bytes"}:
-            rows.append(str(getattr(layer_log, "activation_memory", "")))
-        elif field_name == "module":
-            rows.append(format_module_path(node_address) or "@root")
-        elif field_name == "params":
-            param_line = format_param_list(layer_log)
-            if param_line is not None:
-                rows.append(param_line)
-        elif field_name == "pass":
-            rows.append(
-                str(
-                    getattr(layer_log, "call_index", 1)
-                    if vis_mode == "unrolled"
-                    else getattr(layer_log, "num_passes", 1)
-                )
-            )
-        elif field_name == "flops":
-            rows.append(str(getattr(layer_log, "flops_forward", 0) or 0))
-        elif field_name == "time":
-            rows.append(str(Duration(float(getattr(layer_log, "func_duration", 0.0) or 0.0))))
-        else:
-            raise ValueError(f"Unsupported node label field: {field_name!r}.")
-    return rows or compute_default_node_lines(layer_log, node_address, vis_mode)
 
 
 __all__ = [
@@ -1886,12 +2063,12 @@ __all__ = [
     "_annotation_image_path_for_node",
     "_append_container_overlay_edge",
     "_apply_node_spec_fn",
+    "_atomic_module_sibling_counts",
     "_atomic_module_split_range",
     "_batch_render_limit",
     "_buffer_versions_for_layer",
     "_build_collapsed_module_node",
     "_build_layer_node",
-    "_compute_selected_node_lines",
     "_container_boundary_edge_attrs",
     "_container_path_leaf_label",
     "_format_batch_topk_output_lines",

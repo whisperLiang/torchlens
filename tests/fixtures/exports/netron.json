@@ -1,0 +1,130 @@
+{
+  "docString": "TorchLens lossy graph export: not a runnable ONNX model; graph inspection only. Ops keep their captured TorchLens names under the ai.torchlens.lossy domain and carry no standard-ONNX execution semantics.",
+  "graph": {
+    "docString": "TorchLens lossy graph export: not a runnable ONNX model; graph inspection only. Ops keep their captured TorchLens names under the ai.torchlens.lossy domain and carry no standard-ONNX execution semantics.",
+    "name": "<trace-id>",
+    "node": [
+      {
+        "attribute": [
+          {
+            "ints": [
+              2,
+              3
+            ],
+            "name": "shape",
+            "type": "INTS"
+          }
+        ],
+        "domain": "ai.torchlens.lossy",
+        "input": [],
+        "name": "input_1",
+        "opType": "input",
+        "output": [
+          "input_1"
+        ]
+      },
+      {
+        "attribute": [
+          {
+            "ints": [
+              2,
+              4
+            ],
+            "name": "shape",
+            "type": "INTS"
+          }
+        ],
+        "domain": "ai.torchlens.lossy",
+        "input": [
+          "input_1"
+        ],
+        "name": "linear_1_1",
+        "opType": "linear",
+        "output": [
+          "linear_1_1"
+        ]
+      },
+      {
+        "attribute": [
+          {
+            "ints": [
+              2,
+              4
+            ],
+            "name": "shape",
+            "type": "INTS"
+          }
+        ],
+        "domain": "ai.torchlens.lossy",
+        "input": [
+          "linear_1_1"
+        ],
+        "name": "relu_1_2",
+        "opType": "relu",
+        "output": [
+          "relu_1_2"
+        ]
+      },
+      {
+        "attribute": [
+          {
+            "ints": [
+              2,
+              2
+            ],
+            "name": "shape",
+            "type": "INTS"
+          }
+        ],
+        "domain": "ai.torchlens.lossy",
+        "input": [
+          "relu_1_2"
+        ],
+        "name": "linear_2_3",
+        "opType": "linear",
+        "output": [
+          "linear_2_3"
+        ]
+      },
+      {
+        "attribute": [
+          {
+            "ints": [
+              2,
+              2
+            ],
+            "name": "shape",
+            "type": "INTS"
+          }
+        ],
+        "domain": "ai.torchlens.lossy",
+        "input": [
+          "linear_2_3"
+        ],
+        "name": "output_1",
+        "opType": "output",
+        "output": [
+          "output_1"
+        ]
+      }
+    ]
+  },
+  "irVersion": 8,
+  "metadataProps": [
+    {
+      "key": "torchlens.lossy_export",
+      "value": "true"
+    },
+    {
+      "key": "torchlens.runnable",
+      "value": "false"
+    }
+  ],
+  "opsetImport": [
+    {
+      "domain": "ai.torchlens.lossy",
+      "version": 1
+    }
+  ],
+  "producerName": "torchlens"
+}

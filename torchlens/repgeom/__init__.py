@@ -6,21 +6,23 @@ helpers are for visualization-oriented representation geometry, not inference.
 
 from __future__ import annotations
 
+import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from pathlib import Path
-import tempfile
 from typing import Any, Literal, TypeAlias, TypedDict
-import warnings
 
 import numpy as np
-from PIL import Image, ImageDraw
 import torch
+from PIL import Image, ImageDraw
 
 from ..intervention.errors import MultiMatchWarning
+from ..utils._multipass_access import get_multipass_attr
+from ..utils.display import ensure_trace_visualizer_dir
 from ..viz.node_plots import render_heatmap, render_image_scatter, render_lineplot
 
 DistanceMetric: TypeAlias = Literal["euclidean", "cosine", "correlation"]
+MDSInputKind: TypeAlias = Literal["auto", "distances", "features"]
 MDSInfo: TypeAlias = dict[str, int | float | bool | str]
 MDSEvolution: TypeAlias = "OrderedDict[str, np.ndarray]"
 RDMEvolution: TypeAlias = "OrderedDict[str, np.ndarray]"
@@ -42,6 +44,62 @@ class EffectiveDimensionalityInfo(TypedDict):
 _RANK_TOLERANCE = 1e-12
 _SYMMETRY_TOLERANCE = 1e-10
 _SCATTER_CANVAS_SIZE = 420
+
+
+def _symmetry_tolerance(array: np.ndarray) -> float:
+    """Return the scale-aware absolute tolerance for symmetry-family gates.
+
+    ``_SYMMETRY_TOLERANCE`` is a RELATIVE budget measured against the
+    largest magnitude in the matrix (the ``_positive_rank_tolerance``
+    idiom). The former fixed absolute ``1e-10`` was broken in both
+    directions: 66% relative asymmetry at scale ``1e-10`` read as symmetric,
+    while ``1e-15``-relative float64 round-off at scale ``1e7`` was
+    rejected. Scaling by ``max|x|`` keeps the gate at ~``1e-10`` relative at
+    every scale: strictly tighter than the old absolute gate below O(1)
+    scale (fail-toward-strict) and no longer false-failing float64 noise
+    above it. Used by the symmetry, zero-diagonal, non-negativity, and
+    ambiguity-disclosure comparisons.
+
+    Parameters
+    ----------
+    array:
+        Matrix whose magnitude sets the tolerance scale.
+
+    Returns
+    -------
+    float
+        Absolute tolerance proportional to the matrix's largest magnitude.
+    """
+
+    max_abs = float(np.max(np.abs(array))) if array.size else 0.0
+    return _SYMMETRY_TOLERANCE * max_abs
+
+
+def _near_zero_tolerance(array: np.ndarray) -> float:
+    """Return the scale-aware tolerance for closeness-to-zero REFUSAL gates.
+
+    Duplicate-distance and zero-norm detection REFUSE input when a value
+    sits within tolerance of zero, so a LARGER tolerance is the strict
+    direction (more refusals) and a smaller one widens acceptance. This
+    tolerance therefore keeps the O(1) floor -- ``max(1.0, max_abs)`` --
+    so behavior below O(1) scale is unchanged from the historical absolute
+    ``1e-10`` (never widening acceptance there), while above O(1) scale a
+    value that is ~``1e-10``-relative-to-max close to zero is now correctly
+    refused instead of slipping past a vanishing absolute gate.
+
+    Parameters
+    ----------
+    array:
+        Values whose magnitude sets the tolerance scale.
+
+    Returns
+    -------
+    float
+        Absolute tolerance with an O(1) scale floor.
+    """
+
+    max_abs = float(np.max(np.abs(array))) if array.size else 0.0
+    return _SYMMETRY_TOLERANCE * max(1.0, max_abs)
 
 
 def _as_numpy_array(value: Any) -> np.ndarray:
@@ -99,9 +157,10 @@ def _looks_like_distance_matrix(array: np.ndarray) -> bool:
 
     if array.ndim != 2 or array.shape[0] != array.shape[1]:
         return False
+    tolerance = _symmetry_tolerance(array)
     return bool(
-        np.allclose(array, array.T, atol=_SYMMETRY_TOLERANCE, rtol=0.0)
-        and np.allclose(np.diag(array), 0.0, atol=_SYMMETRY_TOLERANCE, rtol=0.0)
+        np.allclose(array, array.T, atol=tolerance, rtol=0.0)
+        and np.allclose(np.diag(array), 0.0, atol=tolerance, rtol=0.0)
     )
 
 
@@ -122,11 +181,12 @@ def _check_square_distances(distances: np.ndarray) -> None:
     if distances.ndim != 2 or distances.shape[0] != distances.shape[1]:
         raise ValueError("distances must be a square pairwise distance matrix.")
     _validate_finite(distances, "distances")
-    if not np.allclose(distances, distances.T, atol=_SYMMETRY_TOLERANCE, rtol=0.0):
+    tolerance = _symmetry_tolerance(distances)
+    if not np.allclose(distances, distances.T, atol=tolerance, rtol=0.0):
         raise ValueError("distances must be symmetric.")
-    if not np.allclose(np.diag(distances), 0.0, atol=_SYMMETRY_TOLERANCE, rtol=0.0):
+    if not np.allclose(np.diag(distances), 0.0, atol=tolerance, rtol=0.0):
         raise ValueError("distances must have a zero diagonal.")
-    if np.any(distances < -_SYMMETRY_TOLERANCE):
+    if np.any(distances < -tolerance):
         raise ValueError("distances must be non-negative.")
 
 
@@ -169,7 +229,7 @@ def _has_duplicate_distances(distances: np.ndarray) -> bool:
         True when off-diagonal distances indicate duplicate stimuli.
     """
 
-    off_diagonal_zero = np.isclose(distances, 0.0, atol=_SYMMETRY_TOLERANCE, rtol=0.0)
+    off_diagonal_zero = np.isclose(distances, 0.0, atol=_near_zero_tolerance(distances), rtol=0.0)
     np.fill_diagonal(off_diagonal_zero, False)
     return bool(np.any(off_diagonal_zero))
 
@@ -307,8 +367,8 @@ def activation_distance_matrix(
 
     features = array.reshape(array.shape[0], -1)
     if metric == "euclidean":
-        differences = features[:, None, :] - features[None, :, :]
-        distances = np.sqrt(np.sum(differences * differences, axis=-1))
+        feature_tensor = torch.as_tensor(features, dtype=torch.float64)
+        distances = torch.cdist(feature_tensor, feature_tensor, p=2).cpu().numpy()
     elif metric == "cosine":
         distances = _angular_dissimilarity(features, center_rows=False)
     elif metric == "correlation":
@@ -374,7 +434,7 @@ def _angular_dissimilarity(features: np.ndarray, *, center_rows: bool) -> np.nda
 
     working = features - features.mean(axis=1, keepdims=True) if center_rows else features.copy()
     norms = np.linalg.norm(working, axis=1, keepdims=True)
-    if np.any(norms <= _SYMMETRY_TOLERANCE):
+    if np.any(norms <= _near_zero_tolerance(norms)):
         metric_name = "correlation" if center_rows else "cosine"
         raise ValueError(f"{metric_name} distance is undefined for zero-norm stimuli.")
     normalized = working / norms
@@ -387,14 +447,19 @@ def classical_mds(
     n_components: int = 2,
     *,
     min_n: int = 8,
+    input_kind: MDSInputKind = "auto",
 ) -> tuple[np.ndarray, MDSInfo]:
     """Embed pairwise distances or row-wise features with classical MDS.
 
-    Square symmetric inputs with zero diagonal are interpreted as precomputed
-    distances. Other inputs are treated as ``[N, ...]`` features and converted
-    to Euclidean distances first. Negative centered-Gram eigenvalues are clipped
-    to zero and reported because non-PSD dissimilarities are expected for some
-    visualization metrics.
+    Under the default ``input_kind="auto"``, square symmetric inputs with zero
+    diagonal are interpreted as precomputed distances and other inputs are
+    treated as ``[N, ...]`` features and converted to Euclidean distances first.
+    Because a square symmetric zero-diagonal *feature* matrix is
+    indistinguishable from a distance matrix by content alone, ``"auto"`` warns
+    whenever it has to make that guess; declare ``input_kind="distances"`` or
+    ``input_kind="features"`` to state the intent and silence the guess.
+    Negative centered-Gram eigenvalues are clipped to zero and reported because
+    non-PSD dissimilarities are expected for some visualization metrics.
 
     Parameters
     ----------
@@ -404,6 +469,11 @@ def classical_mds(
         Number of embedding axes to return.
     min_n:
         Minimum number of stimuli required for visualization-oriented MDS.
+    input_kind:
+        How to read ``data``: ``"auto"`` detects a distance matrix from
+        structure (and warns when the structure is ambiguous), ``"distances"``
+        declares a precomputed pairwise distance matrix, and ``"features"``
+        declares row-wise feature data even when it is square and symmetric.
 
     Returns
     -------
@@ -420,11 +490,40 @@ def classical_mds(
         raise ValueError("n_components must be at least 1.")
     if min_n < 3:
         raise ValueError("min_n must be at least 3.")
+    if input_kind not in ("auto", "distances", "features"):
+        raise ValueError(
+            "input_kind must be one of 'auto', 'distances', or 'features'; "
+            f"received {input_kind!r}."
+        )
 
     array = _as_numpy_array(data)
     _validate_finite(array, "data")
-    input_is_distances = _looks_like_distance_matrix(array)
-    distances = _as_distance_matrix_or_activations(data, metric="euclidean")
+    if input_kind == "auto":
+        input_is_distances = _looks_like_distance_matrix(array)
+        if input_is_distances and not np.allclose(
+            activation_distance_matrix(array, metric="euclidean"),
+            array,
+            atol=_symmetry_tolerance(array),
+            rtol=0.0,
+        ):
+            warnings.warn(
+                (
+                    "classical_mds received an ambiguous square input with symmetric zero "
+                    "diagonal; treating it as a precomputed distance matrix. Pass "
+                    "input_kind='distances' or input_kind='features' to declare the intent "
+                    "and avoid ambiguous square input handling."
+                ),
+                UserWarning,
+                stacklevel=2,
+            )
+    else:
+        input_is_distances = input_kind == "distances"
+    if input_is_distances:
+        distances = array.copy()
+        _check_square_distances(distances)
+    else:
+        distances = activation_distance_matrix(array, metric="euclidean")
+        _check_square_distances(distances)
     n_stimuli = distances.shape[0]
     _check_stimulus_count(n_stimuli, min_n)
     if _has_duplicate_distances(distances):
@@ -628,13 +727,15 @@ def mds_evolution(
     selected = _selected_mds_sites(trace, save)
     coords_by_key: MDSEvolution = OrderedDict()
     previous_coords: np.ndarray | None = None
-    for key, site, activations in selected:
+    for key, _site, activations in selected:
         distances = activation_distance_matrix(activations, metric=metric)
-        coords, _info = classical_mds(distances, n_components=2, min_n=min_n)
+        coords, _info = classical_mds(
+            distances, n_components=2, min_n=min_n, input_kind="distances"
+        )
         if align and previous_coords is not None:
             coords = procrustes_align(coords, previous_coords)
         _annotate_mds_coords(trace, key, coords)
-        coords_by_key[key] = coords
+        coords_by_key[key] = coords.copy()
         previous_coords = coords
     return coords_by_key
 
@@ -686,8 +787,9 @@ def rdm_evolution(
                 f"rdm_evolution has too few stimuli for {key!r}: "
                 f"got {matrix.shape[0]}, need at least {min_n}."
             )
-        _store_annotation_tensor(trace, f"rdm:{key}", torch.from_numpy(matrix))
-        matrices_by_key[key] = matrix
+        stored_matrix = matrix.copy()
+        _store_annotation_tensor(trace, f"rdm:{key}", torch.from_numpy(stored_matrix))
+        matrices_by_key[key] = matrix.copy()
     return matrices_by_key
 
 
@@ -1071,10 +1173,12 @@ def _scree_eigenvalues_for_node(trace: Any, node: Any) -> tuple[str | None, np.n
     if not isinstance(blobs, dict):
         return None, None
     candidates = []
-    label = getattr(node, "label", None)
+    # A rolled multi-pass Layer has no single per-pass label; plain getattr
+    # would leak the multi-pass ValueError tripwire and kill the whole draw.
+    label = get_multipass_attr(node, "label", None, multipass=None)
     if label is not None:
         candidates.append(f"op:{label}")
-    layer_label = getattr(node, "layer_label", None)
+    layer_label = get_multipass_attr(node, "layer_label", None, multipass=None)
     if layer_label is not None:
         candidates.append(f"layer:{layer_label}")
     for key in candidates:
@@ -1175,10 +1279,12 @@ def _rdm_matrix_for_node(trace: Any, node: Any) -> tuple[str | None, np.ndarray 
     if not isinstance(blobs, dict):
         return None, None
     candidates = []
-    label = getattr(node, "label", None)
+    # A rolled multi-pass Layer has no single per-pass label; plain getattr
+    # would leak the multi-pass ValueError tripwire and kill the whole draw.
+    label = get_multipass_attr(node, "label", None, multipass=None)
     if label is not None:
         candidates.append(f"op:{label}")
-    layer_label = getattr(node, "layer_label", None)
+    layer_label = get_multipass_attr(node, "layer_label", None, multipass=None)
     if layer_label is not None:
         candidates.append(f"layer:{layer_label}")
     for key in candidates:
@@ -1212,14 +1318,16 @@ def _mds_scatter_coords_for_node(trace: Any, node: Any) -> tuple[str | None, np.
     if not isinstance(blobs, dict):
         return None, None
     candidates = []
-    label = getattr(node, "label", None)
+    # A rolled multi-pass Layer has no single per-pass label; plain getattr
+    # would leak the multi-pass ValueError tripwire and kill the whole draw.
+    label = get_multipass_attr(node, "label", None, multipass=None)
     if label is not None:
         candidates.append(f"op:{label}")
-    layer_label = getattr(node, "layer_label", None)
+    layer_label = get_multipass_attr(node, "layer_label", None, multipass=None)
     if layer_label is not None:
         candidates.append(f"layer:{layer_label}")
     for key in candidates:
-        value = blobs.get(key)
+        value = blobs.get(f"mds:{key}")
         if value is None:
             continue
         coords = _as_numpy_array(value)
@@ -1305,11 +1413,7 @@ def _write_node_plot_image(trace: Any, namespace: str, key: str, image: Any) -> 
         Local PNG path for ``NodeSpec.image``.
     """
 
-    output_dir = getattr(trace, "_visualizer_dir", None)
-    if output_dir is None:
-        output_dir = tempfile.mkdtemp(prefix="torchlens_visualizers_")
-        trace._visualizer_dir = str(output_dir)
-    plot_dir = Path(str(output_dir)) / namespace
+    plot_dir = ensure_trace_visualizer_dir(trace) / namespace
     plot_dir.mkdir(parents=True, exist_ok=True)
     safe_key = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in key)
     image_path = plot_dir / f"{safe_key}.png"
@@ -1366,7 +1470,10 @@ def _effective_dimensionality_from_eigenvalues(
         participation_ratio = (
             (total_positive * total_positive) / denominator if denominator > 0.0 else 0.0
         )
-        n_components = int(np.searchsorted(cumulative, variance_threshold, side="left") + 1)
+        n_components = min(
+            int(np.searchsorted(cumulative, variance_threshold, side="left") + 1),
+            clipped.size,
+        )
     else:
         variance = np.zeros_like(clipped)
         cumulative = np.zeros_like(clipped)
@@ -1446,7 +1553,9 @@ def _default_saved_mds_sites(trace: Any) -> list[tuple[str, Any, Any]]:
     selected: list[tuple[str, Any, Any]] = []
     for layer in trace.layers:
         if int(getattr(layer, "num_passes", 1)) > 1:
-            saved_ops = [op for op in layer.ops if bool(getattr(op, "has_saved_activation", False))]
+            saved_ops = [
+                op for op in layer.ops.values() if bool(getattr(op, "has_saved_activation", False))
+            ]
             if saved_ops:
                 _raise_recurrent_layer_requires_pass(layer)
             continue
@@ -1539,9 +1648,17 @@ def _annotate_mds_coords(trace: Any, key: str, coords: np.ndarray) -> None:
     -------
     None
         The trace is mutated in place through ``_annotation_blobs``.
+
+    Notes
+    -----
+    Stored under the ``mds:`` namespace: bare ``layer:``/``op:`` keys belong
+    to USER ``annotate(data=...)`` blobs, and an unprefixed store both
+    collided with them and let a user ``[N, 2]`` payload be misread as MDS
+    coordinates by the scatter reader. Derived-prefix keys are also what the
+    rerun refresh invalidates while preserving user blobs.
     """
 
-    _store_annotation_tensor(trace, key, torch.from_numpy(coords))
+    _store_annotation_tensor(trace, f"mds:{key}", torch.from_numpy(coords.copy()))
 
 
 def _store_annotation_tensor(trace: Any, key: str, tensor: torch.Tensor) -> None:

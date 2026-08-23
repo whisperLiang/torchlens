@@ -50,7 +50,7 @@ from torchlens.options import CaptureOptions
 from torchlens.runnable import NumericAttestationStatus, PathFaithfulness
 from torchlens.utils.rng import _rng_exempt_instances, host_nondeterminism_monitor
 
-_CAP = dict(intervention_ready=True, capture_container_structure=True, cache=False)
+_CAP = {"intervention_ready": True, "capture_container_structure": True, "cache": False}
 
 
 def _make_monitor(model: nn.Module) -> host_nondeterminism_monitor:
@@ -80,8 +80,8 @@ class _PreexistingWorker:
     """A worker thread started BEFORE any capture window (a non-hooked, foreign thread)."""
 
     def __init__(self) -> None:
-        self.jobs: "queue.Queue[Any]" = queue.Queue()
-        self.results: "queue.Queue[Any]" = queue.Queue()
+        self.jobs: queue.Queue[Any] = queue.Queue()
+        self.results: queue.Queue[Any] = queue.Queue()
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
 
@@ -217,7 +217,7 @@ def test_slot_generator_preexisting_thread_draw_is_unverifiable(
         else _SlotSubTop(gen, preexisting_worker)
     )
     trace, result = _roundtrip(model, torch.randn(2, 4), tmp_path)
-    assert "model_attribute_generator" in getattr(trace, "_runnable_host_rng_channels", ()), (
+    assert "model_attribute_generator" in trace._runnable.host_rng_channels, (
         f"{placement}: slot-held generator draw was not inventoried"
     )
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
@@ -248,7 +248,7 @@ def test_benign_slots_model_stays_verified(tmp_path: Path) -> None:
     assert monitor.result.uncertain_detail == ()
 
     trace, result = _roundtrip(_BenignSlots(), torch.randn(2, 4), tmp_path)
-    assert "model_attribute_generator" not in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" not in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
     assert result.report.numeric_attestation is NumericAttestationStatus.ATTESTED
 
@@ -258,7 +258,7 @@ def test_undrawn_slot_generator_stays_verified(tmp_path: Path) -> None:
     ``model_attribute_generator`` channel (digest unchanged; possession is not consumption)."""
 
     trace, result = _roundtrip(_SlotTop(np.random.default_rng(3)), torch.randn(2, 4), tmp_path)
-    assert "model_attribute_generator" not in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" not in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
 
 

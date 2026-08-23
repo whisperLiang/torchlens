@@ -9,13 +9,11 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
-from torchlens import _state
-from torchlens import Recording, Trace
+from torchlens import Recording, Trace, _state
+from torchlens.backends.torch.wrappers import wrap_torch
 from torchlens.io import load_intervention_spec
 from torchlens.options import CaptureOptions
 from torchlens.validation import validate_forward_pass
-from torchlens.backends.torch.wrappers import wrap_torch
-
 
 _HAS_TORCH_FUNC = hasattr(torch, "func")
 
@@ -538,7 +536,7 @@ def test_vmap_boundary_node_has_clean_parent_edge() -> None:
 
     assert len(vmap_ops) == 1
     assert vmap_ops[0].label == "vmap_1_1:1"
-    assert vmap_ops[0].parents == ["input_1"]
+    assert vmap_ops[0].parents == ("input_1",)
     assert vmap_ops[0].is_transform is True
     assert vmap_ops[0].transform_kind == "vmap"
     assert vmap_ops[0].transform_chain == ("vmap",)
@@ -581,7 +579,7 @@ def test_grad_boundary_node_has_clean_parent_edge() -> None:
     grad_ops = [op for op in log.ops if op.type == "grad"]
 
     assert len(grad_ops) == 1
-    assert grad_ops[0].parents == ["input_1"]
+    assert grad_ops[0].parents == ("input_1",)
     assert grad_ops[0].is_transform is True
     assert grad_ops[0].transform_kind == "grad"
     assert grad_ops[0].transform_chain == ("grad",)
@@ -605,16 +603,27 @@ def test_grad_over_module_boundary_does_not_crash() -> None:
 
 @pytest.mark.skipif(not _HAS_TORCH_FUNC, reason="torch.func not available")
 def test_raw_grad_over_module_wrapper_tensor_leak_does_not_crash() -> None:
-    """Hardening guards tolerate wrapper tensors from uninstrumented transforms."""
+    """Hardening guards tolerate wrapper tensors from uninstrumented transforms.
+
+    The detached-reference crawler used to rewrite ``self.raw_grad`` to the
+    wrapped ``torch.func.grad``, so the transform was captured as a boundary
+    op and the output attributed. Stage-2 safety net deleted the crawler and
+    model attributes keep their identity: the raw transform interior is
+    honestly not logged, the transform boundary warning/marker stays
+    authoritative (docs/migration/scoped_detached_patching.md), and the
+    unattributable output is tolerated rather than crashing the capture.
+    """
 
     x = torch.randn(4)
-    log = tl.trace(
-        RawGradOverModuleModel().eval(),
-        x,
-        capture=CaptureOptions(layers_to_save="all"),
-    )
+    with pytest.warns(UserWarning, match="functorch"):
+        log = tl.trace(
+            RawGradOverModuleModel().eval(),
+            x,
+            capture=CaptureOptions(layers_to_save="all"),
+        )
 
-    assert log.output_layers
+    assert log._raw_transform_escape_detected is True
+    assert log.output_layers == []
 
 
 @pytest.mark.skipif(not _HAS_TORCH_FUNC, reason="torch.func not available")
@@ -650,7 +659,7 @@ def test_autograd_functional_direct_call_boundary(
     transform_ops = [op for op in log.ops if op.type == op_type]
 
     assert len(transform_ops) == 1
-    assert transform_ops[0].parents == ["input_1"]
+    assert transform_ops[0].parents == ("input_1",)
     assert transform_ops[0].is_transform is True
     assert transform_ops[0].transform_kind == kind
 
@@ -668,7 +677,7 @@ def test_functional_call_substituted_params_are_tensor_parents() -> None:
     assert linear.module == "inner:1"
     assert len(linear.parents) == 3
     assert linear.parents[0] == "input_1"
-    assert linear.parent_params == []
+    assert linear.parent_params == ()
 
 
 def test_functional_call_substituted_buffers_are_tensor_parents() -> None:
@@ -712,6 +721,19 @@ def test_transform_selector_intervention_no_crash() -> None:
     )
 
     assert [op.transform_kind for op in log.transforms] == ["vmap"]
+
+
+def test_transform_selector_sanitized_spelling_matches_live_hooks() -> None:
+    """Live transform hooks accept the documented sanitized spelling."""
+
+    x = torch.randn(3, 4)
+    log = tl.trace(
+        VmapMaskModel().eval(),
+        x,
+        intervene=tl.when(tl.func_transform("v_map"), tl.zero_ablate()),
+    )
+
+    assert torch.equal(log[log.output_layers[0]].out, x)
 
 
 @pytest.mark.skipif(not _HAS_TORCH_FUNC, reason="torch.func not available")
@@ -767,6 +789,100 @@ def test_provenance_warning_foreign_tensor_contract() -> None:
     assert module_add.unattributed_tensor_args == ()
 
 
+def test_arg_spec_table_cannot_silently_cost_a_parent_edge() -> None:
+    """Narrowing an ArgSpec must not drop a traced operand's parent edge.
+
+    This replaces a test that tried to INDUCE a dropped edge by installing a
+    "broken" ``FUNC_ARG_SPECS["polygamma"]`` and asserting the provenance warning
+    named ``arg1``. That test could never pass, for two independent reasons:
+
+    1. Its "broken" spec was byte-identical to the shipped one
+       (``positions=(0,)``, same ``tensor_kwargs``), so the monkeypatch was a
+       no-op.
+    2. Parent-edge discovery does not consult this table at all. Since the r29/r31
+       work, ``_unattributed_tensor_arg_positions`` witnesses edges by tensor
+       IDENTITY against live producer labels, so even ``ArgSpec(positions=(),
+       tensor_kwargs=())`` still recovers the correct parent. Verified for both the
+       ``torch.polygamma(n, t)`` function form and the ``t.polygamma(n)`` method
+       form.
+
+    So assert the stronger property that actually holds and that we want to keep:
+    the spec table is not load-bearing for provenance, and narrowing it cannot
+    silently cost an edge. The ``arg1`` position marker the old test wanted is
+    pinned by the genuine route in the test below instead.
+    """
+
+    from torchlens.capture.arg_positions import FUNC_ARG_SPECS, ArgSpec
+
+    class _PolygammaModel(nn.Module):
+        """Exercise a schema-known tensor operand at a non-zero argument position."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Return a scalar reduction through ``torch.polygamma``.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Scalar reduction of the polygamma output.
+            """
+
+            base = x + 1.0
+            operand = base * 3.0
+            return torch.polygamma(2, operand).sum()
+
+    original_spec = FUNC_ARG_SPECS["polygamma"]
+    FUNC_ARG_SPECS["polygamma"] = ArgSpec(positions=(), tensor_kwargs=())
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            trace = tl.trace(_PolygammaModel().eval(), torch.ones(2, 2) * 0.5)
+    finally:
+        FUNC_ARG_SPECS["polygamma"] = original_spec
+
+    assert [w for w in caught if "no graph/source provenance" in str(w.message)] == []
+    op = next(op for op in trace.ops if op.type == "polygamma")
+    multiply = next(other for other in trace.ops if other.type == "mul")
+    assert op.parents == (multiply.layer_label,)
+    assert op.unattributed_tensor_args == ()
+    assert op.dropped_edge_tensor_args == ()
+
+
+def test_foreign_operand_warns_with_its_arg_position() -> None:
+    """A genuinely un-provenanced operand is flagged at its own arg position."""
+
+    foreign = torch.rand(4) + 0.5
+
+    class _ForeignOperandModel(nn.Module):
+        """Consume a tensor created outside the traced model at position ``1``."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Add a foreign operand as the second argument.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Scalar reduction of the polygamma output.
+            """
+
+            return torch.polygamma(2, (x * 3.0) + foreign).sum()
+
+    with pytest.warns(UserWarning, match=r"no graph/source provenance.*arg1"):
+        trace = tl.trace(_ForeignOperandModel().eval(), torch.rand(4) + 0.5)
+
+    add_op = next(op for op in trace.ops if op.type == "add")
+    assert add_op.unattributed_tensor_args == ("arg1",)
+
+
 @pytest.mark.skipif(not _HAS_TORCH_FUNC, reason="torch.func not available")
 def test_prebuilt_transform_wrap_order_and_raw_warning_contract() -> None:
     """Prebuilt decorated transforms capture; raw prebuilt transforms retain warning."""
@@ -779,7 +895,7 @@ def test_prebuilt_transform_wrap_order_and_raw_warning_contract() -> None:
     )
 
     assert [op.transform_kind for op in decorated_log.transforms] == ["vmap"]
-    assert decorated_log.transforms[0].parents == ["input_1"]
+    assert decorated_log.transforms[0].parents == ("input_1",)
 
     with pytest.warns(UserWarning, match="functorch"):
         raw_log = tl.trace(
@@ -851,7 +967,7 @@ def test_hf_style_runtime_vmap_mask_regression() -> None:
         )
 
     assert [op.transform_kind for op in log.transforms] == ["vmap"]
-    assert log.transforms[0].parents == ["input_1"]
+    assert log.transforms[0].parents == ("input_1",)
     assert any("functorch" in str(record.message).lower() for record in records)
     assert not any("no graph/source provenance" in str(record.message) for record in records)
 

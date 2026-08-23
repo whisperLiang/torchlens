@@ -32,7 +32,7 @@ class _ImageModel(nn.Module):
 
 
 def _pil_image() -> Any:
-    """Create a small RGB PIL image, skipping when PIL is unavailable.
+    """Create a small RGB PIL image (Pillow is a required dependency).
 
     Returns
     -------
@@ -40,7 +40,8 @@ def _pil_image() -> Any:
         PIL image instance.
     """
 
-    image_module = pytest.importorskip("PIL.Image")
+    from PIL import Image as image_module
+
     return image_module.new("RGB", (32, 32), color=(120, 30, 200))
 
 
@@ -49,7 +50,8 @@ def test_hf_vit_uses_auto_image_processor() -> None:
     """HF ViT image input should route through ``AutoImageProcessor``."""
 
     transformers = pytest.importorskip("transformers")
-    pytest.importorskip("PIL.Image")
+    import PIL.Image  # noqa: F401
+
     model = transformers.ViTModel.from_pretrained("google/vit-base-patch16-224")
 
     log = tl.trace(model, _pil_image(), layers_to_save="none")
@@ -64,7 +66,8 @@ def test_clip_image_uses_auto_processor_fallback() -> None:
     """CLIP image input should route through the HF image processor cascade."""
 
     transformers = pytest.importorskip("transformers")
-    pytest.importorskip("PIL.Image")
+    import PIL.Image  # noqa: F401
+
     model = transformers.CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch32")
 
     log = tl.trace(model, _pil_image(), layers_to_save="none")
@@ -78,7 +81,8 @@ def test_clip_image_uses_auto_processor_fallback() -> None:
 def test_torchvision_resnet_weights_uses_tier_two_or_default() -> None:
     """Torchvision models use attached weights when available, otherwise default."""
 
-    pytest.importorskip("PIL.Image")
+    import PIL.Image  # noqa: F401
+
     pytest.importorskip("torchvision.transforms")
     torchvision_models = pytest.importorskip("torchvision.models")
     weights = torchvision_models.ResNet50_Weights.DEFAULT
@@ -99,7 +103,8 @@ def test_torchvision_resnet_weights_uses_tier_two_or_default() -> None:
 def test_timm_model_uses_default_cfg_transform() -> None:
     """timm models with ``default_cfg`` should use the timm resolver tier."""
 
-    pytest.importorskip("PIL.Image")
+    import PIL.Image  # noqa: F401
+
     pytest.importorskip("torchvision.transforms")
     timm = pytest.importorskip("timm")
     model = timm.create_model("resnet18", pretrained=False)
@@ -114,7 +119,8 @@ def test_timm_model_uses_default_cfg_transform() -> None:
 def test_unknown_cnn_uses_imagenet_default_with_warning() -> None:
     """Unknown PIL image models should fall back loudly to ImageNet defaults."""
 
-    pytest.importorskip("PIL.Image")
+    import PIL.Image  # noqa: F401
+
     pytest.importorskip("torchvision.transforms")
 
     with pytest.warns(UserWarning, match="ImageNet default preprocessing"):
@@ -130,7 +136,7 @@ def test_unknown_cnn_uses_imagenet_default_with_warning() -> None:
 def test_transform_override_skips_image_autoroute() -> None:
     """Explicit ``transform=`` should bypass image auto-routing."""
 
-    pytest.importorskip("PIL.Image")
+    import PIL.Image  # noqa: F401
 
     log = tl.trace(
         _ImageModel(),
@@ -145,7 +151,8 @@ def test_transform_override_skips_image_autoroute() -> None:
 def test_pil_raw_input_svg_embeds_montage_data_uri(tmp_path: Path) -> None:
     """SVG raw-input image previews should embed local montages as data URIs."""
 
-    image_module = pytest.importorskip("PIL.Image")
+    from PIL import Image as image_module
+
     images = [
         image_module.new("RGB", (24, 24), color=(120, 30, 200)),
         image_module.new("RGB", (24, 24), color=(20, 180, 90)),
@@ -192,7 +199,8 @@ def test_tensor_input_does_not_route_to_image_bridge(monkeypatch: pytest.MonkeyP
 def test_list_of_pil_images_batches() -> None:
     """A list of PIL images should be transformed into a batch."""
 
-    pytest.importorskip("PIL.Image")
+    import PIL.Image  # noqa: F401
+
     pytest.importorskip("torchvision.transforms")
 
     with pytest.warns(UserWarning, match="ImageNet default preprocessing"):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -16,10 +17,46 @@ from typing import Any, Literal
 import torch
 from safetensors.torch import save_file
 
-from . import TLSPEC_VERSION, TorchLensIOError
-from .manifest import Manifest, TensorEntry, sha256_of_file
 from .. import __version__ as TORCHLENS_VERSION
+from .._errors import InvalidArgumentError
 from ..backends import get_backend_spec
+from . import TLSPEC_VERSION, TorchLensIOError
+from ._durability import fsync_dir, fsync_tree
+from .manifest import Manifest, TensorEntry, sha256_of_file
+from .paths import reject_symlink_path
+
+_PARTIAL_SENTINEL = "PARTIAL"
+"""In-progress marker matching ``bundle.py``/``streaming.py``; ``cleanup_tmp``
+sweeps a stranded ``{target}.tmp.*`` dir without ``force=`` only when present."""
+
+
+def _reject_symlink_path(path: Path, *, context: str) -> None:
+    """Reject symlink paths before writing a ``.tlspec`` payload."""
+
+    reject_symlink_path(
+        path,
+        context=context,
+        message_prefix="Refusing to write through symlink",
+    )
+
+
+def _restrict_mode(path: Path, mode: int) -> None:
+    """Best-effort tighten a written ``.tlspec`` path's permissions (POSIX only).
+
+    Permission parity with ``_io/bundle.py::_restrict_mode`` and the streaming
+    writer (R59): ``mkdir`` / file writes honor the ambient umask, so under
+    umask 002 the bundle directory and its sidecars were left group-writable
+    while the core bundle writer tightens them. The publish rename preserves
+    ``tmp_path``'s mode, so tightening the staged directory tightens the
+    published bundle. Best-effort: a filesystem that ignores mode bits is not a
+    save failure.
+    """
+
+    if os.name != "posix":
+        return
+    with contextlib.suppress(OSError):
+        path.chmod(mode)
+
 
 # NOTE: ``TLSPEC_VERSION`` is imported (not redefined) from ``torchlens._io``
 # so there is a single source of truth for the on-disk ``tlspec_version``
@@ -67,6 +104,7 @@ class _TlSpecWriter:
         legacy_manifest: Manifest,
         save_level: str,
         sparse_run: dict[str, Any] | None = None,
+        scrubbed_state: dict[str, Any] | None = None,
     ) -> None:
         """Write a unified manifest for a saved ``Trace`` payload.
 
@@ -83,6 +121,8 @@ class _TlSpecWriter:
         sparse_run:
             Authoritative sparse runnable descriptor, or ``None`` for all
             pre-existing analysis save levels.
+        scrubbed_state:
+            Portable trace state whose remapped identities must feed public sites.
         """
 
         manifest = legacy_manifest.to_dict()
@@ -94,6 +134,8 @@ class _TlSpecWriter:
             spec_compat_info=None,
             intervention_compat_metadata=None,
         )
+        if scrubbed_state is not None:
+            unified_fields["sites"] = cls._sites(scrubbed_state, kind="trace")
         # ``legacy_manifest.to_dict()`` already carries the authoritative
         # ``tlspec_version`` (sourced from the same ``TLSPEC_VERSION`` single
         # source of truth). Drop the duplicate key from the unified fields
@@ -157,7 +199,12 @@ class _TlSpecWriter:
         """
 
         if save_level == "runnable":
-            raise ValueError("save_level='runnable' is supported only for Trace artifacts.")
+            raise InvalidArgumentError(
+                "Intervention artifacts do not support save_level='runnable'",
+                code="artifact_save_level_unsupported",
+                remedy="use 'audit', 'executable_with_callables', or 'portable'",
+                artifact_kind="intervention",
+            )
         intervention_metadata = cls._intervention_compat_metadata(spec_json)
         manifest = {
             "format_version": legacy_format_version,
@@ -200,24 +247,44 @@ class _TlSpecWriter:
 
         level = coerce_tlspec_save_level(save_level)
         if level == "runnable":
-            raise ValueError("save_level='runnable' is supported only for Trace artifacts.")
+            raise InvalidArgumentError(
+                "Bundle artifacts do not support save_level='runnable'",
+                code="artifact_save_level_unsupported",
+                remedy="use 'audit', 'executable_with_callables', or 'portable'",
+                artifact_kind="bundle",
+            )
         target_path = Path(path)
         _reject_symlink_path(target_path, context="bundle tlspec target")
-        tmp_path = target_path.parent / f"tmp.{uuid.uuid4().hex}"
+        # Target-PREFIXED staging/backup names (R38+R59, one defect two labs):
+        # the old target-independent ``tmp.<hex>`` / ``tmp.bak.<hex>`` names
+        # were invisible to ``cleanup_tmp(target)`` (it globs
+        # ``{name}.tmp.*`` / ``{name}.bak.*``), so a SIGKILL between the two
+        # ``os.replace`` calls below stranded the ONLY pre-overwrite copy in
+        # an undiscoverable directory that no sweep would ever restore.
+        tmp_path = target_path.parent / f"{target_path.name}.tmp.{uuid.uuid4().hex}"
+        # ``backup_path`` holds the pre-overwrite bundle *renamed aside* (never
+        # deleted) so a failure during the final swap can restore it. It stays
+        # ``None`` unless we actually move an existing target out of the way.
+        backup_path: Path | None = None
         body_filename = "body.safetensors"
         try:
             if target_path.exists() and not overwrite:
                 raise FileExistsError(f"Bundle path already exists: {target_path}")
             tmp_path.mkdir(parents=True)
+            _restrict_mode(tmp_path, 0o700)
+            # Sweepable from birth: mark the staging dir PARTIAL so a SIGKILL
+            # anywhere before publish leaves a directory ``cleanup_tmp()``
+            # removes without ``force=True``; the sentinel comes off right
+            # before the durability fsync + publish swap.
+            (tmp_path / _PARTIAL_SENTINEL).write_text("", encoding="utf-8")
             save_file({}, str(tmp_path / body_filename))
             member_records = cls._write_bundle_members(bundle, tmp_path=tmp_path, save_level=level)
-            cls.write_json(
-                tmp_path / "bundle.json",
-                {
-                    "members": member_records,
-                    "baseline_name": getattr(bundle, "baseline_name", None),
-                },
-            )
+            bundle_metadata: dict[str, Any] = {
+                "members": member_records,
+                "baseline_name": getattr(bundle, "baseline_name", None),
+            }
+            cls._add_gated_member_relations(bundle, bundle_metadata)
+            cls.write_json(tmp_path / "bundle.json", bundle_metadata)
 
             manifest = cls.build_manifest(
                 kind="bundle",
@@ -238,13 +305,74 @@ class _TlSpecWriter:
                 }
             ]
             cls.write_json(tmp_path / TLSPEC_MANIFEST_FILENAME, manifest)
+            _restrict_mode(tmp_path / body_filename, 0o600)
+            _restrict_mode(tmp_path / "bundle.json", 0o600)
+            _restrict_mode(tmp_path / TLSPEC_MANIFEST_FILENAME, 0o600)
+            # Durability before publish: fsync every written file and
+            # directory so a power/OS crash after the rename below cannot
+            # publish a bundle holding zero-length or partial members.
+            (tmp_path / _PARTIAL_SENTINEL).unlink()
+            fsync_tree(tmp_path)
+            # Atomic overwrite. Never ``rmtree`` the only good bundle before
+            # the replacement is known installed: move the existing target
+            # ASIDE to a sibling backup (rename, not delete), swap the freshly
+            # written bundle into place, then remove the backup only after the
+            # swap succeeds. Any failure before/during the swap leaves the OLD
+            # bundle recoverable (see the ``except`` restore below). All three
+            # paths are siblings under ``target_path.parent`` so every rename
+            # is same-filesystem/atomic. Mirrors the backup/restore state
+            # machine in ``torchlens/_io/bundle.py`` (``_make_backup_path`` /
+            # ``_restore_backup``).
             if target_path.exists():
-                shutil.rmtree(target_path)
-            os.rename(tmp_path, target_path)
-        except Exception:
+                # Re-check overwrite at swap time, not just at save start
+                # (R59 TOCTOU): under ``overwrite=False`` a concurrent writer
+                # could have created ``target_path`` AFTER the start-of-save
+                # check passed, and the unconditional swap below would then
+                # back it aside and destroy it (the backup is rmtree'd on
+                # success). Mirror ``torchlens/_io/bundle.py`` and refuse
+                # instead of live-destroying a concurrently-published artifact.
+                if not overwrite:
+                    raise FileExistsError(f"Bundle path already exists: {target_path}")
+                backup_path = target_path.parent / f"{target_path.name}.bak.{uuid.uuid4().hex}"
+                os.replace(target_path, backup_path)
+            os.replace(tmp_path, target_path)
+            # Make the rename(s) themselves durable: one parent-directory
+            # fsync after the final swap persists both the aside-rename and
+            # the publish (they are entries of the same directory).
+            fsync_dir(target_path.parent)
+            if backup_path is not None:
+                # The overwrite is complete; discarding the backup can never
+                # lose the new bundle, so a cleanup failure must not fail the
+                # save nor trigger a spurious restore.
+                shutil.rmtree(backup_path, ignore_errors=True)
+        except BaseException:
+            # ``BaseException`` (not ``Exception``) so an interrupt unwinding
+            # mid-swap still restores the old bundle; ``raise`` re-raises the
+            # original unchanged, preserving control-flow semantics.
             if tmp_path.exists():
                 shutil.rmtree(tmp_path, ignore_errors=True)
+            if backup_path is not None and not target_path.exists() and backup_path.exists():
+                # The swap did not install the new bundle; put the old one back
+                # exactly where it was. If this restore itself fails, the old
+                # bundle survives under ``backup_path`` as a recovery artifact.
+                with contextlib.suppress(OSError):
+                    os.replace(backup_path, target_path)
             raise
+
+    @staticmethod
+    def _add_gated_member_relations(bundle: Any, bundle_metadata: dict[str, Any]) -> None:
+        """Write the S6 ``member_relations`` key into ``bundle.json``.
+
+        The key persists plainly as of the tlspec v8 coordinated bump; the
+        load side validates it against the closed S6 row schema and re-checks
+        R1 against the loaded member names. An empty table writes nothing
+        (S6 R7: absence means a plain bundle).
+        """
+
+        relation_table = getattr(bundle, "_member_relations", None)
+        if relation_table is None or len(relation_table.rows) == 0:
+            return
+        bundle_metadata["member_relations"] = relation_table.to_payload()
 
     @classmethod
     def _write_bundle_members(
@@ -351,9 +479,11 @@ class _TlSpecWriter:
             JSON object to write.
         """
 
+        text = json.dumps(data, indent=2, sort_keys=False, allow_nan=False)
         with path.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2, sort_keys=False)
-            handle.write("\n")
+            handle.write(text + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
 
     @staticmethod
     def _backend_runtime(source: Any, *, backend_name: str) -> dict[str, Any]:
@@ -542,6 +672,10 @@ class _TlSpecWriter:
         if kind == "bundle":
             return cls._bundle_fingerprint(source, model_signature)
 
+        source_fingerprint = getattr(source, "_source_bundle_model_fingerprint", None)
+        if isinstance(source_fingerprint, dict):
+            return dict(source_fingerprint)
+
         model = _source_model(source)
         if model is not None:
             parameter_hash = _hash_named_tensor_meta(model.named_parameters())
@@ -622,7 +756,11 @@ class _TlSpecWriter:
                         site["bundle_member"] = member_name
                         sites.append(site)
             return sites
-        layers = getattr(source, "layer_list", [])
+        layers = (
+            source.get("layer_list", [])
+            if isinstance(source, dict)
+            else getattr(source, "layer_list", [])
+        )
         sites = []
         for layer in layers if isinstance(layers, list) else []:
             sites.append(
@@ -788,8 +926,11 @@ def coerce_tlspec_save_level(save_level: str) -> TlspecSaveLevel:
 
     if save_level not in TLSPEC_VALID_SAVE_LEVELS:
         levels = ", ".join(repr(level) for level in TLSPEC_VALID_SAVE_LEVELS)
-        raise ValueError(
-            f"Unsupported .tlspec save level {save_level!r}; expected one of {levels}."
+        raise InvalidArgumentError(
+            f".tlspec save level {save_level!r} is unsupported",
+            code="artifact_save_level_invalid",
+            remedy=f"set the save level to one of {levels}",
+            argument="save_level",
         )
     return save_level  # type: ignore[return-value]
 
@@ -916,26 +1057,6 @@ def _utc_timestamp() -> str:
     """
 
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _reject_symlink_path(path: Path, *, context: str) -> None:
-    """Reject symlink paths before writing a ``.tlspec`` payload.
-
-    Parameters
-    ----------
-    path:
-        Path to inspect.
-    context:
-        Human-readable path role.
-
-    Raises
-    ------
-    TorchLensIOError
-        If ``path`` is a symlink.
-    """
-
-    if path.is_symlink():
-        raise TorchLensIOError(f"Refusing to write through symlink {context}: {path}.")
 
 
 __all__ = [

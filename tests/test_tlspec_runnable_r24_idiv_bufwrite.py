@@ -15,7 +15,6 @@ import torchlens as tl
 from torchlens.options import CaptureOptions
 from torchlens.runnable import PathFaithfulness
 
-
 _CAPTURE = CaptureOptions(
     intervention_ready=True,
     capture_container_structure=True,

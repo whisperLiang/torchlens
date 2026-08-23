@@ -132,6 +132,10 @@ def test_recording_to_trace_matches_trace_structure_and_unsaved_out_fails() -> N
     full = tl.trace(model, x, random_seed=23)
 
     assert _structure(cooked) == _structure(full)
+    # Provenance honesty: the cooked projection runs exhaustive-style
+    # postprocess but records its true origin; a live capture carries no marker.
+    assert getattr(cooked, "_cooked_from", None) == "recording"
+    assert getattr(full, "_cooked_from", None) is None
     saved = [op for op in cooked.layer_list if op.has_saved_activation]
     assert saved
     assert {op.layer_type for op in saved} == {"conv2d"}
@@ -234,7 +238,7 @@ def test_recording_to_trace_passes_full_metadata_invariants(model_factory) -> No
     so both slipped through:
 
     * ``graph_ordering`` -- ``Recording.to_trace()`` never seeded
-      ``trace._layer_counter`` from the replayed event stream, so postprocess's
+      ``trace._raw_graph_ws.layer_counter`` from the replayed event stream, so postprocess's
       synthetic output node was stamped ``raw_index=1``, colliding with
       ``input_1`` (fails even for a flat, submodule-free model).
     * ``module_hierarchy`` -- the fastlog recorder dropped the real
@@ -286,19 +290,16 @@ def test_recording_to_trace_module_tree_matches_exhaustive(model_factory) -> Non
     assert _module_call_stacks(cooked) == _module_call_stacks(exhaustive)
 
 
-def test_record_save_matches_deprecated_keep_op_alias() -> None:
-    """record(save=...) and deprecated record(keep_op=...) retain the same ops."""
+def test_removed_keep_aliases_raise_type_error() -> None:
+    """The removed keep_op=/keep_module= aliases fail loudly, never silently."""
 
     model = ConvReluAdd()
     x = torch.randn(1, 1, 4, 4)
 
-    save_recording = tl.record(model, x, save=tl.func("conv2d"), random_seed=29)
-    with pytest.warns(DeprecationWarning, match="keep_op"):
-        alias_recording = tl.record(model, x, keep_op=tl.func("conv2d"), random_seed=29)
-
-    assert [record.ctx.raw_label for record in save_recording] == [
-        record.ctx.raw_label for record in alias_recording
-    ]
+    with pytest.raises(TypeError, match="keep_op"):
+        tl.record(model, x, keep_op=tl.func("conv2d"), random_seed=29)
+    with pytest.raises(TypeError, match="keep_module"):
+        tl.record(model, x, keep_module=lambda ctx: True, random_seed=29)
 
 
 # ---------------------------------------------------------------------------
@@ -491,13 +492,14 @@ def test_recording_to_trace_halted_without_payload_rejected() -> None:
     """
 
     x = torch.randn(2, 4)
-    recording = tl.record(
-        _HaltNested().eval(),
-        x,
-        save=tl.func("this_function_name_never_matches"),
-        halt=lambda ctx: getattr(ctx, "func_name", "") == "relu",
-        random_seed=9,
-    )
+    with pytest.warns(UserWarning, match="matched zero sites"):
+        recording = tl.record(
+            _HaltNested().eval(),
+            x,
+            save=tl.func("this_function_name_never_matches"),
+            halt=lambda ctx: getattr(ctx, "func_name", "") == "relu",
+            random_seed=9,
+        )
     assert recording.halted is True
     assert len(recording.records) == 0
     with pytest.raises(RuntimeError, match="halted Recording that retained no raw activation"):
@@ -567,6 +569,27 @@ def test_recording_to_trace_reuse_does_not_corrupt_frozen_recording() -> None:
     rec_records = tl.record(NestedBlocks().eval(), x, save=tl.func("relu"))
     _ = rec_records.to_trace()
     assert rec_records.n_records > 0
+
+
+def test_recording_to_trace_rejects_multi_pass_recordings() -> None:
+    """to_trace() refuses multi-pass Recorder outputs instead of cooking an invalid Trace."""
+
+    class RepeatRelu(nn.Module):
+        """Two-op model used to reproduce the multi-pass projector collision."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Apply one add and one relu."""
+
+            return torch.relu(x + 1)
+
+    with tl.fastlog.Recorder(RepeatRelu(), save=lambda ctx: ctx.kind == "op") as recorder:
+        recorder.log(torch.ones(1, 3))
+        recorder.log(torch.ones(1, 3) * 2)
+
+    recording = recorder.recording
+    assert recording.n_passes == 2
+    with pytest.raises(RuntimeError, match="multi-pass Recordings"):
+        recording.to_trace()
 
 
 def test_recording_to_trace_reuse_survives_output_tensor_label_undecoration() -> None:

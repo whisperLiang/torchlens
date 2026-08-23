@@ -11,22 +11,23 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.validation import core
-from torchlens.validation import backward as backward_validation
+from torchlens.validation import backward as backward_validation, core
 from torchlens.validation.diagnostics import get_validation_failure
-from torchlens.validation.invariants import (
-    MetadataInvariantError,
-    _check_backend_neutral_graph_topology,
-    _check_pass_count_consistency,
-    check_metadata_invariants,
-)
 from torchlens.validation.exemptions import (
     SKIP_VALIDATION_ENTIRELY,
     _binary_extrema_nonperturbed_arg_dominates,
     _check_getitem_exempt,
     _check_scatter_exempt,
     _check_setitem_exempt,
+    _posthoc_overwrite_decision,
+    _scatter_index_fully_overwrites_dim,
     perturbed_layer_at_structural_position,
+)
+from torchlens.validation.invariants import (
+    MetadataInvariantError,
+    _check_backend_neutral_graph_topology,
+    _check_pass_count_consistency,
+    check_metadata_invariants,
 )
 from torchlens.validation.status import ValidationReplayStatus
 
@@ -217,6 +218,46 @@ def test_setitem_duplicate_advanced_index_destination_is_not_exempt() -> None:
     destination_label = setitem_op.parent_arg_positions["args"][0]
 
     assert not _check_setitem_exempt(trace, setitem_op, [destination_label])
+
+
+def test_posthoc_setitem_duplicate_indices_are_not_full_overwrite() -> None:
+    """Posthoc overwrite logic delegates to the duplicate-index guard."""
+
+    destination = torch.zeros(4)
+    layer = _fake_layer(
+        func_name="__setitem__",
+        parent_arg_positions={"args": {0: "destination"}, "kwargs": {}},
+    )
+    decision = _posthoc_overwrite_decision(
+        layer,
+        ["destination"],
+        (destination, torch.tensor([0, 0, 0, 0]), torch.full((4,), 9.0)),
+    )
+    assert not decision.exempt
+
+
+def test_posthoc_scalar_partial_setitem_is_not_full_overwrite() -> None:
+    """A scalar write to one cell leaves the rest of the destination live."""
+
+    destination = torch.zeros(4, 4)
+    layer = _fake_layer(
+        func_name="__setitem__",
+        parent_arg_positions={"args": {0: "destination"}, "kwargs": {}},
+    )
+    decision = _posthoc_overwrite_decision(
+        layer,
+        ["destination"],
+        (destination, (0, 0), 5.0),
+    )
+    assert not decision.exempt
+
+
+def test_scatter_partial_other_dimensions_are_not_full_overwrite() -> None:
+    """Covering scatter dim columns cannot excuse untouched destination rows."""
+
+    destination = torch.zeros(4, 4)
+    index = torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]])
+    assert not _scatter_index_fully_overwrites_dim(destination, 1, index)
 
 
 def test_scatter_exemption_uses_destination_position_not_equal_value() -> None:
@@ -473,10 +514,18 @@ class UniqueMaxModel(nn.Module):
 
 
 class MultiplyByZeroModel(nn.Module):
-    """Model where a parent is provably annihilated by another parent."""
+    """Model where a parent is provably annihilated by another parent.
+
+    Integer dtype on purpose: float multiply-by-zero is now HONESTLY validated
+    through the signed-zero exact tier (the product's zero signs carry the
+    perturbed parent's signs, so the edge is provably live and no exemption is
+    consulted). Integers have no signed zero, so the perturbed replay stays
+    bit-identical and the structural annihilator proof remains the only
+    legitimate rescue -- exactly the path this test pins.
+    """
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Multiply by a zero tensor.
+        """Multiply an integer cast by a zero tensor.
 
         Parameters
         ----------
@@ -486,10 +535,11 @@ class MultiplyByZeroModel(nn.Module):
         Returns
         -------
         torch.Tensor
-            Zero output independent of ``x``.
+            Integer zero output independent of ``x``.
         """
 
-        return x * torch.zeros_like(x)
+        cast = x.to(torch.int64)
+        return cast * torch.zeros_like(cast)
 
 
 class LoopOutputBookkeepingModel(nn.Module):
@@ -825,25 +875,774 @@ def test_backward_validation_zero_param_grads_is_not_pass() -> None:
 
     model = DetachedParamModel()
 
-    assert not backward_validation.validate_backward_pass(
-        model,
-        torch.randn(2, 3),
-        random_seed=5,
-        validate_metadata=False,
-    )
+    with pytest.warns(RuntimeWarning, match="zero parameter gradients"):
+        assert not backward_validation.validate_backward_pass(
+            model,
+            torch.randn(2, 3),
+            random_seed=5,
+            validate_metadata=False,
+        )
 
 
-def test_backward_validation_zero_param_grads_still_runs_layer_grad_validation() -> None:
-    """Layer-grad validation should run when parameter grads are empty."""
+def test_backward_validation_zero_param_grads_still_runs_layer_grad_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Layer-grad validation runs when parameter grads are empty -- and still fails.
+
+    The layer-grad oracle IS exercised (asserted directly by counting the
+    comparison call rather than inferring it from the return value), but it
+    cannot turn an unverifiable parameter-gradient census into a pass. This
+    used to assert True, which directly contradicted the sibling
+    ``test_backward_validation_zero_param_grads_is_not_pass`` -- the two tests
+    call the same code path because ``validate_layer_grads`` defaults to True,
+    so one of them was necessarily red.
+    """
 
     model = DetachedParamModel()
+    calls = 0
 
-    assert backward_validation.validate_backward_pass(
+    from torchlens.validation import _layer_grad_report
+
+    original_comparison = _layer_grad_report._compare_module_output_grads
+
+    def count_original_comparison(*args: Any, **kwargs: Any) -> Any:
+        """Count and delegate without recursing through the monkeypatch."""
+
+        nonlocal calls
+        calls += 1
+        return original_comparison(*args, **kwargs)
+
+    monkeypatch.setattr(
+        _layer_grad_report, "_compare_module_output_grads", count_original_comparison
+    )
+    with pytest.warns(RuntimeWarning, match="zero parameter gradients"):
+        assert not backward_validation.validate_backward_pass(
+            model,
+            torch.randn(2, 3),
+            random_seed=5,
+            validate_metadata=False,
+            validate_layer_grads=True,
+        )
+    assert calls == 1
+
+
+class _NaNLossModel(nn.Module):
+    """Model whose output is entirely NaN, making every gradient NaN."""
+
+    def __init__(self) -> None:
+        """Initialize the model."""
+
+        super().__init__()
+        self.lin = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return an all-NaN output.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            All-NaN tensor of the linear output's shape.
+        """
+
+        return self.lin(x) * float("nan")
+
+
+class _ZeroLossModel(nn.Module):
+    """Model whose output is annihilated, making every gradient exactly zero."""
+
+    def __init__(self) -> None:
+        """Initialize the model."""
+
+        super().__init__()
+        self.lin = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return an all-zero output.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            All-zero tensor of the linear output's shape.
+        """
+
+        return self.lin(x) * 0.0
+
+
+def test_setitem_overwrite_proof_rejects_negative_index_aliasing() -> None:
+    """Negative advanced indices must be normalized before the coverage proof.
+
+    ``dest[tensor([0, -2])] = repl`` on a length-2 dim addresses element 0
+    TWICE: raw values 0 and -2 are distinct to ``torch.unique`` but alias the
+    same position, so element 1 survives with its prior value while the proof
+    counted a full overwrite (deephunt finding H1). The positional proof
+    indexes an identity-position tensor with the saved index, so torch's own
+    indexing semantics normalize negatives, slices, and masks exactly.
+    """
+
+    from torchlens.validation.exemptions import _setitem_destination_coverage_is_total
+
+    dest = torch.tensor([10.0, 20.0])
+    aliasing = (dest, torch.tensor([0, -2]), torch.tensor([1.0, 2.0]))
+    assert not _setitem_destination_coverage_is_total(dest, aliasing)
+
+    # Positive controls: genuine full single-coverage stays exempt, including
+    # through negative spellings that cover distinct positions.
+    plain = (dest, torch.tensor([0, 1]), torch.tensor([1.0, 2.0]))
+    assert _setitem_destination_coverage_is_total(dest, plain)
+    negative_full = (dest, torch.tensor([1, -2]), torch.tensor([1.0, 2.0]))
+    assert _setitem_destination_coverage_is_total(dest, negative_full)
+
+
+def test_index_put_overwrite_proof_rejects_negative_index_aliasing() -> None:
+    """The ``index_put`` full-overwrite proof has the same negative-index hole.
+
+    ``torch.index_put(dest, (tensor([0, -2]),), values)`` on a length-2 dim
+    passes value-uniqueness and total-coverage while element 1 survives
+    (deephunt finding H2).
+    """
+
+    from torchlens.validation.exemptions import _index_put_destination_is_fully_overwritten
+
+    dest = torch.tensor([10.0, 20.0])
+    aliasing_layer = _fake_layer(
+        saved_args=(dest, (torch.tensor([0, -2]),), torch.tensor([1.0, 2.0])),
+        saved_kwargs={},
+    )
+    assert not _index_put_destination_is_fully_overwritten(dest, aliasing_layer)
+
+    plain_layer = _fake_layer(
+        saved_args=(dest, (torch.tensor([0, 1]),), torch.tensor([1.0, 2.0])),
+        saved_kwargs={},
+    )
+    assert _index_put_destination_is_fully_overwritten(dest, plain_layer)
+    negative_full_layer = _fake_layer(
+        saved_args=(dest, (torch.tensor([1, -2]),), torch.tensor([1.0, 2.0])),
+        saved_kwargs={},
+    )
+    assert _index_put_destination_is_fully_overwritten(dest, negative_full_layer)
+
+
+def test_equivalence_symmetry_catches_suffixed_in_module_group_corruption() -> None:
+    """Symmetric group corruption on a suffixed in-module layer must FAIL.
+
+    Per-op ``equivalence_class`` carries the module suffix appended at op
+    creation, while ``trace.op_equivalence_classes`` keys are pre-suffix, so
+    the key-based group lookup missed for EVERY parameterized in-module layer
+    and the group-symmetry comparison silently skipped: corrupting
+    ``equivalent_ops`` identically on all passes of a shared Linear (and its
+    Layer, keeping the pass-agreement checks satisfied) passed the full
+    invariant suite while the same corruption on an unsuffixed op was caught
+    instantly (deephunt finding H4). Membership lookup restores the invariant.
+    """
+
+    class SharedLinearModel(nn.Module):
+        """Model applying one Linear twice so its passes form a group."""
+
+        def __init__(self) -> None:
+            """Initialize the model."""
+
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Apply the shared linear twice.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Twice-transformed output.
+            """
+
+            return self.lin(self.lin(x))
+
+    model = SharedLinearModel().eval()
+    trace = tl.trace(model, torch.randn(2, 4))
+    check_metadata_invariants(trace)
+
+    linear_ops = [op for op in trace.layer_list if op.func_name == "linear"]
+    assert len(linear_ops) == 2
+    # The vacuousness precondition: the suffixed per-op key misses the
+    # pre-suffix trace-dict keys, while membership still resolves the group.
+    assert all(op.equivalence_class not in trace.op_equivalence_classes for op in linear_ops), (
+        "suffix mismatch precondition gone -- update or retire this regression test"
+    )
+    expected_group = {op.label for op in linear_ops}
+    assert any(group == expected_group for group in trace.op_equivalence_classes.values())
+
+    wrong_group = {linear_ops[0].label}
+    for op in linear_ops:
+        op.equivalent_ops = set(wrong_group)
+    layer = trace.layer_logs[linear_ops[0].layer_label]
+    layer.equivalent_ops = set(wrong_group)
+
+    with pytest.raises(MetadataInvariantError, match="equivalent_ops"):
+        check_metadata_invariants(trace)
+
+
+def test_wiped_grad_fn_registry_on_detached_trace_fails_invariants() -> None:
+    """An empty grad-fn registry beside backward evidence must FAIL, not skip.
+
+    The whole backward invariant family was gated on ``grad_fn_logs`` being
+    non-empty, and the capture-event journal is never serialized: on a
+    detached trace (pickle restore, fork, bundle load) the event-flow
+    reconciliation early-returns, so wiping ``grad_fn_logs`` (with
+    ``backward_pass_logs``, ``num_backward_passes``, ``grad_fn_order``, and
+    dangling per-layer backpointers all left in place) silently skipped
+    registry, backpointer, saved-grad, density, topology, and domain checks
+    (deephunt finding H5). The gate now refuses when backward-projection
+    evidence exists without a registry.
+    """
+
+    from torchlens.options import CaptureOptions
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU()).eval()
+    trace = tl.trace(
         model,
-        torch.randn(2, 3),
-        random_seed=5,
-        validate_metadata=False,
-        validate_layer_grads=True,
+        torch.randn(2, 4),
+        capture=CaptureOptions(layers_to_save="all", save_grads="all"),
+    )
+    trace.log_backward(trace[trace.output_layers[0]].out.sum())
+    check_metadata_invariants(trace)
+    assert trace.backward_pass_logs, "backward evidence precondition"
+    assert trace.num_backward_passes >= 1
+    assert trace.grad_fn_logs, "registry precondition"
+
+    # The journal is a run-scoped live-capture fact: pickle restore, fork, and
+    # bundle load all produce journal-less traces, which is where the
+    # event-flow reconciliation cannot catch the wipe.
+    trace._capture_events = None
+    check_metadata_invariants(trace)
+
+    trace.grad_fn_logs = {}
+    with pytest.raises(MetadataInvariantError, match="grad_fn"):
+        check_metadata_invariants(trace)
+
+
+def test_forward_only_trace_keeps_empty_backward_registry_valid() -> None:
+    """A trace that never ran backward legitimately has an empty registry.
+
+    Guards the H5 refusal against over-firing: forward-time
+    ``grad_fn_object_id`` stamps are NOT backward evidence, and a plain
+    forward-only capture (with or without its journal) must keep passing with
+    every backward field empty.
+    """
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU()).eval()
+    trace = tl.trace(model, torch.randn(2, 4))
+    assert not trace.grad_fn_logs
+    check_metadata_invariants(trace)
+    trace._capture_events = None
+    check_metadata_invariants(trace)
+
+
+def test_forged_placeholder_still_fails_func_call_id_after_save_load(
+    tmp_path: Any,
+) -> None:
+    """A plain-capture placeholder must STILL fail after save/load (locked rule).
+
+    ``op_has_genuine_replacement_evidence`` returned True unconditionally for
+    ``_loaded_from_bundle`` traces (journal edit records are live-capture
+    facts and never serialize), so a placeholder that FAILED the
+    ``func_call_id_consistency`` invariant live PASSED it after a save/load
+    round trip -- a laundering channel that contradicted the locked
+    2026-06-02 rule (deephunt finding M3). The save path now stamps the live
+    corroboration verdict into persisted op annotations and the loaded arm
+    requires it.
+    """
+
+    from torchlens.validation.invariants import check_func_call_id_invariant
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU()).eval()
+    trace = tl.trace(model, torch.randn(2, 4), layers_to_save="all", save_arg_values=True)
+    relu_op = next(op for op in trace.layer_list if op.func_name == "relu")
+    object.__setattr__(relu_op, "func", None)
+    object.__setattr__(relu_op, "func_name", "intervention_replacement")
+    object.__setattr__(relu_op, "intervention_replaced", True)
+    object.__setattr__(relu_op, "func_call_id", None)
+
+    with pytest.raises(MetadataInvariantError, match="func_call_id"):
+        check_func_call_id_invariant(trace)
+
+    path = str(tmp_path / "forged.tlspec")
+    tl.save(trace, path)
+    loaded = tl.load(path)
+    assert getattr(loaded, "_loaded_from_bundle", False) is True
+    with pytest.raises(MetadataInvariantError, match="func_call_id"):
+        check_func_call_id_invariant(loaded)
+
+
+def test_genuine_intervention_replacement_survives_save_load(tmp_path: Any) -> None:
+    """A genuinely corroborated replacement keeps its exemption after load.
+
+    Guards the M3 fail-closed change against over-firing: the save-time stamp
+    carries the live verdict, so a live-fire intervention capture (hook-minted
+    ``replaced=True`` FireRecord plus armed spec) still passes the
+    ``func_call_id_consistency`` invariant after a save/load round trip.
+    """
+
+    from torchlens.validation.invariants import check_func_call_id_invariant
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
+    trace = tl.trace(
+        model,
+        torch.randn(3, 4),
+        layers_to_save="all",
+        save_arg_values=True,
+        intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
+    )
+    replaced_ops = [op for op in trace.layer_list if getattr(op, "intervention_replaced", False)]
+    assert replaced_ops, "zero_ablate must stamp its site"
+    check_func_call_id_invariant(trace)
+
+    path = str(tmp_path / "genuine.tlspec")
+    tl.save(trace, path)
+    loaded = tl.load(path)
+    assert getattr(loaded, "_loaded_from_bundle", False) is True
+    check_func_call_id_invariant(loaded)
+    loaded_replaced = [
+        op for op in loaded.layer_list if getattr(op, "intervention_replaced", False)
+    ]
+    assert loaded_replaced
+    for op in loaded_replaced:
+        stamp = (getattr(op, "annotations", None) or {}).get("replacement_evidence_v1")
+        assert isinstance(stamp, dict) and stamp.get("corroborated") is True
+
+
+def test_to_tensor_template_exemption_refuses_perturbed_data_source() -> None:
+    """``to(other)`` only excuses the TEMPLATE parent, never the data SOURCE.
+
+    The posthoc blanket fired on func name + template-tensor presence without
+    consulting ``layers_to_perturb``: perturbing the SOURCE (``args[0]``) of a
+    ``to(other)`` cast and seeing an unchanged output is exactly a
+    dropped-substitution capture bug, yet it was excused as
+    ``type_template_output`` (deephunt finding H3). The template parent
+    (``args[1]`` / ``other=``) is genuinely structural -- only its
+    dtype/device flow into the output -- and keeps the exemption, mirroring
+    the F2 ``*_like`` template-slot tightening.
+    """
+
+    from torchlens.validation.exemptions import _posthoc_structural_output_decision
+
+    layer = _fake_layer(
+        func_name="to",
+        saved_args=(torch.randn(2, 2), torch.zeros(2, 2, dtype=torch.float64)),
+        saved_kwargs={},
+        parent_arg_positions={
+            "args": {0: "source_parent", 1: "template_parent"},
+            "kwargs": {},
+        },
+        out=torch.randn(2, 2).to(torch.float64),
+        dtype=torch.float64,
+    )
+
+    source_decision = _posthoc_structural_output_decision(
+        layer, layer.saved_args, ["source_parent"]
+    )
+    assert not source_decision.exempt
+
+    template_decision = _posthoc_structural_output_decision(
+        layer, layer.saved_args, ["template_parent"]
+    )
+    assert template_decision.exempt
+    assert template_decision.reason == "type_template_output"
+
+    # Missing position metadata fails closed, like the *_like template proof.
+    unmapped = _fake_layer(
+        func_name="to",
+        saved_args=layer.saved_args,
+        saved_kwargs={},
+        parent_arg_positions={"args": {}, "kwargs": {}},
+        out=layer.out,
+        dtype=torch.float64,
+    )
+    assert not _posthoc_structural_output_decision(
+        unmapped, unmapped.saved_args, ["source_parent"]
+    ).exempt
+
+
+def test_func_name_none_string_cannot_launder_missing_func_call_id() -> None:
+    """The literal ``"none"`` func_name must not exempt a computational op.
+
+    ``_is_func_call_id_exempt`` ended with a bare string set
+    (``{"input","output","buffer","none"}``) with no cross-check against the
+    ``is_input``/``is_output``/``is_buffer``/``is_internal_source`` flags, so
+    a traced relu whose ``func_call_id`` was nulled and ``func_name`` rewritten
+    to ``"none"`` (func still callable, no special flags) passed the full
+    invariant suite (deephunt finding M2). The sentinel is only legitimate on
+    flagged bookkeeping ops (outputs) and functionless internal sources.
+    """
+
+    from torchlens.validation.invariants import check_func_call_id_invariant
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU()).eval()
+    trace = tl.trace(model, torch.randn(2, 4), layers_to_save="all", save_arg_values=True)
+    check_metadata_invariants(trace)
+
+    relu_op = next(op for op in trace.layer_list if op.func_name == "relu")
+    object.__setattr__(relu_op, "func_call_id", None)
+    object.__setattr__(relu_op, "func_name", "none")
+    assert callable(relu_op.func)
+    assert not relu_op.is_internal_source
+
+    with pytest.raises(MetadataInvariantError):
+        check_func_call_id_invariant(trace)
+    with pytest.raises(MetadataInvariantError):
+        check_metadata_invariants(trace)
+
+
+class _BareBernoulliModel(nn.Module):
+    """Model drawing an in-place bernoulli mask from computed probabilities."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Draw a mask from sigmoid probabilities and scale it.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Scaled drawn mask.
+        """
+
+        mask = torch.sigmoid(x).bernoulli_()
+        return mask * 2.0
+
+
+class _ExplicitPBernoulliModel(nn.Module):
+    """Model drawing into a destination with an explicit probability tensor."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Overwrite a scratch destination with draws from sigmoid(x).
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Scaled drawn mask.
+        """
+
+        probabilities = torch.sigmoid(x)
+        destination = x * 0.5
+        mask = destination.bernoulli_(probabilities)
+        return mask * 2.0
+
+
+def test_bernoulli_parent_replay_exemption_requires_snapshot_proof() -> None:
+    """A replay mismatch under a bernoulli_ parent needs a snapshot proof.
+
+    ANY replay mismatch on an op with ANY ``bernoulli_`` parent was exempted
+    wholesale -- including a mismatch caused by a corrupted recorded func on
+    the CHILD (deephunt finding M1): swapping the recorded func of
+    ``mask * 2.0`` to ``torch.add`` flipped the decision from
+    ``failed:replay_mismatch`` to ``exempted:parent_inplace_rng_bernoulli``.
+    The exemption now requires re-feeding the child's own saved-arg snapshots
+    at the bernoulli-parent slots to reproduce the saved output; a corrupted
+    child func cannot pass that proof.
+    """
+
+    torch.manual_seed(0)
+    trace = tl.trace(
+        _BareBernoulliModel().eval(),
+        torch.randn(4, 4),
+        layers_to_save="all",
+        save_arg_values=True,
+    )
+    mul_op = next(op for op in trace.layer_list if op.func_name == "__mul__")
+    bernoulli_parents = [
+        parent for parent in mul_op.parents if trace[parent].func_name == "bernoulli_"
+    ]
+    assert bernoulli_parents, "mul must be a child of the in-place bernoulli"
+
+    mul_op.func = torch.add
+    result = core._check_whether_func_on_saved_parents_yields_saved_tensor(  # noqa: SLF001
+        trace, mul_op.label, perturb=False
+    )
+    assert result.decision == "failed"
+
+
+def test_bernoulli_arg_logging_case2_requires_binary_draw_shape() -> None:
+    """Case 2 of arg logging only excuses a genuine in-place re-draw shape.
+
+    The companion blanket validated ANY parent-logged-but-value-mismatched
+    arg whenever the parent was named ``bernoulli_`` (deephunt M1). The
+    legitimate mutation shape is an in-place RE-DRAW: both the child's
+    snapshot and the parent's current out are same-shape, same-dtype 0/1
+    draws. Arbitrary corrupted values must fall through to the Case 3
+    failure.
+    """
+
+    corrupted_parent = _fake_layer(
+        layer_label="bernoulli__1_1",
+        label="bernoulli__1_1:1",
+        func_name="bernoulli_",
+        out=torch.tensor([0.3, 0.7]),
+        out_versions_by_child={},
+    )
+    child = _fake_layer(
+        layer_label="mul_1_2",
+        label="mul_1_2:1",
+        parent_arg_positions={"args": {0: "bernoulli__1_1"}, "kwargs": {}},
+        parents=["bernoulli__1_1"],
+    )
+    trace = {"bernoulli__1_1": corrupted_parent}
+    result = core._check_arglocs_correct_for_arg(  # noqa: SLF001
+        trace,  # type: ignore[arg-type]
+        child,
+        corrupted_parent,
+        "args",
+        0,
+        torch.tensor([9.0, 9.0]),
+    )
+    assert result.decision == "failed"
+
+    genuine_parent = _fake_layer(
+        layer_label="bernoulli__1_1",
+        label="bernoulli__1_1:1",
+        func_name="bernoulli_",
+        out=torch.tensor([0.0, 1.0]),
+        out_versions_by_child={},
+    )
+    trace = {"bernoulli__1_1": genuine_parent}
+    result = core._check_arglocs_correct_for_arg(  # noqa: SLF001
+        trace,  # type: ignore[arg-type]
+        child,
+        genuine_parent,
+        "args",
+        0,
+        torch.tensor([1.0, 0.0]),
+    )
+    assert result.decision == "validated"
+
+
+class _OutOfPlaceBernoulliModel(nn.Module):
+    """Model with a genuine values-as-probabilities bernoulli edge."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Draw a mask from sigmoid probabilities out of place.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Scaled drawn mask.
+        """
+
+        return torch.bernoulli(torch.sigmoid(x)) * 2.0
+
+
+def test_bernoulli_models_pass_forward_validation() -> None:
+    """Real bernoulli models must validate end-to-end (L17 false-FAIL fix).
+
+    Any model containing a bernoulli draw failed forward validation at the
+    bernoulli op's own parent edge with ``perturbation_insensitive``
+    (deephunt L17). Two distinct root causes, both fixed:
+
+    - A genuine probability edge (out-of-place ``torch.bernoulli(x)``, or
+      ``.bernoulli_(p)``'s ``p``) replays identical samples under restored
+      RNG for small in-domain perturbations. The bernoulli-aware perturbation
+      now forces complement-of-saved-draw probabilities (the deterministic
+      extremes), which provably flip every drawn element when the edge is
+      live -- a genuinely dropped edge still replays unchanged and fails.
+    - ``bernoulli_``'s destination edge carries NO values at all: the bare
+      form fills with Bernoulli(0.5) draws IGNORING self's values (verified
+      empirically -- ``zeros.bernoulli_()`` produces ones), and the explicit
+      form overwrites with Bernoulli(p) draws. That edge is a pure
+      shape/dtype/device template and earns the posthoc template exemption.
+    """
+
+    from torchlens.validation import validate_forward_pass
+
+    torch.manual_seed(0)
+    assert validate_forward_pass(_BareBernoulliModel().eval(), torch.randn(4, 4)) is True
+    torch.manual_seed(0)
+    assert validate_forward_pass(_ExplicitPBernoulliModel().eval(), torch.randn(4, 4)) is True
+    torch.manual_seed(0)
+    assert validate_forward_pass(_OutOfPlaceBernoulliModel().eval(), torch.randn(4, 4)) is True
+
+
+def test_backward_validation_all_nan_grads_is_not_pass() -> None:
+    """An all-NaN stock gradient census must be unverifiable, never PASS.
+
+    A NaN loss makes every stock AND candidate gradient all-NaN, so every
+    ``equal_nan=True`` comparison passes vacuously with ZERO numeric detection
+    power -- the exact degenerate-evidence shape the ABORTED_NONFINITE doctrine
+    refuses elsewhere. Before the degenerate-evidence guard this reported
+    ``True`` (deephunt finding H6).
+    """
+
+    model = _NaNLossModel().eval()
+
+    with pytest.warns(RuntimeWarning, match="degenerate"):
+        assert not backward_validation.validate_backward_pass(
+            model,
+            torch.randn(2, 4),
+            random_seed=7,
+            validate_metadata=False,
+        )
+
+
+def test_backward_validation_all_zero_grads_is_not_pass() -> None:
+    """An all-zero stock gradient census must be unverifiable, never PASS.
+
+    A ``* 0.0`` loss zeroes every gradient buffer, so a capture that filled its
+    gradient records with zeros -- a classic bug shape -- is indistinguishable
+    from a correct one; the comparison has zero detection power (deephunt
+    finding M12, companion to H6).
+    """
+
+    model = _ZeroLossModel().eval()
+
+    with pytest.warns(RuntimeWarning, match="degenerate"):
+        assert not backward_validation.validate_backward_pass(
+            model,
+            torch.randn(2, 4),
+            random_seed=7,
+            validate_metadata=False,
+        )
+
+
+def test_backward_validation_mixed_nan_and_zero_grads_is_not_pass() -> None:
+    """A MIXED all-NaN + all-zero census must be unverifiable, never PASS.
+
+    The two degeneracy arms used to be tracked as independent whole-census
+    totals, so one all-NaN gradient killed the all-zero arm and one all-zero
+    gradient killed the all-nonfinite arm -- a census with ZERO finite-nonzero
+    elements (no detection power at all) returned ``None`` and validation
+    passed vacuously (b4-fable round-2 probe; defect in the a2680381 guard).
+    The decisive predicate is per-element finite-AND-nonzero existence.
+    """
+
+    class MixedDegenerateModel(nn.Module):
+        """Model whose census is one all-NaN grad plus one all-zero grad."""
+
+        def __init__(self) -> None:
+            """Initialize the two degenerate-gradient parameters."""
+
+            super().__init__()
+            self.nan_param = nn.Parameter(torch.tensor(1.0))
+            self.zero_param = nn.Parameter(torch.tensor(1.0))
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Return ``x`` plus a NaN-grad term and a zero-grad term.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Input with one NaN-gradient and one zero-gradient
+                contribution.
+            """
+
+            nan_term = (self.nan_param * 0.0) * torch.tensor(float("inf"))
+            zero_term = (self.zero_param * x.sum()) * 0.0
+            return x + nan_term + zero_term
+
+    model = MixedDegenerateModel().eval()
+
+    with pytest.warns(RuntimeWarning, match="degenerate"):
+        assert not backward_validation.validate_backward_pass(
+            model,
+            torch.randn(2, 4),
+            random_seed=7,
+            validate_metadata=False,
+            # The bare two-parameter module has no submodule outputs, so the
+            # layer-grad report is empty; disable it to reach the parameter
+            # census guard under test.
+            validate_layer_grads=False,
+        )
+
+
+def test_stock_param_grad_degeneracy_mixed_census_is_degenerate() -> None:
+    """Unit pin: the mixed census classifies degenerate, not real-power."""
+
+    census = {
+        "a": torch.full((3,), float("nan")),
+        "b": torch.zeros(3),
+    }
+    verdict = backward_validation._stock_param_grad_degeneracy(census)
+    assert verdict == "mixed-nonfinite-zero"
+
+    # Any finite nonzero element anywhere restores detection power.
+    census["c"] = torch.tensor([0.0, 1e-30, 0.0])
+    assert backward_validation._stock_param_grad_degeneracy(census) is None
+
+
+def test_backward_validation_partial_nan_grads_still_pass() -> None:
+    """A PARTIALLY NaN census keeps its detection power and still passes.
+
+    The degenerate-evidence guard is TOTAL-degeneracy only: finite nonzero
+    gradients elsewhere in the census retain real comparison power, and the
+    NaN-pattern-agreement doctrine (``equal_nan=True``) continues to govern the
+    NaN positions. Guards the guard against over-firing (the L15 pressure that
+    historically breeds disarm-style exemptions).
+    """
+
+    class PartialNaNModel(nn.Module):
+        """Model with one NaN-gradient parameter and one healthy linear."""
+
+        def __init__(self) -> None:
+            """Initialize the model."""
+
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+            self.scale = nn.Parameter(torch.tensor(1.0))
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Return the linear output plus a NaN-gradient term.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Linear output with a NaN contribution on ``scale`` only.
+            """
+
+            nan_term = (self.scale * 0.0) * torch.tensor(float("inf"))
+            return self.lin(x) + nan_term
+
+    model = PartialNaNModel().eval()
+    assert (
+        backward_validation.validate_backward_pass(
+            model,
+            torch.randn(2, 4),
+            random_seed=7,
+            validate_metadata=False,
+        )
+        is True
     )
 
 
@@ -1025,8 +1824,8 @@ def test_max_finite_selection_data_parents_perturb_distinctly() -> None:
         assert trace.validation_replay_status.failed_node_count == 0
 
 
-def test_corrupted_swamped_add_replay_fails_without_generic_probe_exemption() -> None:
-    """A constant replay callable must fail even if generic probes match."""
+def test_corrupted_swamped_add_replay_fails_without_reexecuting_diagnostic_probes() -> None:
+    """A constant replay callable fails without extra diagnostic executions."""
 
     trace = tl.trace(
         SwampedAddModel(),
@@ -1047,7 +1846,8 @@ def test_corrupted_swamped_add_replay_fails_without_generic_probe_exemption() ->
     )
     failure = get_validation_failure(trace)
     assert failure is not None
-    assert failure.extra["generic_invariant_probe_matched"] is True
+    assert set(failure.extra) == {"perturbed_parents"}
+    assert "generic_invariant_probe_matched" not in failure.extra
 
 
 def test_multiplicative_zero_annihilator_uses_structural_proof() -> None:
@@ -1112,7 +1912,14 @@ def test_output_bookkeeping_projection_is_structural() -> None:
 
 
 def test_structural_arg_exemption_covers_keyword_parent_positions() -> None:
-    """Structural arg exemptions should use kwarg parent-position metadata."""
+    """Keyword-spelled index-class parents are sensitivity-VERIFIED, not exempted.
+
+    F2 tightening: the ``cross_entropy`` target blanket was removed from the
+    structural registries, so a keyword-spelled target edge must now be
+    exercised by the in-domain rotation (which reads kwarg parent-position
+    metadata) and register genuine sensitivity instead of a blanket
+    ``pre_perturbation_exemption``.
+    """
 
     logits = torch.tensor([[2.0, -1.0, 0.5], [0.1, 0.4, 0.7]], dtype=torch.float32)
     target = torch.tensor([0, 2], dtype=torch.long)
@@ -1127,7 +1934,21 @@ def test_structural_arg_exemption_covers_keyword_parent_positions() -> None:
     result = trace.validate_forward_pass([_first_output(trace)], validate_metadata=False)
 
     assert result is True
-    assert trace.validation_replay_status.exempted_reason_counts["pre_perturbation_exemption"] >= 1
+    cross_entropy_op = next(op for op in trace.layer_list if op.func_name == "cross_entropy")
+    assert cross_entropy_op.parent_arg_positions["kwargs"]["target"]
+    perturbation_decisions = [
+        decision
+        for decision in trace.validation_replay_status.decisions
+        if decision.get("op_label") == cross_entropy_op.label
+        and decision.get("phase") == "perturbation"
+    ]
+    # Both keyword-spelled parent edges (input= logits and target= labels) are
+    # perturbed and register real sensitivity -- no blanket exemption remains.
+    assert len(perturbation_decisions) >= 2, trace.validation_replay_status.decisions
+    assert all(
+        decision["decision"] == "validated" and decision["reason"] == "perturbation_changed"
+        for decision in perturbation_decisions
+    ), perturbation_decisions
 
 
 def test_skip_validation_registry_entries_have_justifications() -> None:
@@ -1333,8 +2154,69 @@ def test_replay_mismatch_with_missing_nonperturbed_parent_still_fails() -> None:
     assert any(decision["reason"] == "replay_mismatch" for decision in status.decisions)
 
 
+class StepInvalidNarrowModel(nn.Module):
+    """Model whose control parent is invalid under EVERY perturbation.
+
+    ``narrow(0, start, x.shape[0])`` with ``start == 0`` admits NO other valid
+    start value: the wide random draw, ``step_up`` (+1), and ``step_down`` (-1,
+    which wraps to ``size - 1``) all overrun the dimension and raise -- on any
+    seed, by construction. r29 MED: the r28 step-retry made the former
+    ``CholeskyModel`` vehicle soundly ``validated`` (a +-1-ULP step keeps the
+    input positive-definite and changes the output), silently emptying the
+    ``perturbation_execution_exception`` tripwire category across every armed
+    vehicle; this model keeps the category reachable, retry included. The
+    start index is a model INPUT (input ops carry no perturbation check of
+    their own), so no upstream op can add a seed-dependent side decision.
+    """
+
+    def forward(self, x: torch.Tensor, start: torch.Tensor) -> torch.Tensor:
+        """Narrow the full length of ``x`` from a traced zero start index.
+
+        Parameters
+        ----------
+        x:
+            One-dimensional input.
+        start:
+            Zero-dimensional long start index; must be 0.
+
+        Returns
+        -------
+        torch.Tensor
+            The narrowed (full-length) input, scaled.
+        """
+
+        return x.narrow(0, start, x.shape[0]) * 1.0
+
+
 def test_perturbation_exception_yields_reason_coded_unverified() -> None:
     """Invalid perturbed inputs should be unverified rather than exempted."""
+
+    trace = tl.trace(
+        StepInvalidNarrowModel(),
+        [torch.tensor([-2.0, 0.5, 1.5, 2.5]), torch.tensor(0)],
+        layers_to_save="all",
+        save_arg_values=True,
+    )
+
+    torch.manual_seed(108)
+    result = trace.validate_forward_pass([_first_output(trace)], validate_metadata=False)
+
+    assert isinstance(result, ValidationReplayStatus)
+    assert result.state == "unverified"
+    assert result.unverified_reason_counts["perturbation_execution_exception"] >= 1
+
+
+def test_step_retry_soundly_validates_domain_constrained_perturbation() -> None:
+    """The r28 step retry converts the old cholesky vehicle into evidence.
+
+    A wide random perturbation of the ``cholesky`` parent leaves the
+    positive-definite domain and raises; the +-1-ULP step retry stays inside it
+    and CHANGES the output, so the edge is now proven real
+    (``validated``/``perturbation_changed``) instead of reason-coded
+    ``unverified``. Pinned so the retry benefit cannot silently regress; the
+    ``perturbation_execution_exception`` category itself stays armed through
+    :class:`StepInvalidNarrowModel` above.
+    """
 
     trace = tl.trace(
         CholeskyModel(),
@@ -1346,9 +2228,10 @@ def test_perturbation_exception_yields_reason_coded_unverified() -> None:
     torch.manual_seed(108)
     result = trace.validate_forward_pass([_first_output(trace)], validate_metadata=False)
 
-    assert isinstance(result, ValidationReplayStatus)
-    assert result.state == "unverified"
-    assert result.unverified_reason_counts["perturbation_execution_exception"] >= 1
+    assert result is True
+    status = trace.validation_replay_status
+    assert status.state == "passed"
+    assert not status.unverified_reason_counts
 
 
 def test_fully_saved_vanilla_model_has_zero_unverified_decisions() -> None:
@@ -1418,7 +2301,15 @@ def test_validation_status_cache_invalidated_on_fork() -> None:
 
 
 def test_buffer_semantic_ownership_invariant_fires_on_wrong_module_stack() -> None:
-    """Buffer source nodes must claim the owner or an active consumer module."""
+    """Buffer source nodes must claim the owner or an active consumer module.
+
+    Two redundant tripwires cover this plant: op_log_fields'
+    module_call_stack<->modules coherence check (runs first in the contract
+    order, and the plant rewrites modules without the stack) and
+    buffer_xrefs' semantic-ownership check. The plant must refuse either
+    way — the test pins the refusal and the planted module claim, not which
+    redundant layer wins the race.
+    """
 
     trace = tl.trace(
         BufferOwnerModel(),
@@ -1430,7 +2321,7 @@ def test_buffer_semantic_ownership_invariant_fires_on_wrong_module_stack() -> No
     buffer_op._internal_set("modules", ["self:1"])  # noqa: SLF001
     buffer_op._internal_set("module", "self:1")  # noqa: SLF001
 
-    with pytest.raises(MetadataInvariantError, match="buffer_xrefs"):
+    with pytest.raises(MetadataInvariantError, match="module"):
         check_metadata_invariants(trace)
 
 

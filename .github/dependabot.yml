@@ -1,0 +1,32 @@
+# Staleness signal for the repo's frozen pins (R61): the SHA-pinned Actions,
+# the hash-locked release/builder stack (pip @ /.github/workflows), and the
+# pyproject tool pins (pip @ /) each get weekly review PRs. Dependabot never
+# auto-merges, so pins move on review rather than never.
+#
+# NOT covered here (r7 R61, opus+sol): .pre-commit-config.yaml hook SHAs --
+# Dependabot has no pre-commit ecosystem. Their staleness signal is the
+# weekly hook-staleness report in .github/workflows/weekly.yml, which runs
+# `pre-commit autoupdate` on a scratch copy and surfaces the diff in the job
+# summary.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+  - package-ecosystem: "pip"
+    directory: "/.github/workflows"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    # `dependency-type: all` = every update in the locked stack opens a
+    # review PR (whether GitHub's security filtering applies is a repo
+    # setting, not this file).
+    allow:
+      - dependency-type: "all"
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

@@ -14,8 +14,10 @@ import warnings
 from collections import defaultdict, deque
 from typing import Any
 
-from .._render_utils import _open_file_quietly, html_escape
-from .._render_utils import compute_module_penwidth
+from ..._errors import InvalidArgumentError
+from ...utils.display import atomic_write_text, user_stacklevel
+from .. import _render_utils
+from .._render_utils import _open_file_quietly, compute_module_penwidth
 from ..code_panel import _code_panel_label
 from ..render_ir import RenderIR, RenderIRDotStatement
 
@@ -112,7 +114,7 @@ def _compute_topological_layout(
     tuple[dict[str, tuple[float, float]], dict[str, tuple[float, float, float, float]], float]
         Positions keyed by source layer label, compound module boxes, and maximum y coordinate.
     """
-    all_node_labels = set(nd["node_label"] for nd in node_data.values())
+    all_node_labels = {nd["node_label"] for nd in node_data.values()}
 
     # Build adjacency from DOT-level edges.
     children_of: dict[str, list[str]] = defaultdict(list)
@@ -134,9 +136,12 @@ def _compute_topological_layout(
             in_degree[tgt_eid] += 1
 
     # Kahn's algorithm for topological depth assignment.
+    # Seed the queue in a deterministic (sorted) order: ``all_node_labels`` is a
+    # set, so iterating it directly made the BFS order -- and hence the eventual
+    # sibling layout -- depend on PYTHONHASHSEED for multi-root graphs.
     depth: dict[str, int] = {}
     queue: deque[str] = deque()
-    for nid in all_node_labels:
+    for nid in sorted(all_node_labels):
         if in_degree[nid] == 0:
             depth[nid] = 0
             queue.append(nid)
@@ -169,8 +174,12 @@ def _compute_topological_layout(
             if node_info:
                 node_label_module[node_info["node_label"]] = mod_key
 
+    # Sort by module membership for visual grouping, tie-broken by the node
+    # label so the ordering is a TOTAL order. Keying on module alone left ties
+    # in the (hash-dependent) input order, so equal-module siblings landed in
+    # nondeterministic x-positions across PYTHONHASHSEED.
     for d in ranks:
-        ranks[d].sort(key=lambda nid: node_label_module.get(nid, ""))
+        ranks[d].sort(key=lambda nid: (node_label_module.get(nid, ""), nid))
 
     # Compute positions.  Y = depth rank, X = position within rank.
     spacing_y = 120  # points between ranks
@@ -191,6 +200,13 @@ def _compute_topological_layout(
     # Compute module bounding boxes from node positions.
     # Collect all source labels in each module, including nested children.
     def _collect_module_node_labels(mod_key: str) -> set[str]:
+        """Node labels inside ``mod_key``, recursing into its child modules.
+
+        Only nodes that received a position are included, so the result is
+        directly usable as a bounding-box input; a module whose nodes were all
+        collapsed away yields an empty set.
+        """
+
         ids: set[str] = set()
         for dn in module_direct_nodes.get(mod_key, []):
             nd = node_data.get(dn)
@@ -203,23 +219,26 @@ def _compute_topological_layout(
     compound_bboxes = {}
     padding = 60  # points around contained nodes
 
+    # r-b6 R19-2: bboxes are keyed by the FULL pass-qualified region key.
+    # Collapsing "addr:2" to "addr" made every pass cluster share ONE
+    # last-write-wins bbox, and since the write order was set-iteration
+    # order, the surviving geometry was PYTHONHASHSEED-dependent. Sorted
+    # iteration keeps any remaining tie-breaks deterministic.
     all_mod_keys = set(module_direct_nodes.keys()) | set(module_child_map.keys())
-    for mod_key in all_mod_keys:
+    for mod_key in sorted(all_mod_keys):
         module_node_labels = _collect_module_node_labels(mod_key)
         if not module_node_labels:
             continue
         xs = []
         ys = []
-        for eid in module_node_labels:
+        for eid in sorted(module_node_labels):
             cx, cy = positions[eid]
             w, h = node_label_sizes.get(eid, (_DEFAULT_NODE_WIDTH, _DEFAULT_NODE_HEIGHT))
             xs.extend([cx - w / 2, cx + w / 2])
             ys.extend([cy - h / 2, cy + h / 2])
         min_x, max_x_val = min(xs) - padding, max(xs) + padding
         min_y, max_y_val = min(ys) - padding, max(ys) + padding
-        mod_addr = mod_key.split(":")[0] if ":" in mod_key else mod_key
-        group_id = f"group_{mod_addr}"
-        compound_bboxes[group_id] = (
+        compound_bboxes[f"group_{mod_key}"] = (
             min_x,
             min_y,
             max_x_val - min_x,
@@ -322,7 +341,13 @@ def get_node_placement_engine(vis_node_placement: str, layout_cost: int) -> str:
     if vis_node_placement in {"dot", "rank"}:
         return vis_node_placement
     if vis_node_placement != "auto":
-        raise ValueError("vis_node_placement must be one of 'auto', 'dot', or 'rank'.")
+        raise InvalidArgumentError(
+            "vis_node_placement must be one of 'auto', 'dot', or 'rank'; "
+            f"received {vis_node_placement!r}",
+            code="visualization_layout_invalid",
+            remedy="pass vis_node_placement='auto', 'dot', or 'rank'",
+            argument="vis_node_placement",
+        )
     if layout_cost > RANK_LAYOUT_COST_THRESHOLD:
         return "rank"
     return "dot"
@@ -392,6 +417,78 @@ def _rank_node_statement(
     return next((statement for statement in statements if statement.kind == "node"), None)
 
 
+def _rank_legend_lines(theme: Any, max_y: float) -> list[str]:
+    """Emit the compact color legend as a pinned-node cluster for the rank path.
+
+    Mirrors ``_render_edges._add_legend_to_graphviz`` (which builds the legend
+    through the ``graphviz.Digraph`` API and cannot be reused on the raw-DOT
+    rank path). Nodes carry the ``tl_legend_<i>`` ids and are pinned to the left
+    of the graph so ``neato -n`` places them deterministically.
+
+    Parameters
+    ----------
+    theme:
+        Resolved visualization theme (may be ``None``; sensible defaults apply).
+    max_y:
+        Maximum node y-coordinate, used to anchor the legend near the graph.
+
+    Returns
+    -------
+    list[str]
+        Raw DOT lines for the legend subgraph.
+    """
+    from .._render_common import (
+        BOOL_NODE_COLOR,
+        DEFAULT_BG_COLOR,
+        INPUT_COLOR,
+        OUTPUT_COLOR,
+        TRAINABLE_PARAMS_BG_COLOR,
+    )
+    from ..node_spec import INTERVENTION_CONE_COLOR, INTERVENTION_SITE_COLOR
+
+    border = getattr(theme, "default_border", "black")
+    font = getattr(theme, "default_font", "black")
+    specs = [
+        ("input", "oval", INPUT_COLOR, "black"),
+        ("output", "oval", OUTPUT_COLOR, "black"),
+        ("parameterized", "oval", TRAINABLE_PARAMS_BG_COLOR, "black"),
+        ("buffer", "cylinder", DEFAULT_BG_COLOR, "black"),
+        ("boolean", "oval", BOOL_NODE_COLOR, "black"),
+        ("intervention/cone", "oval", INTERVENTION_CONE_COLOR, INTERVENTION_SITE_COLOR),
+    ]
+    legend_x = -240.0
+    top_y = (len(specs) - 1) * 48.0
+    # neato -n does not auto-compute cluster boxes/labels from pinned nodes, so
+    # pin an explicit bounding box around the legend nodes (same technique the
+    # module clusters use above) for the box outline and "TorchLens legend" title.
+    bb_llx, bb_lly, bb_urx, bb_ury = legend_x - 120.0, -40.0, legend_x + 120.0, top_y + 56.0
+    lines = [
+        "  subgraph cluster_torchlens_legend {",
+        '    label="TorchLens legend"',
+        "    labelloc=t",
+        f"    color={_dot_quote(str(border))}",
+        f"    fontcolor={_dot_quote(str(font))}",
+        "    style=rounded",
+        f'    bb="{bb_llx:.1f},{bb_lly:.1f},{bb_urx:.1f},{bb_ury:.1f}"',
+    ]
+    for index, (text, shape, fill, node_border) in enumerate(specs):
+        y = index * 48.0
+        parts = [
+            f"label={_dot_quote(text)}",
+            f"shape={shape}",
+            "style=filled",
+            f"fillcolor={_dot_quote(fill)}",
+            "fontcolor=black",
+            f"color={_dot_quote(node_border)}",
+            f'pos="{legend_x:.1f},{y:.1f}!"',
+        ]
+        if node_border == INTERVENTION_SITE_COLOR:
+            parts.append("penwidth=2.0")
+        lines.append(f"    tl_legend_{index} [{' '.join(parts)}]")
+    lines.append("  }")
+    return lines
+
+
 def render_rank_layout(
     ir: RenderIR,
     vis_mode: str,
@@ -401,6 +498,11 @@ def render_rank_layout(
     graph_caption: str,
     rankdir: str,
     code_panel_source: str | None = None,
+    *,
+    show_legend: bool = False,
+    theme: Any = None,
+    dpi: int | None = None,
+    graph_overrides: dict[str, str] | None = None,
 ) -> str:
     """Render a graph with the pure-Python rank layout.
 
@@ -423,6 +525,12 @@ def render_rank_layout(
         graph_caption: HTML label for the graph title.
         rankdir: Graphviz rank direction (BT, TB, LR).
         code_panel_source: Optional source code to embed as a graph cluster.
+        show_legend: If True, emit the compact colorblind-safe legend cluster
+            (parity with the dot path, which was previously dropped here).
+        theme: Resolved visualization theme; used only for the legend styling.
+        dpi: Optional Graphviz output DPI, applied as a graph attribute.
+        graph_overrides: Resolved (string-valued) graph-attribute overrides,
+            applied last so they win, matching the dot path.
 
     Returns:
         The generated DOT source string.
@@ -449,11 +557,14 @@ def render_rank_layout(
             name = str(attrs.pop("name", statement.args[0] if statement.args else node.name))
         else:
             continue
-        rank_name = (
-            (node.source_label or name).replace(":", "pass") if node.kind != "module_box" else name
-        )
+        # r-b6 R19-2: identity comes from the RENDERER-UNIQUE node name, never
+        # the pass-free ``source_label`` — preferring the source label made
+        # every recurrent pass collapse into ONE node_data entry, so all
+        # passes shared a single positioned node and their clusters inherited
+        # one (last-write-wins) geometry.
+        rank_name = name.replace(":", "pass") if node.kind != "module_box" else name
         rank_names[node.name] = rank_name
-        node_data[rank_name] = {"attrs": attrs, "node_label": node.source_label or rank_name}
+        node_data[rank_name] = {"attrs": attrs, "node_label": rank_name}
         if "solid" in str(attrs.get("style", "")):
             for region_key in node.region_path:
                 module_has_ancestor[region_key] = True
@@ -503,9 +614,21 @@ def render_rank_layout(
 
     lines = []
     lines.append("digraph {")
-    lines.append(
-        f"  graph [rankdir={rankdir} label={graph_caption} labelloc=t labeljust=left ordering=out]"
-    )
+    # Graph-level attributes. dpi and caller graph overrides used to be dropped
+    # on the rank path (the dot path applied them). Emit dpi and the resolved
+    # overrides too; overrides are appended last so later-wins matches dot.
+    graph_attr_parts = [
+        f"rankdir={rankdir}",
+        f"label={graph_caption}",
+        "labelloc=t",
+        "labeljust=left",
+        "ordering=out",
+    ]
+    if dpi is not None:
+        graph_attr_parts.append(f"dpi={int(dpi)}")
+    for override_key, override_val in (graph_overrides or {}).items():
+        graph_attr_parts.append(f"{override_key}={_dot_quote(str(override_val))}")
+    lines.append(f"  graph [{' '.join(graph_attr_parts)}]")
     lines.append("  node [ordering=out]")
 
     def _node_line(name: str, indent: int = 1) -> str:
@@ -554,14 +677,15 @@ def render_rank_layout(
         # whether or not the name is quoted.
         lines.append(f"{prefix}subgraph {_dot_id(f'cluster_{safe}')} {{")
 
-        mod_addr = mod_key.split(":")[0] if ":" in mod_key else mod_key
         mod_attrs = dict(region_by_key[mod_key].style)
         mod_attrs["label"] = str(mod_attrs["label"]).replace("align='left'", 'align="left"')
         mod_attrs["style"] = "filled,solid" if module_has_ancestor.get(mod_key) else "filled,dashed"
         mod_attrs["penwidth"] = f"{compute_module_penwidth(depth, max_nest):.1f}"
         mod_attrs.pop("margin", None)
 
-        group_id = f"group_{mod_addr}"
+        # r-b6 R19-2: pass-qualified lookup — each pass cluster gets ITS OWN
+        # bbox instead of whichever pass's geometry happened to write last.
+        group_id = f"group_{mod_key}"
         if group_id in compound_bboxes:
             ex, ey, ew, eh = compound_bboxes[group_id]
             # Convert rank-layout coords (y-down) to graphviz bb (y-up).
@@ -619,6 +743,12 @@ def render_rank_layout(
         parts = [f"{k}={_dot_quote(str(v))}" for k, v in edge_data.items()]
         lines.append(f"  {tail} -> {head} [{' '.join(parts)}]")
 
+    # The legend was silently dropped on the rank path (the dot path adds it via
+    # _add_legend_to_graphviz after the rank branch has already returned). Emit
+    # an equivalent pinned-node legend cluster here so show_legend is honored.
+    if show_legend:
+        lines.extend(_rank_legend_lines(theme, max_y))
+
     lines.append("}")
     dot_source = "\n".join(lines)
 
@@ -627,7 +757,8 @@ def render_rank_layout(
         warnings.warn(
             f"Graph has {num_rank_nodes} nodes. PDF/PNG rendering may produce "
             f"empty output at this scale. Consider using vis_fileformat='svg' "
-            f"for large graphs; SVG files are zoomable in any browser."
+            f"for large graphs; SVG files are zoomable in any browser.",
+            stacklevel=user_stacklevel(),
         )
 
     source_path = f"{vis_outpath}.dot"
@@ -690,13 +821,28 @@ def _rescale_dot_for_rtree(dot_source: str, ceiling: float = _RTREE_COORD_CEILIN
     scale = ceiling / max_coord
 
     def _scale_pos(m: re.Match) -> str:
+        """Rewrite one pinned ``pos="x,y!"`` match with both coordinates scaled.
+
+        The trailing ``!`` pin marker is preserved -- dropping it would let
+        neato move the node.
+        """
+
         return f'pos="{float(m.group(1)) * scale:.1f},{float(m.group(2)) * scale:.1f}!"'
 
     def _scale_bb(m: re.Match) -> str:
+        """Rewrite one cluster ``bb="x1,y1,x2,y2"`` match with all four points scaled."""
+
         vals = [float(m.group(i)) * scale for i in range(1, 5)]
         return 'bb="' + ",".join(f"{v:.1f}" for v in vals) + '"'
 
     def _scale_dim(m: re.Match) -> str:
+        """Rewrite one ``width=``/``height=`` match, in inches, with the value scaled.
+
+        Kept at four decimals because node dimensions are small inch values
+        where the one-decimal point precision used for coordinates would
+        visibly quantize node sizes.
+        """
+
         return f"{m.group(1)}={float(m.group(2)) * scale:.4f}"
 
     out = _RTREE_POS_RE.sub(_scale_pos, dot_source)
@@ -725,7 +871,7 @@ def _run_neato(
         rendered_path,
         source_path,
     ]
-    return subprocess.run(cmd, timeout=render_timeout, capture_output=True, text=True)
+    return _render_utils.run_bounded_subprocess(cmd, timeout=render_timeout, check=False, text=True)
 
 
 def _run_neato_with_fallbacks(
@@ -766,7 +912,8 @@ def _run_neato_with_fallbacks(
             raise
         warnings.warn(
             "neato spline routing timed out; retrying with straight-line edges "
-            "(-Gsplines=line). The graph is rendered with straight edges."
+            "(-Gsplines=line). The graph is rendered with straight edges.",
+            stacklevel=user_stacklevel(),
         )
         result = _run_neato(
             rendered_path=rendered_path,
@@ -781,15 +928,16 @@ def _run_neato_with_fallbacks(
         # coordinates themselves (uniform scale preserves the layout) so they fit,
         # and retry once with straight-line edges. -Gsize/-Gratio do NOT help here
         # because they only rescale the output viewport, not the rtree input.
-        rescaled = _rescale_dot_for_rtree(open(source_path, encoding="utf-8").read())
+        with open(source_path, encoding="utf-8") as source_file:
+            rescaled = _rescale_dot_for_rtree(source_file.read())
         if rescaled is not None:
             warnings.warn(
                 "neato layout exceeded the rtree coordinate limit; retrying with "
                 "straight-line edges and down-scaled pinned coordinates so the "
-                "canvas fits. Geometry is preserved (uniform scale)."
+                "canvas fits. Geometry is preserved (uniform scale).",
+                stacklevel=user_stacklevel(),
             )
-            with open(source_path, "w", encoding="utf-8") as f:
-                f.write(rescaled)
+            atomic_write_text(source_path, rescaled)
             result = _run_neato(
                 rendered_path=rendered_path,
                 source_path=source_path,
@@ -800,46 +948,3 @@ def _run_neato_with_fallbacks(
 
     if result.returncode != 0:
         raise RuntimeError(f"neato rendering failed (exit {result.returncode}):\n{result.stderr}")
-
-
-def _add_arg_label(
-    parent_node: Any,
-    child_node: Any,
-    edge_dict: dict[str, Any],
-    trace: Any,
-    show_buffer_layers: bool,
-    occurrence_argument_label: str | None = None,
-) -> None:
-    """Add argument position labels to an edge when the child has multiple parents.
-
-    Simplified version of ``rendering._label_node_arguments_if_needed`` for the
-    direct rank-layout path.
-    """
-    from ...data_classes.layer import Layer
-    from ...data_classes.op import Op
-
-    # Count visible parents
-    num_parents = len(child_node.parents)
-    if not show_buffer_layers:
-        for pl in child_node.parents:
-            if isinstance(child_node, Op):
-                if trace[pl].is_buffer:
-                    num_parents -= 1
-            elif isinstance(child_node, Layer):
-                if trace.layer_logs[pl].is_buffer:
-                    num_parents -= 1
-    if num_parents <= 1:
-        return
-
-    if occurrence_argument_label is not None:
-        arg_labels = [occurrence_argument_label]
-    else:
-        arg_labels = []
-        for arg_type in ["args", "kwargs"]:
-            for arg_loc, arg_label in child_node.parent_arg_positions[arg_type].items():
-                if parent_node.layer_label == arg_label:
-                    arg_labels.append(f"{arg_type[:-1]} {arg_loc}")
-
-    if arg_labels:
-        label_str = "<br/>".join(html_escape(str(label)) for label in arg_labels)
-        edge_dict["label"] = f"<<FONT POINT-SIZE='10'><b>{label_str}</b></FONT>>"

@@ -22,7 +22,6 @@ from __future__ import annotations
 import inspect
 
 import pytest
-import torch
 
 from torchlens.intervention.helpers import helper_from_serialized
 from torchlens.intervention.save import _resolve_import_ref
@@ -55,29 +54,5 @@ def test_omitting_value_decoder_raises_typeerror_not_silent_corruption() -> None
     with pytest.raises(TypeError, match="value_decoder"):
         helper_from_serialized(  # type: ignore[call-arg]
             payload,
-            tensor_loader=lambda tid: torch.zeros(1),
             import_resolver=_resolve_import_ref,
         )
-
-
-def test_decode_jsonish_still_pinned_but_unreachable_from_helper_from_serialized() -> None:
-    """MINOR-1: _decode_jsonish is quarantined -- no longer reachable as a fallback.
-
-    It is retained only so the characterization test can keep pinning the narrow
-    decoder's wrapper-leaking behavior; nothing in ``helper_from_serialized``
-    references it anymore.
-    """
-
-    import ast
-    import inspect as _inspect
-
-    from torchlens.intervention import helpers as helpers_mod
-
-    source = _inspect.getsource(helpers_mod.helper_from_serialized)
-    tree = ast.parse(source)
-    called_names = {
-        node.func.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
-    assert "_decode_jsonish" not in called_names

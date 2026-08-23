@@ -41,9 +41,9 @@ from torchlens.ir.container import (
     _container_type_is_admissible,
     _model_output_has_foreign_init,
     _resolve_container_type,
+    rebuild_container_from_spec,
     reconstruction_is_lossy,
     reconstruction_is_lossy_by_type,
-    rebuild_container_from_spec,
 )
 from torchlens.options import CaptureOptions
 from torchlens.runnable import PathFaithfulness
@@ -453,7 +453,7 @@ def test_no_regression_plain_containers_round_trip() -> None:
 class _Point(tuple):  # stand-in namedtuple-like with _fields
     _fields = ("x", "y")
 
-    def __new__(cls, x: Any, y: Any) -> "_Point":
+    def __new__(cls, x: Any, y: Any) -> _Point:
         return super().__new__(cls, (x, y))
 
 
@@ -477,7 +477,7 @@ class _WeaponizedNamedTupleLike(tuple):
 
     _fields = ("a", "b")
 
-    def __new__(cls, *args: Any) -> "_WeaponizedNamedTupleLike":  # pragma: no cover
+    def __new__(cls, *args: Any) -> _WeaponizedNamedTupleLike:  # pragma: no cover
         _NAMEDTUPLE_NEW_SENTINEL.append("weaponized __new__ ran")
         return tuple.__new__(cls, args)
 

@@ -9,7 +9,7 @@ from torch import nn
 import torchlens as tl
 from torchlens.options import CaptureOptions, VisualizationOptions
 from torchlens.visualization import show_model_graph
-from torchlens.visualization.rendering import GRADIENT_ARROW_COLOR
+from torchlens.visualization._render_common import GRADIENT_ARROW_COLOR
 
 
 class _LinearReluModel(nn.Module):

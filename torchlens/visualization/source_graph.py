@@ -6,6 +6,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from .._errors import InvalidArgumentError
 from .request import ResolvedRenderRequest
 
 if TYPE_CHECKING:
@@ -35,11 +36,11 @@ class SourceGraph:
     skipped_labels: set[str]
     module_ancestry: Mapping[str, tuple[str, ...]]
     container_ancestry: Mapping[str, tuple[Any, ...]]
-    trace: "Trace"
+    trace: Trace
     request: ResolvedRenderRequest
 
 
-def build_source_graph(trace: "Trace", request: ResolvedRenderRequest) -> SourceGraph:
+def build_source_graph(trace: Trace, request: ResolvedRenderRequest) -> SourceGraph:
     """Extract the normalized forward source graph for one draw request.
 
     Parameters
@@ -64,7 +65,15 @@ def build_source_graph(trace: "Trace", request: ResolvedRenderRequest) -> Source
     elif request.vis_mode == "rolled":
         entries_to_plot = dict(trace.layer_logs)
     else:
-        raise ValueError("vis_mode must be either 'rolled' or 'unrolled'")
+        # First-to-fire validation of the flagship draw option: typed with the
+        # same code as the backward/combined siblings (R65) instead of a bare
+        # builtin that named neither the received value nor a remedy.
+        raise InvalidArgumentError(
+            f"vis_mode must be either 'rolled' or 'unrolled'; received {request.vis_mode!r}",
+            code="visualization_mode_invalid",
+            remedy="pass vis_mode='rolled' or 'unrolled'",
+            argument="vis_mode",
+        )
 
     if request.module is not None:
         target_module = _resolve_focus_module(trace, request.module)
@@ -94,7 +103,7 @@ def build_source_graph(trace: "Trace", request: ResolvedRenderRequest) -> Source
     )
 
 
-def _resolve_focus_module(trace: "Trace", module: Any) -> Any:
+def _resolve_focus_module(trace: Trace, module: Any) -> Any:
     """Resolve and validate a module focus argument.
 
     Parameters
@@ -118,15 +127,35 @@ def _resolve_focus_module(trace: "Trace", module: Any) -> Any:
 
     if isinstance(module, str):
         if module not in trace.modules:
-            raise ValueError(f"Module address '{module}' was not found in this Trace.")
+            raise InvalidArgumentError(
+                f"Module address '{module}' was not found in this Trace",
+                code="module_focus_not_found",
+                remedy="pass a module address that exists in this Trace",
+                module=module,
+            )
         resolved = trace.modules[module]
         if not isinstance(resolved, Module):
-            raise ValueError(f"Module address '{module}' resolved to a module pass, not a Module.")
+            raise InvalidArgumentError(
+                f"Module address '{module}' resolved to a module pass, not a Module",
+                code="module_focus_invalid",
+                remedy="pass an unqualified module address, not a pass label",
+                module=module,
+            )
         return resolved
     if not isinstance(module, Module):
-        raise ValueError("module must be a Module, module address string, or None.")
+        raise InvalidArgumentError(
+            f"module must be a Module, module address string, or None; "
+            f"received {type(module).__name__}",
+            code="module_focus_invalid",
+            remedy="pass a Module, a module address string, or None",
+            argument="module",
+        )
     if module._source_trace is not trace:
-        raise ValueError("Module focus must belong to the Trace being rendered.")
+        raise InvalidArgumentError(
+            "Module focus must belong to the Trace being rendered",
+            code="module_focus_invalid",
+            remedy="pass a Module owned by the Trace being drawn",
+        )
     return module
 
 

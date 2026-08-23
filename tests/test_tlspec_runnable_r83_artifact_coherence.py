@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +70,59 @@ def _save(path: Path, *, cache: bool = False) -> Path:
     return path
 
 
+def _recompute_runtime_fingerprints(manifest: dict[str, Any]) -> None:
+    """Rewrite each call's ``runtime_fingerprint`` per the loader recipe.
+
+    Naive manifest tampers are now caught at PARSE time by c9904d19's
+    ``_verify_runtime_fingerprints`` check (sha256 over callable key, argument
+    names, arity, output slot shapes/dtypes, and execution context), which
+    would pre-empt the deeper gates this suite pins. Recomputing the
+    fingerprints after the tamper keeps these tests exercising the deeper
+    resolver gates (``SEMANTIC_DRIFT`` / ``UNRESOLVED_QUALNAME``), which is
+    their point.
+    """
+
+    run = manifest["run"]
+    keys_by_registry_id = {entry["registry_id"]: entry["key"] for entry in run["callable_registry"]}
+    slots_by_id = {slot["slot_id"]: slot for slot in run["tensor_slots"]}
+    for call in run["calls"]:
+        key = keys_by_registry_id[call["registry_id"]]
+        context = call["execution_context"]
+        payload = {
+            "callable": {
+                "namespace": key["namespace"],
+                "qualname": key["qualname"],
+                "dispatch_kind": key["dispatch_kind"],
+                "version": key["version"],
+                "import_path": key.get("import_path"),
+            },
+            "argument_names": list(call["argument_names"]),
+            "num_positional_args": int(call["num_positional_args"]),
+            "num_keyword_args": int(call["num_keyword_args"]),
+            "outputs": [
+                {
+                    "shape": list(slots_by_id[slot_id]["shape"]),
+                    "dtype": slots_by_id[slot_id]["dtype"],
+                }
+                for slot_id in call["output_slot_ids"]
+            ],
+            "execution_context": {
+                "autocast": [
+                    {
+                        "device_type": entry["device_type"],
+                        "enabled": entry["enabled"],
+                        "dtype": entry.get("dtype"),
+                    }
+                    for entry in context["autocast"]
+                ],
+                "grad_enabled": context["grad_enabled"],
+                "inference_mode": context["inference_mode"],
+            },
+        }
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        call["runtime_fingerprint"] = sha256(serialized.encode("utf-8")).hexdigest()
+
+
 def _retarget_registry(source: Path, target: Path, frm: str, to: str) -> Path:
     """Copy an artifact and rewrite one ``callable_registry`` qualname."""
 
@@ -81,6 +135,7 @@ def _retarget_registry(source: Path, target: Path, frm: str, to: str) -> Path:
             entry["key"]["qualname"] = to
             hits += 1
     assert hits == 1, f"expected exactly one {frm!r} registry entry, found {hits}"
+    _recompute_runtime_fingerprints(manifest)
     (target / "manifest.json").write_text(json.dumps(manifest))
     return target
 

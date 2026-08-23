@@ -8,33 +8,13 @@ from typing import Any
 
 import pytest
 import torch
-from torch import nn
+from example_models import TinyReluAdd as _ReluModel
 
 import torchlens as tl
 from torchlens._io import TLSPEC_VERSION
 from torchlens.intervention.save import load_intervention_spec as legacy_load_intervention_spec
 from torchlens.intervention.types import InterventionSpec
 from torchlens.options import CaptureOptions
-
-
-class _ReluModel(nn.Module):
-    """Small model with one portable intervention site."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run a forward pass.
-
-        Parameters
-        ----------
-        x:
-            Input tensor.
-
-        Returns
-        -------
-        torch.Tensor
-            Model output.
-        """
-
-        return torch.relu(x) + 1
 
 
 def _interventions() -> tl.Trace:

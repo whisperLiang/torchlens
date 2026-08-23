@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -38,7 +39,7 @@ class StatefulRunnableModel(nn.Module):
 @pytest.fixture(scope="module")
 def runnable_artifact(
     tmp_path_factory: pytest.TempPathFactory,
-) -> tuple[Path, dict[str, torch.Tensor]]:
+) -> Iterator[tuple[Path, dict[str, torch.Tensor]]]:
     """Create one sparse runnable artifact and its independent user state mapping."""
 
     model = StatefulRunnableModel().eval()
@@ -54,7 +55,11 @@ def runnable_artifact(
     assert model.forward_calls == 1
     path = tmp_path_factory.mktemp("runnable-state") / "state.tlspec"
     trace.save(path, level="runnable")
-    return path, {name: value.detach().clone() for name, value in model.state_dict().items()}
+    state = {name: value.detach().clone() for name, value in model.state_dict().items()}
+    try:
+        yield path, state
+    finally:
+        trace.cleanup()
 
 
 def _with_rebuilt_state_metadata_witnesses(descriptor: Any) -> Any:
@@ -133,9 +138,9 @@ def test_load_state_dict_maps_names_to_slots_and_does_not_execute(
     trace = _load(runnable_artifact)
     state = runnable_artifact[1]
     descriptor_before = trace.runnable_descriptor
-    calls_before = dict(trace.__dict__["_runnable_callables_by_call_id"])
+    calls_before = dict(trace._runnable.callables_by_call_id)
     for call_id in calls_before:
-        trace.__dict__["_runnable_callables_by_call_id"][call_id] = _execution_forbidden
+        trace._runnable.callables_by_call_id[call_id] = _execution_forbidden
 
     trace.load_state_dict(state)
     prepared = prepare_runnable_state(trace, seed=19)
@@ -220,7 +225,7 @@ def test_load_state_dict_verifies_module_path_and_semantic_role(
     binding = slots[index].state_binding
     assert binding is not None
     slots[index] = replace(slots[index], state_binding=replace(binding, **{field: replacement}))
-    trace.__dict__["_runnable_descriptor"] = replace(descriptor, tensor_slots=tuple(slots))
+    trace._runnable.descriptor = replace(descriptor, tensor_slots=tuple(slots))
 
     with pytest.raises(StateBindingError) as caught:
         trace.load_state_dict(runnable_artifact[1])
@@ -253,7 +258,7 @@ def test_alias_groups_reject_conflicts_and_share_one_staged_value(
             alias_group="tied:linear",
         ),
     )
-    trace.__dict__["_runnable_descriptor"] = _with_rebuilt_state_metadata_witnesses(
+    trace._runnable.descriptor = _with_rebuilt_state_metadata_witnesses(
         replace(
             descriptor,
             tensor_slots=tuple(slot for slot in descriptor.tensor_slots if slot is not original)
@@ -311,7 +316,7 @@ def test_n1a_initializes_every_role_deterministically_and_names_every_slot(
     )
     roles = tuple(StateSlotRole)
     slots = []
-    for index, role in enumerate(roles):
+    for _index, role in enumerate(roles):
         is_counter = role is StateSlotRole.COUNTER
         binding = template.state_binding
         assert binding is not None
@@ -365,7 +370,7 @@ def test_n1a_initializes_every_role_deterministically_and_names_every_slot(
     slots[0] = replace(
         slots[0], state_binding=replace(slots[0].state_binding, alias_group="tied:test")
     )
-    trace.__dict__["_runnable_descriptor"] = _with_rebuilt_state_metadata_witnesses(
+    trace._runnable.descriptor = _with_rebuilt_state_metadata_witnesses(
         replace(descriptor, tensor_slots=tuple(slots) + (tied,))
     )
     global_rng_before = torch.random.get_rng_state().clone()
@@ -399,7 +404,7 @@ def test_user_state_overrides_embedded_hook_and_embedded_precedes_random(
 
     trace = _load(runnable_artifact)
     embedded = {name: value + 1 for name, value in runnable_artifact[1].items()}
-    trace.__dict__["_runnable_embedded_state"] = embedded
+    trace._runnable.embedded_state = embedded
     prepared_embedded = prepare_runnable_state(trace, seed=7)
     assert prepared_embedded.state_source is StateSource.EMBEDDED_CAPTURE_STATE
 

@@ -44,7 +44,8 @@ def main() -> None:
     x = torch.randn(2, 8)
     clean = tl.trace(model, x, intervention_ready=True, name="clean")
     zero = clean.fork("zero")
-    zero.attach_hooks(tl.func("relu"), tl.zero_ablate()).replay()
+    zero.attach_hooks(tl.func("relu"), tl.zero_ablate())
+    zero.replay()
 
     bundle = tl.bundle({"clean": clean, "zero": zero}, baseline="clean")
     node = bundle.node(tl.func("relu"))

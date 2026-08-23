@@ -8,7 +8,13 @@ import warnings
 import torchlens
 
 TARGET_ALL = [
+    # L3 ATen profile facade (documented-unstable; exported at __all__ head).
+    # Ratchet row repaired by L6 post-merge: the L1/L3 merge train landed the
+    # export without this row, leaving main red on the frozen-surface test.
+    "AtenOp",
     "trace",
+    "release_model",
+    "clear_capture_cache",
     "export",
     "hash",
     "assert_unchanged",
@@ -73,6 +79,7 @@ TARGET_ALL = [
     "func_transform",
     "followed_by",
     "grad_fn",
+    "grad_fn_label",
     "grad_input",
     "grad_output",
     "in_backward_pass",
@@ -92,6 +99,8 @@ TARGET_ALL = [
     "head",
     "clamp",
     "mean_ablate",
+    "merge_ranks",
+    "merge_report",
     "noise",
     "project_off",
     "project_onto",
@@ -113,6 +122,27 @@ TARGET_ALL = [
     "grad_zero",
     "tap",
     "record_span",
+    "Selection",
+    "ResolvedSelection",
+    "units",
+    "params",
+    "random_selection",
+    "Edit",
+    "patch_from",
+    "top_k",
+    "top_fraction",
+    "threshold",
+    "sign",
+    "dead",
+    "saturated",
+    "low_variance",
+    "neighborhood",
+    "between",
+    "changed",
+    "top_changed",
+    "stable_across_passes",
+    "pass_variance",
+    "subspace",
 ]
 
 CANONICAL_SUBMODULES = [
@@ -142,8 +172,8 @@ CANONICAL_SUBMODULES = [
 ]
 
 
-def test_all_size_exactly_105() -> None:
-    """Top-level ``__all__`` should contain exactly the current API budget.
+def test_all_matches_frozen_132_name_surface() -> None:
+    """Top-level ``__all__`` should match the current frozen API ledger.
 
     Phase 1a budget was 40; backward-parity sprint added 6 (grad_clip, grad_noise,
     grad_clamp, grad_fn, intervening, label) = 46; post-backward
@@ -167,13 +197,38 @@ def test_all_size_exactly_105() -> None:
     `record_kpi_in_graph`, `register_tensor_connection`, `show_bundle_graph`,
     `options`, `to_disk`, `grad_input`, `grad_output`, and `in_backward_pass` = 90.
     The provisional structural-hash namespace and CI tripwire add `hash` and
-    `assert_unchanged`, and the v2 backend-neutral split runtime adds thirteen public
-    names = 105.
+    `assert_unchanged` = 92. Model-lifecycle release support adds
+    `release_model` = 93. The predicate-interpreter consolidation exports
+    `grad_fn_label` (its own selector kind after the label-kind collision fix) = 94.
+    Merge-ranks rung C1 adds `merge_ranks` and `merge_report` (spec'd
+    top-level entry points; machinery lives in `torchlens.merged`) = 96.
+    The grind R39 cache remedy exports `clear_capture_cache` (the agreed
+    user-facing half of the capture-cache bounds fix) = 97.
+    The L6 selection algebra (feature megasprint, DOCUMENTED-UNSTABLE pending
+    naming-session ratification) adds `Selection`, `ResolvedSelection`,
+    `units`, `params`, and `random_selection` = 102; its stage 2 adds
+    `Edit` (public edit-object type; HelperSpec is the deprecated alias)
+    and `patch_from` = 104. The L6 producer wave adds the value-based and
+    statistical selection producers (DOCUMENTED-UNSTABLE) `top_k`,
+    `top_fraction`, `threshold`, `sign`, `dead`, `saturated`, and
+    `low_variance` = 111. Three further 2026-08-19 waves land on top of that,
+    all DOCUMENTED-UNSTABLE: the graph-structural producers `neighborhood` and
+    `between` (executed-DAG n-hop region; source-to-sink influence sub-DAG);
+    the comparative producers `changed`, `top_changed`,
+    `stable_across_passes`, and `pass_variance`; and the semantic/appliance
+    additions from the same sprint. The RUNTIME total is 118 -- asserted
+    against TARGET_ALL below rather than re-derived here, because three
+    concurrent lanes each computed an increment from 111 without knowing about
+    the others and every hand-derived subtotal was wrong. The subspace
+    producer wave adds `subspace` (direction/subspace support selection with
+    mandatory basis provenance, DOCUMENTED-UNSTABLE) on top of that.
+    Backend-neutral split replay adds thirteen public names, bringing the
+    frozen surface to 132 names.
     Paper-era compatibility shims remain available through ``__getattr__`` but
     are not advertised in ``__all__``.
     """
 
-    assert len(torchlens.__all__) == 105
+    assert len(torchlens.__all__) == len(TARGET_ALL)
     assert torchlens.__all__ == TARGET_ALL
 
 
@@ -213,7 +268,7 @@ def test_submodules_have_all() -> None:
             warnings.simplefilter("error", DeprecationWarning)
             submodule = importlib.import_module(module_name)
         assert hasattr(submodule, "__all__"), module_name
-        assert len(submodule.__all__) >= 0
+        assert all(isinstance(name, str) and name for name in submodule.__all__), module_name
 
 
 def test_attribution_submodule_namespace_is_exposed_without_top_level_pollution() -> None:

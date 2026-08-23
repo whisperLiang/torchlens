@@ -8,54 +8,49 @@ used by ``torchlens.load(..., materialize_nested=False)``.
 
 from __future__ import annotations
 
-from collections import OrderedDict, defaultdict
 import dataclasses
-import inspect
 import types
+import weakref
+from collections import OrderedDict, defaultdict
+from collections.abc import Iterable, Mapping
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 import torch
 from safetensors import SafetensorError
 from safetensors.torch import load_file
 
-from . import BlobRef, FieldPolicy, PayloadLoadHints, TorchLensIOError
+from ..backends import BackendRuntimeCompatibilityError
+from ..data_classes._state_adapter import state_items
+from ..data_classes.trace import Trace
+from ..ir.workspaces import LEGACY_TRACE_BUILD_STATE_KEYS
+from . import BlobRef, FieldPolicy, PayloadLoadHints, TorchLensIOError, prerelease as _prerelease
 from ._torch_symbols import torch_attr
 from .accessor_rebuild import rebuild_trace_accessors
-from .lazy import LazyActivationRef
+from .lazy import LazyActivationRef, _file_identity
 from .manifest import Manifest, TensorEntry, sha256_of_file
+from .paths import resolve_bundle_blob_path, resolve_bundle_blobs_dir
 from .payload_codec import materialize_transport_tensor
-from .paths import resolve_bundle_blob_path
 from .scrub import (
     _RAW_IMAGE_SENTINEL,
     _RAW_INPUT_IMAGE_BYTES_LIMIT,
     _RAW_INPUT_IMAGE_MAX_EDGE,
+    _pin_in_memo,
 )
-from ..backends import BackendRuntimeCompatibilityError
-from ..data_classes._state_adapter import state_items
-from ..data_classes.trace import Trace
+from .state_keys import invalidate_static_class_attr_cache, static_class_attr
 
 _LEGACY_CAPTURE_TRACE_KEYS = {
-    "_raw_layer_dict",
-    "_raw_layer_labels_list",
-    "_layer_counter",
-    "_raw_layer_type_counter",
-    "_current_func_barcode",
-    "_mod_entered",
-    "_mod_exited",
-    "_mod_call_index",
-    "_mod_call_labels",
-    "_module_build_data",
-    "_module_metadata",
-    "_module_forward_args",
-    "_module_containment_engine",
-    "_exhaustive_module_stack",
-    "_grad_fn_strong_refs",
-    "_in_exhaustive_pass",
+    *LEGACY_TRACE_BUILD_STATE_KEYS,
+    "_build_state",
+    "_raw_graph_ws",
+    "_module_capture_ws",
+    "_wrapper_runtime_ws",
     "_pending_live_fire_records",
 }
 _TORCH_BACKEND_NAME = "torch"
+_PORTABLE_WALK_MAX_DEPTH = 200
+_REHYDRATE_IN_PROGRESS = object()
 
 
 def rehydrate_trace(
@@ -67,6 +62,7 @@ def rehydrate_trace(
     map_location: str | torch.device,
     materialize_nested: bool,
     payload_hints: PayloadLoadHints | Mapping[str, Any] | None = None,
+    resolved_blobs_dir: Path | None = None,
 ) -> Trace:
     """Restore a scrubbed portable ``Trace`` state.
 
@@ -87,6 +83,9 @@ def rehydrate_trace(
         ``lazy=True``.
     payload_hints:
         Optional backend payload hints used during materialization.
+    resolved_blobs_dir:
+        Canonical blob containment root already resolved for this load
+        operation. When omitted, it is resolved once here.
 
     Returns
     -------
@@ -94,9 +93,10 @@ def rehydrate_trace(
         Rehydrated model log.
     """
 
+    # Load boundary: force every memoized class-owned static lookup to re-validate
+    # its class-definition fingerprint before this artifact's fields are assigned.
+    invalidate_static_class_attr_cache()
     state_for_load = dict(scrubbed_state)
-    source_version = _source_io_format_version(state_for_load, manifest)
-    state_for_load = _normalize_legacy_trace_state(state_for_load, source_version)
     module_accessor_state = state_for_load.pop("_io_module_accessor_state", None)
     portable_key_order = tuple(state_for_load)
 
@@ -112,11 +112,16 @@ def rehydrate_trace(
     payload_statuses: list[str] = []
     if audit_only_payloads:
         payload_statuses.append("audit_only")
-    seen: set[int] = set()
+    seen: dict[int, Any] = {}
+    bundle_root = Path(bundle_path)
+    canonical_blobs_dir = (
+        resolve_bundle_blobs_dir(bundle_root) if resolved_blobs_dir is None else resolved_blobs_dir
+    )
     _rehydrate_object(
         trace,
         manifest_index=manifest_index,
-        bundle_path=Path(bundle_path),
+        bundle_path=bundle_root,
+        resolved_blobs_dir=canonical_blobs_dir,
         lazy=lazy,
         map_location=map_location,
         materialize_nested=materialize_nested,
@@ -129,7 +134,8 @@ def rehydrate_trace(
         _rehydrate_object(
             module_accessor_state,
             manifest_index=manifest_index,
-            bundle_path=Path(bundle_path),
+            bundle_path=bundle_root,
+            resolved_blobs_dir=canonical_blobs_dir,
             lazy=lazy,
             map_location=map_location,
             materialize_nested=materialize_nested,
@@ -159,6 +165,16 @@ def rehydrate_trace(
             module_accessor_state._list,
             module_accessor_state._pass_dict,
         )
+
+    serialized_tlspec_version = (
+        manifest.tlspec_version
+        if isinstance(manifest, Manifest)
+        else manifest.get("tlspec_version")
+    )
+    if isinstance(serialized_tlspec_version, int) and not isinstance(
+        serialized_tlspec_version, bool
+    ):
+        trace.tlspec_version = serialized_tlspec_version
 
     _bind_conditional_arms(trace)
     _set_payload_load_status(trace, manifest_index, payload_statuses)
@@ -244,68 +260,11 @@ def _rehydrate_small_raw_images(value: Any) -> Any:
         return [_rehydrate_small_raw_images(item) for item in value]
     if isinstance(value, tuple):
         return tuple(_rehydrate_small_raw_images(item) for item in value)
+    if isinstance(value, frozenset):
+        return frozenset(_rehydrate_small_raw_images(item) for item in value)
     if isinstance(value, dict):
         return {key: _rehydrate_small_raw_images(item) for key, item in value.items()}
     return value
-
-
-def _source_io_format_version(
-    state: dict[str, Any],
-    manifest: Manifest | dict[str, Any],
-) -> int:
-    """Return the serialized I/O version from manifest metadata.
-
-    Parameters
-    ----------
-    state:
-        Scrubbed metadata dict being loaded.
-    manifest:
-        Portable manifest describing the on-disk bundle.
-
-    Returns
-    -------
-    int
-        Source bundle ``tlspec_version``. Falls back to state metadata for
-        plain test fixtures.
-    """
-
-    if isinstance(manifest, Manifest):
-        return manifest.tlspec_version
-    version = manifest.get("tlspec_version", state.get("tlspec_version", 0))
-    return int(version) if isinstance(version, int) else 0
-
-
-def _normalize_legacy_trace_state(state: dict[str, Any], source_version: int) -> dict[str, Any]:
-    """Normalize a v3-and-earlier scrubbed Trace state dict into v4 shape.
-
-    v4 dropped these capture-only fields from ``Trace.__dict__``:
-    ``_raw_layer_dict``, ``_raw_layer_labels_list``, ``_layer_counter``,
-    ``_raw_layer_type_counter``, ``_current_func_barcode``, ``_mod_entered``,
-    ``_mod_exited``, ``_mod_call_index``, ``_mod_call_labels``,
-    ``_module_build_data``, ``_module_metadata``, ``_module_forward_args``,
-    ``_module_containment_engine``, ``_exhaustive_module_stack``,
-    ``_grad_fn_strong_refs``, ``_in_exhaustive_pass``, and
-    ``_pending_live_fire_records``.
-
-    For v3 artifacts being loaded into v4, strip these keys if present. The
-    dropped state was capture-time-only; user-facing data is preserved.
-
-    Parameters
-    ----------
-    state:
-        Scrubbed ``Trace`` state loaded from ``metadata.pkl``.
-    source_version:
-        Source bundle ``tlspec_version``.
-
-    Returns
-    -------
-    dict[str, Any]
-        State suitable for ``Trace.__setstate__``.
-    """
-
-    if source_version >= 4:
-        return state
-    return {key: value for key, value in state.items() if key not in _LEGACY_CAPTURE_TRACE_KEYS}
 
 
 def _drop_capture_only_trace_fields(trace: Trace) -> None:
@@ -378,129 +337,235 @@ def _build_manifest_index(
     return index
 
 
+_REHYDRATE_LEAF = 0
+_REHYDRATE_TUPLE = 1
+_REHYDRATE_LIST = 2
+_REHYDRATE_MAPPING = 3
+_REHYDRATE_SET = 4
+_REHYDRATE_FROZENSET = 5
+_REHYDRATE_OBJECT = 6
+
+_REHYDRATE_LEAF_TYPES = (str, int, float, bool, type(None), torch.dtype, torch.device, BlobRef)
+_REHYDRATE_KINDS: weakref.WeakKeyDictionary[type, int] = weakref.WeakKeyDictionary()
+
+
+def _rebuild_tuple_value(value: tuple[Any, ...], items: Iterable[Any]) -> tuple[Any, ...]:
+    """Rebuild a tuple-like container without erasing its public type.
+
+    Parameters
+    ----------
+    value:
+        Source tuple-like container.
+    items:
+        Rehydrated child values.
+
+    Returns
+    -------
+    tuple[Any, ...]
+        Rebuilt tuple subclass, or a plain tuple when reconstruction is unsupported.
+    """
+
+    materialized = tuple(items)
+    if isinstance(value, torch.Size):
+        return torch.Size(materialized)
+    maker = getattr(type(value), "_make", None)
+    if callable(maker):
+        try:
+            return maker(materialized)
+        except (TypeError, ValueError):
+            return materialized
+    if type(value) is not tuple:
+        try:
+            return type(value)(materialized)
+        except (TypeError, ValueError):
+            return materialized
+    return materialized
+
+
+def _rehydrate_node_kind(value_type: type) -> int:
+    """Classify one node type for :func:`_rehydrate_object`, memoized per type.
+
+    Same branch order as the ``isinstance`` chain it replaces: leaf types (which
+    include ``BlobRef``, resolved by the caller, not walked) first, then ``tuple``,
+    ``list``, mappings, and ``set``.
+    """
+
+    if issubclass(value_type, _REHYDRATE_LEAF_TYPES):
+        kind = _REHYDRATE_LEAF
+    elif issubclass(value_type, tuple):
+        kind = _REHYDRATE_TUPLE
+    elif issubclass(value_type, list):
+        kind = _REHYDRATE_LIST
+    elif issubclass(value_type, dict):
+        kind = _REHYDRATE_MAPPING
+    elif issubclass(value_type, set):
+        kind = _REHYDRATE_SET
+    elif issubclass(value_type, frozenset):
+        kind = _REHYDRATE_FROZENSET
+    else:
+        kind = _REHYDRATE_OBJECT
+    _REHYDRATE_KINDS[value_type] = kind
+    return kind
+
+
 def _rehydrate_object(
     value: Any,
-    *,
     manifest_index: Mapping[str, dict[str, Any] | TensorEntry],
     bundle_path: Path,
+    resolved_blobs_dir: Path,
     lazy: bool,
     map_location: str | torch.device,
     materialize_nested: bool,
     payload_hints: PayloadLoadHints | Mapping[str, Any] | None,
     audit_only_payloads: bool,
     payload_statuses: list[str],
-    seen: set[int],
+    seen: dict[int, Any],
+    depth: int = 0,
 ) -> Any:
     """Walk a rehydrated object graph and materialize blob refs in place."""
 
-    if isinstance(value, (str, int, float, bool, type(None), torch.dtype, torch.device, BlobRef)):
-        return value
-    if isinstance(value, tuple):
-        return tuple(
-            _rehydrate_object(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                lazy=lazy,
-                map_location=map_location,
-                materialize_nested=materialize_nested,
-                payload_hints=payload_hints,
-                audit_only_payloads=audit_only_payloads,
-                payload_statuses=payload_statuses,
-                seen=seen,
-            )
-            for item in value
+    if depth > _PORTABLE_WALK_MAX_DEPTH:
+        raise TorchLensIOError(
+            f"Portable metadata exceeds the maximum depth of {_PORTABLE_WALK_MAX_DEPTH}."
         )
-    if isinstance(value, list):
+
+    # One cached type lookup replaces the eight-way ``isinstance`` chain this branch
+    # table re-ran for every one of the ~226k nodes a ResNet load walks. The three
+    # former mapping branches (``OrderedDict`` / ``defaultdict`` / ``dict``) had
+    # byte-identical in-place bodies and are one branch; immutable frozensets use
+    # their own rebuilding branch so nested blob references are not skipped.
+    value_type = type(value)
+    kind = _REHYDRATE_KINDS.get(value_type)
+    if kind is None:
+        kind = _rehydrate_node_kind(value_type)
+    if kind == _REHYDRATE_LEAF:
+        return value
+    obj_id = id(value)
+    cached = seen.get(obj_id)
+    if cached is _REHYDRATE_IN_PROGRESS:
+        raise TorchLensIOError("Portable metadata contains a cycle through an immutable container.")
+    if cached is not None:
+        return cached
+    if kind == _REHYDRATE_TUPLE:
+        _pin_in_memo(seen, value)
+        seen[obj_id] = _REHYDRATE_IN_PROGRESS
+        rebuilt_tuple = _rebuild_tuple_value(
+            value,
+            (
+                _rehydrate_object(
+                    item,
+                    manifest_index,
+                    bundle_path,
+                    resolved_blobs_dir,
+                    lazy,
+                    map_location,
+                    materialize_nested,
+                    payload_hints,
+                    audit_only_payloads,
+                    payload_statuses,
+                    seen,
+                    depth + 1,
+                )
+                for item in value
+            ),
+        )
+        seen[obj_id] = rebuilt_tuple
+        return rebuilt_tuple
+    if kind == _REHYDRATE_LIST:
+        seen[obj_id] = value
         for index, item in enumerate(value):
             value[index] = _rehydrate_object(
                 item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                lazy=lazy,
-                map_location=map_location,
-                materialize_nested=materialize_nested,
-                payload_hints=payload_hints,
-                audit_only_payloads=audit_only_payloads,
-                payload_statuses=payload_statuses,
-                seen=seen,
+                manifest_index,
+                bundle_path,
+                resolved_blobs_dir,
+                lazy,
+                map_location,
+                materialize_nested,
+                payload_hints,
+                audit_only_payloads,
+                payload_statuses,
+                seen,
+                depth + 1,
             )
         return value
-    if isinstance(value, OrderedDict):
+    if kind == _REHYDRATE_MAPPING:
+        seen[obj_id] = value
         for key, item in list(value.items()):
             value[key] = _rehydrate_object(
                 item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                lazy=lazy,
-                map_location=map_location,
-                materialize_nested=materialize_nested,
-                payload_hints=payload_hints,
-                audit_only_payloads=audit_only_payloads,
-                payload_statuses=payload_statuses,
-                seen=seen,
+                manifest_index,
+                bundle_path,
+                resolved_blobs_dir,
+                lazy,
+                map_location,
+                materialize_nested,
+                payload_hints,
+                audit_only_payloads,
+                payload_statuses,
+                seen,
+                depth + 1,
             )
         return value
-    if isinstance(value, defaultdict):
-        for key, item in list(value.items()):
-            value[key] = _rehydrate_object(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                lazy=lazy,
-                map_location=map_location,
-                materialize_nested=materialize_nested,
-                payload_hints=payload_hints,
-                audit_only_payloads=audit_only_payloads,
-                payload_statuses=payload_statuses,
-                seen=seen,
-            )
-        return value
-    if isinstance(value, dict):
-        for key, item in list(value.items()):
-            value[key] = _rehydrate_object(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                lazy=lazy,
-                map_location=map_location,
-                materialize_nested=materialize_nested,
-                payload_hints=payload_hints,
-                audit_only_payloads=audit_only_payloads,
-                payload_statuses=payload_statuses,
-                seen=seen,
-            )
-        return value
-    if isinstance(value, set):
-        return {
+    if kind == _REHYDRATE_SET:
+        rebuilt_set: set[Any] = set()
+        _pin_in_memo(seen, value)
+        seen[obj_id] = rebuilt_set
+        rebuilt_set.update(
             _rehydrate_object(
                 item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                lazy=lazy,
-                map_location=map_location,
-                materialize_nested=materialize_nested,
-                payload_hints=payload_hints,
-                audit_only_payloads=audit_only_payloads,
-                payload_statuses=payload_statuses,
-                seen=seen,
+                manifest_index,
+                bundle_path,
+                resolved_blobs_dir,
+                lazy,
+                map_location,
+                materialize_nested,
+                payload_hints,
+                audit_only_payloads,
+                payload_statuses,
+                seen,
+                depth + 1,
             )
             for item in value
-        }
+        )
+        return rebuilt_set
+    if kind == _REHYDRATE_FROZENSET:
+        _pin_in_memo(seen, value)
+        seen[obj_id] = _REHYDRATE_IN_PROGRESS
+        rebuilt_frozenset = frozenset(
+            _rehydrate_object(
+                item,
+                manifest_index,
+                bundle_path,
+                resolved_blobs_dir,
+                lazy,
+                map_location,
+                materialize_nested,
+                payload_hints,
+                audit_only_payloads,
+                payload_statuses,
+                seen,
+                depth + 1,
+            )
+            for item in value
+        )
+        seen[obj_id] = rebuilt_frozenset
+        return rebuilt_frozenset
 
-    spec = getattr(type(value), "PORTABLE_STATE_SPEC", None)
+    seen[obj_id] = value
+
+    spec = getattr(value_type, "PORTABLE_STATE_SPEC", None)
     if spec is None:
         return value
-
-    obj_id = id(value)
-    if obj_id in seen:
-        return value
-    seen.add(obj_id)
 
     for field_name, field_value in list(state_items(value)):
         if field_name not in spec:
             continue
-        policy = spec[field_name]
+        # Registered pre-release fields materialize under their SWITCHED-ON
+        # persisting policy, mirroring scrub's write-side override -- a
+        # declared-DROP field saved BLOB_RECURSIVE under the switch must
+        # rehydrate its nested BlobRefs, not hand them back dead.
+        policy = _prerelease.effective_policy(value_type, field_name, spec[field_name])
         if policy == FieldPolicy.BLOB:
             if isinstance(field_value, BlobRef):
                 ref_field_name = _lazy_ref_field_name(field_name)
@@ -527,6 +592,7 @@ def _rehydrate_object(
                                 bundle_path,
                                 map_location,
                                 payload_hints,
+                                resolved_blobs_dir,
                             )
                         except BackendRuntimeCompatibilityError:
                             if _payload_hints_are_explicit(payload_hints):
@@ -545,6 +611,7 @@ def _rehydrate_object(
                             bundle_path,
                             map_location,
                             payload_hints,
+                            resolved_blobs_dir,
                         )
                     except BackendRuntimeCompatibilityError:
                         if _payload_hints_are_explicit(payload_hints):
@@ -562,6 +629,7 @@ def _rehydrate_object(
                     field_value,
                     manifest_index=manifest_index,
                     bundle_path=bundle_path,
+                    resolved_blobs_dir=resolved_blobs_dir,
                     map_location=map_location,
                     payload_hints=payload_hints,
                     payload_statuses=payload_statuses,
@@ -573,15 +641,17 @@ def _rehydrate_object(
                 field_name,
                 _rehydrate_object(
                     field_value,
-                    manifest_index=manifest_index,
-                    bundle_path=bundle_path,
-                    lazy=lazy,
-                    map_location=map_location,
-                    materialize_nested=materialize_nested,
-                    payload_hints=payload_hints,
-                    audit_only_payloads=audit_only_payloads,
-                    payload_statuses=payload_statuses,
-                    seen=seen,
+                    manifest_index,
+                    bundle_path,
+                    resolved_blobs_dir,
+                    lazy,
+                    map_location,
+                    materialize_nested,
+                    payload_hints,
+                    audit_only_payloads,
+                    payload_statuses,
+                    seen,
+                    depth + 1,
                 ),
             )
     return value
@@ -608,7 +678,7 @@ def _assign_rehydrated_field(value: Any, field_name: str, field_value: Any) -> N
     # ``Op._internal_set``) is bound and invoked; non-slotted classes have no
     # ``_internal_set`` on the class and fall through to the frozen/``setattr``
     # branch exactly as before.
-    internal_set = inspect.getattr_static(type(value), "_internal_set", None)
+    internal_set = static_class_attr(type(value), "_internal_set", None)
     if isinstance(internal_set, types.FunctionType):
         internal_set.__get__(value, type(value))(field_name, field_value)
     elif dataclasses.is_dataclass(value) and getattr(type(value), "__dataclass_params__").frozen:
@@ -622,11 +692,19 @@ def _materialize_recursive_blob_refs(
     *,
     manifest_index: Mapping[str, dict[str, Any] | TensorEntry],
     bundle_path: Path,
+    resolved_blobs_dir: Path,
     map_location: str | torch.device,
     payload_hints: PayloadLoadHints | Mapping[str, Any] | None,
     payload_statuses: list[str],
+    active_ids: frozenset[int] = frozenset(),
+    depth: int = 0,
 ) -> Any:
     """Materialize ``BlobRef`` objects inside nested containers and portable objects."""
+
+    if depth > _PORTABLE_WALK_MAX_DEPTH:
+        raise TorchLensIOError(
+            f"Portable payload exceeds the maximum depth of {_PORTABLE_WALK_MAX_DEPTH}."
+        )
 
     if isinstance(value, BlobRef):
         try:
@@ -636,87 +714,56 @@ def _materialize_recursive_blob_refs(
                 bundle_path,
                 map_location,
                 payload_hints,
+                resolved_blobs_dir,
             )
         except BackendRuntimeCompatibilityError:
             if _payload_hints_are_explicit(payload_hints):
                 raise
             payload_statuses.append("audit_only_missing_runtime")
             return value
+    if isinstance(value, (list, tuple, dict, set, frozenset)):
+        value_id = id(value)
+        if value_id in active_ids:
+            raise TorchLensIOError("Portable payload contains a cyclic container.")
+        child_active_ids = active_ids | {value_id}
+    else:
+        child_active_ids = active_ids
+
+    def recurse(item: Any) -> Any:
+        """Materialize one child at the next portable-walk depth."""
+
+        return _materialize_recursive_blob_refs(
+            item,
+            manifest_index=manifest_index,
+            bundle_path=bundle_path,
+            resolved_blobs_dir=resolved_blobs_dir,
+            map_location=map_location,
+            payload_hints=payload_hints,
+            payload_statuses=payload_statuses,
+            active_ids=child_active_ids,
+            depth=depth + 1,
+        )
+
     if isinstance(value, list):
-        return [
-            _materialize_recursive_blob_refs(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                map_location=map_location,
-                payload_hints=payload_hints,
-                payload_statuses=payload_statuses,
-            )
-            for item in value
-        ]
+        return [recurse(item) for item in value]
     if isinstance(value, tuple):
-        return tuple(
-            _materialize_recursive_blob_refs(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                map_location=map_location,
-                payload_hints=payload_hints,
-                payload_statuses=payload_statuses,
-            )
-            for item in value
+        return _rebuild_tuple_value(
+            value,
+            (recurse(item) for item in value),
         )
     if isinstance(value, OrderedDict):
-        return OrderedDict(
-            (
-                key,
-                _materialize_recursive_blob_refs(
-                    item,
-                    manifest_index=manifest_index,
-                    bundle_path=bundle_path,
-                    map_location=map_location,
-                    payload_hints=payload_hints,
-                    payload_statuses=payload_statuses,
-                ),
-            )
-            for key, item in value.items()
-        )
+        return OrderedDict((key, recurse(item)) for key, item in value.items())
     if isinstance(value, defaultdict):
         materialized: defaultdict[Any, Any] = defaultdict(value.default_factory)
         for key, item in value.items():
-            materialized[key] = _materialize_recursive_blob_refs(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                map_location=map_location,
-                payload_hints=payload_hints,
-                payload_statuses=payload_statuses,
-            )
+            materialized[key] = recurse(item)
         return materialized
     if isinstance(value, dict):
-        return {
-            key: _materialize_recursive_blob_refs(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                map_location=map_location,
-                payload_hints=payload_hints,
-                payload_statuses=payload_statuses,
-            )
-            for key, item in value.items()
-        }
+        return {key: recurse(item) for key, item in value.items()}
     if isinstance(value, set):
-        return {
-            _materialize_recursive_blob_refs(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                map_location=map_location,
-                payload_hints=payload_hints,
-                payload_statuses=payload_statuses,
-            )
-            for item in value
-        }
+        return {recurse(item) for item in value}
+    if isinstance(value, frozenset):
+        return frozenset(recurse(item) for item in value)
     spec = getattr(type(value), "PORTABLE_STATE_SPEC", None)
     if spec is not None and type(value).__name__ == "GradientRecord":
         for field_name, field_value in list(state_items(value)):
@@ -725,14 +772,7 @@ def _materialize_recursive_blob_refs(
             _assign_rehydrated_field(
                 value,
                 field_name,
-                _materialize_recursive_blob_refs(
-                    field_value,
-                    manifest_index=manifest_index,
-                    bundle_path=bundle_path,
-                    map_location=map_location,
-                    payload_hints=payload_hints,
-                    payload_statuses=payload_statuses,
-                ),
+                recurse(field_value),
             )
         return value
     return value
@@ -744,6 +784,7 @@ def _materialize_blob_ref(
     bundle_path: Path,
     map_location: str | torch.device,
     payload_hints: PayloadLoadHints | Mapping[str, Any] | None,
+    resolved_blobs_dir: Path,
 ) -> Any:
     """Load one payload blob from disk using safetensors and its codec.
 
@@ -757,6 +798,10 @@ def _materialize_blob_ref(
         Root bundle directory containing the blob files.
     map_location:
         Target device for decoded tensors.
+    payload_hints:
+        Optional backend payload hints used during materialization.
+    resolved_blobs_dir:
+        Canonical blob containment root for this load operation.
 
     Returns
     -------
@@ -772,7 +817,11 @@ def _materialize_blob_ref(
         payload_hints=payload_hints,
     )
     if tensor_ref is not None:
-        return tensor_ref.materialize(map_location=map_location, payload_hints=payload_hints)
+        return tensor_ref.materialize(
+            map_location=map_location,
+            payload_hints=payload_hints,
+            resolved_blobs_dir=resolved_blobs_dir,
+        )
 
     if blob_ref.blob_id not in manifest_index:
         raise TorchLensIOError(f"Manifest is missing blob_id={blob_ref.blob_id}.")
@@ -782,16 +831,35 @@ def _materialize_blob_ref(
         if isinstance(entry, TensorEntry)
         else entry.get("relative_path", f"blobs/{blob_ref.blob_id}.safetensors")
     )
-    blob_path = resolve_bundle_blob_path(bundle_path, relative_path)
+    blob_path = resolve_bundle_blob_path(
+        bundle_path,
+        relative_path,
+        resolved_blobs_dir=resolved_blobs_dir,
+    )
     if not blob_path.exists():
         raise TorchLensIOError(f"Tensor blob not found at {blob_path}.")
 
+    # The digest and the load are two separate opens of the same path (the load
+    # is mmap-backed). Bracket the hash with the file identity and re-check it
+    # before the load -- the same R59 TOCTOU discipline as lazy.py -- so a
+    # rename-replace between integrity check and load is refused rather than
+    # admitting bytes that were never hashed.
+    try:
+        pre_hash_identity = _file_identity(blob_path.stat())
+    except OSError as exc:
+        raise TorchLensIOError(f"Failed to access blob at {blob_path}.") from exc
     observed_sha256 = sha256_of_file(blob_path)
     expected_sha256 = entry.sha256 if isinstance(entry, TensorEntry) else entry.get("sha256")
     if expected_sha256 is not None and observed_sha256 != expected_sha256:
         raise TorchLensIOError(
             f"blob at {blob_path} sha256 mismatch; expected {expected_sha256} got {observed_sha256}"
         )
+    try:
+        pre_load_identity = _file_identity(blob_path.stat())
+    except OSError as exc:
+        raise TorchLensIOError(f"Failed to access blob at {blob_path}.") from exc
+    if pre_load_identity != pre_hash_identity:
+        raise TorchLensIOError(f"blob at {blob_path} changed between integrity check and load.")
 
     tensor = _load_safetensors_tensor(blob_path, map_location, entry)
     return materialize_transport_tensor(
@@ -1143,14 +1211,16 @@ def rehydrate_nested(
     manifest = Manifest.read(manifest_path)
     manifest_index = _build_manifest_index(manifest)
     payload_statuses: list[str] = []
+    resolved_blobs_dir = resolve_bundle_blobs_dir(bundle_path)
     _rehydrate_nested_object(
         trace,
         manifest_index=manifest_index,
         bundle_path=bundle_path,
+        resolved_blobs_dir=resolved_blobs_dir,
         map_location=map_location,
         payload_hints=payload_hints,
         payload_statuses=payload_statuses,
-        seen=set(),
+        seen={},
     )
     module_logs = getattr(trace, "_module_logs", None)
     if module_logs is not None:
@@ -1158,10 +1228,11 @@ def rehydrate_nested(
             module_logs,
             manifest_index=manifest_index,
             bundle_path=bundle_path,
+            resolved_blobs_dir=resolved_blobs_dir,
             map_location=map_location,
             payload_hints=payload_hints,
             payload_statuses=payload_statuses,
-            seen=set(),
+            seen={},
         )
     if payload_statuses:
         _set_payload_load_status(trace, manifest_index, payload_statuses)
@@ -1172,10 +1243,12 @@ def _rehydrate_nested_object(
     *,
     manifest_index: Mapping[str, dict[str, Any] | TensorEntry],
     bundle_path: Path,
+    resolved_blobs_dir: Path,
     map_location: str | torch.device,
     payload_hints: PayloadLoadHints | Mapping[str, Any] | None,
     payload_statuses: list[str],
-    seen: set[int],
+    seen: dict[int, Any],
+    depth: int = 0,
 ) -> Any:
     """Walk an object graph and materialize only nested ``BlobRef`` fields.
 
@@ -1187,6 +1260,8 @@ def _rehydrate_nested_object(
         Manifest tensor entries indexed by blob id.
     bundle_path:
         Root bundle directory containing the blob files.
+    resolved_blobs_dir:
+        Canonical blob containment root for this materialization operation.
     map_location:
         Target device for decoded tensors.
     payload_hints:
@@ -1200,96 +1275,151 @@ def _rehydrate_nested_object(
         Original value, potentially with nested fields replaced in place.
     """
 
+    if depth > _PORTABLE_WALK_MAX_DEPTH:
+        raise TorchLensIOError(
+            f"Portable metadata exceeds the maximum depth of {_PORTABLE_WALK_MAX_DEPTH}."
+        )
     if isinstance(value, (str, int, float, bool, type(None), torch.dtype, torch.device, BlobRef)):
         return value
+    obj_id = id(value)
+    cached = seen.get(obj_id)
+    if cached is _REHYDRATE_IN_PROGRESS:
+        raise TorchLensIOError("Portable metadata contains a cycle through an immutable container.")
+    if cached is not None:
+        return cached
     if isinstance(value, tuple):
-        return tuple(
-            _rehydrate_nested_object(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                map_location=map_location,
-                payload_hints=payload_hints,
-                payload_statuses=payload_statuses,
-                seen=seen,
-            )
-            for item in value
+        _pin_in_memo(seen, value)
+        seen[obj_id] = _REHYDRATE_IN_PROGRESS
+        rebuilt_tuple = _rebuild_tuple_value(
+            value,
+            (
+                _rehydrate_nested_object(
+                    item,
+                    manifest_index=manifest_index,
+                    bundle_path=bundle_path,
+                    resolved_blobs_dir=resolved_blobs_dir,
+                    map_location=map_location,
+                    payload_hints=payload_hints,
+                    payload_statuses=payload_statuses,
+                    seen=seen,
+                    depth=depth + 1,
+                )
+                for item in value
+            ),
         )
+        seen[obj_id] = rebuilt_tuple
+        return rebuilt_tuple
     if isinstance(value, list):
+        seen[obj_id] = value
         for index, item in enumerate(value):
             value[index] = _rehydrate_nested_object(
                 item,
                 manifest_index=manifest_index,
                 bundle_path=bundle_path,
+                resolved_blobs_dir=resolved_blobs_dir,
                 map_location=map_location,
                 payload_hints=payload_hints,
                 payload_statuses=payload_statuses,
                 seen=seen,
+                depth=depth + 1,
             )
         return value
     if isinstance(value, OrderedDict):
+        seen[obj_id] = value
         for key, item in list(value.items()):
             value[key] = _rehydrate_nested_object(
                 item,
                 manifest_index=manifest_index,
                 bundle_path=bundle_path,
+                resolved_blobs_dir=resolved_blobs_dir,
                 map_location=map_location,
                 payload_hints=payload_hints,
                 payload_statuses=payload_statuses,
                 seen=seen,
+                depth=depth + 1,
             )
         return value
     if isinstance(value, defaultdict):
+        seen[obj_id] = value
         for key, item in list(value.items()):
             value[key] = _rehydrate_nested_object(
                 item,
                 manifest_index=manifest_index,
                 bundle_path=bundle_path,
+                resolved_blobs_dir=resolved_blobs_dir,
                 map_location=map_location,
                 payload_hints=payload_hints,
                 payload_statuses=payload_statuses,
                 seen=seen,
+                depth=depth + 1,
             )
         return value
     if isinstance(value, dict):
+        seen[obj_id] = value
         for key, item in list(value.items()):
             value[key] = _rehydrate_nested_object(
                 item,
                 manifest_index=manifest_index,
                 bundle_path=bundle_path,
+                resolved_blobs_dir=resolved_blobs_dir,
                 map_location=map_location,
                 payload_hints=payload_hints,
                 payload_statuses=payload_statuses,
                 seen=seen,
+                depth=depth + 1,
             )
         return value
     if isinstance(value, set):
-        return {
+        rebuilt_set: set[Any] = set()
+        _pin_in_memo(seen, value)
+        seen[obj_id] = rebuilt_set
+        rebuilt_set.update(
             _rehydrate_nested_object(
                 item,
                 manifest_index=manifest_index,
                 bundle_path=bundle_path,
+                resolved_blobs_dir=resolved_blobs_dir,
                 map_location=map_location,
                 payload_hints=payload_hints,
                 payload_statuses=payload_statuses,
                 seen=seen,
+                depth=depth + 1,
             )
             for item in value
-        }
+        )
+        return rebuilt_set
+    if isinstance(value, frozenset):
+        _pin_in_memo(seen, value)
+        seen[obj_id] = _REHYDRATE_IN_PROGRESS
+        rebuilt_frozenset = frozenset(
+            _rehydrate_nested_object(
+                item,
+                manifest_index=manifest_index,
+                bundle_path=bundle_path,
+                resolved_blobs_dir=resolved_blobs_dir,
+                map_location=map_location,
+                payload_hints=payload_hints,
+                payload_statuses=payload_statuses,
+                seen=seen,
+                depth=depth + 1,
+            )
+            for item in value
+        )
+        seen[obj_id] = rebuilt_frozenset
+        return rebuilt_frozenset
+
+    seen[obj_id] = value
 
     spec = getattr(type(value), "PORTABLE_STATE_SPEC", None)
     if spec is None:
         return value
 
-    obj_id = id(value)
-    if obj_id in seen:
-        return value
-    seen.add(obj_id)
-
     for field_name, field_value in list(state_items(value)):
         if field_name not in spec:
             continue
-        policy = spec[field_name]
+        # Same switched-on override as the top-level walk: nested records'
+        # registered pre-release fields rehydrate with their persisting policy.
+        policy = _prerelease.effective_policy(type(value), field_name, spec[field_name])
         if policy == FieldPolicy.BLOB_RECURSIVE:
             _assign_rehydrated_field(
                 value,
@@ -1298,6 +1428,7 @@ def _rehydrate_nested_object(
                     field_value,
                     manifest_index=manifest_index,
                     bundle_path=bundle_path,
+                    resolved_blobs_dir=resolved_blobs_dir,
                     map_location=map_location,
                     payload_hints=payload_hints,
                     payload_statuses=payload_statuses,
@@ -1311,10 +1442,12 @@ def _rehydrate_nested_object(
                     field_value,
                     manifest_index=manifest_index,
                     bundle_path=bundle_path,
+                    resolved_blobs_dir=resolved_blobs_dir,
                     map_location=map_location,
                     payload_hints=payload_hints,
                     payload_statuses=payload_statuses,
                     seen=seen,
+                    depth=depth + 1,
                 ),
             )
     return value

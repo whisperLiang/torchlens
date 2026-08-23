@@ -6,6 +6,8 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
+import pytest
+
 from torchlens import constants
 from torchlens._io import FieldPolicy
 from torchlens.data_classes.buffer import Buffer
@@ -17,6 +19,11 @@ from torchlens.data_classes.module import Module, ModuleCall
 from torchlens.data_classes.op import Op
 from torchlens.data_classes.param import Param
 from torchlens.data_classes.trace import Trace
+
+# Static contract checks over constants only: cheap enough for the commit-level
+# gate, which is exactly where a schema drift has to become visible (the
+# 00bc67d3 KEEP->DROP flips were invisible to -m smoke for want of a marker).
+pytestmark = pytest.mark.smoke
 
 
 @dataclass(frozen=True)
@@ -38,32 +45,34 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
         # _grad_fn_param_refs, _phase_timings, and _replay_arg_version_data_complete
         # were promoted into MODEL_LOG_FIELD_ORDER (cert10); _buffer_persistence
         # was promoted into MODEL_LOG_FIELD_ORDER too (r81 buffer-rung parity
-        # lockstep), so only the two remaining portable-only fields stay
-        # documented here.
+        # lockstep); ops_with_params left this set when 00bc67d3 flipped the
+        # computed field KEEP->DROP (recomputed on load, nothing portable left
+        # to document).
+        # The tlspec v8 bump made three unordered runtime rows portable:
+        # the L3 primitive profile and the two L9 backward-residual markers.
         portable_only_fields=frozenset(
             {
                 "_buffer_initial_values",
-                "ops_with_params",
+                "_primitive_op_profile",
+                "checkpoint_invocation_witness",
+                "grad_fn_timing_provenance",
             }
         ),
         dropped_display_fields=frozenset(
             {
                 "_code_context_cache",
+                # _distributed_plane_p is the L8/C2 session-only physical
+                # dispatch journal used by the capture-fidelity census. It is
+                # ordered for diagnostic visibility but never persisted.
+                "_distributed_plane_p",
+                "_fast_run_session",
                 "_intervention_spec",
                 "_last_hook_handle_ids",
                 "_out_dedup_mode",
                 "_out_hash_cache",
                 "_out_identity_cache",
                 "_output_transform",
-                "_runnable_capture_state",
-                "_runnable_descriptor",
-                "_runnable_embedded_state",
-                "_runnable_archived_activations",
-                "_runnable_first_mismatch",
-                "_runnable_path_faithfulness",
-                "_runnable_poisoned",
-                "_runnable_readiness",
-                "_runnable_staged_user_state",
+                "_runnable",
                 "_source_model_ref",
                 "_transform",
                 "_visualizer_dir",
@@ -77,8 +86,10 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
                 "capture_thread_activity_detected",
                 "capture_thread_count_end",
                 "capture_thread_count_start",
-                "capture_verification_reason",
-                "capture_verified",
+                # capture_verified / capture_verification_reason left this
+                # ledger in fixwave-5 (2020c7c2): the negative verification
+                # verdict now PERSISTS across save/load (FieldPolicy.KEEP).
+                "rescue_rerun",
                 "completeness_decompositions",
                 "completeness_diagnostics",
                 "completeness_witness_accounted_count",
@@ -88,8 +99,6 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
                 "completeness_witness_mode",
                 "completeness_witness_unaccounted_count",
                 "completeness_witness_verified",
-                "detached_patch_epoch",
-                "detached_patch_policy",
                 "escape_detector_backward_coverage",
                 "escape_detector_callback_ns",
                 "escape_detector_event_count",
@@ -98,6 +107,10 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
                 "escape_diagnostics",
                 "facet_registry_snapshot",
                 "grad_transform",
+                # grouping/grouping_policy, distributed_scope,
+                # intervention_audit, and structure_only left this ledger at
+                # the tlspec v8 coordinated bump: all five now persist
+                # (FieldPolicy.KEEP) with load validation.
                 "last_run",
                 "layer_visualizers",
                 "module_filter",
@@ -118,6 +131,9 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
                 "activation_transform",
                 "arg_expressions",
                 "args_template",
+                # edge_substitutions / edge_replacement_stamps and site_key
+                # left this ledger at the tlspec v8 coordinated bump: all
+                # three now persist with load validation.
                 "func",
                 "grad_fn",
                 "grad_fn_handle",
@@ -128,6 +144,10 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
                 "input_shapes",
                 # "interventions" became a KEEP (portable) ordered field in
                 # cert10, so it is no longer a documented DROP display field.
+                # The public computed flag flipped KEEP->DROP in 00bc67d3; the
+                # raw _is_in_conditional_body datum stays KEEP (portable-only
+                # above), so the display field is recomputed on load.
+                "is_in_conditional_body",
                 "is_internally_initialized",
                 "kwargs_template",
                 "num_inputs",
@@ -144,8 +164,21 @@ FIELD_ORDER_CASES: tuple[FieldOrderCase, ...] = (
         # into LAYER_LOG_FIELD_ORDER (cert10); only the private conditional-body
         # flag remains portable-only.
         portable_only_fields=frozenset({"_is_in_conditional_body"}),
+        # source_trace, transformed_out/transformed_grad, and
+        # is_in_conditional_body joined the DROP set in 00bc67d3: Layer is a
+        # presenter over Op rows, so these are recomputed views / live payload
+        # handles, not portable state.
         dropped_display_fields=frozenset(
-            {"activation_transform", "func", "grad_fn", "grad_fn_handle"}
+            {
+                "activation_transform",
+                "func",
+                "grad_fn",
+                "grad_fn_handle",
+                "is_in_conditional_body",
+                "source_trace",
+                "transformed_grad",
+                "transformed_out",
+            }
         ),
     ),
     FieldOrderCase(

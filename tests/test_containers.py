@@ -12,6 +12,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.ir.container import HFKey, NamedField, TupleIndex
+from torchlens.utils.collections import assign_into_container_by_path
 
 
 class DemoModelOutput(dict):
@@ -121,6 +122,72 @@ class PairBox:
 
     left: torch.Tensor
     right: torch.Tensor
+
+
+class FailingCopyMapping:
+    """Mapping-like container whose writes fail after copying."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        """Store the underlying mapping payload.
+
+        Parameters
+        ----------
+        payload:
+            Initial mapping contents.
+        """
+
+        self._payload = dict(payload)
+
+    def keys(self) -> Any:
+        """Return the mapping keys.
+
+        Returns
+        -------
+        Any
+            Underlying key view.
+        """
+
+        return self._payload.keys()
+
+    def __getitem__(self, key: Any) -> Any:
+        """Return one payload entry.
+
+        Parameters
+        ----------
+        key:
+            Mapping key.
+
+        Returns
+        -------
+        Any
+            Stored value.
+        """
+
+        return self._payload[key]
+
+    def copy(self) -> FailingCopyMapping:
+        """Return a same-type shallow copy.
+
+        Returns
+        -------
+        FailingCopyMapping
+            Copied mapping.
+        """
+
+        return type(self)(self._payload)
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        """Reject all writes to exercise the fallback assignment path.
+
+        Parameters
+        ----------
+        key:
+            Mapping key.
+        value:
+            Proposed new value.
+        """
+
+        raise RuntimeError("write blocked")
 
 
 class PairBoxModel(nn.Module):
@@ -248,6 +315,13 @@ def test_capture_container_structure_default_off_preserves_output_shape_metadata
     )
     with pytest.raises(ValueError, match="No reconstructable final-output container"):
         default_trace.reconstruct_output()
+
+
+def test_assign_into_container_by_path_raises_on_mapping_assignment_failure() -> None:
+    """Mapping-like assignment failures must not look like successful no-ops."""
+
+    with pytest.raises(TypeError, match="cannot assign into FailingCopyMapping"):
+        assign_into_container_by_path(FailingCopyMapping({"key": 1}), ("key",), 2)
 
 
 def test_opaque_nested_output_fallback_preserves_each_tensor_leaf() -> None:
@@ -382,3 +456,32 @@ class StackTupleOutputModel(nn.Module):
 
         stacked = torch.stack([left, right])
         return stacked, right - left
+
+
+def test_trace_container_capability_fails_closed_on_unknown_backend() -> None:
+    """An unresolvable backend never earns the STRONGEST capability (b1 R22 F2).
+
+    ``_trace_container_capability`` returned ``"full_spec"`` -- full structure
+    plus ``supports_reconstruct=True`` -- both when the backend lookup raised
+    and for a backend that never declared container structure. Unknown
+    backends now read ``"none"`` (fail closed); a legacy trace WITHOUT a
+    backend field resolves the torch default instead of a hardcoded claim.
+    """
+
+    from types import SimpleNamespace
+
+    from torchlens.backends import get_backend_spec
+    from torchlens.data_classes.container import Role, _trace_container_capability
+
+    unknown = SimpleNamespace(backend="no_such_backend_zzz")
+    assert _trace_container_capability(unknown, Role.CALL_OUTPUT) == "none"
+    assert _trace_container_capability(unknown, Role.MODEL_INPUT) == "none"
+
+    legacy = SimpleNamespace()  # no backend attribute at all
+    torch_caps = get_backend_spec("torch").capabilities
+    assert _trace_container_capability(legacy, Role.CALL_OUTPUT) == str(
+        torch_caps.output_container_structure
+    )
+    assert _trace_container_capability(legacy, Role.MODEL_INPUT) == str(
+        torch_caps.input_container_structure
+    )

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import pickle
+from pathlib import Path
 from typing import Any
 
 import pytest
-from safetensors.torch import load_file
 import torch
+from safetensors.torch import load_file
 from torch import nn
 
 import torchlens as tl
@@ -378,7 +378,7 @@ def test_include_weights_requires_runnable_save_level(tmp_path: Path) -> None:
 
     trace = _capture(WeightPayloadModel().eval())
 
-    with pytest.raises(ValueError, match="requires level='runnable'"):
+    with pytest.raises(ValueError, match="set level='runnable' or set include_weights=False"):
         trace.save(tmp_path / "portable.tlspec", include_weights=True)
 
 
@@ -473,7 +473,7 @@ def test_loaded_runnable_embedded_state_trace_pickles_and_deepcopies(tmp_path: P
         inputs=torch.ones(5, 3), on_divergence=DivergencePolicy.RETURN_DIVERGED
     ).trace
     for revived in (pickle.loads(pickle.dumps(diverged)), copy.deepcopy(diverged)):
-        assert revived.__dict__.get("_runnable_poisoned") is True
+        assert revived._runnable.poisoned is True
         with pytest.raises(PoisonedRunError):
             revived.to_pandas()
 
@@ -487,11 +487,11 @@ def test_capture_state_trace_pickles_deepcopies_and_forks() -> None:
         trace = _capture(model)
 
     for copied in (pickle.loads(pickle.dumps(trace)), copy.deepcopy(trace)):
-        state = copied.__dict__.get("_runnable_capture_state")
+        state = copied._runnable.capture_state
         assert isinstance(state, dict)
-        assert state is not trace._runnable_capture_state
+        assert state is not trace._runnable.capture_state
         for name, value in model.state_dict().items():
             assert torch.equal(state[name], value)
 
     fork = trace.fork()
-    assert fork._runnable_capture_state is trace._runnable_capture_state
+    assert fork._runnable.capture_state is trace._runnable.capture_state

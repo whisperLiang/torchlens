@@ -9,6 +9,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+_DEFAULT_PATH_IN_REPO = "torchlens_artifact.pkl"
+_DEFAULT_TARBALL_PATH_IN_REPO = "torchlens_artifact.tar.gz"
+
 
 def push_to_hub(
     log_or_bundle_or_spec: Any,
@@ -16,7 +19,7 @@ def push_to_hub(
     *,
     token: str | None = None,
     private: bool | None = None,
-    path_in_repo: str = "torchlens_artifact.pkl",
+    path_in_repo: str = _DEFAULT_PATH_IN_REPO,
     commit_message: str = "Add TorchLens artifact",
     create_repo: bool = True,
     dry_run: bool = False,
@@ -56,7 +59,11 @@ def push_to_hub(
     Returns
     -------
     dict[str, Any]
-        Upload metadata including ``repo_id`` and ``path_in_repo``.
+        Upload metadata including ``repo_id``, ``path_in_repo``, and ``format``
+        (``"pickle"`` or ``"tar.gz"``). When the artifact must be packed as a
+        gzipped tar bundle and the caller left ``path_in_repo`` at its default,
+        the destination name is switched to a ``.tar.gz`` extension so a bundle
+        is never uploaded under a ``.pkl`` name.
 
     Raises
     ------
@@ -77,18 +84,22 @@ def push_to_hub(
             ) from exc
         api = HfApi(token=token)
 
+    payload, artifact_format = _artifact_bytes(log_or_bundle_or_spec, save_level=save_level)
+    if artifact_format == "tar.gz" and path_in_repo == _DEFAULT_PATH_IN_REPO:
+        path_in_repo = _DEFAULT_TARBALL_PATH_IN_REPO
+
     if dry_run:
-        payload = _artifact_bytes(log_or_bundle_or_spec, save_level=save_level)
         return {
             "repo_id": repo_id,
             "path_in_repo": path_in_repo,
             "size_bytes": len(payload),
+            "format": artifact_format,
             "dry_run": True,
         }
 
     with tempfile.TemporaryDirectory() as tmpdir:
         artifact_path = Path(tmpdir) / Path(path_in_repo).name
-        artifact_path.write_bytes(_artifact_bytes(log_or_bundle_or_spec, save_level=save_level))
+        artifact_path.write_bytes(payload)
         size_bytes = artifact_path.stat().st_size
         if api is None:
             raise RuntimeError("A Hugging Face API object is required when dry_run=False.")
@@ -105,13 +116,16 @@ def push_to_hub(
         "repo_id": repo_id,
         "path_in_repo": path_in_repo,
         "size_bytes": size_bytes,
+        "format": artifact_format,
         "dry_run": False,
         "upload_result": upload_result,
     }
 
 
-def _artifact_bytes(log_or_bundle_or_spec: Any, *, save_level: str = "portable") -> bytes:
-    """Serialize an artifact for Hub upload.
+def _artifact_bytes(
+    log_or_bundle_or_spec: Any, *, save_level: str = "portable"
+) -> tuple[bytes, str]:
+    """Serialize an artifact for Hub upload and report its serialized format.
 
     Parameters
     ----------
@@ -123,39 +137,34 @@ def _artifact_bytes(log_or_bundle_or_spec: Any, *, save_level: str = "portable")
 
     Returns
     -------
-    bytes
-        Pickle bytes when the object pickles directly. When direct pickling
-        fails (for example a ``Trace``/``Bundle`` retaining live ``grad_fn``
-        references, which is the default for any backward-eligible capture),
-        this scrubs the artifact through the same real ``.tlspec`` portable
-        bundle path used by :func:`torchlens.save`/``Bundle.save`` -- i.e. the
-        grad_fn/live-callable scrub is real, not a metadata stand-in -- and
-        returns the resulting bundle directory packed as a gzipped tar
-        archive. This never silently substitutes a metadata-only stub for
-        genuine artifact content.
+    tuple[bytes, str]
+        The serialized bytes and a format tag. A ``Trace``/``Bundle`` -- which
+        raw ``pickle.dumps`` would embed ``$HOME``, the username, and absolute
+        source/bundle/visualizer paths into (R62-1: a privacy leak to the one
+        PUBLIC sharing surface) -- is ALWAYS serialized through the same real,
+        privacy-scrubbed ``.tlspec`` portable bundle path used by
+        :func:`torchlens.save`/``Bundle.save`` and returned as a gzipped tar
+        archive with the tag ``"tar.gz"``. The scrub is real, not a metadata
+        stand-in. Only an object with NO portable-bundle save path (e.g. a plain
+        dict of user data the caller chose to push) is pickled directly and
+        tagged ``"pickle"``.
 
     Raises
     ------
     TorchLensIOError
-        If the artifact cannot be serialized at all (direct pickling fails
-        and no portable-bundle path applies, or the portable-bundle path
-        itself fails).
+        If the artifact cannot be serialized at all (the portable-bundle path
+        itself fails, or a no-bundle object fails to pickle).
     """
 
-    try:
-        return pickle.dumps(log_or_bundle_or_spec)
-    except Exception as direct_pickle_error:
-        from .._io import TorchLensIOError
+    from .._io import TorchLensIOError
 
-        saver = _resolve_bundle_saver(log_or_bundle_or_spec)
-        if saver is None:
-            raise TorchLensIOError(
-                "push_to_hub could not serialize this "
-                f"{type(log_or_bundle_or_spec).__name__} artifact for upload "
-                f"({direct_pickle_error!r}) and it has no portable `.tlspec` bundle "
-                "save path to fall back to. Refusing to silently upload a metadata-only "
-                "stub instead of the real artifact."
-            ) from direct_pickle_error
+    # Privacy-first (R62-1): any artifact with a portable-bundle save path
+    # (Trace/Bundle) is serialized through the SCRUBBED bundle path, never raw
+    # ``pickle.dumps`` -- raw pickle leaks $HOME, the username, and absolute
+    # source paths to a public hub. Raw pickle is reserved for objects that have
+    # no bundle save path and thus carry no scrubbable TorchLens internals.
+    saver = _resolve_bundle_saver(log_or_bundle_or_spec)
+    if saver is not None:
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
                 bundle_dir = Path(tmpdir) / "bundle"
@@ -163,15 +172,26 @@ def _artifact_bytes(log_or_bundle_or_spec: Any, *, save_level: str = "portable")
                 buffer = io.BytesIO()
                 with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
                     tar.add(bundle_dir, arcname=bundle_dir.name)
-                return buffer.getvalue()
+                return buffer.getvalue(), "tar.gz"
         except Exception as bundle_error:
             raise TorchLensIOError(
                 "push_to_hub could not serialize this "
-                f"{type(log_or_bundle_or_spec).__name__} artifact for upload: direct "
-                f"pickling failed ({direct_pickle_error!r}) and the portable `.tlspec` "
-                f"bundle path also failed ({bundle_error!r}). Refusing to silently "
-                "upload a metadata-only stub instead of the real artifact."
+                f"{type(log_or_bundle_or_spec).__name__} artifact for upload through "
+                f"the privacy-scrubbed portable `.tlspec` bundle path ({bundle_error!r}). "
+                "Refusing to fall back to raw pickle (which would leak local paths) or "
+                "to silently upload a metadata-only stub instead of the real artifact."
             ) from bundle_error
+
+    try:
+        return pickle.dumps(log_or_bundle_or_spec), "pickle"
+    except Exception as direct_pickle_error:
+        raise TorchLensIOError(
+            "push_to_hub could not serialize this "
+            f"{type(log_or_bundle_or_spec).__name__} artifact for upload "
+            f"({direct_pickle_error!r}) and it has no portable `.tlspec` bundle "
+            "save path to fall back to. Refusing to silently upload a metadata-only "
+            "stub instead of the real artifact."
+        ) from direct_pickle_error
 
 
 def _resolve_bundle_saver(log_or_bundle_or_spec: Any) -> Any | None:
@@ -196,6 +216,18 @@ def _resolve_bundle_saver(log_or_bundle_or_spec: Any) -> Any | None:
         from .._io.bundle import save as _save_trace_bundle
 
         def _save_trace(path: Path, *, level: str, overwrite: bool) -> None:
+            """Save the captured ``Trace`` as a portable ``.tlspec`` bundle.
+
+            Parameters
+            ----------
+            path:
+                Destination bundle directory.
+            level:
+                Public ``.tlspec`` save level.
+            overwrite:
+                Whether to overwrite an existing bundle at ``path``.
+            """
+
             _save_trace_bundle(log_or_bundle_or_spec, path, level=level, overwrite=overwrite)
 
         return _save_trace

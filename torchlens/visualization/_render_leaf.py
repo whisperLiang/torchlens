@@ -2,8 +2,12 @@
 
 # ruff: noqa: F403, F405
 
+import functools
 from collections import deque
+from contextvars import ContextVar
 
+from .._errors import InvalidArgumentError
+from ..utils._multipass_access import get_multipass_attr, is_multipass_layer
 from ._render_common import *
 
 # Bound the forward walk that maps a branch-entry edge to its condition bool, so a
@@ -344,13 +348,51 @@ def _add_combined_correspondence_edges(
             cluster_name = f"cluster_{module_key.replace(':', '_pass')}"
             edge_attrs["ltail"] = cluster_name
             edge_attrs["lhead"] = cluster_name
-        op = grad_fn_handle.op
-        if op is not None:
+        forward_node_name = _forward_correspondence_node_name(grad_fn_handle.op)
+        if forward_node_name is not None:
             graphviz_graph.edge(
-                op.layer_label,
+                forward_node_name,
                 _backward_dot_node_name(grad_fn_handle),
                 **edge_attrs,
             )
+
+
+def _forward_correspondence_node_name(op: "Layer | None") -> str | None:
+    """Return the forward endpoint for a combined correspondence edge.
+
+    Scoped to the MULTI-PASS case only (r18j gate rework): for a recurrent
+    aggregate ``Layer`` the specific forward *pass* a grad_fn maps to is not
+    recoverable from current metadata (all passes share ``op_label`` and
+    ``backward_pass_index``), so historically every grad_fn attached to ONE
+    aggregate node -- return ``None`` and let the caller SKIP the edge rather than
+    emit that ambiguous aggregate endpoint. Omitting an unprovable correspondence
+    is honest.
+
+    For a NON-recurrent op the historical aggregate ``layer_label`` emission is
+    preserved verbatim, so the locked render-identity oracle (which covers the
+    feedforward combined case) stays byte-identical. NOTE: that emission still
+    yields a bare ``layer_label`` vs the declared ``...pass1`` forward node, so
+    Graphviz auto-creates a phantom duplicate; killing that feedforward
+    phantom-correspondence cosmetic (finding F3) is a rendering change that
+    REQUIRES a captain-approved oracle-golden regeneration -- DEFERRED, see report.
+
+    Parameters
+    ----------
+    op:
+        Forward ``Op`` or aggregate ``Layer`` paired with a grad_fn, or ``None``.
+
+    Returns
+    -------
+    str | None
+        Forward endpoint dot name, or ``None`` to skip the edge (recurrent aggregate).
+    """
+
+    if op is None:
+        return None
+    if is_multipass_layer(op):
+        return None
+    layer_label = getattr(op, "layer_label", None)
+    return layer_label if isinstance(layer_label, str) else None
 
 
 def _module_key_for_grad_fn(
@@ -390,7 +432,45 @@ def _module_key_for_grad_fn(
         return _infer_intervening_module_upstream(trace, grad_fn_handle)
     if mode == "downstream":
         return _infer_intervening_module_downstream(trace, grad_fn_handle)
-    raise ValueError("intervening_cluster must be 'upstream', 'outside', 'downstream', or 'own'.")
+    raise InvalidArgumentError(
+        f"intervening_cluster must be 'upstream', 'outside', 'downstream', or 'own'; "
+        f"received {mode!r}",
+        code="intervening_cluster_invalid",
+        remedy="pass intervening_cluster='upstream', 'outside', 'downstream', or 'own'",
+        argument="intervening_cluster",
+    )
+
+
+def _forward_op_is_module_output(op: "Layer") -> bool:
+    """Resolve ``is_module_output`` for a forward op, aggregate-safe on recurrent Layers.
+
+    ``is_module_output`` is a per-pass field whose access raises the multi-pass
+    ``ValueError`` tripwire on a recurrent aggregate ``Layer`` (this is what
+    detonated ``draw_combined`` on any recurrent model). Module-output status is a
+    static containment property, so -- matching how the sibling module fields
+    ``output_of_modules`` / ``modules`` are already stored aggregate-as-first-pass
+    on the Layer -- resolve it explicitly from the first captured pass instead of
+    leaking the tripwire out of the public combined renderer.
+
+    Parameters
+    ----------
+    op:
+        Forward ``Op`` or aggregate ``Layer`` paired with a grad_fn.
+
+    Returns
+    -------
+    bool
+        Whether the forward op is a module output.
+    """
+
+    if is_multipass_layer(op):
+        ops = getattr(op, "ops", None)
+        if ops is not None:
+            first_pass = next(iter(ops.values()), None)
+            if first_pass is not None:
+                return bool(getattr(first_pass, "is_module_output", False))
+        return False
+    return bool(get_multipass_attr(op, "is_module_output", False, multipass=False))
 
 
 def _module_key_for_forward_op(op: "Layer") -> str | None:
@@ -408,7 +488,7 @@ def _module_key_for_forward_op(op: "Layer") -> str | None:
     """
 
     output_modules = list(getattr(op, "output_of_modules", []) or [])
-    if getattr(op, "is_module_output", False) and output_modules:
+    if _forward_op_is_module_output(op) and output_modules:
         output_module = str(output_modules[0])
         output_calls = list(getattr(op, "output_of_module_calls", []) or [])
         for output_call in output_calls:
@@ -492,6 +572,7 @@ def _infer_intervening_module_downstream(trace: "Trace", grad_fn_handle: "GradFn
         trace,
         reverse_edges.get(grad_fn_handle.grad_fn_object_id, []),
         reverse=True,
+        reverse_edges=reverse_edges,
     )
 
 
@@ -500,6 +581,7 @@ def _infer_intervening_module_bfs(
     start_ids: Iterable[int],
     *,
     reverse: bool,
+    reverse_edges: dict[int, list[int]] | None = None,
 ) -> str | None:
     """Find the nearest module-anchored grad_fn_handle by breadth-first search.
 
@@ -511,6 +593,11 @@ def _infer_intervening_module_bfs(
         Initial grad_fn_handle ids to inspect.
     reverse:
         Whether traversal uses reverse edges.
+    reverse_edges:
+        Prebuilt reverse-edge map for ``reverse=True`` callers. The downstream
+        caller already builds this exact map to seed ``start_ids``; rebuilding
+        it here doubled the O(E) sweep per intervening grad_fn
+        (hunt-6 R52-3).
 
     Returns
     -------
@@ -518,15 +605,19 @@ def _infer_intervening_module_bfs(
         Module key for the nearest paired grad_fn_handle, if found.
     """
 
-    queue = list(start_ids)
+    # deque: list.pop(0) shifted the whole queue per node, Theta(V^2) on
+    # wide backward graphs for a linear BFS (R29, b4 sol MED).
+    queue = deque(start_ids)
     seen: set[int] = set()
-    reverse_edges: dict[int, list[int]] = defaultdict(list)
-    if reverse:
+    if reverse and reverse_edges is None:
+        reverse_edges = defaultdict(list)
         for candidate in trace.grad_fns:
             for next_grad_fn_id in candidate.next_grad_fn_ids:
                 reverse_edges[next_grad_fn_id].append(candidate.grad_fn_object_id)
+    if reverse_edges is None:
+        reverse_edges = {}
     while queue:
-        grad_fn_object_id = queue.pop(0)
+        grad_fn_object_id = queue.popleft()
         if grad_fn_object_id in seen or grad_fn_object_id not in trace.grad_fn_logs:
             continue
         seen.add(grad_fn_object_id)
@@ -668,12 +759,17 @@ def _container_group_id(node: BaseGraphNode) -> str | None:
         Container group id, or ``None`` when the node has no container.
     """
 
-    spec = getattr(node, "container_spec", None)
-    path = tuple(getattr(node, "container_path", ()) or ())
+    # Container metadata is per-pass: a rolled multi-pass Layer has no single
+    # honest value (typically only the final pass feeds the output container),
+    # so the aggregate node explicitly degrades to "no container decoration" —
+    # the same per-pass "n/a" policy the encoding channel uses. A plain
+    # getattr here leaked the multi-pass ValueError tripwire out of draw().
+    spec = get_multipass_attr(node, "container_spec", None, multipass=None)
+    path = tuple(get_multipass_attr(node, "container_path", (), multipass=None) or ())
     if spec is None or not path:
         return None
-    func_call_id = getattr(node, "func_call_id", None)
-    if bool(getattr(node, "is_output", False)):
+    func_call_id = get_multipass_attr(node, "func_call_id", None, multipass=None)
+    if bool(get_multipass_attr(node, "is_output", False, multipass=False)):
         root = "final_output:0"
     elif func_call_id is not None:
         root = f"call:{func_call_id}"
@@ -1087,7 +1183,14 @@ def _node_for_label(trace: "Trace", label: str) -> GraphNode | None:
 
 
 def _same_layer_reachability(layer_log: "Layer") -> dict[int, set[int]]:
-    """Compute transitive same-layer reachability among passes.
+    """Compute direct same-layer reachability among passes.
+
+    Each pass's walk stops at the first same-layer op it reaches instead of
+    walking through it. The weak transitive closure of this direct graph equals
+    that of full transitive reachability (a path through an intermediate pass
+    contributes that pass's own outgoing edges), so the dependency components
+    built from it are unchanged while the walk stays near-linear for long
+    recurrent chains.
 
     Parameters
     ----------
@@ -1097,7 +1200,7 @@ def _same_layer_reachability(layer_log: "Layer") -> dict[int, set[int]]:
     Returns
     -------
     dict[int, set[int]]
-        Mapping from pass index to reachable same-layer pass indices.
+        Mapping from pass index to directly reachable same-layer pass indices.
     """
 
     trace = layer_log.source_trace
@@ -1115,6 +1218,7 @@ def _same_layer_reachability(layer_log: "Layer") -> dict[int, set[int]]:
             seen.add(label)
             if label in same_layer_labels:
                 reachability[pass_index].add(label_to_pass[label])
+                continue
             child = _node_for_label(trace, label)
             if child is not None:
                 stack.extend(child.children)
@@ -1194,29 +1298,130 @@ def _same_layer_dependency_components(layer_log: "Layer") -> tuple[tuple[int, ..
         Pass-index components, sorted by first pass.
     """
 
-    reachability = _same_layer_reachability(layer_log)
-    adjacency: dict[int, set[int]] = {pass_index: set() for pass_index in layer_log.ops}
-    for source, targets in reachability.items():
-        for target in targets:
-            adjacency[source].add(target)
-            adjacency[target].add(source)
+    trace = layer_log.source_trace
+    same_layer_pass = {op.label: pass_index for pass_index, op in layer_log.ops.items()}
 
-    components: list[tuple[int, ...]] = []
-    seen: set[int] = set()
-    for pass_index in sorted(layer_log.ops):
-        if pass_index in seen:
+    # Build the descendant interior once for the whole layer. Same-layer nodes are
+    # boundaries: their outgoing edges are handled from their own seeded traversal,
+    # matching the historical per-pass walk's stop-at-first-same-layer rule.
+    forward: dict[str, tuple[str, ...]] = {}
+    reverse: dict[str, set[str]] = {}
+    pending = deque(same_layer_pass)
+    expanded: set[str] = set()
+    while pending:
+        label = pending.popleft()
+        if label in expanded:
             continue
-        stack = [pass_index]
-        component: set[int] = set()
-        while stack:
-            current = stack.pop()
-            if current in seen:
+        expanded.add(label)
+        node = _node_for_label(trace, label)
+        children = tuple(node.children) if node is not None else ()
+        forward[label] = children
+        for child_label in children:
+            reverse.setdefault(child_label, set()).add(label)
+            if child_label not in same_layer_pass:
+                pending.append(child_label)
+
+    # Only interior nodes lying on a path to a same-layer boundary can contribute
+    # an edge in the historical reachability graph. Pruning dead descendant tails
+    # avoids falsely joining passes that merely converge after their final use.
+    productive = set(same_layer_pass)
+    pending = deque(same_layer_pass)
+    while pending:
+        label = pending.popleft()
+        for parent_label in reverse.get(label, ()):
+            if parent_label in productive:
                 continue
-            seen.add(current)
-            component.add(current)
-            stack.extend(sorted(adjacency[current] - seen, reverse=True))
-        components.append(tuple(sorted(component)))
+            productive.add(parent_label)
+            pending.append(parent_label)
+
+    parents = {label: label for label in productive}
+
+    def find(label: str) -> str:
+        """Return the canonical union-find root for one productive node."""
+
+        root = label
+        while parents[root] != root:
+            root = parents[root]
+        while parents[label] != label:
+            next_label = parents[label]
+            parents[label] = root
+            label = next_label
+        return root
+
+    def union(left: str, right: str) -> None:
+        """Join two productive nodes with deterministic lexical-root ownership."""
+
+        left_root = find(left)
+        right_root = find(right)
+        if left_root == right_root:
+            return
+        smaller, larger = sorted((left_root, right_root))
+        parents[larger] = smaller
+
+    # Weak components of the productive descendant interior induce exactly the
+    # weak transitive closure of the historical direct same-layer reachability.
+    for label in productive:
+        for child_label in forward.get(label, ()):
+            if child_label in productive:
+                union(label, child_label)
+
+    components_by_root: dict[str, list[int]] = {}
+    for label, pass_index in sorted(same_layer_pass.items(), key=lambda item: item[1]):
+        components_by_root.setdefault(find(label), []).append(pass_index)
+    components = (tuple(values) for values in components_by_root.values())
     return tuple(sorted(components, key=lambda values: values[0]))
+
+
+@dataclass
+class _PerDrawCollapseCache:
+    """Per-draw memo for the pure per-layer collapse-rolling computations.
+
+    ``_call_groups_for_layer`` and ``_collapsed_module_rolling_suffix`` are pure
+    functions of the captured graph, but the renderer re-enters them once per
+    collapsed-module NODE. Memoizing them for the duration of ONE draw removes
+    that ``nodes x layers x passes`` blowup. The cache is per-draw rather than
+    per-``Trace`` so a graph mutated between draws is never served stale results.
+    """
+
+    #: Memoized ``_call_groups_for_layer`` results. Keyed by ``id`` of the layer
+    #: object, with the layer itself retained in the value so the identity key
+    #: can never be recycled onto a different object mid-draw.
+    call_groups: dict[int, tuple[Any, tuple[tuple[int, ...], ...]]] = field(default_factory=dict)
+    #: Memoized ``address -> face suffix`` map, built lazily in one pass.
+    rolling_suffixes: dict[str, str] | None = None
+
+
+_PER_DRAW_COLLAPSE_CACHE: ContextVar["_PerDrawCollapseCache | None"] = ContextVar(
+    "torchlens_per_draw_collapse_cache", default=None
+)
+
+
+def _with_per_draw_collapse_cache(render_fn: Any) -> Any:
+    """Scope a fresh :class:`_PerDrawCollapseCache` to one render call.
+
+    Parameters
+    ----------
+    render_fn:
+        Render entrypoint to wrap.
+
+    Returns
+    -------
+    Any
+        Wrapper installing (and always tearing down) the per-draw cache, so no
+        layer references outlive the draw and no result crosses draw boundaries.
+    """
+
+    @functools.wraps(render_fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        """Install the per-draw collapse cache, always tearing it down afterwards."""
+
+        token = _PER_DRAW_COLLAPSE_CACHE.set(_PerDrawCollapseCache())
+        try:
+            return render_fn(*args, **kwargs)
+        finally:
+            _PER_DRAW_COLLAPSE_CACHE.reset(token)
+
+    return wrapper
 
 
 def _call_groups_for_layer(layer_log: "Layer") -> tuple[tuple[int, ...], ...]:
@@ -1234,17 +1439,44 @@ def _call_groups_for_layer(layer_log: "Layer") -> tuple[tuple[int, ...], ...]:
         no single common module address.
     """
 
+    cache = _PER_DRAW_COLLAPSE_CACHE.get()
+    if cache is None:
+        return _call_groups_for_layer_uncached(layer_log)
+    memo_key = id(layer_log)
+    memoized = cache.call_groups.get(memo_key)
+    if memoized is not None:
+        return memoized[1]
+    groups = _call_groups_for_layer_uncached(layer_log)
+    cache.call_groups[memo_key] = (layer_log, groups)
+    return groups
+
+
+def _call_groups_for_layer_uncached(layer_log: "Layer") -> tuple[tuple[int, ...], ...]:
+    """Compute :func:`_call_groups_for_layer` without consulting the draw memo.
+
+    Parameters
+    ----------
+    layer_log:
+        Layer to inspect.
+
+    Returns
+    -------
+    tuple[tuple[int, ...], ...]
+        Module call-index groups.
+    """
+
+    if len(layer_log.ops) <= 1:
+        return ()
     common_calls = _common_module_call_indices(layer_log)
     if len(common_calls) != 1:
         return ()
-    pass_to_call_index = {
-        pass_index: call_index
-        for pass_index, call_index in zip(
+    pass_to_call_index = dict(
+        zip(
             layer_log.ops,
             next(iter(common_calls.values())),
             strict=True,
         )
-    }
+    )
     components = _same_layer_dependency_components(layer_log)
     if len(components) <= 1:
         return ()
@@ -1271,6 +1503,50 @@ def _format_call_groups(call_groups: Sequence[Sequence[int]]) -> str:
     return ",".join(_compact_int_ranges(group) for group in call_groups)
 
 
+def _collapsed_module_rolling_suffix_map(trace: "Trace") -> dict[str, str]:
+    """Build every collapsed module's rolling face suffix in one pass.
+
+    Walks the rolled layers once and keeps, per module address, the first
+    partition with the most groups -- exactly the strictly-greater ``candidate``
+    rule the per-address scan applied while iterating the same layers in the same
+    order. Addresses with no split partition are simply absent, which the caller
+    reads back as the empty suffix.
+
+    Parameters
+    ----------
+    trace:
+        Trace containing the rendered modules.
+
+    Returns
+    -------
+    dict[str, str]
+        Module address to face suffix beginning with ``":"``.
+    """
+
+    best_groups: dict[str, tuple[tuple[int, ...], ...]] = {}
+    for layer_log in trace.layer_logs.values():
+        if not isinstance(layer_log, Layer) or layer_log.num_passes <= 1:
+            continue
+        groups = _call_groups_for_layer(layer_log)
+        if not groups:
+            # A layer with no split partition could never beat an incumbent
+            # (the rule is strictly-greater group count), so skip its addresses.
+            continue
+        layer_addresses = {
+            parsed[0]
+            for op in layer_log.ops.values()
+            for module_call in op.modules
+            if (parsed := _module_address_and_call(module_call)) is not None
+        }
+        for layer_address in layer_addresses:
+            if len(groups) > len(best_groups.get(layer_address, ())):
+                best_groups[layer_address] = groups
+    return {
+        layer_address: f":{_format_call_groups(groups)}"
+        for layer_address, groups in best_groups.items()
+    }
+
+
 def _collapsed_module_rolling_suffix(trace: "Trace", address: str) -> str:
     """Return a face suffix for a collapsed module's hidden call partitions.
 
@@ -1287,24 +1563,12 @@ def _collapsed_module_rolling_suffix(trace: "Trace", address: str) -> str:
         Suffix beginning with ``":"`` or an empty string.
     """
 
-    candidate_groups: tuple[tuple[int, ...], ...] = ()
-    for layer_log in trace.layer_logs.values():
-        if not isinstance(layer_log, Layer) or layer_log.num_passes <= 1:
-            continue
-        layer_addresses = {
-            parsed[0]
-            for op in layer_log.ops.values()
-            for module_call in op.modules
-            if (parsed := _module_address_and_call(module_call)) is not None
-        }
-        if address not in layer_addresses:
-            continue
-        groups = _call_groups_for_layer(layer_log)
-        if len(groups) > len(candidate_groups):
-            candidate_groups = groups
-    if not candidate_groups:
-        return ""
-    return f":{_format_call_groups(candidate_groups)}"
+    cache = _PER_DRAW_COLLAPSE_CACHE.get()
+    if cache is None:
+        return _collapsed_module_rolling_suffix_map(trace).get(address, "")
+    if cache.rolling_suffixes is None:
+        cache.rolling_suffixes = _collapsed_module_rolling_suffix_map(trace)
+    return cache.rolling_suffixes.get(address, "")
 
 
 def _node_spec_to_graphviz_args(spec: NodeSpec) -> dict[str, str]:
@@ -1332,8 +1596,18 @@ def _node_spec_to_graphviz_args(spec: NodeSpec) -> dict[str, str]:
         "color": spec.color,
         "penwidth": spec.penwidth,
         "tooltip": spec.tooltip,
-        "image": spec.image,
+        # r-b6 R19-6: relative to the visualizer root (graph-level imagepath).
+        "image": relativize_visualizer_image(spec.image) if spec.image else spec.image,
+        "fixedsize": spec.fixedsize,
     }
+    # 2.4(ii) funnel rule (L5): DROP NodeSpec width/height when an image is
+    # set -- an image node's size is pixel-derived, and a channel-set width
+    # under fixedsize=false would otherwise become a live MINIMUM the image
+    # is scaled into. ``extra_attrs`` (merged last, below) stays the
+    # power-valve override for a user who genuinely wants a sized image node.
+    if spec.image is None:
+        optional_attrs["width"] = spec.width
+        optional_attrs["height"] = spec.height
     for attr_name, attr_value in optional_attrs.items():
         if attr_value is not None:
             node_args[attr_name] = str(attr_value)
@@ -1871,7 +2145,9 @@ def _container_edge_label(node: BaseGraphNode | None) -> str | None:
 
     if node is None:
         return None
-    path = tuple(getattr(node, "container_path", ()) or ())
+    # Per-pass field: a rolled multi-pass Layer degrades to no label (see
+    # _container_group_id) instead of leaking the multi-pass tripwire.
+    path = tuple(get_multipass_attr(node, "container_path", (), multipass=None) or ())
     if not path:
         return None
     return _container_component_role(path[-1])
@@ -2034,9 +2310,11 @@ __all__ = [
     "_base_node_for_metadata",
     "_branch_kind_sort_key",
     "_call_groups_for_layer",
+    "_call_groups_for_layer_uncached",
     "_collapse_address_for_node",
     "_collapsed_container_node_name",
     "_collapsed_module_rolling_suffix",
+    "_collapsed_module_rolling_suffix_map",
     "_common_module_call_indices",
     "_compact_int_ranges",
     "_compute_arm_entry_edge_label",
@@ -2086,4 +2364,5 @@ __all__ = [
     "_single_op_module_should_keep_op_render",
     "_unique_repeat_folds",
     "_unwrap_focus_node",
+    "_with_per_draw_collapse_cache",
 ]

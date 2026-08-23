@@ -37,8 +37,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens._io import runnable as io_runnable
-from torchlens._io import runnable_load
+from torchlens._io import runnable as io_runnable, runnable_load
 from torchlens._runnable_state import (
     _ORACLE_POLICY_CLASSES,
     _STATE_METADATA_BIND_SCOPE,
@@ -58,19 +57,19 @@ from torchlens._runnable_state import (
     state_metadata_read_violations,
 )
 from torchlens.backends.torch.completeness_witness import (
-    INPUT_METADATA_BOOL_METHODS,
-    INPUT_METADATA_PREDICATE_FUNCS,
-    INPUT_METADATA_PROPERTY_NAMES,
-    STATE_METADATA_MIRROR,
     _STATE_METADATA_ALIAS_SAFE_STATE_NAMES,
     _STATE_METADATA_DIRECT_ONLY_NAMES,
     _STATE_ROUTE_DECLARED_FACT,
     _STATE_ROUTE_READ_KIND,
     _STATE_ROUTE_STRUCTURAL,
+    INPUT_METADATA_BOOL_METHODS,
+    INPUT_METADATA_PREDICATE_FUNCS,
+    INPUT_METADATA_PROPERTY_NAMES,
+    STATE_METADATA_MIRROR,
     host_escape_state_metadata_facts,
     host_escape_state_metadata_reads,
 )
-from torchlens.errors import RunnablePreflightError
+from torchlens.errors import RunCapabilityUnavailableError, RunnablePreflightError
 from torchlens.options import CaptureOptions
 from torchlens.runnable import ControlWitness, ControlWitnessKind, PathFaithfulness
 
@@ -131,7 +130,7 @@ def test_r65_mirror_keys_equal_input_constant_union_and_fact_vocabulary() -> Non
     # owes no state-mirror row (its state-rooted twin is contract residual (3), deliberately
     # unwitnessed). The subtraction uses the NAMED constant so a future synthetic fact still
     # REDs this test until its state-side decision is made explicit there.
-    assert io_runnable._INPUT_METADATA_SYNTHETIC_FACT_NAMES == {"derived_layout_read"}
+    assert {"derived_layout_read"} == io_runnable._INPUT_METADATA_SYNTHETIC_FACT_NAMES
     assert input_union == (
         io_runnable._INPUT_METADATA_FACT_NAMES - io_runnable._INPUT_METADATA_SYNTHETIC_FACT_NAMES
     )
@@ -199,19 +198,22 @@ def test_r65_named_residual_set_is_exactly_the_autograd_family() -> None:
     state twin of the input net's leaf-only residual (contract residual note).
     """
 
-    assert _STATE_METADATA_DIRECT_ONLY_NAMES == frozenset(
-        {
-            "requires_grad",
-            "grad_fn",
-            "is_leaf",
-            "retains_grad",
-            "_base",
-            "_is_view",
-            "output_nr",
-            "grad",
-            "_grad",
-            "_version",
-        }
+    assert (
+        frozenset(
+            {
+                "requires_grad",
+                "grad_fn",
+                "is_leaf",
+                "retains_grad",
+                "_base",
+                "_is_view",
+                "output_nr",
+                "grad",
+                "_grad",
+                "_version",
+            }
+        )
+        == _STATE_METADATA_DIRECT_ONLY_NAMES
     )
     # Together with the alias-safe family, the layout trio, the storage-geometry fact, and
     # the single structural row, the two attribution families tile the mirror exactly.
@@ -251,7 +253,7 @@ def test_r65_staged_state_satisfies_full_signature(tmp_path: Path) -> None:
     x = torch.randn(3)
     loaded = tl.load(_save(_trace(Plain(), x), tmp_path / "plain.tlspec"))
     loaded.load_state_dict({"w": torch.ones(3, 2).t(), "b": torch.arange(8.0)[2:5]})
-    for name, value in loaded.__dict__["_runnable_staged_user_state"].items():
+    for name, value in loaded._runnable.staged_user_state.items():
         assert state_metadata_full_violations(value) == [], name
     prepared = prepare_runnable_state(loaded)
     for slot_id, value in prepared.slot_values.items():
@@ -273,7 +275,7 @@ def test_r65_staging_inside_inference_mode_stays_canonical(tmp_path: Path) -> No
     loaded = tl.load(_save(_trace(Plain(), x), tmp_path / "plain.tlspec"))
     with torch.inference_mode():
         loaded.load_state_dict({"w": torch.ones(2, 3)})
-    for name, value in loaded.__dict__["_runnable_staged_user_state"].items():
+    for name, value in loaded._runnable.staged_user_state.items():
         assert not value.is_inference(), name
         assert state_metadata_full_violations(value) == [], name
 
@@ -658,7 +660,7 @@ def test_r65_requires_grad_read_is_declared_fact_never_refusal(tmp_path: Path) -
     assert "lin.weight" not in host_escape_state_metadata_reads(trace)
     path = _save(trace, tmp_path / "f1.tlspec")
     loaded = tl.load(path)
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     recorded = recorded_state_metadata_facts(descriptor)
     assert "requires_grad" in recorded.get("lin.weight", {})
     recorded_bit = recorded["lin.weight"]["requires_grad"]
@@ -734,7 +736,7 @@ def test_r65_unread_bit_records_no_fact(tmp_path: Path) -> None:
     assert host_escape_state_metadata_facts(trace) == {}
     assert host_escape_state_metadata_reads(trace) == {}
     loaded = tl.load(_save(trace, tmp_path / "plain.tlspec"))
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     facts = recorded_state_metadata_facts(descriptor)
     declared_names = {
         binding.state_dict_name
@@ -1073,7 +1075,8 @@ def test_r67_meta_destination_has_no_oracle_copy() -> None:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             oracle.load_state_dict(source, strict=True, assign=False)
-    except (RuntimeError, NotImplementedError):
+    except (RuntimeError, NotImplementedError) as exc:
+        assert "meta" in str(exc).lower()
         return  # raising torch versions: no destination exists, trivially no canonical
     entries = list(oracle.named_parameters(remove_duplicate=False))
     entries.extend(oracle.named_buffers(remove_duplicate=False))
@@ -1127,11 +1130,14 @@ def _r69_assert_refused(path: Path) -> None:
     from torchlens.runnable import ReadinessStatus
 
     loaded = tl.load(path)
-    readiness = loaded.__dict__.get("_runnable_readiness")
+    readiness = loaded._runnable.readiness
     assert readiness is not None
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     assert "context_field_invalid" in {d.code.value for d in readiness.diagnostics}
-    with pytest.raises(Exception):
+    with pytest.raises(
+        RunCapabilityUnavailableError,
+        match="analysis-only and has no sparse run descriptor",
+    ):
         loaded.run(inputs=torch.randn(3))
 
 
@@ -1223,7 +1229,7 @@ def test_r69_read_gated_emission_and_locked_staging_semantics_unchanged(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         trace.save(path, level="runnable", include_weights=True)
-    descriptor = tl.load(path).__dict__["_runnable_descriptor"]
+    descriptor = tl.load(path)._runnable.descriptor
     row = next(
         row
         for row in descriptor.required_witness_inventory.families
@@ -1242,7 +1248,7 @@ def test_r69_read_gated_emission_and_locked_staging_semantics_unchanged(
     # Locked F-1: a read-gated capture still stages the recorded bit.
     read_path = _r69_save(tmp_path, "readgated.tlspec")
     loaded = tl.load(read_path)
-    facts = recorded_state_metadata_facts(loaded.__dict__["_runnable_descriptor"])
+    facts = recorded_state_metadata_facts(loaded._runnable.descriptor)
     assert facts.get("lin.weight", {}).get("requires_grad") is True
     result = loaded.run(inputs=torch.randn(3))
     assert result.report.path_faithfulness.value == "verified"

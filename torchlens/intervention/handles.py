@@ -36,7 +36,7 @@ class HookHandle:
         for handle_id in self.handle_ids:
             self.owner.detach_hooks(handle=handle_id, confirm_mutation=self.confirm_mutation)
 
-    def __enter__(self) -> "HookHandle":
+    def __enter__(self) -> HookHandle:
         """Enter a scoped hook attachment.
 
         Returns

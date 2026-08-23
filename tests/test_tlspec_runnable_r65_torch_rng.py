@@ -127,7 +127,7 @@ def _discover_rng_bearing_modules() -> dict[str, dict[str, Any]]:
     """
 
     found: dict[str, dict[str, Any]] = {}
-    for module_name, module in sorted(list(sys.modules.items())):
+    for module_name, module in sorted(sys.modules.items()):
         if not isinstance(module, types.ModuleType):
             continue
         if module_name != "torch" and not module_name.startswith("torch."):
@@ -645,9 +645,8 @@ def test_monitor_get_only_reads_mark_nothing(_torch_rng_state_guard) -> None:
 def test_monitor_fork_rng_ceilings_transitively(_torch_rng_state_guard) -> None:
     """``fork_rng`` needs no direct row: its restore transits the set_rng_state patch."""
 
-    with host_nondeterminism_monitor(None) as result:
-        with torch.random.fork_rng(devices=[]):
-            pass
+    with host_nondeterminism_monitor(None) as result, torch.random.fork_rng(devices=[]):
+        pass
     assert "torch.set_rng_state" in result.channels
 
 
@@ -842,7 +841,7 @@ def test_torch_seed_profile_is_permanently_unreplayable() -> None:
     profile = build_sparse_run_descriptor(trace).rng_profile
     assert profile.host_rng_consumed is True
     assert profile.capture_seed is None
-    assert any("torch.seed" in name for name in trace._runnable_host_rng_channels)
+    assert any("torch.seed" in name for name in trace._runnable.host_rng_channels)
 
 
 def test_torch_seed_every_run_unverifiable(tmp_path: Path) -> None:
@@ -860,8 +859,8 @@ def test_initial_seed_profile_keeps_capture_seed() -> None:
     profile = build_sparse_run_descriptor(trace).rng_profile
     assert profile.host_rng_consumed is True
     assert profile.capture_seed == 1
-    assert not trace._runnable_host_rng_channels
-    assert "torch.initial_seed" in trace._runnable_host_rng_replayable_reads
+    assert not trace._runnable.host_rng_channels
+    assert "torch.initial_seed" in trace._runnable.host_rng_replayable_reads
 
 
 def test_initial_seed_on_seed_is_verified_and_attested(tmp_path: Path) -> None:
@@ -901,7 +900,7 @@ def test_in_forward_mutation_ceilings_every_run(model_cls: type, tmp_path: Path)
     profile = build_sparse_run_descriptor(trace).rng_profile
     assert profile.host_rng_consumed is True
     assert profile.capture_seed is None
-    assert trace._runnable_host_rng_channels
+    assert trace._runnable.host_rng_channels
     result = _roundtrip_run(
         model_cls(), torch.tensor([2.0]), capture_seed=1, run_seed=1, tmp=tmp_path
     )
@@ -955,7 +954,7 @@ def test_checkpoint_model_stays_verified_attested(tmp_path: Path) -> None:
     x = torch.randn(2, 4)
     trace = _capture(_CheckpointModel(), x, seed=5)
     assert build_sparse_run_descriptor(trace).rng_profile.host_rng_consumed is False
-    assert not trace._runnable_host_rng_channels
+    assert not trace._runnable.host_rng_channels
     result = _roundtrip_run(
         _CheckpointModel(), x, capture_seed=5, run_seed=5, tmp=tmp_path, include_weights=True
     )
@@ -980,7 +979,7 @@ def test_r67_private_generator_seed_ceilings_every_run(model_cls: type, tmp_path
     profile = build_sparse_run_descriptor(trace).rng_profile
     assert profile.host_rng_consumed is True
     assert profile.capture_seed is None
-    assert any("torch.Generator.seed" in name for name in trace._runnable_host_rng_channels)
+    assert any("torch.Generator.seed" in name for name in trace._runnable.host_rng_channels)
     result = _roundtrip_run(
         model_cls(), torch.tensor([2.0]), capture_seed=1, run_seed=1, tmp=tmp_path
     )
@@ -998,7 +997,7 @@ def test_r67_clone_state_initial_seed_ceilings_every_run(run_seed: int, tmp_path
     """
 
     trace = _capture(_CloneStateSeedBranch(), torch.tensor([2.0]), seed=1)
-    assert "torch.Generator.initial_seed" in trace._runnable_host_rng_channels
+    assert "torch.Generator.initial_seed" in trace._runnable.host_rng_channels
     profile = build_sparse_run_descriptor(trace).rng_profile
     assert profile.host_rng_consumed is True
     assert profile.capture_seed is None
@@ -1028,7 +1027,7 @@ def test_r67_cuda_default_get_offset_ceilings_every_run(
 
     torch.cuda.init()
     trace = _capture(_OffsetBranch(), torch.tensor([2.0]), seed=1)
-    assert "torch.default_generator.get_offset" in trace._runnable_host_rng_channels
+    assert "torch.default_generator.get_offset" in trace._runnable.host_rng_channels
     result = _roundtrip_run(
         _OffsetBranch(), torch.tensor([2.0]), capture_seed=1, run_seed=1, tmp=tmp_path
     )
@@ -1045,9 +1044,9 @@ def test_deterministic_model_records_zero_torch_rng() -> None:
     """A torch-RNG-free forward records nothing on either result set."""
     trace = _capture(_Deterministic(), torch.tensor([2.0]), seed=1)
     assert build_sparse_run_descriptor(trace).rng_profile.host_rng_consumed is False
-    assert trace._runnable_host_rng_channels == ()
-    assert trace._runnable_host_rng_replayable_reads == ()
-    assert trace._runnable_rng_monitor_uncertain is False
+    assert trace._runnable.host_rng_channels == ()
+    assert trace._runnable.host_rng_replayable_reads == ()
+    assert trace._runnable.rng_monitor_uncertain is False
 
 
 def test_capture_restores_torch_rng_attrs_identity_exact() -> None:

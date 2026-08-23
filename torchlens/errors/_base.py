@@ -9,6 +9,9 @@ Severity: TypeAlias = Literal["recoverable", "informational", "fatal"]
 
 _VALID_SEVERITIES = frozenset({"recoverable", "informational", "fatal"})
 
+_REMEDY_MARKER = "Remedy: "
+"""Message sentinel the refusal contract's remedy sentences start with."""
+
 
 def _validate_severity(severity: Severity | str) -> Severity:
     """Validate and normalize a TorchLens diagnostic severity.
@@ -30,8 +33,12 @@ def _validate_severity(severity: Severity | str) -> Severity:
     """
 
     if severity not in _VALID_SEVERITIES:
-        raise ValueError(
-            f"severity must be one of 'recoverable', 'informational', or 'fatal'; got {severity!r}"
+        raise DiagnosticSeverityError(
+            f"severity={severity!r} is not a supported TorchLens diagnostic severity. "
+            "Remedy: set severity to 'recoverable', 'informational', or 'fatal'.",
+            code="diagnostic_severity_invalid",
+            remedy="set severity to 'recoverable', 'informational', or 'fatal'",
+            argument="severity",
         )
     return severity  # type: ignore[return-value]
 
@@ -102,6 +109,15 @@ class TorchLensError(Exception):
         self.fields = dict(payload)
         if message is None and payload:
             message = _message_from_payload(type(self).__name__, self.fields)
+        # Remedy-contract alignment (R65 fixwave-6): the refusal contract
+        # promises a non-empty ``fields["remedy"]`` whose text the message
+        # ends with, but most sites author the remedy ONLY in the message.
+        # Derive the structured field from the authored "Remedy: ..." tail at
+        # this one chokepoint; an explicit ``remedy=`` kwarg always wins.
+        if message and "remedy" not in self.fields and _REMEDY_MARKER in message:
+            derived_remedy = message.rsplit(_REMEDY_MARKER, 1)[1].strip().rstrip(".")
+            if derived_remedy:
+                self.fields["remedy"] = derived_remedy
         super().__init__("" if message is None else message)
 
 
@@ -115,6 +131,10 @@ class CaptureError(TorchLensError):
 
 class ConfigurationError(TorchLensError):
     """Base for invalid options, selectors, and user-supplied configuration."""
+
+
+class DiagnosticSeverityError(ConfigurationError, ValueError):
+    """Raised when a diagnostic severity value is outside the closed vocabulary."""
 
 
 class CompatibilityError(TorchLensError):
@@ -178,12 +198,18 @@ class TraceNotReproducibleWarning(TorchLensWarning):
     """Warning emitted when validation captures different graph structures."""
 
 
+class ScalarEscapeWarning(TorchLensWarning):
+    """Warning emitted when captured tensor data escapes to a Python scalar."""
+
+
 __all__ = [
     "CaptureError",
     "CompatibilityError",
     "ConfigurationError",
+    "DiagnosticSeverityError",
     "InterventionError",
     "Severity",
+    "ScalarEscapeWarning",
     "TorchLensError",
     "TorchLensWarning",
     "TraceNotReproducibleWarning",

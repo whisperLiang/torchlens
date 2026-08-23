@@ -114,7 +114,7 @@ def _raw_input_num_stimuli(value: Any) -> int | None:
         return None
     if _is_pil_image_like(value) or isinstance(value, str):
         return 1
-    if isinstance(value, torch.Tensor) or isinstance(value, np.ndarray):
+    if isinstance(value, (torch.Tensor, np.ndarray)):
         if value.ndim == 0:
             return 1
         return int(value.shape[0])
@@ -150,6 +150,6 @@ def _infer_input_modality(raw_input: Any, preprocessing_source: str | None) -> s
         return "image"
     if preprocessing_source in _TEXT_PREPROCESSING_SOURCES or isinstance(raw_input, str):
         return "text"
-    if isinstance(raw_input, torch.Tensor) or isinstance(raw_input, np.ndarray):
+    if isinstance(raw_input, (torch.Tensor, np.ndarray)):
         return "tensor"
     return "unknown"

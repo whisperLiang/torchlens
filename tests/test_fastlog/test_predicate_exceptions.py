@@ -40,7 +40,7 @@ def test_accumulate_ram_raises_at_end_with_capped_failures() -> None:
         tl.fastlog.record(
             ExceptionModel(),
             torch.ones(1, 3),
-            keep_op=_raising_predicate,
+            save=_raising_predicate,
             on_predicate_error="accumulate",
             max_predicate_failures=2,
         )
@@ -66,7 +66,7 @@ def test_fail_fast_raises_on_first_failure() -> None:
         tl.fastlog.record(
             ExceptionModel(),
             torch.ones(1, 3),
-            keep_op=keep_op,
+            save=keep_op,
             on_predicate_error="fail-fast",
         )
 
@@ -80,7 +80,7 @@ def test_auto_maps_to_accumulate_for_ram() -> None:
         tl.fastlog.record(
             ExceptionModel(),
             torch.ones(1, 3),
-            keep_op=_raising_predicate,
+            save=_raising_predicate,
             on_predicate_error="auto",
             max_predicate_failures=1,
         )
@@ -105,7 +105,7 @@ def test_auto_maps_to_fail_fast_for_disk(tmp_path: Path) -> None:
         tl.fastlog.record(
             ExceptionModel(),
             torch.ones(1, 3),
-            keep_op=keep_op,
+            save=keep_op,
             on_predicate_error="auto",
             streaming=tl.StreamingOptions(
                 bundle_path=tmp_path / "disk.tlfast",
@@ -123,7 +123,7 @@ def test_max_predicate_failures_tracks_overflow_separately() -> None:
         tl.fastlog.record(
             ExceptionModel(),
             torch.ones(1, 3),
-            keep_op=_raising_predicate,
+            save=_raising_predicate,
             on_predicate_error="accumulate",
             max_predicate_failures=0,
         )

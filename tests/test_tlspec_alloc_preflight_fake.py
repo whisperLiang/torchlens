@@ -24,9 +24,10 @@ from __future__ import annotations
 import json
 import resource
 import types
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import pytest
 import torch
@@ -49,7 +50,7 @@ from torchlens.runnable import LiteralAtom, LiteralAtomKind, LiteralSequence, Li
 
 pytestmark = pytest.mark.smoke
 
-_CAPTURE = dict(intervention_ready=True)
+_CAPTURE = {"intervention_ready": True}
 
 
 class _Factory(nn.Module):

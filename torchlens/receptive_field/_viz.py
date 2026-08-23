@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from PIL import Image, ImageDraw
 
-from ._errors import AmbiguousInputError, ReceptiveFieldError
+from ..visualization.node_spec import NodeSpec, NodeSpecFn
+from ..viz.node_plots import render_heatmap
+from ._errors import (
+    AmbiguousInputError,
+    ReceptiveFieldConfigurationError,
+    ReceptiveFieldError,
+)
 from ._types import (
     GradientReceptiveField,
     ReceptiveField,
@@ -16,12 +22,10 @@ from ._types import (
     ReceptiveFieldDirection,
     ReceptiveFieldStatus,
 )
-from ..viz.node_plots import render_heatmap
-from ..visualization.node_spec import NodeSpec, NodeSpecFn
 
 if TYPE_CHECKING:
-    from ._types import ReceptiveFieldView
     from ..data_classes.op import Op
+    from ._types import ReceptiveFieldView
 
 
 _CONE_FILL = "#FFD8A8"
@@ -29,7 +33,7 @@ _DIM_FILL = "#E4E7EB"
 
 
 def show(
-    view: "ReceptiveFieldView",
+    view: ReceptiveFieldView,
     unit: Sequence[int] | None = None,
     *,
     input: Any | None = None,
@@ -37,6 +41,7 @@ def show(
     target: Any | None = None,
     image: Image.Image | None = None,
     gradient: bool = False,
+    retain_graph: bool = False,
     slice: tuple[int, int] | None = None,
     box_color: str = "#FF3B30",
     alpha: float = 0.6,
@@ -56,6 +61,9 @@ def show(
         Optional base image overriding the captured raw stimulus.
     gradient:
         Whether to alpha-blend the empirical gradient magnitude.
+    retain_graph:
+        Whether the empirical gradient probe retains autograd buffers, so a
+        later backward over the same captured graph stays possible.
     slice:
         Required ``(input_axis, index)`` plane selection for three spatial axes.
     box_color:
@@ -79,19 +87,23 @@ def show(
     """
 
     if not 0.0 <= alpha <= 1.0:
-        raise ValueError("alpha must be between 0 and 1.")
+        raise ReceptiveFieldConfigurationError("alpha must be between 0 and 1.")
     selected = target if direction is ReceptiveFieldDirection.PROJECTIVE else input
     descriptor = _select_descriptor(view, selected)
     if gradient and unit is None:
         raise ReceptiveFieldError("gradient=True requires an explicit complete output unit.")
     box = None if unit is None else _view_box(view, unit, descriptor, selected, direction)
-    gradient_result = _view_gradient(view, unit, selected, direction) if gradient else None
+    gradient_result = (
+        _view_gradient(view, unit, selected, direction, retain_graph=retain_graph)
+        if gradient
+        else None
+    )
     spatial_axes = _spatial_axes(descriptor, gradient_result)
     rendered_axes = _rendered_axes(spatial_axes, slice)
     base = _base_image(view, descriptor, image, rendered_axes)
     if gradient_result is not None:
         heatmap = _gradient_image(gradient_result, rendered_axes, slice, base.size, cmap)
-        base = Image.blend(base, heatmap, alpha)
+        base = _blend_heatmap(base, heatmap, alpha=alpha)
     if box is not None and box.status in {
         ReceptiveFieldStatus.EXACT,
         ReceptiveFieldStatus.WHOLE_INPUT,
@@ -107,8 +119,48 @@ def show(
     return base
 
 
+def _blend_heatmap(
+    base: Image.Image,
+    heatmap: Image.Image,
+    *,
+    alpha: float,
+    disclosure: str | None = None,
+) -> Image.Image:
+    """Blend a heatmap through the receptive-field overlay path.
+
+    Parameters
+    ----------
+    base
+        RGB source image.
+    heatmap
+        RGB heatmap with the same pixel dimensions.
+    alpha
+        Heatmap opacity in ``[0, 1]``.
+    disclosure
+        Optional text rendered into a permanent footer below the overlay.
+
+    Returns
+    -------
+    PIL.Image.Image
+        Blended image, with a visible disclosure footer when requested.
+    """
+
+    blended = Image.blend(base.convert("RGB"), heatmap.convert("RGB"), alpha)
+    if disclosure is None:
+        return blended
+    footer_height = 20
+    probe = ImageDraw.Draw(Image.new("RGB", (1, 1), "white"))
+    text_box = probe.textbbox((0, 0), disclosure)
+    footer_width = max(blended.width, int(text_box[2] - text_box[0]) + 8)
+    artifact = Image.new("RGB", (footer_width, blended.height + footer_height), "white")
+    artifact.paste(blended, (0, 0))
+    ImageDraw.Draw(artifact).text((4, blended.height + 3), disclosure, fill="#111827")
+    artifact.info["torchlens_disclosure"] = disclosure
+    return artifact
+
+
 def node_spec(
-    op: "Op",
+    op: Op,
     *,
     unit: Sequence[int] | None = None,
     input: Any | None = None,
@@ -172,7 +224,7 @@ def node_spec(
     return node_spec_fn
 
 
-def _select_descriptor(view: "ReceptiveFieldView", selected: Any | None) -> ReceptiveField:
+def _select_descriptor(view: ReceptiveFieldView, selected: Any | None) -> ReceptiveField:
     """Resolve one descriptor from a view without guessing a multi-input role."""
 
     per_input = view.per_input
@@ -189,7 +241,7 @@ def _select_descriptor(view: "ReceptiveFieldView", selected: Any | None) -> Rece
 
 
 def _view_box(
-    view: "ReceptiveFieldView",
+    view: ReceptiveFieldView,
     unit: Sequence[int],
     descriptor: ReceptiveField,
     selected: Any | None,
@@ -202,7 +254,10 @@ def _view_box(
     windowed_axes = tuple(axis.output_axis for axis in descriptor.axes if axis.kind == "windowed")
     if any(axis is None for axis in windowed_axes):
         raise ReceptiveFieldError("The derived layout is ambiguous; use .gradient() instead.")
-    coordinates = tuple(unit[cast(int, axis)] for axis in windowed_axes)
+    # ``at()`` consumes windowed coordinates in ascending output-axis order.
+    coordinates = tuple(
+        unit[cast(int, axis)] for axis in sorted(cast("tuple[int, ...]", windowed_axes))
+    )
     try:
         if direction is ReceptiveFieldDirection.RECEPTIVE:
             return cast(ReceptiveFieldBox, view.at(coordinates, input=selected))
@@ -218,18 +273,22 @@ def _view_box(
 
 
 def _view_gradient(
-    view: "ReceptiveFieldView",
+    view: ReceptiveFieldView,
     unit: Sequence[int] | None,
     selected: Any | None,
     direction: ReceptiveFieldDirection,
+    *,
+    retain_graph: bool = False,
 ) -> GradientReceptiveField:
     """Obtain and disambiguate one empirical gradient result."""
 
     assert unit is not None
     if direction is ReceptiveFieldDirection.RECEPTIVE:
-        result = view.gradient(tuple(unit), input=selected)
+        result = view.gradient(tuple(unit), input=selected, retain_graph=retain_graph)
     else:
-        result = view.gradient(tuple(unit), direction=direction, target=selected)
+        result = view.gradient(
+            tuple(unit), direction=direction, target=selected, retain_graph=retain_graph
+        )
     if isinstance(result, Mapping):
         if len(result) != 1:
             raise AmbiguousInputError("Select one reachable input before rendering a gradient.")
@@ -278,7 +337,7 @@ def _rendered_axes(
 
 
 def _base_image(
-    view: "ReceptiveFieldView",
+    view: ReceptiveFieldView,
     descriptor: ReceptiveField,
     image: Image.Image | None,
     rendered_axes: tuple[int, ...],
@@ -420,7 +479,7 @@ def _dashed_rectangle(
 
 
 def _descriptor_for_op(
-    op: "Op", selected: Any | None, direction: ReceptiveFieldDirection
+    op: Op, selected: Any | None, direction: ReceptiveFieldDirection
 ) -> ReceptiveField:
     """Resolve an RF descriptor for one target operation."""
 
@@ -443,7 +502,7 @@ def _descriptor_for_op(
     return descriptors[cast(str, role)]
 
 
-def _projective_cone(op: "Op", target_label: str) -> frozenset[str]:
+def _projective_cone(op: Op, target_label: str) -> frozenset[str]:
     """Return the source-to-target path slice for a projective graph cone."""
 
     from ._path import between_labels
@@ -451,7 +510,7 @@ def _projective_cone(op: "Op", target_label: str) -> frozenset[str]:
     return between_labels(op.source_trace, op, target_label)
 
 
-def _ancestor_cone(op: "Op", io_role: str) -> frozenset[str]:
+def _ancestor_cone(op: Op, io_role: str) -> frozenset[str]:
     """Reverse-walk target parents to one selected model input on demand."""
 
     trace = op.source_trace

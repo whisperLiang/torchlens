@@ -1,7 +1,7 @@
 """Manage the torch capture module-call stack.
 
 All capture modes push and pop ``ModuleStackFrame`` objects here, and this
-module is the only incrementer of ``trace._mod_call_index``.
+module is the only incrementer of ``trace._module_capture_ws.mod_call_index``.
 """
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ from typing import Any, cast
 
 import torch.nn as nn
 
-from ._tl import get_module_meta
 from ...fastlog.types import ModuleStackFrame
+from ._tl import get_module_meta
 
 
 def push_frame(trace: Any, stack: list[ModuleStackFrame], module: nn.Module) -> ModuleStackFrame:
@@ -25,7 +25,7 @@ def push_frame(trace: Any, stack: list[ModuleStackFrame], module: nn.Module) -> 
     stack:
         The module stack list to append the frame to. Caller picks: e.g.
         ``state.module_stack`` for predicate mode,
-        ``trace._exhaustive_module_stack`` (added in Phase 1) for
+        ``trace._module_capture_ws.exhaustive_module_stack`` (added in Phase 1) for
         exhaustive mode.
     module:
         The nn.Module entering forward. Must have ``_tl.address`` and
@@ -37,7 +37,7 @@ def push_frame(trace: Any, stack: list[ModuleStackFrame], module: nn.Module) -> 
         The freshly created frame, identity-comparable for pop_frame.
     """
     module_id = id(module)
-    trace._mod_call_index[module_id] += 1
+    trace._module_capture_ws.mod_call_index[module_id] += 1
     module_meta = get_module_meta(module)
     if module_meta is None:
         raise RuntimeError("Module is missing TorchLens metadata; was it prepared?")
@@ -45,7 +45,7 @@ def push_frame(trace: Any, stack: list[ModuleStackFrame], module: nn.Module) -> 
         address=cast(str, module_meta.address),
         module_type=cast(str, module_meta.module_type),
         module_id=module_id,
-        pass_index=trace._mod_call_index[module_id],
+        pass_index=trace._module_capture_ws.mod_call_index[module_id],
     )
     stack.append(frame)
     return frame
@@ -80,13 +80,6 @@ def pop_frame(stack: list[ModuleStackFrame], frame: ModuleStackFrame) -> None:
     if top is not frame:
         raise RuntimeError(f"module stack top mismatch: expected {frame!r}, got {top!r}")
     stack.pop()
-
-
-def current_address(stack: list[ModuleStackFrame]) -> str | None:
-    """Return the address of the topmost frame, or None if stack empty."""
-    if not stack:
-        return None
-    return stack[-1].address
 
 
 def snapshot(stack: list[ModuleStackFrame]) -> tuple[ModuleStackFrame, ...]:

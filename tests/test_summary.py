@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Generator
+from collections.abc import Generator
 
 import pytest
 import torch
@@ -82,9 +82,27 @@ def test_small_model_default_output_golden(tiny_summary_log: tl.Trace) -> None:
         "Branching factor: 1.00\n"
         "Saved outs: 0 B\n"
         "Forward FLOPs: 19.2 KFLOPs  MACs: 9.6 KFLOPs\n"
+        "Unknown-FLOPs ops: 0\n"
         "FLOP convention: counts use the captured TorchLens convention; "
         "MACs are reported as FLOPs // 2."
     )
+
+
+def test_summary_discloses_unknown_flops_operations() -> None:
+    """Summary reports unknown operations excluded from aggregate FLOP totals."""
+
+    class _PadModel(nn.Module):
+        """Model containing an intentionally unregistered pad operation."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Pad the final dimension."""
+
+            return torch.nn.functional.pad(x, (1, 1))
+
+    log = tl.trace(_PadModel(), torch.randn(2, 3))
+
+    assert "Unknown-FLOPs ops: 1 (excluded from FLOP/MAC totals)" in log.summary()
+    assert "Unknown-FLOPs ops: 1 (excluded from FLOP/MAC totals)" in log.summary(level="compute")
 
 
 @pytest.mark.parametrize("training", [True, False])
@@ -155,15 +173,26 @@ def test_compute_summary_handles_multi_pass_layers(level: str) -> None:
 
 
 def test_memory_summary_names_recurrent_layers_with_pass_count() -> None:
-    """Memory summary row names should show recurrent layer multiplicity."""
+    """Memory summary row names should show recurrent layer multiplicity.
+
+    The multiplicity is spelled per aggregation mode, and the two spellings are
+    not interchangeable. A rolled table has one row per LAYER, so ``xN`` reads
+    correctly. An unrolled table -- which ``mode="auto"`` selects for a
+    recurrent trace -- has one row per PASS, where ``xN`` would claim N calls
+    on each of N rows; those rows carry the pass-qualified label instead.
+    """
 
     log = tl.trace(RecurrentSummaryModel(), torch.randn(1, 3), layers_to_save=None)
     try:
-        summary_text = log.summary(level="memory")
+        rolled_text = log.summary(level="memory", mode="rolled")
+        auto_text = log.summary(level="memory")
     finally:
         log.cleanup()
 
-    assert "linear_1_1 x3" in summary_text
+    assert "linear_1_1 x3" in rolled_text
+    assert "linear_1_1 x3" not in auto_text
+    for pass_num in (1, 2, 3):
+        assert f"linear_1_1:{pass_num}" in auto_text
 
 
 def test_summary_entry_name_uses_layer_num_passes() -> None:

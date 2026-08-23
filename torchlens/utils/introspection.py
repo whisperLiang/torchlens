@@ -6,23 +6,34 @@ nested attribute traversal and call-stack capture.
 """
 
 import dis
+import os
 import sys
 import warnings
 from collections.abc import Callable, Iterator
 from types import CodeType, FrameType
-from typing import Any, Dict, List, Optional, TypeAlias
+from typing import Any, TypeAlias
 
 import numpy as np
 import torch
 from torch import nn
 
+from .._input_walk import INPUT_TREE_MAX_DEPTH
+
+# r-b4 R26-6c: read capability flags at USE time through the module object --
+# an import-time value binding never sees mark_torch_capability_missing flips.
+from . import _torch_compat
+
 # Attributes to skip when crawling an object's namespace looking for tensors.
-# These are all tensor properties that either:
-#   - trigger deprecation warnings (.T, .H, .mT on non-2D tensors), or
-#   - return views that would create duplicate tensor entries (.real, .imag).
-# "grad" is also excluded (via substring check) to avoid pulling in grad
-# tensors, which are tracked separately.
-_ATTR_SKIP_SET = frozenset({"T", "mT", "real", "imag", "H"})
+# Two groups, matched by EXACT name:
+#   - View/deprecation properties: .T/.H/.mT (deprecation warnings on non-2D
+#     tensors) and .real/.imag (duplicate tensor views).
+#   - Gradient attributes: .grad/._grad hold the gradient tensor (tracked
+#     separately) and .grad_fn/._grad_fn lead into the autograd graph (which
+#     would pull in saved backward tensors).
+# The grad names are matched EXACTLY. An earlier ``"grad" in name`` substring
+# test over-matched and silently dropped unrelated attributes such as
+# ``upgrade``, ``gradient``, or ``degrade`` -- suppressing legitimate tensors.
+_ATTR_SKIP_SET = frozenset({"T", "mT", "real", "imag", "H", "grad", "_grad", "grad_fn", "_grad_fn"})
 
 # Cached instruction-offset -> column-offset maps, keyed by ``id(code_obj)``.
 #
@@ -32,13 +43,13 @@ _ATTR_SKIP_SET = frozenset({"T", "mT", "real", "imag", "H"})
 # 2026-04-27, ``dis.*`` self time ~16.5s on GPT-2). Re-using the parsed
 # offset map per code object reduces repeated work to a single dict lookup.
 #
-# Keys are ``id(code_obj)`` so unloaded code objects (e.g. via
-# ``importlib.reload``) get implicitly evicted: the new module's code
-# objects are fresh objects with new ids, and the old entries become
-# unreachable garbage. To keep the cache from growing without bound on
-# pathological workloads, we apply a soft cap and emit a one-shot warning
-# when crossed (the cap is large enough that real-world models never hit it).
-_COL_OFFSET_CACHE: Dict[int, Dict[int, Optional[int]]] = {}
+# The integer key alone is not sufficient because CPython may re-use object
+# addresses after the original code object dies. We therefore keep the code
+# object itself in the cached value and verify identity on lookup before
+# trusting the offset map. Retaining that strong reference also makes the size
+# cap meaningful because a live entry cannot be silently re-used for a
+# different code object that happens to land at the same address.
+_COL_OFFSET_CACHE: dict[int, tuple[CodeType, dict[int, int | None]]] = {}
 _COL_OFFSET_CACHE_SIZE_CAP = 100_000
 _col_offset_cache_warned = False
 _AddressPath = list[tuple[str, Any]]
@@ -47,60 +58,97 @@ _CodeContextCacheKey: TypeAlias = tuple[
     int,
     bool,
     bool,
-    tuple[tuple[str, str, int, int, Optional[str], int], ...],
+    tuple[tuple[CodeType, int, int], ...],
 ]
-_CodeContextCache: TypeAlias = dict[_CodeContextCacheKey, tuple[Any, ...]]
-_CodeContextQualnames: TypeAlias = dict[int, Optional[str]]
+_CodeContextCache: TypeAlias = dict[Any, tuple[Any, ...]]
+
+# Reserved key holding the per-capture call-site anchor inside a
+# ``context_cache`` dict (see ``_get_code_context``). The cache dict itself is
+# created fresh per ``Trace`` and reset on fork/``__setstate__``, so the anchor
+# inherits exactly the capture-scoped lifetime it needs. The value is
+# ``(id(frame), code_object, f_lasti, f_lineno)`` -- ints plus an immutable
+# code object, never the frame itself (a retained frame would pin its
+# ``f_locals`` and therefore the user's model/input tensors).
+_CODE_CONTEXT_ANCHOR_KEY = "__torchlens_code_context_anchor__"
+
+# Directory-based stack filter for ``_get_code_context``. Resolved ONCE at import
+# rather than per captured op: ``os.path.abspath`` calls ``getcwd`` + ``normpath``,
+# which is not free when it runs thousands of times per forward pass. Using the
+# package directory (instead of hardcoded module suffixes) keeps the filter
+# correct across package-layout refactors.
+_TORCHLENS_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# ``FuncCallLocation`` lives in ``..data_classes``, which imports this module, so
+# it cannot be imported at module scope. Resolve it on first use and memoize.
+_FUNC_CALL_LOCATION: Any = None
 
 
-def _build_col_offset_map(code: CodeType) -> Dict[int, Optional[int]]:
+def _build_col_offset_map(code: CodeType) -> dict[int, int | None]:
     """Return ``instruction_offset -> column_offset`` for every instruction.
 
-    The map covers all bytecode instructions in ``code``. Instructions whose
-    ``positions`` are missing or whose ``col_offset`` is ``None`` are stored
-    with ``None`` so callers can distinguish "not in map" (unknown offset)
-    from "no column information available" (positions absent).
+    The map covers all bytecode instructions in ``code``, INCLUDING each
+    instruction's trailing inline-cache region. On Python 3.11+ adaptive
+    instructions (``CALL``, ``LOAD_METHOD``/``LOAD_ATTR``, ``BINARY_OP``, ...)
+    are followed by hidden ``CACHE`` slots that ``dis.get_instructions`` does
+    not list, and a caller frame's ``f_lasti`` during a METHOD call points
+    INSIDE that cache region. Without spreading each instruction's column
+    across its cache slots, every ``x.sum()``-style call site resolved to a
+    missing key -- silently degrading branch attribution to line-only mode
+    for method-produced bools (round-24 condbranch seal, S2). Each column is
+    therefore assigned to every code unit from the instruction's offset up to
+    the next listed instruction (or the end of ``co_code``).
+
+    Instructions whose ``positions`` are missing or whose ``col_offset`` is
+    ``None`` are stored with ``None`` so callers can distinguish "not in map"
+    (unknown offset) from "no column information available" (positions absent).
     """
-    if sys.version_info < (3, 11):
+    if not _torch_compat.HAS_CODE_POSITIONS:
         return {}
-    offset_map: Dict[int, Optional[int]] = {}
+    offset_map: dict[int, int | None] = {}
     try:
-        for instruction in dis.get_instructions(code):
+        instructions = list(dis.get_instructions(code))
+        code_end = len(code.co_code)
+        for index, instruction in enumerate(instructions):
             positions = instruction.positions
-            if positions is None:
-                offset_map[instruction.offset] = None
-            else:
-                offset_map[instruction.offset] = positions.col_offset
+            col_offset = None if positions is None else positions.col_offset
+            next_offset = (
+                instructions[index + 1].offset if index + 1 < len(instructions) else code_end
+            )
+            # Bytecode units are 2 bytes; the half-open gap up to the next
+            # listed instruction is exactly this instruction's cache region.
+            for offset in range(instruction.offset, max(next_offset, instruction.offset + 2), 2):
+                offset_map[offset] = col_offset
     except (TypeError, ValueError):
         return {}
     return offset_map
 
 
-def _get_or_build_col_offset_map(code: CodeType) -> Dict[int, Optional[int]]:
+def _get_or_build_col_offset_map(code: CodeType) -> dict[int, int | None]:
     """Return the cached column-offset map for ``code`` (build on miss).
 
-    The cache is keyed by ``id(code)``. Code objects are immutable, so the
-    cached map is valid for the entire lifetime of the code object.
+    The cache is keyed by ``id(code)`` and stores the code object itself in the
+    value. Code objects are immutable, so the cached map is valid for the
+    lifetime of that exact object. The identity check guards against CPython
+    re-using an address for an unrelated code object after eviction.
     """
     global _col_offset_cache_warned
     code_id = id(code)
     cached = _COL_OFFSET_CACHE.get(code_id)
     if cached is not None:
-        return cached
-    if not _col_offset_cache_warned and len(_COL_OFFSET_CACHE) >= _COL_OFFSET_CACHE_SIZE_CAP:
-        # Emit a single warning so unbounded growth in pathological workloads
-        # is visible without spamming the logs. Real-world models are well
-        # under this cap; crossing it usually points to a code-object leak.
-        warnings.warn(
-            "torchlens column-offset cache exceeded "
-            f"{_COL_OFFSET_CACHE_SIZE_CAP} entries; new entries will still be "
-            "added but this likely indicates a long-running process touching "
-            "very many unique code objects.",
-            stacklevel=2,
-        )
-        _col_offset_cache_warned = True
+        cached_code, cached_map = cached
+        if cached_code is code:
+            return cached_map
+    if len(_COL_OFFSET_CACHE) >= _COL_OFFSET_CACHE_SIZE_CAP:
+        if not _col_offset_cache_warned:
+            warnings.warn(
+                "torchlens column-offset cache reached "
+                f"{_COL_OFFSET_CACHE_SIZE_CAP} entries; evicting oldest entries.",
+                stacklevel=2,
+            )
+            _col_offset_cache_warned = True
+        _COL_OFFSET_CACHE.pop(next(iter(_COL_OFFSET_CACHE)))
     offset_map = _build_col_offset_map(code)
-    _COL_OFFSET_CACHE[code_id] = offset_map
+    _COL_OFFSET_CACHE[code_id] = (code, offset_map)
     return offset_map
 
 
@@ -115,7 +163,7 @@ def _clear_col_offset_cache() -> None:
     _col_offset_cache_warned = False
 
 
-def _get_code_qualname(frame: FrameType) -> Optional[str]:
+def _get_code_qualname(frame: FrameType) -> str | None:
     """Return ``co_qualname`` when available on this Python version.
 
     Args:
@@ -124,12 +172,12 @@ def _get_code_qualname(frame: FrameType) -> Optional[str]:
     Returns:
         Qualified code object name, or None when unavailable.
     """
-    if sys.version_info < (3, 11):
+    if not _torch_compat.HAS_CODE_QUALNAME:
         return None
     return getattr(frame.f_code, "co_qualname", None)
 
 
-def _get_col_offset(frame: FrameType) -> Optional[int]:
+def _get_col_offset(frame: FrameType) -> int | None:
     """Return the current instruction's column offset when available.
 
     Args:
@@ -138,7 +186,7 @@ def _get_col_offset(frame: FrameType) -> Optional[int]:
     Returns:
         Column offset for the current instruction, or None when unavailable.
     """
-    if sys.version_info < (3, 11):
+    if not _torch_compat.HAS_CODE_POSITIONS:
         return None
     offset_map = _get_or_build_col_offset_map(frame.f_code)
     if not offset_map:
@@ -171,6 +219,18 @@ _NON_CONTAINER_LEAF_TYPES: tuple[type, ...] = (
     torch.UntypedStorage,
 )
 
+INPUT_SEARCH_DEPTH_LIMIT = INPUT_TREE_MAX_DEPTH + 1
+"""Maximum input-boundary search depth before callers must fail closed.
+
+Unified with the ONE shared input-boundary nesting ceiling (grind-p3 T11.4):
+this walker's private ``64`` disagreed with ``INPUT_TREE_MAX_DEPTH`` (200), so
+a legal input the boundary contract admits (nesting 65-200) passed every other
+walker and then silently dropped its tensor leaves here into a traversal gap.
+``+ 1`` converts the BFS level count (level N MATCHES depth-N items; expansion
+happens a level earlier) to the walkers' path-length semantics, so a leaf at
+exactly the ceiling depth is still enumerated.
+"""
+
 
 def get_vars_of_type_from_obj(
     obj: Any,
@@ -179,6 +239,7 @@ def get_vars_of_type_from_obj(
     search_depth: int = 3,
     return_addresses: bool = False,
     allow_repeats: bool = False,
+    depth_exceeded_paths: list[str] | None = None,
 ) -> list[Any]:
     """Recursively find all instances of ``which_type`` inside a nested object.
 
@@ -201,6 +262,9 @@ def get_vars_of_type_from_obj(
             tuples instead of bare objects.
         allow_repeats: If False, deduplicates by ``id()`` so the same
             tensor object is returned at most once.
+        depth_exceeded_paths: Optional accumulator receiving unresolved frontier
+            paths when ``search_depth`` is exhausted. Callers that use a finite
+            correctness boundary must inspect this list and fail closed.
 
     Returns:
         List of found objects (or tuples if ``return_addresses=True``).
@@ -213,6 +277,14 @@ def get_vars_of_type_from_obj(
     found_addresses: list[Any] = []
     found_addresses_full: list[_AddressPath] = []
     found_ids: set[int] = set()
+    # R30: arm the expansion memo whenever results are deduplicated anyway
+    # (allow_repeats=False, the dominant call shape) -- without it a shared
+    # container was re-expanded at EVERY depth level (found_ids dedups the
+    # RESULTS, so the extra traversal was pure waste). allow_repeats=True
+    # keeps the historical repeat traversal, whose repeats are the point.
+    expanded_ids: set[int] | None = (
+        set() if (depth_exceeded_paths is not None or not allow_repeats) else None
+    )
     # BFS: each iteration processes one depth level.
     # Hoist warnings context manager to avoid ~77K per-attribute entries.
     with warnings.catch_warnings():
@@ -228,12 +300,94 @@ def get_vars_of_type_from_obj(
                 subclass_exceptions,
                 allow_repeats,
                 return_addresses,
+                expanded_ids,
             )
 
+    if depth_exceeded_paths is not None and this_stack:
+        depth_exceeded_paths.extend(str(address) for _, address, _ in this_stack)
+
     if return_addresses:
-        return list(zip(found_items, found_addresses, found_addresses_full))
+        # The three accumulators are appended together in lockstep by the walker,
+        # so they pair exactly.
+        return list(zip(found_items, found_addresses, found_addresses_full, strict=True))
     else:
         return found_items
+
+
+def get_arg_tensors_for_resolution(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> list[Any]:
+    """Return non-Parameter tensors in ``args``/``kwargs`` for source resolution.
+
+    Exact fast path for the per-op / per-module-entry pattern
+    ``get_vars_of_type_from_obj([args, kwargs], torch.Tensor,
+    [torch.nn.Parameter], search_depth=5)``. When every argument value is a
+    tensor, a known non-container leaf, or an exact ``list``/``tuple``/``set``
+    or dict(-subclass) whose members are all tensors or known leaves, the BFS
+    is provably equivalent to two linear passes: level order guarantees every
+    top-level tensor is matched before any container member, both passes share
+    one ``id()`` dedup set, and ``nn.Parameter`` entries are skipped without
+    entering the dedup set (exactly as ``subclass_exceptions`` does). Any value
+    outside that shape (nested containers, namedtuples, arbitrary objects)
+    falls back to the full BFS so deeply nested tensors keep their historical
+    discovery behavior byte-for-byte.
+    """
+    tensor_type = torch.Tensor
+    param_type = torch.nn.Parameter
+    found: list[Any] = []
+    found_ids: set[int] = set()
+    containers: list[Any] = []
+    flat = True
+    for value in args if not kwargs else (*args, *kwargs.values()):
+        value_class = type(value)
+        if issubclass(value_class, tensor_type):
+            if issubclass(value_class, param_type):
+                continue
+            value_id = id(value)
+            if value_id in found_ids:
+                continue
+            found_ids.add(value_id)
+            found.append(value)
+            continue
+        if value_class in _NON_CONTAINER_LEAF_TYPES:
+            continue
+        if value_class in (list, tuple, set):
+            containers.append(value)
+            continue
+        if value_class is dict:
+            # Exact dict only: the BFS *also* attribute-crawls dict SUBCLASSES
+            # (an ``OrderedDict`` can carry instance attributes holding
+            # tensors), so anything but a plain dict takes the full BFS.
+            containers.append(value.values())
+            continue
+        flat = False
+        break
+    if flat:
+        for container in containers:
+            for item in container:
+                item_class = type(item)
+                if issubclass(item_class, tensor_type):
+                    if issubclass(item_class, param_type):
+                        continue
+                    item_id = id(item)
+                    if item_id in found_ids:
+                        continue
+                    found_ids.add(item_id)
+                    found.append(item)
+                elif item_class not in _NON_CONTAINER_LEAF_TYPES:
+                    flat = False
+                    break
+            if not flat:
+                break
+    if flat:
+        return found
+    return get_vars_of_type_from_obj(
+        [args, kwargs],
+        torch.Tensor,
+        [torch.nn.Parameter],
+        search_depth=5,
+    )
 
 
 def _get_tensors_and_params_from_obj(
@@ -264,6 +418,7 @@ def _get_tensors_and_params_from_obj(
     tensors: list[torch.Tensor] = []
     params: list[torch.nn.Parameter] = []
     found_ids: set[int] = set()
+    expanded_ids: set[int] | None = None if allow_repeats else set()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         for _ in range(search_depth):
@@ -273,6 +428,7 @@ def _get_tensors_and_params_from_obj(
                 params,
                 found_ids,
                 allow_repeats,
+                expanded_ids,
             )
     return tensors, params
 
@@ -283,6 +439,7 @@ def _search_stack_for_tensors_and_params(
     params: list[torch.nn.Parameter],
     found_ids: set[int],
     allow_repeats: bool,
+    expanded_ids: set[int] | None = None,
 ) -> list[_SearchEntry]:
     """Process one BFS level while partitioning tensors from parameters.
 
@@ -308,8 +465,10 @@ def _search_stack_for_tensors_and_params(
     next_stack: list[_SearchEntry] = []
     if len(current_stack) == 0:
         return current_stack
-    while len(current_stack) > 0:
-        item, address, address_full = current_stack.pop(0)
+    # Iterate rather than pop(0): each left-pop shifts the whole list, making
+    # one BFS level O(k^2) in its own width for the wide levels big module
+    # trees produce. Iteration order (and thus output order) is identical.
+    for item, address, address_full in current_stack:
         item_class = type(item)
         if (id(item) in found_ids) and not allow_repeats:
             continue
@@ -323,6 +482,11 @@ def _search_stack_for_tensors_and_params(
             continue
         if item_class in _NON_CONTAINER_LEAF_TYPES:
             continue
+        if expanded_ids is not None:
+            item_id = id(item)
+            if item_id in expanded_ids:
+                continue
+            expanded_ids.add(item_id)
         # This traversal collects only the objects (not addresses), so skip
         # address construction.
         _extend_search_stack_from_item(item, address, address_full, next_stack, False)
@@ -339,6 +503,7 @@ def _search_stack_for_vars_of_type(
     subclass_exceptions: list[type[Any]],
     allow_repeats: bool,
     track_addresses: bool,
+    expanded_ids: set[int] | None,
 ) -> list[_SearchEntry]:
     """Process one BFS depth level: classify items, collect matches, build next level.
 
@@ -359,6 +524,10 @@ def _search_stack_for_vars_of_type(
         found_ids: Set of ``id()`` values for deduplication.
         subclass_exceptions: Subclasses of ``which_type`` to skip.
         allow_repeats: If True, skip ``id()``-based deduplication.
+        track_addresses: Whether hierarchical addresses should be retained.
+        expanded_ids: Identities of non-leaf objects already expanded, or ``None``
+            to retain historical repeat traversal. A set makes traversal cycle-safe
+            independently of tensor-result deduplication.
 
     Returns:
         ``next_stack`` — items to process in the next depth iteration.
@@ -366,8 +535,10 @@ def _search_stack_for_vars_of_type(
     next_stack: list[_SearchEntry] = []
     if len(current_stack) == 0:
         return current_stack
-    while len(current_stack) > 0:
-        item, address, address_full = current_stack.pop(0)
+    # Iterate rather than pop(0): each left-pop shifts the whole list, making
+    # one BFS level O(k^2) in its own width for the wide levels big module
+    # trees produce. Iteration order (and thus output order) is identical.
+    for item, address, address_full in current_stack:
         item_class = type(item)
         # Skip excluded subclasses (e.g. nn.Parameter) and duplicates.
         if any(issubclass(item_class, subclass) for subclass in subclass_exceptions) or (
@@ -384,9 +555,77 @@ def _search_stack_for_vars_of_type(
         # Leaf types that can't contain tensors — skip.
         if item_class in _NON_CONTAINER_LEAF_TYPES:
             continue
+        if expanded_ids is not None:
+            item_id = id(item)
+            if item_id in expanded_ids:
+                continue
+            expanded_ids.add(item_id)
         # Non-leaf, non-match — expand into next depth level.
         _extend_search_stack_from_item(item, address, address_full, next_stack, track_addresses)
     return next_stack
+
+
+def _passes_attr_filter(name: str) -> bool:
+    """Return whether an attribute name should be crawled for tensors.
+
+    Skips dunder machinery and the view/deprecation/grad names in
+    :data:`_ATTR_SKIP_SET`.
+    """
+    return not name.startswith("__") and name not in _ATTR_SKIP_SET
+
+
+def _crawl_attr_names(item: Any, obj_type: type) -> list[str] | None:
+    """Return the filtered attribute names to crawl on ``item``.
+
+    ``dir()`` walks the full MRO and is expensive, so the *class-level*
+    attribute names are cached by type. Per-INSTANCE attributes vary between
+    objects of the same type and must NOT be cached by type: doing so silently
+    omits tensors stored on a second, differently populated object of that type
+    (an order-dependent capture gap -- the first instance seeds the cache and
+    later instances reuse its stale name list).
+
+    * Objects with the default ``__dir__`` (the common case) expose exactly
+      ``class attributes + instance __dict__ keys``. The class portion is cached
+      by type; the varying ``__dict__`` keys are unioned in on every visit.
+    * Objects with a customized ``__dir__`` (e.g. ``nn.Module`` surfacing its
+      registered parameters/buffers) have authoritative per-instance names that
+      cannot be reconstructed from ``__dict__``; ``dir(item)`` is consulted every
+      visit for them and is never cached by type.
+
+    Returns ``None`` when the object refuses introspection (opaque leaf).
+    """
+    from .. import _state
+
+    if getattr(obj_type, "__dir__", None) is not object.__dir__:
+        # Customized __dir__: per-instance and not type-cacheable.
+        try:
+            names = dir(item)
+        except Exception:
+            # Third-party proxy that refuses introspection -> opaque leaf, so
+            # tensor discovery can continue for the real tensor arguments.
+            return None
+        return [name for name in names if _passes_attr_filter(name)]
+
+    # Default __dir__: cache the stable class-level names by type.
+    class_names = _state._dir_cache.get(obj_type)
+    if class_names is None:
+        try:
+            attrs = dir(obj_type)
+        except Exception:
+            attrs = []
+        class_names = [name for name in attrs if _passes_attr_filter(name)]
+        _state._dir_cache[obj_type] = class_names
+
+    # Union in the per-instance __dict__ keys (which the class cache cannot
+    # cover). This is what fixes the second-same-typed-object capture gap.
+    inst_dict = getattr(item, "__dict__", None)
+    if not inst_dict:
+        return class_names
+    seen = set(class_names)
+    extra = [name for name in inst_dict if name not in seen and _passes_attr_filter(name)]
+    if not extra:
+        return class_names
+    return class_names + extra
 
 
 def _extend_search_stack_from_item(
@@ -412,8 +651,6 @@ def _extend_search_stack_from_item(
         address_full: List of ``(kind, key)`` tuples for programmatic re-indexing.
         next_stack: List to append children onto.
     """
-    from .. import _state
-
     # --- Sequence containers (list, tuple, set) ---
     if type(item) in [list, tuple, set]:
         if not track_addresses:
@@ -444,28 +681,14 @@ def _extend_search_stack_from_item(
             )
 
     # --- Object attribute crawl ---
-    # Cache dir() results per type — dir() walks the full MRO and is expensive.
-    # Same types (e.g. every nn.Conv2d) have identical dir() output.
-    obj_type = type(item)
-    if obj_type not in _state._dir_cache:
-        # Filter rules:
-        #   - Skip dunders (__*) — internal Python machinery
-        #   - Skip _ATTR_SKIP_SET (.T, .mT, .H, .real, .imag) — trigger
-        #     deprecation warnings or create duplicate tensor views
-        #   - Skip anything containing "grad" — grad tensors tracked separately
-        try:
-            attrs = dir(item)
-        except Exception:
-            # Some third-party expression/proxy objects intentionally refuse
-            # Python introspection. Treat them as opaque leaves so tensor
-            # discovery can continue for the real tensor arguments.
-            return
-        _state._dir_cache[obj_type] = [
-            a
-            for a in attrs
-            if not a.startswith("__") and a not in _ATTR_SKIP_SET and "grad" not in a
-        ]
-    filtered_attrs = _state._dir_cache[obj_type]
+    # Class-level attribute names are cached per type (dir() walks the full MRO
+    # and is expensive), but per-instance attributes are recomputed every visit
+    # -- see ``_crawl_attr_names`` for why type-caching the full dir() silently
+    # drops tensors held on a second, differently populated same-typed object.
+    filtered_attrs = _crawl_attr_names(item, type(item))
+    if filtered_attrs is None:
+        # Opaque object that refuses introspection -> treat as a leaf.
+        return
 
     # warnings.catch_warnings() is hoisted to get_vars_of_type_from_obj
     for attr_name in filtered_attrs:
@@ -497,7 +720,7 @@ def _extend_search_stack_from_item(
             )
 
 
-def get_attr_values_from_tensor_list(tensor_list: List[torch.Tensor], field_name: str) -> List[Any]:
+def get_attr_values_from_tensor_list(tensor_list: list[torch.Tensor], field_name: str) -> list[Any]:
     """Collect a named attribute from each tensor that has it.
 
     Used for generic tensor attribute scans where tensors may or may not carry
@@ -536,7 +759,7 @@ def nested_getattr(obj: Any, attr: str) -> Any:
         return obj
 
     attributes = attr.split(".")
-    for i, a in enumerate(attributes):
+    for _i, a in enumerate(attributes):
         # Certain tensor properties emit DeprecationWarnings on access
         # (e.g. .T on >2D tensors, .volatile). Suppress to avoid noise.
         if a in [
@@ -586,7 +809,7 @@ def nested_assign(obj: Any, addr: list[tuple[Any, Any]], val: Any) -> None:
 
 
 def iter_accessible_attributes(
-    obj: Any, *, short_circuit: Optional[Callable[[Any, str], bool]] = None
+    obj: Any, *, short_circuit: Callable[[Any, str], bool] | None = None
 ) -> Iterator[tuple[str, Any]]:
     """Yield ``(attr_name, attr_value)`` for every accessible attribute of ``obj``.
 
@@ -610,9 +833,14 @@ def iter_accessible_attributes(
         # Attribute access can fail for any number of reasons, especially when
         # working with objects that we don't know anything about.  This
         # function makes a best-effort attempt to access every attribute, but
-        # gracefully skips any that cause problems.
+        # gracefully skips any that cause problems. Warnings raised *during
+        # access* (deprecated properties, etc.) are suppressed as promised; the
+        # suppression is scoped narrowly to the getattr so it never leaks into
+        # the consumer's code between yields.
         try:
-            attr = getattr(obj, attr_name)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                attr = getattr(obj, attr_name)
         except Exception:
             continue
 
@@ -649,6 +877,26 @@ def _get_code_context(
     expensive per-frame source file I/O.  Source context is loaded lazily
     by ``FuncCallLocation`` on first access via ``linecache``.
 
+    The walk is a single innermost-to-outermost pass that keeps only
+    surviving (non-internal, non-``_call_impl``) frames. The historical
+    outermost-first scan is recovered from the survivor list: the outermost
+    ``forward``-named survivor starts the context, every deeper survivor
+    follows, and the first survivor above that ``forward`` (the user's
+    ``trace`` call site) is appended last.
+
+    When a ``context_cache`` is supplied, the walk also maintains a
+    per-capture *anchor* -- the identity of the call-site frame -- under
+    :data:`_CODE_CONTEXT_ANCHOR_KEY`. The call-site frame is suspended at the
+    ``trace(...)`` call for the entire capture and every code-context request
+    happens (transitively) beneath it, so it is alive at every lookup: an
+    ``id`` + code-object + ``f_lasti`` + ``f_lineno`` match therefore proves
+    object identity, and because a live frame's caller chain is immutable and
+    contained no ``forward``-named survivor at anchor establishment, nothing
+    above the anchor can influence the result. The walk then stops at the
+    anchor instead of traversing the (potentially deep) harness stack above
+    the call site. The stored anchor holds ints plus an immutable code object,
+    never the frame, so no locals (and no activation tensors) are pinned.
+
     Args:
         num_context_lines: Number of source lines to show on each side of
             the call line.  The total context window is
@@ -664,101 +912,98 @@ def _get_code_context(
     Returns:
         List[FuncCallLocation] ordered shallow-to-deep.
     """
-    import os
+    global _FUNC_CALL_LOCATION
 
-    from ..data_classes import FuncCallLocation  # type: ignore[attr-defined]
+    FuncCallLocation = _FUNC_CALL_LOCATION
+    if FuncCallLocation is None:
+        from ..data_classes import FuncCallLocation
 
-    # Use directory-based check instead of hardcoded suffixes so that
-    # refactoring the package layout doesn't break stack filtering.
-    _TORCHLENS_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        _FUNC_CALL_LOCATION = FuncCallLocation
 
-    def _is_torchlens_internal(filename: str) -> bool:
-        """Return whether ``filename`` is inside the TorchLens package.
+    pkg_dir = _TORCHLENS_PKG_DIR
 
-        Parameters
-        ----------
-        filename:
-            Frame filename to test.
-
-        Returns
-        -------
-        bool
-            Whether the frame should be filtered as TorchLens internals.
-        """
-
-        return filename.startswith(_TORCHLENS_PKG_DIR)
-
-    # Phase 1: Collect lightweight frame data — only co_filename, co_name, f_lineno.
-    # Do NOT do f_locals/f_globals dict lookups or bytecode walks yet.
-    raw_frames = []
-    frame = sys._getframe(0)
-    while frame is not None:
-        raw_frames.append(
-            (
-                frame.f_code.co_filename,
-                frame.f_code.co_name,
-                frame.f_lineno,
-                frame.f_code.co_firstlineno,
-                frame,  # keep reference for phase 2 func_obj lookup
-            )
-        )
-        frame = frame.f_back  # type: ignore[assignment]
-
-    # Walk bottom-up (deepest caller last → first in output) and collect
-    # non-internal frames.  Start tracking once we hit a ``forward`` frame,
-    # but also include the frame *before* the first ``forward`` (the user's
-    # script that called ``trace``).
-    tracking = False
-    pre_forward_frame_idx = None
-    filtered_indices = []
-
-    for idx in range(len(raw_frames) - 1, -1, -1):
-        filename, func_name, lineno, _, frame_ref = raw_frames[idx]
-
-        # Skip torchlens internals and PyTorch _call_impl
-        if _is_torchlens_internal(filename):
-            continue
-        if "_call_impl" in func_name:
-            continue
-
-        if func_name == "forward" and not tracking:
-            tracking = True
-            # Look for the user-script frame that called trace
-            for j in range(idx + 1, len(raw_frames)):
-                j_filename, j_func_name, _, _, _ = raw_frames[j]
-                if not _is_torchlens_internal(j_filename) and "_call_impl" not in j_func_name:
-                    pre_forward_frame_idx = j
-                    break
-
-        if tracking:
-            filtered_indices.append(idx)
-
-    # Prepend the trace call-site frame if found and not already included
-    if pre_forward_frame_idx is not None and pre_forward_frame_idx not in filtered_indices:
-        filtered_indices.append(pre_forward_frame_idx)
-
+    anchor: tuple[int, CodeType, int, int] | None = None
     if context_cache is not None:
-        cache_key, qualnames_by_index = _code_context_cache_key_and_qualnames(
-            raw_frames,
-            filtered_indices,
+        anchor = context_cache.get(_CODE_CONTEXT_ANCHOR_KEY)
+
+    # Single pass, innermost -> outermost. Survivors keep (frame, code,
+    # lineno, lasti); internal frames are skipped without building tuples.
+    survivors: list[tuple[FrameType, CodeType, int, int]] = []
+    append_survivor = survivors.append
+    last_forward_pos = -1
+    anchor_frame: FrameType | None = None
+    frame: FrameType | None = sys._getframe(0)
+    while frame is not None:
+        code = frame.f_code
+        if (
+            anchor is not None
+            and id(frame) == anchor[0]
+            and code is anchor[1]
+            and frame.f_lasti == anchor[2]
+            and frame.f_lineno == anchor[3]
+        ):
+            # Verified call-site frame: the stack above it is capture-constant
+            # and was forward-free at anchor establishment.
+            anchor_frame = frame
+            break
+        name = code.co_name
+        if not code.co_filename.startswith(pkg_dir) and "_call_impl" not in name:
+            if name == "forward":
+                last_forward_pos = len(survivors)
+            append_survivor((frame, code, frame.f_lineno, frame.f_lasti))
+        frame = frame.f_back
+
+    # Reconstruct the historical selection from the survivor list. With no
+    # ``forward`` frame, tracking never starts and the context is empty; the
+    # call site is only ever appended when a ``forward`` frame exists.
+    selected: list[tuple[FrameType, CodeType, int, int]] = []
+    if last_forward_pos >= 0:
+        selected = survivors[last_forward_pos::-1]
+        if last_forward_pos + 1 < len(survivors):
+            call_site = survivors[last_forward_pos + 1]
+            selected.append(call_site)
+        elif anchor_frame is not None:
+            call_site = (
+                anchor_frame,
+                anchor_frame.f_code,
+                anchor_frame.f_lineno,
+                anchor_frame.f_lasti,
+            )
+            selected.append(call_site)
+        else:
+            call_site = None
+        if context_cache is not None and anchor is None and call_site is not None:
+            # Establish the anchor: ``call_site`` is the first survivor above
+            # the OUTERMOST ``forward`` frame, so no ``forward``-named survivor
+            # exists anywhere above it -- the invariant the early-stop relies on.
+            cs_frame = call_site[0]
+            context_cache[_CODE_CONTEXT_ANCHOR_KEY] = (
+                id(cs_frame),
+                cs_frame.f_code,
+                cs_frame.f_lasti,
+                cs_frame.f_lineno,
+            )
+
+    cache_key: _CodeContextCacheKey | None = None
+    if context_cache is not None:
+        cache_key = (
             num_context_lines,
             source_loading_enabled,
             disable_col_offset,
+            tuple((code, lineno, lasti) for _frame, code, lineno, lasti in selected),
         )
         cached = context_cache.get(cache_key)
         if cached is not None:
             return list(cached)
-    else:
-        cache_key = None
-        qualnames_by_index = {}
 
-    # Phase 2: Build FuncCallLocation objects only for surviving frames (~5-10).
-    # Do expensive f_locals/f_globals lookups and bytecode walks only here.
+    # Build FuncCallLocation objects only for surviving frames (~5-10) and
+    # only on a cache miss. f_locals/f_globals lookups, qualname reads, and
+    # bytecode walks happen exclusively here.
     result = []
-    for idx in filtered_indices:
-        filename, func_name, lineno, code_firstlineno, frame_ref = raw_frames[idx]
+    for frame_ref, code, lineno, _lasti in selected:
+        func_name = code.co_name
         loc = FuncCallLocation(
-            file=filename,
+            file=code.co_filename,
             line_number=lineno,
             func_name=func_name,
             num_context_lines_requested=num_context_lines,
@@ -767,12 +1012,8 @@ def _get_code_context(
                 if source_loading_enabled
                 else None
             ),
-            code_firstlineno=code_firstlineno,
-            func_qualname=(
-                qualnames_by_index[idx]
-                if idx in qualnames_by_index
-                else _get_code_qualname(frame_ref)
-            ),
+            code_firstlineno=code.co_firstlineno,
+            func_qualname=_get_code_qualname(frame_ref),
             col_offset=None if disable_col_offset else _get_col_offset(frame_ref),
             source_loading_enabled=source_loading_enabled,
         )
@@ -781,97 +1022,3 @@ def _get_code_context(
     if context_cache is not None and cache_key is not None:
         context_cache[cache_key] = tuple(result)
     return result
-
-
-def _code_context_cache_key_and_qualnames(
-    raw_frames: list[tuple[str, str, int, int, FrameType]],
-    filtered_indices: list[int],
-    num_context_lines: int,
-    source_loading_enabled: bool,
-    disable_col_offset: bool,
-) -> tuple[_CodeContextCacheKey, _CodeContextQualnames]:
-    """Return a code-context cache key and per-frame qualnames used to build it.
-
-    Parameters
-    ----------
-    raw_frames:
-        Lightweight frame tuples collected by ``_get_code_context``.
-    filtered_indices:
-        Indices of user-visible frames retained for the context.
-    num_context_lines:
-        Requested source context radius.
-    source_loading_enabled:
-        Whether source text should load lazily on returned locations.
-    disable_col_offset:
-        Whether bytecode column-offset inspection is disabled.
-
-    Returns
-    -------
-    tuple
-        Cache key plus a mapping from filtered frame index to the qualname
-        computed for that frame.
-    """
-
-    qualnames_by_index: _CodeContextQualnames = {}
-    frame_parts = []
-    for idx in filtered_indices:
-        filename, func_name, lineno, code_firstlineno, frame_ref = raw_frames[idx]
-        func_qualname = _get_code_qualname(frame_ref)
-        qualnames_by_index[idx] = func_qualname
-        frame_parts.append(
-            (
-                filename,
-                func_name,
-                lineno,
-                code_firstlineno,
-                func_qualname,
-                frame_ref.f_lasti,
-            )
-        )
-    return (
-        (
-            num_context_lines,
-            source_loading_enabled,
-            disable_col_offset,
-            tuple(frame_parts),
-        ),
-        qualnames_by_index,
-    )
-
-
-def _code_context_cache_key(
-    raw_frames: list[tuple[str, str, int, int, FrameType]],
-    filtered_indices: list[int],
-    num_context_lines: int,
-    source_loading_enabled: bool,
-    disable_col_offset: bool,
-) -> _CodeContextCacheKey:
-    """Return a stable key for one filtered code-context stack.
-
-    Parameters
-    ----------
-    raw_frames:
-        Lightweight frame tuples collected by ``_get_code_context``.
-    filtered_indices:
-        Indices of user-visible frames retained for the context.
-    num_context_lines:
-        Requested source context radius.
-    source_loading_enabled:
-        Whether source text should load lazily on returned locations.
-    disable_col_offset:
-        Whether bytecode column-offset inspection is disabled.
-
-    Returns
-    -------
-    tuple
-        Hashable cache key preserving line and bytecode-offset identity.
-    """
-
-    cache_key, _qualnames_by_index = _code_context_cache_key_and_qualnames(
-        raw_frames,
-        filtered_indices,
-        num_context_lines,
-        source_loading_enabled,
-        disable_col_offset,
-    )
-    return cache_key

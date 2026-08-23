@@ -6,16 +6,15 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-
 if TYPE_CHECKING:
     import pandas as pd
 
     from torchlens.data_classes.trace import Trace
 
-from ._common import _op_label, _tensor_unavailable_reason, _require_pandas
+from ._common import _op_label, _require_pandas, _tensor_unavailable_reason
 
 
-def _empty_grad_frame(message: str, *, pd: Any, **attrs: Any) -> "pd.DataFrame":
+def _empty_grad_frame(message: str, *, pd: Any, **attrs: Any) -> pd.DataFrame:
     """Build an empty gradient audit frame with attrs.
 
     Parameters
@@ -47,7 +46,7 @@ def gradient_flow_audit(
     bwd: int | None = None,
     vanishing_threshold: float = 1e-7,
     exploding_threshold: float = 1e4,
-) -> "pd.DataFrame":
+) -> pd.DataFrame:
     """Audit saved op gradients for vanishing, exploding, and zero gradients.
 
     Parameters

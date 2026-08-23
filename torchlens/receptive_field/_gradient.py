@@ -2,24 +2,26 @@
 
 from __future__ import annotations
 
+import importlib
+import warnings
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-import importlib
 from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
-import warnings
 
 import torch
 
-from .._io import FieldPolicy
+from .. import _state
 from ..backends import BackendUnsupportedError, get_backend_spec
-from . import _engine
-from . import _rules
-from ._errors import ReceptiveFieldError, ReceptiveFieldUnavailableError
+from . import _engine, _rules
+from ._errors import (
+    ReceptiveFieldConfigurationError,
+    ReceptiveFieldError,
+    ReceptiveFieldUnavailableError,
+)
 from ._path import require_path, resolve_graph_point
 from ._types import GradientReceptiveField, GridLayout, ReceptiveFieldDirection
-
 
 if TYPE_CHECKING:
     from ..data_classes.op import Op
@@ -29,7 +31,8 @@ if TYPE_CHECKING:
 
 
 _RECAPTURE_RECIPE = (
-    "tl.trace(model, x, capture=tl.options.CaptureOptions(backward_ready=True), save=...)"
+    "tl.trace(model, x.requires_grad_(True), "
+    'capture=tl.options.CaptureOptions(backward_ready=True), save_mode="reference")'
 )
 
 
@@ -47,14 +50,22 @@ def _builtin_rules_when_registry_empty() -> Iterator[None]:
         yield
         return
     original_epoch = _rules._RF_RULES_EPOCH
-    module = importlib.import_module(f"{__package__}.rules")
-    if not _rules._RF_RULES:
-        for name in module.__all__:
-            importlib.reload(getattr(module, name))
+    original_rules = dict(_rules._RF_RULES)
     try:
+        # Installing the built-in pack (import plus per-module reload) mutates the
+        # shared rule registry and epoch through decorator side effects. Keep that
+        # work inside the try so a mid-loop reload failure cannot leak a partially
+        # populated registry or a half-advanced epoch: the finally always restores
+        # the exact pre-entry mapping and epoch, whether install, the reload loop,
+        # or the guarded body raised.
+        module = importlib.import_module(f"{__package__}.rules")
+        if not _rules._RF_RULES:
+            for name in module.__all__:
+                importlib.reload(getattr(module, name))
         yield
     finally:
         _rules._RF_RULES.clear()
+        _rules._RF_RULES.update(original_rules)
         _rules._RF_RULES_EPOCH = original_epoch
 
 
@@ -106,7 +117,7 @@ class _GradientReceptiveFieldResult(GradientReceptiveField):
         """
 
         if not 0.0 < mass <= 1.0:
-            raise ValueError("mass must be in the interval (0, 1].")
+            raise ReceptiveFieldConfigurationError("mass must be in the interval (0, 1].")
         flat_magnitude = self.grad.reshape(-1)
         flat_support = self.support_mask.reshape(-1)
         supported_indices = torch.nonzero(flat_support, as_tuple=False).reshape(-1)
@@ -223,6 +234,13 @@ def _probe_suppressed(trace: Trace) -> Iterator[None]:
     autograd or user code raises. A post-condition tripwire rejects any mutation
     of TorchLens backward-pass state.
 
+    The flag's ``FieldPolicy.DROP`` scrub policy is declared statically on
+    ``Trace``, alongside the other lazily-populated receptive-field state. It is
+    deliberately not registered from here: mutating the class-level
+    ``PORTABLE_STATE_SPEC`` per probe is a process-global side effect of a
+    per-instance operation, and it desynchronizes that spec from the
+    ``FIELD_POLICY`` table it is generated from.
+
     Parameters
     ----------
     trace:
@@ -234,15 +252,24 @@ def _probe_suppressed(trace: Trace) -> Iterator[None]:
         Control while both backward-capture gates are suppressed.
     """
 
-    type(trace).PORTABLE_STATE_SPEC.setdefault("_tl_rf_probe_active", FieldPolicy.DROP)
+    # "_tl_rf_probe_active" is declared statically in Trace.PORTABLE_STATE_SPEC
+    # (FieldPolicy.DROP): registering it here at call time gave a Trace
+    # serialized before any RF probe a different class spec than one after.
     trace_dict = trace.__dict__
     flag_was_present = "_tl_rf_probe_active" in trace_dict
     previous_flag = trace_dict.get("_tl_rf_probe_active")
     before = _snapshot_probe_state(trace)
     trace._tl_rf_probe_active = True
+    # The per-trace flag alone cannot suppress a probe on a FORK: the
+    # backward grad-fn registry and the capture-time tensor hooks resolve to
+    # the BASE trace (forks preserve tensor identity), whose flag is unset, so
+    # a fork probe minted a phantom managed pass on the parent. The global
+    # depth gates every autograd entry and grad hook while ANY probe runs.
+    _state._rf_probe_depth += 1
     try:
         yield
     finally:
+        _state._rf_probe_depth -= 1
         if flag_was_present:
             trace._tl_rf_probe_active = previous_flag
         else:
@@ -271,6 +298,17 @@ def _normalize_unit(unit: Sequence[int], shape: tuple[int, ...], op_label: str) 
     ------
     ReceptiveFieldError
         If rank, types, or bounds do not identify exactly one output element.
+
+    Notes
+    -----
+    This is the complete-index contract shared by the gradient probes
+    (``gradient``/``check`` and their projective counterparts). A negative index
+    on any axis is wrapped with Python semantics (``index + extent``) before the
+    bounds check, so ``-1`` selects the last element of that axis and any value
+    still outside ``[-extent, extent)`` raises. This negative-wrap policy is
+    intentionally distinct from the windowed ``ReceptiveFieldView.at`` coordinate
+    contract, which rejects negative coordinates outright; the two entry points
+    keep separate, individually documented negative-index policies.
     """
 
     raw = tuple(unit)
@@ -439,8 +477,9 @@ def _source_recapture_recipe(source: Op, target: Op) -> str:
     """
 
     return (
-        "tl.trace(model, x, backward_ready=True, save="
-        f"tl.label({source.layer_label_short!r}) | tl.label({target.layer_label_short!r}))"
+        "tl.trace(model, x.requires_grad_(True), "
+        'capture=tl.options.CaptureOptions(backward_ready=True), save_mode="reference", '
+        f"save=tl.label({source.layer_label_short!r}) | tl.label({target.layer_label_short!r}))"
     )
 
 
@@ -534,34 +573,79 @@ def _batch_semantics(
     mask: torch.Tensor,
     state: _InputState | None,
     unit: tuple[int, ...],
+    *,
+    projective: bool = False,
 ) -> tuple[tuple[int, ...] | None, bool]:
     """Derive supported samples and cross-sample influence from engine layout state.
+
+    The support ``mask`` and the seeded ``unit`` live in different coordinate
+    spaces, and a batch-moving transform (for example a ``permute``) can place
+    the batch axis at a different position in each. ``state.batch_axis`` is the
+    batch axis in the space the engine solved from -- the model-input space for a
+    receptive probe (``mask`` space) and the source space for a projective probe
+    (``unit`` space) -- and ``state.axes[batch_axis].output_axis`` gives its
+    counterpart in the opposite space. Because a batch coordinate is preserved
+    across pure repositioning, the supported samples are counted along the batch
+    axis of ``mask`` while the seeded element's batch coordinate is read from the
+    batch axis of ``unit``; conflating the two positions is what produced a false
+    ``cross_batch_influence`` after a batch-moving transform.
 
     Parameters
     ----------
     mask:
-        Full input support mask.
+        Full support mask in the probe's own coordinate space (model-input space
+        for a receptive probe, target space for a projective probe).
     state:
-        Reachable engine state carrying the derived batch-like input axis.
+        Reachable engine state carrying the derived batch-like axis and its
+        input/output axis correspondence.
     unit:
-        Complete normalized target output index.
+        Complete normalized seeded index (target space for a receptive probe,
+        source space for a projective probe).
+    projective:
+        Whether ``mask`` is in target space and ``unit`` in source space (the
+        projective probe). The default receptive orientation is the mirror image.
 
     Returns
     -------
     tuple[tuple[int, ...] or None, bool]
-        Supported batch indices and whether any differs from the seeded sample.
+        Supported batch indices and whether influence reaches a sample other than
+        the seeded one. When the batch axis is fully coupled in the seed space
+        (no 1:1 counterpart, as with batch-statistic normalization) support
+        spanning more than one sample is reported as cross-batch; a batch axis
+        with no support axis at all reports no samples and no cross-batch.
     """
 
-    if state is None or state.batch_axis is None:
+    if state is None or state.batch_axis is None or state.axes is None:
         return None, False
     batch_axis = state.batch_axis
-    reduce_axes = tuple(axis for axis in range(mask.ndim) if axis != batch_axis)
+    if not 0 <= batch_axis < len(state.axes):
+        return None, False
+    mapped_axis = state.axes[batch_axis].output_axis
+    if projective:
+        # ``mask`` is target space; ``unit`` is source space.
+        mask_batch_axis = mapped_axis
+        seed_axis: int | None = batch_axis
+    else:
+        # ``mask`` is model-input space; ``unit`` is target space.
+        mask_batch_axis = batch_axis
+        seed_axis = mapped_axis
+    if mask_batch_axis is None or not 0 <= mask_batch_axis < mask.ndim:
+        return None, False
+    reduce_axes = tuple(axis for axis in range(mask.ndim) if axis != mask_batch_axis)
     per_batch = mask if not reduce_axes else mask.any(dim=reduce_axes)
     batch_support = tuple(int(index) for index in torch.nonzero(per_batch).reshape(-1).tolist())
-    seeded_batch = unit[batch_axis] if batch_axis < len(unit) else None
-    return batch_support, seeded_batch is not None and any(
-        index != seeded_batch for index in batch_support
-    )
+    if seed_axis is not None and 0 <= seed_axis < len(unit):
+        seeded_batch = unit[seed_axis]
+        cross_batch = any(index != seeded_batch for index in batch_support)
+    else:
+        # The batch axis is fully coupled in the seed space (no 1:1 counterpart,
+        # e.g. batch-statistic normalization), so the seeded sample cannot be
+        # pinned to one coordinate. Empirical support that spans more than one
+        # sample is then itself cross-batch influence; a single-sample support is
+        # not. This keeps the ``undeclared_batch`` tripwire armed for coupling
+        # rather than silently reporting ``False``.
+        cross_batch = len(batch_support) > 1
+    return batch_support, cross_batch
 
 
 def _build_result(
@@ -623,6 +707,7 @@ def _build_result(
         io_role=role,
         unit=unit,
         grad=magnitude,
+        signed_grad=grad.detach(),
         support_mask=support,
         support_ranges=_support_ranges(support),
         spatial_support_mask=_spatial_support(
@@ -684,7 +769,7 @@ def gradient_for_unit(
     """
 
     if atol < 0 or rtol < 0:
-        raise ValueError("atol and rtol must be non-negative.")
+        raise ReceptiveFieldConfigurationError("atol and rtol must be non-negative.")
     if input is not None and source is not None:
         raise TypeError("input= and source= cannot be used together.")
     trace = target.source_trace
@@ -746,8 +831,9 @@ def gradient_for_unit(
         if grad is None:
             raise ReceptiveFieldUnavailableError(
                 f"Source {source_op.label!r} is reachable from {target.label!r} in the captured "
-                "DAG, but autograd returned no gradient. The saved tensor identity may be stale "
-                f"or the path may have been detached; recapture with {_source_recapture_recipe(source_op, target)}."
+                "DAG, but autograd returned no gradient. The trace was likely captured with a "
+                'detaching save mode (the default); recapture with save_mode="reference", '
+                f"for example {_source_recapture_recipe(source_op, target)}."
             )
         return _build_result(
             target=target,
@@ -789,8 +875,8 @@ def gradient_for_unit(
         if grad is None and descriptor is not None:
             raise ReceptiveFieldUnavailableError(
                 f"Input {role!r} is reachable from {target.label!r} in the captured DAG, but "
-                "autograd returned no gradient. The saved tensor identity may be stale or the "
-                "path may have been detached; recapture and inspect the path."
+                "autograd returned no gradient. The trace was likely captured with a detaching "
+                f"save mode (the default); recapture with {_RECAPTURE_RECIPE}."
             )
         if grad is None:
             grad = torch.zeros_like(_saved_tensor(input_op, "input"))

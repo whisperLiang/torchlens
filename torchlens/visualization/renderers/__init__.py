@@ -1,9 +1,9 @@
 """Renderer contracts and implementations for visualization RenderIR."""
 
 from .base import (
-    RenderReport,
     Renderer,
     RendererCapabilities,
+    RenderReport,
     UnsupportedRendererCapabilityError,
 )
 from .graphviz import GraphvizRenderer

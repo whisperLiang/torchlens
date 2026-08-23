@@ -2,8 +2,7 @@
 
 Layer 3 of the version-bump prevention mechanism (after the commit-msg and
 pre-push hooks in ``scripts/check_no_breaking_markers.py``). TorchLens stays
-on the 2.x family per the locked policy in
-``~/.claude/projects/-home-jtaylor-projects-torchlens/memory/feedback_version_bumps.md``.
+on the 2.x family per the locked project release policy.
 The PyPI 1.0.0 and 2.0.0 slots have already been burned by accidental major
 bumps; the 3.0.0 slot was nearly burned a third time on 2026-05-01 (rescued
 only by an unrelated workflow bug).
@@ -22,11 +21,15 @@ To intentionally cut a major release, use:
 
 (with explicit JMT authorization in the same turn).
 
-Pointed at via ``[tool.semantic_release] commit_parser`` in ``pyproject.toml``.
-The ``scripts/`` directory is added to ``sys.path`` by ``conftest.py``-style
-import-time machinery embedded in this module's loader path -- semantic-release
-imports it via dotted name ``no_major_parser:NoMajorAngularParser`` from the
-repo root, where ``scripts/`` is added to ``sys.path`` ahead of release.
+Discovery (grind r4 correction -- the old paragraph here described sys.path
+"conftest-style machinery" that has never existed): ``[tool.semantic_release]
+commit_parser`` in ``pyproject.toml`` names this class with python-semantic-
+release's FILE-PATH spec, ``scripts/no_major_parser.py:NoMajorAngularParser``.
+PSR loads the class directly from that file at release time; no sys.path
+manipulation is involved, and nothing imports this module outside the release
+run. It depends on three PSR-9.x API surfaces (AngularCommitParser,
+ParsedCommit/ParseResult, LevelBump) and fails AT RELEASE TIME if a PSR bump
+renames them -- which is why release.yml pins PSR exactly.
 """
 
 from __future__ import annotations

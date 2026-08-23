@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+import inspect
 import time
 import warnings
+import weakref
 from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from types import SimpleNamespace
 from typing import Any
 
@@ -50,15 +52,57 @@ def active_intervention_context(
         Control while the context is installed.
     """
 
-    previous_spec = _state._active_intervention_spec
-    previous_hook_plan = _state._active_hook_plan
+    # grind-r5 b7 R55 (sol HIGH, poss. REOPENED b2:C10): restores unwind
+    # through a SPLICEABLE entry list (the rng-monitor _PATCH_STACKS
+    # standard), not blind save/restore. The old unconditional restore
+    # re-published a DEAD context when two overlapping contexts unwound out
+    # of stack order (two-thread probe left thread A's spec/plan live after
+    # BOTH finally blocks ran), poisoning every later operation with a stale
+    # intervention. A non-top exit now splices its link out (the entry above
+    # inherits its predecessor) and only the top exit writes the globals.
+    # Cross-thread VISIBILITY of the process-global slot remains bounded by
+    # the single-threaded-by-design capture contract (concurrent captures
+    # refuse at admission; this hot-path manager takes no lock by doctrine).
+    entry = _InterventionContextEntry(
+        intervention_spec,
+        hook_plan,
+        _state._active_intervention_spec,
+        _state._active_hook_plan,
+    )
+    _CONTEXT_ENTRIES.append(entry)
     _state._active_intervention_spec = intervention_spec
     _state._active_hook_plan = hook_plan
     try:
         yield
     finally:
-        _state._active_intervention_spec = previous_spec
-        _state._active_hook_plan = previous_hook_plan
+        if _CONTEXT_ENTRIES and _CONTEXT_ENTRIES[-1] is entry:
+            _CONTEXT_ENTRIES.pop()
+            _state._active_intervention_spec = entry.previous_spec
+            _state._active_hook_plan = entry.previous_plan
+        else:
+            for index in range(len(_CONTEXT_ENTRIES) - 1, -1, -1):
+                if _CONTEXT_ENTRIES[index] is entry:
+                    if index + 1 < len(_CONTEXT_ENTRIES):
+                        above = _CONTEXT_ENTRIES[index + 1]
+                        above.previous_spec = entry.previous_spec
+                        above.previous_plan = entry.previous_plan
+                    del _CONTEXT_ENTRIES[index]
+                    break
+
+
+class _InterventionContextEntry:
+    """One live ``active_intervention_context`` publication, spliceable."""
+
+    __slots__ = ("hook_plan", "previous_plan", "previous_spec", "spec")
+
+    def __init__(self, spec: Any, hook_plan: Any, previous_spec: Any, previous_plan: Any) -> None:
+        self.spec = spec
+        self.hook_plan = hook_plan
+        self.previous_spec = previous_spec
+        self.previous_plan = previous_plan
+
+
+_CONTEXT_ENTRIES: list[_InterventionContextEntry] = []
 
 
 class _HookReentrancyGuard:
@@ -82,7 +126,7 @@ class _HookReentrancyGuard:
 
         return self.depth > 0
 
-    def __enter__(self) -> "_HookReentrancyGuard":
+    def __enter__(self) -> _HookReentrancyGuard:
         """Enter hook execution.
 
         Returns
@@ -151,14 +195,14 @@ def _execute_hook(
     """
 
     try:
-        with HOOK_REENTRANCY_GUARD:
-            with pause_logging():
-                result = hook_callable(out, hook=hook_context)
+        inspect.signature(hook_callable).bind(out, hook=hook_context)
     except TypeError as exc:
         raise HookSignatureError(
             f"hook {hook_context.name!r} could not be called at "
             f"{_site_name(hook_context)} with signature (out, *, hook)"
         ) from exc
+    with HOOK_REENTRANCY_GUARD, pause_logging():
+        result = hook_callable(out, hook=hook_context)
     return validate_hook_output(
         result,
         out,
@@ -198,35 +242,76 @@ def validate_hook_output(
         If the return value is invalid.
     """
 
+    # R67: these are user-payload refusals. Say "intervention replacement" (the
+    # vocabulary the user typed via intervene=/tl.when), name the helper/site,
+    # and stamp structured fields so a partial record is diagnosable from the
+    # public record alone.
+    helper_name = getattr(hook_context, "name", None)
+    site = _site_name(hook_context)
+
+    def _payload_refusal(problem: str, expected: object, got: object) -> HookValueError:
+        """Build one structured intervention-payload refusal."""
+
+        helper_text = f" (helper {helper_name!r})" if helper_name else ""
+        return HookValueError(
+            f"intervention replacement{helper_text} {problem} at {site}; "
+            f"expected {expected}, got {got}. Fix the replacement tensor passed "
+            "to the intervene= clause.",
+            code="intervention_replacement_invalid",
+            site=site,
+            slot="intervene",
+            helper=helper_name,
+            expected=str(expected),
+            got=str(got),
+        )
+
     if result is None:
-        raise HookValueError(
-            f"hook returned None at {_site_name(hook_context)}; expected torch.Tensor"
-        )
+        raise _payload_refusal("returned None", "torch.Tensor", None)
     if not isinstance(result, torch.Tensor):
-        raise HookValueError(
-            f"hook returned {type(result).__name__} at {_site_name(hook_context)}; "
-            "expected torch.Tensor"
-        )
+        raise _payload_refusal("returned a non-tensor", "torch.Tensor", type(result).__name__)
     if force_shape_change:
+        result = _copy_reused_live_hook_result(out, result)
         _copy_tl_replacement_attrs(out, result)
         return result
     if result.dtype != out.dtype:
-        raise HookValueError(
-            f"hook returned dtype {result.dtype} at {_site_name(hook_context)}; "
-            f"expected {out.dtype}"
-        )
+        raise _payload_refusal("has the wrong dtype", out.dtype, result.dtype)
     if result.device != out.device:
-        raise HookValueError(
-            f"hook returned device {result.device} at {_site_name(hook_context)}; "
-            f"expected {out.device}"
-        )
+        raise _payload_refusal("is on the wrong device", out.device, result.device)
     if tuple(result.shape) != tuple(out.shape):
-        raise HookValueError(
-            f"hook returned shape {tuple(result.shape)} at {_site_name(hook_context)}; "
-            f"expected {tuple(out.shape)}"
-        )
+        raise _payload_refusal("has the wrong shape", tuple(out.shape), tuple(result.shape))
+    result = _copy_reused_live_hook_result(out, result)
     _copy_tl_replacement_attrs(out, result)
     return result
+
+
+def _copy_reused_live_hook_result(out: torch.Tensor, result: torch.Tensor) -> torch.Tensor:
+    """Copy a hook result that is already a labeled live capture object.
+
+    The commit path OVERWRITES the result's live label metadata in place
+    (:func:`_copy_tl_replacement_attrs` -> ``copy_replacement_meta``). When a
+    hook returns a REUSED tensor object -- another live op's current-session
+    output, or one shared object fired at 2+ matched sites -- each fire stamps
+    its own site label on the same object and the LAST fire steals it:
+    consumers executing afterwards record the last site as parent, the earlier
+    site's children vanish (byte-identical payloads make the misattributed
+    graph validate clean), and chained edits at the orphaned site become
+    silent no-ops. A labeled foreign object is therefore CLONED (autograd
+    graph preserved) so the site label lands on a distinct object, mirroring
+    the raw-module-hook rewire guard. The site's own pass-through result is
+    exempt (the in-place carve-out).
+    """
+
+    if result is out:
+        return result
+    from torchlens.backends.torch import _tl as _tl_meta
+
+    if _tl_meta.get(result) is None:
+        return result
+    # The copy is TorchLens-internal bookkeeping the user's program never
+    # executed; it must not enter the captured graph as a spurious clone op
+    # (this runs OUTSIDE _execute_hook's paused window).
+    with pause_logging():
+        return result.clone()
 
 
 def _copy_tl_replacement_attrs(source: torch.Tensor, replacement: torch.Tensor) -> None:
@@ -248,10 +333,8 @@ def _copy_tl_replacement_attrs(source: torch.Tensor, replacement: torch.Tensor) 
 
     if replacement is source:
         return
-    try:
+    with suppress(Exception):
         copy_replacement_meta(source, replacement)
-    except Exception:
-        pass
 
 
 def _apply_live_hooks(
@@ -332,6 +415,8 @@ def _apply_live_hooks(
         previous_notes = tuple(hook_context.run_ctx.get("ledger_notes", ()))
         pre_hook_shape = tuple(current_out.shape)
         pre_hook_dtype = str(current_out.dtype)
+        version_before = _tensor_version(current_out)
+        content_before = _tensor_content_probe(current_out)
         result = _execute_hook(
             normalized_entry.normalized_callable,
             current_out,
@@ -345,6 +430,22 @@ def _apply_live_hooks(
             call_args=call_args,
             call_kwargs=call_kwargs,
         )
+        if (
+            not replaced
+            and result is current_out
+            and (
+                (version_before is not None and _tensor_version(current_out) != version_before)
+                or _content_probe_mutated(content_before, _tensor_content_probe(current_out))
+            )
+        ):
+            # An in-place-mutating HOOK (``out.mul_(0); return out``) is a
+            # genuine value change: recording replaced=False minted ZERO
+            # replacement evidence, so validation later failed forward replay
+            # in a capture-bug shape on a genuine intervention, and an
+            # unvalidated trace carried the false no-replacement claim. The
+            # content probe closes the ``.data``-alias channel the version
+            # counter cannot see (fresh counter on the alias impl).
+            replaced = True
         record = _build_live_fire_record(
             normalized_entry,
             site=site,
@@ -374,8 +475,109 @@ def _apply_live_hooks(
                 fire_record=record,
             )
         )
+        if normalized_entry.metadata.get("zero_match_ledger") == "intervene_selector":
+            trace = _state._active_trace
+            if trace is not None:
+                trace._tl_intervene_selector_fire_count = (
+                    int(getattr(trace, "_tl_intervene_selector_fire_count", 0)) + 1
+                )
         current_out = result
     return current_out, tuple(fire_results)
+
+
+def _tensor_version(value: Any) -> int | None:
+    """Return a tensor's in-place mutation counter, or ``None`` when unreadable.
+
+    ``Tensor._version`` is the cheap autograd version counter; inference-mode
+    tensors (no counter) and exotic subclasses read as ``None``, which callers
+    treat as "no in-place evidence" rather than a refusal.
+    """
+
+    if not isinstance(value, torch.Tensor):
+        return None
+    try:
+        return int(value._version)
+    except Exception:
+        return None
+
+
+def _tuple_versions(values: tuple[torch.Tensor | None, ...]) -> tuple[int | None, ...]:
+    """Version counters for one grad tuple, ``None`` per non-tensor slot."""
+
+    return tuple(_tensor_version(value) for value in values)
+
+
+_CONTENT_PROBE_SAMPLES = 8
+"""Bounded per-fire sample width for the storage-alias mutation probe."""
+
+
+def _tensor_content_probe(value: Any) -> tuple[Any, ...] | None:
+    """Bounded strided content sample witnessing storage-alias mutations.
+
+    ``Tensor._version`` misses mutations routed through a DIFFERENT impl over
+    the same storage: ``.data`` mints a storage-sharing alias with a FRESH
+    version counter, so ``out.data.mul_(0); return out`` changed execution
+    with the counter witness reading "no mutation" (the incomplete half of
+    2289e56c). Identity returns therefore pair the counter with this O(1)
+    sample -- numel plus up to :data:`_CONTENT_PROBE_SAMPLES` evenly strided
+    elements. Wholesale in-place edits (zeroing, scaling) are caught; a
+    mutation confined to unsampled elements remains a documented residual,
+    with replay validation the fail-closed authority. ``None`` (non-tensor /
+    unreadable / exotic subclass) reads as "no evidence", never a refusal.
+    """
+
+    if not isinstance(value, torch.Tensor):
+        return None
+    from .._state import pause_logging
+
+    try:
+        with pause_logging():
+            numel = int(value.numel())
+            if numel == 0:
+                return (0, ())
+            flat = value.detach().reshape(-1)
+            count = min(_CONTENT_PROBE_SAMPLES, numel)
+            step = max(1, numel // count)
+            sample = flat[::step][:count].tolist()
+        return (numel, tuple(sample))
+    except Exception:
+        return None
+
+
+def _content_probe_mutated(before: tuple[Any, ...] | None, after: tuple[Any, ...] | None) -> bool:
+    """NaN-aware inequality between two content probes (missing = no evidence)."""
+
+    if before is None or after is None:
+        return False
+    numel_before, sample_before = before
+    numel_after, sample_after = after
+    if numel_before != numel_after or len(sample_before) != len(sample_after):
+        return True
+    for left, right in zip(sample_before, sample_after, strict=True):
+        if left != right and not (left != left and right != right):  # NaN == NaN here
+            return True
+    return False
+
+
+def _tuple_content_probes(
+    values: tuple[torch.Tensor | None, ...],
+) -> tuple[tuple[Any, ...] | None, ...]:
+    """Content probes for one grad tuple, ``None`` per non-tensor slot."""
+
+    return tuple(_tensor_content_probe(value) for value in values)
+
+
+def _tuple_probes_mutated(
+    before: tuple[tuple[Any, ...] | None, ...],
+    after: tuple[tuple[Any, ...] | None, ...],
+) -> bool:
+    """Whether any grad-tuple slot's content probe changed (NaN-aware)."""
+
+    if len(before) != len(after):
+        return True
+    return any(
+        _content_probe_mutated(left, right) for left, right in zip(before, after, strict=True)
+    )
 
 
 def _apply_inplace_replacement_to_mutated_storage(
@@ -480,7 +682,21 @@ def _apply_module_boundary_live_hooks(
         Module output with any tensor replacements applied.
     """
 
-    if not _state._active_hook_plan:
+    trace = _state._active_trace
+    predicate_options = getattr(trace, "_predicate_save_options", None)
+    predicate_intervene = getattr(predicate_options, "intervene", None)
+    predicate_selector = getattr(predicate_intervene, "selector", None)
+    if predicate_selector is not None:
+        from ..ir.selector_eval import selector_contains_kind
+        from .selectors import BaseSelector
+
+        if not isinstance(predicate_selector, BaseSelector) or not selector_contains_kind(
+            predicate_selector, "module"
+        ):
+            predicate_intervene = None
+    else:
+        predicate_intervene = None
+    if not _state._active_hook_plan and predicate_intervene is None:
         return out_orig
     module_call = (module_address, module_call_index)
     replacements: dict[tuple[Any, ...], torch.Tensor] = {}
@@ -508,16 +724,45 @@ def _apply_module_boundary_live_hooks(
             call_args=call_args,
             call_kwargs=call_kwargs,
         )
+        all_fire_results = list(fire_results)
+        if predicate_intervene is not None and trace is not None:
+            from ..backends.torch.ops import _record_predicate_intervention_spec
+            from ..capture.predicates import _evaluate_intervene_op
+            from .hooks import normalize_hook_plan
+
+            assert predicate_options is not None
+            decision = _evaluate_intervene_op(site, predicate_options)
+            if decision is not None:
+                _record_predicate_intervention_spec(trace, site, decision)
+                hook_entries = normalize_hook_plan(
+                    decision.hook,
+                    default_site_target=predicate_selector,
+                    direction=decision.direction,
+                )
+                with active_intervention_context(
+                    intervention_spec=getattr(trace, "_intervention_spec", None),
+                    hook_plan=hook_entries,
+                ):
+                    hooked, predicate_fire_results = _apply_live_hooks(
+                        hooked,
+                        site=site,
+                        container_path=container_path,
+                        call_args=call_args,
+                        call_kwargs=call_kwargs,
+                    )
+                all_fire_results.extend(predicate_fire_results)
+                if predicate_fire_results:
+                    trace._tl_intervene_selector_fire_count = int(
+                        getattr(trace, "_tl_intervene_selector_fire_count", 0)
+                    ) + len(predicate_fire_results)
+        fire_results = tuple(all_fire_results)
         if fire_results:
             if hooked is not out:
                 parent_label = get_tensor_label(out)
                 if parent_label is not None:
-                    try:
-                        setattr(hooked, "_tl_module_intervention_parent_labels", (parent_label,))
-                    except Exception:
-                        pass
+                    _record_module_intervention_parent_labels(hooked, (parent_label,), trace)
                 clear_tensor_label(hooked)
-            _set_tensor_live_fire_results_if_available(hooked, fire_results)
+            _record_tensor_live_fire_results(hooked, fire_results)
         if hooked is not out:
             replacements[container_path] = hooked
     if not replacements:
@@ -525,10 +770,21 @@ def _apply_module_boundary_live_hooks(
     return _replace_tensor_outputs(out_orig, replacements)
 
 
-def _set_tensor_live_fire_results_if_available(
+_MODULE_INTERVENTION_PARENTS_ATTR = "_tl_module_intervention_parent_labels"
+_MODULE_INTERVENTION_PARENTS_TABLE = "_tl_module_intervention_parents_by_id"
+
+
+def _record_tensor_live_fire_results(
     tensor: torch.Tensor, fire_results: tuple[FireResult, ...]
 ) -> None:
-    """Attach fire results to a tensor when dynamic attributes are available.
+    """Attach module-boundary fire results to a tensor, never dropping them silently.
+
+    A replacement tensor that rejects dynamic attributes used to swallow the
+    evidence (bare ``except: pass``), so the module exit reran with no
+    intervention provenance and the fresh value was misclassified as an
+    ``internal_source``. Delegate to the op-level setter, which falls back to
+    the storage-owned side table and raises a typed ``CompatibilityError``
+    only when NEITHER channel is writable.
 
     Parameters
     ----------
@@ -538,10 +794,113 @@ def _set_tensor_live_fire_results_if_available(
         Fire results emitted by the live hook dispatcher.
     """
 
+    from ..backends.torch._ops_interventions import _set_tensor_live_fire_results
+
+    _set_tensor_live_fire_results(tensor, fire_results)
+
+
+def _peek_tensor_live_fire_results(tensor: torch.Tensor) -> tuple[FireResult, ...]:
+    """Return (without consuming) live fire results attached to ``tensor``.
+
+    Checks the plain attribute first, then the storage-owned side table the
+    robust setter falls back to for attr-rejecting replacement tensors. The
+    module-exit consumer gates its replacement-vs-internal-source
+    classification on this peek, so it must see both channels.
+
+    Parameters
+    ----------
+    tensor:
+        Tensor about to be classified at a module exit.
+    """
+
     try:
-        setattr(tensor, "_tl_live_fire_results", fire_results)
+        fire_results = tuple(getattr(tensor, "_tl_live_fire_results", ()) or ())
+    except Exception:
+        fire_results = ()
+    if fire_results:
+        return fire_results
+    from ..backends.torch import _ops_interventions as intervention_state
+
+    try:
+        with pause_logging():
+            storage = tensor.untyped_storage()
+        records = getattr(storage, intervention_state._LIVE_FIRE_RESULTS_STORAGE_ATTR, None)
+    except Exception:
+        return ()
+    if not isinstance(records, dict):
+        return ()
+    entry = records.get(id(tensor))
+    if entry is not None and entry[0]() is tensor:
+        return tuple(entry[1])
+    return ()
+
+
+def _record_module_intervention_parent_labels(
+    tensor: torch.Tensor,
+    parent_labels: tuple[str, ...],
+    trace: Any,
+) -> None:
+    """Record the replaced-parent labels for a module-boundary replacement.
+
+    Falls back to a trace-scoped identity-keyed table (weakly guarded against
+    id reuse, dying with the capture) when the replacement tensor rejects
+    dynamic attributes, so the boundary op minted at module exit keeps its
+    dataflow parents instead of silently losing them.
+
+    Parameters
+    ----------
+    tensor:
+        Replacement tensor produced by a live module-boundary hook.
+    parent_labels:
+        Raw labels of the replaced module-output tensors.
+    trace:
+        Active trace owning the fallback table (``None`` tolerated; the loss
+        is then disclosed with a warning rather than swallowed).
+    """
+
+    labels = tuple(parent_labels)
+    try:
+        setattr(tensor, _MODULE_INTERVENTION_PARENTS_ATTR, labels)
+        return
     except Exception:
         pass
+    if trace is None:
+        warnings.warn(
+            "TorchLens could not record intervention parent provenance for a "
+            "module-boundary replacement tensor (dynamic attributes rejected and "
+            "no active trace); the replacement op will carry no parents.",
+            stacklevel=2,
+        )
+        return
+    table = trace.__dict__.setdefault(_MODULE_INTERVENTION_PARENTS_TABLE, {})
+    table[id(tensor)] = (weakref.ref(tensor), labels)
+
+
+def _peek_module_intervention_parent_labels(tensor: torch.Tensor, trace: Any) -> tuple[str, ...]:
+    """Return the recorded replaced-parent labels for ``tensor``, if any.
+
+    Parameters
+    ----------
+    tensor:
+        Module-output tensor being classified at a module exit.
+    trace:
+        Active trace whose fallback table is consulted when the tensor
+        carries no attribute.
+    """
+
+    try:
+        labels = tuple(getattr(tensor, _MODULE_INTERVENTION_PARENTS_ATTR, ()) or ())
+    except Exception:
+        labels = ()
+    if labels:
+        return labels
+    table = getattr(trace, _MODULE_INTERVENTION_PARENTS_TABLE, None) if trace is not None else None
+    if not isinstance(table, dict):
+        return ()
+    entry = table.get(id(tensor))
+    if entry is not None and entry[0]() is tensor:
+        return tuple(entry[1])
+    return ()
 
 
 def _iter_tensor_outputs(
@@ -597,10 +956,13 @@ def _replace_tensor_outputs(value: Any, replacements: dict[tuple[Any, ...], torc
     if () in replacements:
         return replacements[()]
     if isinstance(value, tuple):
-        return type(value)(
+        rebuilt_items = tuple(
             _replace_tensor_outputs_by_child(item, replacements, (index,))
             for index, item in enumerate(value)
         )
+        if _is_namedtuple_instance(value):
+            return tuple.__new__(type(value), rebuilt_items)
+        return type(value)(rebuilt_items)
     if isinstance(value, list):
         return [
             _replace_tensor_outputs_by_child(item, replacements, (index,))
@@ -642,6 +1004,24 @@ def _replace_tensor_outputs_by_child(
     if not child_replacements:
         return value
     return _replace_tensor_outputs(value, child_replacements)
+
+
+def _is_namedtuple_instance(value: Any) -> bool:
+    """Return whether ``value`` is a namedtuple instance.
+
+    Parameters
+    ----------
+    value:
+        Candidate container.
+
+    Returns
+    -------
+    bool
+        Whether ``value`` is a tuple with ``_fields`` metadata.
+    """
+
+    fields = getattr(type(value), "_fields", None)
+    return isinstance(value, tuple) and isinstance(fields, tuple)
 
 
 def _hook_call_inputs_for_site(
@@ -874,6 +1254,9 @@ def _selector_uses_only_provisional_fields(selector: Any) -> bool:
 
     try:
         normalized = getattr(selector, "selector_kind", None)
+        # A provisional op explicitly carries ``_tl_module_boundary=False`` and
+        # ``output_of_module_calls=()``. Therefore ``tl.module`` is definitively
+        # false here; its eventual true match is evaluated by the module-exit hook.
         if normalized in {"func", "module", "in_module"}:
             return True
         if normalized in {"and", "or"}:
@@ -929,8 +1312,8 @@ def _provisional_inplace_site(func_name: str, trace: Any, func_call_id: int) -> 
 
     layer_type = _normalize_func_name(func_name)
     modules = tuple(_snapshot_exhaustive_module_stack(trace))
-    raw_index = int(getattr(trace, "_layer_counter", 0)) + 1
-    type_index = int(getattr(trace, "_raw_layer_type_counter", {}).get(layer_type, 0)) + 1
+    raw_index = trace._raw_graph_ws.layer_counter + 1
+    type_index = trace._raw_graph_ws.raw_layer_type_counter.get(layer_type, 0) + 1
     raw_label = f"{layer_type}_{type_index}_{raw_index}_raw"
     return SimpleNamespace(
         layer_label=raw_label,
@@ -1075,15 +1458,16 @@ def _apply_live_backward_hooks(
         ):
             continue
         previous = current
-        with HOOK_REENTRANCY_GUARD:
-            with pause_logging():
-                result = normalized_entry.normalized_callable(
-                    current,
-                    grad_output=grad_output,
-                    grad_fn_handle=grad_fn_handle,
-                    call_index=call_index,
-                    run_ctx=_live_run_ctx(),
-                )
+        versions_before = _tuple_versions(current)
+        probes_before = _tuple_content_probes(current)
+        with HOOK_REENTRANCY_GUARD, pause_logging():
+            result = normalized_entry.normalized_callable(
+                current,
+                grad_output=grad_output,
+                grad_fn_handle=grad_fn_handle,
+                call_index=call_index,
+                run_ctx=_live_run_ctx(),
+            )
         if result is not None:
             current = _validate_grad_tuple(result, current, grad_fn_handle=grad_fn_handle)
             mutated = True
@@ -1093,11 +1477,14 @@ def _apply_live_backward_hooks(
                 grad_fn_handle=grad_fn_handle,
                 call_index=call_index,
                 grad_kind="grad_input",
+                inplace_mutated=_tuple_versions(previous) != versions_before
+                or _tuple_probes_mutated(probes_before, _tuple_content_probes(previous)),
                 timing="post",
                 previous=previous,
                 current=current,
             )
         )
+        _record_backward_selector_fire(normalized_entry)
     _append_active_spec_records(fire_records)
     return (current if mutated else None), tuple(fire_records)
 
@@ -1145,15 +1532,16 @@ def _apply_live_backward_prehooks(
         ):
             continue
         previous = current
-        with HOOK_REENTRANCY_GUARD:
-            with pause_logging():
-                result = normalized_entry.normalized_callable(
-                    current,
-                    grad_output=None,
-                    grad_fn_handle=grad_fn_handle,
-                    call_index=call_index,
-                    run_ctx=_live_run_ctx(),
-                )
+        versions_before = _tuple_versions(current)
+        probes_before = _tuple_content_probes(current)
+        with HOOK_REENTRANCY_GUARD, pause_logging():
+            result = normalized_entry.normalized_callable(
+                current,
+                grad_output=None,
+                grad_fn_handle=grad_fn_handle,
+                call_index=call_index,
+                run_ctx=_live_run_ctx(),
+            )
         if result is not None:
             current = _validate_grad_tuple(result, current, grad_fn_handle=grad_fn_handle)
             mutated = True
@@ -1163,13 +1551,35 @@ def _apply_live_backward_prehooks(
                 grad_fn_handle=grad_fn_handle,
                 call_index=call_index,
                 grad_kind="grad_input",
+                inplace_mutated=_tuple_versions(previous) != versions_before
+                or _tuple_probes_mutated(probes_before, _tuple_content_probes(previous)),
                 timing="pre",
                 previous=previous,
                 current=current,
             )
         )
+        _record_backward_selector_fire(normalized_entry)
     _append_active_spec_records(fire_records)
     return (current if mutated else None), tuple(fire_records)
+
+
+def _record_backward_selector_fire(entry: NormalizedHookEntry) -> None:
+    """Increment the deferred zero-match ledger for one backward selector fire.
+
+    Parameters
+    ----------
+    entry:
+        Normalized backward hook entry that matched the live GradFn site.
+    """
+
+    if entry.metadata.get("created_by") != "intervene_backward_selector":
+        return
+    trace = _state._active_trace
+    if trace is None:
+        return
+    trace._tl_intervene_selector_fire_count = (
+        int(getattr(trace, "_tl_intervene_selector_fire_count", 0)) + 1
+    )
 
 
 def _validate_grad_tuple(
@@ -1205,6 +1615,38 @@ def _validate_grad_tuple(
             f"backward helper at {getattr(grad_fn_handle, 'label', '<unknown>')} returned "
             f"{len(result)} gradients; expected {len(reference)}"
         )
+    for index, (candidate, expected) in enumerate(zip(result, reference, strict=True)):
+        if expected is None:
+            if candidate is not None:
+                raise HookValueError(
+                    "backward helper at "
+                    f"{getattr(grad_fn_handle, 'label', '<unknown>')} returned a tensor for "
+                    f"slot {index}; expected None"
+                )
+            continue
+        if candidate is None:
+            continue
+        if not isinstance(candidate, torch.Tensor):
+            raise HookValueError(
+                f"backward helper at {getattr(grad_fn_handle, 'label', '<unknown>')} returned "
+                f"{type(candidate).__name__} for slot {index}; expected torch.Tensor or None"
+            )
+        if candidate.dtype != expected.dtype:
+            raise HookValueError(
+                f"backward helper at {getattr(grad_fn_handle, 'label', '<unknown>')} returned "
+                f"dtype {candidate.dtype} for slot {index}; expected {expected.dtype}"
+            )
+        if candidate.device != expected.device:
+            raise HookValueError(
+                f"backward helper at {getattr(grad_fn_handle, 'label', '<unknown>')} returned "
+                f"device {candidate.device} for slot {index}; expected {expected.device}"
+            )
+        if tuple(candidate.shape) != tuple(expected.shape):
+            raise HookValueError(
+                f"backward helper at {getattr(grad_fn_handle, 'label', '<unknown>')} returned "
+                f"shape {tuple(candidate.shape)} for slot {index}; expected "
+                f"{tuple(expected.shape)}"
+            )
     return result
 
 
@@ -1330,6 +1772,7 @@ def _build_live_backward_fire_record(
     timing: str,
     previous: tuple[torch.Tensor | None, ...],
     current: tuple[torch.Tensor | None, ...],
+    inplace_mutated: bool = False,
 ) -> FireRecord:
     """Build an audit record for one live backward hook fire.
 
@@ -1349,6 +1792,10 @@ def _build_live_backward_fire_record(
         Tuple before this helper ran.
     current:
         Tuple after this helper ran.
+    inplace_mutated:
+        Whether the hook mutated a grad slot IN PLACE (version-counter
+        evidence): a hook editing a tensor and returning ``None`` is a
+        genuine value change and must not record ``replaced=False``.
 
     Returns
     -------
@@ -1377,7 +1824,7 @@ def _build_live_backward_fire_record(
         call_index=call_index,
         grad_kind=grad_kind,  # type: ignore[arg-type]
         tuple_index=tuple_index,
-        replaced=tuple_index is not None or current is not previous,
+        replaced=tuple_index is not None or current is not previous or inplace_mutated,
     )
 
 

@@ -2,28 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
-    Dict,
-    Iterable,
-    List,
     Literal,
-    Mapping,
-    Optional,
-    Sequence,
     cast,
 )
 
-from ...utils.display import format_flops, human_readable_size
+from ..._errors import InvalidArgumentError
 from ..._source_links import terminal_file_line_link
+from ...utils.display import format_flops, human_readable_size
 
 if TYPE_CHECKING:
     from ..data_classes.layer import Layer
+    from ..data_classes.module import Module
     from ..data_classes.op import Op
     from ..data_classes.trace import ConditionalEvent, Trace
-    from ..data_classes.module import Module
 
 
 SummaryLevel = Literal[
@@ -31,9 +26,9 @@ SummaryLevel = Literal[
 ]
 SummaryMode = Literal["auto", "rolled", "unrolled"]
 
-_LEVEL_ALIASES: Dict[str, str] = {"cost": "compute"}
+_LEVEL_ALIASES: dict[str, str] = {"cost": "compute"}
 
-_COLUMN_LABELS: Dict[str, str] = {
+_COLUMN_LABELS: dict[str, str] = {
     "name": "Layer",
     "shape": "Output Shape",
     "params": "Params",
@@ -61,7 +56,7 @@ _COLUMN_LABELS: Dict[str, str] = {
     "prob": "Prob",
 }
 
-_LEVEL_DEFAULT_FIELDS: Dict[str, List[str]] = {
+_LEVEL_DEFAULT_FIELDS: dict[str, list[str]] = {
     "overview": ["name", "shape", "params", "train"],
     "graph": ["name", "shape", "params", "parents"],
     "memory": ["name", "shape", "dtype", "tensor_mb", "running_mb"],
@@ -73,17 +68,17 @@ _LEVEL_DEFAULT_FIELDS: Dict[str, List[str]] = {
 
 
 def render_model_summary(
-    trace: "Trace",
+    trace: Trace,
     *,
     level: SummaryLevel = "overview",
     preset: SummaryLevel | None = None,
-    fields: Optional[List[str]] = None,
-    columns: Optional[List[str]] = None,
+    fields: list[str] | None = None,
+    columns: list[str] | None = None,
     mode: SummaryMode = "auto",
     show_ops: bool = False,
-    include_ops: Optional[bool] = None,
-    max_rows: Optional[int] = 200,
-    print_to: Optional[Callable[[str], None]] = None,
+    include_ops: bool | None = None,
+    max_rows: int | None = 200,
+    print_to: Callable[[str], None] | None = None,
     show_input_preprocessing_details: bool = False,
 ) -> str:
     """Render a textual summary for a ``Trace``.
@@ -146,12 +141,52 @@ def render_model_summary(
         f"{format_discoverability_summary(trace, show_input_preprocessing_details=show_input_preprocessing_details)}"
         f"\n\n{legacy_text}"
     )
+    banner = _capture_verification_banner(trace)
+    if banner:
+        text = f"{banner}\n{text}"
     if print_to is not None:
         print_to(text)
     return text
 
 
-def format_model_repr(trace: "Trace") -> str:
+def _capture_verification_banner(trace: Trace) -> str:
+    """Return the disclosure line for a non-clean capture, or ``""``.
+
+    Round-7 R67/R88: the report honesty contract requires a rescued or
+    ceilinged capture (``capture_verified=False``) and any non-COMPLETE
+    settled outcome to stay VISIBLE in summary output rather than rendering
+    indistinguishably from a clean complete capture.
+
+    Parameters
+    ----------
+    trace:
+        Trace being summarized.
+
+    Returns
+    -------
+    str
+        One-line disclosure, or empty for a clean complete capture.
+    """
+
+    notes = []
+    # L7a G3 render honesty: a structure-only capture's shapes/dtypes are
+    # HYPOTHESES; every human surface says so (memo sec 3.4).
+    if bool(getattr(trace, "structure_only", False)):
+        notes.append("structure-only capture -- shapes/dtypes are HYPOTHESES, not measurements")
+    status_value = getattr(getattr(getattr(trace, "outcome", None), "status", None), "value", None)
+    if status_value not in (None, "complete"):
+        notes.append(f"capture outcome: {status_value}")
+    if getattr(trace, "capture_verified", None) is False:
+        reason = getattr(trace, "capture_verification_reason", None) or "unrecorded reason"
+        notes.append(f"capture UNVERIFIED ({reason})")
+    if bool(getattr(trace, "rescue_rerun", None) or False):
+        notes.append("rescue re-run result (mode_rescue_rerun)")
+    if not notes:
+        return ""
+    return "! " + "; ".join(notes) + " -- this summary may undercount what ran"
+
+
+def format_model_repr(trace: Trace) -> str:
     """Return a short ``repr`` string for a ``Trace``.
 
     Parameters
@@ -182,7 +217,7 @@ def format_model_repr(trace: "Trace") -> str:
     )
 
 
-def _live_op_count(trace: "Trace") -> int:
+def _live_op_count(trace: Trace) -> int:
     """Return live op-event count when capture events are present.
 
     Parameters
@@ -199,11 +234,11 @@ def _live_op_count(trace: "Trace") -> int:
     events = getattr(trace, "capture_events", None)
     if events is not None and getattr(events, "op_events", None) is not None:
         return len(events.op_events)
-    return len(trace._raw_layer_dict)
+    return len(trace._raw_graph_ws.raw_layer_dict)
 
 
 def format_discoverability_summary(
-    trace: "Trace",
+    trace: Trace,
     *,
     show_input_preprocessing_details: bool = False,
 ) -> str:
@@ -269,7 +304,7 @@ def format_discoverability_summary(
 
 
 def _input_preprocessing_lines(
-    trace: "Trace",
+    trace: Trace,
     *,
     show_details: bool = False,
 ) -> list[str]:
@@ -306,7 +341,7 @@ def _input_preprocessing_lines(
     return lines
 
 
-def _output_postprocessing_lines(trace: "Trace") -> list[str]:
+def _output_postprocessing_lines(trace: Trace) -> list[str]:
     """Return output-postprocessing summary lines.
 
     Parameters
@@ -340,7 +375,7 @@ def _output_postprocessing_lines(trace: "Trace") -> list[str]:
     return lines
 
 
-def _decoded_output_preview(trace: "Trace") -> str | None:
+def _decoded_output_preview(trace: Trace) -> str | None:
     """Return a compact decoded-output preview for discoverability summary.
 
     Parameters
@@ -395,7 +430,7 @@ def _decoded_batch_topk_rows(value: Any) -> list[Mapping[str, Any]] | None:
     return None
 
 
-def _input_shape_summary(trace: "Trace") -> str:
+def _input_shape_summary(trace: Trace) -> str:
     """Return a compact input-shape summary.
 
     Parameters
@@ -419,7 +454,7 @@ def _input_shape_summary(trace: "Trace") -> str:
     return "unknown"
 
 
-def _capture_timestamp(trace: "Trace") -> str:
+def _capture_timestamp(trace: Trace) -> str:
     """Return a readable capture timestamp surrogate.
 
     Parameters
@@ -442,7 +477,7 @@ def _capture_timestamp(trace: "Trace") -> str:
     return f"start={pass_start:.6f}"
 
 
-def _run_state_name(trace: "Trace") -> str:
+def _run_state_name(trace: Trace) -> str:
     """Return the run-state enum name.
 
     Parameters
@@ -460,7 +495,7 @@ def _run_state_name(trace: "Trace") -> str:
     return str(getattr(state, "name", state))
 
 
-def _stale_spec_status(trace: "Trace") -> str:
+def _stale_spec_status(trace: Trace) -> str:
     """Return whether the out recipe is stale.
 
     Parameters
@@ -480,7 +515,7 @@ def _stale_spec_status(trace: "Trace") -> str:
     return f"{stale} (spec={spec_revision}, out_recipe={recipe_revision})"
 
 
-def _last_run_summary(trace: "Trace") -> str:
+def _last_run_summary(trace: Trace) -> str:
     """Return a compact last-run context summary.
 
     Parameters
@@ -586,7 +621,7 @@ def _portability_status(target_specs: Sequence[Any], hook_specs: Sequence[Any]) 
     return "all helpers builtin -> portable"
 
 
-def _recent_operation_lines(trace: "Trace") -> list[str]:
+def _recent_operation_lines(trace: Trace) -> list[str]:
     """Return recent operation-history lines.
 
     Parameters
@@ -637,7 +672,7 @@ def _operation_detail(record: Mapping[str, Any]) -> str:
     return f": {', '.join(parts)}" if parts else ""
 
 
-def _parent_run_summary(trace: "Trace") -> str:
+def _parent_run_summary(trace: Trace) -> str:
     """Return parent-run status.
 
     Parameters
@@ -660,7 +695,7 @@ def _parent_run_summary(trace: "Trace") -> str:
     return f"{getattr(parent, 'trace_label', None)!r} ({getattr(parent, 'model_class_name', None)})"
 
 
-def _fork_chain_summary(trace: "Trace") -> str:
+def _fork_chain_summary(trace: Trace) -> str:
     """Return a compact fork lineage chain.
 
     Parameters
@@ -712,7 +747,7 @@ def _truncated(value: Any, *, length: int = 8) -> str:
     return text[:length]
 
 
-def _relationship_evidence_summary(trace: "Trace") -> str:
+def _relationship_evidence_summary(trace: Trace) -> str:
     """Return relationship evidence enum names.
 
     Parameters
@@ -736,7 +771,7 @@ def _relationship_evidence_summary(trace: "Trace") -> str:
     return ", ".join(parts)
 
 
-def _next_operation_hint(trace: "Trace") -> str:
+def _next_operation_hint(trace: Trace) -> str:
     """Return available next-operation guidance.
 
     Parameters
@@ -759,7 +794,7 @@ def _next_operation_hint(trace: "Trace") -> str:
     return "ready for set(), attach_hooks(), do(), replay(), rerun(), or fork()"
 
 
-def _rng_note_summary(trace: "Trace") -> str:
+def _rng_note_summary(trace: Trace) -> str:
     """Return helper RNG and non-determinism notes.
 
     Parameters
@@ -828,15 +863,24 @@ def _resolve_level(*, level: SummaryLevel, preset: SummaryLevel | None) -> str:
         If conflicting selectors are provided.
     """
     if preset is not None and preset != level:
-        raise ValueError("Pass either `level` or `preset`, not both with different values.")
+        raise InvalidArgumentError(
+            "Pass either `level` or `preset`, not both with different values",
+            code="summary_option_conflict",
+            remedy="pass level= or preset=, or give both the same value",
+        )
     selected_name: str = preset or level
     selected_name = _LEVEL_ALIASES.get(selected_name, selected_name)
     if selected_name not in _LEVEL_DEFAULT_FIELDS:
-        raise ValueError(f"Unsupported summary level: {selected_name!r}.")
+        raise InvalidArgumentError(
+            f"Unsupported summary level: {selected_name!r}",
+            code="summary_level_invalid",
+            remedy="pass a documented summary level",
+            argument="level",
+        )
     return selected_name
 
 
-def _resolve_show_ops(*, show_ops: bool, include_ops: Optional[bool]) -> bool:
+def _resolve_show_ops(*, show_ops: bool, include_ops: bool | None) -> bool:
     """Resolve the operation-dump toggle.
 
     Parameters
@@ -860,16 +904,20 @@ def _resolve_show_ops(*, show_ops: bool, include_ops: Optional[bool]) -> bool:
     # This implementation treats them as strict aliases and rejects conflicting
     # values rather than silently guessing precedence.
     if include_ops is not None and include_ops != show_ops:
-        raise ValueError("Pass either `show_ops` or `include_ops`, not both with different values.")
+        raise InvalidArgumentError(
+            "Pass either `show_ops` or `include_ops`, not both with different values",
+            code="summary_option_conflict",
+            remedy="pass show_ops= or include_ops=, or give both the same value",
+        )
     return include_ops if include_ops is not None else show_ops
 
 
 def _resolve_fields(
     level: str,
     *,
-    fields: Optional[List[str]],
-    columns: Optional[List[str]],
-) -> List[str]:
+    fields: list[str] | None,
+    columns: list[str] | None,
+) -> list[str]:
     """Resolve the primary-table field selection.
 
     Parameters
@@ -892,23 +940,32 @@ def _resolve_fields(
         If conflicting values are provided.
     """
     if fields is not None and columns is not None and fields != columns:
-        raise ValueError("Pass either `fields` or `columns`, not both with different values.")
+        raise InvalidArgumentError(
+            "Pass either `fields` or `columns`, not both with different values",
+            code="summary_option_conflict",
+            remedy="pass fields= or columns=, or give both the same value",
+        )
     selected = columns if columns is not None else fields
     if selected is None:
         return list(_LEVEL_DEFAULT_FIELDS[level])
     unknown = [field for field in selected if field not in _COLUMN_LABELS]
     if unknown:
-        raise ValueError(f"Unsupported summary fields: {unknown}.")
+        raise InvalidArgumentError(
+            f"Unsupported summary fields: {unknown}",
+            code="summary_fields_invalid",
+            remedy="pass documented summary field names",
+            fields=unknown,
+        )
     return list(selected)
 
 
 def _render_in_progress_summary(
     *,
-    trace: "Trace",
+    trace: Trace,
     fields: Sequence[str],
     mode: SummaryMode,
     show_ops: bool,
-    max_rows: Optional[int],
+    max_rows: int | None,
 ) -> str:
     """Render a truthful summary while the pass is still in progress.
 
@@ -952,7 +1009,7 @@ def _render_in_progress_summary(
     return "\n".join(lines)
 
 
-def _live_op_rows(trace: "Trace") -> list[dict[str, str]]:
+def _live_op_rows(trace: Trace) -> list[dict[str, str]]:
     """Return display rows for live operation records.
 
     Parameters
@@ -969,7 +1026,7 @@ def _live_op_rows(trace: "Trace") -> list[dict[str, str]]:
     events = getattr(trace, "capture_events", None)
     if events is not None and getattr(events, "op_events", None) is not None:
         rows = []
-        for event in events.op_events:
+        for event in events.amended_op_records():
             rows.append(
                 {
                     "name": str(event.layer_label_raw or event.label_raw),
@@ -979,10 +1036,11 @@ def _live_op_rows(trace: "Trace") -> list[dict[str, str]]:
             )
         return rows
 
-    if getattr(trace, "_raw_layer_dict", None):
+    raw_graph_ws = trace.__dict__.get("_raw_graph_ws")
+    if raw_graph_ws is not None and raw_graph_ws.raw_layer_dict:
         rows = []
-        for raw_label in trace._raw_layer_labels_list:
-            entry = trace._raw_layer_dict[raw_label]
+        for raw_label in trace._raw_graph_ws.raw_layer_labels_list:
+            entry = trace._raw_graph_ws.raw_layer_dict[raw_label]
             rows.append(
                 {
                     "name": str(
@@ -999,12 +1057,12 @@ def _live_op_rows(trace: "Trace") -> list[dict[str, str]]:
 
 def _render_finished_summary(
     *,
-    trace: "Trace",
+    trace: Trace,
     level: str,
     fields: Sequence[str],
     mode: SummaryMode,
     show_ops: bool,
-    max_rows: Optional[int],
+    max_rows: int | None,
 ) -> str:
     """Render a summary for a finalized ``Trace``.
 
@@ -1050,7 +1108,7 @@ def _render_finished_summary(
     return "\n".join(lines)
 
 
-def _level_title(*, trace: "Trace", level: str) -> str:
+def _level_title(*, trace: Trace, level: str) -> str:
     """Return the section title for a summary level.
 
     Parameters
@@ -1079,10 +1137,10 @@ def _level_title(*, trace: "Trace", level: str) -> str:
 
 def _build_level_rows(
     *,
-    trace: "Trace",
+    trace: Trace,
     level: str,
     mode: SummaryMode,
-) -> tuple[List[Dict[str, str]], List[str]]:
+) -> tuple[list[dict[str, str]], list[str]]:
     """Build rows and footer lines for one summary level.
 
     Parameters
@@ -1114,7 +1172,7 @@ def _build_level_rows(
     return _build_compute_rows(trace)
 
 
-def _build_overview_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]:
+def _build_overview_rows(trace: Trace) -> tuple[list[dict[str, str]], list[str]]:
     """Build the default overview rows.
 
     Parameters
@@ -1127,7 +1185,7 @@ def _build_overview_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str
     tuple[list[dict[str, str]], list[str]]
         Overview rows and footer lines.
     """
-    rows: List[Dict[str, str]] = [
+    rows: list[dict[str, str]] = [
         {
             "name": "input",
             "shape": _combined_shape_str(trace, trace.input_layers),
@@ -1135,8 +1193,9 @@ def _build_overview_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str
             "train": "-",
         }
     ]
+    origin_by_label, input_labels = _module_dataflow_origins(trace)
     for module in _iter_summary_modules(trace):
-        rows.append(_module_overview_row(trace, module))
+        rows.append(_module_overview_row(trace, module, origin_by_label, input_labels))
     rows.append(
         {
             "name": "output",
@@ -1154,13 +1213,14 @@ def _build_overview_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str
         f"Saved outs: {human_readable_size(trace.saved_activation_memory)}",
         f"Forward FLOPs: {_human_flops(trace.total_flops_forward)}  "
         f"MACs: {_human_flops(trace.total_macs_forward)}",
+        _unknown_flops_footer(trace),
         "FLOP convention: counts use the captured TorchLens convention; "
         "MACs are reported as FLOPs // 2.",
     ]
     return rows, footer_lines
 
 
-def _build_graph_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]:
+def _build_graph_rows(trace: Trace) -> tuple[list[dict[str, str]], list[str]]:
     """Build graph-summary rows.
 
     Parameters
@@ -1174,13 +1234,14 @@ def _build_graph_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]:
         Graph rows and footer lines.
     """
     rows = []
+    origin_by_label, input_labels = _module_dataflow_origins(trace)
     for module in _iter_summary_modules(trace):
         rows.append(
             {
                 "name": f"{module.address} ({module.class_name})",
                 "shape": _module_shape(trace, module),
                 "params": _human_count(module.num_params),
-                "parents": _module_parent_summary(module),
+                "parents": _module_parent_summary(module, origin_by_label, input_labels),
             }
         )
     footer_lines = [
@@ -1193,10 +1254,10 @@ def _build_graph_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]:
 
 
 def _build_memory_rows(
-    trace: "Trace",
+    trace: Trace,
     *,
     mode: SummaryMode,
-) -> tuple[List[Dict[str, str]], List[str]]:
+) -> tuple[list[dict[str, str]], list[str]]:
     """Build memory-summary rows.
 
     Parameters
@@ -1212,7 +1273,7 @@ def _build_memory_rows(
         Memory rows and footer lines.
     """
     running_total = 0
-    rows: List[Dict[str, str]] = []
+    rows: list[dict[str, str]] = []
     for entry in _iter_operation_entries(trace, mode=mode):
         memory = int(getattr(entry, "activation_memory", 0) or 0)
         running_total += memory
@@ -1233,7 +1294,7 @@ def _build_memory_rows(
     return rows, footer_lines
 
 
-def _build_control_flow_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]:
+def _build_control_flow_rows(trace: Trace) -> tuple[list[dict[str, str]], list[str]]:
     """Build control-flow rows or an empty state.
 
     Parameters
@@ -1246,7 +1307,7 @@ def _build_control_flow_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List
     tuple[list[dict[str, str]], list[str]]
         Control-flow rows and footer lines.
     """
-    rows: List[Dict[str, str]] = []
+    rows: list[dict[str, str]] = []
     for event in trace.conditional_records:
         branch_kinds = _event_branch_kinds(trace, event)
         rows.append(
@@ -1259,16 +1320,50 @@ def _build_control_flow_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List
                 "notes": event.function_qualname,
             }
         )
+    loop_groups = _recurrent_loop_groups(trace)
+    recurrent = bool(loop_groups) or bool(getattr(trace, "is_recurrent", False))
     if not rows:
-        footer_lines = [
-            "No conditional branches or recurrent loop groups were detected in this forward pass."
-        ]
-        return rows, footer_lines
-    footer_lines = [f"Conditionals: {len(rows)}"]
+        if not recurrent:
+            return rows, [
+                "No conditional branches or recurrent loop groups were detected "
+                "in this forward pass."
+            ]
+        footer_lines = ["No conditional branches were detected in this forward pass."]
+    else:
+        footer_lines = [f"Conditionals: {len(rows)}"]
+    footer_lines.extend(_recurrent_loop_group_lines(loop_groups, recurrent))
     return rows, footer_lines
 
 
-def _build_compute_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]:
+def _recurrent_loop_groups(trace: Trace) -> list[tuple[str, int]]:
+    """Return ``(layer_label, num_passes)`` for every recurrent (multi-pass) layer.
+
+    These are the loop groups the control-flow summary claims to detect. Driven
+    off the concrete per-layer pass counts rather than only ``trace.is_recurrent``
+    so the disclosure names the exact layers that replay.
+    """
+    groups: list[tuple[str, int]] = []
+    for layer in trace.layer_logs.values():
+        num_passes = int(getattr(layer, "num_passes", 1) or 1)
+        if num_passes > 1:
+            groups.append((str(layer.layer_label), num_passes))
+    return groups
+
+
+def _recurrent_loop_group_lines(
+    loop_groups: list[tuple[str, int]],
+    recurrent: bool,
+) -> list[str]:
+    """Return honest footer disclosure lines for recurrent loop groups."""
+    if not recurrent:
+        return []
+    if not loop_groups:
+        return ["Recurrent execution detected (rolled layers replay across passes)."]
+    detail = ", ".join(f"{label} (x{passes})" for label, passes in loop_groups)
+    return [f"Recurrent loop groups ({len(loop_groups)}): {detail}"]
+
+
+def _build_compute_rows(trace: Trace) -> tuple[list[dict[str, str]], list[str]]:
     """Build compute-summary rows.
 
     Parameters
@@ -1293,16 +1388,31 @@ def _build_compute_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]
                 "dtype": _module_dtype(trace, module),
             }
         )
+    accumulated_ms = (
+        sum(
+            _entry_func_duration(entry) for entry in _iter_operation_entries(trace, mode="unrolled")
+        )
+        * 1000.0
+    )
+    wall_ms = float(getattr(trace, "forward_duration", 0.0) or 0.0) * 1000.0
     footer_lines = [
         f"Params: {_int_with_commas(trace.num_params)} unique",
         f"Forward FLOPs: {_human_flops(trace.total_flops_forward)}",
         f"MACs: {_human_flops(trace.total_macs_forward)}",
-        f"Forward time: {float(trace.forward_duration) * 1000:.2f} ms",
+        _unknown_flops_footer(trace),
+        # Report the compute-relevant accumulated op time (matching the waterfall
+        # level) as the headline number, and disclose the raw capture wall time
+        # separately as overhead-inclusive. Previously a single "Forward time"
+        # line reported trace.forward_duration -- capture wall time that INCLUDES
+        # all TorchLens instrumentation overhead (~100x+ the real op time) -- and
+        # sitting next to FLOPs/MACs it read as the model's forward compute cost.
+        f"Accumulated op time: {accumulated_ms:.2f} ms",
+        f"Capture wall time (includes TorchLens overhead): {wall_ms:.2f} ms",
     ]
     return rows, footer_lines
 
 
-def _build_output_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]:
+def _build_output_rows(trace: Trace) -> tuple[list[dict[str, str]], list[str]]:
     """Build decoded output rows for the output summary level.
 
     Parameters
@@ -1333,10 +1443,10 @@ def _build_output_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]
 
 
 def _build_waterfall_rows(
-    trace: "Trace",
+    trace: Trace,
     *,
     mode: SummaryMode,
-) -> tuple[List[Dict[str, str]], List[str]]:
+) -> tuple[list[dict[str, str]], list[str]]:
     """Build timing and memory waterfall rows.
 
     Parameters
@@ -1354,9 +1464,9 @@ def _build_waterfall_rows(
 
     elapsed = 0.0
     peak_memory = 0
-    rows: List[Dict[str, str]] = []
+    rows: list[dict[str, str]] = []
     for entry in _iter_operation_entries(trace, mode=mode):
-        duration = float(getattr(entry, "func_duration", 0.0) or 0.0)
+        duration = _entry_func_duration(entry)
         memory = int(getattr(entry, "activation_memory", 0) or 0)
         peak_memory = max(peak_memory, memory)
         rows.append(
@@ -1378,10 +1488,10 @@ def _build_waterfall_rows(
 
 def _build_operation_rows(
     *,
-    trace: "Trace",
+    trace: Trace,
     mode: SummaryMode,
     level: str,
-) -> tuple[List[Dict[str, str]], List[str]]:
+) -> tuple[list[dict[str, str]], list[str]]:
     """Build operation rows for the optional op dump.
 
     Parameters
@@ -1398,7 +1508,7 @@ def _build_operation_rows(
     tuple[list[dict[str, str]], list[str]]
         Operation rows and footer lines.
     """
-    rows: List[Dict[str, str]] = []
+    rows: list[dict[str, str]] = []
     running_total = 0
     for entry in _iter_operation_entries(trace, mode=mode):
         memory = int(getattr(entry, "activation_memory", 0) or 0)
@@ -1414,7 +1524,7 @@ def _build_operation_rows(
                 "running_mb": _mb_str(running_total),
                 "flops": _human_flops(int(getattr(entry, "flops_forward", 0) or 0)),
                 "macs": _human_flops(int(getattr(entry, "macs_forward", 0) or 0)),
-                "time_ms": f"{float(getattr(entry, 'func_duration', 0.0) or 0.0) * 1000:.2f}",
+                "time_ms": f"{_entry_func_duration(entry) * 1000:.2f}",
             }
         )
     footer_lines = [
@@ -1423,7 +1533,7 @@ def _build_operation_rows(
     return rows, footer_lines
 
 
-def _default_op_fields(level: str) -> List[str]:
+def _default_op_fields(level: str) -> list[str]:
     """Return the default operation columns for the active level.
 
     Parameters
@@ -1443,7 +1553,7 @@ def _default_op_fields(level: str) -> List[str]:
     return ["name", "shape", "params", "parents"]
 
 
-def _iter_summary_modules(trace: "Trace") -> List["Module"]:
+def _iter_summary_modules(trace: Trace) -> list[Module]:
     """Return top-level module rows for summary tables.
 
     Parameters
@@ -1465,7 +1575,12 @@ def _iter_summary_modules(trace: "Trace") -> List["Module"]:
     return modules
 
 
-def _module_overview_row(trace: "Trace", module: "Module") -> Dict[str, str]:
+def _module_overview_row(
+    trace: Trace,
+    module: Module,
+    origin_by_label: dict[str, str],
+    input_labels: set[str],
+) -> dict[str, str]:
     """Build one overview row for a module.
 
     Parameters
@@ -1474,6 +1589,10 @@ def _module_overview_row(trace: "Trace", module: "Module") -> Dict[str, str]:
         Finalized log object.
     module:
         Module to summarize.
+    origin_by_label:
+        Reverse index mapping op labels to owning top-level module addresses.
+    input_labels:
+        Set of graph-input op labels.
 
     Returns
     -------
@@ -1488,12 +1607,12 @@ def _module_overview_row(trace: "Trace", module: "Module") -> Dict[str, str]:
         "shape": _module_shape(trace, module),
         "params": _human_count(module.num_params),
         "train": train,
-        "parents": _module_parent_summary(module),
+        "parents": _module_parent_summary(module, origin_by_label, input_labels),
         "class": module.class_name,
     }
 
 
-def _module_shape(trace: "Trace", module: "Module") -> str:
+def _module_shape(trace: Trace, module: Module) -> str:
     """Return a representative output shape for a module.
 
     Parameters
@@ -1514,25 +1633,64 @@ def _module_shape(trace: "Trace", module: "Module") -> str:
     return _shape_str(getattr(layer, "shape", None))
 
 
-def _module_parent_summary(module: "Module") -> str:
-    """Return a short parent summary for a module row.
+def _strip_pass_suffix(label: str) -> str:
+    """Return the aggregate layer label for a possibly pass-qualified op label.
 
-    Parameters
-    ----------
-    module:
-        Module to summarize.
-
-    Returns
-    -------
-    str
-        Parent summary text.
+    ``relu_1_1:2`` -> ``relu_1_1``; a label without a pass suffix is returned
+    unchanged.
     """
-    if module.address_parent in (None, "self"):
-        return "input"
-    return str(module.address_parent)
+    return str(label).split(":", 1)[0]
 
 
-def _module_dtype(trace: "Trace", module: "Module") -> str:
+def _module_dataflow_origins(trace: Trace) -> tuple[dict[str, str], set[str]]:
+    """Build a reverse index for module-level dataflow connectivity.
+
+    Returns ``(origin_by_label, input_labels)`` where ``origin_by_label`` maps
+    every (aggregate) op label to the address of the top-level summary module
+    that owns it, and ``input_labels`` is the set of graph-input op labels. Both
+    are keyed by pass-stripped labels so pass-qualified producers resolve.
+    """
+    origin_by_label: dict[str, str] = {}
+    for module in _iter_summary_modules(trace):
+        for label in module.layer_labels:
+            origin_by_label[_strip_pass_suffix(label)] = module.address
+    input_labels = {_strip_pass_suffix(op.label) for op in trace.input_ops}
+    return origin_by_label, input_labels
+
+
+def _module_parent_summary(
+    module: Module,
+    origin_by_label: dict[str, str],
+    input_labels: set[str],
+) -> str:
+    """Return the REAL upstream dataflow producers feeding a module.
+
+    The graph/overview "Connected To" column is a dataflow claim. Previously it
+    returned ``module.address_parent`` -- the containment-tree parent -- and
+    hard-coded ``"input"`` for every top-level module, so a chain ``a -> b``
+    falsely reported both ``a`` and ``b`` as connected to ``input``. This
+    fabricated topology from the wrong graph entirely. Now each of the module's
+    recorded input ops is mapped to its producing top-level module (or ``input``
+    for a graph-input producer, or the bare op label when the producer is not
+    inside any summary module). Producers are de-duplicated in first-seen order;
+    a module with no recorded upstream reports ``-`` rather than inventing one.
+    """
+    input_ops = getattr(module, "input_ops", None)
+    if not input_ops:
+        return "-"
+    upstream: list[str] = []
+    for op_label in input_ops:
+        normalized = _strip_pass_suffix(op_label)
+        if normalized in input_labels:
+            origin = "input"
+        else:
+            origin = origin_by_label.get(normalized, normalized)
+        if origin not in upstream:
+            upstream.append(origin)
+    return ", ".join(upstream) if upstream else "-"
+
+
+def _module_dtype(trace: Trace, module: Module) -> str:
     """Return a representative dtype for a module.
 
     Parameters
@@ -1553,7 +1711,7 @@ def _module_dtype(trace: "Trace", module: "Module") -> str:
     return _dtype_str(getattr(layer, "dtype", None))
 
 
-def _module_output_layer(trace: "Trace", module: "Module") -> Any | None:
+def _module_output_layer(trace: Trace, module: Module) -> Any | None:
     """Return the representative output layer for a module.
 
     Parameters
@@ -1584,7 +1742,7 @@ def _module_output_layer(trace: "Trace", module: "Module") -> Any | None:
         return None
 
 
-def _module_time_ms(trace: "Trace", module: "Module") -> float:
+def _module_time_ms(trace: Trace, module: Module) -> float:
     """Return the summed forward time for a module.
 
     Parameters
@@ -1612,11 +1770,30 @@ def _module_time_ms(trace: "Trace", module: "Module") -> float:
     return total * 1000.0
 
 
+def _entry_func_duration(entry: Any) -> float:
+    """Return an entry's forward duration in seconds without tripping the tripwire.
+
+    In ``rolled`` mode ``_iter_operation_entries`` yields aggregate ``Layer``
+    objects; a recurrent (multi-pass) ``Layer`` deliberately RAISES ``ValueError``
+    on the per-pass ``func_duration`` accessor (the locked multi-pass tripwire) and
+    exposes the documented aggregate ``total_func_duration`` (sum over passes)
+    instead. In ``unrolled`` mode the entries are per-pass ``Op`` objects, which
+    expose their own ``func_duration`` and do not define ``total_func_duration``.
+    Prefer the aggregate accessor when present, else the per-pass value; this is
+    the same safe idiom already used by ``_module_time_ms`` and never lets the
+    tripwire ``ValueError`` leak nor silently substitutes a wrong default.
+    """
+    duration = getattr(entry, "total_func_duration", None)
+    if duration is None:
+        duration = getattr(entry, "func_duration", 0.0)
+    return float(duration or 0.0)
+
+
 def _iter_operation_entries(
-    trace: "Trace",
+    trace: Trace,
     *,
     mode: SummaryMode,
-) -> Iterable["Layer | Op"]:
+) -> Iterable[Layer | Op]:
     """Iterate operation-like entries according to the requested mode.
 
     Parameters
@@ -1637,7 +1814,7 @@ def _iter_operation_entries(
     return cast(Iterable["Layer | Op"], trace.layer_list)
 
 
-def _effective_mode(trace: "Trace", mode: SummaryMode) -> Literal["rolled", "unrolled"]:
+def _effective_mode(trace: Trace, mode: SummaryMode) -> Literal["rolled", "unrolled"]:
     """Resolve the effective operation mode.
 
     Parameters
@@ -1674,6 +1851,16 @@ def _entry_name(entry: Any) -> str:
     if base_name is None:
         base_name = getattr(entry, "label", None) or getattr(entry, "layer_label", "?")
     num_passes = int(getattr(entry, "num_passes", 1) or 1)
+    if num_passes > 1 and _is_pass_op(entry):
+        # Unrolled tables emit one row PER PASS; each such row is a per-pass Op,
+        # not the aggregate Layer. Name it with its pass-qualified identity
+        # (relu_1_1:2) rather than the aggregate "xN" multiplicity, which on a
+        # per-pass row would imply N calls per row (a false 9-call reading for a
+        # 3-pass layer). An Op exposes a safe pass-qualified label; only the
+        # aggregate Layer would raise the multi-pass tripwire here.
+        pass_label = getattr(entry, "label", None)
+        if isinstance(pass_label, str):
+            return pass_label
     if num_passes > 1 and hasattr(entry, "ops"):
         return f"{base_name} x{num_passes}"
     if getattr(entry, "call_index", 1) > 1:
@@ -1681,7 +1868,21 @@ def _entry_name(entry: Any) -> str:
     return str(base_name)
 
 
-def _combined_shape_str(trace: "Trace", labels: Sequence[str]) -> str:
+def _is_pass_op(entry: Any) -> bool:
+    """Return True if ``entry`` is a per-pass ``Op`` (vs an aggregate ``Layer``).
+
+    Unrolled summaries iterate per-pass ``Op`` objects while rolled summaries
+    iterate aggregate ``Layer`` objects, but an ``Op`` proxies its parent's
+    ``num_passes``/``ops`` so those attributes cannot tell them apart. Use the
+    concrete type as the discriminator (imported lazily to avoid any import
+    cycle at module load).
+    """
+    from ...data_classes.op import Op
+
+    return isinstance(entry, Op)
+
+
+def _combined_shape_str(trace: Trace, labels: Sequence[str]) -> str:
     """Return a compact combined shape string for one or more labels.
 
     Parameters
@@ -1711,7 +1912,7 @@ def _combined_shape_str(trace: "Trace", labels: Sequence[str]) -> str:
     return f"{len(shapes)} tensors"
 
 
-def _event_branch_kinds(trace: "Trace", event: "ConditionalEvent") -> List[str]:
+def _event_branch_kinds(trace: Trace, event: ConditionalEvent) -> list[str]:
     """Return the taken branch kinds for one conditional event.
 
     Parameters
@@ -1734,7 +1935,7 @@ def _event_branch_kinds(trace: "Trace", event: "ConditionalEvent") -> List[str]:
     return sorted(branch_kinds)
 
 
-def _event_source(event: "ConditionalEvent") -> str:
+def _event_source(event: ConditionalEvent) -> str:
     """Return a short source locator for a conditional event.
 
     Parameters
@@ -1750,7 +1951,7 @@ def _event_source(event: "ConditionalEvent") -> str:
     return terminal_file_line_link(event.source_file, event.if_stmt_span[0])
 
 
-def _event_bool_layer(event: "ConditionalEvent") -> str:
+def _event_bool_layer(event: ConditionalEvent) -> str:
     """Return a compact bool-layer summary for a conditional event.
 
     Parameters
@@ -1770,7 +1971,7 @@ def _event_bool_layer(event: "ConditionalEvent") -> str:
     return f"{event.bool_layers[0]} +{len(event.bool_layers) - 1}"
 
 
-def _event_branch_op_count(trace: "Trace", event: "ConditionalEvent") -> int:
+def _event_branch_op_count(trace: Trace, event: ConditionalEvent) -> int:
     """Return the number of operation edges attributed to a conditional event.
 
     Parameters
@@ -1887,6 +2088,28 @@ def _human_count(value: int) -> str:
     return str(value)
 
 
+def _unknown_flops_footer(trace: Trace) -> str:
+    """Return the summary disclosure for operations with unknown FLOPs.
+
+    Parameters
+    ----------
+    trace
+        Finalized trace whose compute operations are summarized.
+
+    Returns
+    -------
+    str
+        Unknown-operation count and, when nonzero, the total-exclusion warning.
+    """
+
+    count = sum(
+        1 for entry in trace.layer_list if entry.is_compute_op and entry.flops_forward is None
+    )
+    if count:
+        return f"Unknown-FLOPs ops: {count} (excluded from FLOP/MAC totals)"
+    return "Unknown-FLOPs ops: 0"
+
+
 def _human_flops(value: int) -> str:
     """Format FLOPs or MACs compactly.
 
@@ -1921,9 +2144,9 @@ def _int_with_commas(value: int) -> str:
 
 def _render_table(
     fields: Sequence[str],
-    rows: Sequence[Dict[str, str]],
+    rows: Sequence[dict[str, str]],
     *,
-    max_rows: Optional[int],
+    max_rows: int | None,
 ) -> str:
     """Render an ASCII table.
 
