@@ -754,7 +754,7 @@ def _get_op_nums_from_user_labels(
         )
 
     if not isinstance(which_layers, list):
-        which_layers = [which_layers]  # type: ignore[list-item]
+        which_layers = [which_layers]
     raw_layer_nums_to_save: set[int] = set()
     for layer_key in which_layers:
         if isinstance(layer_key, BaseSelector):

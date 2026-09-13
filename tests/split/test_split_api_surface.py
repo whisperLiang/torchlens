@@ -48,15 +48,28 @@ def test_split_v2_exports_are_public() -> None:
 
 
 def test_split_request_validation() -> None:
-    """Typed points and feature ranges reject invalid v2 requests."""
+    """Typed points and declared batch axes reject invalid v2 requests."""
 
-    request = SplitRequest(point=after("relu"), features=SplitFeatures(dynamic_batch=(1, 4)))
+    request = SplitRequest(point=after("relu"), features=SplitFeatures())
     assert request.boundary == "after:relu"
-    assert request.dynamic_batch == (1, 4)
+    assert request.features.batch_axes is None
     assert request.trainable is False
+    assert request.placement.is_explicit is False
     with pytest.raises(ValueError):
         SplitRequest(point=SplitPoint("percent", 0))
     with pytest.raises(ValueError):
-        SplitFeatures(dynamic_batch=(4, 2))
+        SplitFeatures(batch_axes={"bad-pointer": 0})
+    with pytest.raises(TypeError):
+        SplitFeatures(batch_axes={"/args/0": "0"})  # type: ignore[dict-item]
     with pytest.raises(ValueError):
         SplitRequest(point=after("relu"), validation="unknown")  # type: ignore[arg-type]
+
+
+def test_split_features_has_no_batch_range_surface() -> None:
+    """The public request surface exposes no allowed-batch range."""
+
+    features = SplitFeatures()
+
+    assert not hasattr(features, "dynamic_batch")
+    assert "dynamic_batch" not in features.as_dict()
+    assert not hasattr(SplitRequest(point=after("relu")), "dynamic_batch")

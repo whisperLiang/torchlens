@@ -120,6 +120,7 @@ def test_tf_suffix_boundary_gradients() -> None:
     assert result.optimizer_applied is False
 
 
+@pytest.mark.heavy
 def test_paddle_suffix_boundary_gradients() -> None:
     """Paddle split training returns suffix boundary gradients."""
 
@@ -156,6 +157,7 @@ def test_paddle_suffix_boundary_gradients() -> None:
     )
 
 
+@pytest.mark.heavy
 def test_tinygrad_suffix_boundary_gradients() -> None:
     """tinygrad split training returns suffix boundary gradients."""
 
@@ -199,6 +201,7 @@ def test_tinygrad_suffix_boundary_gradients() -> None:
     )
 
 
+@pytest.mark.heavy
 def test_tinygrad_suffix_and_prefix_gradient_handoff() -> None:
     """tinygrad split training hands suffix gradients back through the prefix."""
 
@@ -242,6 +245,7 @@ def test_tinygrad_suffix_and_prefix_gradient_handoff() -> None:
     )
 
 
+@pytest.mark.heavy
 def test_tinygrad_suffix_optimizer_step_matches_full_step() -> None:
     """tinygrad suffix optimizer mutates suffix-owned live params like a full step."""
 
@@ -309,6 +313,7 @@ def test_tf_detached_boundary_rejects_prefix_backward() -> None:
         runtime.backward_prefix(boundary, grads)
 
 
+@pytest.mark.heavy
 def test_tinygrad_detached_boundary_rejects_prefix_backward() -> None:
     """A detached tinygrad replay boundary cannot drive prefix backprop."""
 

@@ -1,4 +1,4 @@
-"""Held torch-function reference normalization for ``release_model``.
+"""Held torch-function reference normalization for releases and split capture.
 
 A plain module attribute holding a torch function (``self.act = F.relu``)
 captures whichever object -- pristine original or wrap-epoch wrapper -- the
@@ -13,6 +13,15 @@ serializable in EVERY epoch, never a one-way trip (split out of
 ``model_prep.py`` under the R43 file-size ratchet -- this is the release-time
 serializability seam, not preparation).
 
+Split capture has a narrower, transactional companion scope. It temporarily
+re-points only direct module attributes that hold a stale, ledgered torch
+function reference while wrappers are installed. This lets calls made through
+references captured before wrapping (for example
+``transformers.activations.GELUActivation.act``) reach the logging wrapper
+during canonical and batch-witness captures. The exact original object is
+restored on exit, including when capture raises; user reassignments made inside
+the scope are preserved.
+
 Container coverage is type-exact by design: one level of exact builtin
 ``list``/``tuple``/``dict``/``set``/``frozenset`` plus namedtuples (rebuilt
 through ``_make`` so the runtime type survives). Other builtin subclasses are
@@ -22,6 +31,8 @@ the disclosed closures/partials/custom-container residual.
 """
 
 import weakref
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from torch import nn
@@ -32,6 +43,7 @@ __all__ = [
     "normalize_held_torch_function_refs",
     "register_released_model",
     "renormalize_released_models",
+    "scoped_held_torch_function_refs",
 ]
 
 # Models the user explicitly released. A wrap-state flip re-points their held
@@ -103,6 +115,46 @@ def _live_counterpart(value: Any) -> Any | None:
     ):
         return current
     return None
+
+
+@contextmanager
+def scoped_held_torch_function_refs(model: nn.Module) -> Iterator[None]:
+    """Temporarily bind direct stale torch-function attrs to live wrappers.
+
+    Parameters
+    ----------
+    model:
+        Root module whose module tree should be scanned.
+
+    Notes
+    -----
+    This is intentionally narrower than :func:`normalize_held_torch_function_refs`:
+    only direct ``module.__dict__`` values are considered. Container contents,
+    closures, partials, custom objects, and arbitrary user callables remain
+    untouched. Every replacement is fenced by the wrapper epoch ledger via
+    :func:`_live_counterpart`, and teardown is identity-checked so a user's
+    deliberate reassignment during capture is never overwritten.
+    """
+
+    replacements: list[tuple[nn.Module, str, Any, Any]] = []
+    try:
+        # ``modules()`` includes the root and every nested child, which is the
+        # only traversal needed for module attributes while avoiding arbitrary
+        # object graphs reachable through those attributes.
+        for module in model.modules():
+            for attr_name, attr_value in tuple(module.__dict__.items()):
+                live = _live_counterpart(attr_value)
+                if live is None:
+                    continue
+                module.__dict__[attr_name] = live
+                replacements.append((module, attr_name, attr_value, live))
+        yield
+    finally:
+        # Restore only slots that still contain the object we installed. If
+        # user code changed or deleted an attribute, that change wins.
+        for module, attr_name, original, live in reversed(replacements):
+            if module.__dict__.get(attr_name) is live:
+                module.__dict__[attr_name] = original
 
 
 def _is_namedtuple_instance(value: Any) -> bool:

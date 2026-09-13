@@ -89,6 +89,8 @@ def _live_tinygrad_tensors_by_uop(model: Any) -> dict[int, Any]:
     visited: set[int] = set()
 
     def visit(value: Any) -> None:
+        """Record reachable tensor leaves once, following supported containers."""
+
         value_id = id(value)
         if value_id in visited:
             return
@@ -156,7 +158,7 @@ class TinygradUOpCapture:
     uop: Any
     op_name: str
     parent_labels: tuple[str, ...]
-    parent_arg_positions: tuple[tuple[int, str], ...]
+    parent_arg_positions: tuple[tuple[int | tuple[int, ...], str], ...]
     payload_snapshot: Any
     live_tensor: Any | None = None
 
@@ -810,10 +812,10 @@ class TinygradBackend:
             if id(uop) in uop_labels or not _is_materializable_uop(uop):
                 continue
             op_name = _uop_name(uop)
+            parent_paths = _uop_parent_paths(uop, uop_labels)
             parents = tuple(
-                ParentEdge(parent_label_raw=label, arg_position=index, edge_use="arg")
-                for index, src in enumerate(getattr(uop, "src", ()) or ())
-                if (label := uop_labels.get(id(src))) is not None
+                ParentEdge(parent_label_raw=label, arg_position=position, edge_use="arg")
+                for position, label in parent_paths
             )
             parent_positions = {
                 "args": {edge.arg_position: edge.parent_label_raw for edge in parents},
@@ -848,9 +850,7 @@ class TinygradBackend:
                     uop=uop,
                     op_name=op_name,
                     parent_labels=tuple(edge.parent_label_raw for edge in parents),
-                    parent_arg_positions=tuple(
-                        (cast(int, edge.arg_position), edge.parent_label_raw) for edge in parents
-                    ),
+                    parent_arg_positions=parent_paths,
                     payload_snapshot=payload,
                     live_tensor=(live_tensors_by_uop or {}).get(id(uop)),
                 )
@@ -1465,7 +1465,7 @@ class TinygradBackend:
         capture: TinygradUOpCapture,
         op: Any,
         ops_by_raw_label: Mapping[str, Any],
-        replacements: Mapping[int, Any] | None = None,
+        replacements: Mapping[int | tuple[int, ...], Any] | None = None,
         hidden_outputs_by_label: Mapping[str, Any] | None = None,
     ) -> Any:
         """Replay one captured UOp with inputs from materialized trace parents.
@@ -1489,7 +1489,7 @@ class TinygradBackend:
             Realized tinygrad tensor replay output.
         """
 
-        src = list(getattr(capture.uop, "src", ()) or ())
+        replay_uop = capture.uop
         # Captured UOp metadata speaks RAW label space (frozen at emit time).
         # Recurrence grouping rewrites graph edges to final pass-qualified
         # labels, so op-side labels are resolved back to raw space before the
@@ -1514,20 +1514,16 @@ class TinygradBackend:
         positioned_labels = {label for label in graph_positions.values() if isinstance(label, str)}
         if positioned_labels != set(parent_labels):
             raise ValueError("tinygrad trace parent labels and parent_arg_positions disagree.")
-        if tuple(sorted(graph_positions.items())) != tuple(sorted(capture.parent_arg_positions)):
+        if graph_positions != dict(capture.parent_arg_positions):
             raise ValueError("tinygrad trace parent_arg_positions changed after capture.")
         for position, parent_label in graph_positions.items():
-            if not isinstance(position, int) or position < 0 or position >= len(src):
-                raise ValueError(f"tinygrad trace parent arg position {position!r} is invalid.")
+            source = _uop_source_at_path(capture.uop, position)
             parent_op = ops_by_raw_label[parent_label]
             parent_value = _saved_single_output(parent_op, hidden_outputs_by_label)
-            if _source_matches_payload(src[position], parent_value):
-                src[position] = parent_value.uop
+            if _source_matches_payload(source, parent_value):
+                replay_uop = _replace_uop_source_at_path(replay_uop, position, parent_value.uop)
         for position, replacement in (replacements or {}).items():
-            if position < 0 or position >= len(src):
-                raise ValueError(f"tinygrad perturbation position {position!r} is invalid.")
-            src[position] = replacement.uop
-        replay_uop = capture.uop.replace(src=tuple(src))
+            replay_uop = _replace_uop_source_at_path(replay_uop, position, replacement.uop)
         return self._realized_copy(self._tensor_from_uop(replay_uop))
 
     def _input_identities(self, args: Sequence[Any]) -> tuple[str, ...]:
@@ -2462,7 +2458,7 @@ class _observe_tensor_ops:
             return result
 
         # tinygrad deliberately exposes this as a method; preview capture replaces it temporarily.
-        Tensor._apply_uop = wrapped
+        setattr(Tensor, "_apply_uop", wrapped)
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
@@ -2486,7 +2482,7 @@ class _observe_tensor_ops:
         from tinygrad import Tensor
 
         # Restore the deliberately replaced tinygrad method after preview capture.
-        Tensor._apply_uop = self.original
+        setattr(Tensor, "_apply_uop", self.original)
 
 
 class _reject_mid_capture_execution:
@@ -2601,13 +2597,113 @@ def _unique_uops(outputs: Sequence[Any]) -> tuple[Any, ...]:
 
     seen: set[int] = set()
     ordered: list[Any] = []
+
+    def callable_arguments(uop: Any) -> tuple[Any, ...]:
+        """Traverse call arguments, never an unbound function/kernel body."""
+
+        src = tuple(getattr(uop, "src", ()) or ())
+        return src[1:] if _uop_name(uop) in {"FUNCTION", "CALL"} else src
+
     for output in outputs:
-        for uop in cast(Any, output).uop.toposort():
+        stack = [(cast(Any, output).uop, False)]
+        while stack:
+            uop, expanded = stack.pop()
             if id(uop) in seen:
                 continue
-            seen.add(id(uop))
-            ordered.append(uop)
+            if expanded:
+                seen.add(id(uop))
+                ordered.append(uop)
+            else:
+                stack.append((uop, True))
+                stack.extend((source, False) for source in reversed(callable_arguments(uop)))
     return tuple(ordered)
+
+
+def _uop_parent_paths(
+    uop: Any, labels: Mapping[int, str]
+) -> tuple[tuple[int | tuple[int, ...], str], ...]:
+    """Find labeled tensor operands through non-tensor UOp containers.
+
+    Parameters
+    ----------
+    uop:
+        Value-producing UOp whose incoming dataflow edges are being recorded.
+    labels:
+        Already emitted tensor UOps, including public input sources.
+
+    Returns
+    -------
+    tuple
+        Direct integer positions or nested source-index paths and raw labels.
+    """
+
+    parents: list[tuple[int | tuple[int, ...], str]] = []
+
+    def visit(node: Any, path: tuple[int, ...]) -> None:
+        """Stop at a labeled tensor and bypass only non-tensor containers."""
+
+        if (label := labels.get(id(node))) is not None:
+            parents.append((path[0] if len(path) == 1 else path, label))
+            return
+        if _uop_name(node) not in {"FUNCTION", "CALL", "TUPLE"}:
+            return
+        for index, source in enumerate(getattr(node, "src", ()) or ()):
+            if index == 0 and _uop_name(node) in {"FUNCTION", "CALL"}:
+                continue
+            visit(source, (*path, index))
+
+    for index, source in enumerate(getattr(uop, "src", ()) or ()):
+        visit(source, (index,))
+    return tuple(parents)
+
+
+def _uop_source_at_path(uop: Any, position: int | tuple[int, ...]) -> Any:
+    """Resolve a checked direct or nested UOp source address.
+
+    Parameters
+    ----------
+    uop:
+        Captured or replay UOp root.
+    position:
+        Direct source index or non-empty nested source-index path.
+    """
+
+    path = (position,) if isinstance(position, int) else position
+    if not isinstance(path, tuple) or not path:
+        raise ValueError(f"tinygrad parent arg position {position!r} is invalid.")
+    current = uop
+    for index in path:
+        src = tuple(getattr(current, "src", ()) or ())
+        if not isinstance(index, int) or not 0 <= index < len(src):
+            raise ValueError(f"tinygrad parent arg position {position!r} is invalid.")
+        current = src[index]
+    return current
+
+
+def _replace_uop_source_at_path(uop: Any, position: int | tuple[int, ...], replacement: Any) -> Any:
+    """Replace one checked UOp operand without mutating captured graph nodes.
+
+    Parameters
+    ----------
+    uop:
+        Replay UOp root.
+    position:
+        Direct source index or nested source-index path.
+    replacement:
+        Runtime tensor UOp to bind at that occurrence.
+    """
+
+    _uop_source_at_path(uop, position)
+    path = (position,) if isinstance(position, int) else position
+    ancestors = [uop]
+    for index in path[:-1]:
+        ancestors.append(ancestors[-1].src[index])
+    result = replacement
+    for parent, index in zip(reversed(ancestors), reversed(path)):
+        src = list(parent.src)
+        src[index] = result
+        result = parent.replace(src=tuple(src))
+    return result
 
 
 def _is_materializable_uop(uop: Any) -> bool:
@@ -2920,7 +3016,7 @@ def _parent_perturbations_change_output(
     }
     if not graph_positions:
         return True
-    positions_by_parent: dict[str, list[int]] = {}
+    positions_by_parent: dict[str, list[int | tuple[int, ...]]] = {}
     for position, parent_label in graph_positions.items():
         positions_by_parent.setdefault(parent_label, []).append(position)
     attempted = False
@@ -2930,7 +3026,7 @@ def _parent_perturbations_change_output(
         value_positions = tuple(
             position
             for position in positions
-            if _source_matches_payload(capture.uop.src[position], parent_value)
+            if _source_matches_payload(_uop_source_at_path(capture.uop, position), parent_value)
         )
         if not value_positions:
             continue

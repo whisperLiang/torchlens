@@ -44,7 +44,7 @@ def _boundary(
         backend="torch",
         tensors={"h": torch.ones(2, 3) if tensor is None else tensor},
         spec=_spec() if spec is None else spec,
-        metadata={"split_id": split_id, "batch_symbol": "B", "dynamic_batch": (1, 4)},
+        metadata={"split_id": split_id, "batch_symbol": "B"},
     )
 
 
@@ -85,7 +85,9 @@ def test_boundary_validation_mismatch_errors() -> None:
     """Boundary ABI mismatches raise structured errors."""
 
     with pytest.raises(SplitBoundaryError):
-        _boundary(torch.ones(5, 3)).validate(split_id="s1")
+        _boundary(torch.ones(2, 7)).validate(split_id="s1")
+    with pytest.raises(SplitBoundaryError):
+        _boundary(torch.ones(2, 3, 4)).validate(split_id="s1")
     with pytest.raises(SplitBoundaryError):
         _boundary().validate(split_id="other")
     bad = ReplayBoundary(
@@ -96,3 +98,10 @@ def test_boundary_validation_mismatch_errors() -> None:
     )
     with pytest.raises(SplitBoundaryError):
         bad.validate(split_id="s1")
+
+
+def test_symbolic_batch_dimension_accepts_any_positive_extent() -> None:
+    """A boundary batch axis is unbounded: no range gate rejects a large batch."""
+
+    for batch in (1, 2, 3, 8, 32, 4096):
+        _boundary(torch.ones(batch, 3)).validate(split_id="s1")

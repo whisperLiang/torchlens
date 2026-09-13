@@ -205,7 +205,7 @@ def test_torch_transformer_cross_batch_and_device() -> None:
             runtime = tl.split.prepare(
                 model,
                 x,
-                split_request(boundary, dynamic_batch=(1, 4)),
+                split_request(boundary),
             )
             for batch in (1, 4):
                 replay_x = torch.randint(0, 128, (batch, 12), device=device)
@@ -262,7 +262,7 @@ def test_torchvision_extra_real_models_cross_batch_and_device() -> None:
                 runtime = tl.split.prepare(
                     model,
                     x,
-                    split_request(boundary, dynamic_batch=(1, 3)),
+                    split_request(boundary),
                 )
                 for batch in (1, 3):
                     replay_x = torch.ones((batch, *shape[1:]), device=device)
@@ -290,10 +290,10 @@ def test_yolo26_detection_split_replay_cross_batch_and_device() -> None:
         import torchlens as tl
         from torchlens.utils._torch_compat import get_dynamo_optimized_module_type
 
-        # Probe Dynamo before importing Ultralytics.  In the torch 2.13 + CUDA
-        # 13 environment, importing Triton lazily after Ultralytics has loaded
-        # can crash inside torch._dynamo; the probe is otherwise side-effect free.
-        get_dynamo_optimized_module_type()
+        # Initialize Dynamo/Triton before Ultralytics can import TensorFlow.
+        # The default probe is lazy and does not initialize an unseen Dynamo;
+        # loading its LLVM extension after TensorFlow can crash this process.
+        get_dynamo_optimized_module_type(force_probe=True)
         from ultralytics import YOLO
 
         torch.set_num_threads(1)
@@ -304,7 +304,7 @@ def test_yolo26_detection_split_replay_cross_batch_and_device() -> None:
         weight_path.parent.mkdir(parents=True, exist_ok=True)
         detector = YOLO(str(weight_path)).model.eval()
         digest = hashlib.sha256(weight_path.read_bytes()).hexdigest()
-        assert digest == "9b09cc8bf347f0fc8a5f7657480587f25db09b34bf33b0652110fb03a8ad4fef"
+        assert digest == "9b09cc8bf347f0fc8a5f7657480587f25db09b34bf33b0652110fb03a8ad4fef"  # pragma: allowlist secret
 
         def tensor_leaves(value):
             if isinstance(value, torch.Tensor):
@@ -349,7 +349,6 @@ def test_yolo26_detection_split_replay_cross_batch_and_device() -> None:
             split_request(
                 "50%",
                 backend="torch",
-                dynamic_batch=(1, 3),
                 live_param_sources=True,
             ),
         )
@@ -381,7 +380,7 @@ def test_yolo26_detection_split_replay_cross_batch_and_device() -> None:
 
 
 def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
-    """YOLOv8n replays all 552 boundaries across batch and device."""
+    """YOLOv8n replays all 558 boundaries across batch and device."""
 
     _skip_unless_enabled()
     _skip_unless_yolov8_exhaustive()
@@ -397,7 +396,7 @@ def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
         from torchlens.utils._torch_compat import get_dynamo_optimized_module_type
 
         torch.set_num_threads(1)
-        get_dynamo_optimized_module_type()
+        get_dynamo_optimized_module_type(force_probe=True)
         from ultralytics import YOLO
 
         def assert_same(actual, expected):
@@ -441,15 +440,18 @@ def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
         torch.manual_seed(0)
         cpu_model = YOLO("yolov8n.yaml").model.eval()
         gpu_model = copy.deepcopy(cpu_model).cuda().eval() if torch.cuda.is_available() else None
-        request = split_request("50%", dynamic_batch=(1, 3))
+        request = split_request("50%")
         cpu_seed = tl.split.prepare(
             cpu_model,
             torch.zeros(2, 3, 160, 160),
             request,
         )
-        assert len(cpu_seed.trace_graph.compute_nodes) == 276
+        # The canonical B=1 capture retains 279 compute nodes for this graph.
+        assert len(cpu_seed.trace_graph.compute_nodes) == 279
         assert cpu_seed.trace_graph.shape_program.unresolved == {}
-        assert cpu_seed.trace_graph.shape_program.witness_batch_sizes == (1, 3)
+        assert cpu_seed.traced_batch_size == 1
+        assert cpu_seed.trace_graph.shape_program.witness_batch_sizes == (2,)
+        assert cpu_seed.batch_validation["status"] == "passed"
 
         gpu_seed = None
         if gpu_model is not None:
@@ -467,7 +469,7 @@ def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
             for node in cpu_seed.trace_graph.compute_nodes
             for point in (tl.split.before(node.canonical_id), tl.split.after(node.canonical_id))
         ]
-        assert len(all_points) == 552
+        assert len(all_points) == 558
         partition_count = int(os.environ.get("TORCHLENS_YOLOV8_PARTITIONS", "1"))
         partition_index = int(os.environ.get("TORCHLENS_YOLOV8_PARTITION", "0"))
         assert partition_count >= 1
@@ -560,7 +562,7 @@ def test_rfdetr_detection_split_replay_fixed_batch() -> None:
             "RF_HOME",
             str(Path.home() / ".cache" / "torchlens" / "models" / "rfdetr"),
         )
-        get_dynamo_optimized_module_type()
+        get_dynamo_optimized_module_type(force_probe=True)
         from rfdetr import RFDETRNano
         from rfdetr.utilities.tensors import NestedTensor
 
@@ -582,7 +584,7 @@ def test_rfdetr_detection_split_replay_fixed_batch() -> None:
         detector = RFDETRNano()
         checkpoint_path = Path(os.environ["RF_HOME"]) / "rf-detr-nano.pth"
         digest = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
-        assert digest == "d8d6b9ee57d4d0ed2b1f305163624712a0532cb7bce0c747317984fc5457440d"
+        assert digest == "d8d6b9ee57d4d0ed2b1f305163624712a0532cb7bce0c747317984fc5457440d"  # pragma: allowlist secret
         model = RFDETRTensorModel(detector.model.model).eval()
         inputs = torch.zeros(2, 3, 384, 384)
 
@@ -640,7 +642,7 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
             "RF_HOME",
             str(Path.home() / ".cache" / "torchlens" / "models" / "rfdetr"),
         )
-        get_dynamo_optimized_module_type()
+        get_dynamo_optimized_module_type(force_probe=True)
         from rfdetr import RFDETRNano
         from rfdetr.utilities.tensors import NestedTensor
 
@@ -698,24 +700,30 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
         detector = RFDETRNano()
         checkpoint_path = Path(os.environ["RF_HOME"]) / "rf-detr-nano.pth"
         digest = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
-        assert digest == "d8d6b9ee57d4d0ed2b1f305163624712a0532cb7bce0c747317984fc5457440d"
+        assert digest == "d8d6b9ee57d4d0ed2b1f305163624712a0532cb7bce0c747317984fc5457440d"  # pragma: allowlist secret
         cpu_model = RFDETRTensorModel(detector.model.model).eval()
         gpu_model = copy.deepcopy(cpu_model).cuda().eval() if torch.cuda.is_available() else None
 
-        request = split_request("50%", dynamic_batch=(1, 3))
+        request = split_request("50%")
         cpu_example = torch.zeros(2, 3, 384, 384)
-        cpu_seed = tl.split.prepare(cpu_model, cpu_example, request)
+        # This matrix tests inference. Do not retain backward graphs for the
+        # B=1 capture and B=2 probe alongside both CPU and GPU runtimes.
+        with torch.no_grad():
+            cpu_seed = tl.split.prepare(cpu_model, cpu_example, request)
         assert len(cpu_seed.trace_graph.compute_nodes) == 858
         assert cpu_seed.trace_graph.shape_program.unresolved == {}
-        assert cpu_seed.trace_graph.shape_program.witness_batch_sizes == (1, 3)
+        assert cpu_seed.traced_batch_size == 1
+        assert cpu_seed.trace_graph.shape_program.witness_batch_sizes == (2,)
+        assert cpu_seed.batch_validation["status"] == "passed"
 
         gpu_seed = None
         if gpu_model is not None:
-            gpu_seed = tl.split.prepare(
-                gpu_model,
-                torch.zeros(2, 3, 384, 384, device="cuda"),
-                request,
-            )
+            with torch.no_grad():
+                gpu_seed = tl.split.prepare(
+                    gpu_model,
+                    torch.zeros(2, 3, 384, 384, device="cuda"),
+                    request,
+                )
             assert [
                 node.canonical_id for node in gpu_seed.trace_graph.compute_nodes
             ] == [node.canonical_id for node in cpu_seed.trace_graph.compute_nodes]
@@ -816,14 +824,14 @@ def test_torchvision_ops_mlp_all_split_nodes_cross_batch_and_device() -> None:
         seed_runtime = tl.split.prepare(
             model,
             x,
-            split_request("50%", dynamic_batch=(1, 3)),
+            split_request("50%"),
         )
 
         for boundary in _all_compute_split_boundaries(seed_runtime):
             runtime = tl.split.prepare(
                 model,
                 x,
-                split_request(boundary, dynamic_batch=(1, 3)),
+                split_request(boundary),
             )
             for batch in (1, 3):
                 replay_x = torch.ones((batch, 6), device=device)
@@ -833,7 +841,7 @@ def test_torchvision_ops_mlp_all_split_nodes_cross_batch_and_device() -> None:
                 assert torch.allclose(split_output, full_output, atol=1e-5, rtol=1e-4)
 
 
-def test_tf_vgg16_split_replay_dynamic_batch_and_train() -> None:
+def test_tf_vgg16_split_replay_batch_symbolic_and_train() -> None:
     """Keras VGG16 exercises TensorFlow real-model split replay and training."""
 
     _skip_unless_enabled()
@@ -853,7 +861,7 @@ def test_tf_vgg16_split_replay_dynamic_batch_and_train() -> None:
         runtime = tl.split.prepare(
             model,
             x,
-            split_request("25%", backend="tf", dynamic_batch=(1, 4)),
+            split_request("25%", backend="tf"),
         )
         for batch in (1, 2, 4):
             replay_x = tf.ones((batch, 32, 32, 3), dtype=tf.float32)
@@ -863,7 +871,7 @@ def test_tf_vgg16_split_replay_dynamic_batch_and_train() -> None:
         train_runtime = tl.split.prepare(
             model,
             x,
-            split_request("75%", backend="tf", dynamic_batch=(1, 4), trainable=True),
+            split_request("75%", backend="tf", trainable=True),
         )
         boundary = train_runtime.run_training_prefix(x)
         loss, grads = train_runtime.train_suffix(
@@ -874,6 +882,11 @@ def test_tf_vgg16_split_replay_dynamic_batch_and_train() -> None:
         assert grads
         assert train_runtime.backward_prefix(boundary, grads)
         """,
+        # Each prepare now includes an isolated B=2 probe as well as the B=1
+        # capture. VGG16's large dense weights are copied/serialized by Keras
+        # in both inference and training preparations, exceeding the generic
+        # 180-second budget on shared GPU hosts.
+        timeout=600,
     )
 
 
@@ -881,7 +894,7 @@ def test_tf_vgg16_split_replay_dynamic_batch_and_train() -> None:
     "model_name",
     ("MobileNetV2", "ResNet50", "DenseNet121"),
 )
-def test_tf_keras_application_matrix_split_replay_dynamic_batch(model_name: str) -> None:
+def test_tf_keras_application_matrix_split_replay_batch_symbolic(model_name: str) -> None:
     """Additional Keras application models replay representative split boundaries."""
 
     _skip_unless_enabled()
@@ -924,7 +937,7 @@ def test_tf_keras_application_matrix_split_replay_dynamic_batch(model_name: str)
         seed_runtime = tl.split.prepare(
             model,
             x,
-            split_request("25%", backend="tf", dynamic_batch=(1, 3)),
+            split_request("25%", backend="tf"),
         )
         for boundary in ("25%", "50%", "75%"):
             runtime = seed_runtime.at(split_request(boundary, backend="tf").point)
@@ -977,7 +990,7 @@ def test_tf_keras_cv_yolov8_complete_model_all_nodes_cross_batch_and_device() ->
             / "models/keras/yolov8/keras/yolo_v8_m_pascalvoc/2/model.weights.h5"
         )
         digest = hashlib.sha256(weights_path.read_bytes()).hexdigest()
-        assert digest == "6988dc0d736bc8dab04b82f9085a2314fb1ac6d90575cb47087b94df8cdf0741"
+        assert digest == "6988dc0d736bc8dab04b82f9085a2314fb1ac6d90575cb47087b94df8cdf0741"  # pragma: allowlist secret
         official_model.trainable = False
 
         def leaves(value):
@@ -1021,9 +1034,13 @@ def test_tf_keras_cv_yolov8_complete_model_all_nodes_cross_batch_and_device() ->
             except AssertionError as exc:
                 raise AssertionError(f"official YOLOv8 mismatch at {boundary}") from exc
 
+        # The B=2 probe clones Keras models to avoid mutating the caller's
+        # variables. Supply Keras' normal reconstruction contract for this
+        # local fixture, just as the official preset above does.
+        @tf.keras.utils.register_keras_serializable(package="TorchLensTests")
         class CompleteYOLOV8Detector(tf.keras.Model):
-            def __init__(self):
-                super().__init__()
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
                 self.stem = tf.keras.layers.Conv2D(
                     8, 3, padding="same", activation="relu"
                 )
@@ -1076,7 +1093,7 @@ def test_tf_keras_cv_yolov8_complete_model_all_nodes_cross_batch_and_device() ->
         compact_runtime = tl.split.prepare(
             compact_model,
             trace_x,
-            split_request("50%", backend="tf", dynamic_batch=(1, 3)),
+            split_request("50%", backend="tf"),
         )
         boundaries = [
             (kind, node.canonical_id)
@@ -1154,7 +1171,7 @@ def test_tf_xception_split_replay_cross_batch_and_device() -> None:
                     runtime = tl.split.prepare(
                         model,
                         x,
-                        split_request(boundary, backend="tf", dynamic_batch=(1, 3)),
+                        split_request(boundary, backend="tf"),
                     )
                     for batch in (1, 3):
                         replay_x = tf.ones((batch, 75, 75, 3), dtype=tf.float32)
@@ -1207,7 +1224,7 @@ def test_tf_keras_cnn_all_split_nodes_cross_batch_and_device() -> None:
                 seed_runtime = tl.split.prepare(
                     model,
                     x,
-                    split_request("50%", backend="tf", dynamic_batch=(1, 3)),
+                    split_request("50%", backend="tf"),
                 )
                 boundaries = [
                     f"{kind}:{node.canonical_id}"
@@ -1218,7 +1235,7 @@ def test_tf_keras_cnn_all_split_nodes_cross_batch_and_device() -> None:
                     runtime = tl.split.prepare(
                         model,
                         x,
-                        split_request(boundary, backend="tf", dynamic_batch=(1, 3)),
+                        split_request(boundary, backend="tf"),
                     )
                     for batch in (1, 3):
                         replay_x = tf.ones((batch, 8, 8, 3), dtype=tf.float32)
@@ -1280,7 +1297,7 @@ def test_tf_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
             seed_runtime = tl.split.prepare(
                 model,
                 trace_x,
-                split_request("50%", backend="tf", trainable=True, dynamic_batch=(1, 3)),
+                split_request("50%", backend="tf", trainable=True),
             )
             relu_id = next(
                 node.canonical_id
@@ -1294,7 +1311,6 @@ def test_tf_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
                     f"after:{relu_id}",
                     backend="tf",
                     trainable=True,
-                    dynamic_batch=(1, 3),
                 ),
             )
 
@@ -1326,7 +1342,7 @@ def test_tf_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
     )
 
 
-def test_paddle_layer_model_split_replay_dynamic_batch_and_train() -> None:
+def test_paddle_layer_model_split_replay_batch_symbolic_and_train() -> None:
     """Paddle Layer stack exercises preview split replay and training on real modules."""
 
     _skip_unless_enabled()
@@ -1354,7 +1370,7 @@ def test_paddle_layer_model_split_replay_dynamic_batch_and_train() -> None:
         runtime = tl.split.prepare(
             model,
             x,
-            split_request("25%", backend="paddle", dynamic_batch=(1, 4)),
+            split_request("25%", backend="paddle"),
         )
         for batch in (1, 2, 4):
             replay_x = paddle.ones([batch, 2, 3], dtype="float32")
@@ -1365,7 +1381,7 @@ def test_paddle_layer_model_split_replay_dynamic_batch_and_train() -> None:
         train_runtime = tl.split.prepare(
             model,
             x,
-            split_request("25%", backend="paddle", dynamic_batch=(1, 4), trainable=True),
+            split_request("25%", backend="paddle", trainable=True),
         )
         boundary = train_runtime.run_training_prefix(x)
         loss, grads = train_runtime.train_suffix(
@@ -1413,7 +1429,7 @@ def test_paddle_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
         seed_runtime = tl.split.prepare(
             model,
             trace_x,
-            split_request("50%", backend="paddle", trainable=True, dynamic_batch=(1, 3)),
+            split_request("50%", backend="paddle", trainable=True),
         )
         relu_id = next(
             node.canonical_id
@@ -1427,7 +1443,6 @@ def test_paddle_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
                 f"after:{relu_id}",
                 backend="paddle",
                 trainable=True,
-                dynamic_batch=(1, 3),
             ),
         )
 
@@ -1498,7 +1513,7 @@ def test_paddle_mlp_all_split_nodes_cross_batch_and_device() -> None:
         seed_runtime = tl.split.prepare(
             model,
             x,
-            split_request("50%", backend="paddle", dynamic_batch=(1, 3)),
+            split_request("50%", backend="paddle"),
         )
         boundaries = [
             f"{kind}:{node.canonical_id}"
@@ -1511,7 +1526,7 @@ def test_paddle_mlp_all_split_nodes_cross_batch_and_device() -> None:
             runtime = tl.split.prepare(
                 model,
                 x,
-                split_request(boundary, backend="paddle", dynamic_batch=(1, 3)),
+                split_request(boundary, backend="paddle"),
             )
             for batch in (1, 3):
                 paddle.set_device("cpu")
@@ -1537,7 +1552,7 @@ def test_paddle_mlp_all_split_nodes_cross_batch_and_device() -> None:
     )
 
 
-def test_paddle_transformer_block_split_replay_dynamic_batch_and_device() -> None:
+def test_paddle_transformer_block_split_replay_batch_symbolic_and_device() -> None:
     """A Paddle attention/FFN block replays representative splits across batch/device."""
 
     _skip_unless_enabled()
@@ -1581,7 +1596,7 @@ def test_paddle_transformer_block_split_replay_dynamic_batch_and_device() -> Non
                 runtime = tl.split.prepare(
                     model,
                     x,
-                    split_request(boundary, backend="paddle", dynamic_batch=(1, 3)),
+                    split_request(boundary, backend="paddle"),
                 )
                 for batch in (1, 3):
                     replay_x = paddle.ones([batch, 4, 8], dtype="float32")
@@ -1592,7 +1607,7 @@ def test_paddle_transformer_block_split_replay_dynamic_batch_and_device() -> Non
     )
 
 
-def test_paddle_official_vision_models_split_replay_dynamic_batch() -> None:
+def test_paddle_official_vision_models_split_replay_batch_symbolic() -> None:
     """Official Paddle vision models replay representative splits across dynamic batch."""
 
     _skip_unless_enabled()
@@ -1615,7 +1630,7 @@ def test_paddle_official_vision_models_split_replay_dynamic_batch() -> None:
                 runtime = tl.split.prepare(
                     model,
                     x,
-                    split_request(boundary, backend="paddle", dynamic_batch=(1, 3)),
+                    split_request(boundary, backend="paddle"),
                 )
                 for batch in (1, 3):
                     replay_x = paddle.ones([batch, *shape[1:]], dtype="float32")
@@ -1699,7 +1714,7 @@ def test_paddle_complete_multiscale_detector_all_nodes_cross_batch() -> None:
         seed_runtime = tl.split.prepare(
             model,
             trace_x,
-            split_request("50%", backend="paddle", dynamic_batch=(1, 3)),
+            split_request("50%", backend="paddle"),
         )
         boundaries = [
             (kind, node.canonical_id)
@@ -1755,7 +1770,7 @@ def test_paddle_official_resnet_cross_batch_and_device() -> None:
             runtime = tl.split.prepare(
                 model,
                 trace_x,
-                split_request(boundary, backend="paddle", dynamic_batch=(1, 3)),
+                split_request(boundary, backend="paddle"),
             )
             for batch in (1, 3):
                 paddle.set_device("cpu")
@@ -1805,7 +1820,7 @@ def test_paddle_official_lenet_all_split_nodes_cross_batch_and_device() -> None:
         seed_runtime = tl.split.prepare(
             model,
             x,
-            split_request("50%", backend="paddle", dynamic_batch=(1, 3)),
+            split_request("50%", backend="paddle"),
         )
         boundaries = [
             f"{kind}:{node.canonical_id}"
@@ -1819,7 +1834,7 @@ def test_paddle_official_lenet_all_split_nodes_cross_batch_and_device() -> None:
             runtime = tl.split.prepare(
                 model,
                 x,
-                split_request(boundary, backend="paddle", dynamic_batch=(1, 3)),
+                split_request(boundary, backend="paddle"),
             )
             for batch in (1, 3):
                 paddle.set_device("cpu")
@@ -1845,7 +1860,7 @@ def test_paddle_official_lenet_all_split_nodes_cross_batch_and_device() -> None:
     )
 
 
-def test_jax_stax_cnn_split_replay_dynamic_batch_and_train() -> None:
+def test_jax_stax_cnn_split_replay_batch_symbolic_and_train() -> None:
     """JAX stax CNN exercises library-model split replay and VJP handoff."""
 
     _skip_unless_enabled()
@@ -1874,7 +1889,7 @@ def test_jax_stax_cnn_split_replay_dynamic_batch_and_train() -> None:
         runtime = tl.split.prepare(
             model,
             (params, x),
-            split_request("25%", backend="jax", dynamic_batch=(1, 4)),
+            split_request("25%", backend="jax"),
         )
         for batch in (1, 2, 4):
             replay_x = jnp.ones((batch, 32, 32, 3), dtype=jnp.float32)
@@ -1883,7 +1898,7 @@ def test_jax_stax_cnn_split_replay_dynamic_batch_and_train() -> None:
         train_runtime = tl.split.prepare(
             model,
             (params, x),
-            split_request("25%", backend="jax", dynamic_batch=(1, 4), trainable=True),
+            split_request("25%", backend="jax", trainable=True),
         )
         boundary = train_runtime.run_training_prefix(params, x)
         loss, grads = train_runtime.train_suffix(
@@ -1943,14 +1958,14 @@ def test_jax_flax_haiku_equinox_all_split_nodes_cross_batch_and_device() -> None
                 seed_runtime = tl.split.prepare(
                     model,
                     traced_args,
-                    split_request("50%", backend="jax", dynamic_batch=(1, 3)),
+                    split_request("50%", backend="jax"),
                 )
             for boundary in all_boundaries(seed_runtime):
                 with jax.default_device(cpu):
                     runtime = tl.split.prepare(
                         model,
                         traced_args,
-                        split_request(boundary, backend="jax", dynamic_batch=(1, 3)),
+                        split_request(boundary, backend="jax"),
                     )
                 for batch in (1, 3):
                     with jax.default_device(cpu):
@@ -2110,7 +2125,7 @@ def test_jax_flax_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
         seed_runtime = tl.split.prepare(
             model,
             (params_cpu, trace_x),
-            split_request("50%", backend="jax", trainable=True, dynamic_batch=(1, 3)),
+            split_request("50%", backend="jax", trainable=True),
         )
         activation_id = next(
             node.canonical_id
@@ -2124,7 +2139,6 @@ def test_jax_flax_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
                 f"after:{activation_id}",
                 backend="jax",
                 trainable=True,
-                dynamic_batch=(1, 3),
             ),
         )
 
@@ -2164,7 +2178,7 @@ def test_jax_flax_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
     )
 
 
-def test_jax_reference_resnet_transformer_and_vit_split_replay_dynamic_batch() -> None:
+def test_jax_reference_resnet_transformer_and_vit_split_replay_batch_symbolic() -> None:
     """JAX reference ResNet/Transformer/ViT-style architectures replay dynamic splits."""
 
     _skip_unless_enabled()
@@ -2281,7 +2295,7 @@ def test_jax_reference_resnet_transformer_and_vit_split_replay_dynamic_batch() -
                 runtime = tl.split.prepare(
                     model,
                     (params, x),
-                    split_request(boundary, backend="jax", dynamic_batch=(1, 3)),
+                    split_request(boundary, backend="jax"),
                 )
                 for batch in (1, 3):
                     replay_x = input_factory(batch)
@@ -2358,7 +2372,7 @@ def test_jax_complete_multiscale_detector_all_nodes_cross_batch() -> None:
         seed_runtime = tl.split.prepare(
             model,
             (params, trace_x),
-            split_request("50%", backend="jax", dynamic_batch=(1, 3)),
+            split_request("50%", backend="jax"),
         )
         boundaries = [
             (kind, node.canonical_id)
@@ -2380,7 +2394,7 @@ def test_jax_complete_multiscale_detector_all_nodes_cross_batch() -> None:
         for batch in (2, 3):
             replay_x = jnp.ones((batch, 32, 32, 3), dtype=jnp.float32)
             runtime = seed_runtime.at(
-                split_request("50%", backend="jax", dynamic_batch=(1, 3)).point
+                split_request("50%", backend="jax").point
             )
             assert_same(runtime.replay(params, replay_x), model(params, replay_x))
         """,
@@ -2429,14 +2443,14 @@ def test_jax_stax_mlp_all_split_nodes_cross_batch_and_device() -> None:
         seed_runtime = tl.split.prepare(
             model,
             (params_cpu, x_cpu),
-            split_request("50%", backend="jax", dynamic_batch=(1, 3)),
+            split_request("50%", backend="jax"),
         )
         boundaries = ("25%", "50%", "75%")
         for boundary in boundaries:
             runtime = tl.split.prepare(
                 model,
                 (params_cpu, x_cpu),
-                split_request(boundary, backend="jax", dynamic_batch=(1, 3)),
+                split_request(boundary, backend="jax"),
             )
             for batch in (1, 3):
                 replay_x_cpu = jax.device_put(
@@ -2585,7 +2599,7 @@ def test_tinygrad_conv_and_transformerish_models_split_replay() -> None:
     )
 
 
-def test_tinygrad_conv_split_replay_dynamic_batch_and_cpu_gpu() -> None:
+def test_tinygrad_conv_split_replay_batch_symbolic_and_cpu_gpu() -> None:
     """tinygrad Conv replay covers dynamic batches and CPU-prefix/GPU-suffix."""
 
     _skip_unless_enabled()
@@ -2644,7 +2658,7 @@ def test_tinygrad_conv_split_replay_dynamic_batch_and_cpu_gpu() -> None:
             runtime = tl.split.prepare(
                 model,
                 trace_x,
-                split_request(boundary, backend="tinygrad", dynamic_batch=(1, 4)),
+                split_request(boundary, backend="tinygrad"),
             )
             for batch in (1, 2, 4):
                 replay_x = Tensor.ones(batch, 3, 16, 16, device="CPU").realize()
@@ -2673,7 +2687,7 @@ def test_tinygrad_conv_split_replay_dynamic_batch_and_cpu_gpu() -> None:
         runtime = tl.split.prepare(
             model,
             trace_x,
-            split_request("90%", backend="tinygrad", dynamic_batch=(1, 4)),
+            split_request("90%", backend="tinygrad"),
         )
         for batch in (1, 3):
             cpu_x = Tensor.ones(batch, 3, 16, 16, device="CPU").realize()
@@ -2747,8 +2761,13 @@ def test_tinygrad_official_llm_transformer_block_split_replay() -> None:
 
         x = Tensor.ones(2, 4, 8).realize()
         for boundary in ("25%", "50%", "75%"):
-            runtime = tl.split.prepare(model, x, split_request(boundary, backend="tinygrad"))
-            replay_x = Tensor.ones(2, 4, 8).realize()
+            # This fixture exercises a fixed-batch, stateful KV-cache block.
+            # Explicitly retain its B=2 input contract instead of requesting
+            # automatic B=1 canonicalization and batch extrapolation.
+            runtime = tl.split.prepare(
+                model, x, split_request(boundary, backend="tinygrad", batch_axes={})
+            )
+            replay_x = (Tensor.arange(64).reshape(2, 4, 8).float() / 64).realize()
             diff = max_abs_diff(
                 runtime.replay(replay_x).realize(),
                 model(replay_x).realize(),
@@ -2835,7 +2854,7 @@ def test_tinygrad_complete_multiscale_detector_all_nodes_cross_batch_and_device(
         seed_runtime = tl.split.prepare(
             model,
             trace_x,
-            split_request("50%", backend="tinygrad", dynamic_batch=(1, 3)),
+            split_request("50%", backend="tinygrad"),
         )
         boundaries = [
             (kind, node.canonical_id)
@@ -2853,7 +2872,7 @@ def test_tinygrad_complete_multiscale_detector_all_nodes_cross_batch_and_device(
         for batch in (2, 3):
             replay_x = Tensor.ones(batch, 3, 4, 4, device="CPU").realize()
             runtime = seed_runtime.at(
-                split_request("50%", backend="tinygrad", dynamic_batch=(1, 3)).point
+                split_request("50%", backend="tinygrad").point
             )
             expected = model(replay_x)
             expected = tuple(value.realize() for value in leaves(expected))
@@ -2878,7 +2897,7 @@ def test_tinygrad_complete_multiscale_detector_all_nodes_cross_batch_and_device(
         runtime = tl.split.prepare(
             model,
             trace_x,
-            split_request("50%", backend="tinygrad", dynamic_batch=(1, 3)),
+            split_request("50%", backend="tinygrad"),
         )
         for batch in (1, 2):
             cpu_x = Tensor.ones(batch, 3, 4, 4, device="CPU").realize()
@@ -2899,7 +2918,7 @@ def test_tinygrad_complete_multiscale_detector_all_nodes_cross_batch_and_device(
     )
 
 
-def test_tinygrad_nn_mlp_split_replay_dynamic_batch_and_train() -> None:
+def test_tinygrad_nn_mlp_split_replay_batch_symbolic_and_train() -> None:
     """tinygrad nn.Linear MLP exercises real layer params and split training."""
 
     _skip_unless_enabled()
@@ -2939,7 +2958,7 @@ def test_tinygrad_nn_mlp_split_replay_dynamic_batch_and_train() -> None:
         runtime = tl.split.prepare(
             model,
             x,
-            split_request("25%", backend="tinygrad", dynamic_batch=(1, 4)),
+            split_request("25%", backend="tinygrad"),
         )
         for batch in (1, 2, 4):
             replay_x = Tensor.ones(batch, 2, 3).realize()
@@ -2951,7 +2970,7 @@ def test_tinygrad_nn_mlp_split_replay_dynamic_batch_and_train() -> None:
         train_runtime = tl.split.prepare(
             model,
             train_x,
-            split_request("25%", backend="tinygrad", dynamic_batch=(1, 4), trainable=True),
+            split_request("25%", backend="tinygrad", trainable=True),
         )
         boundary = train_runtime.run_training_prefix(train_x)
         loss, grads = train_runtime.train_suffix(boundary, Tensor.zeros(2, 3).realize())
@@ -3024,7 +3043,7 @@ def test_tinygrad_nn_mlp_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None
             seed_runtime = tl.split.prepare(
                 model,
                 trace_x,
-                split_request("50%", backend="tinygrad", trainable=True, dynamic_batch=(1, 3)),
+                split_request("50%", backend="tinygrad", trainable=True),
             )
             split_id = next(
                 node.canonical_id
@@ -3038,7 +3057,6 @@ def test_tinygrad_nn_mlp_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None
                     f"after:{split_id}",
                     backend="tinygrad",
                     trainable=True,
-                    dynamic_batch=(1, 3),
                 ),
             )
 
@@ -3139,7 +3157,7 @@ def test_tinygrad_nn_mlp_all_split_nodes_cross_batch_and_device() -> None:
         seed_runtime = tl.split.prepare(
             model,
             x,
-            split_request("50%", backend="tinygrad", dynamic_batch=(1, 3)),
+            split_request("50%", backend="tinygrad"),
         )
         op_types = {"reduce", "add", "where"}
         candidate_count = len(
@@ -3153,7 +3171,7 @@ def test_tinygrad_nn_mlp_all_split_nodes_cross_batch_and_device() -> None:
                 seed_runtime = tl.split.prepare(
                     model,
                     x,
-                    split_request("50%", backend="tinygrad", dynamic_batch=(1, 3)),
+                    split_request("50%", backend="tinygrad"),
                 )
                 candidates = [
                     node
@@ -3167,7 +3185,6 @@ def test_tinygrad_nn_mlp_all_split_nodes_cross_batch_and_device() -> None:
                     split_request(
                         f"{kind}:{target.canonical_id}",
                         backend="tinygrad",
-                        dynamic_batch=(1, 3),
                     ),
                 )
                 for batch in (1, 3):

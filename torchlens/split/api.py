@@ -10,11 +10,12 @@ from .errors import SplitErrorContext, SplitUnsupportedError
 from .ir import SplitRequest
 from .pipeline import (
     analyze_split_capabilities,
-    capture_model,
+    capture_canonical_model,
     execute_split_runtime,
     lower_split_program,
     normalize_to_split_ir,
 )
+from .placement import require_placement_support
 from .planner import plan_split
 from .profiles import resolve_model_profile
 from .program import ensure_capability_report_supported
@@ -84,25 +85,24 @@ def prepare(
                 reason="unsupported split training",
             ),
         )
-    if request.dynamic_batch is not None and not adapter.supports_dynamic_batch:
-        raise SplitUnsupportedError(
-            f"backend={backend_spec.name!r} does not support dynamic-batch split replay.",
-            context=SplitErrorContext(
-                backend=str(backend_spec.name),
-                split_point=request.boundary,
-                reason="unsupported dynamic batch",
-            ),
-        )
+    require_placement_support(adapter, request.placement, split_point=request.boundary)
 
-    capture = capture_model(model, input_tuple, request, input_kwargs=input_kwargs)
+    capture, canonical_inputs, canonical_kwargs, batch_spec = capture_canonical_model(
+        model,
+        input_tuple,
+        request,
+        input_kwargs=input_kwargs,
+        adapter=adapter,
+    )
     graph, graph_ir = normalize_to_split_ir(
         capture,
         request,
-        inputs=input_tuple,
-        input_kwargs=input_kwargs,
+        inputs=canonical_inputs,
+        input_kwargs=canonical_kwargs,
         adapter=adapter,
         model_profile=profile,
         model=model,
+        batch_spec=batch_spec,
     )
     plan = plan_split(graph, request)
     prefix_program = lower_split_program(graph, plan, request, segment="prefix", adapter=adapter)
@@ -135,6 +135,7 @@ def prepare(
         graph_ir=graph_ir,
         model_profile=profile,
         prepared_input_kwargs=input_kwargs,
+        batch_spec=batch_spec,
     )
 
 

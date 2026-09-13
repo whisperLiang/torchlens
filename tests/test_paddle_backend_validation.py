@@ -120,6 +120,13 @@ def test_paddle_validation_fails_unwrapped_intermediate_gap(
         "_TOP_LEVEL_CORE_OPS",
         paddle_wrappers._TOP_LEVEL_CORE_OPS - {"add"},
     )
+    # The native wrapper also observes an add reached through its Python API.
+    # Remove both observers so this adversary actually creates a capture gap.
+    monkeypatch.setattr(
+        paddle_wrappers,
+        "_C_OPS_CORE_OPS",
+        paddle_wrappers._C_OPS_CORE_OPS - {"add"},
+    )
 
     def add_then_relu(x: Any, y: Any) -> Any:
         """Apply an unwrapped add followed by a wrapped relu."""
@@ -129,6 +136,7 @@ def test_paddle_validation_fails_unwrapped_intermediate_gap(
     args = (paddle.ones([2, 3], dtype="float32"), paddle.ones([2, 3], dtype="float32"))
     trace = tl.trace(add_then_relu, args, backend="paddle")
 
+    assert not any(op.func_name in {"add", "c_ops.add"} for op in trace.layer_list)
     assert PaddleBackend().validate_trace(trace) is False
     assert PaddleBackend().validate_entry(add_then_relu, args) is False
 

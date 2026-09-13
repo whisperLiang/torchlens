@@ -32,7 +32,7 @@ def test_native_ir_non_torch_adapters_advertise_replay_capabilities(backend: str
     assert adapter.supports_replay is True
     assert adapter.supports_training is True
     assert adapter.supports_boundary_cache is True
-    assert adapter.supports_dynamic_batch is True
+    assert adapter.supports_state_placement is False
 
 
 def test_paddle_adapter_advertises_replay_capabilities() -> None:
@@ -43,7 +43,7 @@ def test_paddle_adapter_advertises_replay_capabilities() -> None:
     assert adapter.supports_replay is True
     assert adapter.supports_training is True
     assert adapter.supports_boundary_cache is True
-    assert adapter.supports_dynamic_batch is True
+    assert adapter.supports_state_placement is False
 
 
 def test_tinygrad_adapter_advertises_replay_capabilities() -> None:
@@ -54,15 +54,23 @@ def test_tinygrad_adapter_advertises_replay_capabilities() -> None:
     assert adapter.supports_replay is True
     assert adapter.supports_training is True
     assert adapter.supports_boundary_cache is True
-    assert adapter.supports_dynamic_batch is True
+    assert adapter.supports_state_placement is False
 
 
 def test_torch_adapter_advertises_v2_capabilities() -> None:
-    """Torch keeps full replay/training/cache/dynamic-batch capabilities."""
+    """Torch keeps replay/training/cache and adds segment state placement."""
 
     adapter = resolve_split_adapter("torch")
 
     assert adapter.supports_replay is True
     assert adapter.supports_training is True
     assert adapter.supports_boundary_cache is True
-    assert adapter.supports_dynamic_batch is True
+    assert adapter.supports_state_placement is True
+
+
+def test_no_adapter_declares_a_dynamic_batch_capability() -> None:
+    """Batch polymorphism is unconditional: no adapter gates a batch range."""
+
+    for name in ("torch", "jax", "tf", "paddle", "tinygrad", "mlx"):
+        adapter = resolve_split_adapter(name)
+        assert not hasattr(adapter, "supports_dynamic_batch")

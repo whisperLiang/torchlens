@@ -17,10 +17,14 @@ _CACHE_METADATA_KEYS = (
     "split_id",
     "graph_shape_hash",
     "batch_symbol",
-    "dynamic_batch",
     "runtime_batch_size",
     "shape_program_hash",
     "device_policy",
+    "batch_validation",
+    "runtime_batch_validation",
+    "state_fingerprint",
+    "state_prefix_kind",
+    "profile_hash",
 )
 
 

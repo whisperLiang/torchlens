@@ -43,6 +43,41 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
   spellings are provisional (no deprecation shim owed). See
   [Episode capture](episode_capture.md).
 
+## Split execution
+
+**SplitRequest / SplitPoint**
+: A typed request for preparing a split execution. `SplitPoint` identifies a boundary before or
+  after a named site, or by percentage; `SplitRequest` combines it with backend, validation,
+  feature, and placement choices.
+
+**SplitFeatures**
+: The requested replay, training, boundary-cache, batch-axis, cross-device, and live-parameter
+  capabilities. A declared batch axis identifies semantics, not a list of allowed batch sizes.
+
+**SplitModelProfile**
+: Pinned metadata for a real-model loader, checkpoint, and expected capabilities.
+
+**SplitGraphIR**
+: The normalized graph of values, operations, state, shape constraints, and boundary metadata
+  shared by split planning and replay lowering.
+
+**BoundarySchema / ReplayBoundary**
+: `BoundarySchema` describes one value crossing the split boundary (including its shape, dtype,
+  device, and alias group). `ReplayBoundary` carries concrete boundary values for a replay.
+
+**SplitRuntime / prepare**
+: `tl.prepare(model, inputs, request)` produces a `SplitRuntime` that can replay the prepared
+  segments and explain their capabilities; the same entry point is available as
+  `tl.split.prepare(...)`.
+
+**SplitVerificationStatus**
+: The declared verification level of a lowered split component: exact, region-verified,
+  unverified, unsupported, or environment-unavailable.
+
+**percent**
+: `tl.percent(value)` creates a percentage-based `SplitPoint`; the value must be strictly
+  between 0 and 100.
+
 ## Graph records
 
 **Op**

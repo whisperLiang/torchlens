@@ -67,7 +67,7 @@ def profile_cache_dir(profile: str | SplitModelProfile) -> Path:
     """Return a deterministic cache directory for one profile."""
 
     resolved = resolve_model_profile(profile)
-    if resolved is None:  # pragma: no cover - defensive typing guard.
+    if resolved is None:
         raise ValueError("profile_cache_dir requires a model profile")
     return model_cache_dir() / resolved.id
 

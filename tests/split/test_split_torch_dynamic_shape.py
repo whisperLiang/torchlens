@@ -8,7 +8,7 @@ from torch import nn
 from v2_helpers import split_request
 
 import torchlens as tl
-from torchlens.split.errors import SplitUnsupportedError
+from torchlens.split.errors import SplitBoundaryError
 
 
 class DynamicShapeModel(nn.Module):
@@ -78,10 +78,10 @@ class AffineConcatAndSliceModel(nn.Module):
 
 
 class InteriorBatchBranchModel(nn.Module):
-    """Change a shape at an interior batch while preserving operation topology."""
+    """Change a shape at the B=2 sample while preserving operation topology."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        size = 3 if x.shape[0] == 3 else 2
+        size = 3 if x.shape[0] == 2 else 2
         return torch.zeros((size, x.shape[1]), device=x.device) + x.sum() * 0
 
 
@@ -98,7 +98,7 @@ class MutableCaptureStateModel(nn.Module):
         return x.reshape(x.shape[0], -1)
 
 
-def test_dynamic_batch_replay_for_view_reshape_flatten() -> None:
+def test_batch_symbolic_replay_for_view_reshape_flatten() -> None:
     """A trace at batch 2 replays supported dynamic batches."""
 
     torch.manual_seed(0)
@@ -107,7 +107,7 @@ def test_dynamic_batch_replay_for_view_reshape_flatten() -> None:
     runtime = tl.split.prepare(
         model,
         example,
-        split_request("50%", dynamic_batch=(1, 8)),
+        split_request("50%"),
     )
 
     for batch in (1, 2, 4, 8):
@@ -116,7 +116,7 @@ def test_dynamic_batch_replay_for_view_reshape_flatten() -> None:
 
 
 def test_dynamic_shape_witness_solves_attention_view_and_preserves_state() -> None:
-    """Range witnesses disambiguate B products without mutating caller state."""
+    """One B=2 sample disambiguates B products without mutating caller state."""
 
     torch.manual_seed(7)
     rng_state = torch.random.get_rng_state().clone()
@@ -126,12 +126,13 @@ def test_dynamic_shape_witness_solves_attention_view_and_preserves_state() -> No
     runtime = tl.split.prepare(
         model,
         example,
-        split_request("50%", dynamic_batch=(1, 3)),
+        split_request("50%"),
     )
 
     shape_program = runtime.trace_graph.shape_program
     assert shape_program.unresolved == {}
-    assert shape_program.witness_batch_sizes == (1, 3)
+    assert runtime.traced_batch_size == 1
+    assert shape_program.witness_batch_sizes == (2,)
     assert model.forward_calls == 0
     assert torch.equal(torch.random.get_rng_state(), rng_state)
 
@@ -150,16 +151,17 @@ def test_reshape_does_not_guess_from_trace_batch_divisibility() -> None:
     runtime = tl.split.prepare(
         model,
         torch.randn(2, 4),
-        split_request("50%", dynamic_batch=(1, 3)),
+        split_request("50%"),
     )
 
     assert runtime.trace_graph.shape_program.unresolved == {}
-    assert runtime.trace_graph.shape_program.witness_batch_sizes == (1, 3)
+    assert runtime.traced_batch_size == 1
+    assert runtime.trace_graph.shape_program.witness_batch_sizes == (2,)
     reshape_node = next(
         node for node in runtime.trace_graph.compute_nodes if node.op_type == "reshape"
     )
     assert runtime.trace_graph.shape_program.proof_sources[reshape_node.canonical_id] == (
-        "shape_witness"
+        "sampled_shape_witness"
     )
     assert runtime.trace_graph.shape_program.witness_axis_diagnostics[
         reshape_node.canonical_id
@@ -182,12 +184,13 @@ def test_rank_change_and_reduction_use_witnesses_without_axis_guessing() -> None
     runtime = tl.split.prepare(
         model,
         torch.randn(2, 4),
-        split_request("50%", dynamic_batch=(1, 3)),
+        split_request("50%"),
     )
 
     shape_program = runtime.trace_graph.shape_program
     assert shape_program.unresolved == {}
-    assert shape_program.witness_batch_sizes == (1, 3)
+    assert runtime.traced_batch_size == 1
+    assert shape_program.witness_batch_sizes == (2,)
     stack_node = next(node for node in runtime.trace_graph.compute_nodes if node.op_type == "stack")
     stack_diagnostics = shape_program.witness_axis_diagnostics[stack_node.canonical_id]
     assert stack_diagnostics["accepted_axes"] == (1,)
@@ -208,7 +211,7 @@ def test_scalar_shape_refs_are_frontier_dependencies_at_every_boundary() -> None
     seed_runtime = tl.split.prepare(
         model,
         trace_input,
-        split_request("50%", dynamic_batch=(1, 3)),
+        split_request("50%"),
     )
 
     for node in seed_runtime.trace_graph.compute_nodes:
@@ -226,7 +229,7 @@ def test_concat_and_slice_compile_additive_and_ceildiv_batch_expressions() -> No
     runtime = tl.split.prepare(
         model,
         torch.randn(2, 4),
-        split_request("50%", dynamic_batch=(1, 5)),
+        split_request("50%"),
     )
 
     shape_program = runtime.trace_graph.shape_program
@@ -239,15 +242,34 @@ def test_concat_and_slice_compile_additive_and_ceildiv_batch_expressions() -> No
         torch.testing.assert_close(actual_slice, expected_slice)
 
 
-def test_interior_batch_shape_change_is_not_proven_by_endpoints() -> None:
-    """All declared batches are witnessed before a captured literal is called static."""
+@pytest.mark.parametrize("segment", ("prefix", "suffix"))
+def test_unresolved_shape_allows_captured_batch_and_refuses_changed_batch(segment: str) -> None:
+    """A failed shape probe restricts changed batches across all executing segments."""
 
-    with pytest.raises(SplitUnsupportedError, match="preflight"):
-        tl.split.prepare(
-            InteriorBatchBranchModel().eval(),
-            torch.randn(2, 4),
-            split_request("50%", dynamic_batch=(1, 4)),
-        )
+    model = InteriorBatchBranchModel().eval()
+    seed_runtime = tl.split.prepare(model, torch.randn(2, 4), split_request("50%"))
+    shape_program = seed_runtime.trace_graph.shape_program
+    assert shape_program is not None
+    assert shape_program.unresolved
+    unresolved_id = next(iter(shape_program.unresolved))
+    point = tl.split.after(unresolved_id) if segment == "prefix" else tl.split.before(unresolved_id)
+    runtime = seed_runtime.at(point)
+
+    assert runtime.capability_report.preflight_ok
+    assert runtime.capability_report.replay.supported
+    diagnostics = runtime.explain_capabilities()["shape_diagnostics"]
+    assert diagnostics["unresolved"] == shape_program.unresolved
+    assert diagnostics["traced_batch_size"] == runtime.traced_batch_size == 1
+    captured_input = torch.randn(runtime.traced_batch_size, 4)
+    torch.testing.assert_close(runtime.replay(captured_input), model(captured_input))
+
+    for batch in (2, 3):
+        value = torch.randn(batch, 4)
+        with pytest.raises(SplitBoundaryError, match="probe did not pass") as exc_info:
+            runtime.run_prefix(value)
+        assert exc_info.value.context.reason == "batch probe did not pass"
+
+    torch.testing.assert_close(runtime.replay(captured_input), model(captured_input))
 
 
 def test_capture_transaction_restores_mutable_and_new_plain_attributes() -> None:
@@ -257,7 +279,7 @@ def test_capture_transaction_restores_mutable_and_new_plain_attributes() -> None
     runtime = tl.split.prepare(
         model,
         torch.randn(2, 4),
-        split_request("50%", dynamic_batch=(1, 3)),
+        split_request("50%"),
     )
 
     assert runtime.trace_graph.shape_program.unresolved == {}

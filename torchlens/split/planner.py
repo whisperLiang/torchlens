@@ -295,7 +295,6 @@ def _split_id(graph: SplitTraceGraph, spec: SplitRequest, target: SplitTraceNode
             graph.graph_shape_hash,
             spec.boundary,
             spec.batch_symbol,
-            spec.dynamic_batch,
             spec.validation,
             spec.features.training,
             target.canonical_id,

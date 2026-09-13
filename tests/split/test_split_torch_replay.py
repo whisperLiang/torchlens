@@ -221,7 +221,7 @@ def test_identity_output_marker_reconstructs_from_graph_parent() -> None:
     model = nn.Sequential(nn.Linear(6, 4), nn.Dropout(p=0.0)).eval()
     x = torch.ones(2, 6)
 
-    runtime = tl.split.prepare(model, x, split_request("after:dropout", dynamic_batch=(1, 3)))
+    runtime = tl.split.prepare(model, x, split_request("after:dropout"))
 
     for batch in (1, 3):
         replay_x = torch.ones(batch, 6)

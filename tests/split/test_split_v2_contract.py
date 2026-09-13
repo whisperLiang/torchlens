@@ -16,7 +16,28 @@ from torchlens.split import (
     checkpoint_cache_path,
     register_model_profile,
 )
-from torchlens.split.profiles import model_cache_dir
+from torchlens.split.errors import (
+    SplitBoundaryError,
+    SplitError,
+    SplitRequestError,
+    SplitUnsupportedError,
+)
+from torchlens.split.profiles import model_cache_dir, profile_cache_dir
+
+
+@pytest.mark.parametrize(
+    ("error_type", "code"),
+    [
+        (SplitError, "split_error"),
+        (SplitRequestError, "split_request_error"),
+        (SplitBoundaryError, "split_boundary_error"),
+        (SplitUnsupportedError, "split_unsupported"),
+    ],
+)
+def test_split_error_codes_are_stable(error_type: type[SplitError], code: str) -> None:
+    """The split preview exposes distinct typed error codes to callers."""
+
+    assert error_type("split failure").code == code
 
 
 def test_v2_prepare_normalizes_graph_and_exposes_boundary_abi() -> None:
@@ -27,7 +48,7 @@ def test_v2_prepare_normalizes_graph_and_exposes_boundary_abi() -> None:
     request = SplitRequest(
         point=after("relu"),
         backend="torch",
-        features=SplitFeatures(dynamic_batch=(1, 5), boundary_cache=True),
+        features=SplitFeatures(boundary_cache=True),
         validation="strict",
     )
 
@@ -42,7 +63,7 @@ def test_v2_prepare_normalizes_graph_and_exposes_boundary_abi() -> None:
     assert runtime.capability_report.verification == SplitVerificationStatus.EXACT
     report = runtime.explain_capabilities()
     assert report["backend_capabilities"]["replay"] is True
-    assert report["features"]["dynamic_batch"] == (1, 5)
+    assert "dynamic_batch" not in report["features"]
     assert "backend_handle" not in repr(runtime.graph_ir.as_dict())
 
     replayed = runtime.replay(torch.randn(4, 4))
@@ -67,6 +88,13 @@ def test_model_profile_cache_is_user_scoped(monkeypatch: pytest.MonkeyPatch, tmp
     assert checkpoint_cache_path(profile, "weights.safetensors") == (
         tmp_path / "models" / profile.id / "weights.safetensors"
     )
+
+
+def test_profile_cache_dir_rejects_missing_profile() -> None:
+    """A missing runtime profile is rejected before building a cache path."""
+
+    with pytest.raises(ValueError, match="requires a model profile"):
+        profile_cache_dir(None)
 
 
 def test_jax_custom_jvp_pure_primal_is_inlined() -> None:

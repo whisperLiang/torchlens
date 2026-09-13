@@ -5,9 +5,11 @@ from __future__ import annotations
 from math import prod
 from typing import Any
 
+from ...backends.registry import TINYGRAD_BACKEND_NAME
 from ...backends.tinygrad.backend import (
     TinygradBackend,
     TinygradUOpCapture,
+    _replace_uop_source_at_path,
     _source_matches_payload,
 )
 from ..boundary import ReplayBoundary
@@ -99,11 +101,14 @@ def _rewrite_tinygrad_uop_device(uop: Any, target_device: str | None) -> Any:
 def _tinygrad_shape_tuple(uop: Any) -> tuple[int, ...] | None:
     """Convert a tinygrad shape descriptor UOp into a concrete shape tuple."""
 
+    if not _is_tinygrad_shape_uop(uop):
+        return None
     ops = _tinygrad_ops()
     if getattr(uop, "op", None) is ops.CONST:
         try:
-            return (int(getattr(uop, "arg")),)
-        except (TypeError, ValueError):
+            count = int(getattr(getattr(uop, "dtype", None), "count", 1))
+            return (int(getattr(uop, "arg")),) * count
+        except (TypeError, ValueError, OverflowError):
             return None
     if getattr(uop, "op", None) is ops.STACK:
         dims: list[int] = []
@@ -121,9 +126,12 @@ def _replace_tinygrad_shape_tuple(uop: Any, shape: tuple[int, ...]) -> Any:
 
     ops = _tinygrad_ops()
     if getattr(uop, "op", None) is ops.CONST:
-        if len(shape) != 1:
-            raise ValueError("CONST shape descriptors require one replacement dim.")
-        return uop.replace(arg=int(shape[0]))
+        count = int(getattr(getattr(uop, "dtype", None), "count", 1))
+        if len(shape) != count:
+            raise ValueError("CONST shape descriptor rank changed during dynamic batch rewrite.")
+        if len(set(shape)) == 1:
+            return uop.replace(arg=int(shape[0]))
+        return type(uop).const(uop.dtype, shape)
     if getattr(uop, "op", None) is ops.STACK:
         src = tuple(getattr(uop, "src", ()) or ())
         if len(src) != len(shape):
@@ -167,6 +175,13 @@ class _TinygradGeneratedSegmentBase:
         self._label_to_id = graph.node_id_by_alias
         self._backend = TinygradBackend()
         self._shape_binding: ShapeBinding | None = None
+
+    @property
+    def _has_symbolic_batch(self) -> bool:
+        """Return whether this capture carries a symbolic batch axis."""
+
+        program = self.graph.shape_program
+        return program is not None and bool(program.input_batch_axes)
 
     def _context(self, node: SplitTraceNode, reason: str) -> SplitErrorContext:
         """Build an error context for ``node``."""
@@ -306,6 +321,57 @@ class _TinygradGeneratedSegmentBase:
             )
         return overlay[parent_id]
 
+    def _parameter_parent_uop(
+        self,
+        node: SplitTraceNode,
+        parent: SplitTraceNode,
+        value: Any,
+    ) -> Any:
+        """Broadcast a fixed parameter branch to a dynamic elementwise shape.
+
+        tinygrad's lazy UOp builder emits an explicit ``EXPAND`` for a
+        singleton parameter axis when the native forward is first traced at a
+        larger batch.  Replaying a canonical B=1 UOp verbatim leaves that
+        branch at ``(1, ...)``; unlike the eager Tensor API, the low-level UOp
+        ``MUL``/``ADD`` nodes do not perform implicit broadcasting and reject
+        the otherwise valid ``(B, ...)`` combination.  Insert the same lazy
+        expand when a parameter-only parent has singleton dimensions that must
+        match the current node's runtime shape.  No values are realized or
+        mutated here.
+        """
+
+        from tinygrad.uop import GroupOp
+
+        if getattr(getattr(node.target, "uop", None), "op", None) not in GroupOp.ALU:
+            return getattr(value, "uop", value)
+        if self.graph.shape_program is None or self._shape_binding is None:
+            return getattr(value, "uop", value)
+        if not self._is_parameter_lineage(parent) or not self._backend.is_tensor(value):
+            return getattr(value, "uop", value)
+        target_shape = self.graph.shape_program.value_shape(
+            node.canonical_id,
+            self._shape_binding,
+        )
+        if target_shape is None:
+            return value.uop
+        try:
+            source_shape = tuple(int(dim) for dim in value.shape)
+        except Exception:
+            return value.uop
+        if len(source_shape) != len(target_shape):
+            return value.uop
+        if any(
+            source != target and source != 1 for source, target in zip(source_shape, target_shape)
+        ):
+            return value.uop
+        if source_shape == target_shape:
+            return value.uop
+        try:
+            expanded = value.expand(target_shape)
+        except Exception:
+            return value.uop
+        return getattr(expanded, "uop", value.uop)
+
     def _rewrite_shape_descriptor(
         self,
         *,
@@ -392,7 +458,11 @@ class _TinygradGeneratedSegmentBase:
     ) -> bool:
         """Return whether one replay node derives exclusively from model state."""
 
-        if node.is_param_source or node.is_buffer or node.param_refs:
+        # tinygrad's UOp-backed buffer leaves are not annotated with the
+        # Torch-specific ``is_buffer`` flag on finalized Ops.  Their operation
+        # kind is nevertheless an unambiguous model-state marker.
+        tinygrad_buffer = node.backend == TINYGRAD_BACKEND_NAME and node.op_type.lower() == "buffer"
+        if node.is_param_source or node.is_buffer or node.param_refs or tinygrad_buffer:
             return True
         if node.is_input:
             return False
@@ -415,7 +485,14 @@ class _TinygradGeneratedSegmentBase:
     ) -> bool:
         """Return whether one replay node derives exclusively from captured constants."""
 
-        if node.is_input or node.is_param_source or node.is_buffer or node.param_refs:
+        tinygrad_buffer = node.backend == TINYGRAD_BACKEND_NAME and node.op_type.lower() == "buffer"
+        if (
+            node.is_input
+            or node.is_param_source
+            or node.is_buffer
+            or node.param_refs
+            or tinygrad_buffer
+        ):
             return False
         if not node.parents:
             return True
@@ -468,6 +545,8 @@ class _TinygradGeneratedSegmentBase:
     ) -> Any:
         """Replay one captured tinygrad UOp using runtime parent values."""
 
+        from tinygrad.uop import GroupOp
+
         if preserve_autograd and node.op_type == "buffer":
             live_param = self._live_child_param_source_value(node)
             if live_param is None:
@@ -511,7 +590,17 @@ class _TinygradGeneratedSegmentBase:
         ]
         if not src and not capture.parent_arg_positions:
             return self._move_source_to_device(capture.payload_snapshot, target_device)
+        # Shape recipes describe the captured literals, never a runtime
+        # tensor's already-bound shape.  Rewrite before inserting replay
+        # parents: otherwise a runtime shape such as (B, 1, 4) can match the
+        # captured (1, 4) suffix and spuriously acquire a second batch axis.
+        src = self._rewrite_dynamic_uop_src(node, src, overlay)
+        replay_uop = capture.uop.replace(src=tuple(src))
         for position, parent_label in capture.parent_arg_positions:
+            if isinstance(position, tuple):
+                parent_value = self._resolve_parent_value(parent_label, node, overlay)
+                replay_uop = _replace_uop_source_at_path(replay_uop, position, parent_value.uop)
+                continue
             if position < 0 or position >= len(src):
                 raise SplitUnsupportedError(
                     f"{node.label!r} has invalid tinygrad parent arg position {position!r}.",
@@ -520,21 +609,33 @@ class _TinygradGeneratedSegmentBase:
             if _is_tinygrad_literal_uop(src[position]):
                 continue
             parent_node = self.graph.node_for_label(parent_label)
-            if parent_node is not None and self._is_constant_lineage(parent_node):
+            if (
+                parent_node is not None
+                and self._is_constant_lineage(parent_node)
+                and capture.uop.op not in GroupOp.ALU
+            ):
                 # Keep the native lazy broadcast tree: a realized replay value
                 # loses the EXPAND node needed to encode a new batch extent.
                 continue
             parent_value = self._resolve_parent_value(parent_label, node, overlay)
             if (
                 preserve_autograd
-                or self.spec.dynamic_batch is not None
+                or self._has_symbolic_batch
                 or _source_matches_payload(src[position], parent_value)
             ):
-                src[position] = parent_value.uop
-        src = self._rewrite_dynamic_uop_src(node, src, overlay)
+                src[position] = (
+                    self._parameter_parent_uop(
+                        node,
+                        parent_node,
+                        parent_value,
+                    )
+                    if parent_node is not None
+                    else parent_value.uop
+                )
+                replay_uop = _replace_uop_source_at_path(replay_uop, position, src[position])
         try:
             replay_uop = _rewrite_tinygrad_uop_device(
-                capture.uop.replace(src=tuple(src)),
+                replay_uop,
                 target_device,
             )
             value = self._backend._tensor_from_uop(replay_uop)
@@ -618,6 +719,12 @@ class TinygradGeneratedPrefix(_TinygradGeneratedSegmentBase):
                 backend="tinygrad",
                 split_point=self.spec.boundary,
             )
+            self.graph.shape_program.require_batch_resolvable(
+                self._shape_binding.batch_size,
+                self.node_ids,
+                backend="tinygrad",
+                split_point=self.spec.boundary,
+            )
         runtime_batch_size = None if self._shape_binding is None else self._shape_binding.batch_size
         self._execute_nodes(overlay, preserve_autograd=not detach_boundary)
         boundary_tensors: dict[str, Any] = {}
@@ -636,7 +743,6 @@ class TinygradGeneratedPrefix(_TinygradGeneratedSegmentBase):
                 "split_id": self.plan.split_id,
                 "graph_shape_hash": self.graph.graph_shape_hash,
                 "batch_symbol": self.spec.batch_symbol,
-                "dynamic_batch": self.spec.dynamic_batch,
                 "runtime_batch_size": runtime_batch_size,
                 "shape_program_hash": (
                     None
@@ -662,6 +768,12 @@ class TinygradGeneratedSuffix(_TinygradGeneratedSegmentBase):
         if self.graph.shape_program is not None and runtime_batch_size is not None:
             self._shape_binding = self.graph.shape_program.binding_from_batch(
                 int(runtime_batch_size)
+            )
+            self.graph.shape_program.require_batch_resolvable(
+                int(runtime_batch_size),
+                self.node_ids,
+                backend="tinygrad",
+                split_point=self.spec.boundary,
             )
         preserve_autograd = bool(boundary.metadata.get("suffix_training_roots"))
         self._execute_nodes(
@@ -703,7 +815,7 @@ class TinygradSplitAdapter(SplitPolicyMixin):
     supports_replay = True
     supports_training = True
     supports_boundary_cache = True
-    supports_dynamic_batch = True
+    supports_state_placement = False
     native_target_types = frozenset({"TinygradUOpCapture"})
 
     def __init__(self) -> None:
@@ -747,6 +859,28 @@ class TinygradSplitAdapter(SplitPolicyMixin):
         if not self.is_tensor(value):
             return value
         return self._backend._realized_copy(value)
+
+    def resize_batch(self, value: Any, axis: int, batch_size: int) -> Any:
+        """Realize cyclic batch rows without retaining a large input view."""
+
+        if not self.is_tensor(value):
+            return value
+        normalized_axis = axis if axis >= 0 else len(value.shape) + axis
+        current = int(value.shape[normalized_axis])
+        if current <= 0:
+            raise ValueError("Cannot resize an empty batch axis.")
+        copies, remainder = divmod(batch_size, current)
+        parts = [value] * copies
+        if remainder:
+            bounds = tuple(
+                (0, remainder) if index == normalized_axis else None
+                for index in range(len(value.shape))
+            )
+            parts.append(value.shrink(bounds))
+        resized = parts[0].cat(*parts[1:], dim=normalized_axis) if len(parts) > 1 else parts[0]
+        # A realized contiguous slice can still reference the original buffer;
+        # clone severs that lineage so capture cannot include the rebatching ops.
+        return resized.clone().realize()
 
     def to_device(self, value: Any, device: Any) -> Any:
         """Move tensor values to a tinygrad device when requested."""

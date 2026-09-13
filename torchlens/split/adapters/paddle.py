@@ -441,6 +441,12 @@ class PaddleGeneratedPrefix(_PaddleGeneratedSegmentBase):
                 backend="paddle",
                 split_point=self.spec.boundary,
             )
+            self.graph.shape_program.require_batch_resolvable(
+                self._shape_binding.batch_size,
+                self.node_ids,
+                backend="paddle",
+                split_point=self.spec.boundary,
+            )
         self._execute_nodes(overlay)
         boundary_tensors: dict[str, Any] = {}
         prefix_tensors: dict[str, Any] = {}
@@ -454,7 +460,6 @@ class PaddleGeneratedPrefix(_PaddleGeneratedSegmentBase):
             "split_id": self.plan.split_id,
             "graph_shape_hash": self.graph.graph_shape_hash,
             "batch_symbol": self.spec.batch_symbol,
-            "dynamic_batch": self.spec.dynamic_batch,
             "runtime_batch_size": (
                 None if self._shape_binding is None else self._shape_binding.batch_size
             ),
@@ -485,6 +490,12 @@ class PaddleGeneratedSuffix(_PaddleGeneratedSegmentBase):
         if self.graph.shape_program is not None and runtime_batch_size is not None:
             self._shape_binding = self.graph.shape_program.binding_from_batch(
                 int(runtime_batch_size)
+            )
+            self.graph.shape_program.require_batch_resolvable(
+                int(runtime_batch_size),
+                self.node_ids,
+                backend="paddle",
+                split_point=self.spec.boundary,
             )
         self._execute_nodes(overlay)
         return self._reconstruct_output(overlay)
@@ -521,7 +532,7 @@ class PaddleSplitAdapter(SplitPolicyMixin):
     supports_replay = True
     supports_training = True
     supports_boundary_cache = True
-    supports_dynamic_batch = True
+    supports_state_placement = False
     allow_callable_target = True
 
     def is_tensor(self, value: Any) -> bool:
@@ -558,6 +569,20 @@ class PaddleSplitAdapter(SplitPolicyMixin):
 
         paddle = _paddle()
         return paddle.clone(value) if self.is_tensor(value) else value
+
+    def resize_batch(self, value: Any, axis: int, batch_size: int) -> Any:
+        """Select cyclic batch rows on the source Paddle device."""
+
+        if not self.is_tensor(value):
+            return value
+        current = int(value.shape[axis])
+        if current <= 0:
+            raise ValueError("Cannot resize an empty batch axis.")
+        paddle = _paddle()
+        indexes = paddle.to_tensor(
+            [index % current for index in range(batch_size)], dtype="int64", place=value.place
+        )
+        return paddle.index_select(value, indexes, axis=axis)
 
     def to_device(self, value: Any, device: Any) -> Any:
         """Move tensor values to a device when Paddle exposes the method."""

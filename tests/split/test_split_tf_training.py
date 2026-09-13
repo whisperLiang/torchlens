@@ -57,7 +57,7 @@ def test_tf_module_split_training_optimizer_step_matches_full_step() -> None:
         runtime = tl.split.prepare(
             split_model,
             x,
-            split_request("after:relu", backend="tf", trainable=True, dynamic_batch=(1, 4)),
+            split_request("after:relu", backend="tf", trainable=True),
         )
         full_opt = tf.keras.optimizers.SGD(learning_rate=0.05)
         suffix_opt = tf.keras.optimizers.SGD(learning_rate=0.05)

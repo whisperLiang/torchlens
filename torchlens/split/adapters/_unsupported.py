@@ -14,7 +14,7 @@ class UnsupportedSplitAdapter(SplitPolicyMixin):
     supports_replay = False
     supports_training = False
     supports_boundary_cache = False
-    supports_dynamic_batch = False
+    supports_state_placement = False
 
     def __init__(self, name: str) -> None:
         """Create an unsupported adapter shell."""

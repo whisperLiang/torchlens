@@ -439,10 +439,15 @@ def _scrub_nondeterministic_identities(state: dict[str, Any]) -> None:
 
     equivalence_groups = state.get("op_equivalence_classes")
     if isinstance(equivalence_groups, dict):
-        state["op_equivalence_classes"] = type(equivalence_groups)(
+        # defaultdict's first constructor argument is its factory, not items.
+        # Copy the container so its type/factory survive key canonicalization.
+        remapped_groups = copy.copy(equivalence_groups)
+        remapped_groups.clear()
+        remapped_groups.update(
             (equivalence_class_map.get(key) or canonical_equivalence_key(key), value)
             for key, value in equivalence_groups.items()
         )
+        state["op_equivalence_classes"] = remapped_groups
 
     grad_fn_order = list(state.get("grad_fn_order") or ())
     grad_fn_logs = state.get("grad_fn_logs") or {}

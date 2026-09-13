@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pickle
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -22,12 +23,39 @@ from torchlens.backends import (
     get_backend_spec,
 )
 from torchlens.backends.tinygrad import GradOptions, TinygradBackend, capabilities
+from torchlens.backends.tinygrad.backend import _observe_tensor_ops
 
 tinygrad = pytest.importorskip("tinygrad")
 Tensor = pytest.importorskip("tinygrad").Tensor
 
 
 pytestmark = pytest.mark.backend_tinygrad
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("raise_in_scope", [False, True])
+def test_tensor_op_observer_restores_method(raise_in_scope: bool) -> None:
+    """The temporary method observes real tensors and restores itself on every exit."""
+
+    original = Tensor._apply_uop
+    observed_ops: dict[int, list[str]] = {}
+    observed_tensors: dict[int, list[Any]] = {}
+    value = Tensor([1.0, 2.0], device="PYTHON")
+    error_scope = (
+        pytest.raises(RuntimeError, match="observer test") if raise_in_scope else nullcontext()
+    )
+    with error_scope:
+        with _observe_tensor_ops(observed_ops, observed_tensors=observed_tensors):
+            assert Tensor._apply_uop is not original
+            result = value + 1.0
+            assert observed_ops[id(result.uop)]
+            assert any(item is result for item in observed_tensors[id(result.uop)])
+            if raise_in_scope:
+                raise RuntimeError("observer test")
+    assert Tensor._apply_uop is original
+    recorded_count = sum(len(names) for names in observed_ops.values())
+    value + 2.0
+    assert sum(len(names) for names in observed_ops.values()) == recorded_count
 
 
 def _tiny_block(x: Any) -> Any:
@@ -803,6 +831,7 @@ def test_tinygrad_derived_grads_reject_audit_only_payload_envelope() -> None:
         )
 
 
+@pytest.mark.heavy
 def test_tinygrad_public_surface_matrix(tmp_path: Path) -> None:
     """Assert supported and unsupported public surfaces on a real tinygrad trace."""
 

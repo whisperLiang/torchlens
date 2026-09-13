@@ -75,30 +75,23 @@ def infer_traced_batch_size(trace: Any) -> int | None:
     return None
 
 
-def symbolic_shape_from_tensor_ref(
-    tensor_ref: Any,
-    *,
-    batch_symbol: str,
-    dynamic_batch: tuple[int, int] | None,
-    traced_batch_size: int | None = None,
-) -> SymbolicShape | None:
-    """Build a symbolic shape from an op, tensor ref, tensor, or raw shape.
+def symbolic_shape_from_tensor_ref(tensor_ref: Any) -> SymbolicShape | None:
+    """Build a concrete shape record from an op, tensor ref, tensor, or shape.
+
+    Batch symbols are NOT introduced here.  A dimension only becomes symbolic
+    once the compiled :class:`~torchlens.split.shape_program.ShapeProgram`
+    proves it carries batch provenance, which is projected onto graph nodes
+    after compilation.
 
     Parameters
     ----------
     tensor_ref:
         Object exposing ``shape`` or a raw shape tuple/list.
-    batch_symbol:
-        Symbol replacing a dynamic leading batch dimension.
-    dynamic_batch:
-        Optional dynamic batch range.
-    traced_batch_size:
-        Leading dimension observed during tracing.
 
     Returns
     -------
     SymbolicShape | None
-        Symbolic shape, or ``None`` when shape metadata is unavailable.
+        Shape record, or ``None`` when shape metadata is unavailable.
     """
 
     shape = getattr(tensor_ref, "shape", tensor_ref)
@@ -108,13 +101,6 @@ def symbolic_shape_from_tensor_ref(
         dims = tuple(int(dim) for dim in shape)
     except (TypeError, ValueError):
         return None
-    if (
-        dynamic_batch is not None
-        and traced_batch_size is not None
-        and dims
-        and dims[0] == traced_batch_size
-    ):
-        return SymbolicShape((batch_symbol, *dims[1:]))
     return SymbolicShape(dims)
 
 
@@ -123,13 +109,16 @@ def validate_tensor_against_symbolic_shape(
     symbolic_shape: SymbolicShape | None,
     *,
     adapter: Any,
-    dynamic_batch: tuple[int, int] | None = None,
     batch_symbol: str = "B",
     backend: str = "unknown",
     split_point: str = "",
     label: str | None = None,
 ) -> None:
     """Validate a tensor-like value against a symbolic shape.
+
+    A dimension spelled with ``batch_symbol`` accepts any positive extent:
+    the batch dimension is unbounded, so only rank and concrete non-batch
+    dimensions are enforced here.
 
     Parameters
     ----------
@@ -139,8 +128,6 @@ def validate_tensor_against_symbolic_shape(
         Expected symbolic shape.
     adapter:
         Backend adapter used to query shape.
-    dynamic_batch:
-        Optional inclusive batch range.
     batch_symbol:
         Batch symbol expected in ``symbolic_shape``.
     backend:
@@ -151,6 +138,7 @@ def validate_tensor_against_symbolic_shape(
         Boundary label for error context.
     """
 
+    del batch_symbol  # retained for caller compatibility; any non-int dim is symbolic
     if symbolic_shape is None:
         return
     runtime_shape = adapter.shape(value)
@@ -172,23 +160,22 @@ def validate_tensor_against_symbolic_shape(
             ),
         )
     for index, (runtime_dim, expected_dim) in enumerate(zip(runtime_shape, expected)):
-        if expected_dim == batch_symbol:
-            if dynamic_batch is not None:
-                low, high = dynamic_batch
-                if not low <= runtime_dim <= high:
-                    raise SplitBoundaryError(
-                        f"Boundary batch dimension {runtime_dim} is outside {dynamic_batch}.",
-                        context=SplitErrorContext(
-                            backend=backend,
-                            split_point=split_point,
-                            module_path=None,
-                            op_type=None,
-                            layer_label=label,
-                            reason="dynamic batch outside allowed range",
-                            traced_shape=expected,
-                            runtime_shape=runtime_shape,
-                        ),
-                    )
+        if not isinstance(expected_dim, int):
+            if int(runtime_dim) < 1:
+                raise SplitBoundaryError(
+                    f"Boundary symbolic dimension {index} is {runtime_dim}; "
+                    "a symbolic extent must be positive.",
+                    context=SplitErrorContext(
+                        backend=backend,
+                        split_point=split_point,
+                        module_path=None,
+                        op_type=None,
+                        layer_label=label,
+                        reason="non-positive symbolic dimension",
+                        traced_shape=expected,
+                        runtime_shape=runtime_shape,
+                    ),
+                )
             continue
         if runtime_dim != expected_dim:
             raise SplitBoundaryError(
@@ -237,7 +224,7 @@ _SHAPE_SENSITIVE_OP_TOKENS = frozenset(
 )
 
 
-def is_dynamic_batch_shape_sensitive_op(*names: str | None) -> bool:
+def is_batch_shape_sensitive_op(*names: str | None) -> bool:
     """Return whether an op name may carry batch-sized shape literals.
 
     Parameters
@@ -262,7 +249,7 @@ __all__ = [
     "SymbolicDim",
     "SymbolicShape",
     "infer_traced_batch_size",
-    "is_dynamic_batch_shape_sensitive_op",
+    "is_batch_shape_sensitive_op",
     "symbolic_shape_from_tensor_ref",
     "validate_tensor_against_symbolic_shape",
 ]

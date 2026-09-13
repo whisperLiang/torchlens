@@ -76,11 +76,12 @@ def test_mlx_optional_adapter_gate() -> None:
     adapter = resolve_split_adapter("mlx")
     assert adapter.supports_replay is False
     assert adapter.supports_training is False
-    assert adapter.supports_dynamic_batch is False
+    assert adapter.supports_state_placement is False
     with pytest.raises(SplitUnsupportedError):
         adapter.build_segments(None, None, None)  # type: ignore[arg-type]
 
 
+@pytest.mark.heavy
 def test_paddle_optional_adapter_gate() -> None:
     """Installed Paddle supports generated-eager split replay."""
 

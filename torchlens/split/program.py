@@ -9,7 +9,7 @@ from .errors import SplitErrorContext, SplitUnsupportedError
 from .graph import SplitTraceGraph, SplitTraceNode
 from .ir import SplitGraphIR, SplitModelProfile, SplitRequest, SplitVerificationStatus
 from .planner import SplitPlan
-from .shape import is_dynamic_batch_shape_sensitive_op
+from .shape import is_batch_shape_sensitive_op
 
 ReplaySegment = Literal["prefix", "suffix"]
 
@@ -92,7 +92,6 @@ class SplitCapabilityReport:
     split_id: str
     replay: CapabilityStatus
     training: CapabilityStatus
-    dynamic_batch: CapabilityStatus
     boundary_cache: CapabilityStatus
     preflight: CapabilityStatus
     prefix_ops: int
@@ -118,7 +117,6 @@ class SplitCapabilityReport:
         for status in (
             self.replay,
             self.training,
-            self.dynamic_batch,
             self.preflight,
         ):
             if status.supported:
@@ -135,7 +133,6 @@ class SplitCapabilityReport:
         for field_name in (
             "replay",
             "training",
-            "dynamic_batch",
             "boundary_cache",
             "preflight",
         ):
@@ -203,24 +200,24 @@ def _dynamic_shape_reasons(
     spec: SplitRequest,
     adapter: Any,
 ) -> tuple[str, ...]:
-    """Return dynamic-shape preflight failures for a node."""
+    """Return shape failures that prevent even captured-batch replay.
 
-    if spec.dynamic_batch is None:
-        return ()
+    Unresolved batch relations remain in the capability diagnostics, but do
+    not block preparation: each executing segment's runtime binding calls
+    ``ShapeProgram.require_batch_resolvable`` before changing the batch.
+    """
+
     shape_program = graph.shape_program
     if shape_program is None:
-        return ("dynamic batch requested but no ShapeProgram was compiled",)
-    unresolved = shape_program.unresolved.get(node.canonical_id)
-    if unresolved is not None:
-        return (unresolved,)
+        return ()
     adapter_reasons = _adapter_policy(adapter, "dynamic_shape_reasons", node, graph, spec)
     if adapter_reasons:
         return adapter_reasons
     func_name = str(getattr(node.target, "op_type", "") or getattr(node.target, "__name__", ""))
-    if not is_dynamic_batch_shape_sensitive_op(node.op_type, func_name):
+    if not is_batch_shape_sensitive_op(node.op_type, func_name):
         return ()
     if graph.traced_batch_size is None:
-        return ("dynamic batch requested but traced batch size is unavailable",)
+        return ("batch-symbolic replay requested but traced batch size is unavailable",)
     return ()
 
 
@@ -348,17 +345,6 @@ def build_capability_report(
         else f"backend={graph.backend!r} does not support split training",
         status=verification if training_supported else SplitVerificationStatus.UNSUPPORTED,
     )
-    dynamic_requested = spec.dynamic_batch is not None
-    dynamic_supported = (not dynamic_requested) or bool(
-        getattr(adapter, "supports_dynamic_batch", False)
-    )
-    dynamic_batch = CapabilityStatus(
-        supported=dynamic_supported,
-        reason=None
-        if dynamic_supported
-        else f"backend={graph.backend!r} does not support dynamic-batch split replay",
-        status=verification if dynamic_supported else SplitVerificationStatus.UNSUPPORTED,
-    )
     cache_supported = bool(getattr(adapter, "supports_boundary_cache", False))
     boundary_cache = CapabilityStatus(
         supported=cache_supported,
@@ -372,7 +358,6 @@ def build_capability_report(
         split_id=plan.split_id,
         replay=replay,
         training=training,
-        dynamic_batch=dynamic_batch,
         boundary_cache=boundary_cache,
         preflight=preflight,
         prefix_ops=len(prefix_program.ops),
@@ -384,8 +369,8 @@ def build_capability_report(
         backend_capabilities={
             "replay": bool(getattr(adapter, "supports_replay", False)),
             "training": bool(getattr(adapter, "supports_training", False)),
-            "dynamic_batch": bool(getattr(adapter, "supports_dynamic_batch", False)),
             "boundary_cache": bool(getattr(adapter, "supports_boundary_cache", False)),
+            "state_placement": bool(getattr(adapter, "supports_state_placement", False)),
         },
         shape_diagnostics=(
             None
@@ -393,6 +378,12 @@ def build_capability_report(
             else {
                 "fingerprint": graph.shape_program.fingerprint,
                 "inference_mode": graph.shape_program.inference_mode,
+                "traced_batch_size": graph.shape_program.traced_batch_size,
+                "batch_validation": (
+                    {}
+                    if graph.shape_program.batch_probe is None
+                    else graph.shape_program.batch_probe.as_dict()
+                ),
                 "input_batch_axes": dict(graph.shape_program.input_batch_axes),
                 "witness_batch_sizes": graph.shape_program.witness_batch_sizes,
                 "proof_sources": dict(graph.shape_program.proof_sources),
@@ -459,8 +450,6 @@ def ensure_capability_report_supported(
         blocking_reasons.append(report.replay.reason or "split replay unsupported")
     if spec.trainable and not report.training.supported:
         blocking_reasons.append(report.training.reason or "split training unsupported")
-    if spec.dynamic_batch is not None and not report.dynamic_batch.supported:
-        blocking_reasons.append(report.dynamic_batch.reason or "dynamic batch unsupported")
     if not blocking_reasons:
         return
     raise SplitUnsupportedError(

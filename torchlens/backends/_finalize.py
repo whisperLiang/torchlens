@@ -94,7 +94,7 @@ def finalize_single_pass_trace(
         mapping after grouping relabels the graph. Backends holding
         label-keyed sidecar state (validation replay inventories, intervention
         records) must remap it atomically here; capture-index-keyed sidecars
-        may ignore the hook. Only called when ``recurrence_detection`` is on.
+        may ignore the hook. Also called when recurrence detection is off.
 
     Returns
     -------
@@ -150,8 +150,7 @@ def finalize_single_pass_trace(
         # resolves to its exact op (a layer label would resolve to pass 1 and
         # mis-seed distances for outputs produced by a later pass).
         compute_preview_input_output_distances(trace)
-    if assignments is not None:
-        _apply_recurrence_relabel_epilogue(trace, assignments, relabel_sidecar_labels)
+    _apply_recurrence_relabel_epilogue(trace, assignments, relabel_sidecar_labels)
     # The stored flag is the EFFECTIVE value: ``True`` only when the neutral
     # grouper actually ran over this graph, so an ungrouped finalize can never
     # claim grouping that never happened. (JAX finalizes through its own
@@ -547,8 +546,8 @@ def _finalize_single_op(
         Zero-based raw op index.
     assignment:
         Recurrence assignment for this op when grouping ran. ``None`` (and any
-        singleton assignment) reproduces the historical single-pass layout:
-        the raw label stays the layer label and the main lookup key. Multi-pass
+        singleton assignment) produces a single-pass layout, with the capture
+        suffix removed from the public layer label and main lookup key. Multi-pass
         members become pass-qualified: ``label`` is ``layer_label:pass_index``,
         and the main key is the pass label. The bare shared layer label lands
         in ``layer_dict_all_keys`` as an INCIDENTAL raw-index artifact (each
@@ -563,41 +562,40 @@ def _finalize_single_op(
         ``op_log`` and trace lookup dictionaries are mutated in place.
     """
 
-    layer_label = assignment.layer_label if assignment is not None else label
+    raw_layer_label = assignment.layer_label if assignment is not None else label
+    layer_label = raw_layer_label.removesuffix("_raw")
     pass_index = assignment.pass_index if assignment is not None else 1
     num_passes = assignment.num_passes if assignment is not None else 1
     pass_label = f"{layer_label}:{pass_index}"
     op_log._label_raw = label
-    op_log._layer_label_raw = layer_label
+    op_log._layer_label_raw = raw_layer_label
     op_log.label = pass_label
     op_log.label_short = pass_label
     op_log.layer_label = layer_label
     op_log.layer_label_short = layer_label
-    op_log.lookup_keys = [label, pass_label]
+    op_log.lookup_keys = list(dict.fromkeys((label, pass_label, layer_label)))
     op_log.pass_index = pass_index
     op_log.num_passes = num_passes
     if assignment is not None:
         op_log.equivalence_class = assignment.equivalence_key
     trace.layer_list.append(op_log)
-    trace.layer_dict_main_keys[label if num_passes == 1 else pass_label] = op_log
+    trace.layer_dict_main_keys[layer_label if num_passes == 1 else pass_label] = op_log
     trace.layer_dict_all_keys[label] = op_log
     trace.layer_dict_all_keys[pass_label] = op_log
-    if num_passes > 1:
-        # Incidental, not a contract: the bare layer label is a raw-index
-        # artifact that every pass overwrites (last pass wins, torch parity).
-        trace.layer_dict_all_keys[layer_label] = op_log
-        op_log.lookup_keys.append(layer_label)
+    # For multi-pass layers this incidental bare-label binding is last-pass-wins.
+    trace.layer_dict_all_keys[layer_label] = op_log
     trace.op_labels.append(pass_label)
     if layer_label not in trace.layer_num_calls:
         trace.layer_labels.append(layer_label)
     trace.layer_num_calls[layer_label] = num_passes
-    trace._lookup_keys_to_layer_num_dict[label] = raw_index
-    trace._layer_num_to_lookup_keys_dict[raw_index].append(label)
+    for lookup_key in op_log.lookup_keys:
+        trace._lookup_keys_to_layer_num_dict[lookup_key] = raw_index
+        trace._layer_num_to_lookup_keys_dict[raw_index].append(lookup_key)
 
 
 def _apply_recurrence_relabel_epilogue(
     trace: Trace,
-    assignments: dict[str, RecurrenceAssignment],
+    assignments: dict[str, RecurrenceAssignment] | None,
     relabel_sidecar_labels: SidecarRelabelHook | None,
 ) -> None:
     """Relabel graph metadata after recurrence assignments were applied.
@@ -607,7 +605,7 @@ def _apply_recurrence_relabel_epilogue(
     trace:
         Trace whose ops already carry final (possibly pass-qualified) labels.
     assignments:
-        Recurrence assignments keyed by raw label.
+        Recurrence assignments keyed by raw label, or ``None`` for ungrouped capture.
     relabel_sidecar_labels:
         Backend hook receiving the complete raw-to-final label mapping so
         label-keyed sidecar state can be remapped atomically.
@@ -620,41 +618,40 @@ def _apply_recurrence_relabel_epilogue(
 
     Notes
     -----
-    Edge labels are rewritten only for members of multi-pass groups: singleton
-    ops keep their raw labels as layer labels (the historical layout), while a
-    grouped member's raw label no longer names any visible layer and every
-    reference to it must follow the op to its pass-qualified label. Raw labels
-    stay resolvable through ``lookup_keys`` either way.
+    Public relations always use final labels, including singleton ops and
+    captures without recurrence grouping. Raw labels remain private capture
+    identities and lookup aliases for backend validation sidecars.
     """
 
     raw_dict = trace._raw_graph_ws.raw_layer_dict
     raw_to_final = {label: raw_dict[label].label for label in raw_dict}
-    changed = {
-        label: final for label, final in raw_to_final.items() if raw_dict[label].num_passes != 1
+    raw_to_layer = {label: op.layer_label for label, op in raw_dict.items()}
+    raw_to_endpoint = {
+        label: op.label if op.num_passes > 1 else op.layer_label for label, op in raw_dict.items()
     }
+    changed = {label: final for label, final in raw_to_final.items() if label != final}
     if changed:
         for op_log in raw_dict.values():
             relabel_edge_metadata(op_log, changed)
-        # Trace-side input/output/source lists speak OP space: each entry must
-        # resolve to the specific pass that produced the value (``output_ops``
-        # reads them through ``trace[label]``). Inputs and internal sources are
-        # pseudo-ops and never group; only lists naming grouped computational
-        # ops (an output produced by a later pass) are rewritten, to the
-        # pass-qualified final label. The module-log builders map these to
-        # layer space at their own boundary.
+        # Input/output inventories feed the Op accessors: a grouped endpoint
+        # must retain the exact producing pass, including a non-final pass.
         for attr_name in (
             "input_layers",
             "output_layers",
             "internal_source_layers",
             "internal_source_ops",
+            "internal_sink_ops",
             "buffer_layers",
         ):
             labels = getattr(trace, attr_name, None)
             if isinstance(labels, list):
+                mapping = raw_to_final if attr_name.endswith("_ops") else raw_to_layer
+                if attr_name in ("input_layers", "output_layers"):
+                    mapping = raw_to_endpoint
                 setattr(
                     trace,
                     attr_name,
-                    [changed.get(item, item) if isinstance(item, str) else item for item in labels],
+                    [mapping.get(item, item) if isinstance(item, str) else item for item in labels],
                 )
 
     equivalent_labels_by_key: dict[str, set[str]] = {}
@@ -662,10 +659,9 @@ def _apply_recurrence_relabel_epilogue(
         equivalent_labels_by_key.setdefault(op_log.equivalence_class, set()).add(op_log.label)
     for label, op_log in raw_dict.items():
         op_log.equivalent_ops = equivalent_labels_by_key[op_log.equivalence_class]
+        members = assignments[label].recurrent_labels if assignments is not None else (label,)
         op_log.recurrent_ops = [
-            raw_to_final[member]
-            for member in assignments[label].recurrent_labels
-            if member in raw_to_final
+            raw_to_final[member] for member in members if member in raw_to_final
         ]
     trace.op_equivalence_classes.clear()
     trace.op_equivalence_classes.update(equivalent_labels_by_key)

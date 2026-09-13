@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import replace
 from typing import Any
 
@@ -20,8 +21,10 @@ from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
 from ..graph import ReplayValueRef, SplitTraceGraph, SplitTraceNode
 from ..ir import SplitRequest
+from ..placement import DevicePlacement, SegmentName
 from ..planner import SplitPlan
 from ..shape_program import ShapeBinding, shape_semantic_for_node
+from ..state import SegmentState
 from .base import SegmentBundle, SplitPolicyMixin, boundary_overlay
 
 
@@ -93,6 +96,67 @@ def _dtype_name(value: Any) -> str | None:
     return None if dtype is None else str(dtype)
 
 
+def _module_for_param_ref(param_ref: Any) -> Any | None:
+    """Return a parameter's owning module metadata when its address is live.
+
+    ``Param.module`` resolves through ``trace.modules[module_address]``.  A
+    captured parameter can belong to a module whose ``forward`` was never
+    called (for example, an embedding accessed directly through ``.weight``),
+    so that owner need not have an executed module-log entry. Module metadata
+    is needed here only to add
+    registered-buffer handles; the parameter handle itself is resolved in the
+    strict pass above and must not be softened.
+    """
+
+    try:
+        return getattr(param_ref, "module", None)
+    except (AttributeError, KeyError):
+        return None
+
+
+def _rewrite_placement_device_args(
+    node: SplitTraceNode,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    placement: DevicePlacement,
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Relocate device arguments using Torch argument semantics, not literal values.
+
+    Parameters
+    ----------
+    node:
+        Captured Torch call whose argument template supplies the callable identity.
+    args, kwargs:
+        Reconstructed runtime arguments; unrelated strings and integers remain unchanged.
+    placement:
+        Segment device override, or the unplaced policy that preserves the capture.
+
+    Returns
+    -------
+    tuple
+        Positional and keyword arguments with explicit device destinations relocated.
+    """
+
+    if not placement.is_explicit:
+        return args, kwargs
+    func_id = getattr(node.args_template, "func_id", None)
+    namespace = getattr(func_id, "namespace", "") or ""
+    if namespace != "torch" and not namespace.startswith("torch."):
+        return args, kwargs
+    torch = _torch()
+    device = torch.device(placement.device)
+    if "device" in kwargs:
+        kwargs = {**kwargs, "device": device}
+    qualname = getattr(func_id, "qualname", "").rsplit(".", 1)[-1]
+    if namespace == "torch.Tensor" and qualname == "to" and len(args) > 1:
+        # Tensor.to has device, dtype and other-tensor overloads. Only the
+        # device overload's positional slot is a device destination.
+        destination = args[1]
+        if isinstance(destination, (str, torch.device)) or type(destination) is int:
+            args = (args[0], device, *args[2:])
+    return args, kwargs
+
+
 class _LiveParamCursor:
     """Sequential matcher from literal tensor template leaves to live params."""
 
@@ -120,6 +184,8 @@ class _LiveParamCursor:
 class _GeneratedSegmentBase:
     """Shared generated-eager replay helpers."""
 
+    segment: SegmentName = "prefix"
+
     def __init__(
         self,
         *,
@@ -128,6 +194,8 @@ class _GeneratedSegmentBase:
         spec: SplitRequest,
         node_ids: frozenset[str],
         use_live_param_sources: bool,
+        placement: DevicePlacement | None = None,
+        state: SegmentState | None = None,
     ) -> None:
         """Create a generated replay segment."""
 
@@ -139,6 +207,81 @@ class _GeneratedSegmentBase:
         self._node_by_id = graph.node_by_id
         self._label_to_id = self._build_label_lookup(graph)
         self._shape_binding: ShapeBinding | None = None
+        resolved_placement = (
+            placement if placement is not None else spec.placement.for_segment(self.segment)
+        )
+        self._state = (
+            state
+            if state is not None
+            else SegmentState(adapter=TorchSplitAdapter(), placement=resolved_placement)
+        )
+
+    @property
+    def placement(self) -> DevicePlacement:
+        """Return this segment's declared placement."""
+
+        return self._state.placement
+
+    def trainable_parameters(self) -> list[Any]:
+        """Bind and return owned parameters before an optimizer or forward runs."""
+
+        for node in self.graph.nodes:
+            if node.canonical_id in self.node_ids and not (node.is_input or node.is_output):
+                self._param_handles_for_node(node)
+        return self._state.trainable_values()
+
+    def state_report(self) -> dict[str, Any]:
+        """Return diagnostics for this segment's state binding."""
+
+        return self._state.as_dict()
+
+    def bound_state_values(self) -> dict[str, Any]:
+        """Bind and expose effective replay state without executing graph operations.
+
+        Returns
+        -------
+        dict
+            Tensor state keyed by stable node ID and template occurrence. Live
+            parameter substitution follows the same cursor as argument replay,
+            so unused captured copies do not contribute to state fingerprints.
+        """
+
+        values: dict[str, Any] = {}
+        for node in self.graph.nodes:
+            if node.canonical_id not in self.node_ids or node.is_input or node.is_output:
+                continue
+            if node.is_buffer or (node.target is None and self._is_replay_source_node(node)):
+                values[f"{node.canonical_id}:source"] = self._source_value(node)
+                continue
+            template = node.args_template
+            if template is None:
+                continue
+            param_cursor = _LiveParamCursor(self._param_handles_for_node(node))
+            occurrence = 0
+
+            def bind_component(component: Any) -> None:
+                """Walk captured argument leaves in replay's resolution order."""
+
+                nonlocal occurrence
+                if isinstance(component, LiteralTensor):
+                    value = param_cursor.maybe_replace(component.value)
+                    if value is component.value:
+                        value = self._state.resolve(value)
+                    values[f"{node.canonical_id}:literal:{occurrence}"] = value
+                    occurrence += 1
+                elif isinstance(component, tuple):
+                    if _is_template_dict(component):
+                        for _key, item in component:
+                            bind_component(item)
+                    else:
+                        for item in component:
+                            bind_component(item)
+
+            for component in template.args:
+                bind_component(component)
+            for _key, component in template.kwargs:
+                bind_component(component)
+        return values
 
     @staticmethod
     def _build_label_lookup(graph: SplitTraceGraph) -> dict[str, str]:
@@ -174,19 +317,22 @@ class _GeneratedSegmentBase:
                     f"Cannot resolve live parameter source for {node.label!r}.",
                     context=self._context(node, "missing live parameter source"),
                 )
+            handle = self._state.resolve(handle)
             if id(handle) not in seen_handles:
                 handles.append(handle)
                 seen_handles.add(id(handle))
         for param_ref in node.param_refs:
-            module = getattr(param_ref, "module", None)
+            module = _module_for_param_ref(param_ref)
             buffers = getattr(module, "buffers", None)
             if buffers is None:
                 continue
             for buffer in buffers.values():
                 buffer_handle = getattr(buffer, "handle", None)
-                if buffer_handle is not None and id(buffer_handle) not in seen_handles:
-                    handles.append(buffer_handle)
-                    seen_handles.add(id(buffer_handle))
+                if buffer_handle is not None:
+                    buffer_handle = self._state.resolve(buffer_handle)
+                    if id(buffer_handle) not in seen_handles:
+                        handles.append(buffer_handle)
+                        seen_handles.add(id(buffer_handle))
         return handles
 
     def _resolve_parent_ref(
@@ -223,7 +369,8 @@ class _GeneratedSegmentBase:
         if isinstance(component, (ParentRef, ReplayValueRef)):
             return self._resolve_parent_ref(component, node, overlay)
         if isinstance(component, LiteralTensor):
-            return param_cursor.maybe_replace(component.value)
+            value = param_cursor.maybe_replace(component.value)
+            return self._state.resolve(value) if value is component.value else value
         if isinstance(component, LiteralValue):
             return self._rewrite_literal_value(
                 component.value,
@@ -349,7 +496,8 @@ class _GeneratedSegmentBase:
             )
             for key, component in template.kwargs
         }
-        return self._rewrite_dynamic_call_args(node, args, kwargs)
+        args, kwargs = self._rewrite_dynamic_call_args(node, args, kwargs)
+        return _rewrite_placement_device_args(node, args, kwargs, self.placement)
 
     def _execute_func(
         self,
@@ -365,13 +513,22 @@ class _GeneratedSegmentBase:
                 context=self._context(node, "missing callable target"),
             )
         try:
-            output = execute_with_restored_rng_autocast(
-                node.target,
-                args,
-                kwargs,
-                rng_states=getattr(node.op, "func_rng_states", None),
-                autocast_state=getattr(node.op, "func_autocast_state", None),
+            # Factory calls without a device argument must also allocate on
+            # the segment's device. Explicit captured destinations are handled
+            # separately during argument reconstruction above.
+            device_scope = (
+                _torch().device(self.placement.device)
+                if self.placement.is_explicit
+                else nullcontext()
             )
+            with device_scope:
+                output = execute_with_restored_rng_autocast(
+                    node.target,
+                    args,
+                    kwargs,
+                    rng_states=getattr(node.op, "func_rng_states", None),
+                    autocast_state=getattr(node.op, "func_autocast_state", None),
+                )
         except Exception as exc:
             raise SplitUnsupportedError(
                 f"Torch replay failed at {node.canonical_id!r} ({node.op_type}): {exc}",
@@ -385,14 +542,15 @@ class _GeneratedSegmentBase:
         """Return a replay value for an input/buffer/source node."""
 
         if self.use_live_param_sources and node.buffer_refs:
-            return getattr(node.buffer_refs[0], "handle", node.buffer_refs[0])
+            handle = getattr(node.buffer_refs[0], "handle", node.buffer_refs[0])
+            return self._state.resolve(handle)
         value = getattr(node.op, "out", None)
         if value is None:
             raise SplitUnsupportedError(
                 f"{node.label!r} source value is unavailable.",
                 context=self._context(node, "missing source value"),
             )
-        return value
+        return self._state.resolve(value)
 
     @staticmethod
     def _is_replay_source_node(node: SplitTraceNode) -> bool:
@@ -449,6 +607,8 @@ class _GeneratedSegmentBase:
 class GeneratedPrefix(_GeneratedSegmentBase):
     """Generated-eager Torch prefix segment."""
 
+    segment = "prefix"
+
     def __call__(
         self,
         *inputs: Any,
@@ -477,6 +637,12 @@ class GeneratedPrefix(_GeneratedSegmentBase):
                 backend="torch",
                 split_point=self.spec.boundary,
             )
+            self.graph.shape_program.require_batch_resolvable(
+                self._shape_binding.batch_size,
+                self.node_ids,
+                backend="torch",
+                split_point=self.spec.boundary,
+            )
         self._execute_nodes(overlay)
         boundary_tensors: dict[str, Any] = {}
         prefix_tensors: dict[str, Any] = {}
@@ -492,7 +658,6 @@ class GeneratedPrefix(_GeneratedSegmentBase):
             "split_id": self.plan.split_id,
             "graph_shape_hash": self.graph.graph_shape_hash,
             "batch_symbol": self.spec.batch_symbol,
-            "dynamic_batch": self.spec.dynamic_batch,
             "runtime_batch_size": (
                 None if self._shape_binding is None else self._shape_binding.batch_size
             ),
@@ -518,6 +683,8 @@ class GeneratedPrefix(_GeneratedSegmentBase):
 class GeneratedSuffix(_GeneratedSegmentBase):
     """Generated-eager Torch suffix segment."""
 
+    segment = "suffix"
+
     def __call__(self, boundary: ReplayBoundary) -> Any:
         """Run the suffix from ``boundary`` and reconstruct final output."""
 
@@ -526,6 +693,12 @@ class GeneratedSuffix(_GeneratedSegmentBase):
         if self.graph.shape_program is not None and runtime_batch_size is not None:
             self._shape_binding = self.graph.shape_program.binding_from_batch(
                 int(runtime_batch_size)
+            )
+            self.graph.shape_program.require_batch_resolvable(
+                int(runtime_batch_size),
+                self.node_ids,
+                backend="torch",
+                split_point=self.spec.boundary,
             )
         self._execute_nodes(overlay)
         return self._reconstruct_output(overlay)
@@ -569,7 +742,7 @@ class TorchSplitAdapter(SplitPolicyMixin):
     supports_replay = True
     supports_training = True
     supports_boundary_cache = True
-    supports_dynamic_batch = True
+    supports_state_placement = True
     allow_callable_target = True
     native_state_replay = True
 
@@ -610,6 +783,19 @@ class TorchSplitAdapter(SplitPolicyMixin):
         """Move tensor values to a device."""
 
         return value.to(device) if hasattr(value, "to") else value
+
+    def device_of(self, value: Any) -> Any:
+        """Return the device of a torch tensor."""
+
+        return getattr(value, "device", None)
+
+    def replicate_state(self, value: Any, device: Any, *, trainable: bool) -> Any:
+        """Create a device-local replica that can own its own gradients."""
+
+        replica = self.to_device(self.clone(self.detach(value)), device)
+        if trainable and hasattr(replica, "requires_grad_"):
+            replica.requires_grad_(True)
+        return replica
 
     def collate(self, values: list[Any]) -> Any:
         """Stack torch tensor values."""
@@ -667,12 +853,15 @@ class TorchSplitAdapter(SplitPolicyMixin):
             spec,
             features=replace(spec.features, training=True, live_param_sources=True),
         )
+        # Detaching a boundary must not create another copy of live prefix weights.
+        # Captured-state inference remains separate when live sources were disabled.
         training_prefix = GeneratedPrefix(
             graph=graph,
             plan=plan,
             spec=training_spec,
             node_ids=plan.prefix_node_ids,
             use_live_param_sources=True,
+            state=prefix._state if use_live else None,
         )
         suffix = GeneratedSuffix(
             graph=graph,

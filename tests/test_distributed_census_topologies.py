@@ -29,8 +29,7 @@ pytestmark = pytest.mark.skipif(
     reason="torch.distributed gloo unavailable",
 )
 
-import torchlens as tl  # noqa: E402
-from tests.support.census_harness import (  # noqa: E402
+from support.census_harness import (  # noqa: E402
     CENSUS_ROWS,
     COMPLETION_FLOOR_MISSING,
     FULL_CRITERIA,
@@ -48,6 +47,8 @@ from tests.support.census_harness import (  # noqa: E402
     run_census_row,
     run_refusal_row,
 )
+
+import torchlens as tl  # noqa: E402
 from torchlens.distributed import (  # noqa: E402
     _lifecycle as lifecycle,
     _recognizer as recognizer_mod,
@@ -263,8 +264,7 @@ class TestDualChannelBareLeg:
         # the ACT-triggered wait, the dispatcher counter does.
         dist = single_rank_world
         import torch.distributed._functional_collectives as funcol
-
-        from tests.support.census_harness import ReferenceDispatchLogger
+        from support.census_harness import ReferenceDispatchLogger
 
         with dispatcher_interposition_counters() as counters:
             logger = ReferenceDispatchLogger()
@@ -423,7 +423,7 @@ class TestZeroInterferenceSuiteAndPerf:
         """ZI-3: armed-ON overhead on the A1 workload stays inside P2's
         blocking 10% gate (P2 owns the ceiling; asserted, not invented)."""
 
-        from tests.test_perf_capture_ab import GATE_CEILING_FRACTION
+        from test_perf_capture_ab import GATE_CEILING_FRACTION
 
         torch.manual_seed(5)
         model = nn.Sequential(
@@ -500,8 +500,8 @@ class TestGroupAControlsWave0:
 
 def _a2_worker(rank: int, world_size: int, init_file: str, out_dir: str) -> None:
     import torch.distributed as dist
+    from support.census_harness import run_census_row
 
-    from tests.support.census_harness import run_census_row
     from torchlens.distributed import arm
 
     store = dist.FileStore(init_file, world_size)
@@ -563,8 +563,8 @@ def _a2_worker(rank: int, world_size: int, init_file: str, out_dir: str) -> None
 
 def _a3_worker(rank: int, world_size: int, init_file: str, out_dir: str) -> None:
     import torch.distributed as dist
+    from support.census_harness import run_census_row
 
-    from tests.support.census_harness import run_census_row
     from torchlens.distributed import arm
 
     store = dist.FileStore(init_file, world_size)
@@ -913,7 +913,7 @@ class TestWave1FullCriteria:
                 reduced = funcol.all_reduce(hidden, "sum", dist.group.WORLD)
                 return reduced + 1
 
-        from tests.support.census_harness import _seq_counter_snapshot
+        from support.census_harness import _seq_counter_snapshot
 
         lifecycle.arm()
         seq_before = _seq_counter_snapshot()
@@ -925,7 +925,7 @@ class TestWave1FullCriteria:
         """K3 passes on a real boundary-crossing capture: every collective
         dispatch discharged, completions classified, seq deltas == journal."""
 
-        from tests.support.census_harness import (
+        from support.census_harness import (
             run_census_criterion_3,
             run_census_criterion_4,
         )
@@ -954,7 +954,7 @@ class TestWave1FullCriteria:
         """N3a: a synthetic extra issue tick (the double-tick construction)
         must violate the per-(group_uid, channel) seq invariant."""
 
-        from tests.support.census_harness import run_census_criterion_3
+        from support.census_harness import run_census_criterion_3
 
         log, seq_before, seq_after = self._mixed_capture(single_rank_world)
         failures = run_census_criterion_3(log, seq_before, seq_after, extra_ticks=1)
@@ -964,7 +964,7 @@ class TestWave1FullCriteria:
         """The seq invariant is two-sided: a journaled boundary with no
         corresponding issue tick fails too."""
 
-        from tests.support.census_harness import run_census_criterion_3
+        from support.census_harness import run_census_criterion_3
 
         log, seq_before, _seq_after = self._mixed_capture(single_rank_world)
         failures = run_census_criterion_3(log, seq_before, seq_before)
@@ -974,7 +974,7 @@ class TestWave1FullCriteria:
         """N4: an orphan interior record (no plane-S owner, no module context,
         not discharged, not TorchLens-internal) must fail K4."""
 
-        from tests.support.census_harness import run_census_criterion_4
+        from support.census_harness import run_census_criterion_4
 
         log, _before, _after = self._mixed_capture(single_rank_world)
         orphan = ("aten.mm.default", None, False, False, False)

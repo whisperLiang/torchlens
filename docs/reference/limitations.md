@@ -116,10 +116,54 @@ HYPOTHESIS until discharged against a real capture.
 
 Backend-neutral split replay is broader than true backward capture. TensorFlow, Paddle,
 JAX, and tinygrad support `tl.split.prepare()` with `SplitRequest`, trusted local boundary
-caches, conservative leading-dimension dynamic batching, and split-training boundary
-gradients. JAX uses functional gradients; TensorFlow and Paddle can update parameters only
-when generated replay reaches the live parameter objects; tinygrad uses live UOp autograd for
-an uncached `run_training_prefix`. MLX currently gates split training and dynamic batching.
+caches, a batch-symbolic `ShapeProgram` (B=1 capture and one empirical B=2 probe),
+and split-training boundary gradients. JAX uses functional gradients;
+TensorFlow and Paddle can update parameters only when generated replay reaches the live
+parameter objects; tinygrad uses live UOp autograd for an uncached `run_training_prefix`.
+MLX currently gates split replay and split training entirely.
+
+`SplitFeatures(batch_axes=None)` (the default) uses conservative auto-inference:
+only top-level tensors of rank at least two with matching leading extents are candidates.
+Unbatched vectors such as a `(4,)` input to `nn.Linear(4, 3)` retain their shape.
+Use `SplitFeatures(batch_axes={})` to explicitly disable batching for all inputs, including
+matrices or nested inputs: capture uses the original shapes, with no rebatching or B=2 probe,
+and replay requires those exact shapes. A genuinely batched vector can opt in with
+`SplitFeatures(batch_axes={"/args/0": 0})`. Empty mappings no longer mean auto-inference;
+omit `batch_axes` or use `None` for that behavior.
+Canonical rebatching preserves repeated tensor objects and Torch shared-storage views with
+identical geometry. Other overlapping or unprovable Torch input views refuse before capture
+instead of being independently resized; use explicit fixed-shape mode for those inputs.
+
+The B=2 probe compares generated replay with native output structure, exact shapes/dtypes,
+and numeric values. Passing permits empirical extrapolation, subject to shape guards; it
+does **not** prove correctness at every batch. A Python branch starting at B>=8 can remain
+undetected and silently produce incorrect results at that batch. Failed or unavailable probes
+restrict replay/training to the captured batch. If B=1 cannot run, the B=2 fallback capture
+also stays captured-only, with no B=3 probe. Runtime calls do not recapture or rerun the model.
+Inspect `runtime.batch_validation`, `explain_capabilities()["shape_diagnostics"]["batch_validation"]`,
+and boundary `metadata["runtime_batch_validation"]` (captured/sampled/extrapolated).
+tinygrad may optimize away singleton UOps between these batches; if graph alignment fails,
+it uses existing semantic shape rules without sampled shape witnesses, and still requires
+the B=2 output comparison to pass. This is disclosed in the probe's `reason`.
+Torch numerical probes use the same capture seed and the B=2 oracle's aligned per-call RNG
+states, including multiple random draws; this temporary replay does not modify retained B=1
+RNG metadata or caller RNG state.
+
+Explicit prefix/suffix device placement (`SplitRequest(placement=PlacementPlan.across(...))`,
+`SplitRuntime.with_placement()`) binds SEGMENT STATE on the requested devices and is
+implemented for the torch backend only (`adapter.supports_state_placement`). Other backends
+refuse an explicit `PlacementPlan` typed; they still transport a boundary across devices with
+`ReplayBoundary.to(device)`.
+Torch placement also relocates device arguments and implicit tensor factories to the segment
+device. `with_placement()` and `at()` preserve current effective parameter values, including
+trained owned replicas, without writing them back into the original model. Same-device owned
+values are shared with the derived runtime; moving devices creates new replicas, so rebuild
+optimizers from that runtime's parameter accessors. A recut that would merge different values
+of one tied parameter refuses until those replicas agree. Moving a node into the shared suffix
+also refuses when its frozen inference-prefix and live training-prefix state differ.
+Boundary state fingerprints cover the effective prefix and suffix state, including owned
+values and cached training boundaries; updates invalidate old boundaries. Empty non-batch
+dimensions remain zero in cached schemas.
 
 | When it can occur | What you see | Remedy |
 | --- | --- | --- |

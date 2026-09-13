@@ -69,6 +69,8 @@ def _rebuild_output_container(
     """Rebuild a JAX output pytree from its recorded leaf paths."""
 
     def build(items: list[tuple[tuple[Any, ...], Any]]) -> Any:
+        """Reconstruct one pytree level from its leaf paths."""
+
         if len(items) == 1 and not items[0][0]:
             return items[0][1]
         keys: list[Any] = []
@@ -354,6 +356,12 @@ class JaxGeneratedPrefix(_JaxGeneratedSegmentBase):
                 backend="jax",
                 split_point=self.spec.boundary,
             )
+            self.graph.shape_program.require_batch_resolvable(
+                self._shape_binding.batch_size,
+                self.node_ids,
+                backend="jax",
+                split_point=self.spec.boundary,
+            )
         runtime_batch_size = None if self._shape_binding is None else self._shape_binding.batch_size
         self._execute_nodes(overlay)
         boundary_tensors: dict[str, Any] = {}
@@ -368,7 +376,6 @@ class JaxGeneratedPrefix(_JaxGeneratedSegmentBase):
             "split_id": self.plan.split_id,
             "graph_shape_hash": self.graph.graph_shape_hash,
             "batch_symbol": self.spec.batch_symbol,
-            "dynamic_batch": self.spec.dynamic_batch,
             "runtime_batch_size": runtime_batch_size,
             "shape_program_hash": (
                 None if self.graph.shape_program is None else self.graph.shape_program.fingerprint
@@ -398,6 +405,12 @@ class JaxGeneratedSuffix(_JaxGeneratedSegmentBase):
         if self.graph.shape_program is not None and runtime_batch_size is not None:
             self._shape_binding = self.graph.shape_program.binding_from_batch(
                 int(runtime_batch_size)
+            )
+            self.graph.shape_program.require_batch_resolvable(
+                int(runtime_batch_size),
+                self.node_ids,
+                backend="jax",
+                split_point=self.spec.boundary,
             )
         self._execute_nodes(overlay)
         return self._reconstruct_output(overlay)
@@ -445,7 +458,7 @@ class JaxSplitAdapter(SplitPolicyMixin):
     supports_replay = True
     supports_training = True
     supports_boundary_cache = True
-    supports_dynamic_batch = True
+    supports_state_placement = False
     native_target_types = frozenset({"JaxEquationCapture", "JaxRegionCapture"})
 
     def is_tensor(self, value: Any) -> bool:
@@ -481,6 +494,18 @@ class JaxSplitAdapter(SplitPolicyMixin):
         """Clone tensor values."""
 
         return _jnp().array(value) if self.is_tensor(value) else value
+
+    def resize_batch(self, value: Any, axis: int, batch_size: int) -> Any:
+        """Select cyclic batch rows on the source JAX device."""
+
+        if not self.is_tensor(value):
+            return value
+        current = int(value.shape[axis])
+        if current <= 0:
+            raise ValueError("Cannot resize an empty batch axis.")
+        with _jax().default_device(value.device):
+            indexes = _jnp().arange(batch_size) % current
+            return _jnp().take(value, indexes, axis=axis)
 
     def to_device(self, value: Any, device: Any) -> Any:
         """Move tensor values to a device when JAX accepts the device object."""

@@ -66,12 +66,18 @@ def test_storage_rounding_agreement_still_matches(dtype: torch.dtype) -> None:
 def test_real_sdpa_reconstruction_round_trip_matches() -> None:
     """An honest unfused recomputation of SDPA passes the gate end-to-end."""
 
-    torch.manual_seed(0)
-    q = torch.randn(2, 4, 8, 16)
-    k = torch.randn(2, 4, 8, 16)
-    v = torch.randn(2, 4, 8, 16)
-    fused = torch.nn.functional.scaled_dot_product_attention(q, k, v)
-    scores = q @ k.transpose(-2, -1) / (q.shape[-1] ** 0.5)
-    pattern = torch.softmax(scores.float(), dim=-1).to(q.dtype)
-    z = pattern @ v
-    assert _allclose_sdpa(z, fused)
+    original_precision = torch.get_float32_matmul_precision()
+    try:
+        # Vendored model imports can select reduced matmul precision during collection.
+        torch.set_float32_matmul_precision("highest")
+        torch.manual_seed(0)
+        q = torch.randn(2, 4, 8, 16)
+        k = torch.randn(2, 4, 8, 16)
+        v = torch.randn(2, 4, 8, 16)
+        fused = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+        scores = q @ k.transpose(-2, -1) / (q.shape[-1] ** 0.5)
+        pattern = torch.softmax(scores.float(), dim=-1).to(q.dtype)
+        z = pattern @ v
+        assert _allclose_sdpa(z, fused)
+    finally:
+        torch.set_float32_matmul_precision(original_precision)

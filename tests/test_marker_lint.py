@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import ast
 import functools
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from _source_corpus import package_ast, package_files, package_source
@@ -1139,7 +1141,53 @@ def _lru_cached_functions(package_root: Path) -> dict[tuple[str, str], str]:
     return cached
 
 
-def test_capability_dependent_caches_are_cleared() -> None:
+def _root_conftest_plugin(request: pytest.FixtureRequest) -> ModuleType:
+    """Resolve the active root conftest without ambiguous module-name imports.
+
+    Parameters
+    ----------
+    request:
+        Current test request carrying the live pytest plugin registry.
+
+    Returns
+    -------
+    ModuleType
+        The registered plugin loaded from this test directory's conftest.py.
+    """
+
+    expected_path = Path(__file__).with_name("conftest.py").resolve()
+    for plugin in request.config.pluginmanager.get_plugins():
+        if not isinstance(plugin, ModuleType):
+            continue
+        plugin_path = getattr(plugin, "__file__", None)
+        if plugin_path is not None and Path(plugin_path).resolve() == expected_path:
+            return plugin
+    pytest.fail(f"Root conftest plugin is not registered: {expected_path}")
+
+
+def test_root_conftest_plugin_ignores_shadowing_modules(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the root plugin when scoped conftests or installed tests own the names.
+
+    Parameters
+    ----------
+    request:
+        Current request holding the actual registered conftest plugins.
+    monkeypatch:
+        Restores the import cache after introducing unrelated modules.
+    """
+
+    expected = _root_conftest_plugin(request)
+    foreign_tests = ModuleType("tests")
+    foreign_tests.__path__ = []
+    monkeypatch.setitem(sys.modules, "tests", foreign_tests)
+    monkeypatch.setitem(sys.modules, "conftest", ModuleType("conftest"))
+
+    assert _root_conftest_plugin(request) is expected
+
+
+def test_capability_dependent_caches_are_cleared(request: pytest.FixtureRequest) -> None:
     """Every probe-derived lru_cache must be in the conftest clear list.
 
     Restoring the lazy ``HAS_*`` capability latches un-poisons the b7fe953e
@@ -1155,7 +1203,7 @@ def test_capability_dependent_caches_are_cleared() -> None:
 
     import re
 
-    from tests.conftest import _CAPABILITY_DEPENDENT_CACHES
+    _CAPABILITY_DEPENDENT_CACHES = _root_conftest_plugin(request)._CAPABILITY_DEPENDENT_CACHES
 
     package_root = Path(__file__).resolve().parents[1] / "torchlens"
     cached = _lru_cached_functions(package_root)
@@ -1186,12 +1234,14 @@ def test_capability_dependent_caches_are_cleared() -> None:
     )
 
 
-def test_capability_dependent_cache_clear_actually_clears() -> None:
+def test_capability_dependent_cache_clear_actually_clears(request: pytest.FixtureRequest) -> None:
     """The conftest clear helper empties every declared probe-derived cache."""
 
     import importlib
 
-    from tests.conftest import _CAPABILITY_DEPENDENT_CACHES, _clear_capability_dependent_caches
+    conftest_plugin = _root_conftest_plugin(request)
+    _CAPABILITY_DEPENDENT_CACHES = conftest_plugin._CAPABILITY_DEPENDENT_CACHES
+    _clear_capability_dependent_caches = conftest_plugin._clear_capability_dependent_caches
 
     primed = []
     for module_name, attr in _CAPABILITY_DEPENDENT_CACHES:
@@ -1204,7 +1254,9 @@ def test_capability_dependent_cache_clear_actually_clears() -> None:
         assert function.cache_info().currsize == 0, f"{function} survived the probe restore"
 
 
-def test_usage_stats_gate_arms_on_documented_backstop_spellings() -> None:
+def test_usage_stats_gate_arms_on_documented_backstop_spellings(
+    request: pytest.FixtureRequest,
+) -> None:
     """Every documented broad tier spelling arms the ArgSpec usage gate.
 
     The predicate compared literal markexpr strings, so the DOCUMENTED
@@ -1215,7 +1267,9 @@ def test_usage_stats_gate_arms_on_documented_backstop_spellings() -> None:
 
     from types import SimpleNamespace
 
-    from tests.conftest import TESTS_DIR, _is_full_usage_stats_run
+    conftest_plugin = _root_conftest_plugin(request)
+    TESTS_DIR = conftest_plugin.TESTS_DIR
+    _is_full_usage_stats_run = conftest_plugin._is_full_usage_stats_run
 
     def config(markexpr: str, keyword: str = "", args: list[str] | None = None):
         return SimpleNamespace(
@@ -1238,7 +1292,7 @@ def test_usage_stats_gate_arms_on_documented_backstop_spellings() -> None:
     assert not _is_full_usage_stats_run(config("", args=[str(Path(TESTS_DIR) / "sub")]))
 
 
-def test_serial_marker_is_not_a_budget_exemption() -> None:
+def test_serial_marker_is_not_a_budget_exemption(request: pytest.FixtureRequest) -> None:
     """A serial item resolves its tier budget; only slow/rare stay exempt.
 
     ``serial`` formerly returned ``None`` before tier resolution, so any
@@ -1247,11 +1301,10 @@ def test_serial_marker_is_not_a_budget_exemption() -> None:
     round 5).
     """
 
-    from tests.conftest import (
-        HEAVY_DURATION_BUDGET_SECONDS,
-        SMOKE_DURATION_BUDGET_SECONDS,
-        _duration_budget_tier,
-    )
+    conftest_plugin = _root_conftest_plugin(request)
+    HEAVY_DURATION_BUDGET_SECONDS = conftest_plugin.HEAVY_DURATION_BUDGET_SECONDS
+    SMOKE_DURATION_BUDGET_SECONDS = conftest_plugin.SMOKE_DURATION_BUDGET_SECONDS
+    _duration_budget_tier = conftest_plugin._duration_budget_tier
 
     class _FakeItem:
         def __init__(self, markers: set[str]) -> None:
@@ -1291,18 +1344,7 @@ def test_sessionfinish_budget_tripwire_flips_exit_status(
 
     from types import SimpleNamespace
 
-    conftest_plugin = next(
-        (
-            plugin
-            for plugin in request.config.pluginmanager.get_plugins()
-            if hasattr(plugin, "_enforce_duration_budget_at_sessionfinish")
-        ),
-        None,
-    )
-    assert conftest_plugin is not None, (
-        "tests/conftest.py no longer registers the sessionfinish duration-"
-        "budget enforcement helper -- the always-on tripwire is gone"
-    )
+    conftest_plugin = _root_conftest_plugin(request)
     _enforce_duration_budget_at_sessionfinish = (
         conftest_plugin._enforce_duration_budget_at_sessionfinish
     )

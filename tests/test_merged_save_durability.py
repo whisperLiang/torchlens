@@ -12,10 +12,10 @@ from pathlib import Path
 
 import pytest
 
-import torchlens as tl
-
 # Reuse the rank-core builder from the load-identity module.
-from tests.test_merged_load_identity import _rank_trace
+from test_merged_load_identity import _rank_trace
+
+import torchlens as tl
 from torchlens.merged._artifact import load_merged, save_merged
 from torchlens.merged._enums import MergedErrorCode
 from torchlens.merged._errors import MergedArtifactError

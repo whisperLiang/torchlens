@@ -232,7 +232,7 @@ def test_paddle_duplicate_trace_signature_group_is_ambiguous() -> None:
     signature = PaddleIntermediateSignature(
         func_call_id=relu_ops[0].func_call_id,
         op_name=relu_ops[0].func_name,
-        parent_labels=tuple(relu_ops[0].parents),
+        parent_labels=tuple(trace[parent]._label_raw for parent in relu_ops[0].parents),
         module_stack=tuple(relu_ops[0].modules),
     )
 

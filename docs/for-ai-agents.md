@@ -13,12 +13,20 @@ metadata lives on `Trace.backend`, `Trace.module_identity_mode`, `Trace.param_so
 `Trace.validation_replay_status`, `dtype_ref`, `device_ref`, `backend_address`, and
 `resolver_status`.
 Split replay is backend-neutral for torch, JAX, TF, Paddle, and tinygrad, with MLX still gated.
-TF/Paddle/JAX/tinygrad additionally support conservative leading-dimension
-`SplitFeatures.dynamic_batch` and split-training boundary gradients. JAX split training is functional
+TF/Paddle/JAX/tinygrad additionally support a batch-symbolic ShapeProgram (B=1 capture,
+one empirical B=2 probe) and split-training boundary gradients. JAX split training is functional
 and rejects `optimizer=`; TF/Paddle may step supplied mutable optimizers when generated replay
 reaches live trainable params. tinygrad uses live UOp autograd for uncached
 `run_training_prefix()` boundaries and may step tinygrad optimizers with `Tensor.training`
 temporarily enabled.
+Batch extrapolation is empirical, not a universal correctness guarantee: the B=2 probe compares
+native and replay output structure, shapes/dtypes and values. Failed/unavailable probes (including
+fallback B=2 captures after B=1 failure) allow only the captured batch. Check `runtime.batch_validation`
+and boundary `runtime_batch_validation`; an untested branch such as B>=8 can silently return wrong
+results even after the sample passes. See [preview limitations](reference/limitations.md#preview-backends).
+`SplitFeatures.batch_axes` distinguishes `None` (automatic), `{}` (no batch axes), and a
+nonempty path-to-axis mapping (explicit). Vectors/scalars are not automatically batched;
+unbatched inputs retain their shapes, skip canonical resizing/probing, and replay at fixed shapes.
 JAX leaf gradients are requested with `tl.backends.jax.GradOptions`; they are derived by a
 second functional AD run and never populate backward-pass or op-gradient surfaces.
 JAX intermediate derived gradients are requested with
@@ -63,7 +71,7 @@ on the measured fixtures.
 
 ## Public surface map
 
-`torchlens.__all__` currently exposes 119 names. The most-used ones, grouped by job (this
+`torchlens.__all__` currently exposes 132 names. The most-used ones, grouped by job (this
 table is a selection, not the full list — read `torchlens.__all__` for that):
 
 | Job | Names |

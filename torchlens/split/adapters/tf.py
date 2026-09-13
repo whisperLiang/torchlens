@@ -14,7 +14,7 @@ from ..frontier import boundary_key_for_node
 from ..graph import SplitTraceGraph, SplitTraceNode
 from ..ir import SplitRequest
 from ..planner import SplitPlan
-from ..shape_program import ShapeBinding
+from ..shape_program import ShapeBinding, _tf_shape_literal_input
 from .base import SegmentBundle, SplitPolicyMixin, boundary_overlay
 
 
@@ -166,6 +166,7 @@ class _TfGeneratedSegmentBase:
         value: Any,
         *,
         node: SplitTraceNode,
+        input_index: int,
         overlay: dict[str, Any],
     ) -> Any:
         """Rewrite captured TF shape tensors for dynamic-batch replay."""
@@ -173,6 +174,8 @@ class _TfGeneratedSegmentBase:
         tf = _tf()
         tensor = tf.convert_to_tensor(value)
         capture = node.target
+        if not _tf_shape_literal_input(capture, input_index, tensor):
+            return tensor
         if isinstance(capture, TFOpCapture) and capture.inputs:
             first_input = min(capture.inputs, key=lambda item: item.input_index)
             parent_label = first_input.producer_label_raw or first_input.source_label_raw
@@ -222,6 +225,7 @@ class _TfGeneratedSegmentBase:
                     self._rewrite_tf_literal_tensor(
                         input_record.tensor,
                         node=node,
+                        input_index=input_record.input_index,
                         overlay=overlay,
                     )
                 )
@@ -300,6 +304,12 @@ class TfGeneratedPrefix(_TfGeneratedSegmentBase):
                 backend="tf",
                 split_point=self.spec.boundary,
             )
+            self.graph.shape_program.require_batch_resolvable(
+                self._shape_binding.batch_size,
+                self.node_ids,
+                backend="tf",
+                split_point=self.spec.boundary,
+            )
         tape = None
         if detach_boundary:
             overlay = dict(zip(self.graph.input_node_ids, input_leaves))
@@ -326,7 +336,6 @@ class TfGeneratedPrefix(_TfGeneratedSegmentBase):
             "split_id": self.plan.split_id,
             "graph_shape_hash": self.graph.graph_shape_hash,
             "batch_symbol": self.spec.batch_symbol,
-            "dynamic_batch": self.spec.dynamic_batch,
             "runtime_batch_size": (
                 None if self._shape_binding is None else self._shape_binding.batch_size
             ),
@@ -358,6 +367,12 @@ class TfGeneratedSuffix(_TfGeneratedSegmentBase):
         if self.graph.shape_program is not None and runtime_batch_size is not None:
             self._shape_binding = self.graph.shape_program.binding_from_batch(
                 int(runtime_batch_size)
+            )
+            self.graph.shape_program.require_batch_resolvable(
+                int(runtime_batch_size),
+                self.node_ids,
+                backend="tf",
+                split_point=self.spec.boundary,
             )
         self._execute_nodes(overlay)
         return self._reconstruct_output(overlay)
@@ -406,7 +421,7 @@ class TfSplitAdapter(SplitPolicyMixin):
     supports_replay = True
     supports_training = True
     supports_boundary_cache = True
-    supports_dynamic_batch = True
+    supports_state_placement = False
     native_target_types = frozenset({"TFOpCapture"})
 
     def is_tensor(self, value: Any) -> bool:
@@ -443,6 +458,19 @@ class TfSplitAdapter(SplitPolicyMixin):
         """Clone tensor values."""
 
         return _tf().identity(value) if self.is_tensor(value) else value
+
+    def resize_batch(self, value: Any, axis: int, batch_size: int) -> Any:
+        """Select cyclic batch rows on the source TensorFlow device."""
+
+        if not self.is_tensor(value):
+            return value
+        current = int(value.shape[axis])
+        if current <= 0:
+            raise ValueError("Cannot resize an empty batch axis.")
+        tf = _tf()
+        with tf.device(value.device):
+            indexes = tf.range(batch_size) % current
+            return tf.gather(value, indexes, axis=axis)
 
     def to_device(self, value: Any, device: Any) -> Any:
         """Move tensor values to a TensorFlow device when possible."""

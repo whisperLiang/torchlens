@@ -21,10 +21,11 @@ pytestmark = pytest.mark.skipif(
     reason="torch.distributed gloo unavailable",
 )
 
-from tests.support.census_harness import (  # noqa: E402
+from support.census_harness import (  # noqa: E402
     run_census_criterion_1,
     run_census_criterion_2,
 )
+
 from torchlens.distributed import _lifecycle as lifecycle  # noqa: E402
 
 

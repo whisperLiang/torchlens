@@ -544,6 +544,43 @@ pytest tests/ -m "not rare and not slow" -x --tb=short
   any inequality. Frozen enums + error/finding codes: `torchlens.merged` +
   `docs/reference/merged_trace_contract.md` (ordered-equality gated). p2p/pipeline (C3) and
   DTensor topologies (C2) refuse typed; merged replay does not exist.
+- BATCH-POLYMORPHIC SPLIT RUNTIME (`torchlens/split/`, spellings DOCUMENTED-UNSTABLE):
+  `tl.split.prepare()` retains a canonical `B=1` capture plus ONE empirical `B=2` probe.
+  The probe checks generated replay against native output structure, exact shape/dtype and
+  numeric values; passing permits extrapolation subject to existing shape guards, NOT a proof
+  for every positive B. Hidden Python branches at untested batches may silently return wrong
+  results. Failed/unavailable probes restrict execution to the captured batch. A genuine B=1
+  failure may fall back to a B=2 capture, captured-only with no B=3 probe. `dynamic_batch`,
+  `supports_dynamic_batch`, and user-configured low/high ranges remain deleted. Inspect
+  `runtime.batch_validation`, capability `shape_diagnostics.batch_validation`, and boundary
+  `runtime_batch_validation` (captured/sampled/extrapolated). Declare axis SEMANTICS with
+  `SplitFeatures.batch_axes` (JSON Pointer -> axis), use `{}` to explicitly declare no batch
+  axes (fixed input shapes, no canonical resize/probe), or leave it `None` to let
+  `torchlens/split/batching.py` infer them conservatively from the caller's example; nested
+  input trees rebatch through the shape program's own flattening. Auto inference only considers
+  rank >= 2 top-level tensors with matching leading extents; unbatched scalars/vectors keep their
+  shapes, and one-dimensional batches need explicit axes. The B=2 probe also supplies
+  empirical shape witnesses, never universal proof. An inexecutable probe yields no evidence.
+  A batch-VARYING run
+  over unproven relations refuses typed (`ShapeProgram.require_batch_resolvable`); replaying at
+  the captured batch stays allowed. `SplitRuntime.split_points()` enumerates every valid
+  `before:`/`after:` cut as `SplitCandidate` rows carrying boundary IDs/schema and a
+  deterministic `unsupported_reasons` (never silently skipped); `.at(point)` re-plans on the
+  same capture. `PlacementPlan.across(prefix, suffix)` / `SplitRuntime.with_placement()` bind
+  segment state per device through `SegmentState` (`referenced` vs `owned`, one replica per
+  source identity so tied params keep one identity; `prefix_parameters()` /
+  `suffix_parameters()`), with runtime boundary and boundary-gradient transport. Segment-state
+  placement is torch-only (`adapter.supports_state_placement`); other backends refuse an
+  explicit plan typed but still move boundaries with `ReplayBoundary.to(device)`. Semantic
+  split identity and cache keys exclude batch entirely. MLX stays an unsupported shell.
+  Rebinding/recutting preserves effective owned state (same-device values shared, moved values
+  replicated without source-model writes); merging divergent tied replicas or divergent
+  inference/training prefix values into a shared suffix refuses. Boundary state fingerprints
+  cover actual segment values, including cached training boundaries.
+  Torch placement relocates device arguments and implicit factories. Canonical input resizing
+  preserves repeated objects and identical-geometry Torch aliases; other overlapping/unprovable
+  views refuse before capture. Probe replay uses aligned B=2 per-call RNG in a temporary graph,
+  never modifying retained B=1 RNG metadata; zero-valued dimensions stay concrete in the ABI.
 - `CaptureOptions(save_budget=...)` is a per-device ceiling on retained activation bytes, default
   `"auto"` = half of measurable available memory. Exhaustive, predicate, and deferred
   `Op.save_activation()` paths pre-admit the primary source-sized RAM copy before allocation, then

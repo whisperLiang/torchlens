@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
 from _paddle_subprocess import run_paddle_subprocess
+
+# Each scenario starts a fresh native backend process (measured 7-8 seconds).
+pytestmark = pytest.mark.heavy
 
 
 def test_paddle_split_replay_equivalence() -> None:
@@ -72,7 +76,7 @@ def test_paddle_boundary_cache_roundtrip() -> None:
     )
 
 
-def test_paddle_dynamic_batch_replay_for_reshape() -> None:
+def test_paddle_batch_symbolic_replay_for_reshape() -> None:
     """Paddle replay rewrites conservative leading-batch shape literals."""
 
     run_paddle_subprocess(
@@ -92,7 +96,7 @@ def test_paddle_dynamic_batch_replay_for_reshape() -> None:
         runtime = tl.split.prepare(
             model,
             x,
-            split_request("after:reshape", backend="paddle", dynamic_batch=(1, 4)),
+            split_request("after:reshape", backend="paddle"),
         )
 
         for batch in (1, 2, 4):
@@ -102,7 +106,7 @@ def test_paddle_dynamic_batch_replay_for_reshape() -> None:
     )
 
 
-def test_paddle_dynamic_batch_preserves_fixed_dim_matching_trace_batch() -> None:
+def test_paddle_batch_symbolic_preserves_fixed_dim_matching_trace_batch() -> None:
     """Paddle dynamic replay only rewrites the leading shape dimension."""
 
     run_paddle_subprocess(
@@ -121,7 +125,7 @@ def test_paddle_dynamic_batch_preserves_fixed_dim_matching_trace_batch() -> None
         runtime = tl.split.prepare(
             model,
             x,
-            split_request("after:reshape", backend="paddle", dynamic_batch=(1, 4)),
+            split_request("after:reshape", backend="paddle"),
         )
 
         for batch in (1, 2, 4):
@@ -162,7 +166,7 @@ def test_paddle_layer_split_training_optimizer_step_matches_full_step() -> None:
         runtime = tl.split.prepare(
             split_model,
             x,
-            split_request("after:relu", backend="paddle", trainable=True, dynamic_batch=(1, 4)),
+            split_request("after:relu", backend="paddle", trainable=True),
         )
         suffix_opt = paddle.optimizer.SGD(
             learning_rate=0.05,

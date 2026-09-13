@@ -279,18 +279,48 @@ def relabel_edge_metadata(
     Returns
     -------
     None
-        ``parents``, ``children``, ``parent_arg_positions``, and ``_edge_uses``
-        are updated in place.
+        Graph relations, argument positions, and edge-use records are updated
+        in place without changing capture-time identities.
     """
 
-    op_log.parents = [
-        raw_to_final.get(parent, parent) if isinstance(parent, str) else parent
-        for parent in op_log.parents
-    ]
-    op_log.children = [
-        raw_to_final.get(child, child) if isinstance(child, str) else child
-        for child in op_log.children
-    ]
+    for name in (
+        "parents",
+        "children",
+        "root_ancestors",
+        "input_ancestors",
+        "output_descendants",
+        "internal_source_parents",
+        "internal_source_ancestors",
+        "conditional_entry_children",
+        "conditional_then_children",
+        "conditional_else_children",
+    ):
+        labels = getattr(op_log, name, None)
+        if isinstance(labels, (list, tuple, set, frozenset)):
+            setattr(op_log, name, type(labels)(raw_to_final.get(label, label) for label in labels))
+    buffer_source = getattr(op_log, "buffer_source", None)
+    if isinstance(buffer_source, str):
+        op_log.buffer_source = raw_to_final.get(buffer_source, buffer_source)
+    elif_children = getattr(op_log, "conditional_elif_children", None)
+    if elif_children:
+        op_log.conditional_elif_children = {
+            arm: [raw_to_final.get(label, label) for label in labels]
+            for arm, labels in elif_children.items()
+        }
+    arm_children = getattr(op_log, "conditional_arm_children", None)
+    if arm_children:
+        op_log.conditional_arm_children = {
+            group: {
+                arm: [raw_to_final.get(label, label) for label in labels]
+                for arm, labels in arms.items()
+            }
+            for group, arms in arm_children.items()
+        }
+    out_versions = getattr(op_log, "out_versions_by_child", None)
+    if out_versions:
+        op_log.out_versions_by_child = {
+            raw_to_final.get(label, label): value for label, value in out_versions.items()
+        }
     parent_arg_positions = getattr(op_log, "parent_arg_positions", None)
     if parent_arg_positions:
         op_log.parent_arg_positions = {

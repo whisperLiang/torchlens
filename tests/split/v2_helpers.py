@@ -2,37 +2,42 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from torchlens.split import SplitPoint, SplitRequest
+    from torchlens.split import PlacementPlan, SplitPoint, SplitRequest
 
 
 def split_request(
     boundary: str | SplitPoint,
     *,
     backend: str | None = None,
-    dynamic_batch: tuple[int, int] | None = None,
     trainable: bool = False,
     boundary_cache: bool = False,
     validation: str = "strict",
     live_param_sources: bool | None = None,
+    batch_axes: dict[str, int] | None = None,
+    placement: PlacementPlan | None = None,
 ) -> SplitRequest:
     """Construct a v2 request from the test matrix's compact boundary spelling."""
 
     from torchlens.split import SplitFeatures, SplitPoint, SplitRequest
 
     point = boundary if isinstance(boundary, SplitPoint) else _point_from_text(boundary)
+    extra: dict[str, Any] = {}
+    if placement is not None:
+        extra["placement"] = placement
     return SplitRequest(
         point=point,
         backend=backend,
         features=SplitFeatures(
-            dynamic_batch=dynamic_batch,
             training=trainable,
             boundary_cache=boundary_cache,
             live_param_sources=live_param_sources,
+            batch_axes=None if batch_axes is None else dict(batch_axes),
         ),
         validation=validation,  # type: ignore[arg-type]
+        **extra,
     )
 
 

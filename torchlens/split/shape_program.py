@@ -8,9 +8,11 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 from math import prod
 from numbers import Integral
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
+from ..backends.registry import TINYGRAD_BACKEND_NAME, TORCH_BACKEND_NAME
 from ..intervention.types import CapturedArgTemplate, LiteralValue
+from .batch_probe import BatchProbeResult
 from .errors import SplitBoundaryError, SplitErrorContext, SplitUnsupportedError
 from .graph import iter_replay_value_refs
 
@@ -168,6 +170,19 @@ class DimExpr:
             "args": [item.as_dict() for item in self.args],
         }
 
+    def simplify(self) -> DimExpr:
+        """Fold constant arithmetic without sampling any symbolic dimension."""
+
+        if self.op in {"const", "symbol"}:
+            return self
+        args = tuple(item.simplify() for item in self.args)
+        if self.op == "mul" and any(item.op == "const" and item.value == 0 for item in args):
+            return DimExpr.const(0)
+        simplified = DimExpr(self.op, self.value, args)
+        if all(item.op == "const" for item in args):
+            return DimExpr.const(simplified.evaluate({}))
+        return simplified
+
     def contains(self, symbol: str) -> bool:
         """Return whether this expression references ``symbol``."""
 
@@ -243,10 +258,13 @@ class InputLeaf:
 
 @dataclass(frozen=True)
 class ShapeProgram:
-    """Compiled symbolic batch program shared by every backend adapter."""
+    """Compiled symbolic batch program shared by every backend adapter.
+
+    Cross-batch use is an empirical extrapolation after a B=2 replay probe.
+    Shape rules still apply; samples do not prove correctness at arbitrary B.
+    """
 
     batch_symbol: str
-    dynamic_batch: tuple[int, int]
     traced_batch_size: int
     input_paths: tuple[str, ...]
     input_node_ids: tuple[str, ...]
@@ -259,10 +277,17 @@ class ShapeProgram:
     fingerprint: str
     inference_mode: Literal["explicit", "conservative_auto"]
     witness_batch_sizes: tuple[int, ...] = ()
+    batch_probe: BatchProbeResult | None = None
     proof_sources: Mapping[str, str] = field(default_factory=dict)
     witness_axis_diagnostics: Mapping[str, Mapping[str, tuple[int, ...]]] = field(
         default_factory=dict
     )
+
+    @property
+    def has_batch_axes(self) -> bool:
+        """Return whether any input leaf carries the symbolic batch axis."""
+
+        return bool(self.input_batch_axes)
 
     def bind_flat_values(
         self,
@@ -283,7 +308,7 @@ class ShapeProgram:
         missing = tuple(path for path in self.input_batch_axes if path not in by_path)
         if missing:
             raise SplitBoundaryError(
-                f"Dynamic-batch input paths are missing at runtime: {missing!r}.",
+                f"Batch input paths are missing at runtime: {missing!r}.",
                 context=SplitErrorContext(
                     backend=backend,
                     split_point=split_point,
@@ -292,10 +317,19 @@ class ShapeProgram:
             )
         batch_values: dict[str, int] = {}
         input_shapes: dict[str, tuple[int, ...]] = {}
+        for path, traced_shape in self.traced_input_shapes.items():
+            if path in self.input_batch_axes:
+                continue
+            shape = shape_of(by_path[path])
+            if shape is None or tuple(shape) != traced_shape:
+                raise SplitBoundaryError(
+                    f"Runtime non-batch input {path!r} shape changed from {traced_shape} to {shape}."
+                )
+            input_shapes[path] = tuple(shape)
         for path, axis in self.input_batch_axes.items():
             shape = shape_of(by_path[path])
             if shape is None:
-                raise SplitBoundaryError(f"Dynamic-batch input {path!r} is not tensor-like.")
+                raise SplitBoundaryError(f"Batch input {path!r} is not tensor-like.")
             normalized_axis = axis if axis >= 0 else len(shape) + axis
             if not 0 <= normalized_axis < len(shape):
                 raise SplitBoundaryError(
@@ -314,10 +348,15 @@ class ShapeProgram:
                         f"Runtime input {path!r} non-batch dimension {index} changed from "
                         f"{traced_dim} to {runtime_dim}."
                     )
+        if not batch_values:
+            return ShapeBinding(
+                symbols={self.batch_symbol: self.traced_batch_size},
+                input_shapes=input_shapes,
+            )
         unique = set(batch_values.values())
         if len(unique) != 1:
             raise SplitBoundaryError(
-                f"Dynamic-batch inputs disagree: {batch_values!r}.",
+                f"Batch inputs disagree: {batch_values!r}.",
                 context=SplitErrorContext(
                     backend=backend,
                     split_point=split_point,
@@ -325,14 +364,13 @@ class ShapeProgram:
                 ),
             )
         batch_size = next(iter(unique))
-        low, high = self.dynamic_batch
-        if not low <= batch_size <= high:
+        if batch_size < 1:
             raise SplitBoundaryError(
-                f"Runtime batch {batch_size} is outside {self.dynamic_batch}.",
+                f"Runtime batch {batch_size} must be a positive integer.",
                 context=SplitErrorContext(
                     backend=backend,
                     split_point=split_point,
-                    reason="dynamic batch outside allowed range",
+                    reason="non-positive runtime batch",
                 ),
             )
         return ShapeBinding(
@@ -343,12 +381,48 @@ class ShapeProgram:
     def binding_from_batch(self, batch_size: int) -> ShapeBinding:
         """Create a suffix binding from trusted boundary metadata."""
 
-        low, high = self.dynamic_batch
-        if not low <= int(batch_size) <= high:
-            raise SplitBoundaryError(
-                f"Boundary batch {batch_size} is outside {self.dynamic_batch}."
-            )
-        return ShapeBinding(symbols={self.batch_symbol: int(batch_size)}, input_shapes={})
+        resolved = int(batch_size)
+        if resolved < 1:
+            raise SplitBoundaryError(f"Boundary batch {batch_size} must be a positive integer.")
+        return ShapeBinding(symbols={self.batch_symbol: resolved}, input_shapes={})
+
+    def require_batch_resolvable(
+        self,
+        batch_size: int,
+        node_ids: frozenset[str] | set[str] | None = None,
+        *,
+        backend: str,
+        split_point: str,
+    ) -> None:
+        """Require a passed batch probe and resolved shape relations for extrapolation.
+
+        At the captured batch, unresolved relations use their captured literals.
+        A different batch also needs every shape-sensitive node in the executing
+        segment to have a resolved symbolic relation. Sample-derived relations
+        remain empirical; they do not prove behavior on untested Python branches.
+        """
+
+        if self.batch_probe is not None:
+            self.batch_probe.require_batch(batch_size, backend=backend, split_point=split_point)
+        if int(batch_size) == int(self.traced_batch_size) or not self.unresolved:
+            return
+        relevant = {
+            node_id: reason
+            for node_id, reason in self.unresolved.items()
+            if node_ids is None or node_id in node_ids
+        }
+        if not relevant:
+            return
+        details = "; ".join(f"{node_id}: {reason}" for node_id, reason in sorted(relevant.items()))
+        raise SplitBoundaryError(
+            f"Runtime batch {batch_size} differs from the captured batch "
+            f"{self.traced_batch_size}, but these shape relations were not proven: {details}.",
+            context=SplitErrorContext(
+                backend=backend,
+                split_point=split_point,
+                reason="unproven batch shape relation",
+            ),
+        )
 
     def rewrite(self, node_id: str, value: Any, binding: ShapeBinding) -> Any:
         """Apply an exact lowered recipe to a captured literal tree."""
@@ -390,12 +464,22 @@ def compile_shape_program(
     request: SplitRequest,
     *,
     adapter: SplitBackendAdapter,
+    batch_axes: Mapping[str, int] | None = None,
+    inference_mode: Literal["explicit", "conservative_auto"] | None = None,
     shape_witnesses: Mapping[int, Mapping[str, tuple[int, ...] | None]] | None = None,
-) -> ShapeProgram | None:
-    """Compile a backend-neutral dynamic-batch shape program."""
+) -> ShapeProgram:
+    """Compile a backend-neutral batch-symbolic shape program.
 
-    if request.dynamic_batch is None:
-        return None
+    The program is always compiled with a symbolic batch dimension; the
+    attached probe result controls extrapolation. When no batch axis can be established it still
+    carries exact traced shapes, and runtime binding requires exact input
+    shapes rather than inventing a symbolic axis.
+
+    ``batch_axes`` carries axis semantics already resolved against the
+    caller's example inputs.  When omitted, axes are resolved from this
+    capture's own inputs.
+    """
+
     leaves = flatten_input_leaves(inputs, input_kwargs, adapter=adapter)
     if len(leaves) != len(graph.input_node_ids):
         raise SplitUnsupportedError(
@@ -408,54 +492,45 @@ def compile_shape_program(
             ),
         )
     input_by_path = {leaf.path: leaf for leaf in leaves}
-    explicit = dict(request.features.batch_axes)
-    if explicit:
-        unknown = tuple(path for path in explicit if path not in input_by_path)
+    if batch_axes is not None:
+        unknown = tuple(path for path in batch_axes if path not in input_by_path)
         if unknown:
             raise SplitUnsupportedError(
-                f"Unknown dynamic-batch input paths: {unknown!r}; available paths are "
+                f"Unknown batch input paths: {unknown!r}; available paths are "
                 f"{tuple(input_by_path)!r}."
             )
         axes = {
             path: _normalize_axis(int(axis), adapter.shape(input_by_path[path].value), path)
-            for path, axis in explicit.items()
+            for path, axis in batch_axes.items()
         }
-        declared_batch_values = {
-            tuple(adapter.shape(input_by_path[path].value) or ())[axis]
-            for path, axis in axes.items()
-        }
-        if len(declared_batch_values) != 1:
-            raise SplitUnsupportedError(
-                "Declared batch inputs disagree during capture: "
-                f"{ {path: adapter.shape(input_by_path[path].value) for path in axes}!r}."
-            )
-        traced_batch = int(next(iter(declared_batch_values)))
-        undeclared_candidates: dict[str, tuple[int, ...]] = {}
-        for path, leaf in input_by_path.items():
-            if path in axes:
-                continue
-            shape = tuple(adapter.shape(leaf.value) or ())
-            candidates = tuple(index for index, dim in enumerate(shape) if dim == traced_batch)
-            if candidates:
-                undeclared_candidates[path] = candidates
-        if undeclared_candidates:
-            raise SplitUnsupportedError(
-                "Explicit dynamic-batch inputs are incomplete: undeclared tensor paths contain "
-                f"the traced batch dimension {traced_batch}: {undeclared_candidates!r}. "
-                "Declare these paths in SplitFeatures.batch_axes."
-            )
-        inference_mode: Literal["explicit", "conservative_auto"] = "explicit"
+        resolved_mode: Literal["explicit", "conservative_auto"] = (
+            inference_mode if inference_mode is not None else "conservative_auto"
+        )
     else:
-        axes = _infer_batch_axes(leaves, graph, adapter)
-        inference_mode = "conservative_auto"
+        from .batching import resolve_batch_spec
 
-    traced_shapes = {path: tuple(adapter.shape(input_by_path[path].value) or ()) for path in axes}
-    traced_batch_values = {shape[axes[path]] for path, shape in traced_shapes.items()}
-    if len(traced_batch_values) != 1:
+        spec = resolve_batch_spec(
+            inputs,
+            input_kwargs,
+            adapter=adapter,
+            explicit_axes=request.features.batch_axes,
+        )
+        axes = dict(spec.axes)
+        resolved_mode = "explicit" if spec.inference == "explicit" else "conservative_auto"
+
+    traced_shapes = {
+        path: tuple(adapter.shape(leaf.value) or ()) for path, leaf in input_by_path.items()
+    }
+    traced_batch_values = {traced_shapes[path][axis] for path, axis in axes.items()}
+    if len(traced_batch_values) > 1:
         raise SplitUnsupportedError(
             f"Declared batch inputs disagree during capture: {traced_shapes!r}."
         )
-    traced_batch_size = int(next(iter(traced_batch_values)))
+    traced_batch_size = (
+        int(next(iter(traced_batch_values)))
+        if traced_batch_values
+        else int(graph.traced_batch_size or 1)
+    )
     node_axis: dict[str, int] = {}
     input_paths = tuple(leaf.path for leaf in leaves)
     for node_id, path in zip(graph.input_node_ids, input_paths):
@@ -489,12 +564,10 @@ def compile_shape_program(
         request.batch_symbol,
         traced_batch_size=traced_batch_size,
         shape_witnesses=shape_witnesses or {},
-        dynamic_batch=request.dynamic_batch,
     )
     payload = {
         "rule_version": _SHAPE_RULE_VERSION,
         "batch_symbol": request.batch_symbol,
-        "range": request.dynamic_batch,
         "axes": sorted(axes.items()),
         "values": {
             key: [dim.as_dict() for dim in value.dims]
@@ -513,7 +586,6 @@ def compile_shape_program(
     )
     return ShapeProgram(
         batch_symbol=request.batch_symbol,
-        dynamic_batch=request.dynamic_batch,
         traced_batch_size=traced_batch_size,
         input_paths=input_paths,
         input_node_ids=graph.input_node_ids,
@@ -524,7 +596,7 @@ def compile_shape_program(
         recipes=recipes,
         unresolved=unresolved,
         fingerprint=fingerprint,
-        inference_mode=inference_mode,
+        inference_mode=resolved_mode,
         witness_batch_sizes=tuple(sorted(shape_witnesses or {})),
         proof_sources=_shape_proof_sources(
             graph,
@@ -576,36 +648,6 @@ def _normalize_axis(axis: int, shape: tuple[int, ...] | None, path: str) -> int:
     if not 0 <= normalized < len(shape):
         raise SplitUnsupportedError(f"Batch axis {axis} is invalid for {path!r} shape {shape}.")
     return normalized
-
-
-def _infer_batch_axes(
-    leaves: Sequence[InputLeaf],
-    graph: SplitTraceGraph,
-    adapter: SplitBackendAdapter,
-) -> dict[str, int]:
-    """Infer only unambiguous top-level tensor batch inputs."""
-
-    traced_batch = graph.traced_batch_size
-    candidates = {
-        leaf.path: 0
-        for leaf in leaves
-        if leaf.path.count("/") == 2
-        and (shape := adapter.shape(leaf.value)) is not None
-        and shape
-        and traced_batch is not None
-        and int(shape[0]) == traced_batch
-    }
-    if not candidates:
-        available = {
-            leaf.path: adapter.shape(leaf.value)
-            for leaf in leaves
-            if adapter.shape(leaf.value) is not None
-        }
-        raise SplitUnsupportedError(
-            "Dynamic batch could not be inferred conservatively. Declare "
-            f"SplitFeatures.batch_axes using one of {available!r}."
-        )
-    return candidates
 
 
 def _propagate_shapes(
@@ -1158,8 +1200,17 @@ def _compile_recipes(
     recipes: dict[str, tuple[ShapeRecipe, ...]] = {}
     for node in graph.nodes:
         semantic = shape_semantic_for_node(node)
-        if graph.backend == "torch" and semantic not in {"reshape", "expand", "factory"}:
-            continue
+        if graph.backend == TORCH_BACKEND_NAME:
+            if semantic not in {"reshape", "expand", "factory"}:
+                continue
+            func_id = getattr(node.args_template, "func_id", None)
+            qualname = getattr(func_id, "qualname", "")
+            if isinstance(qualname, str) and qualname.rsplit(".", 1)[-1] == "flatten":
+                # Flatten participates in output-shape propagation, but its
+                # arguments are AXES, not shape descriptors. At canonical B=1,
+                # (start_dim=1, end_dim=-1) can resemble (B, -1); rewriting it
+                # would change which dimensions flatten, rather than their sizes.
+                continue
         shape = value_shapes.get(node.canonical_id)
         if shape is None or node.output_shape is None:
             continue
@@ -1246,6 +1297,43 @@ def _descriptor_exprs(
     return None
 
 
+def _tf_shape_literal_input(capture: Any, input_index: int, tensor: Any) -> bool:
+    """Recognize integer scalar/vector operands that carry TensorFlow dimensions.
+
+    Parameters
+    ----------
+    capture:
+        TensorFlow op-callback record.
+    input_index:
+        Positional operand index in that raw op.
+    tensor:
+        Captured operand, inspected through metadata only.
+
+    Returns
+    -------
+    bool
+        Whether this operand can contain a dimension descriptor. Axis indices,
+        permutations, repeat factors, and data values are not dimension extents.
+    """
+
+    from ..backends.tf.op_callback_capture import TFOpCapture
+
+    if not isinstance(capture, TFOpCapture):
+        return False
+    # Keep this closed and slot-specific: integer data must never become shape
+    # metadata merely because its values happen to match an observed shape.
+    shape_slots = {"Reshape": 1, "BroadcastTo": 1, "Fill": 0}
+    if shape_slots.get(capture.op_type) != input_index:
+        return False
+    if not bool(getattr(getattr(tensor, "dtype", None), "is_integer", False)):
+        return False
+    shape = getattr(tensor, "shape", None)
+    rank = getattr(shape, "rank", None)
+    if rank is None and isinstance(shape, (tuple, list)):
+        rank = len(shape)
+    return rank in (0, 1)
+
+
 def _captured_shape_descriptors(node: SplitTraceNode) -> set[tuple[int, ...]]:
     """Collect backend-native shape literals attached to one audited node."""
 
@@ -1253,6 +1341,8 @@ def _captured_shape_descriptors(node: SplitTraceNode) -> set[tuple[int, ...]]:
     seen: set[int] = set()
 
     def visit(value: Any) -> None:
+        """Collect shape descriptors from one nested captured value."""
+
         if value is None or id(value) in seen:
             return
         if not isinstance(value, (int, str, bytes, bool, float)):
@@ -1263,11 +1353,18 @@ def _captured_shape_descriptors(node: SplitTraceNode) -> set[tuple[int, ...]]:
                 descriptors.add(descriptor)
                 return
             unwrapped = [getattr(item, "value", item) for item in value]
-            for start in range(len(unwrapped)):
-                descriptor = _flat_int_shape(unwrapped[start:])
-                if descriptor is not None:
-                    descriptors.add(descriptor)
-                    break
+            # Only the longest trailing integer run can be the first valid
+            # suffix. Find it once instead of allocating every suffix (O(n²)
+            # on non-shape lists such as floating-point data).
+            start = len(unwrapped)
+            while (
+                start
+                and isinstance(unwrapped[start - 1], Integral)
+                and not isinstance(unwrapped[start - 1], bool)
+            ):
+                start -= 1
+            if start < len(unwrapped):
+                descriptors.add(tuple(int(cast(Integral, item)) for item in unwrapped[start:]))
             for item in value:
                 visit(item)
             return
@@ -1293,7 +1390,9 @@ def _captured_shape_descriptors(node: SplitTraceNode) -> set[tuple[int, ...]]:
         if inputs is not None:
             for item in inputs:
                 tensor = getattr(item, "tensor", None)
-                if tensor is not None:
+                if tensor is not None and _tf_shape_literal_input(
+                    value, getattr(item, "input_index", -1), tensor
+                ):
                     try:
                         visit(tensor.numpy().tolist())
                     except Exception:
@@ -1329,14 +1428,30 @@ def _unresolved_dynamic_nodes(
     *,
     traced_batch_size: int,
     shape_witnesses: Mapping[int, Mapping[str, tuple[int, ...] | None]],
-    dynamic_batch: tuple[int, int],
 ) -> dict[str, str]:
-    """Return shape-sensitive nodes whose dynamic relation was not solved."""
+    """Return shape-sensitive nodes whose dynamic relation was not solved.
+
+    Witnesses corroborate a candidate; they never define an allowed runtime
+    range.  Completeness is "the captured probe set is non-empty", not
+    "every integer in a declared interval was executed".
+    """
 
     unresolved: dict[str, str] = {}
+    witnesses_present = bool(shape_witnesses)
     for node in graph.nodes:
         semantic = shape_semantic_for_node(node)
         if not _shape_sensitive(node.op_type.lower()) and semantic is None:
+            continue
+        # tinygrad lowers parameter/buffer broadcasts through a chain of
+        # ``RESHAPE``/``EXPAND`` UOps whose descriptors commonly contain a
+        # singleton ``1`` in the leading position.  A canonical B=1 capture
+        # therefore makes those *fixed model-state* descriptors look as if
+        # they might encode the runtime batch, even though they are entirely
+        # independent of the input.  Do not gate dynamic replay on such
+        # literals: parameter lineage is immutable across batch sizes and the
+        # replay adapter already keeps this branch separate from input-driven
+        # shape rewrites.
+        if graph.backend == TINYGRAD_BACKEND_NAME and _is_parameter_lineage(graph, node):
             continue
         parent_dynamic = any(
             parent_node is not None
@@ -1349,14 +1464,16 @@ def _unresolved_dynamic_nodes(
         output_dynamic = output is not None and any(
             dim.contains(batch_symbol) for dim in output.dims
         )
-        expected_witnesses = set(range(dynamic_batch[0], dynamic_batch[1] + 1)) - {
-            traced_batch_size
-        }
-        witnesses_complete = expected_witnesses == set(shape_witnesses)
         witness_shapes = tuple(shapes.get(node.canonical_id) for shapes in shape_witnesses.values())
-        witnessed_unchanged = witnesses_complete and all(
+        witnessed_unchanged = witnesses_present and all(
             shape == node.output_shape for shape in witness_shapes
         )
+        witnessed_varies = witnesses_present and not witnessed_unchanged
+        if not output_dynamic and witnessed_varies:
+            unresolved[node.canonical_id] = (
+                "witnessed shape varies with batch but no symbolic relation was proven"
+            )
+            continue
         if parent_dynamic and not output_dynamic and not witnessed_unchanged:
             unresolved[node.canonical_id] = "dynamic shape relation could not be proven"
             continue
@@ -1504,7 +1621,12 @@ def _is_parameter_lineage(
 ) -> bool:
     """Return whether a node is derived exclusively from parameter or buffer state."""
 
-    if node.is_param_source or node.is_buffer or node.param_refs:
+    # tinygrad's UOp preview exposes BUFFER leaves as ordinary operations (the
+    # finalized Op does not carry Torch's ``is_buffer`` flag).  Treat those
+    # leaves as model state so singleton broadcast descriptors are not
+    # mistaken for dynamic batch literals.
+    tinygrad_buffer = graph.backend == TINYGRAD_BACKEND_NAME and node.op_type.lower() == "buffer"
+    if node.is_param_source or node.is_buffer or node.param_refs or tinygrad_buffer:
         return True
     if node.is_input:
         return False
@@ -1614,7 +1736,7 @@ def _witness_scaled_axes(
     traced_batch_size: int,
     witnesses: Mapping[int, Mapping[str, tuple[int, ...] | None]],
 ) -> set[int]:
-    """Return axes proven to be a fixed multiple of batch by all witnesses."""
+    """Return axes observed to be a fixed multiple of batch at every sample."""
 
     if not witnesses:
         return set()
@@ -1627,7 +1749,8 @@ def _witness_scaled_axes(
     return {
         axis
         for axis, traced_dim in enumerate(traced_shape)
-        if traced_dim % traced_batch_size == 0
+        if traced_dim > 0
+        and traced_dim % traced_batch_size == 0
         and all(
             shape[axis] * traced_batch_size == traced_dim * batch_size
             for batch_size, shape in witnessed_shapes
@@ -1651,7 +1774,7 @@ def _witness_axis_diagnostics(
         candidates = tuple(
             axis
             for axis, dim in enumerate(node.output_shape)
-            if traced_batch_size > 0 and dim % traced_batch_size == 0
+            if traced_batch_size > 0 and dim > 0 and dim % traced_batch_size == 0
         )
         if not candidates:
             continue
@@ -1679,7 +1802,7 @@ def _shape_proof_sources(
     batch_symbol: str,
     witness_diagnostics: Mapping[str, Mapping[str, tuple[int, ...]]],
 ) -> dict[str, str]:
-    """Return the strongest proof source for each batch-dependent graph value."""
+    """Label semantic or empirical evidence for each batch-dependent graph value."""
 
     sources: dict[str, str] = {}
     input_ids = set(graph.input_node_ids)
@@ -1694,7 +1817,7 @@ def _shape_proof_sources(
         elif semantic == "repeat":
             source = "semantic:repeat"
         elif witness_axes:
-            source = "shape_witness"
+            source = "sampled_shape_witness"
         elif semantic is not None:
             source = f"semantic:{semantic}"
         else:

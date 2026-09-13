@@ -161,7 +161,7 @@ print(tl.compat.report(model, x).to_markdown())
 
 ## Current 2.x Surface
 
-- Top-level `torchlens.__all__` has 119 names: capture, save/load, intervention,
+- Top-level `torchlens.__all__` has 132 names: capture, save/load, intervention,
   selectors, helper transforms, observers, validation, and the three main log classes.
 - Relation accessors on FINISHED traces return IMMUTABLE views (authorized public type
   break, JMT 2026-08-12): label sequences (`op.parents`, `op.children`, `op.modules`,
@@ -810,6 +810,53 @@ print(tl.compat.report(model, x).to_markdown())
   Crash-safety is pinned by a hard-process-death test.
 - Appliance packages `notebook` and `neuro` reserve extras boundaries and enforce
   import gating for their optional dependencies.
+- BATCH-POLYMORPHIC SPLIT RUNTIME (`torchlens/split/`; spellings DOCUMENTED-UNSTABLE):
+  `tl.split.prepare(model, example, SplitRequest(...))` retains one canonical B=1
+  graph and runs ONE B=2 probe comparing generated replay with native output structure,
+  exact shape/dtype and numeric values. A passed sample permits empirical extrapolation
+  with shape guards, not universal proof: hidden branches such as B>=8 may still produce
+  silent wrong results. Failed/unavailable probes restrict execution to the captured batch.
+  A genuine B=1 failure may fall back to B=2 capture, captured-only without B=3 probing.
+  The retained `SplitTraceGraph` / `SplitGraphIR` / `SplitPlan` / `ShapeProgram` are reused;
+  runtime execution neither recaptures nor reruns the original model. There is NO configurable
+  batch range: `dynamic_batch`, `supports_dynamic_batch`, and user low/high ranges remain
+  deleted. `runtime.batch_validation` and capability `shape_diagnostics.batch_validation`
+  disclose the evidence; boundary `runtime_batch_validation` is captured/sampled/extrapolated.
+  Batch-axis SEMANTICS are declared
+  through `SplitFeatures.batch_axes` (JSON Pointer -> axis), explicitly disabled with `{}`,
+  or inferred conservatively with the default `None`
+  from the caller's own example inputs (`torchlens/split/batching.py`, internal
+  `BatchSpec`). Auto inference excludes rank-zero/rank-one tensors; vectors/scalars keep their
+  original shapes, and genuine one-dimensional batches require explicit axes. Explicit `{}`
+  skips rebatching/probing and guards exact input shapes; nested input trees rebatch through
+  the same flattening the shape program uses. The B=2 probe supplies empirical shape witnesses
+  (`witness_probe_sizes`),
+  never a universal proof or allowed interval. An inexecutable probe yields no evidence. A
+  batch-VARYING run whose shape relations were not proven refuses typed at bind time
+  (`ShapeProgram.require_batch_resolvable`, naming the nodes and reasons) while
+  replaying AT the captured batch stays allowed. Fine-grained cuts:
+  `SplitRuntime.split_points()` enumerates every semantically valid `before:`/`after:`
+  compute boundary as `SplitCandidate` rows with boundary value IDs, boundary schema,
+  and a deterministic `unsupported_reasons` — nothing is silently skipped;
+  `SplitRuntime.at(point)` re-plans a new boundary on the SAME capture. Heterogeneous
+  placement is first-class: `PlacementPlan.across(prefix, suffix)` on the request (or
+  `SplitRuntime.with_placement()`), with `SegmentState` owning device-local replicas
+  (`referenced` vs `owned`, one replica per source identity so tied/shared params keep
+  one identity) exposed via `prefix_parameters()` / `suffix_parameters()`; boundary
+  forward transport and boundary-gradient backward transport are handled by the
+  runtime. Segment-state placement is torch-only
+  (`adapter.supports_state_placement`); other backends refuse an explicit plan typed
+  and still transport boundaries with `ReplayBoundary.to(device)`. Semantic split
+  identity (`SplitPlan.split_id`, graph hash, cache keys) excludes batch entirely.
+  Rebinding preserves trained owned state: same-device tensors remain shared, moved tensors are
+  new replicas (rebuild optimizers), and original model state is not written. Recutting divergent
+  tied replicas, or divergent inference/training prefix values into a shared suffix, refuses.
+  Boundary fingerprints include effective segment state and survive cache
+  conversion. Torch factories and device arguments follow placement. Canonical rebatching keeps
+  repeated-object/identical-geometry Torch aliases; unsupported overlap refuses. Temporary B=2
+  replay aligns per-call RNG with its oracle without mutating retained B=1 state. Empty non-batch
+  dimensions stay concrete zeros in the boundary ABI.
+  MLX remains an explicit unsupported shell.
 
 ## Anti-Patterns
 

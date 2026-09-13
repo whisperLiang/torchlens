@@ -92,11 +92,18 @@ class SplitPolicyMixin:
     allow_callable_target = False
     native_state_replay = False
 
+    supports_state_placement = False
+
     def resize_batch(self, value: Any, axis: int, batch_size: int) -> Any:
         """Resize a batch leaf when an adapter supports shape witnessing."""
 
         del value, axis, batch_size
         raise NotImplementedError(f"backend={self.name!r} does not support shape witnesses")
+
+    def device_of(self, value: Any) -> Any:
+        """Return the device of a tensor when the backend exposes one."""
+
+        return getattr(value, "device", None)
 
     def target_support_reasons(self, node: Any, graph: Any) -> tuple[str, ...]:
         """Validate a node against this adapter's native capture handles."""
@@ -207,7 +214,7 @@ class SplitBackendAdapter(TensorOps, ReplayExecutor, Protocol):
     supports_replay: bool
     supports_training: bool
     supports_boundary_cache: bool
-    supports_dynamic_batch: bool
+    supports_state_placement: bool
 
     def target_support_reasons(self, node: Any, graph: Any) -> tuple[str, ...]:
         """Validate a captured target against backend replay handles."""

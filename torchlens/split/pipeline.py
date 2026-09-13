@@ -2,16 +2,33 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import fields, is_dataclass, replace
+import json
+import sys
+import types
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from copy import deepcopy
+from dataclasses import dataclass, fields, is_dataclass, replace
 from hashlib import sha256
-from typing import Any
+from typing import Any, Literal
 
 from ..backends import resolve_backend_spec
+from ..backends.registry import JAX_BACKEND_NAME, TINYGRAD_BACKEND_NAME, TORCH_BACKEND_NAME
 from .adapters.base import SegmentBundle
+from .batch_probe import BatchProbeResult
+from .batching import (
+    FALLBACK_TRACE_BATCH,
+    BatchSpec,
+    canonical_batch_for,
+    clone_dataclass_fields,
+    rebatch_inputs,
+    resolve_batch_spec,
+    witness_probe_sizes,
+)
 from .errors import SplitUnsupportedError
-from .graph import SplitTraceGraph, split_graph_from_trace
+from .graph import SplitTraceGraph, project_symbolic_shapes, split_graph_from_trace
 from .ir import SplitGraphIR, SplitModelProfile, SplitRequest
+from .placement import PlacementPlan
 from .planner import SplitPlan, plan_split
 from .program import (
     ReplayProgram,
@@ -20,64 +37,7 @@ from .program import (
     build_capability_report,
     lower_replay_program,
 )
-from .shape_program import ShapeProgram, _escape_pointer, compile_shape_program
-
-_MAX_EXHAUSTIVE_SHAPE_WITNESSES = 32
-
-
-def _resize_witness_tree(
-    value: Any,
-    path: str,
-    *,
-    axes: Mapping[str, int],
-    batch_size: int,
-    adapter: Any,
-) -> Any:
-    """Clone an input tree while resizing declared batch tensor leaves."""
-
-    if adapter.is_tensor(value):
-        if path in axes:
-            return adapter.resize_batch(value, axes[path], batch_size)
-        return adapter.clone(value)
-    if isinstance(value, Mapping):
-        resized = {
-            key: _resize_witness_tree(
-                item,
-                f"{path}/{_escape_pointer(str(key))}",
-                axes=axes,
-                batch_size=batch_size,
-                adapter=adapter,
-            )
-            for key, item in value.items()
-        }
-        if isinstance(value, dict):
-            return type(value)(resized)
-        return resized
-    if isinstance(value, (list, tuple)):
-        items = [
-            _resize_witness_tree(
-                item,
-                f"{path}/{index}",
-                axes=axes,
-                batch_size=batch_size,
-                adapter=adapter,
-            )
-            for index, item in enumerate(value)
-        ]
-        return type(value)(*items) if hasattr(type(value), "_fields") else type(value)(items)
-    if is_dataclass(value) and not isinstance(value, type):
-        updates = {
-            item.name: _resize_witness_tree(
-                getattr(value, item.name),
-                f"{path}/{_escape_pointer(item.name)}",
-                axes=axes,
-                batch_size=batch_size,
-                adapter=adapter,
-            )
-            for item in fields(value)
-        }
-        return replace(value, **updates)
-    return value
+from .shape_program import ShapeProgram, compile_shape_program
 
 
 def _witness_node_signature(node: Any) -> tuple[Any, ...]:
@@ -108,7 +68,7 @@ def _align_shape_witness(
 
     if len(graph.nodes) != len(witness.nodes):
         raise SplitUnsupportedError(
-            f"Dynamic batch {batch_size} changed graph topology from "
+            f"Batch witness {batch_size} changed graph topology from "
             f"{len(graph.nodes)} to {len(witness.nodes)} values."
         )
     shapes: dict[str, tuple[int, ...] | None] = {}
@@ -117,7 +77,7 @@ def _align_shape_witness(
     for index, (base_node, witness_node) in enumerate(zip(graph.nodes, witness.nodes)):
         if _witness_node_signature(base_node) != _witness_node_signature(witness_node):
             raise SplitUnsupportedError(
-                f"Dynamic batch {batch_size} changed graph topology at value {index}: "
+                f"Batch witness {batch_size} changed graph topology at value {index}: "
                 f"{base_node.op_type!r} != {witness_node.op_type!r}."
             )
         base_parent_indexes = tuple(
@@ -132,14 +92,14 @@ def _align_shape_witness(
         )
         if base_parent_indexes != witness_parent_indexes:
             raise SplitUnsupportedError(
-                f"Dynamic batch {batch_size} changed parent-call topology at value "
+                f"Batch witness {batch_size} changed parent-call topology at value "
                 f"{index}: {base_parent_indexes!r} != {witness_parent_indexes!r}."
             )
         shapes[base_node.canonical_id] = witness_node.output_shape
     return shapes
 
 
-def _capture_shape_witnesses(
+def _probe_batch_replay(
     model: Any,
     inputs: tuple[Any, ...],
     input_kwargs: dict[str, Any] | None,
@@ -147,81 +107,281 @@ def _capture_shape_witnesses(
     graph: SplitTraceGraph,
     shape_program: ShapeProgram,
     adapter: Any,
-) -> dict[int, dict[str, tuple[int, ...] | None]]:
-    """Capture safe alternate-batch shape evidence for unresolved Torch relations."""
+    *,
+    random_seed: int | None = None,
+) -> ShapeProgram:
+    """Use one B=2 capture to infer shapes and compare generated replay outputs.
 
-    if adapter.name != "torch" or not shape_program.unresolved:
-        return {}
-    low, high = shape_program.dynamic_batch
-    batches = tuple(
-        batch for batch in range(low, high + 1) if batch != shape_program.traced_batch_size
-    )
-    if not batches:
-        return {}
-    if len(batches) > _MAX_EXHAUSTIVE_SHAPE_WITNESSES:
-        raise SplitUnsupportedError(
-            "Dynamic shape ambiguity requires exhaustive witnesses across the declared "
-            f"batch range, but {len(batches)} alternate batches exceed the safe limit "
-            f"of {_MAX_EXHAUSTIVE_SHAPE_WITNESSES}. Narrow dynamic_batch or make the "
-            "shape relation explicit."
+    Passing this sample authorizes empirical extrapolation, not a proof about
+    untested Python branches. Failures retain the captured-batch runtime.
+    """
+
+    traced_batch = shape_program.traced_batch_size
+    probes = witness_probe_sizes(traced_batch)
+    if not probes or not shape_program.input_batch_axes:
+        return replace(
+            shape_program,
+            batch_probe=BatchProbeResult(
+                traced_batch,
+                None,
+                "unavailable",
+                "Inputs have no batch axes; replay requires the captured input shapes."
+                if not shape_program.input_batch_axes
+                else "No independent B=2 probe for this capture.",
+            ),
         )
 
-    from .._capture_state_helpers import _model_for_validation_replay
-    from ..utils.rng import log_current_rng_states, set_rng_from_saved_states
-
-    initial_rng = log_current_rng_states()
-    witnesses: dict[int, dict[str, tuple[int, ...] | None]] = {}
+    witness_capture = None
+    candidate = shape_program
+    alignment_note = None
+    phase = "construct probe"
     try:
-        for batch_size in batches:
-            set_rng_from_saved_states(initial_rng)
-            witness_model, _plain_snapshot, copied = _model_for_validation_replay(model)
-            if not copied:
-                raise SplitUnsupportedError(
-                    "Dynamic shape ambiguity requires a shape witness, but the model "
-                    "could not be copied without mutating user state."
-                )
-            witness_inputs = tuple(
-                _resize_witness_tree(
-                    value,
-                    f"/args/{index}",
-                    axes=shape_program.input_batch_axes,
-                    batch_size=batch_size,
-                    adapter=adapter,
-                )
-                for index, value in enumerate(inputs)
+        with _probe_state_scope(model, adapter):
+            if adapter.name == "torch" and not isinstance(model, types.FunctionType):
+                from .._capture_state_helpers import _model_for_validation_replay
+
+                witness_model, _snapshot, copied = _model_for_validation_replay(model)
+                if not copied:
+                    raise SplitUnsupportedError("Cannot copy the model for an isolated B=2 probe.")
+            else:
+                witness_model = deepcopy(model)
+                if witness_model is model and not isinstance(model, types.FunctionType):
+                    raise SplitUnsupportedError("The model copy aliases the original model.")
+                if adapter.name == "tf":
+                    from ._tf_capture import preserve_probe_layer_names
+
+                    preserve_probe_layer_names(model, witness_model)
+            witness_inputs, witness_kwargs = rebatch_inputs(
+                inputs,
+                input_kwargs,
+                axes=shape_program.input_batch_axes,
+                batch_size=2,
+                adapter=adapter,
             )
-            witness_kwargs = {
-                key: _resize_witness_tree(
-                    value,
-                    f"/kwargs/{_escape_pointer(str(key))}",
-                    axes=shape_program.input_batch_axes,
-                    batch_size=batch_size,
-                    adapter=adapter,
-                )
-                for key, value in (input_kwargs or {}).items()
-            }
+            # Capture may modify its inputs. Replay uses independent, identical
+            # sample values, and never reruns the original Python model.
+            replay_inputs, replay_kwargs = rebatch_inputs(
+                witness_inputs,
+                witness_kwargs,
+                axes=shape_program.input_batch_axes,
+                batch_size=2,
+                adapter=adapter,
+            )
+            outputs: list[Any] = []
+
+            def observe_output(output: Any) -> None:
+                """Retain the native forward result independently of trace normalization."""
+
+                outputs.append(_snapshot_probe_output(adapter, output))
+
+            phase = "capture B=2"
             witness_capture = capture_model(
                 witness_model,
                 witness_inputs,
                 request,
                 input_kwargs=witness_kwargs,
+                output_observer=observe_output,
+                random_seed=random_seed,
             )
-            witness_graph = split_graph_from_trace(
-                witness_capture,
-                batch_symbol=request.batch_symbol,
-                dynamic_batch=request.dynamic_batch,
+            if not outputs:
+                raise SplitUnsupportedError("The backend did not expose the native probe output.")
+            phase = "compare topology"
+            witness_graph = split_graph_from_trace(witness_capture)
+            try:
+                witness_shapes = _align_shape_witness(graph, witness_graph, batch_size=2)
+            except SplitUnsupportedError as exc:
+                if adapter.name != "tinygrad":
+                    raise
+                # Lazy UOp optimization can fold singleton shape operations at
+                # B=1. Do not invent cross-graph shape correspondences: retain
+                # semantic shape lowering and still require the B=2 replay and
+                # exact output structure/shape/dtype plus numeric comparison.
+                witness_shapes = None
+                alignment_note = f"Shape witness alignment unavailable: {exc}"
+            if witness_shapes is not None:
+                phase = "infer sampled shapes"
+                candidate = compile_shape_program(
+                    graph,
+                    inputs,
+                    input_kwargs,
+                    request,
+                    adapter=adapter,
+                    batch_axes=dict(shape_program.input_batch_axes),
+                    inference_mode=shape_program.inference_mode,
+                    shape_witnesses={2: witness_shapes},
+                )
+            phase = "replay B=2"
+            probe_graph = project_symbolic_shapes(
+                replace(graph, traced_batch_size=traced_batch), candidate
             )
-            witnesses[batch_size] = _align_shape_witness(
-                graph,
-                witness_graph,
-                batch_size=batch_size,
+            if adapter.name == "torch":
+                probe_graph = _with_probe_rng_states(probe_graph, witness_graph)
+            # Probe the same split without creating optimizer-owned placement
+            # replicas or consuming live training state.
+            probe_request = replace(
+                request,
+                placement=PlacementPlan(),
+                features=replace(request.features, training=False, live_param_sources=False),
             )
+            probe_plan = plan_split(probe_graph, probe_request)
+            segments = execute_split_runtime(adapter, probe_graph, probe_plan, probe_request)
+            boundary = segments.prefix(
+                *replay_inputs, input_kwargs=replay_kwargs, detach_boundary=True
+            )
+            actual = segments.suffix(boundary)
+            phase = "compare outputs"
+            mismatch = _probe_output_mismatch(adapter, outputs[-1], actual)
+            if mismatch is not None:
+                raise SplitUnsupportedError(mismatch)
+        result = BatchProbeResult(traced_batch, 2, "passed", alignment_note)
+    except Exception as exc:  # noqa: BLE001 - probe failures restrict capability, not preparation
+        result = BatchProbeResult(
+            traced_batch,
+            2,
+            "unavailable" if phase == "construct probe" else "failed",
+            f"{phase}: {type(exc).__name__}: {exc}",
+        )
+    finally:
+        # Trace.cleanup currently assumes Torch parameter .grad attributes.
+        # Native preview captures are temporary locals and release normally.
+        if witness_capture is not None and adapter.name == "torch":
             cleanup = getattr(witness_capture, "cleanup", None)
             if callable(cleanup):
                 cleanup()
+    return replace(candidate, batch_probe=result)
+
+
+@dataclass(frozen=True)
+class _ProbeOpState:
+    """Read capture metadata unchanged except for an isolated probe's RNG state."""
+
+    captured_op: Any
+    func_rng_states: dict[str, Any] | None
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate all other metadata to the retained capture's operation."""
+
+        return getattr(self.captured_op, name)
+
+
+def _with_probe_rng_states(graph: SplitTraceGraph, witness: SplitTraceGraph) -> SplitTraceGraph:
+    """Align temporary replay with the B=2 oracle's per-call random stream.
+
+    Matching only the initial capture seed is insufficient: earlier random
+    operations may consume a different number of draws at B=2. Topology has
+    already been checked, so each replay call can use its aligned witness's
+    state while preserving every B=1 callable, argument and captured Op.
+    """
+
+    return replace(
+        graph,
+        nodes=tuple(
+            replace(
+                node,
+                op=_ProbeOpState(node.op, getattr(probe.op, "func_rng_states", None)),
+            )
+            for node, probe in zip(graph.nodes, witness.nodes, strict=True)
+        ),
+    )
+
+
+@contextmanager
+def _probe_state_scope(model: Any, adapter: Any) -> Iterator[None]:
+    """Restore supported model state and shared RNGs around the complete probe."""
+
+    from ..utils.rng import log_current_rng_states, set_rng_from_saved_states
+
+    rng_state = log_current_rng_states()
+    try:
+        if adapter.name == "torch":
+            with _torch_capture_state(model):
+                yield
+        elif adapter.name == "tinygrad":
+            from ._tinygrad_state import tinygrad_capture_state
+
+            with tinygrad_capture_state(model):
+                yield
+        elif isinstance(model, (types.FunctionType, types.MethodType)):
+            from ._callable_state import callable_capture_state
+
+            with callable_capture_state(model, adapter):
+                yield
+        else:
+            yield
     finally:
-        set_rng_from_saved_states(initial_rng)
-    return witnesses
+        set_rng_from_saved_states(rng_state)
+
+
+def _snapshot_probe_output(adapter: Any, value: Any) -> Any:
+    """Copy tensors and containers without retaining a second autograd graph."""
+
+    from .._state import pause_logging
+
+    with pause_logging():
+        if adapter.is_tensor(value):
+            return adapter.clone(adapter.detach(value))
+        if isinstance(value, dict):
+            return type(value)(
+                (key, _snapshot_probe_output(adapter, item)) for key, item in value.items()
+            )
+        if isinstance(value, (tuple, list)):
+            items = [_snapshot_probe_output(adapter, item) for item in value]
+            return type(value)(*items) if hasattr(type(value), "_fields") else type(value)(items)
+        if is_dataclass(value) and not isinstance(value, type):
+            return clone_dataclass_fields(
+                value,
+                {
+                    item.name: _snapshot_probe_output(adapter, getattr(value, item.name))
+                    for item in fields(value)
+                },
+            )
+        return deepcopy(value)
+
+
+def _probe_output_mismatch(
+    adapter: Any, expected: Any, actual: Any, path: str = "output"
+) -> str | None:
+    """Compare exact output structure, shape and dtype before numeric tolerance."""
+
+    if adapter.is_tensor(expected) or adapter.is_tensor(actual):
+        if not (adapter.is_tensor(expected) and adapter.is_tensor(actual)):
+            return f"{path}: tensor/non-tensor mismatch"
+        if adapter.shape(expected) != adapter.shape(actual):
+            return f"{path}: shape mismatch {adapter.shape(expected)} != {adapter.shape(actual)}"
+        if adapter.dtype_name(expected) != adapter.dtype_name(actual):
+            return f"{path}: dtype mismatch"
+        dtype = str(adapter.dtype_name(expected))
+        if "bool" in dtype or "int" in dtype:
+            # Integer labels/masks need exact equality; TF's allclose-style
+            # subtraction is not defined for boolean tensors.
+            left = expected.tolist() if hasattr(expected, "tolist") else expected.numpy().tolist()
+            right = actual.tolist() if hasattr(actual, "tolist") else actual.numpy().tolist()
+            return None if left == right else f"{path}: numeric mismatch"
+        if not adapter.allclose(expected, actual, atol=1e-5, rtol=1e-4):
+            return f"{path}: numeric mismatch"
+        return None
+    if type(expected) is not type(actual):
+        return f"{path}: output container/type mismatch"
+    if isinstance(expected, dict):
+        if expected.keys() != actual.keys():
+            return f"{path}: mapping keys mismatch"
+        pairs = [(key, expected[key], actual[key]) for key in expected]
+    elif isinstance(expected, (tuple, list)):
+        if len(expected) != len(actual):
+            return f"{path}: container length mismatch"
+        pairs = [(index, left, right) for index, (left, right) in enumerate(zip(expected, actual))]
+    elif is_dataclass(expected) and not isinstance(expected, type):
+        pairs = [
+            (item.name, getattr(expected, item.name), getattr(actual, item.name))
+            for item in fields(expected)
+        ]
+    else:
+        return None if expected == actual else f"{path}: literal mismatch"
+    for key, left, right in pairs:
+        mismatch = _probe_output_mismatch(adapter, left, right, f"{path}/{key}")
+        if mismatch is not None:
+            return mismatch
+    return None
 
 
 def capture_model(
@@ -230,6 +390,8 @@ def capture_model(
     spec: SplitRequest,
     *,
     input_kwargs: dict[str, Any] | None = None,
+    output_observer: Callable[[Any], None] | None = None,
+    random_seed: int | None = None,
 ) -> Any:
     """Capture one complete model execution with the native backend."""
 
@@ -242,7 +404,11 @@ def capture_model(
         "keep_orphans": True,
         "backend": str(backend_spec.name),
     }
-    if str(backend_spec.name) == "torch":
+    if output_observer is not None:
+        common["output_transform"] = output_observer
+    if random_seed is not None:
+        common["random_seed"] = random_seed
+    if str(backend_spec.name) == TORCH_BACKEND_NAME:
         common.update(
             {
                 "intervention_ready": True,
@@ -253,8 +419,31 @@ def capture_model(
                 "backward_ready": spec.trainable,
             }
         )
-    if str(backend_spec.name) != "torch":
+    if str(backend_spec.name) == TINYGRAD_BACKEND_NAME:
+        from ._tinygrad_state import tinygrad_capture_state
+
+        with tinygrad_capture_state(model):
+            return trace(model, inputs, **common)
+    if str(backend_spec.name) in {"tf", "tensorflow"}:
+        from ._tf_capture import batch_stable_keras_add
+
+        with batch_stable_keras_add():
+            return trace(model, inputs, **common)
+    if str(backend_spec.name) == JAX_BACKEND_NAME:
+        from ._jax_capture import batch_stable_matmul
+
+        with batch_stable_matmul():
+            return trace(model, inputs, **common)
+    if str(backend_spec.name) != TORCH_BACKEND_NAME:
         return trace(model, inputs, **common)
+
+    with _torch_capture_state(model):
+        return trace(model, inputs, **common)
+
+
+@contextmanager
+def _torch_capture_state(model: Any) -> Iterator[None]:
+    """Restore Torch state and RNG around internal capture or replay execution."""
 
     from .._capture_state_helpers import (
         _clone_state_dict_with_metadata,
@@ -272,21 +461,162 @@ def capture_model(
         (module, bool(module.training))
         for module in (model.modules() if hasattr(model, "modules") else ())
     )
+    registered_state = tuple(
+        (
+            module,
+            dict(getattr(module, "_parameters", {})),
+            dict(getattr(module, "_buffers", {})),
+            dict(getattr(module, "_modules", {})),
+        )
+        for module in (model.modules() if hasattr(model, "modules") else ())
+    )
     plain_attrs = _ModuleTreePlainAttrSnapshot(
         model,
         ignored_names=frozenset({"_tl", "forward"}),
     )
     try:
-        return trace(model, inputs, **common)
+        # Split capture can encounter modules (notably transformer activation
+        # helpers) that stored a torch builtin before TorchLens installed its
+        # wrappers. Prepare first so the wrapper epoch ledger is populated,
+        # then bind only direct stale function attrs for this transaction.
+        # Ordinary ``tl.trace`` does not pass through this split-only scope.
+        import torch
+
+        if isinstance(model, torch.nn.Module):
+            from ..backends.torch._held_refs import scoped_held_torch_function_refs
+            from ..backends.torch.wrappers import wrap_torch
+
+            # ``trace`` performs model preparation after entering this state
+            # scope. Install wrappers here first so stale direct references can
+            # be rebound before that preparation and the forward; the native
+            # preparation call remains the single owner of model metadata.
+            wrap_torch()
+            with scoped_held_torch_function_refs(model):
+                yield
+        else:
+            yield
     finally:
-        try:
+        active_error = sys.exc_info()[1]
+        cleanup_errors: list[BaseException] = []
+
+        def attempt_restore(action: Callable[[], None]) -> None:
+            """Run one cleanup action while allowing later actions to proceed."""
+
+            try:
+                action()
+            except BaseException as exc:  # noqa: BLE001 - cleanup must be best effort
+                cleanup_errors.append(exc)
+
+        def restore_registered_state() -> None:
+            """Restore parameter, buffer, and child-module registrations first."""
+
+            for module, parameters, buffers, children in reversed(registered_state):
+                module._parameters.clear()
+                module._parameters.update(parameters)
+                module._buffers.clear()
+                module._buffers.update(buffers)
+                module._modules.clear()
+                module._modules.update(children)
+
+        def restore_state_dict() -> None:
+            """Restore captured tensor values after the module tree is restored."""
+
             if state_dict is not None:
                 model.load_state_dict(state_dict)
+
+        def restore_training_modes() -> None:
+            """Restore every module's original training mode."""
+
             for module, training in training_modes:
                 module.train(training)
-            plain_attrs.restore_changed_attrs()
-        finally:
-            set_rng_from_saved_states(rng_state)
+
+        attempt_restore(restore_registered_state)
+        attempt_restore(restore_state_dict)
+        attempt_restore(restore_training_modes)
+        attempt_restore(plain_attrs.restore_changed_attrs)
+        attempt_restore(lambda: set_rng_from_saved_states(rng_state))
+        if active_error is None and cleanup_errors:
+            raise cleanup_errors[0]
+
+
+def capture_canonical_model(
+    model: Any,
+    inputs: tuple[Any, ...],
+    spec: SplitRequest,
+    *,
+    input_kwargs: dict[str, Any] | None = None,
+    adapter: Any,
+) -> tuple[Any, tuple[Any, ...], dict[str, Any], BatchSpec]:
+    """Capture the model, normalizing only declared or inferred batch axes.
+
+    The canonical batch is ``B=1``; ``B=2`` is used only when a ``B=1``
+    capture genuinely fails.  A large example batch is never used just
+    because the caller supplied one. With no batch axes, inputs retain their
+    original shapes and no canonical rebatching is attempted.
+
+    Returns
+    -------
+    tuple
+        ``(capture, canonical_inputs, canonical_kwargs, batch_spec)``.
+    """
+
+    batch_spec = resolve_batch_spec(
+        inputs,
+        input_kwargs,
+        adapter=adapter,
+        explicit_axes=spec.features.batch_axes,
+    )
+    if not batch_spec.axes:
+        capture = capture_model(model, inputs, spec, input_kwargs=input_kwargs)
+        return capture, inputs, dict(input_kwargs or {}), batch_spec
+
+    canonical = canonical_batch_for(batch_spec)
+    attempts: list[int] = [canonical]
+    if FALLBACK_TRACE_BATCH not in attempts:
+        attempts.append(FALLBACK_TRACE_BATCH)
+    errors: dict[int, Exception] = {}
+    for index, attempt in enumerate(attempts):
+        is_last = index == len(attempts) - 1
+        if batch_spec.user_batch_size == attempt:
+            canonical_inputs, canonical_kwargs = inputs, dict(input_kwargs or {})
+        else:
+            try:
+                canonical_inputs, canonical_kwargs = rebatch_inputs(
+                    inputs,
+                    input_kwargs,
+                    axes=batch_spec.axes,
+                    batch_size=attempt,
+                    adapter=adapter,
+                )
+            except Exception as exc:  # noqa: BLE001 - rebatching is backend-owned
+                raise SplitUnsupportedError(
+                    f"Cannot construct canonical batch B={attempt} with backend "
+                    f"{adapter.name!r}: {exc}"
+                ) from exc
+        try:
+            capture = capture_model(model, canonical_inputs, spec, input_kwargs=canonical_kwargs)
+        except Exception as exc:  # noqa: BLE001 - a model may genuinely reject a small batch
+            # The last attempt propagates verbatim: a capture failure there is
+            # the real diagnosis, not "no small batch worked".
+            if is_last:
+                raise
+            errors[attempt] = exc
+            continue
+        return (
+            capture,
+            canonical_inputs,
+            canonical_kwargs,
+            BatchSpec(
+                axes=batch_spec.axes,
+                inference=batch_spec.inference,
+                user_batch_size=batch_spec.user_batch_size,
+                canonical_batch_size=attempt,
+            ),
+        )
+    raise SplitUnsupportedError(
+        f"Canonical split capture failed at every small batch {tuple(attempts)!r}: "
+        f"{ {batch: repr(exc) for batch, exc in errors.items()} }."
+    )
 
 
 def normalize_to_split_ir(
@@ -299,59 +629,64 @@ def normalize_to_split_ir(
     plan: SplitPlan | None = None,
     model_profile: SplitModelProfile | None = None,
     model: Any | None = None,
+    batch_spec: BatchSpec | None = None,
 ) -> tuple[SplitTraceGraph, SplitGraphIR]:
-    """Normalize a backend capture into the runtime graph and portable Split IR."""
+    """Normalize a backend capture into the runtime graph and portable Split IR.
 
-    graph = (
-        capture
-        if isinstance(capture, SplitTraceGraph)
-        else split_graph_from_trace(
-            capture,
-            batch_symbol=spec.batch_symbol,
-            dynamic_batch=spec.dynamic_batch,
-        )
+    The retained B=1 graph is reused after one empirical B=2 replay check.
+    A failed or unavailable check keeps the graph runnable at its capture batch.
+    """
+
+    graph = capture if isinstance(capture, SplitTraceGraph) else split_graph_from_trace(capture)
+    if adapter is None:
+        from .adapters import resolve_split_adapter
+
+        adapter = resolve_split_adapter(graph.backend)
+    resolved_axes = None if batch_spec is None else dict(batch_spec.axes)
+    inference_mode: Literal["explicit", "conservative_auto"] | None = None
+    if batch_spec is not None:
+        inference_mode = "explicit" if batch_spec.inference == "explicit" else "conservative_auto"
+    shape_program = compile_shape_program(
+        graph,
+        inputs,
+        input_kwargs,
+        spec,
+        adapter=adapter,
+        batch_axes=resolved_axes,
+        inference_mode=inference_mode,
     )
-    if spec.dynamic_batch is not None:
-        if adapter is None:
-            from .adapters import resolve_split_adapter
-
-            adapter = resolve_split_adapter(graph.backend)
-        shape_program = compile_shape_program(
-            graph,
+    if shape_program is not None and model is not None:
+        shape_program = _probe_batch_replay(
+            model,
             inputs,
             input_kwargs,
             spec,
-            adapter=adapter,
+            graph,
+            shape_program,
+            adapter,
+            random_seed=getattr(capture, "random_seed", None) if adapter.name == "torch" else None,
         )
-        if shape_program is not None and shape_program.unresolved and model is not None:
-            witnesses = _capture_shape_witnesses(
-                model,
-                inputs,
-                input_kwargs,
-                spec,
-                graph,
+    if shape_program is not None:
+        if shape_program.batch_probe is not None:
+            probe = shape_program.batch_probe
+            # Include authorization, not environment-dependent error text or
+            # concrete runtime B, in cache and graph identity.
+            stamp = json.dumps(
+                ("single_probe_v1", probe.status, probe.traced_batch_size, probe.probe_batch_size)
+            )
+            shape_program = replace(
                 shape_program,
-                adapter,
+                fingerprint=sha256(f"{shape_program.fingerprint}:{stamp}".encode()).hexdigest(),
             )
-            if witnesses:
-                shape_program = compile_shape_program(
-                    graph,
-                    inputs,
-                    input_kwargs,
-                    spec,
-                    adapter=adapter,
-                    shape_witnesses=witnesses,
-                )
-        if shape_program is not None:
-            graph_hash = sha256(
-                f"{graph.graph_shape_hash or ''}:{shape_program.fingerprint}".encode()
-            ).hexdigest()
-            graph = replace(
-                graph,
-                graph_shape_hash=graph_hash,
-                traced_batch_size=shape_program.traced_batch_size,
-                shape_program=shape_program,
-            )
+        graph_hash = sha256(
+            f"{graph.graph_shape_hash or ''}:{shape_program.fingerprint}".encode()
+        ).hexdigest()
+        graph = replace(
+            graph,
+            graph_shape_hash=graph_hash,
+            traced_batch_size=shape_program.traced_batch_size,
+        )
+        graph = project_symbolic_shapes(graph, shape_program)
     resolved_plan = plan if plan is not None else plan_split(graph, spec)
     return graph, SplitGraphIR.from_trace_graph(
         graph,
@@ -413,6 +748,7 @@ def execute_split_runtime(
 
 __all__ = [
     "analyze_split_capabilities",
+    "capture_canonical_model",
     "capture_model",
     "execute_split_runtime",
     "lower_split_program",

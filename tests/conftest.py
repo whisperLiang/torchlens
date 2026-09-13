@@ -16,6 +16,11 @@ import pytest
 import torch
 
 from torchlens import _state
+from torchlens._paddle_compat import install_import_guard
+
+# A lazy, extension-specific guard also handles TensorFlow imported by a pytest
+# plugin before this conftest. Do not force optional runtime imports at startup.
+install_import_guard()
 
 # Menagerie tests exercise the menagerie/ build subsystem, which is not importable
 # on Python < 3.11 because it uses datetime.UTC. Skip collecting them on those

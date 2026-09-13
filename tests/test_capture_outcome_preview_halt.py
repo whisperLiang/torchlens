@@ -193,7 +193,7 @@ def test_paddle_halted_capture_settles_halted() -> None:
         Tiny(),
         paddle.ones([1, 3]),
         backend="paddle",
-        halt=tl.func("relu"),
+        halt=tl.func("functional.relu"),
     )
     assert trace.halted is True
     assert trace.outcome is not None

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from .api import prepare
 from .boundary import ReplayBoundary
+from .candidates import SplitCandidate, SplitCandidateReport
 from .ir import (
     BackendHandle,
     BoundarySchema,
+    DevicePlacement,
     ModelProfile,
     OpIR,
+    PlacementPlan,
     RegionIR,
     ShapeConstraint,
     SplitFeatures,
@@ -25,6 +28,7 @@ from .ir import (
 )
 from .pipeline import (
     analyze_split_capabilities,
+    capture_canonical_model,
     capture_model,
     execute_split_runtime,
     lower_split_program,
@@ -47,8 +51,10 @@ __all__ = [
     "BoundarySchema",
     "BackendHandle",
     "CapabilityStatus",
+    "DevicePlacement",
     "ModelProfile",
     "OpIR",
+    "PlacementPlan",
     "ReplayOp",
     "ReplayProgram",
     "ReplayBoundary",
@@ -59,6 +65,8 @@ __all__ = [
     "ShapeProgram",
     "ShapeRecipe",
     "TensorShapeIR",
+    "SplitCandidate",
+    "SplitCandidateReport",
     "SplitCapabilityReport",
     "SplitFeatures",
     "SplitGraphIR",
@@ -72,6 +80,7 @@ __all__ = [
     "after",
     "analyze_split_capabilities",
     "before",
+    "capture_canonical_model",
     "capture_model",
     "checkpoint_cache_path",
     "get_model_profile",

@@ -33,7 +33,7 @@ def test_jax_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
     runtime = tl.split.prepare(
         model,
         x,
-        split_request("after:max", backend="jax", dynamic_batch=(1, 4)),
+        split_request("after:max", backend="jax"),
     )
 
     replay_x = jnp.ones((3, 3))
@@ -60,7 +60,7 @@ def test_tinygrad_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
     runtime = tl.split.prepare(
         model,
         x,
-        split_request("after:where", backend="tinygrad", dynamic_batch=(1, 4)),
+        split_request("after:where", backend="tinygrad"),
     )
 
     replay_x = tinygrad.Tensor([[-1.0, 2.0, 3.0], [4.0, -5.0, 6.0], [7.0, -8.0, 9.0]]).realize()
@@ -98,6 +98,27 @@ def test_tf_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
     loaded = runtime.load_boundary(tmp_path)
     runtime.validate_boundary(loaded)
     assert bool(tf.reduce_all(tf.abs(runtime.run_suffix(loaded) - model(x)) < 1e-5).numpy())
+
+
+def test_tf_gpu_kernel_after_torch_optimizer() -> None:
+    """Torch training must not corrupt TensorFlow's subsequent LLVM GPU compilation."""
+
+    tf = pytest.importorskip("tensorflow")
+    import torch
+
+    if not tf.config.list_physical_devices("GPU"):
+        pytest.skip("TensorFlow GPU is required for the native compiler regression.")
+
+    model = torch.nn.Linear(3, 3)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    model(torch.ones(2, 3)).sum().backward()
+    optimizer.step()
+
+    with tf.device("/GPU:0"):
+        x = tf.constant([[-1.0, 2.0, 3.0]], dtype=tf.float32)
+        output = tf.nn.relu(x)
+    assert "GPU:0" in output.device
+    assert output.numpy().tolist() == [[0.0, 2.0, 3.0]]
 
 
 def test_jax_split_replay_preserves_integer_dict_and_list_containers() -> None:
@@ -140,7 +161,7 @@ def test_tf_split_replay_preserves_integer_dict_and_list_containers() -> None:
     assert bool(tf.reduce_all(tf.equal(output[1][0], expected + 1.0)).numpy())
 
 
-def test_jax_dynamic_batch_replay_for_reshape() -> None:
+def test_jax_batch_symbolic_replay_for_reshape() -> None:
     """JAX replay rewrites conservative leading-batch shape literals."""
 
     jnp = pytest.importorskip("jax.numpy")
@@ -154,7 +175,7 @@ def test_jax_dynamic_batch_replay_for_reshape() -> None:
     runtime = tl.split.prepare(
         model,
         x,
-        split_request("after:reshape", backend="jax", dynamic_batch=(1, 4)),
+        split_request("after:reshape", backend="jax"),
     )
 
     for batch in (1, 2, 4):
@@ -162,7 +183,7 @@ def test_jax_dynamic_batch_replay_for_reshape() -> None:
         assert bool(jnp.allclose(runtime.replay(replay_x), model(replay_x)))
 
 
-def test_jax_dynamic_batch_replay_for_broadcast_bias() -> None:
+def test_jax_batch_symbolic_replay_for_broadcast_bias() -> None:
     """JAX rewrites data-batch broadcast shapes without rewriting parameters."""
 
     jnp = pytest.importorskip("jax.numpy")
@@ -175,7 +196,7 @@ def test_jax_dynamic_batch_replay_for_broadcast_bias() -> None:
     runtime = tl.split.prepare(
         model,
         x,
-        split_request("after:broadcast_in_dim_2_3_raw", backend="jax", dynamic_batch=(1, 4)),
+        split_request("after:broadcast_in_dim_2_3_raw", backend="jax"),
     )
 
     for batch in (1, 2, 4):
@@ -183,7 +204,7 @@ def test_jax_dynamic_batch_replay_for_broadcast_bias() -> None:
         assert bool(jnp.allclose(runtime.replay(replay_x), model(replay_x)))
 
 
-def test_jax_dynamic_batch_preserves_fixed_dim_matching_trace_batch() -> None:
+def test_jax_batch_symbolic_preserves_fixed_dim_matching_trace_batch() -> None:
     """JAX dynamic replay only rewrites the leading shape dimension."""
 
     jnp = pytest.importorskip("jax.numpy")
@@ -196,7 +217,7 @@ def test_jax_dynamic_batch_preserves_fixed_dim_matching_trace_batch() -> None:
     runtime = tl.split.prepare(
         model,
         x,
-        split_request("after:reshape", backend="jax", dynamic_batch=(1, 4)),
+        split_request("after:reshape", backend="jax"),
     )
 
     for batch in (1, 2, 4):
@@ -204,7 +225,7 @@ def test_jax_dynamic_batch_preserves_fixed_dim_matching_trace_batch() -> None:
         assert bool(jnp.allclose(runtime.replay(replay_x), model(replay_x)))
 
 
-def test_tf_dynamic_batch_replay_for_reshape() -> None:
+def test_tf_batch_symbolic_replay_for_reshape() -> None:
     """TensorFlow replay rewrites conservative leading-batch shape literals."""
 
     tf = pytest.importorskip("tensorflow")
@@ -217,7 +238,7 @@ def test_tf_dynamic_batch_replay_for_reshape() -> None:
     runtime = tl.split.prepare(
         model,
         x,
-        split_request("after:reshape", backend="tf", dynamic_batch=(1, 4)),
+        split_request("after:reshape", backend="tf"),
     )
 
     for batch in (1, 2, 4):
@@ -226,7 +247,7 @@ def test_tf_dynamic_batch_replay_for_reshape() -> None:
         assert bool(tf.reduce_all(diff < 1e-5).numpy())
 
 
-def test_tf_dynamic_batch_preserves_fixed_dim_matching_trace_batch() -> None:
+def test_tf_batch_symbolic_preserves_fixed_dim_matching_trace_batch() -> None:
     """TensorFlow dynamic replay only rewrites the leading shape dimension."""
 
     tf = pytest.importorskip("tensorflow")
@@ -239,7 +260,7 @@ def test_tf_dynamic_batch_preserves_fixed_dim_matching_trace_batch() -> None:
     runtime = tl.split.prepare(
         model,
         x,
-        split_request("after:reshape", backend="tf", dynamic_batch=(1, 4)),
+        split_request("after:reshape", backend="tf"),
     )
 
     for batch in (1, 2, 4):
@@ -248,7 +269,7 @@ def test_tf_dynamic_batch_preserves_fixed_dim_matching_trace_batch() -> None:
         assert bool(tf.reduce_all(diff < 1e-5).numpy())
 
 
-def test_tinygrad_dynamic_batch_replay_for_reshape() -> None:
+def test_tinygrad_batch_symbolic_replay_for_reshape() -> None:
     """tinygrad replay rewrites conservative leading-batch shape literals."""
 
     tinygrad = pytest.importorskip("tinygrad")
@@ -261,9 +282,12 @@ def test_tinygrad_dynamic_batch_replay_for_reshape() -> None:
     runtime = tl.split.prepare(
         model,
         x,
-        split_request("after:reshape_3", backend="tinygrad", dynamic_batch=(1, 4)),
+        split_request("after:reshape_3", backend="tinygrad"),
     )
 
+    # B=1 may retain a singleton UOp that B=2 optimizes away. The native
+    # output comparison must still run without inventing aligned shape rows.
+    assert runtime.batch_validation["status"] == "passed"
     for batch in (1, 2, 4):
         replay_x = tinygrad.Tensor.ones(batch, 3, 2).realize()
         assert _flatten_numbers(runtime.replay(replay_x).tolist()) == pytest.approx(
@@ -271,8 +295,32 @@ def test_tinygrad_dynamic_batch_replay_for_reshape() -> None:
         )
 
 
-def test_tinygrad_dynamic_batch_rejects_out_of_range_batch() -> None:
-    """tinygrad dynamic batch replay validates the allowed leading-dim range."""
+def test_tinygrad_unaligned_shape_probe_still_requires_numeric_equivalence() -> None:
+    """Singleton UOp differences cannot bypass the native/replay comparison."""
+
+    tinygrad = pytest.importorskip("tinygrad")
+
+    def model(x: Any) -> Any:
+        """Reshape with a batch-dependent scalar on the same tensor path."""
+
+        flat = x.reshape(x.shape[0], -1)
+        return flat.relu() * (3.0 if x.shape[0] >= 2 else 2.0)
+
+    runtime = tl.split.prepare(
+        model,
+        tinygrad.Tensor.ones(2, 3, 2).realize(),
+        split_request("after:reshape_3", backend="tinygrad"),
+    )
+    assert runtime.batch_validation["status"] == "failed"
+    assert "numeric mismatch" in runtime.batch_validation["reason"]
+    singleton = tinygrad.Tensor.ones(1, 3, 2).realize()
+    assert runtime.replay(singleton).tolist() == model(singleton).tolist()
+    with pytest.raises(SplitBoundaryError, match="probe did not pass"):
+        runtime.replay(tinygrad.Tensor.ones(2, 3, 2).realize())
+
+
+def test_tinygrad_batch_symbolic_accepts_untested_batch() -> None:
+    """tinygrad replay accepts a compatible batch that was never part of a range."""
 
     tinygrad = pytest.importorskip("tinygrad")
 
@@ -284,14 +332,18 @@ def test_tinygrad_dynamic_batch_rejects_out_of_range_batch() -> None:
     runtime = tl.split.prepare(
         model,
         x,
-        split_request("after:reshape_3", backend="tinygrad", dynamic_batch=(1, 4)),
+        split_request("after:reshape_3", backend="tinygrad"),
     )
 
-    with pytest.raises(SplitBoundaryError, match="outside"):
-        runtime.replay(tinygrad.Tensor.ones(5, 3, 2).realize())
+    replay_x = tinygrad.Tensor.ones(5, 3, 2).realize()
+    actual = runtime.replay(replay_x)
+    expected = model(replay_x)
+    assert _flatten_numbers(actual.tolist()) == pytest.approx(
+        _flatten_numbers(expected.realize().tolist())
+    )
 
 
-def test_tinygrad_dynamic_batch_rejects_non_batch_dim_change() -> None:
+def test_tinygrad_batch_symbolic_rejects_non_batch_dim_change() -> None:
     """tinygrad dynamic-batch replay fails closed for changed non-batch dimensions."""
 
     tinygrad = pytest.importorskip("tinygrad")
@@ -304,7 +356,7 @@ def test_tinygrad_dynamic_batch_rejects_non_batch_dim_change() -> None:
     runtime = tl.split.prepare(
         model,
         x,
-        split_request("after:reshape_3", backend="tinygrad", dynamic_batch=(1, 4)),
+        split_request("after:reshape_3", backend="tinygrad"),
     )
 
     with pytest.raises((SplitUnsupportedError, ValueError, RuntimeError)):

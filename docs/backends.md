@@ -210,10 +210,19 @@ predicates remain deferred. These surfaces raise typed backend errors instead of
 producing partial traces.
 
 `tl.split.prepare(..., SplitRequest(..., backend="tf"))` supports raw-op prefix/suffix replay, trusted local boundary
-caches, conservative leading-dimension `SplitFeatures.dynamic_batch`, and split-training boundary
+caches, a batch-symbolic ShapeProgram (B=1 capture, empirical B=2 probe), and split-training boundary
 gradients. Mutable optimizer updates are attempted for live TensorFlow variables that participate
 in the generated suffix/prefix replay; unsupported resource or structural ops fail closed with a
 typed split error rather than fabricating gradients.
+
+Across split backends, B=2 probing compares native and replay output structure, exact shapes/dtypes,
+and numeric values. A pass allows empirical extrapolation with shape guards; a failure or unavailable
+probe allows only the captured batch. B=1 capture failure may fall back to captured-only B=2, without
+a B=3 probe. `runtime.batch_validation` discloses this scope. Untested Python branches (for example
+B>=8) can still return silently incorrect results; see [limitations](reference/limitations.md#preview-backends).
+`SplitFeatures(batch_axes={})` explicitly disables batching (fixed input shapes, no probe);
+the default `None` infers axes only for compatible top-level tensors of rank at least two.
+One-dimensional batches require an explicit mapping, such as `{"/args/0": 0}`.
 
 ## MLX Preview
 
@@ -296,6 +305,52 @@ x = paddle.ones([1, 3], dtype="float32")
 trace = tl.trace(model, x, backend="paddle")
 ```
 
+### Sharing a Linux process with TensorFlow
+
+Some Linux Paddle GPU builds bundle CINN/LLVM symbols that collide with TensorFlow's
+globally exported LLVM symbols (see its
+[native-loader flags](https://github.com/tensorflow/tensorflow/blob/v2.21.0/tensorflow/python/pywrap_dlopen_global_flags.py)).
+On the tested Paddle GPU 3.3.0 / TensorFlow 2.21.0
+combination, `import tensorflow; import paddle` can terminate Python with `SIGSEGV`
+before any TorchLens capture runs. Disabling CINN graph compilation does not prevent
+its native library from loading.
+
+The repository's pytest startup installs a **lazy, extension-specific** compatibility
+guard. For ordinary Python processes in the same virtual environment, install the
+same opt-in guard from this checkout:
+
+```bash
+.venv/bin/python scripts/paddle_import_compat.py install
+.venv/bin/python scripts/paddle_import_compat.py check
+.venv/bin/python -c 'import tensorflow; import paddle'
+```
+
+The installer owns only `_torchlens_paddle_compat.py` and `_torchlens_paddle_compat.pth`
+inside that virtual environment. It does not change framework wheels, versions, or
+`sys.path`. Startup only registers a finder; it imports no tensor framework. When
+TensorFlow is already imported, the finder locally preloads the resolved
+`paddle.base.libpaddle` extension with `RTLD_LOCAL | RTLD_NOW | RTLD_DEEPBIND` before
+delegating to Python's original loader. The interpreter-wide `sys.getdlopenflags()`
+setting stays unchanged. Unrelated modules, earlier custom import finders, non-CINN
+Paddle builds, and unsupported platforms are left alone; native load errors propagate.
+
+This is a Linux compatibility workaround, not a patched upstream library. Validation
+covers both import orders, CPU forward/backward computation, TorchLens capture, and
+TensorFlow XLA compilation before and after Paddle loads. GPU computation, Paddle
+CINN compilation, and arbitrary future framework versions are not covered by that
+claim. Do not use this deep-binding workaround with sanitizer builds. This guard
+does not isolate other frameworks' native libraries; a TensorFlow-first import of
+Triton's native extension can still crash independently of Paddle.
+Restart existing Python/Jupyter processes after installation;
+`python -S` bypasses `.pth` startup hooks. To undo the environment change:
+
+```bash
+.venv/bin/python scripts/paddle_import_compat.py remove
+```
+
+Removal deletes only the two managed files and takes effect in new processes; it
+does not attempt to unload native libraries from an existing interpreter.
+
 Paddle module roots default to object module hierarchy when TorchLens can inspect the
 `paddle.nn.Layer` tree, with `function_root` available for raw callables. Static-label `save=`
 selectors are applied after full graph capture; value-dependent `save=` predicates, streaming,
@@ -340,7 +395,7 @@ nodes. Same-object no-ops, such as an operation that returns the exact input ten
 recorded as alias annotations rather than cloned value-producing ops.
 
 `tl.split.prepare(..., SplitRequest(..., backend="paddle"))` supports generated-eager prefix/suffix replay, trusted
-local boundary caches, conservative leading-dimension `SplitFeatures.dynamic_batch`, and split training.
+local boundary caches, a batch-symbolic ShapeProgram (empirical batch extrapolation), and split training.
 `train_suffix()` returns boundary gradients and steps a supplied Paddle optimizer when the generated
 suffix uses live parameters; `backward_prefix()` propagates gradients from a
 `run_training_prefix()` boundary.
@@ -408,7 +463,7 @@ trace.derived_grads["params.w"]
 ```
 
 `tl.split.prepare(..., SplitRequest(..., backend="jax"))` supports native-IR prefix/suffix replay, trusted local
-boundary caches, conservative leading-dimension `SplitFeatures.dynamic_batch`, and split-training
+boundary caches, a batch-symbolic ShapeProgram (empirical batch extrapolation), and split-training
 gradient handoff. JAX split training is functional: `train_suffix()` returns boundary/parameter-leaf
 gradients and rejects `optimizer=`, while `backward_prefix()` returns VJP gradients for the original
 prefix input pytrees so users can apply Optax or custom updates outside TorchLens.
@@ -524,7 +579,7 @@ the payload through read-only `op.derived_grad`. Ambiguous signature matches are
 attached, and `op.grads` / `trace.saved_grad_ops` remain true-backward-only.
 
 `tl.split.prepare(..., SplitRequest(..., backend="tinygrad"))` supports UOp prefix/suffix replay, trusted local
-boundary caches, conservative leading-dimension `SplitFeatures.dynamic_batch`, and split-training
+boundary caches, a batch-symbolic ShapeProgram (empirical batch extrapolation), and split-training
 boundary gradients. Ordinary replay continues to realize copied tensors for stable cache/validation
 behavior; `run_training_prefix()` uses a separate live-UOp path so `train_suffix()` can return
 boundary gradients and `backward_prefix()` can hand them through the prefix. Cached or detached

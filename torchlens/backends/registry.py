@@ -31,6 +31,9 @@ JAX_BACKEND_NAME: Final[BackendName] = "jax"
 TINYGRAD_BACKEND_NAME: Final[BackendName] = "tinygrad"
 """Canonical registry name of the tinygrad preview backend."""
 
+PADDLE_BACKEND_NAME: Final[BackendName] = "paddle"
+"""Canonical registry name of the Paddle preview backend."""
+
 CanHandleFn: TypeAlias = Callable[[object, object, dict[Any, Any] | None], bool]
 CaptureTraceFn: TypeAlias = Callable[..., Any]
 ValidateEntryFn: TypeAlias = Callable[..., bool]

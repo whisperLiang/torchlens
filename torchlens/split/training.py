@@ -81,6 +81,26 @@ def _context(runtime: Any, reason: str) -> SplitErrorContext:
     )
 
 
+def _transport_boundary_grads(
+    runtime: Any,
+    boundary_grads: BoundaryGradients,
+) -> BoundaryGradients:
+    """Move suffix boundary gradients back onto the prefix placement.
+
+    A heterogeneous split computes ``dL/dboundary`` on the suffix device; the
+    prefix backward needs those gradients on its own device.
+    """
+
+    placement = runtime.request.placement.prefix
+    if not placement.is_explicit:
+        return boundary_grads
+    adapter = runtime.adapter
+    return {
+        key: (adapter.to_device(value, placement.device) if adapter.is_tensor(value) else value)
+        for key, value in boundary_grads.items()
+    }
+
+
 def _require_training_boundary(runtime: Any, boundary: Any) -> None:
     """Reject prefix backward for boundaries without a graph-connected prefix."""
 
@@ -460,6 +480,8 @@ def _train_suffix_jax(
     values = [boundary.tensors[key] for key in keys]
 
     def suffix_loss(*roots: Any) -> Any:
+        """Replay the suffix with differentiable boundary roots and return its loss."""
+
         tensors = dict(boundary.tensors)
         tensors.update(dict(zip(keys, roots, strict=False)))
         replay_boundary = ReplayBoundary(
@@ -856,13 +878,14 @@ def _backward_prefix_torch(
     runtime.validate_boundary(boundary, validate_state=False)
     _require_training_boundary(runtime, boundary)
     prefix_tensors = boundary.metadata.get("prefix_boundary_tensors", {})
+    transported = _transport_boundary_grads(runtime, boundary_grads)
     tensors: list[Any] = []
     grads: list[Any] = []
-    for key, grad in boundary_grads.items():
+    for key, grad in transported.items():
         tensor = prefix_tensors.get(key)
         if isinstance(tensor, torch.Tensor) and tensor.requires_grad:
             tensors.append(tensor)
-            grads.append(grad)
+            grads.append(grad if grad.device == tensor.device else grad.to(tensor.device))
     if not tensors:
         return
     if optimizer is not None:
@@ -970,6 +993,8 @@ def _backward_prefix_jax(
     inputs = tuple(boundary.metadata.get("prefix_inputs", ()))
 
     def prefix_outputs(*args: Any) -> tuple[Any, ...]:
+        """Replay the prefix and expose boundary values for the JAX pullback."""
+
         replay_boundary = runtime.run_training_prefix(*args)
         return tuple(replay_boundary.tensors[key] for key in keys)
 

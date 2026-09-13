@@ -8,6 +8,7 @@ from functools import cached_property
 from hashlib import sha256
 from typing import Any, Literal
 
+from ..backends.registry import JAX_BACKEND_NAME, PADDLE_BACKEND_NAME, TINYGRAD_BACKEND_NAME
 from ..intervention.types import CapturedArgTemplate, LiteralTensor, LiteralValue, ParentRef
 from ..utils.tensor_utils import safe_copy
 from .shape import SymbolicShape, infer_traced_batch_size, symbolic_shape_from_tensor_ref
@@ -284,6 +285,8 @@ def _normalize_edge_aliases(nodes: list[SplitTraceNode]) -> tuple[SplitTraceNode
     )
 
     def normalize(labels: tuple[str, ...]) -> tuple[str, ...]:
+        """Resolve known edge labels to canonical node IDs."""
+
         normalized: list[str] = []
         for label in labels:
             node = graph.node_for_label(label)
@@ -723,8 +726,6 @@ def _node_from_op(
     op: Any,
     *,
     backend: str,
-    batch_symbol: str,
-    dynamic_batch: tuple[int, int] | None,
     traced_batch_size: int | None,
 ) -> SplitTraceNode:
     """Project one finalized TorchLens ``Op`` to a split graph node."""
@@ -746,7 +747,7 @@ def _node_from_op(
         replay_source_policy = "live_param"
     elif is_param_source:
         replay_source_policy = "live_param_derived"
-    elif dynamic_batch is not None and shape and traced_batch_size is not None:
+    elif shape and traced_batch_size is not None:
         replay_source_policy = "batch_dynamic_constant"
     return SplitTraceNode(
         label=label,
@@ -764,12 +765,7 @@ def _node_from_op(
         output_ref=getattr(op, "out_ref", None),
         module_path=_module_path_for_op(op),
         output_shape=shape,
-        symbolic_output_shape=symbolic_shape_from_tensor_ref(
-            shape,
-            batch_symbol=batch_symbol,
-            dynamic_batch=dynamic_batch,
-            traced_batch_size=traced_batch_size,
-        ),
+        symbolic_output_shape=symbolic_shape_from_tensor_ref(shape),
         dtype=None if getattr(op, "dtype", None) is None else str(getattr(op, "dtype")),
         requires_grad=_requires_grad_for_op(op),
         output_container_path=tuple(getattr(op, "container_path", ()) or ()),
@@ -785,22 +781,17 @@ def _node_from_op(
     )
 
 
-def split_graph_from_trace(
-    trace: Any,
-    *,
-    batch_symbol: str,
-    dynamic_batch: tuple[int, int] | None,
-) -> SplitTraceGraph:
+def split_graph_from_trace(trace: Any) -> SplitTraceGraph:
     """Build a split graph from a current-main TorchLens ``Trace``.
+
+    Node shapes are recorded concretely.  Batch symbols are projected later by
+    :func:`project_symbolic_shapes` once a compiled shape program proves which
+    axes carry batch provenance.
 
     Parameters
     ----------
     trace:
         Current-main TorchLens trace.
-    batch_symbol:
-        Symbol to use for dynamic leading batch dimensions.
-    dynamic_batch:
-        Optional inclusive runtime batch range.
 
     Returns
     -------
@@ -811,20 +802,14 @@ def split_graph_from_trace(
     backend = str(getattr(trace, "backend", "torch"))
     traced_batch_size = infer_traced_batch_size(trace)
     nodes = [
-        _node_from_op(
-            op,
-            backend=backend,
-            batch_symbol=batch_symbol,
-            dynamic_batch=dynamic_batch,
-            traced_batch_size=traced_batch_size,
-        )
+        _node_from_op(op, backend=backend, traced_batch_size=traced_batch_size)
         for op in getattr(trace, "layer_list", ()) or ()
     ]
-    if backend == "paddle":
+    if backend == PADDLE_BACKEND_NAME:
         nodes = _attach_paddle_capture_templates(trace, nodes)
-    elif backend == "jax":
+    elif backend == JAX_BACKEND_NAME:
         nodes = _attach_jax_captures(trace, nodes)
-    elif backend == "tinygrad":
+    elif backend == TINYGRAD_BACKEND_NAME:
         nodes = _attach_tinygrad_captures(trace, nodes)
     elif backend in {"tf", "tensorflow"}:
         nodes = _attach_tf_captures(trace, nodes)
@@ -859,11 +844,55 @@ def split_graph_from_trace(
     )
 
 
+def _portable_dim(expression: Any, batch_symbol: str) -> int | str:
+    """Render one dimension expression as a portable ABI token."""
+
+    simplify = getattr(expression, "simplify", None)
+    if callable(simplify):
+        expression = simplify()
+    op = getattr(expression, "op", None)
+    if op == "const" and isinstance(getattr(expression, "value", None), int):
+        return int(expression.value)
+    if op == "symbol" and expression.value == batch_symbol:
+        return batch_symbol
+    contains = getattr(expression, "contains", None)
+    if callable(contains) and contains(batch_symbol):
+        return batch_symbol
+    value = getattr(expression, "value", None)
+    if isinstance(value, int):
+        return int(value)
+    return batch_symbol
+
+
+def project_symbolic_shapes(graph: SplitTraceGraph, shape_program: Any) -> SplitTraceGraph:
+    """Overlay proven batch-symbolic shapes onto graph nodes.
+
+    A dimension becomes the batch symbol only when the compiled program
+    proves it carries batch provenance.  Concrete coincidences (a constant
+    that happens to equal the traced batch) stay integers.
+    """
+
+    if shape_program is None:
+        return graph
+    batch_symbol = shape_program.batch_symbol
+    value_shapes = shape_program.value_shapes
+    updated: list[SplitTraceNode] = []
+    for node in graph.nodes:
+        shape_ir = value_shapes.get(node.canonical_id)
+        if shape_ir is None:
+            updated.append(node)
+            continue
+        symbolic = SymbolicShape(tuple(_portable_dim(dim, batch_symbol) for dim in shape_ir.dims))
+        updated.append(replace(node, symbolic_output_shape=symbolic))
+    return replace(graph, nodes=tuple(updated), shape_program=shape_program)
+
+
 __all__ = [
     "ReplaySourcePolicy",
     "ReplayCall",
     "ReplayValueRef",
     "SplitTraceGraph",
     "SplitTraceNode",
+    "project_symbolic_shapes",
     "split_graph_from_trace",
 ]

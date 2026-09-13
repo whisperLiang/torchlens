@@ -80,6 +80,8 @@ def test_tinygrad_repeated_block_groups_into_passes() -> None:
     assert {op.layer_label for op in where_ops} == {where_ops[0].layer_label}
     assert list(where_ops[0].recurrent_ops) == [op.label for op in where_ops]
     assert trace.layer_num_calls[where_ops[0].layer_label] == 2
+    assert trace.output_layers == [where_ops[-1].label]
+    assert trace.output_ops[0] is where_ops[-1]
     assert TinygradBackend().validate_trace(trace) is True
 
 
@@ -202,7 +204,9 @@ def test_tinygrad_derived_grads_survive_grouping() -> None:
     assert set(grouped.derived_grads.keys()) == set(ungrouped.derived_grads.keys())
     # Records key on final op labels, which differ across the two layouts;
     # compare in raw-label space (the per-op capture identity).
-    grouped_raw = {grouped[label]._label_raw for label in grouped.intermediate_derived_grads}
-    ungrouped_raw = {ungrouped[label]._label_raw for label in ungrouped.intermediate_derived_grads}
+    grouped_raw = {grouped[label]._label_raw for label in grouped.intermediate_derived_grads.keys()}
+    ungrouped_raw = {
+        ungrouped[label]._label_raw for label in ungrouped.intermediate_derived_grads.keys()
+    }
     assert ungrouped_raw, "reference ungrouped trace produced no records"
     assert grouped_raw == ungrouped_raw

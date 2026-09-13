@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import os
 import stat
+from collections import OrderedDict, defaultdict
 from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
@@ -30,6 +32,7 @@ from torch import nn
 import torchlens as tl
 from torchlens._io import bundle as bundle_mod
 from torchlens._io.bundle import _mark_partial, _reanchor_visualizer_paths, cleanup_tmp
+from torchlens._io.scrub import _scrub_nondeterministic_identities
 from torchlens.errors import TorchLensIOError
 
 pytestmark = pytest.mark.smoke
@@ -191,6 +194,41 @@ def test_visualizer_path_inside_bundle_is_reanchored(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # R21-1: persisted equivalence-class keys are canonically ordered              #
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("container", ["dict", "ordered", "default"])
+@pytest.mark.parametrize("empty", [False, True])
+def test_equivalence_key_scrub_preserves_mapping_semantics(container: str, empty: bool) -> None:
+    """Canonical keys retain mapping type, default factory, members and source state."""
+
+    groups: dict[str, set[str]]
+    if container == "default":
+        groups = defaultdict(set)
+    elif container == "ordered":
+        groups = OrderedDict()
+    else:
+        groups = {}
+    original_key = "mul_param_000002_param_000001_outindex0"
+    members = {"mul_1", "mul_2"}
+    if not empty:
+        groups[original_key] = members
+    state: dict[str, Any] = {"op_equivalence_classes": groups}
+
+    _scrub_nondeterministic_identities(state)
+
+    actual = state["op_equivalence_classes"]
+    assert type(actual) is type(groups)
+    assert actual is not groups
+    if empty:
+        assert not actual
+    else:
+        assert list(actual) == ["mul_param_000001_param_000002_outindex0"]
+        assert actual["mul_param_000001_param_000002_outindex0"] is members
+        assert list(groups) == [original_key]
+    if container == "default":
+        assert actual.default_factory is set
+        assert actual["new"] == set()
+        assert "new" not in groups
 
 
 class _NestedParamModel(nn.Module):

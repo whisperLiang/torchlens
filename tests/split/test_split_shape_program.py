@@ -10,13 +10,13 @@ from torchlens.split import SplitFeatures, SplitRequest, percent
 from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
 
 
-def _request(*, batch_axes: dict[str, int]) -> SplitRequest:
+def _request(*, batch_axes: dict[str, int] | None) -> SplitRequest:
     """Return a strict dynamic-batch request for shape-program tests."""
 
     return SplitRequest(
         point=percent(50),
         backend="torch",
-        features=SplitFeatures(dynamic_batch=(1, 5), batch_axes=batch_axes),
+        features=SplitFeatures(batch_axes=batch_axes),
     )
 
 
@@ -155,7 +155,7 @@ def test_explicit_batch_axes_reject_unknown_and_non_batch_changes() -> None:
 
     model = torch.nn.Sequential(torch.nn.Flatten(start_dim=1), torch.nn.Linear(12, 2)).eval()
     example = torch.ones(2, 3, 4)
-    with pytest.raises(SplitUnsupportedError, match="Unknown dynamic-batch input paths"):
+    with pytest.raises(SplitUnsupportedError, match="Unknown batch input paths"):
         tl.split.prepare(
             model,
             example,
@@ -182,5 +182,25 @@ def test_auto_inference_rejects_nested_ambiguous_inputs() -> None:
         tl.split.prepare(
             Model().eval(),
             {"x": torch.ones(2, 3)},
-            _request(batch_axes={}),
+            _request(batch_axes=None),
         )
+
+
+def test_nested_dict_inputs_rebatch_via_explicit_axes() -> None:
+    """A nested input tree rebatches every declared leaf, not just the top tensor."""
+
+    class Model(torch.nn.Module):
+        def forward(self, values: dict[str, torch.Tensor]) -> torch.Tensor:
+            return values["x"] + values["y"]
+
+    model = Model().eval()
+    example = {"x": torch.ones(2, 3), "y": torch.ones(2, 3)}
+    runtime = tl.split.prepare(
+        model,
+        example,
+        _request(batch_axes={"/args/0/x": 0, "/args/0/y": 0}),
+    )
+    assert runtime.traced_batch_size == 1
+    for batch in (1, 3, 8):
+        values = {"x": torch.ones(batch, 3), "y": torch.ones(batch, 3) * 2}
+        torch.testing.assert_close(runtime.replay(values), model(values))

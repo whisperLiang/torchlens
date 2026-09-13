@@ -291,13 +291,15 @@ torchlens = [
 
 [tool.pytest.ini_options]
 # Repo root on sys.path, EXPLICITLY. Several suites import first-party helpers
-# by path (`import scripts.*`, `from tests.support import ...`). `python -m
-# pytest` prepends the cwd automatically but bare `pytest` does NOT, so those
+# by path (`import scripts.*`). `python -m pytest` prepends the cwd automatically
+# but bare `pytest` does NOT, so those
 # modules imported fine locally and failed collection in CI with
-# "ModuleNotFoundError: No module named 'scripts'" / "'tests'" -- an
+# "ModuleNotFoundError: No module named 'scripts'" -- an
 # invocation-dependent import environment that hid a whole class of breakage
 # from local verification (2026-08-19). Setting it here makes both invocations
 # identical instead of relying on how pytest happened to be launched.
+# Shared test helpers use `support.*` from pytest's prepended tests directory;
+# this avoids unrelated installed `tests` packages shadowing our test tree.
 pythonpath = ["."]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",

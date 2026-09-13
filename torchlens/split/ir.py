@@ -14,6 +14,8 @@ from enum import Enum
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Literal
 
+from .placement import DevicePlacement, PlacementPlan
+
 if TYPE_CHECKING:
     from .graph import SplitTraceGraph, SplitTraceNode
     from .planner import SplitPlan
@@ -513,24 +515,27 @@ class SplitGraphIR:
 
 @dataclass(frozen=True)
 class SplitFeatures:
-    """Requested split features independent of a backend implementation."""
+    """Requested split features independent of a backend implementation.
+
+    ``batch_axes`` declares batch-axis SEMANTICS (which axis of which input
+    leaf is the batch), never a set of allowed batch values. ``None`` selects
+    conservative auto-inference; ``{}`` explicitly declares no batch axes.
+    Rank-zero and rank-one inputs are not auto-inferred as batched. A runtime batch
+    is accepted after an empirical B=2 replay probe, subject to shape guards.
+    Untested batches are extrapolations, not universally verified executions.
+    """
 
     replay: bool = True
-    dynamic_batch: tuple[int, int] | None = None
     training: bool = False
     boundary_cache: bool = False
-    batch_axes: Mapping[str, int] = field(default_factory=dict)
+    batch_axes: Mapping[str, int] | None = None
     cross_device: bool = False
     live_param_sources: bool | None = None
 
     def __post_init__(self) -> None:
-        """Validate feature ranges."""
+        """Validate declared batch-axis semantics."""
 
-        if self.dynamic_batch is not None:
-            low, high = self.dynamic_batch
-            if low <= 0 or high < low:
-                raise ValueError("dynamic_batch must be a positive inclusive range")
-        for path, axis in self.batch_axes.items():
+        for path, axis in (self.batch_axes or {}).items():
             if not isinstance(path, str) or not (
                 path.startswith("/args/") or path.startswith("/kwargs/")
             ):
@@ -543,10 +548,9 @@ class SplitFeatures:
 
         return {
             "replay": self.replay,
-            "dynamic_batch": self.dynamic_batch,
             "training": self.training,
             "boundary_cache": self.boundary_cache,
-            "batch_axes": dict(self.batch_axes),
+            "batch_axes": None if self.batch_axes is None else dict(self.batch_axes),
             "cross_device": self.cross_device,
             "live_param_sources": self.live_param_sources,
         }
@@ -611,6 +615,7 @@ class SplitRequest:
     validation: Literal["strict", "permissive"] = "strict"
     device_policy: Literal["runtime"] = "runtime"
     batch_symbol: str = "B"
+    placement: PlacementPlan = field(default_factory=PlacementPlan)
 
     def __post_init__(self) -> None:
         """Validate request-level policy."""
@@ -621,18 +626,14 @@ class SplitRequest:
             raise ValueError("device_policy must be 'runtime'")
         if not self.batch_symbol:
             raise ValueError("batch_symbol must be non-empty")
+        if not isinstance(self.placement, PlacementPlan):
+            raise TypeError("placement must be a PlacementPlan")
 
     @property
     def boundary(self) -> str:
         """Return the planner spelling of the typed split point."""
 
         return self.point.as_boundary()
-
-    @property
-    def dynamic_batch(self) -> tuple[int, int] | None:
-        """Return the requested dynamic batch range."""
-
-        return self.features.dynamic_batch
 
     @property
     def trainable(self) -> bool:
@@ -816,8 +817,10 @@ __all__ = [
     "BackendHandle",
     "BoundaryRole",
     "BoundarySchema",
+    "DevicePlacement",
     "ModelProfile",
     "OpIR",
+    "PlacementPlan",
     "RegionIR",
     "ShapeConstraint",
     "SplitFeatures",

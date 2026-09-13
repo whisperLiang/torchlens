@@ -1,9 +1,10 @@
 # Error refusal contract
 
-User-reachable TorchLens refusals are subclasses of `torchlens.errors.TorchLensError` and retain
+The stable TorchLens refusals below are subclasses of `torchlens.errors.TorchLensError` and retain
 their historical built-in exception compatibility where applicable. Callers should branch on
-`exc.fields["code"]`, never on message text. Each refusal covered by this contract also carries a
-non-empty `exc.fields["remedy"]`, and its human-readable message ends with that remedy.
+`exc.fields["code"]`, never on message text. Each stable refusal also carries a non-empty
+`exc.fields["remedy"]`, and its human-readable message ends with that remedy. The split preview
+family is an explicit exception, documented separately below.
 
 The argument and capture-context classes are resolved lazily from `torchlens.errors`; they do not
 add names to the top-level `torchlens` namespace:
@@ -23,6 +24,21 @@ add names to the top-level `torchlens` namespace:
 - `DiagnosticSeverityError(ConfigurationError, ValueError)`
 - `PayloadUnavailableError(CaptureError, ValueError)`
 - `RecordBindingError(CaptureError, RuntimeError)`
+
+## Split preview codes (documented-unstable)
+
+The split preview uses `torchlens.split.errors.SplitError`, which is not a
+`TorchLensError`: branch on `exc.code`, not `exc.fields["code"]`. Its subclasses
+retain `ValueError` or `NotImplementedError` catchability and may carry a
+`SplitErrorContext`; unlike the stable refusals below, they do not guarantee a
+`fields["remedy"]` entry.
+
+| Code | Refusal | Remedy class |
+|---|---|---|
+| `split_error` | Base split runtime failure code | Inspect the message and optional context; catch a more specific subclass when available |
+| `split_request_error` | Split point or typed request cannot be resolved | Choose a valid point and supported request options |
+| `split_boundary_error` | Supplied replay boundary violates the captured boundary ABI | Rebuild the boundary from the matching runtime and preserve its metadata and tensor contract |
+| `split_unsupported` | Requested split capability or captured construct cannot be replayed | Use a supported backend, operation, or split point |
 
 ## Stable codes
 
