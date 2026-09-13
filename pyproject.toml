@@ -647,9 +647,9 @@ major_on_zero = true
 # release-requirements.txt); tests/test_packaging_diet.py enforces the
 # lockstep in both directions.
 build_command = "SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python -m build --no-isolation && SOURCE_DATE_EPOCH=\"$(git log -1 --pretty=%ct)\" python scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl"
-# `[skip ci]` is REQUIRED: the bot pushes this commit to main, and without the
-# skip token GitHub re-triggers the Release workflow on it, which re-releases and
-# pushes again -> infinite loop. (See git history: a 1599-commit runaway.)
+# `[skip ci]` remains REQUIRED defense-in-depth on the bot's main-branch commit.
+# Release is manual-only today, but this prevents a 1599-commit runaway if an
+# automatic trigger is ever restored without re-auditing the release loop.
 commit_message = "chore(release): {version} [skip ci]"
 # Layer 3: custom parser that refuses to emit LevelBump.MAJOR.
 commit_parser = "scripts/no_major_parser.py:NoMajorAngularParser"

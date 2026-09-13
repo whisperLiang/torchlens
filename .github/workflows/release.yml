@@ -1,8 +1,9 @@
 name: Release
 
 on:
-  push:
-    branches: [main]
+  # Manual-only while the compatibility matrix is being brought back to green.
+  # Ordinary main pushes must not attempt a release from a known-red baseline.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -35,11 +36,6 @@ jobs:
     # upload holds a live push-capable credential on the runner for all of
     # it. A healthy release completes in well under 30 minutes.
     timeout-minutes: 30
-    # Belt-and-suspenders with the `[skip ci]` token in the release commit
-    # message: never run a release on the bot's own release commit, so a missing
-    # skip token can't reignite the runaway release loop.
-    if: ${{ !startsWith(github.event.head_commit.message, 'chore(release):') }}
-
     steps:
       - name: Generate app token
         id: app-token
