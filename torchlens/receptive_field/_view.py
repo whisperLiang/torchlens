@@ -273,6 +273,26 @@ class ReceptiveFieldView:
         )
         return tuple(int(self._op.shape[axis]) // 2 for axis in output_axes)
 
+    def _projective_query_unit(
+        self,
+        solution: _ProjectiveFieldSolution,
+        unit: tuple[int, ...] | Literal["center"],
+        target: object | None,
+    ) -> Sequence[int]:
+        """Resolve the projective midpoint only after selecting its target descriptor."""
+
+        if unit != "center":
+            return cast(Sequence[int], unit)
+        from ._forward_query import _select_target_descriptor
+
+        descriptors = solution.per_op.get(self._op.label)
+        if not descriptors:
+            raise ReceptiveFieldError(
+                f"No projective-field solution is available from source {self._op.label!r}."
+            )
+        descriptor = _select_target_descriptor(descriptors, cast("Op | str | None", target))
+        return self._center_unit(descriptor)
+
     def at(
         self,
         unit: tuple[int, ...] | Literal["center"],
@@ -317,22 +337,10 @@ class ReceptiveFieldView:
         if resolved_direction is ReceptiveFieldDirection.PROJECTIVE:
             if input is not None or source is not None:
                 raise TypeError("Projective queries select their far endpoint with target=.")
-            from ._forward_query import _select_target_descriptor, box_for_source_unit
+            from ._forward_query import box_for_source_unit
 
             projective_solution = self._projective_solution(target)
-            source_unit: Sequence[int]
-            if unit == "center":
-                descriptors = projective_solution.per_op.get(self._op.label)
-                if not descriptors:
-                    raise ReceptiveFieldError(
-                        f"No projective-field solution is available from source {self._op.label!r}."
-                    )
-                proj_descriptor = _select_target_descriptor(
-                    descriptors, cast("Op | str | None", target)
-                )
-                source_unit = self._center_unit(proj_descriptor)
-            else:
-                source_unit = cast(Sequence[int], unit)
+            source_unit = self._projective_query_unit(projective_solution, unit, target)
             return box_for_source_unit(
                 projective_solution,
                 self._op,

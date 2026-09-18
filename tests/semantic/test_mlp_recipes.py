@@ -114,7 +114,7 @@ def test_real_distilbert_ffn_facets_populate() -> None:
 
     try:
         model = AutoModel.from_pretrained("hf-internal-testing/tiny-random-distilbert")
-    except Exception as exc:  # pragma: no cover - cache/network dependent
+    except OSError as exc:  # pragma: no cover - cache/network dependent
         pytest.skip(f"tiny-random-distilbert unavailable offline: {exc}")
     model.eval()
 

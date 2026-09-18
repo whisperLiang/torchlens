@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import subprocess
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,8 +17,9 @@ from menagerie.crawler.checkpoint import (
 from menagerie.crawler.mirrors import MirrorStore
 from menagerie.crawler.policy import static_source_check
 from menagerie.crawler.tests.test_slice_e_checkpoint_retro import RecordingGit
+
 from .support import (
-    fabricated_crawler_locks,
+    crawler_lock_provenance_errors,
     repository_root,
     tracked_paths,
 )
@@ -70,22 +72,29 @@ def test_checkpoint_refuses_wrong_branch_and_nonallowlisted_paths(tmp_path: Path
         )
 
 
-def test_git_tree_ships_no_runtime_solve_or_secret_artifacts(tmp_path: Path) -> None:
-    """Only source/spec facts are tracked; runtime, fabricated locks, and secrets stay local."""
+def test_git_tree_ships_no_runtime_solve_or_secret_artifacts() -> None:
+    """Source/specs and attested release locks may ship; runtime and secrets stay local."""
 
     repo_root = repository_root()
     tracked = tracked_paths(repo_root)
     assert all(".crawl-local" not in path.parts for path in tracked)
-    assert fabricated_crawler_locks(repo_root) == ()
+    assert crawler_lock_provenance_errors(repo_root) == ()
     crawler_paths = [path for path in tracked if path.parts[:2] == ("menagerie", "crawler")]
     secret_parts = {"credential", "credentials", "secret", "secrets", "token"}
     assert all(
         not secret_parts.intersection(part.lower() for part in path.parts) for path in crawler_paths
     )
+
+
+@pytest.mark.slow
+def test_repository_secret_scan(tmp_path: Path) -> None:
+    """Run the full tracked-tree secret scan (measured over 40s wall, 600s worker CPU)."""
+
+    repo_root = repository_root()
     baseline = tmp_path / ".secrets.baseline"
     shutil.copyfile(repo_root / ".secrets.baseline", baseline)
     secret_scan = subprocess.run(
-        ["detect-secrets", "scan", "--baseline", str(baseline)],
+        [sys.executable, "-m", "detect_secrets", "scan", "--baseline", str(baseline)],
         cwd=repo_root,
         check=False,
         capture_output=True,

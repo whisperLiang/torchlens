@@ -1,9 +1,9 @@
-"""Opt-in, Linux-local isolation of Paddle's LLVM symbols from TensorFlow.
+"""Opt-in, Linux-local isolation of Paddle's native symbols from TensorFlow.
 
 This module deliberately imports neither TorchLens nor any tensor framework. It
 can also run as the standalone copy installed by ``scripts/paddle_import_compat.py``.
 Installing the finder does not load Paddle: only a TensorFlow-first import of the
-real Paddle extension with a bundled CINN library receives local deep binding.
+real Paddle extension with bundled CINN or Phi libraries receives local deep binding.
 """
 
 from __future__ import annotations
@@ -123,10 +123,14 @@ class _PaddleImportGuard:
         ):
             return None
         # Derive the library from Python's resolved extension, never a global
-        # library search or a user-controlled override. CPU/non-CINN builds need
-        # no compatibility intervention.
+        # library search or a user-controlled override. GPU CINN builds collide
+        # through LLVM; CPU 3.3.1 also collides through bundled Phi's protobuf
+        # symbols during operator registration, before Python initializes Paddle.
         package_dir = os.path.dirname(os.path.dirname(spec.origin))
-        if not os.path.isfile(os.path.join(package_dir, "libs", "libcinnapi.so")):
+        if not any(
+            os.path.isfile(os.path.join(package_dir, "libs", library))
+            for library in ("libcinnapi.so", "libphi_core.so")
+        ):
             return None
         spec.loader = _PaddleExtensionLoader(spec.loader)  # type: ignore[assignment]
         return spec

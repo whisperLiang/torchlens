@@ -249,6 +249,6 @@ def _diff_sequence(
     if len(a) != len(b):
         return [f"{path}: len {len(a)} != {len(b)}"]
     diffs: list[str] = []
-    for index, (left, right) in enumerate(zip(a, b)):
+    for index, (left, right) in enumerate(zip(a, b, strict=True)):
         diffs.extend(_diff(left, right, f"{path}[{index}]", seen))
     return diffs

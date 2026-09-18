@@ -381,8 +381,14 @@ def test_honest_amplifier_zoo_runs_verified(tmp_path: Path) -> None:
 
     x = torch.randn(6)
     bundle = _build(tmp_path, "zoo.tlspec", _AmplifierZoo(), x)
-    result = tl.load(str(bundle)).run(inputs=x.clone())
-    assert result.report.path_faithfulness.value == "verified"
+    loaded = tl.load(str(bundle))
+    result = loaded.run(inputs=x.clone())
+    assert result.report.path_faithfulness.value == "verified", {
+        "coverage_gaps": loaded._runnable.descriptor.coverage_gaps,
+        "rng_profile": loaded._runnable.descriptor.rng_profile,
+        "nondeterministic_sources": result.report.nondeterministic_sources,
+        "first_mismatch": result.report.first_mismatch,
+    }
 
 
 def test_honest_zero_numel_model_runs_verified(tmp_path: Path) -> None:

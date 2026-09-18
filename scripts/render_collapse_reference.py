@@ -6,16 +6,21 @@ Run from the repository root:
 
 The default destination is ``docs/images/collapse``.  The script also copies
 the finished gallery to ``/tmp/collapse_renders`` for visual review.
+The byte-reference renderer uses Linux Graphviz 2.43 with fonts-dejavu-core;
+its private fontconfig pins the original serif metrics without changing the
+user's normal TorchLens rendering or system font configuration.
 """
 
 from __future__ import annotations
 
 import argparse
 import html
+import os
 import shutil
 import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -174,6 +179,28 @@ def render(out_dir: Path, *, copy_for_review: bool = True) -> None:
         Whether to also copy the gallery to the human-review staging
         directory. ``--check`` renders to a throwaway directory and skips it.
     """
+
+    with _reference_font_scope():
+        _render_gallery(out_dir, copy_for_review=copy_for_review)
+
+
+@contextmanager
+def _reference_font_scope() -> Iterator[None]:
+    """Pin subprocess font matching and restore the caller's environment on exit."""
+
+    previous = os.environ.get("FONTCONFIG_FILE")
+    os.environ["FONTCONFIG_FILE"] = str(Path(__file__).with_name("collapse_reference_fonts.conf"))
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("FONTCONFIG_FILE", None)
+        else:
+            os.environ["FONTCONFIG_FILE"] = previous
+
+
+def _render_gallery(out_dir: Path, *, copy_for_review: bool) -> None:
+    """Capture and render the complete gallery under the reference font scope."""
 
     _verify_checkout()
     torch.manual_seed(1234)

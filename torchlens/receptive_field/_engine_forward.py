@@ -30,10 +30,12 @@ from ._engine_geometry import (
     _identity_map,
     _InputState,
     _Mapped,
+    _RuleApplication,
     _select_full_axes,
     _transpose_mapped,
+    _WindowMapping,
 )
-from ._errors import ReceptiveFieldConfigurationError
+from ._errors import ReceptiveFieldConfigurationError, ReceptiveFieldUnavailableError
 from ._path import ancestor_labels, resolve_graph_point
 from ._rules import _rf_rules_epoch, _RuleResult
 from ._types import ReceptiveField, ReceptiveFieldDirection, ReceptiveFieldStatus
@@ -180,6 +182,10 @@ def _solve_projective_uncached(
     per_op: dict[str, Mapping[str, ReceptiveField]] = {}
     flattened_states: dict[tuple[str, str], _InputState] = {}
     for op in operations:
+        # Non-tensor boundary states must carry uncertainty through the graph,
+        # but have no source grid on which a public descriptor could be queried.
+        if op.shape is None:
+            continue
         op_descriptors: dict[str, ReceptiveField] = {}
         for role, state in states_by_op.get(op.label, {}).items():
             descriptor = replace(
@@ -205,6 +211,10 @@ def _solve_projective_uncached(
 def _seed_target(op: Op) -> _InputState:
     """Create identity geometry at one projective result target."""
 
+    if op.shape is None:
+        raise ReceptiveFieldUnavailableError(
+            f"Operation {op.label!r} has no tensor output grid to seed projective geometry."
+        )
     shape = tuple(op.shape)
     role = op.io_role or op.label
     identity = _identity_map()
@@ -238,16 +248,36 @@ def _transpose_rule(
         if result.kind == "data_dependent":
             notes += (f"{child.label}: data-dependent forward routing has no static transpose",)
         return replace(state, axes=None, taint=status, notes=notes, rule=rule_name)
+    if parent.shape is None:
+        return replace(
+            state,
+            axes=None,
+            taint=state.taint or ReceptiveFieldStatus.UNKNOWN,
+            notes=notes + (f"{parent.label}: no tensor output grid for the transpose",),
+            rule=rule_name,
+        )
     if state.taint is not None or state.axes is None:
         return replace(state, notes=notes, rule=rule_name)
-    if result.kind == "window":
-        return _transpose_window(child, parent, state, result, rule_name, notes)
-    if result.kind == "window_edges":
-        return _transpose_window_edges(child, parent, state, result, rule_name, notes)
-    if result.kind == "full":
-        return _transpose_full(child, parent, state, result, rule_name, notes)
-    if result.kind == "axis_map":
-        return _transpose_axis_map(child, parent, state, result, rule_name, notes)
+    application = _RuleApplication(result, rule_name, notes)
+    handler = {
+        "window": _transpose_window,
+        "window_edges": _transpose_window_edges,
+        "full": _transpose_full,
+        "axis_map": _transpose_axis_map,
+    }.get(result.kind)
+    if handler is not None:
+        return handler(child, parent, state, application)
+    return _transpose_unmapped_rule(child, parent, state, application)
+
+
+def _transpose_unmapped_rule(
+    child: Op, parent: Op, state: _InputState, application: _RuleApplication
+) -> _InputState:
+    """Transpose degradation or passthrough without an explicit coordinate map."""
+
+    result, rule_name, notes = application.result, application.name, application.notes
+    if state.axes is None:
+        return replace(state, notes=notes, rule=rule_name)
     if result.kind == "dissolve":
         axes = tuple(
             replace(
@@ -275,21 +305,20 @@ def _transpose_rule(
             for axis in state.axes
         )
         return replace(state, axes=axes, notes=notes + (degradation,), rule=rule_name)
-    return _transpose_passthrough(child, parent, state, result, rule_name, notes)
+    return _transpose_passthrough(child, parent, state, application)
 
 
 def _transpose_passthrough(
     child: Op,
     parent: Op,
     state: _InputState,
-    result: _RuleResult,
-    rule_name: str,
-    notes: tuple[str, ...],
+    application: _RuleApplication,
     *,
     child_to_parent: Mapping[int, int] | None = None,
 ) -> _InputState:
     """Transpose identity and broadcast relations with explicit axis alignment."""
 
+    result, rule_name, notes = application.result, application.name, application.notes
     assert state.axes is not None
     if child_to_parent is None:
         parent_to_child = _passthrough_axis_map(child, parent, result)
@@ -377,12 +406,11 @@ def _transpose_window(
     child: Op,
     parent: Op,
     state: _InputState,
-    result: _RuleResult,
-    rule_name: str,
-    notes: tuple[str, ...],
+    application: _RuleApplication,
 ) -> _InputState:
     """Transpose a standard kernel/stride/padding/dilation recurrence."""
 
+    result = application.result
     kernels = _as_tuple(result.values["kernel"])
     rank = len(kernels)
     strides = _as_tuple(result.values.get("stride", 1), rank)
@@ -404,10 +432,11 @@ def _transpose_window(
         child,
         parent,
         state,
-        local_maps,
-        rule_name,
-        notes,
-        channel_dependency=str(result.values.get("channel_dependency", "full_exact")),
+        _WindowMapping(
+            local_maps,
+            channel_dependency=str(result.values.get("channel_dependency", "full_exact")),
+        ),
+        application,
     )
 
 
@@ -415,12 +444,11 @@ def _transpose_window_edges(
     child: Op,
     parent: Op,
     state: _InputState,
-    result: _RuleResult,
-    rule_name: str,
-    notes: tuple[str, ...],
+    application: _RuleApplication,
 ) -> _InputState:
     """Transpose registered raw two-edge maps or taint malformed metadata."""
 
+    result, rule_name, notes = application.result, application.name, application.notes
     raw_edges = result.values.get("per_axis_edges")
     if not isinstance(raw_edges, Sequence) or isinstance(raw_edges, (str, bytes)):
         return _malformed_window_state(child, state, rule_name, notes)
@@ -442,10 +470,11 @@ def _transpose_window_edges(
         child,
         parent,
         state,
-        tuple(maps),
-        rule_name,
-        notes,
-        preserve_non_window_axes=bool(result.values.get("preserve_non_window_axes", False)),
+        _WindowMapping(
+            tuple(maps),
+            preserve_non_window_axes=bool(result.values.get("preserve_non_window_axes", False)),
+        ),
+        application,
     )
 
 
@@ -470,15 +499,15 @@ def _transpose_window_maps(
     child: Op,
     parent: Op,
     state: _InputState,
-    local_maps: tuple[_Mapped, ...],
-    rule_name: str,
-    notes: tuple[str, ...],
-    *,
-    preserve_non_window_axes: bool = False,
-    channel_dependency: str = "full_exact",
+    window: _WindowMapping,
+    application: _RuleApplication,
 ) -> _InputState:
     """Transpose local window maps and mirror semantic axis inference."""
 
+    local_maps = window.maps
+    preserve_non_window_axes = window.preserve_non_window_axes
+    channel_dependency = window.channel_dependency
+    rule_name, notes = application.name, application.notes
     assert state.axes is not None
     spatial_rank = len(local_maps)
     parent_rank = len(parent.shape)
@@ -579,12 +608,11 @@ def _transpose_full(
     child: Op,
     parent: Op,
     state: _InputState,
-    result: _RuleResult,
-    rule_name: str,
-    notes: tuple[str, ...],
+    application: _RuleApplication,
 ) -> _InputState:
     """Transpose selected whole-parent-axis dependence into target-space fullness."""
 
+    result, rule_name, notes = application.result, application.name, application.notes
     assert state.axes is not None
     selected = _select_full_axes(result.values.get("axes"), parent, child)
     exact = bool(result.values.get("exact", True))
@@ -602,9 +630,7 @@ def _transpose_full(
         child,
         parent,
         state,
-        result,
-        rule_name,
-        notes,
+        application,
         child_to_parent=child_to_parent,
     )
     if passthrough.axes is None and all(axis.output_axis is None for axis in state.axes):
@@ -675,12 +701,11 @@ def _transpose_axis_map(
     child: Op,
     parent: Op,
     state: _InputState,
-    result: _RuleResult,
-    rule_name: str,
-    notes: tuple[str, ...],
+    application: _RuleApplication,
 ) -> _InputState:
     """Transpose an exact child-axis to parent-axis remapping."""
 
+    result, rule_name, notes = application.result, application.name, application.notes
     raw_mapping = result.values.get("out_to_parent_axis", {})
     if not isinstance(raw_mapping, Mapping):
         return replace(
@@ -738,16 +763,14 @@ def _transpose_axis_map(
                     provenance=provenance,
                 )
             )
-    return _degrade_for_selected_axes(child, parent, state, result, rule_name, notes, axes)
+    return _degrade_for_selected_axes(child, parent, state, application, axes)
 
 
 def _degrade_for_selected_axes(
     child: Op,
     parent: Op,
     state: _InputState,
-    result: _RuleResult,
-    rule_name: str,
-    notes: tuple[str, ...],
+    application: _RuleApplication,
     axes: list[_AxisState],
 ) -> _InputState:
     """Widen a transposed axis-map state whose scalar-select drops real extent.
@@ -765,6 +788,7 @@ def _degrade_for_selected_axes(
     that misses the true mapping (disputed-r3 F2).
     """
 
+    result, rule_name, notes = application.result, application.name, application.notes
     raw_selected = result.values.get("selected_parent_axes", ())
     selected = (
         tuple(int(axis) for axis in raw_selected)

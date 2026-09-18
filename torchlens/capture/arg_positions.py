@@ -2378,7 +2378,8 @@ _PHASE5B_VALIDATED_ARG_SPECS = {
     "reduceex": ArgSpec(positions=(0,), tensor_kwargs=("self",)),
     "registerpostaccumulategradhook": ArgSpec(positions=(0,), tensor_kwargs=("self",)),
     "reshapealiascopy": ArgSpec(positions=(0,), tensor_kwargs=("self",)),
-    "reshapefromtensor": ArgSpec(positions=(0, 1), tensor_kwargs=("self", "shape")),
+    # ATen names the source ``self``; the Python binding accepts ``input``.
+    "reshapefromtensor": ArgSpec(positions=(0, 1), tensor_kwargs=("self", "input", "shape")),
     "resizeas": ArgSpec(positions=(0, 1), tensor_kwargs=("self", "the_template")),
     "resizeassparse": ArgSpec(positions=(0, 1), tensor_kwargs=("self", "the_template")),
     "resizeoutput": ArgSpec(positions=(0,), tensor_kwargs=("self",)),
@@ -2593,6 +2594,11 @@ _PHASE5B_VALIDATED_ARG_SPECS = {
 
 for _name, _spec in _PHASE5B_VALIDATED_ARG_SPECS.items():
     FUNC_ARG_SPECS[_name] = _spec
+
+# ``torch.onnx.operators.reshape_from_tensor_shape`` is a direct alias of
+# ``torch._reshape_from_tensor``. The loaded-alias roster must preserve both
+# tensor parents under either spelling, with the same ATen keyword contract.
+FUNC_ARG_SPECS["reshapefromtensorshape"] = FUNC_ARG_SPECS["reshapefromtensor"]
 
 # Tensor iterator and subclass custom_methods
 for _name in [

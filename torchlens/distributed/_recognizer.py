@@ -141,6 +141,30 @@ VETTED_NAMESPACE_SNAPSHOTS: tuple[tuple[str, dict[str, frozenset[str]]], ...] = 
     ),
 )
 
+# Torch 2.8 is the repository's canonical CPU CI lane. Its materialized five-
+# namespace census is an exact subset of 2.13, with these ten reviewed absences.
+# This is a static snapshot, never a runtime-derived allowlist: additions and
+# deletions still fail closed. CPU gloo boundary/census suites cover this lane;
+# this does not add support for unavailable newer functional collective APIs.
+_TORCH_28_ABSENT: dict[str, frozenset[str]] = {
+    "c10d": frozenset({"check_for_nan"}),
+    "_c10d_functional": frozenset(
+        {"_wrap_tensor_autograd", "batch_p2p_ops", "irecv", "isend", "reduce_scatter_tensor_out"}
+    ),
+    "_c10d_functional_autograd": frozenset(),
+    "c10d_functional": frozenset({"batch_p2p_ops", "irecv", "isend"}),
+    "_dtensor": frozenset({"mesh_get_process_group"}),
+}
+VETTED_NAMESPACE_SNAPSHOTS += (
+    (
+        "torch-2.8",
+        {
+            namespace: ops - _TORCH_28_ABSENT[namespace]
+            for namespace, ops in VETTED_NAMESPACE_SNAPSHOTS[0][1].items()
+        },
+    ),
+)
+
 # Torch 2.14's materialized dispatcher census adds exactly one c10d op.
 # Its new public gather entry points are explicitly refused during capture:
 # the frozen boundary schema cannot represent their root-only aggregate buffer.

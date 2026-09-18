@@ -78,8 +78,10 @@ from .._options import (
     reject_extra_trace_kwargs,
     reject_unsupported_trace_options,
 )
+from .._recurrence import relabel_edge_metadata
 from .._selective_save import apply_static_label_save_policy, pop_static_label_save_predicate
 from .._validation_shared import float_replay_tolerances
+from ._pytree_paths import _jax_dict_keys, _path_to_components, _path_to_string
 from ._site_dialect import jax_site_keys
 from .jaxpr import (
     ALL_JAX_EQUATION_KINDS,
@@ -1877,13 +1879,14 @@ class JAXBackend:
                     equivalence_key=op_log.equivalence_class or label,
                 ),
             )
-            pass_label = f"{assignment.layer_label}:{assignment.pass_index}"
+            layer_label = assignment.layer_label.removesuffix("_raw")
+            pass_label = f"{layer_label}:{assignment.pass_index}"
             op_log._label_raw = label
             op_log._layer_label_raw = assignment.layer_label
             op_log.label = pass_label
             op_log.label_short = pass_label
-            op_log.layer_label = assignment.layer_label
-            op_log.layer_label_short = assignment.layer_label
+            op_log.layer_label = layer_label
+            op_log.layer_label_short = layer_label
             op_log.pass_index = assignment.pass_index
             op_log.num_passes = assignment.num_passes
             op_log.equivalence_class = assignment.equivalence_key
@@ -1915,9 +1918,7 @@ class JAXBackend:
                 if member in raw_to_final_op_label
             ]
             op_log.equivalent_ops = equivalent_labels_by_key.get(op_log.equivalence_class, set())
-            op_log.lookup_keys = [label, op_log.label]
-            if op_log.num_passes > 1:
-                op_log.lookup_keys.append(op_log.layer_label)
+            op_log.lookup_keys = [label, op_log.label, op_log.layer_label]
             trace.layer_list.append(op_log)
             trace.layer_dict_main_keys[op_log.label] = op_log
             for lookup_key in op_log.lookup_keys:
@@ -2041,12 +2042,18 @@ class JAXBackend:
             trace.num_params = num_params
             trace.num_params_trainable = num_params_trainable
             trace.num_params_frozen = num_params - num_params_trainable
-        trace.output_layers = [
-            trace._raw_graph_ws.raw_layer_dict[label].layer_label
-            if label in trace._raw_graph_ws.raw_layer_dict
-            else label
-            for label in trace.output_layers
-        ]
+        for field in (
+            "input_layers",
+            "output_layers",
+            "buffer_layers",
+            "internal_source_ops",
+            "internal_sink_ops",
+        ):
+            setattr(
+                trace,
+                field,
+                [raw_to_final_op_label.get(label, label) for label in getattr(trace, field)],
+            )
         trace._layers_logged = True
         trace._layers_saved = True
         trace.has_backward_pass = False
@@ -2219,6 +2226,7 @@ class JAXBackend:
             parent_call_label: str | None = None
             for module_index, (address, call_index) in enumerate(normalized_calls):
                 call_label = f"{address}:{call_index}"
+                mbd["module_call_stacks"][call_label] = op_log.modules[:module_index]
                 if mbd["module_num_calls"][address] < call_index:
                     mbd["module_num_calls"][address] = call_index
                 mbd["module_num_tensors"][address] += 1
@@ -2405,22 +2413,7 @@ class JAXBackend:
         """
 
         for op_log in trace._raw_graph_ws.raw_layer_dict.values():
-            op_log.parents = [
-                raw_to_final.get(parent, parent) if isinstance(parent, str) else parent
-                for parent in op_log.parents
-            ]
-            op_log.children = [
-                raw_to_final.get(child, child) if isinstance(child, str) else child
-                for child in op_log.children
-            ]
-            op_log.parent_arg_positions = _relabel_jax_parent_arg_positions(
-                op_log.parent_arg_positions,
-                raw_to_final,
-            )
-            op_log._internal_set(
-                "_edge_uses",
-                tuple(_relabel_jax_edge_use(edge, raw_to_final) for edge in op_log._edge_uses),
-            )
+            relabel_edge_metadata(op_log, raw_to_final)
 
     def _normalize_input_args(self, input_args: object) -> list[Any]:
         """Normalize public input args to a positional list.
@@ -4129,65 +4122,6 @@ def _ordered_jax_data_parent_labels(op: Any, raw_label_set: set[str]) -> tuple[s
     return tuple(ordered)
 
 
-def _relabel_jax_parent_arg_positions(
-    parent_arg_positions: Mapping[str, Mapping[Any, Any]],
-    raw_to_final: Mapping[str, str],
-) -> dict[str, dict[Any, Any]]:
-    """Return parent-argument positions with raw labels replaced.
-
-    Parameters
-    ----------
-    parent_arg_positions
-        Existing parent-position metadata.
-    raw_to_final
-        Mapping from raw op labels to final op labels.
-
-    Returns
-    -------
-    dict[str, dict[Any, Any]]
-        Relabeled parent-position metadata.
-    """
-
-    return {
-        arg_kind: {
-            position: raw_to_final.get(parent_label, parent_label)
-            if isinstance(parent_label, str)
-            else parent_label
-            for position, parent_label in positions.items()
-        }
-        for arg_kind, positions in parent_arg_positions.items()
-    }
-
-
-def _relabel_jax_edge_use(edge: Any, raw_to_final: Mapping[str, str]) -> Any:
-    """Return an edge-use record with raw endpoint labels replaced.
-
-    Parameters
-    ----------
-    edge
-        Edge-use record or legacy tuple.
-    raw_to_final
-        Mapping from raw op labels to final op labels.
-
-    Returns
-    -------
-    Any
-        Relabeled edge-use record.
-    """
-
-    parent_label = getattr(edge, "parent_label", None)
-    child_label = getattr(edge, "child_label", None)
-    if isinstance(parent_label, str) and isinstance(child_label, str):
-        return replace(
-            edge,
-            parent_label=raw_to_final.get(parent_label, parent_label),
-            child_label=raw_to_final.get(child_label, child_label),
-        )
-    if isinstance(edge, tuple) and len(edge) >= 3 and isinstance(edge[0], str):
-        return (raw_to_final.get(edge[0], edge[0]), *edge[1:])
-    return edge
-
-
 def _parent_labels_by_control_class(op: Any) -> tuple[set[str], set[str]]:
     """Split operation parents into control and value-replay sets.
 
@@ -4318,85 +4252,3 @@ def _values_close(left: Any, right: Any) -> bool:
         rtol, atol = float_replay_tolerances(jnp.finfo(left_array.dtype))
         return bool(jnp.allclose(left_array, right_array, rtol=rtol, atol=atol, equal_nan=True))
     return bool(jnp.array_equal(left_array, right_array))
-
-
-def _path_to_string(path: Sequence[Any]) -> str:
-    """Convert a JAX pytree path to a stable dotted string.
-
-    Parameters
-    ----------
-    path
-        JAX pytree path entries.
-
-    Returns
-    -------
-    str
-        Dotted path string.
-    """
-
-    if not path:
-        return "root"
-    parts: list[str] = []
-    for entry in path:
-        name = getattr(entry, "name", None)
-        key = getattr(entry, "key", None)
-        idx = getattr(entry, "idx", None)
-        if name is not None:
-            parts.append(str(name))
-        elif key is not None:
-            parts.append(str(key))
-        elif idx is not None:
-            parts.append(str(idx))
-        else:
-            parts.append(str(entry).strip("[]'"))
-    return ".".join(parts)
-
-
-def _jax_dict_keys(value: Mapping[Any, Any]) -> tuple[Any, ...]:
-    """Return dict keys in JAX builtin pytree traversal order.
-
-    Parameters
-    ----------
-    value
-        Builtin dict output.
-
-    Returns
-    -------
-    tuple[Any, ...]
-        Keys sorted when possible, matching JAX's dict pytree order.
-    """
-
-    try:
-        return tuple(sorted(value.keys()))
-    except TypeError:
-        return tuple(value.keys())
-
-
-def _path_to_components(path: Sequence[Any]) -> tuple[object, ...]:
-    """Convert a JAX pytree path to TorchLens output-path components.
-
-    Parameters
-    ----------
-    path
-        JAX pytree path entries.
-
-    Returns
-    -------
-    tuple[object, ...]
-        Backend-neutral container path components.
-    """
-
-    components: list[object] = []
-    for entry in path:
-        name = getattr(entry, "name", None)
-        key = getattr(entry, "key", None)
-        idx = getattr(entry, "idx", None)
-        if name is not None:
-            components.append(str(name))
-        elif key is not None:
-            components.append(DictKey(key))
-        elif idx is not None:
-            components.append(TupleIndex(int(idx)))
-        else:
-            components.append(str(entry).strip("[]'"))
-    return tuple(components)

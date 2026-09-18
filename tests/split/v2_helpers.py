@@ -18,6 +18,7 @@ def split_request(
     live_param_sources: bool | None = None,
     batch_axes: dict[str, int] | None = None,
     placement: PlacementPlan | None = None,
+    retain_trace: bool | None = None,
 ) -> SplitRequest:
     """Construct a v2 request from the test matrix's compact boundary spelling."""
 
@@ -34,6 +35,7 @@ def split_request(
             training=trainable,
             boundary_cache=boundary_cache,
             live_param_sources=live_param_sources,
+            retain_trace=retain_trace,
             batch_axes=None if batch_axes is None else dict(batch_axes),
         ),
         validation=validation,  # type: ignore[arg-type]

@@ -310,7 +310,7 @@ def test_documented_dotted_spellings_resolve() -> None:
             except AttributeError:
                 try:
                     obj = importlib.import_module("torchlens." + ".".join(parts[: index + 1]))
-                except Exception:
+                except ImportError:
                     unresolved.append(token)
                     break
     assert not unresolved, (

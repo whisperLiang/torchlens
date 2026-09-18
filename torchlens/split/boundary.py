@@ -116,15 +116,7 @@ class ReplayBoundary:
                 ),
             )
         for key, expected_item in expected_spec.items():
-            actual_item = self.spec[key]
-            if actual_item.canonical_id != expected_item.canonical_id:
-                raise SplitBoundaryError(f"Boundary canonical ID mismatch for {key!r}.")
-            if actual_item.role != expected_item.role:
-                raise SplitBoundaryError(f"Boundary role mismatch for {key!r}.")
-            if actual_item.output_index != expected_item.output_index:
-                raise SplitBoundaryError(f"Boundary output index mismatch for {key!r}.")
-            if tuple(actual_item.container_path) != tuple(expected_item.container_path):
-                raise SplitBoundaryError(f"Boundary container path mismatch for {key!r}.")
+            _validate_schema_identity(key, self.spec[key], expected_item)
             value = self.tensors[key]
             dtype = resolved_adapter.dtype_name(value)
             if (
@@ -155,20 +147,34 @@ class ReplayBoundary:
                     label=expected_item.label,
                 )
             else:
-                value_shape = shape_program.value_shapes.get(expected_item.canonical_id)
-                runtime_batch = self.metadata.get("runtime_batch_size")
-                if value_shape is not None and runtime_batch is not None:
-                    expected_runtime_shape = value_shape.evaluate(
-                        shape_program.binding_from_batch(int(runtime_batch))
-                    )
-                    actual_runtime_shape = resolved_adapter.shape(value)
-                    if actual_runtime_shape is not None and tuple(actual_runtime_shape) != tuple(
-                        expected_runtime_shape
-                    ):
-                        raise SplitBoundaryError(
-                            f"Boundary tensor {key!r} shape is {actual_runtime_shape}, "
-                            f"expected solved shape {expected_runtime_shape}."
-                        )
+                self._validate_solved_shape(
+                    key, value, expected_item, shape_program, resolved_adapter
+                )
+
+    def _validate_solved_shape(
+        self,
+        key: str,
+        value: Any,
+        expected_item: BoundarySchema,
+        shape_program: Any,
+        adapter: SplitBackendAdapter,
+    ) -> None:
+        """Check a boundary value against an available runtime shape solution."""
+
+        value_shape = shape_program.value_shapes.get(expected_item.canonical_id)
+        runtime_batch = self.metadata.get("runtime_batch_size")
+        if value_shape is not None and runtime_batch is not None:
+            expected_runtime_shape = value_shape.evaluate(
+                shape_program.binding_from_batch(int(runtime_batch))
+            )
+            actual_runtime_shape = adapter.shape(value)
+            if actual_runtime_shape is not None and tuple(actual_runtime_shape) != tuple(
+                expected_runtime_shape
+            ):
+                raise SplitBoundaryError(
+                    f"Boundary tensor {key!r} shape is {actual_runtime_shape}, "
+                    f"expected solved shape {expected_runtime_shape}."
+                )
 
     def detach(self, adapter: SplitBackendAdapter | None = None) -> ReplayBoundary:
         """Return a boundary with detached tensor values."""
@@ -250,6 +256,19 @@ class ReplayBoundary:
                 "batch_size": len(boundaries),
             },
         )
+
+
+def _validate_schema_identity(key: str, actual: BoundarySchema, expected: BoundarySchema) -> None:
+    """Check the ordered identity fields of one boundary ABI entry."""
+
+    if actual.canonical_id != expected.canonical_id:
+        raise SplitBoundaryError(f"Boundary canonical ID mismatch for {key!r}.")
+    if actual.role != expected.role:
+        raise SplitBoundaryError(f"Boundary role mismatch for {key!r}.")
+    if actual.output_index != expected.output_index:
+        raise SplitBoundaryError(f"Boundary output index mismatch for {key!r}.")
+    if tuple(actual.container_path) != tuple(expected.container_path):
+        raise SplitBoundaryError(f"Boundary container path mismatch for {key!r}.")
 
 
 __all__ = ["ReplayBoundary"]

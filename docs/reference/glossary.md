@@ -52,7 +52,10 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
 
 **SplitFeatures**
 : The requested replay, training, boundary-cache, batch-axis, cross-device, and live-parameter
-  capabilities. A declared batch axis identifies semantics, not a list of allowed batch sizes.
+  capabilities, plus diagnostic retention through `retain_trace`. A declared batch axis
+  identifies semantics, not a list of allowed batch sizes. `retain_trace=None` defaults to
+  compact Torch inference; `True` retains the complete diagnostic capture. Training and
+  non-Torch backends retain complete captures by default.
 
 **SplitModelProfile**
 : Pinned metadata for a real-model loader, checkpoint, and expected capabilities.
@@ -68,7 +71,13 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
 **SplitRuntime / prepare**
 : `tl.prepare(model, inputs, request)` produces a `SplitRuntime` that can replay the prepared
   segments and explain their capabilities; the same entry point is available as
-  `tl.split.prepare(...)`.
+  `tl.split.prepare(...)`. `runtime.retains_trace` discloses diagnostic retention;
+  `runtime.trace` refuses with `SplitUnsupportedError` when compact preparation discarded
+  the capture. `trace_graph`, `.at()`, and `.with_placement()` remain available.
+  Split refusals live in `torchlens.split.errors`: `SplitError`, `SplitRequestError`,
+  `SplitBoundaryError`, and `SplitUnsupportedError`. These documented-unstable exceptions
+  keep their own catch hierarchy, `code`, and structured `context`; they are not aliases
+  in the central `torchlens.errors` namespace.
 
 **SplitVerificationStatus**
 : The declared verification level of a lowered split component: exact, region-verified,

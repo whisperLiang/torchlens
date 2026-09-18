@@ -16,12 +16,12 @@ from menagerie.cluster_runner import (
     ClusterAssignment,
     ClusterConfig,
     ClusterJobFailed,
-    DispatchResult,
     ClusterMergeConflict,
     ClusterResultIntegrityError,
     ClusterResultRow,
-    dispatch_giants,
+    DispatchResult,
     collect_cluster_results,
+    dispatch_giants,
     is_giant,
     ledger_completed_stable_ids,
     merge_cluster_results,
@@ -435,9 +435,13 @@ def test_repeated_unregistered_moe_oom_escalates_to_terabyte(tmp_path: Path) -> 
     assert tier.mem_gb == 1000
 
 
-def test_dispatch_uses_mocked_commands_and_one_sbatch_per_tier(tmp_path: Path) -> None:
+def test_dispatch_uses_mocked_commands_and_one_sbatch_per_tier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Dispatch prepares rsync/ssh/sbatch commands without live cluster access."""
 
+    fake_pixi = tmp_path / "pixi"
+    monkeypatch.setattr("menagerie.cluster_runner._local_pixi_bin", lambda: fake_pixi)
     # Two giants in DIFFERENT seed tiers (m3635=180 GiB, m4246=250 GiB) so the
     # dispatch produces one sbatch script per tier.
     catalog_db = _write_catalog(
@@ -474,6 +478,7 @@ def test_dispatch_uses_mocked_commands_and_one_sbatch_per_tier(tmp_path: Path) -
     )
 
     assert result.sbatch_job_ids == ("12345", "12345")
+    assert any(command[:3] == ("rsync", "-az", str(fake_pixi)) for command in commands)
     assert sum("sbatch" in command[-1] for command in commands) == 2
     assert (result.local_artifact_dir / "catalog.db").exists()
     assert (result.local_artifact_dir / "assignments.json").exists()
@@ -492,9 +497,13 @@ def test_dispatch_uses_mocked_commands_and_one_sbatch_per_tier(tmp_path: Path) -
     assert "/worker_ledger/" in sbatch_text
 
 
-def test_dispatch_wait_false_submits_without_sbatch_wait(tmp_path: Path) -> None:
+def test_dispatch_wait_false_submits_without_sbatch_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Async dispatch submits plain sbatch and still records job IDs."""
 
+    fake_pixi = tmp_path / "pixi"
+    monkeypatch.setattr("menagerie.cluster_runner._local_pixi_bin", lambda: fake_pixi)
     catalog_db = _write_catalog(
         tmp_path,
         [_row(model_id=1, stable_id="m3635", name="beit_large_patch16_512")],
@@ -1330,9 +1339,12 @@ def test_render_sbatch_requires_remote_home() -> None:
         )
 
 
-def test_dispatch_submitted_then_failed_raises_cluster_job_failed(tmp_path: Path) -> None:
+def test_dispatch_submitted_then_failed_raises_cluster_job_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A submitted job that runs and exits non-zero raises ClusterJobFailed, not a skip."""
 
+    monkeypatch.setattr("menagerie.cluster_runner._local_pixi_bin", lambda: tmp_path / "pixi")
     catalog_db = _write_catalog(
         tmp_path, [_row(model_id=1, stable_id="m3635", name="beit_large_patch16_512")]
     )
@@ -1373,9 +1385,12 @@ def test_dispatch_submitted_then_failed_raises_cluster_job_failed(tmp_path: Path
     assert excinfo.value.dispatch is not None
 
 
-def test_dispatch_submit_rejected_propagates_transport_error(tmp_path: Path) -> None:
+def test_dispatch_submit_rejected_propagates_transport_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A genuine submit rejection (no job ID) stays a transport error, not a job failure."""
 
+    monkeypatch.setattr("menagerie.cluster_runner._local_pixi_bin", lambda: tmp_path / "pixi")
     catalog_db = _write_catalog(
         tmp_path, [_row(model_id=1, stable_id="m3635", name="beit_large_patch16_512")]
     )

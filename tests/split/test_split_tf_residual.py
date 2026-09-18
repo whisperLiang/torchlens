@@ -64,12 +64,11 @@ def test_keras_add_scope_delegates_other_operands_and_restores_on_error(
         return original(x1, x2)
 
     monkeypatch.setattr(keras_numpy, "add", delegate)
-    with pytest.raises(RuntimeError, match="sentinel"):
-        with batch_stable_keras_add():
-            tf.debugging.assert_equal(keras_numpy.add(tf.ones((2, 4)), tf.ones((2, 1))), 2.0)
-            tf.debugging.assert_equal(keras_numpy.add(tf.ones((1, 4)), 2.0), 3.0)
-            assert len(calls) == 2
-            raise RuntimeError("sentinel")
+    with pytest.raises(RuntimeError, match="sentinel"), batch_stable_keras_add():
+        tf.debugging.assert_equal(keras_numpy.add(tf.ones((2, 4)), tf.ones((2, 1))), 2.0)
+        tf.debugging.assert_equal(keras_numpy.add(tf.ones((1, 4)), 2.0), 3.0)
+        assert len(calls) == 2
+        raise RuntimeError("sentinel")
     assert keras_numpy.add is delegate
 
 

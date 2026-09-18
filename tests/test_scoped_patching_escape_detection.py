@@ -353,6 +353,8 @@ def test_clean_composites_and_descriptor_wrappers_do_not_convict() -> None:
         ),
     ],
 )
+# Reinstalling and auditing all 16 dispatch variants costs 18.7 s in aggregate.
+@pytest.mark.heavy
 @pytest.mark.parametrize("return_indices", [False, True], ids=["values", "indices"])
 def test_boolean_dispatch_pooling_family_does_not_convict(
     function_name: str,

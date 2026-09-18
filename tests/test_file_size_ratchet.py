@@ -116,7 +116,7 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/_io/runnable.py": 5000,
     "torchlens/utils/rng.py": 4950,
     "torchlens/visualization/collapse_optimizer.py": 4600,
-    "torchlens/backends/jax/backend.py": 4400,
+    "torchlens/backends/jax/backend.py": 4300,
     # 4600 -> 4650: the L8 C2-recording settle above re-stepped bundle to 4600
     # but the merged file MEASURES 4603 -- the settle's own re-step was three
     # lines short, red on main since the merge. Reconciled to the next 50-line

@@ -8,15 +8,30 @@ import pytest
 import torch
 from torch import nn
 
-from menagerie.catalog import CatalogRow, load_rows
+from menagerie.catalog import CatalogRow
 from menagerie.recipe import build_model_and_input
 from menagerie.structural_digest import (
     architecture_distinctness_hash,
     structural_fingerprint,
 )
+from support.menagerie_catalog import menagerie_rows as menagerie_rows
 
 
-SAMPLE_MODEL_IDS = (3, 23, 24, 26, 27, 79, 80, 82, 92, 182)
+# Display ordinals move whenever the catalog grows: the old sample ordinal 182
+# now names a billion-parameter AIMv2. Pin bounded, real CPU recipes by natural
+# identity and retain convolution, recurrence, FFT, recursion and indexing coverage.
+SAMPLE_CLASSIC_NAMES = (
+    "LeNet-4 / pre-LeNet-5 CNN",
+    "Clockwork RNN",
+    "Compact Bilinear Pooling",
+    "Williams-Zipser fully-recurrent net",
+    "Original LSTM (1997, no forget gate)",
+    "RAAM (Recursive Auto-Associative Memory)",
+    "Pi-Sigma network",
+    "Sigma-Pi / higher-order unit",
+    "CMAC (Albus)",
+    "Classic Adaptive Mixture-of-Experts (dense)",
+)
 
 
 class WidthOnlyModel(nn.Module):
@@ -51,18 +66,6 @@ class WidthOnlyModel(nn.Module):
         return self.proj(x)
 
 
-def _rows_by_id() -> dict[int, CatalogRow]:
-    """Load menagerie rows keyed by model ID.
-
-    Returns
-    -------
-    dict[int, CatalogRow]
-        Catalog rows keyed by model ID.
-    """
-
-    return {row.model_id: row for row in load_rows()}
-
-
 def _build_sample(row: CatalogRow) -> tuple[Any, Any]:
     """Build a deterministic model/input sample for one menagerie row.
 
@@ -81,17 +84,26 @@ def _build_sample(row: CatalogRow) -> tuple[Any, Any]:
     return build_model_and_input(row)
 
 
-@pytest.mark.parametrize("model_id", SAMPLE_MODEL_IDS)
-def test_structural_fingerprint_is_deterministic_for_menagerie_sample(model_id: int) -> None:
+# The full-catalog fixture costs 7-9 s in the unified environment, independent
+# of which sample receives its first setup. Keep every recipe in the full backstop.
+@pytest.mark.heavy
+@pytest.mark.parametrize("name", SAMPLE_CLASSIC_NAMES)
+def test_structural_fingerprint_is_deterministic_for_menagerie_sample(
+    name: str, menagerie_rows: tuple[CatalogRow, ...]
+) -> None:
     """Structural fingerprints are deterministic across repeated calls.
 
     Parameters
     ----------
-    model_id:
-        Menagerie model ID to build and trace.
+    name:
+        Canonical classic name to build and trace.
+    menagerie_rows:
+        Current catalog loaded from a session-private SQLite artifact.
     """
 
-    row = _rows_by_id()[model_id]
+    matches = [row for row in menagerie_rows if row.name == name and row.source == "classics"]
+    assert len(matches) == 1
+    row = matches[0]
     model, example_input = _build_sample(row)
 
     first = structural_fingerprint(model, example_input)

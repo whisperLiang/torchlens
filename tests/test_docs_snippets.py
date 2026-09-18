@@ -211,7 +211,7 @@ def _optional_tf_ambient() -> dict[str, Any]:
     try:
         import keras
         import tensorflow as tf
-    except Exception:  # pragma: no cover - partial/broken optional install
+    except ImportError:  # pragma: no cover - partial optional install
         return {}
     if keras.backend.backend() != "tensorflow":  # pragma: no cover - env-specific
         return {}

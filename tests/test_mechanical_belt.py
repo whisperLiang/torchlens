@@ -171,6 +171,56 @@ def test_belt_sweep_prefilter_evicts_dead_module_ids() -> None:
         belt.restore_belt_references()
 
 
+@pytest.mark.parametrize("change", ["empty", "unchanged", "added", "same_name"])
+def test_belt_prefilter_only_scans_new_module_identities(
+    change: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unchanged inventories avoid scans; new identities never inherit that exemption."""
+
+    class ModuleInventory(dict[str, types.ModuleType]):
+        """Count full sweeps while keeping the real dict-values iterator."""
+
+        item_reads = 0
+
+        def items(self) -> Any:
+            """Count namespace inventory snapshots, not id-only checks."""
+            self.item_reads += 1
+            return super().items()
+
+    original, wrapper = _original_and_wrapper("from_numpy")
+    inventory = ModuleInventory()
+    monkeypatch.setattr(belt, "sys", types.SimpleNamespace(modules=inventory))
+    monkeypatch.setattr(belt, "_swept_ids_live", set())
+    monkeypatch.setattr(belt, "_swept_module_ids", {})
+    monkeypatch.setattr(belt, "_ledger", [])
+    if change == "empty":
+        assert belt.sweep_stale_belt_references() == 0
+        assert inventory.item_reads == 0
+        return
+
+    first = types.ModuleType("_tl_belt_identity")
+    first.op = original
+    inventory[first.__name__] = first
+    assert belt.sweep_stale_belt_references() == 1
+    assert first.op is wrapper
+    assert belt.sweep_stale_belt_references() == 0
+    assert inventory.item_reads == 1
+    if change == "unchanged":
+        return
+
+    # Keep the old object alive: a same-name replacement must be detected by
+    # its new identity even though neither table length nor old liveness changed.
+    name = first.__name__ if change == "same_name" else "_tl_belt_added"
+    replacement = types.ModuleType(name)
+    replacement.op = original
+    inventory[name] = replacement
+    assert belt.sweep_stale_belt_references() == 1
+    assert replacement.op is wrapper
+    assert inventory.item_reads == 2
+    assert belt.sweep_stale_belt_references() == 0
+    assert inventory.item_reads == 2
+
+
 def test_probe_rng_bracket_restores_global_seed() -> None:
     """The probe framework is RNG-neutral by construction (b8-fable R56).
 

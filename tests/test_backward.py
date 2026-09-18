@@ -464,7 +464,7 @@ def test_backward_seq_invariants_fire_on_planted_mutations() -> None:
     with pytest.raises(MetadataInvariantError, match="follows its pass"):
         _invariant_check(trace)
     events[:] = original_order
-    for original_seq, event in zip(original_seqs, events):
+    for original_seq, event in zip(original_seqs, events, strict=True):
         object.__setattr__(event, "seq", original_seq)
     _invariant_check(trace)
 
@@ -1413,7 +1413,7 @@ def test_param_grad_records_rebuild_from_event_spine() -> None:
     }
     assert after == before
     for address, param_log in trace.param_logs.items():
-        for record, payload in zip(param_log._grad_records, payloads_before[address]):
+        for record, payload in zip(param_log._grad_records, payloads_before[address], strict=True):
             assert record.grad is payload, "rebuild must reuse the event-held payload"
 
 
@@ -1547,7 +1547,7 @@ def test_higher_order_discovery_bracketing_is_armed() -> None:
     with pytest.raises(MetadataInvariantError, match="higher-order GradFnDiscovered"):
         _invariant_check(trace)
     events[:] = original_order
-    for original_seq, event in zip(original_seqs, events):
+    for original_seq, event in zip(original_seqs, events, strict=True):
         object.__setattr__(event, "seq", original_seq)
     _invariant_check(trace)
 
@@ -1586,7 +1586,7 @@ def test_pass_brackets_reject_partial_interleaving() -> None:
     with pytest.raises(MetadataInvariantError, match="partially overlaps"):
         _invariant_check(trace)
     events[:] = original_order
-    for original_seq, event in zip(original_seqs, events):
+    for original_seq, event in zip(original_seqs, events, strict=True):
         object.__setattr__(event, "seq", original_seq)
     _invariant_check(trace)
 

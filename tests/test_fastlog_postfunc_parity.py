@@ -177,7 +177,7 @@ def test_disk_only_mode_persists_transformed_blob(tmp_path: Path) -> None:
     loaded = tl.fastlog.load(bundle_path)
     loaded_disk = _disk_out_records(loaded)
     assert len(loaded_disk) == len(records)
-    for original, restored in zip(records, loaded_disk):
+    for original, restored in zip(records, loaded_disk, strict=True):
         assert restored.metadata.get("transformed_out_blob_id") == original.metadata.get(
             "transformed_out_blob_id"
         )
@@ -447,7 +447,7 @@ def test_transform_roundtrips_via_disk_recovery(tmp_path: Path) -> None:
     assert len(loaded_records) == len(original_records)
     assert len(recovered_records) == len(original_records)
     for original_record, loaded_record, recovered_record in zip(
-        original_records, loaded_records, recovered_records
+        original_records, loaded_records, recovered_records, strict=True
     ):
         original_blob = original_record.metadata.get("transformed_out_blob_id")
         loaded_blob = loaded_record.metadata.get("transformed_out_blob_id")

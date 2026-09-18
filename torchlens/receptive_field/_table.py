@@ -155,23 +155,26 @@ def _entity_outputs(
             for output_index, output_op in enumerate(layer.op_labels):
                 yield layer.layer_label, "layer", output_index, output_op
     elif level == "call":
-        for call in trace.module_calls.values():
-            for output_index, output_op in enumerate(call.output_ops):
-                yield (
-                    call.call_label,
-                    "call",
-                    output_index,
-                    _resolved_output_label(trace, output_op),
-                )
+        yield from _resolved_entity_outputs(
+            trace, trace.module_calls.values(), "call", "call_label"
+        )
     else:
-        for module in trace.modules.values():
-            for output_index, output_op in enumerate(module.output_ops):
-                yield (
-                    module.address,
-                    "module",
-                    output_index,
-                    _resolved_output_label(trace, output_op),
-                )
+        yield from _resolved_entity_outputs(trace, trace.modules.values(), "module", "address")
+
+
+def _resolved_entity_outputs(
+    trace: Trace, entities: Iterable[Any], kind: str, name_attribute: str
+) -> Iterable[tuple[str, str, int, str]]:
+    """Resolve module and call boundary labels without changing entity order."""
+
+    for entity in entities:
+        for output_index, output_op in enumerate(entity.output_ops):
+            yield (
+                getattr(entity, name_attribute),
+                kind,
+                output_index,
+                _resolved_output_label(trace, output_op),
+            )
 
 
 def _kind_summary(descriptor: ReceptiveField) -> str:
@@ -248,6 +251,35 @@ def _row(
     }
 
 
+def _profile_rows(
+    outputs: Iterable[tuple[str, str, int, str]],
+    solution: _ReceptiveFieldSolution | _ProjectiveFieldSolution,
+    requested_role: str | None,
+    status_filter: frozenset[ReceptiveFieldStatus] | None,
+    direction: ReceptiveFieldDirection,
+) -> list[dict[str, Any]]:
+    """Select solved endpoint descriptors and construct direction-specific rows."""
+
+    rows: list[dict[str, Any]] = []
+    for name, kind, output_index, output_op in outputs:
+        for role, descriptor in solution.per_op.get(output_op, {}).items():
+            if requested_role is not None and role != requested_role:
+                continue
+            if status_filter is not None and descriptor.status not in status_filter:
+                continue
+            row = _row(name, kind, output_index, output_op, descriptor)
+            if direction is ReceptiveFieldDirection.PROJECTIVE:
+                row.update(
+                    {
+                        "projective_target": descriptor.io_role,
+                        "projective_target_op": descriptor.input_op_label,
+                        "projective_direction": descriptor.direction,
+                    }
+                )
+            rows.append(row)
+    return rows
+
+
 def build_rf_profile(
     trace: Trace,
     *,
@@ -315,23 +347,9 @@ def build_rf_profile(
         from ._engine_forward import solve_projective
 
         solution = solve_projective(trace, trace.output_ops)
-    rows: list[dict[str, Any]] = []
-    for name, kind, output_index, output_op in _entity_outputs(trace, level):
-        for role, descriptor in solution.per_op.get(output_op, {}).items():
-            if requested_role is not None and role != requested_role:
-                continue
-            if status_filter is not None and descriptor.status not in status_filter:
-                continue
-            row = _row(name, kind, output_index, output_op, descriptor)
-            if resolved_direction is ReceptiveFieldDirection.PROJECTIVE:
-                row.update(
-                    {
-                        "projective_target": descriptor.io_role,
-                        "projective_target_op": descriptor.input_op_label,
-                        "projective_direction": descriptor.direction,
-                    }
-                )
-            rows.append(row)
+    rows = _profile_rows(
+        _entity_outputs(trace, level), solution, requested_role, status_filter, resolved_direction
+    )
 
     columns = [
         "name",

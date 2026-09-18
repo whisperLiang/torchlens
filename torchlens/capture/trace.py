@@ -736,7 +736,7 @@ def _get_op_nums_from_user_labels(
     """
     if which_layers == "all":
         return which_layers
-    elif which_layers in [None, "none", "None", "NONE", []]:
+    elif which_layers is None or which_layers in ["none", "None", "NONE", []]:
         return []
 
     from ..intervention.selectors import BaseSelector
@@ -1690,6 +1690,13 @@ def run_and_log_inputs_through_model(
             _vprint(self, f"Inputs: {len(input_tensors)} tensor(s) on {device_str}")
 
         if bool(getattr(self, "intervention_ready", False)):
+            from ..utils._torch_compat import warm_lazy_torch_imports
+
+            # Warm Dynamo before descriptor patches and active_logging(), keeping
+            # import-time tensor probes out of the graph and completeness ledger.
+            with _state.pause_logging():
+                warm_lazy_torch_imports()
+
             from .._runnable_state import (
                 snapshot_capture_state,
                 snapshot_capture_state_signatures,

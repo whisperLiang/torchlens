@@ -57,7 +57,17 @@ def _with_attention_common(
 ) -> dict[str, Any]:
     """Attach common attention facets to a recipe result."""
 
-    add_if_present(result, "attn_out", module_output_spec(module, "attention"))
+    # DistilBERT 4.x returns (weights, output) when weights are requested;
+    # the unified 5.x class and the other supported HF families return output first.
+    tuple_index = (
+        1
+        if getattr(module, "class_name", "")
+        in {"MultiHeadSelfAttention", "DistilBertSdpaAttention", "DistilBertFlashAttention2"}
+        else 0
+    )
+    add_if_present(
+        result, "attn_out", module_output_spec(module, "attention", tuple_index=tuple_index)
+    )
     add_if_present(result, "input", first_input_spec(module, "attention"))
     if n_q_heads is not None:
         result["n_q_heads"] = n_q_heads
@@ -191,11 +201,14 @@ def gpt2_attention(module: Any) -> dict[str, Any]:
         add_if_present(result, "q", c_attn_out)
         add_if_present(result, "k", c_attn_out)
         add_if_present(result, "v", c_attn_out)
-    add_if_present(result, "attn_out", child_output_spec(module, "c_proj", "gpt2_attention"))
     return _with_attention_common(result, module, n_q_heads, n_kv_heads, d_head)
 
 
-@register(class_name="BertSelfAttention", target_scope="module", facets=_ATTENTION_FACETS_BASE)
+@register(
+    class_name=("BertSelfAttention", "BertSdpaSelfAttention"),
+    target_scope="module",
+    facets=_ATTENTION_FACETS_BASE,
+)
 def bert_self_attention(module: Any) -> dict[str, Any]:
     """Return facets for BERT self-attention modules."""
 
@@ -246,7 +259,6 @@ def gqa_attention(module: Any) -> dict[str, Any]:
         "v",
         reshape_heads(child_output_spec(module, "v_proj", "gqa_attention"), n_kv_heads, d_head),
     )
-    add_if_present(result, "attn_out", child_output_spec(module, "o_proj", "gqa_attention"))
     return _with_attention_common(result, module, n_q_heads, n_kv_heads, d_head)
 
 
@@ -282,7 +294,6 @@ def t5_attention(module: Any) -> dict[str, Any]:
         "v",
         reshape_heads(child_output_spec(module, "v", "t5_attention"), n_kv_heads, d_head),
     )
-    add_if_present(result, "attn_out", child_output_spec(module, "o", "t5_attention"))
     return _with_attention_common(result, module, n_q_heads, n_kv_heads, d_head)
 
 

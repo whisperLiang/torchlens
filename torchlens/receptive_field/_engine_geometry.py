@@ -13,6 +13,16 @@ from ._types import ReceptiveFieldStatus
 
 if TYPE_CHECKING:
     from ..data_classes.op import Op
+    from ._rules import _RuleResult
+
+
+@dataclass(frozen=True)
+class _RuleApplication:
+    """One local rule and the provenance accumulated for its application."""
+
+    result: _RuleResult
+    name: str
+    notes: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -37,6 +47,15 @@ class _Mapped:
     exact: bool = True
     aligned: bool = True
     sparse: bool = False
+
+
+@dataclass(frozen=True)
+class _WindowMapping:
+    """Affine spatial maps with their non-spatial dependency semantics."""
+
+    maps: tuple[_Mapped, ...]
+    preserve_non_window_axes: bool = False
+    channel_dependency: str = "full_exact"
 
 
 @dataclass(frozen=True)

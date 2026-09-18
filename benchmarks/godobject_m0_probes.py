@@ -50,16 +50,15 @@ def _deep_size(root: Any, *, skip_tensors: bool = True) -> tuple[int, int, int]:
         if oid in visited:
             continue
         visited.add(oid)
-        if isinstance(obj, torch.Tensor):
-            if skip_tensors:
-                try:
-                    storage = obj.untyped_storage()
-                    tensor_storages[id(storage)] = storage.nbytes()
-                except RuntimeError:
-                    pass
-                structural += sys.getsizeof(obj)
-                objects += 1
-                continue
+        if isinstance(obj, torch.Tensor) and skip_tensors:
+            try:
+                storage = obj.untyped_storage()
+                tensor_storages[id(storage)] = storage.nbytes()
+            except RuntimeError:
+                pass
+            structural += sys.getsizeof(obj)
+            objects += 1
+            continue
         if isinstance(obj, (type, type(sys), type(_deep_size))):
             continue
         try:

@@ -5,7 +5,6 @@ type) from arbitrarily nested model inputs/outputs, plus utilities for
 nested attribute traversal and call-stack capture.
 """
 
-import dis
 import os
 import sys
 import warnings
@@ -37,11 +36,10 @@ _ATTR_SKIP_SET = frozenset({"T", "mT", "real", "imag", "H", "grad", "_grad", "gr
 
 # Cached instruction-offset -> column-offset maps, keyed by ``id(code_obj)``.
 #
-# CPython code objects are immutable, so once we disassemble a code object
-# the mapping never changes. ``dis.get_instructions`` is one of the most
-# expensive calls on transformer-style hot paths (per profiling audit
-# 2026-04-27, ``dis.*`` self time ~16.5s on GPT-2). Re-using the parsed
-# offset map per code object reduces repeated work to a single dict lookup.
+# CPython code objects are immutable, so their position maps never change.
+# Read the native position table directly: full disassembly builds unnecessary
+# instruction/argument descriptions and amplifies profile-hook work during capture.
+# Re-using the offset map reduces repeated work to a single dict lookup.
 #
 # The integer key alone is not sufficient because CPython may re-use object
 # addresses after the original code object dies. We therefore keep the code
@@ -89,14 +87,11 @@ def _build_col_offset_map(code: CodeType) -> dict[int, int | None]:
     The map covers all bytecode instructions in ``code``, INCLUDING each
     instruction's trailing inline-cache region. On Python 3.11+ adaptive
     instructions (``CALL``, ``LOAD_METHOD``/``LOAD_ATTR``, ``BINARY_OP``, ...)
-    are followed by hidden ``CACHE`` slots that ``dis.get_instructions`` does
-    not list, and a caller frame's ``f_lasti`` during a METHOD call points
-    INSIDE that cache region. Without spreading each instruction's column
-    across its cache slots, every ``x.sum()``-style call site resolved to a
-    missing key -- silently degrading branch attribution to line-only mode
-    for method-produced bools (round-24 condbranch seal, S2). Each column is
-    therefore assigned to every code unit from the instruction's offset up to
-    the next listed instruction (or the end of ``co_code``).
+    are followed by hidden ``CACHE`` slots, and a caller frame's ``f_lasti``
+    during a METHOD call points INSIDE that cache region. ``co_positions()``
+    already supplies one row per two-byte code unit, including those slots.
+    Consuming that native table avoids full Python disassembly and its many
+    profile-hook callbacks without skipping any monitored user execution.
 
     Instructions whose ``positions`` are missing or whose ``col_offset`` is
     ``None`` are stored with ``None`` so callers can distinguish "not in map"
@@ -104,23 +99,10 @@ def _build_col_offset_map(code: CodeType) -> dict[int, int | None]:
     """
     if not _torch_compat.HAS_CODE_POSITIONS:
         return {}
-    offset_map: dict[int, int | None] = {}
     try:
-        instructions = list(dis.get_instructions(code))
-        code_end = len(code.co_code)
-        for index, instruction in enumerate(instructions):
-            positions = instruction.positions
-            col_offset = None if positions is None else positions.col_offset
-            next_offset = (
-                instructions[index + 1].offset if index + 1 < len(instructions) else code_end
-            )
-            # Bytecode units are 2 bytes; the half-open gap up to the next
-            # listed instruction is exactly this instruction's cache region.
-            for offset in range(instruction.offset, max(next_offset, instruction.offset + 2), 2):
-                offset_map[offset] = col_offset
+        return {index * 2: positions[2] for index, positions in enumerate(code.co_positions())}
     except (TypeError, ValueError):
         return {}
-    return offset_map
 
 
 def _get_or_build_col_offset_map(code: CodeType) -> dict[int, int | None]:

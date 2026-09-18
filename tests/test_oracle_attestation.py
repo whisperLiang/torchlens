@@ -70,6 +70,44 @@ _CANONICAL_GOLDENS: dict[str, tuple[Path, ...]] = {
     "rank_render_ir": (_TESTS_DIR / "golden" / "rank_render_ir_semantics.json",),
 }
 
+# Python 3.11 environments were enrolled after canonical/same-runtime HEAD
+# comparison (tests/oracle_environments.md). Pin the enrolled inventory so
+# missing/ignored files cannot silently turn this environment back into SKIPs.
+_REVIEWED_ENV_GOLDENS = tuple(
+    path.parent / f"env-py3.11-torch{torch_version}{extras}" / path.name
+    for torch_version in ("2.13.0", "2.8.0")
+    for family, extras in (
+        ("surface_oracle", ""),
+        ("godobject_viz", "-graphviz0.21"),
+        ("godobject_legacy", ""),
+        ("state_keysets", ""),
+        ("viz_render_identity", "-graphviz0.21-pydot4.0.1"),
+        ("rank_render_ir", "-graphviz0.21-pydot4.0.1"),
+    )
+    for path in _CANONICAL_GOLDENS[family]
+    if path.suffix != ".tlspec"
+)
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("golden", _REVIEWED_ENV_GOLDENS, ids=lambda path: path.name)
+def test_reviewed_environment_golden_inventory(golden: Path) -> None:
+    """Enrolled environment files are present, reviewable, and provenance-stamped."""
+
+    import subprocess
+
+    assert golden.is_file(), f"missing reviewed environment golden: {golden}"
+    provenance = (golden.parent / "PROVENANCE").read_text()
+    assert "reason: " in provenance
+    environment = golden.parent.name.removeprefix("env-").split("-graphviz", 1)[0]
+    assert f"env: {environment}\n" in provenance
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", "--no-index", str(golden)],
+        cwd=_TESTS_DIR.parent,
+        check=False,
+    )
+    assert result.returncode == 1, f"reviewed baseline must not be gitignored: {golden}"
+
 
 @pytest.mark.smoke
 @pytest.mark.parametrize("family", sorted(_CANONICAL_GOLDENS))

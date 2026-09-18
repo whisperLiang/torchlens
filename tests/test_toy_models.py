@@ -771,42 +771,40 @@ def test_repeated_op_type_in_loop(default_input1):
     )
 
 
+@pytest.mark.heavy
 def test_varying_loop_noparam1(default_input1):
     model = example_models.VaryingLoopNoParam1()
     assert validate_forward_pass(model, default_input1)
-    show_model_graph(
-        model,
-        default_input1,
+    log = trace(model, default_input1)
+    log.draw(
         vis_save_only=True,
         vis_mode="unrolled",
         vis_outpath=opj(VIS_OUTPUT_DIR, "toy-networks", "varying_loop_noparam1_unrolled"),
     )
-    show_model_graph(
-        model,
-        default_input1,
+    log.draw(
         vis_save_only=True,
         vis_mode="rolled",
         vis_outpath=opj(VIS_OUTPUT_DIR, "toy-networks", "varying_loop_noparam1_rolled"),
     )
+    log.cleanup()
 
 
+@pytest.mark.heavy
 def test_varying_loop_noparam2(default_input1):
     model = example_models.VaryingLoopNoParam2()
     assert validate_forward_pass(model, default_input1)
-    show_model_graph(
-        model,
-        default_input1,
+    log = trace(model, default_input1)
+    log.draw(
         vis_save_only=True,
         vis_mode="unrolled",
         vis_outpath=opj(VIS_OUTPUT_DIR, "toy-networks", "varying_loop_noparam2_unrolled"),
     )
-    show_model_graph(
-        model,
-        default_input1,
+    log.draw(
         vis_save_only=True,
         vis_mode="rolled",
         vis_outpath=opj(VIS_OUTPUT_DIR, "toy-networks", "varying_loop_noparam2_rolled"),
     )
+    log.cleanup()
 
 
 def test_varying_loop_withparam(vector_input):
@@ -1088,6 +1086,7 @@ def test_module_looping_clash3(default_input1):
     )
 
 
+@pytest.mark.heavy
 def test_nested_param_free_loops(default_input1):
     """Tests nested loop topology where inner ops have the same equivalence type
     across levels but surrounding ops differ per level.
@@ -1109,20 +1108,17 @@ def test_nested_param_free_loops(default_input1):
         f"sin ops fragmented into groups with pass counts {sin_pass_counts}, expected {{12}}"
     )
 
-    show_model_graph(
-        model,
-        default_input1,
+    mh.draw(
         vis_save_only=True,
         vis_mode="unrolled",
         vis_outpath=opj(VIS_OUTPUT_DIR, "toy-networks", "nested_param_free_loops_unrolled"),
     )
-    show_model_graph(
-        model,
-        default_input1,
+    mh.draw(
         vis_save_only=True,
         vis_mode="rolled",
         vis_outpath=opj(VIS_OUTPUT_DIR, "toy-networks", "nested_param_free_loops_rolled"),
     )
+    mh.cleanup()
 
 
 def test_parallel_loops(default_input1):

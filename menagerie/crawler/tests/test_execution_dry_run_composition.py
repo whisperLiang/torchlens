@@ -5,11 +5,12 @@ from __future__ import annotations
 import inspect
 import json
 import os
-from dataclasses import replace
-from pathlib import Path
 import subprocess
 import sys
-from typing import Any, Mapping
+from collections.abc import Mapping
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
 
 from menagerie.crawler.authority import build_authority_context
 from menagerie.crawler.cli import (
@@ -19,8 +20,8 @@ from menagerie.crawler.cli import (
     _persisted_environment_generations,
 )
 from menagerie.crawler.driver import DriverConfig
-from menagerie.crawler.reducer import materialize_current
 from menagerie.crawler.recordio import scan_jsonl
+from menagerie.crawler.reducer import materialize_current
 from menagerie.crawler.status import funnel_counts
 from menagerie.crawler.tests.conftest import RealEnvironmentFixture
 from menagerie.crawler.tests.dry_run_support import (
@@ -28,6 +29,7 @@ from menagerie.crawler.tests.dry_run_support import (
     TinyModelAuthor,
     create_dry_run_snapshot,
     dry_run_paths,
+    read_notification_summaries,
 )
 
 
@@ -193,6 +195,17 @@ def test_documented_dry_run_and_resume_use_real_environment(
         "status:runs": 2,
     }
 
+    paths = dry_run_paths(campaign_root, create_dry_run_snapshot(campaign_root))
+    ledger_paths = (
+        paths.ledgers.models,
+        paths.ledgers.attempts,
+        paths.ledgers.gates,
+        paths.operational_ledger,
+    )
+    prefixes = {path: path.read_bytes() for path in ledger_paths}
+    paused_events = scan_jsonl(paths.operational_ledger)
+    assert sum(event["event_kind"] == "checkpoint-review" for event in paused_events) == 1
+
     resume = _dry_run_command(
         repo_root,
         campaign_root,
@@ -205,6 +218,20 @@ def test_documented_dry_run_and_resume_use_real_environment(
     assert resume_output["acceptance"]["status"] == "passed"
     assert "failed:source" not in f"{resume.stdout}\n{resume.stderr}"
     assert "identity-unresolved" not in f"{resume.stdout}\n{resume.stderr}"
+
+    for path, prefix in prefixes.items():
+        assert path.read_bytes().startswith(prefix)
+    events = scan_jsonl(paths.operational_ledger)
+    event_kinds = [event["event_kind"] for event in events]
+    assert event_kinds.count("checkpoint-review") == 1
+    assert event_kinds.count("review-signoff") == 1
+    assert event_kinds.count("progress-notification") == 1
+    assert event_kinds.count("notification-delivery") == 2
+    progress = next(event for event in events if event["event_kind"] == "progress-notification")
+    assert progress["milestone"] == 3
+    summaries = read_notification_summaries(campaign_root / "notifications.jsonl")
+    assert sum("review checkpoint" in summary for summary in summaries) == 1
+    assert sum("milestone 3" in summary for summary in summaries) == 1
 
     current, attempt_path = _current_projection(campaign_root)
     snapshot = create_dry_run_snapshot(campaign_root)

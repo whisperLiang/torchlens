@@ -33,7 +33,7 @@ from ... import _state
 from ..._deprecations import MISSING, MissingType
 from ..._errors import CaptureContextError
 from ...capture.arg_positions import _ensure_schema_tensor_position_corrections
-from ...constants import _get_torchvision_funcs, get_orig_torch_funcs
+from ...constants import _get_loaded_torch_alias_funcs, _get_torchvision_funcs, get_orig_torch_funcs
 from ...data_classes.func_call_location import FuncCallLocation
 from ...data_classes.internal_types import FuncExecutionContext
 from ...utils._torch_compat import (
@@ -3209,6 +3209,7 @@ def _wrap_torch_locked(
     from .belt import sweep_stale_belt_references
 
     if _state._is_decorated:
+        _decorate_torch_func_pairs(_get_loaded_torch_alias_funcs())
         install_autograd_wrappers()
         sweep_stale_belt_references()
         return

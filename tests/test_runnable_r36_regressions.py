@@ -780,8 +780,15 @@ class AddOne(nn.Module):
 
 x = torch.tensor([1.0, 2.0], device="cpu")
 torch.set_default_device("meta")
+assert "torch._dynamo" not in sys.modules
 trace = tl.trace(AddOne(), x, capture=CaptureOptions(
     intervention_ready=True, capture_container_structure=True, cache=False))
+from torchlens.backends.torch.completeness_witness import runnable_ledger_facts
+
+assert "torch._dynamo" in sys.modules
+assert str(torch.get_default_device()) == "meta"
+assert runnable_ledger_facts(trace) == (), runnable_ledger_facts(trace)
+assert tuple(trace._runnable.host_rng_channels) == ()
 trace.save(sys.argv[1], level="runnable")
 """
 
@@ -794,6 +801,7 @@ assert before == [], before
 result = tl.load(sys.argv[1]).run(inputs=torch.tensor([1.0, 2.0], device="cpu"))
 after = get_current_function_mode_stack()
 assert result.report.path_faithfulness.value == "verified", result.report.path_faithfulness
+torch.testing.assert_close(result.output, torch.tensor([2.0, 3.0], device="cpu"))
 assert after == [], after
 assert str(torch.get_default_device()) == "cpu"
 print("CORR2_3_OK")

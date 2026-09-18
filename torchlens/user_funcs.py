@@ -468,7 +468,9 @@ def _load_authenticated_capture_cache(cache_path: Path, secret: bytes) -> Any:
                 recorded = data[len(_CAPTURE_CACHE_MAGIC) : header_end - 1].decode(
                     "ascii", errors="replace"
                 )
-                payload = data[header_end:]
+                # Authenticate and unpickle a view over the same immutable read.
+                # Slicing bytes here duplicated the entire boundary/trace payload.
+                payload = memoryview(data)[header_end:]
                 observed = hmac.new(secret, payload, hashlib.sha256).hexdigest()
                 if not hmac.compare_digest(recorded, observed):
                     reason = "its embedded authentication tag does not match its bytes"
@@ -477,7 +479,7 @@ def _load_authenticated_capture_cache(cache_path: Path, secret: bytes) -> Any:
     warnings.warn(
         f"Ignoring TorchLens capture cache entry {cache_path} because {reason}. The "
         "entry is NOT unpickled (unauthenticated pickles are never loaded); the "
-        "capture runs normally and the entry is rewritten. "
+        "caller must recompute the payload before rewriting the entry. "
         "torchlens.clear_capture_cache() empties the cache.",
         UserWarning,
         stacklevel=2,
@@ -485,21 +487,19 @@ def _load_authenticated_capture_cache(cache_path: Path, secret: bytes) -> Any:
     return None
 
 
-def _store_authenticated_capture_cache(trace: Trace, cache_path: Path, secret: bytes) -> bool:
+def _store_authenticated_capture_cache(trace: Any, cache_path: Path, secret: bytes) -> bool:
     """Commit a self-authenticating cache entry in ONE atomic step.
 
-    The record is ``magic + hex HMAC tag + newline + pickled payload``. The
-    payload is streamed through the tagging writer after a placeholder header,
-    the real tag is seeked back into the header, and the finished record is
-    installed by a single ``os.replace`` -- so no observer (crash recovery or
-    concurrent reader) can ever see a payload paired with another generation's
-    tag, which the historical payload + ``.hmac`` sidecar two-step commit
-    allowed.
+    Stream ``magic + hex HMAC tag + newline + pickled payload`` through the
+    tagging writer, replace the placeholder tag, then commit with one
+    ``os.replace``. Readers cannot observe a payload paired with another
+    generation's tag (the retired payload/sidecar format's torn-commit bug).
 
     Parameters
     ----------
     trace
-        Trace to cache.
+        Capture or split-boundary payload to cache. Both callers authenticate
+        through this same reader/writer; split uses a domain-separated local key.
     cache_path
         Destination entry path.
     secret

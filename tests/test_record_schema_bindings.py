@@ -11,6 +11,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -51,6 +52,31 @@ _SCHEMA = {
         tl_constants.FUNC_CALL_LOCATION_FIELD_ORDER,
     ),
 }
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    ("annotation", "expected"),
+    [
+        (Any | None, "typing.Optional[typing.Any]"),
+        (int | Any, "typing.Union[int, typing.Any]"),
+        (int | None, "int | None"),
+        (int | str, "int | str"),
+        (int | str | None, "int | str | None"),
+        (list[Any] | None, "list[typing.Any] | None"),
+        (Any, "typing.Any"),
+        ("Any | None", "Any | None"),
+    ],
+)
+def test_binding_annotations_are_interpreter_independent(annotation: Any, expected: str) -> None:
+    """Any unions use canonical aliases; stable unions and source strings stay verbatim."""
+
+    from tools.generate_record_schema import _annotation_for
+
+    parent = type("AnnotatedParent", (), {"__annotations__": {"field": annotation}})
+    child = type("AnnotatedChild", (parent,), {})
+    assert _annotation_for(child, "field") == expected
+    assert _annotation_for(child, "missing") is None
 
 
 @pytest.mark.smoke

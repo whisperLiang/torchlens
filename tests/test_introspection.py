@@ -318,4 +318,6 @@ def test_trace_module_code_context_uses_capture_cache(monkeypatch: pytest.Monkey
     assert len(child_contexts) == 2
     assert len(child_contexts[0]) >= 2
     assert len(child_contexts[1]) == len(child_contexts[0])
-    assert all(first is second for first, second in zip(child_contexts[0], child_contexts[1]))
+    assert all(
+        first is second for first, second in zip(child_contexts[0], child_contexts[1], strict=True)
+    )

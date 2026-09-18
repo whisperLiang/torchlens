@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from hashlib import sha256
 from math import prod
@@ -23,6 +23,14 @@ if TYPE_CHECKING:
 
 
 DimOp = Literal["const", "symbol", "add", "mul", "floordiv", "ceildiv", "min", "max"]
+_DIM_ARITHMETIC: dict[str, Callable[[tuple[int, ...]], int]] = {
+    "add": sum,
+    "mul": prod,
+    "floordiv": lambda values: values[0] // values[1],
+    "ceildiv": lambda values: -(-values[0] // values[1]),
+    "min": min,
+    "max": max,
+}
 ShapeSemantic = Literal[
     "reshape",
     "repeat",
@@ -144,22 +152,10 @@ class DimExpr:
             except KeyError as exc:
                 raise ValueError(f"Missing shape symbol {self.value!r}.") from exc
         values = tuple(arg.evaluate(symbols) for arg in self.args)
-        if self.op == "add":
-            return sum(values)
-        if self.op == "mul":
-            product = 1
-            for value in values:
-                product *= value
-            return product
-        if self.op == "floordiv":
-            return values[0] // values[1]
-        if self.op == "ceildiv":
-            return -(-values[0] // values[1])
-        if self.op == "min":
-            return min(values)
-        if self.op == "max":
-            return max(values)
-        raise ValueError(f"Unsupported dimension expression op {self.op!r}.")
+        operation = _DIM_ARITHMETIC.get(self.op)
+        if operation is None:
+            raise ValueError(f"Unsupported dimension expression op {self.op!r}.")
+        return operation(values)
 
     def as_dict(self) -> dict[str, Any]:
         """Return portable expression metadata."""
@@ -328,26 +324,10 @@ class ShapeProgram:
             input_shapes[path] = tuple(shape)
         for path, axis in self.input_batch_axes.items():
             shape = shape_of(by_path[path])
-            if shape is None:
-                raise SplitBoundaryError(f"Batch input {path!r} is not tensor-like.")
-            normalized_axis = axis if axis >= 0 else len(shape) + axis
-            if not 0 <= normalized_axis < len(shape):
-                raise SplitBoundaryError(
-                    f"Batch axis {axis} is invalid for runtime input {path!r} shape {shape}."
-                )
-            batch_values[path] = int(shape[normalized_axis])
+            batch_values[path] = _runtime_batch_dimension(
+                path, shape, axis, self.traced_input_shapes[path]
+            )
             input_shapes[path] = tuple(shape)
-            traced_shape = self.traced_input_shapes[path]
-            if len(shape) != len(traced_shape):
-                raise SplitBoundaryError(
-                    f"Runtime input {path!r} rank changed from {len(traced_shape)} to {len(shape)}."
-                )
-            for index, (runtime_dim, traced_dim) in enumerate(zip(shape, traced_shape)):
-                if index != normalized_axis and int(runtime_dim) != int(traced_dim):
-                    raise SplitBoundaryError(
-                        f"Runtime input {path!r} non-batch dimension {index} changed from "
-                        f"{traced_dim} to {runtime_dim}."
-                    )
         if not batch_values:
             return ShapeBinding(
                 symbols={self.batch_symbol: self.traced_batch_size},
@@ -1190,6 +1170,46 @@ def _shape_candidate_matches_evidence(
     )
 
 
+def _runtime_batch_dimension(
+    path: str, shape: Any, axis: int, traced_shape: tuple[int, ...]
+) -> int:
+    """Validate one batched input's rank and fixed dimensions, then read its batch."""
+
+    if shape is None:
+        raise SplitBoundaryError(f"Batch input {path!r} is not tensor-like.")
+    normalized_axis = axis if axis >= 0 else len(shape) + axis
+    if not 0 <= normalized_axis < len(shape):
+        raise SplitBoundaryError(
+            f"Batch axis {axis} is invalid for runtime input {path!r} shape {shape}."
+        )
+    batch_size = int(shape[normalized_axis])
+    if len(shape) != len(traced_shape):
+        raise SplitBoundaryError(
+            f"Runtime input {path!r} rank changed from {len(traced_shape)} to {len(shape)}."
+        )
+    for index, (runtime_dim, traced_dim) in enumerate(zip(shape, traced_shape, strict=True)):
+        if index != normalized_axis and int(runtime_dim) != int(traced_dim):
+            raise SplitBoundaryError(
+                f"Runtime input {path!r} non-batch dimension {index} changed from "
+                f"{traced_dim} to {runtime_dim}."
+            )
+    return batch_size
+
+
+def _uses_shape_descriptor(node: SplitTraceNode, backend: str) -> bool:
+    """Distinguish shape-literal operands from axes such as flatten's start/end."""
+
+    if backend != TORCH_BACKEND_NAME:
+        return True
+    if shape_semantic_for_node(node) not in {"reshape", "expand", "factory"}:
+        return False
+    func_id = getattr(node.args_template, "func_id", None)
+    qualname = getattr(func_id, "qualname", "")
+    # Flatten's (start_dim=1, end_dim=-1) can resemble (B, -1) at B=1.
+    # Rewriting it would change axes rather than the output's dimensions.
+    return not (isinstance(qualname, str) and qualname.rsplit(".", 1)[-1] == "flatten")
+
+
 def _compile_recipes(
     graph: SplitTraceGraph,
     value_shapes: Mapping[str, TensorShapeIR],
@@ -1199,31 +1219,15 @@ def _compile_recipes(
 
     recipes: dict[str, tuple[ShapeRecipe, ...]] = {}
     for node in graph.nodes:
-        semantic = shape_semantic_for_node(node)
-        if graph.backend == TORCH_BACKEND_NAME:
-            if semantic not in {"reshape", "expand", "factory"}:
-                continue
-            func_id = getattr(node.args_template, "func_id", None)
-            qualname = getattr(func_id, "qualname", "")
-            if isinstance(qualname, str) and qualname.rsplit(".", 1)[-1] == "flatten":
-                # Flatten participates in output-shape propagation, but its
-                # arguments are AXES, not shape descriptors. At canonical B=1,
-                # (start_dim=1, end_dim=-1) can resemble (B, -1); rewriting it
-                # would change which dimensions flatten, rather than their sizes.
-                continue
+        if not _uses_shape_descriptor(node, graph.backend):
+            continue
         shape = value_shapes.get(node.canonical_id)
         if shape is None or node.output_shape is None:
             continue
-        relations: list[tuple[tuple[int, ...], tuple[DimExpr, ...]]] = [
-            (tuple(node.output_shape), shape.dims)
+        relations = [
+            (tuple(node.output_shape), shape.dims),
+            *_parent_shape_relations(graph, node, value_shapes),
         ]
-        for parent_label in node.parents:
-            parent = graph.node_for_label(parent_label)
-            if parent is None or parent.output_shape is None:
-                continue
-            parent_shape = value_shapes.get(parent.canonical_id)
-            if parent_shape is not None:
-                relations.append((tuple(parent.output_shape), parent_shape.dims))
         if not any(
             dim.contains(batch_symbol) for _concrete_shape, dims in relations for dim in dims
         ):
@@ -1263,6 +1267,24 @@ def _compile_recipes(
         if node_recipes:
             recipes[node.canonical_id] = tuple(node_recipes)
     return recipes
+
+
+def _parent_shape_relations(
+    graph: SplitTraceGraph,
+    node: SplitTraceNode,
+    value_shapes: Mapping[str, TensorShapeIR],
+) -> list[tuple[tuple[int, ...], tuple[DimExpr, ...]]]:
+    """Collect concrete-to-symbolic parent shapes in captured parent order."""
+
+    relations = []
+    for parent_label in node.parents:
+        parent = graph.node_for_label(parent_label)
+        if parent is None or parent.output_shape is None:
+            continue
+        parent_shape = value_shapes.get(parent.canonical_id)
+        if parent_shape is not None:
+            relations.append((tuple(parent.output_shape), parent_shape.dims))
+    return relations
 
 
 def _descriptor_exprs(
@@ -1334,91 +1356,116 @@ def _tf_shape_literal_input(capture: Any, input_index: int, tensor: Any) -> bool
     return rank in (0, 1)
 
 
-def _captured_shape_descriptors(node: SplitTraceNode) -> set[tuple[int, ...]]:
-    """Collect backend-native shape literals attached to one audited node."""
+class _ShapeDescriptorCollector:
+    """Discover audited shape literals without revisiting cyclic native metadata."""
 
-    descriptors: set[tuple[int, ...]] = set()
-    seen: set[int] = set()
+    def __init__(self) -> None:
+        """Initialize per-node discovery state."""
 
-    def visit(value: Any) -> None:
-        """Collect shape descriptors from one nested captured value."""
+        self.descriptors: set[tuple[int, ...]] = set()
+        self.seen: set[int] = set()
 
-        if value is None or id(value) in seen:
+    def visit(self, value: Any) -> None:
+        """Dispatch containers separately from backend-specific metadata."""
+
+        if value is None or id(value) in self.seen:
             return
         if not isinstance(value, (int, str, bytes, bool, float)):
-            seen.add(id(value))
+            self.seen.add(id(value))
         if isinstance(value, (tuple, list)):
-            descriptor = _flat_int_shape(value)
-            if descriptor is not None:
-                descriptors.add(descriptor)
-                return
-            unwrapped = [getattr(item, "value", item) for item in value]
-            # Only the longest trailing integer run can be the first valid
-            # suffix. Find it once instead of allocating every suffix (O(n²)
-            # on non-shape lists such as floating-point data).
-            start = len(unwrapped)
-            while (
-                start
-                and isinstance(unwrapped[start - 1], Integral)
-                and not isinstance(unwrapped[start - 1], bool)
-            ):
-                start -= 1
-            if start < len(unwrapped):
-                descriptors.add(tuple(int(cast(Integral, item)) for item in unwrapped[start:]))
-            for item in value:
-                visit(item)
-            return
-        if isinstance(value, Mapping):
+            self._visit_sequence(value)
+        elif isinstance(value, Mapping):
             for item in value.values():
-                visit(item)
+                self.visit(item)
+        else:
+            self._visit_capture(value)
+            self._visit_uop(value)
+
+    def _visit_sequence(self, value: Sequence[Any]) -> None:
+        """Collect a flat shape or its longest integer suffix, then its children."""
+
+        descriptor = _flat_int_shape(value)
+        if descriptor is not None:
+            self.descriptors.add(descriptor)
             return
+        unwrapped = [getattr(item, "value", item) for item in value]
+        start = len(unwrapped)
+        while (
+            start
+            and isinstance(unwrapped[start - 1], Integral)
+            and not isinstance(unwrapped[start - 1], bool)
+        ):
+            start -= 1
+        if start < len(unwrapped):
+            self.descriptors.add(tuple(int(cast(Integral, item)) for item in unwrapped[start:]))
+        for item in value:
+            self.visit(item)
+
+    def _visit_capture(self, value: Any) -> None:
+        """Visit literal wrappers, JAX shape parameters and captured call arguments."""
+
         literal_value = getattr(value, "value", None)
         if literal_value is not None and literal_value is not value:
-            visit(literal_value)
+            self.visit(literal_value)
         params = getattr(value, "params", None)
         if isinstance(params, Mapping):
             for key in ("shape", "new_sizes", "sizes", "limit_indices", "slice_sizes"):
                 if key in params:
-                    visit(params[key])
+                    self.visit(params[key])
         args = getattr(value, "args", None)
         if isinstance(args, (tuple, list)):
-            visit(args)
+            self.visit(args)
         kwargs = getattr(value, "kwargs", None)
         if isinstance(kwargs, (tuple, list, Mapping)):
-            visit(kwargs)
+            self.visit(kwargs)
+        self._visit_tf_inputs(value)
+
+    def _visit_tf_inputs(self, value: Any) -> None:
+        """Read only the closed TF shape slots, never arbitrary integer data."""
+
         inputs = getattr(value, "inputs", None)
-        if inputs is not None:
-            for item in inputs:
-                tensor = getattr(item, "tensor", None)
-                if tensor is not None and _tf_shape_literal_input(
-                    value, getattr(item, "input_index", -1), tensor
-                ):
-                    try:
-                        visit(tensor.numpy().tolist())
-                    except Exception:
-                        pass
+        if inputs is None:
+            return
+        for item in inputs:
+            tensor = getattr(item, "tensor", None)
+            if tensor is not None and _tf_shape_literal_input(
+                value, getattr(item, "input_index", -1), tensor
+            ):
+                try:
+                    self.visit(tensor.numpy().tolist())
+                except Exception:
+                    pass
+
+    def _visit_uop(self, value: Any) -> None:
+        """Visit tinygrad shape arguments and scalar-stack descriptors."""
+
         native_uop = getattr(value, "uop", None)
         if native_uop is not None and native_uop is not value:
-            visit(native_uop)
+            self.visit(native_uop)
         native_arg = getattr(value, "arg", None)
         if isinstance(native_arg, (tuple, list)):
-            visit(native_arg)
+            self.visit(native_arg)
         src = getattr(value, "src", None)
         if src:
             op_name = str(getattr(value, "op", "")).lower()
             if "stack" in op_name:
                 scalar_values = [getattr(item, "arg", None) for item in src]
                 if all(isinstance(item, Integral) for item in scalar_values):
-                    descriptors.add(
+                    self.descriptors.add(
                         tuple(int(item) for item in scalar_values if isinstance(item, Integral))
                     )
             for item in src:
-                visit(item)
+                self.visit(item)
 
-    visit(node.target)
-    visit(node.args_template)
-    visit(node.kwargs_template)
-    return descriptors
+
+def _captured_shape_descriptors(node: SplitTraceNode) -> set[tuple[int, ...]]:
+    """Collect backend-native shape literals attached to one audited node."""
+
+    collector = _ShapeDescriptorCollector()
+    collector.visit(node.target)
+    collector.visit(node.args_template)
+    collector.visit(node.kwargs_template)
+    return collector.descriptors
 
 
 def _unresolved_dynamic_nodes(
@@ -1501,32 +1548,22 @@ def _rewrite_recipe_tree(
 ) -> Any:
     """Rewrite exact flat shape descriptors inside a literal tree."""
 
-    if isinstance(value, tuple):
+    if isinstance(value, (tuple, list)):
+        # Rebuild builtin containers as before, without invoking a subclass
+        # constructor. Both lanes share identical descriptor matching rules.
+        rebuild = tuple if isinstance(value, tuple) else list
         flat = _flat_int_shape(value)
         if flat is not None:
             for recipe in recipes:
                 if flat == recipe.captured:
-                    return recipe.evaluate(binding)
+                    return rebuild(recipe.evaluate(binding))
         for recipe in recipes:
             width = len(recipe.captured)
             if width <= len(value):
                 suffix = _flat_int_shape(value[-width:])
                 if suffix == recipe.captured:
-                    return (*value[:-width], *recipe.evaluate(binding))
-        return tuple(_rewrite_recipe_tree(item, recipes, binding) for item in value)
-    if isinstance(value, list):
-        flat = _flat_int_shape(value)
-        if flat is not None:
-            for recipe in recipes:
-                if flat == recipe.captured:
-                    return list(recipe.evaluate(binding))
-        for recipe in recipes:
-            width = len(recipe.captured)
-            if width <= len(value):
-                suffix = _flat_int_shape(value[-width:])
-                if suffix == recipe.captured:
-                    return [*value[:-width], *recipe.evaluate(binding)]
-        return [_rewrite_recipe_tree(item, recipes, binding) for item in value]
+                    return rebuild((*value[:-width], *recipe.evaluate(binding)))
+        return rebuild(_rewrite_recipe_tree(item, recipes, binding) for item in value)
     if isinstance(value, dict):
         return {key: _rewrite_recipe_tree(item, recipes, binding) for key, item in value.items()}
     return value

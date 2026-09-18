@@ -155,16 +155,17 @@ def test_object_detection_rfdetr_representative_splits() -> None:
     detector = RFDETRNano()
     model = RFDETRTensorModel(detector.model.model).eval()
     example = torch.randn(1, 3, 384, 384)
-    seed = tl.split.prepare(model, example, split_request("25%"))
+    with torch.no_grad():
+        seed = tl.split.prepare(model, example, split_request("25%"))
     assert seed.traced_batch_size == 1
-    capture_id = id(seed.trace)
+    capture_id = id(seed.trace_graph)
     graph_id = seed.graph_identity
     for point in ("25%", "50%", "75%"):
         runtime = seed if point == "25%" else seed.at(tl.split.percent(float(point.rstrip("%"))))
         x = torch.randn(1, 3, 384, 384)
         with torch.no_grad():
             _nested_allclose(runtime.replay(x), model(x), atol=2e-3)
-        assert id(runtime.trace) == capture_id
+        assert id(runtime.trace_graph) == capture_id
         assert runtime.graph_identity == graph_id
 
 

@@ -248,7 +248,7 @@ def test_covariance_batched_update_matches_torch_cov_across_uneven_chunks() -> N
     cross = tl.stats.CrossCovariance()
     other = torch.randn(37, 5, dtype=torch.float64)
     for chunk_a, chunk_b in zip(
-        torch.split(data, [1, 4, 17, 2, 13]), torch.split(other, [1, 4, 17, 2, 13])
+        torch.split(data, [1, 4, 17, 2, 13]), torch.split(other, [1, 4, 17, 2, 13]), strict=True
     ):
         cross.update(chunk_a, chunk_b)
     centered_a = data - data.mean(dim=0)

@@ -16,6 +16,7 @@ from ...ir.container import (
     rebuild_container_from_spec,
 )
 from ...utils.rng import execute_with_restored_rng_autocast
+from .._torch_liveness import release_schedule
 from ..boundary import ReplayBoundary
 from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
@@ -205,8 +206,17 @@ class _GeneratedSegmentBase:
         self.node_ids = node_ids
         self.use_live_param_sources = use_live_param_sources
         self._node_by_id = graph.node_by_id
-        self._label_to_id = self._build_label_lookup(graph)
+        self._label_to_id = graph.node_id_by_alias
         self._shape_binding: ShapeBinding | None = None
+        retained_ids = set(plan.boundary_node_ids)
+        if self.segment == "suffix":
+            retained_ids = set(graph.output_node_ids)
+            for node_id in graph.output_node_ids:
+                retained_ids.update(
+                    graph.node_id_by_alias.get(parent, parent)
+                    for parent in graph.node_by_id[node_id].parents
+                )
+        self._release_after = release_schedule(graph, node_ids, frozenset(retained_ids))
         resolved_placement = (
             placement if placement is not None else spec.placement.for_segment(self.segment)
         )
@@ -259,15 +269,20 @@ class _GeneratedSegmentBase:
             param_cursor = _LiveParamCursor(self._param_handles_for_node(node))
             occurrence = 0
 
-            def bind_component(component: Any) -> None:
+            def bind_component(
+                component: Any,
+                *,
+                cursor: _LiveParamCursor = param_cursor,
+                node_id: str = node.canonical_id,
+            ) -> None:
                 """Walk captured argument leaves in replay's resolution order."""
 
                 nonlocal occurrence
                 if isinstance(component, LiteralTensor):
-                    value = param_cursor.maybe_replace(component.value)
+                    value = cursor.maybe_replace(component.value)
                     if value is component.value:
                         value = self._state.resolve(value)
-                    values[f"{node.canonical_id}:literal:{occurrence}"] = value
+                    values[f"{node_id}:literal:{occurrence}"] = value
                     occurrence += 1
                 elif isinstance(component, tuple):
                     if _is_template_dict(component):
@@ -282,12 +297,6 @@ class _GeneratedSegmentBase:
             for _key, component in template.kwargs:
                 bind_component(component)
         return values
-
-    @staticmethod
-    def _build_label_lookup(graph: SplitTraceGraph) -> dict[str, str]:
-        """Build raw/final/canonical label lookup table."""
-
-        return graph.node_id_by_alias
 
     def _context(self, node: SplitTraceNode, reason: str) -> SplitErrorContext:
         """Build an error context for ``node``."""
@@ -571,8 +580,10 @@ class _GeneratedSegmentBase:
             if node.is_output:
                 continue
             if node.is_buffer or (node.target is None and self._is_replay_source_node(node)):
-                if node.canonical_id not in overlay and not node.is_output:
+                if node.canonical_id not in overlay:
                     overlay[node.canonical_id] = self._source_value(node)
+                for value_id in self._release_after.get(node.canonical_id, ()):
+                    overlay.pop(value_id, None)
                 continue
             call = call_by_output.get(node.canonical_id)
             call_id = node.canonical_id if call is None else call.call_id
@@ -587,8 +598,6 @@ class _GeneratedSegmentBase:
                     if node_id in self.node_ids
                 ]
             )
-            if not group:
-                group = [node]
             executor = next((member for member in group if member.target is not None), None)
             if executor is None:
                 raise SplitUnsupportedError(
@@ -601,6 +610,12 @@ class _GeneratedSegmentBase:
             for member in group:
                 value = _slice_output_by_path(output, member.output_container_path)
                 overlay[member.canonical_id] = value
+            # Do not let loop locals retain the previous call's input/output
+            # storage during the next kernel. Autograd keeps what it needs
+            # independently when this is a graph-connected training segment.
+            del args, kwargs, output, value
+            for value_id in self._release_after.get(node.canonical_id, ()):
+                overlay.pop(value_id, None)
         return overlay
 
 
@@ -712,17 +727,28 @@ class GeneratedSuffix(_GeneratedSegmentBase):
             parent_id = self._label_to_id.get(parent)
             if parent_id in overlay:
                 return overlay[parent_id]
-        return getattr(node.op, "out", None)
+        if node.parents:
+            raise SplitUnsupportedError(
+                f"Final output {node.canonical_id!r} has no available replay parent.",
+                context=self._context(node, "missing output replay value"),
+            )
+        # A declared parent-less output is a constant source, not a cached
+        # substitute for a missing executed value. Keep its explicit payload.
+        return self._source_value(node)
 
     def _reconstruct_output(self, overlay: dict[str, Any]) -> Any:
         """Reconstruct the traced model output container."""
 
         output_nodes = [self._node_by_id[node_id] for node_id in self.graph.output_node_ids]
         if not output_nodes:
-            if not overlay:
-                return None
-            last_id = next(reversed(overlay))
-            return overlay[last_id]
+            raise SplitUnsupportedError(
+                "Torch split replay requires explicitly recorded final outputs.",
+                context=SplitErrorContext(
+                    backend="torch",
+                    split_point=self.spec.boundary,
+                    reason="missing output records",
+                ),
+            )
         leaves = [self._output_leaf(node, overlay) for node in output_nodes]
         spec = next(
             (node.output_container_spec for node in output_nodes if node.output_container_spec),

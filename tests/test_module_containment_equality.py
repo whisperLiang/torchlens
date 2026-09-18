@@ -70,7 +70,9 @@ def _torch_fuses_mha_output_reshape() -> bool:
             "cannot read torch.nn.functional.multi_head_attention_forward source, so the "
             "multihead_attention_demo golden variant cannot be selected; re-audit the fixture"
         ) from exc
-    transpose_prefix = r"attn_output\s*=\s*attn_output\.transpose\(\s*0\s*,\s*1\s*\)"
+    # Torch 2.8 line-wraps this expression in parentheses; operation identity
+    # is unchanged. Keep the exact chain and extents rather than matching any view.
+    transpose_prefix = r"attn_output\s*=\s*(?:\(\s*)?attn_output\.transpose\(\s*0\s*,\s*1\s*\)"
     output_extent = r"\(\s*tgt_len\s*\*\s*bsz\s*,\s*embed_dim\s*\)"
     if re.search(rf"{transpose_prefix}\.reshape{output_extent}", source):
         return True
@@ -84,18 +86,20 @@ def _torch_fuses_mha_output_reshape() -> bool:
     )
 
 
-def test_mha_probe_recognizes_exact_legacy_output_chain(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("parenthesized", [False, True])
+@pytest.mark.parametrize("fused", [False, True])
+def test_mha_probe_recognizes_exact_output_chain(
+    monkeypatch: pytest.MonkeyPatch, parenthesized: bool, fused: bool
 ) -> None:
-    """Select the legacy golden only for the exact historical output expression."""
+    """Select exact legacy/fused chains independently of upstream line wrapping."""
 
-    source = """
-def multi_head_attention_forward():
-    attn_output = attn_output.transpose(0, 1).contiguous().view(tgt_len * bsz, embed_dim)
-"""
+    operation = "reshape" if fused else "contiguous().view"
+    expression = f"attn_output.transpose(0, 1).{operation}(tgt_len * bsz, embed_dim)"
+    rhs = f"(\n        {expression}\n    )" if parenthesized else expression
+    source = f"def multi_head_attention_forward():\n    attn_output = {rhs}\n"
     monkeypatch.setattr(inspect, "getsource", lambda _object: source)
 
-    assert _torch_fuses_mha_output_reshape() is False
+    assert _torch_fuses_mha_output_reshape() is fused
 
 
 def test_mha_probe_rejects_unrelated_contiguous_call(

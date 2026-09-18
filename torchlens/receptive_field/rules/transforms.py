@@ -144,24 +144,37 @@ def permute(context: ReceptiveFieldRuleContext) -> _RuleResult:
         order_list[first], order_list[second] = order_list[second], order_list[first]
         order = tuple(order_list)
     else:
-        if len(positional) < 2:
-            return context.unknown("movedim source/destination dimensions were not captured")
-        sources = int_tuple(positional[0])
-        destinations = int_tuple(positional[1])
-        if sources is None or destinations is None or len(sources) != len(destinations):
-            return context.unknown("movedim dimensions were malformed")
-        normalized_sources = tuple(axis % rank for axis in sources)
-        normalized_destinations = tuple(axis % rank for axis in destinations)
-        remaining = [axis for axis in range(rank) if axis not in normalized_sources]
-        for destination, source in sorted(zip(normalized_destinations, normalized_sources)):
-            remaining.insert(destination, source)
-        order = tuple(remaining)
+        moved_order = _movedim_order(context, rank, positional)
+        if isinstance(moved_order, _RuleResult):
+            return moved_order
+        order = moved_order
     if sorted(order) != list(range(rank)):
         return context.unknown("permutation dimensions did not form a complete axis order")
     return context.axis_map(
         dict(enumerate(order)),
         note="structural permutation preserves axis coordinates exactly",
     )
+
+
+def _movedim_order(
+    context: ReceptiveFieldRuleContext, rank: int, positional: tuple[Any, ...]
+) -> tuple[int, ...] | _RuleResult:
+    """Resolve the captured source/destination lists into a full axis order."""
+
+    if len(positional) < 2:
+        return context.unknown("movedim source/destination dimensions were not captured")
+    sources = int_tuple(positional[0])
+    destinations = int_tuple(positional[1])
+    if sources is None or destinations is None or len(sources) != len(destinations):
+        return context.unknown("movedim dimensions were malformed")
+    normalized_sources = tuple(axis % rank for axis in sources)
+    normalized_destinations = tuple(axis % rank for axis in destinations)
+    remaining = [axis for axis in range(rank) if axis not in normalized_sources]
+    for destination, source in sorted(
+        zip(normalized_destinations, normalized_sources, strict=True)
+    ):
+        remaining.insert(destination, source)
+    return tuple(remaining)
 
 
 @register_rf_rule("cat", "concat", "stack")
@@ -238,23 +251,7 @@ def pad(context: ReceptiveFieldRuleContext) -> _RuleResult:
         parent_axis = first_padded_axis + local_axis
         extent = parent_shape[parent_axis]
         left = left_by_axis[parent_axis]
-        mapped: list[int] = []
-        for output_index in output_set.values():
-            source = int(output_index) - left
-            if mode == "constant":
-                if 0 <= source < extent:
-                    mapped.append(source)
-            elif mode in {"replicate", "replication"}:
-                mapped.append(min(max(source, 0), extent - 1))
-            elif mode in {"reflect", "reflection"}:
-                if extent <= 1:
-                    return (), False
-                period = 2 * (extent - 1)
-                reflected = source % period
-                mapped.append(reflected if reflected < extent else period - reflected)
-            else:
-                return tuple(range(extent)), False
-        return mapped, mode in {"constant", "replicate", "replication", "reflect", "reflection"}
+        return _map_padded_indices(output_set, extent, left, mode)
 
     return _RuleResult(
         "window_edges",
@@ -268,6 +265,67 @@ def pad(context: ReceptiveFieldRuleContext) -> _RuleResult:
     )
 
 
+def _map_padded_indices(
+    output_set: Any, extent: int, left: int, mode: str
+) -> tuple[Sequence[int], bool]:
+    """Map one axis through a captured padding mode without widening exact support."""
+
+    mapped: list[int] = []
+    for output_index in output_set.values():
+        source = int(output_index) - left
+        if mode == "constant":
+            if 0 <= source < extent:
+                mapped.append(source)
+        elif mode in {"replicate", "replication"}:
+            mapped.append(min(max(source, 0), extent - 1))
+        elif mode in {"reflect", "reflection"}:
+            if extent <= 1:
+                return (), False
+            period = 2 * (extent - 1)
+            reflected = source % period
+            mapped.append(reflected if reflected < extent else period - reflected)
+        else:
+            return tuple(range(extent)), False
+    return mapped, mode in {"constant", "replicate", "replication", "reflect", "reflection"}
+
+
+def _expanded_index(key: tuple[Any, ...], parent_rank: int) -> list[object]:
+    """Expand ellipsis and omitted trailing axes using the captured parent rank."""
+
+    expanded: list[object] = []
+    consumed = sum(item is not None and item is not Ellipsis for item in key)
+    for item in key:
+        if item is Ellipsis:
+            expanded.extend([slice(None)] * (parent_rank - consumed))
+        else:
+            expanded.append(item)
+    expanded.extend([slice(None)] * (parent_rank - consumed))
+    return expanded
+
+
+def _same_rank_slice_result(
+    context: ReceptiveFieldRuleContext,
+    edges: list[tuple[tuple[int, int], tuple[int, int]]],
+) -> _RuleResult:
+    """Represent a rank-preserving basic slice by its changed affine suffix."""
+
+    first_changed = next(
+        (axis for axis, edge in enumerate(edges) if edge != ((1, 0), (1, 0))),
+        len(edges),
+    )
+    if first_changed == len(edges):
+        return context.passthrough(note="full slices preserve every coordinate")
+    return _RuleResult(
+        "window_edges",
+        {
+            "per_axis_edges": edges[first_changed:],
+            "exact": True,
+            "preserve_non_window_axes": True,
+        },
+        "basic slicing is an exact affine map",
+    )
+
+
 @register_rf_rule("getitem")
 def getitem(context: ReceptiveFieldRuleContext) -> _RuleResult:
     """Map basic integer and slice indexing without tainting descendants."""
@@ -277,17 +335,10 @@ def getitem(context: ReceptiveFieldRuleContext) -> _RuleResult:
     parent_shape = context.in_shapes[0]
     raw_key = context.op.non_tensor_pos_args[0]
     key = raw_key if isinstance(raw_key, tuple) else (raw_key,)
-    expanded: list[object] = []
     ellipsis_count = sum(item is Ellipsis for item in key)
     if ellipsis_count > 1:
         return context.unknown("getitem contains multiple ellipses")
-    consumed = sum(item is not None and item is not Ellipsis for item in key)
-    for item in key:
-        if item is Ellipsis:
-            expanded.extend([slice(None)] * (len(parent_shape) - consumed))
-        else:
-            expanded.append(item)
-    expanded.extend([slice(None)] * (len(parent_shape) - consumed))
+    expanded = _expanded_index(key, len(parent_shape))
     output_to_parent: dict[int, int] = {}
     selected: list[int] = []
     selected_indices: dict[int, int] = {}
@@ -322,21 +373,7 @@ def getitem(context: ReceptiveFieldRuleContext) -> _RuleResult:
         parent_axis += 1
         output_axis += 1
     if same_rank and len(edges) == len(parent_shape):
-        first_changed = next(
-            (axis for axis, edge in enumerate(edges) if edge != ((1, 0), (1, 0))),
-            len(edges),
-        )
-        if first_changed == len(edges):
-            return context.passthrough(note="full slices preserve every coordinate")
-        return _RuleResult(
-            "window_edges",
-            {
-                "per_axis_edges": edges[first_changed:],
-                "exact": True,
-                "preserve_non_window_axes": True,
-            },
-            "basic slicing is an exact affine map",
-        )
+        return _same_rank_slice_result(context, edges)
     return _axis_map_result(
         output_to_parent,
         selected_parent_axes=selected,

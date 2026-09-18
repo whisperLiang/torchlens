@@ -215,18 +215,23 @@ class TestJaxToleranceDerivation:
         assert atol_c64 == atol_f32
 
     @pytest.mark.backend_jax
-    def test_live_jax_fp64_corruption_fails(self) -> None:
+    @pytest.mark.parametrize("initial_x64", [False, True])
+    def test_live_jax_fp64_corruption_fails(self, initial_x64: bool) -> None:
         """With jax installed, the full oracle refuses fp64 corruption."""
 
         jax = pytest.importorskip("jax")
-        jax.config.update("jax_enable_x64", True)
         import jax.numpy as jnp
 
         from torchlens.backends.jax.backend import _values_close
 
-        saved = jnp.ones((8,), dtype=jnp.float64)
-        assert not _values_close(saved * (1.0 + 1e-6), saved)
-        assert _values_close(saved + 0.0, saved)
+        # The fp64 oracle needs x64 locally; changing the process-global default
+        # also changes unrelated control-flow carry types and jaxpr site indexes.
+        with jax.enable_x64(initial_x64):
+            with jax.enable_x64(True):
+                saved = jnp.ones((8,), dtype=jnp.float64)
+                assert not _values_close(saved * (1.0 + 1e-6), saved)
+                assert _values_close(saved + 0.0, saved)
+            assert jax.config.jax_enable_x64 is initial_x64
 
 
 class TestJaxFiniteDifferenceStep:

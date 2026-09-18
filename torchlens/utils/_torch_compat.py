@@ -2197,7 +2197,8 @@ def get_funcol_group_resolvers(
         live runtime rather than a cached earlier answer.
 
     Backs the functional-collective boundary wraps (merge-ranks C2 recording):
-    ``torch.distributed._functional_collectives._resolve_group`` maps every
+    ``torch.distributed._functional_collectives._resolve_group`` (or the
+    name-returning ``_resolve_group_name`` on Torch 2.8) maps every
     public funcol group spelling (ProcessGroup / group-name string / DeviceMesh /
     ``(mesh, dim)`` / rank lists) to a ProcessGroup or group name, and
     ``torch.distributed.distributed_c10d._resolve_process_group`` maps a group
@@ -2215,6 +2216,10 @@ def get_funcol_group_resolvers(
         resolve_group = _import_module_attr_or_none(
             "torch.distributed._functional_collectives", "_resolve_group"
         )
+        if not callable(resolve_group):
+            resolve_group = _import_module_attr_or_none(
+                "torch.distributed._functional_collectives", "_resolve_group_name"
+            )
         resolve_name = _import_module_attr_or_none(
             "torch.distributed.distributed_c10d", "_resolve_process_group"
         )
@@ -2784,7 +2789,7 @@ _LAZY_TORCH_IMPORTS_WARMED: bool = False
 
 
 def warm_lazy_torch_imports() -> None:
-    """Force torch's lazy ``torch._compile``/``torch._dynamo`` cascade to run NOW.
+    """Warm torch's lazy compiler and einsum dependencies before capture.
 
     The first wrapped op of a capture can trigger torch's own lazy
     ``import torch._dynamo`` (``torch/_compile.py``), whose import cascade
@@ -2796,6 +2801,17 @@ def warm_lazy_torch_imports() -> None:
     silent, order-dependent breach of the contract's "a plain deterministic
     capture records nothing" pin. The monitor calls this BEFORE arming any
     patch so the cascade runs outside every window.
+
+    ``torch.einsum`` also lazily imports ``torch.backends.opt_einsum``. Import
+    hooks can expose their entire application state to the frame-reachable RNG
+    inventory (for example, pytest's collected suite), exhausting its defensive
+    budget during an otherwise deterministic forward. Warm that torch-owned
+    dependency here too; user imports and inventory limits remain unchanged.
+
+    Import-time tensor probes use a scoped CPU device. On torch 2.8 a meta
+    default sends Dynamo's own bootstrap probes into meta decompositions that
+    require the not-yet-initialized Dynamo module. This scope changes only
+    setup tensors and restores the caller's device stack before model code.
 
     Failure is benign and intentionally unlatched: a partially-executed failed
     import is evicted from ``sys.modules``, so a later in-window retry re-runs
@@ -2813,11 +2829,12 @@ def warm_lazy_torch_imports() -> None:
     if _LAZY_TORCH_IMPORTS_WARMED:
         return
     warmed = True
-    for module_name in ("torch._compile", "torch._dynamo"):
-        try:
-            importlib.import_module(module_name)
-        except Exception:
-            warmed = False
+    with torch.device("cpu"):
+        for module_name in ("torch._compile", "torch._dynamo", "torch.backends.opt_einsum"):
+            try:
+                importlib.import_module(module_name)
+            except Exception:
+                warmed = False
     _LAZY_TORCH_IMPORTS_WARMED = warmed
 
 

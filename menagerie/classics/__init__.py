@@ -152,6 +152,7 @@ def _load_classics() -> dict[str, dict[str, Any]]:
             "module_path": module_path,
             "build": build,
             "example_input": example_input,
+            "input_metadata": getattr(module, "MENAGERIE_INPUT_METADATA", {}).get(canonical_name),
             "year": _year_from_docstring(docstring),
             "family": canonical_name,
             "era": era,
@@ -193,6 +194,9 @@ def _load_classics() -> dict[str, dict[str, Any]]:
                     "module_path": module_path,
                     "build": build,
                     "example_input": example_input,
+                    "input_metadata": getattr(module, "MENAGERIE_INPUT_METADATA", {}).get(
+                        canonical_name
+                    ),
                     "year": str(year) or _year_from_docstring(docstring),
                     "family": canonical_name,
                     "era": code,

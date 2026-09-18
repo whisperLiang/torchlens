@@ -21,6 +21,7 @@ import torch.nn as nn
 import torchlens as tl
 from torchlens._io import _json
 from torchlens._io.runnable_load import _MAX_LITERAL_NESTING_DEPTH, _parse_literal
+from torchlens.errors import TorchLensIOError
 
 pytestmark = pytest.mark.smoke
 
@@ -161,12 +162,9 @@ def test_deeply_nested_manifest_does_not_crash_load(tmp_path: Path) -> None:
     injected = '{"__deep__": ' + raw + ", " + text[1:]
     manifest_path.write_text(injected)
 
-    try:
+    with pytest.raises(TorchLensIOError) as exc_info:
         tl.load(str(bundle))
-    except RecursionError:  # pragma: no cover - the exact failure we forbid
-        pytest.fail("uncaught RecursionError escaped tl.load() on a deep manifest")
-    except Exception:
-        pass  # any typed disposition (TorchLensIOError / analysis-only) is acceptable
+    assert exc_info.value.fields["code"] == "manifest_unreadable"
 
 
 def test_normal_bundle_still_loads(tmp_path: Path) -> None:

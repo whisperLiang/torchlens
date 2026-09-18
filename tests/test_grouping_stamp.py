@@ -257,9 +257,16 @@ def test_g5_legacy_v7_artifact_settles_silently() -> None:
 
     fixture = Path(__file__).parent / "fixtures" / "tlspec_v7" / "tiny_v7.tlspec"
     with warnings.catch_warnings():
-        # Silent wrt TorchLensWarning; the version-age advisory is expected.
+        # Grouping settlement must be silent; schema-age and cross-minor
+        # advisories are independent compatibility disclosures for this fixture.
         warnings.simplefilter("error", TorchLensWarning)
         warnings.simplefilter("default", ArtifactSchemaAgeWarning)
+        warnings.filterwarnings(
+            "default",
+            message=r"^Bundle torch_version=.* differs from runtime torch_version=.* "
+            r"\(minor version mismatch\)\.$",
+            category=TorchLensWarning,
+        )
         loaded = tl.load(str(fixture))  # real v7 write: the stamp was DROPped
     assert loaded.grouping_policy == degraded_grouping_policy_stamp("legacy")
     assert loaded.grouping_policy["settlement_note"] == "grouping_stamp_legacy"

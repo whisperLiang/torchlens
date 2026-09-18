@@ -424,9 +424,11 @@ def sweep_stale_belt_references() -> int:
     # O(new-modules) pre-filter: every id in ``_swept_ids_live`` is a module
     # this epoch's loop already scanned AND that is provably still the same
     # object (death callbacks evict dead ids, so a reused id reads as new).
-    # ``set(map(id, ...))`` executes no Python bytecode, so it is atomic
-    # under the GIL like the ``list(sys.modules.items())`` snapshot below.
-    if not set(map(id, sys.modules.values())) - _swept_ids_live:
+    # Stream ids into the C-level membership check instead of allocating a
+    # complete id set and its difference on every capture. No Python bytecode
+    # runs during this check, so the module inventory remains atomic under
+    # the GIL like the ``list(sys.modules.items())`` snapshot below.
+    if _swept_ids_live.issuperset(map(id, sys.modules.values())):
         return 0
     patched = 0
     for mod_key, module in list(sys.modules.items()):

@@ -542,10 +542,11 @@ def audit_graph(g, pen_eps):
         own_endpoint_gap = None
         own_endpoint_node = None
         for nname in sorted(endpoint_names):
-            if nname in node_gaps:
-                if own_endpoint_gap is None or node_gaps[nname] < own_endpoint_gap:
-                    own_endpoint_gap = node_gaps[nname]
-                    own_endpoint_node = nname
+            if nname in node_gaps and (
+                own_endpoint_gap is None or node_gaps[nname] < own_endpoint_gap
+            ):
+                own_endpoint_gap = node_gaps[nname]
+                own_endpoint_node = nname
         nearest_node = None
         nearest_node_gap = None
         for nname in sorted(node_gaps):

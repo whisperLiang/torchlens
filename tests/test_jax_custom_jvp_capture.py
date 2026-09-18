@@ -47,14 +47,7 @@ def _final_payload(trace: Any) -> Any:
 
 
 def test_jax_nn_relu_captures_faithfully() -> None:
-    """``jax.nn.relu`` inlines through its custom-JVP wrapper with exact values.
-
-    ``trace.validate_forward_pass`` is deliberately NOT asserted here: on
-    jax 0.6 the preview's postprocess currently leaves raw ``:pass`` labels on
-    EVERY capture (plain ``tanh`` captures fail the same graph_ordering
-    invariant on main), which is a pre-existing issue independent of the
-    custom-JVP inlining under test.
-    """
+    """``jax.nn.relu`` inlines through its custom-JVP wrapper with exact values."""
 
     def model(params: dict[str, Any], x: Any) -> Any:
         """Return a dense block through the library ReLU wrapper."""
@@ -68,6 +61,7 @@ def test_jax_nn_relu_captures_faithfully() -> None:
     assert "max" in {op.func_name for op in trace.layer_list}
     expected = jax.nn.relu(x @ params["w"])
     assert jnp.array_equal(_final_payload(trace), expected)
+    assert trace.validate_forward_pass([]) is True
 
 
 def test_jax_nn_softplus_captures_faithfully() -> None:

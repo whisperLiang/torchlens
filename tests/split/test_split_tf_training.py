@@ -66,7 +66,7 @@ def test_tf_module_split_training_optimizer_step_matches_full_step() -> None:
         with tf.GradientTape() as tape:
             full_loss = tf.reduce_mean(tf.math.squared_difference(model(x), y))
         full_grads = tape.gradient(full_loss, model.trainable_variables)
-        full_opt.apply_gradients(zip(full_grads, model.trainable_variables))
+        full_opt.apply_gradients(zip(full_grads, model.trainable_variables, strict=True))
 
         boundary = runtime.run_training_prefix(x)
         split_loss, grads = runtime.train_suffix(boundary, y, optimizer=suffix_opt)

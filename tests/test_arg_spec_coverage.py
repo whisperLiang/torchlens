@@ -391,6 +391,57 @@ def test_high_confidence_static_fills_remain_covered() -> None:
     assert not (_HIGH_CONFIDENCE_STATIC_NAMES & _KNOWN_UNSUPPORTED_ARG_SPECS)
 
 
+@pytest.mark.parametrize("keyword_call", [False, True])
+def test_loaded_onnx_reshape_alias_preserves_both_tensor_arguments(keyword_call: bool) -> None:
+    """The lazily discovered ONNX alias uses the underlying ATen tensor schema."""
+    from torch.onnx import operators
+
+    spec = FUNC_ARG_SPECS["reshapefromtensorshape"]
+    assert spec is FUNC_ARG_SPECS["reshapefromtensor"]
+    assert spec == ArgSpec(positions=(0, 1), tensor_kwargs=("self", "input", "shape"))
+    assert "reshapefromtensorshape" in _decorated_normalized_names()
+
+    value = torch.arange(6)
+    shape = torch.tensor([3, 2])
+    args = () if keyword_call else (value, shape)
+    kwargs = {"input": value, "shape": shape} if keyword_call else {}
+    tensors, parameters = extract_tensors_and_params(spec, args, kwargs)
+    assert len(tensors) == 2
+    assert tensors[0] is value and tensors[1] is shape
+    assert not parameters
+    assert torch.equal(operators.reshape_from_tensor_shape(*args, **kwargs), value.reshape(3, 2))
+
+
+def test_loaded_onnx_reshape_keyword_call_keeps_both_graph_parents() -> None:
+    """Keyword alias calls retain the data source and shape source as parents."""
+    from torch.onnx import operators
+
+    import torchlens as tl
+
+    class Reshape(torch.nn.Module):
+        """Exercise the Python alias's keyword-only call form."""
+
+        def forward(self, value: torch.Tensor, shape: torch.Tensor) -> torch.Tensor:
+            """Reshape using two keyword tensor operands."""
+            return operators.reshape_from_tensor_shape(input=value, shape=shape)
+
+    trace = tl.trace(
+        Reshape(),
+        (torch.arange(6), torch.tensor([3, 2])),
+        capture=tl.options.CaptureOptions(save_arg_values=True),
+    )
+    reshape_ops = [
+        op
+        for op in trace.layer_list
+        if _normalize_func_name(op.func_name) in {"reshapefromtensor", "reshapefromtensorshape"}
+    ]
+    assert len(reshape_ops) == 1
+    assert set(reshape_ops[0].parents) == {op.layer_label for op in trace.input_ops}
+    expected = torch.arange(6).reshape(3, 2)
+    assert torch.equal(reshape_ops[0].out, expected)
+    assert trace.validate_forward_pass(expected) is True
+
+
 @pytest.mark.skipif(not hasattr(torch.linalg, "matrix_sqrth"), reason="requires matrix_sqrth")
 @pytest.mark.parametrize("keyword_call", [False, True])
 def test_matrix_sqrth_keeps_its_graph_parent(keyword_call: bool) -> None:

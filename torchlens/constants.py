@@ -1105,12 +1105,6 @@ IGNORED_FUNCS = [
             "nuttall",
         )
     ),
-    # The public FP8/MoE entry points. Each delegates to a wrapped ``torch._VF``
-    # interior, so capture stayed COMPLETE, but the op recorded under the private v2
-    # name rather than what the user called (mislabel only).
-    ("torch.nn.functional", "scaled_mm"),
-    ("torch.nn.functional", "grouped_mm"),
-    ("torch.nn.functional", "scaled_grouped_mm"),
     ("torch", "tril_indices"),
     ("torch", "triu_indices"),
     ("torch", "vander"),
@@ -1302,7 +1296,44 @@ _TORCHVISION_FUNCS_CACHE: list[tuple[str, str]] | None = None
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     OVERRIDABLE_FUNCS = _get_torch_overridable_functions()
-ORIG_TORCH_FUNCS = OVERRIDABLE_FUNCS + IGNORED_FUNCS
+
+
+def _get_optional_functional_funcs() -> list[tuple[str, str]]:
+    """Discover the closed public FP8/MoE family, absent on older torch builds.
+
+    These public spellings delegate to wrapped private interiors on newer
+    torch. Include them when exported so captures retain the public name,
+    without manufacturing dead roster rows on torch 2.8. This deliberately
+    does not filter the mandatory curated roster: its liveness gate must
+    still detect an unexpectedly missing spelling.
+    """
+    return [
+        ("torch.nn.functional", name)
+        for name in ("scaled_mm", "grouped_mm", "scaled_grouped_mm")
+        if hasattr(torch.nn.functional, name)
+    ]
+
+
+ORIG_TORCH_FUNCS = OVERRIDABLE_FUNCS + IGNORED_FUNCS + _get_optional_functional_funcs()
+
+
+def _get_loaded_torch_alias_funcs() -> list[tuple[str, str]]:
+    """Discover ONNX's tensor-op aliases without importing its export stack.
+
+    Dynamo can import this module during a wrapped epoch. Its aliases then
+    retain wrappers after the main torch namespace is restored, poisoning
+    Dynamo's next identity-rule cache. Including loaded aliases in every
+    install/uninstall inventory keeps both spellings in the same epoch.
+    """
+    namespace = "torch.onnx.operators"
+    module = sys.modules.get(namespace)
+    if module is None:
+        return []
+    return [
+        (namespace, name)
+        for name in ("shape_as_tensor", "reshape_from_tensor_shape")
+        if hasattr(module, name)
+    ]
 
 
 def _get_torchvision_funcs() -> list[tuple[str, str]]:
@@ -1352,6 +1383,7 @@ def get_orig_torch_funcs(*, include_torchvision: bool = True) -> list[tuple[str,
         Torch function targets, including torchvision targets on demand.
     """
 
-    if not include_torchvision:
-        return list(ORIG_TORCH_FUNCS)
-    return [*ORIG_TORCH_FUNCS, *_get_torchvision_funcs()]
+    targets = [*ORIG_TORCH_FUNCS, *_get_loaded_torch_alias_funcs()]
+    if include_torchvision:
+        targets.extend(_get_torchvision_funcs())
+    return targets

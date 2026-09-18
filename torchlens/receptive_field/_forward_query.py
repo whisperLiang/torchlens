@@ -22,6 +22,7 @@ from ._query import (
     _IndexSet,
     _initial_axis_sets,
     _normalize_unit,
+    _passthrough_parent_axes,
     _TerminalState,
     _validate_descriptor_for_query,
     map_transposed_convolution_index_set,
@@ -241,14 +242,14 @@ def _map_to_child(
         result.map_index_set is not None or result.map_index_set_forward is not None
     ):
         return _rule_envelope(parent, child, parent_sets, result), False
-    if result.kind == "window":
-        return _map_window_forward(parent, child, parent_sets, result)
-    if result.kind == "window_edges":
-        return _map_window_edges_forward(parent, child, parent_sets, result)
-    if result.kind == "full":
-        return _map_full_forward(parent, child, parent_sets, result)
-    if result.kind == "axis_map":
-        return _map_axis_forward(parent, child, parent_sets, result)
+    mapper = {
+        "window": _map_window_forward,
+        "window_edges": _map_window_edges_forward,
+        "full": _map_full_forward,
+        "axis_map": _map_axis_forward,
+    }.get(result.kind)
+    if mapper is not None:
+        return mapper(parent, child, parent_sets, result)
     if result.kind == "passthrough":
         return _map_passthrough_forward(parent, child, parent_sets, result), True
     _ = rule_name
@@ -473,20 +474,7 @@ def _map_passthrough_forward(
 ) -> _AxisSets:
     """Map identity, reduction, broadcast, and concatenation relations to a child."""
 
-    parent_to_child: Mapping[int, int] | None = None
-    if result_spec is not None:
-        surviving = result_spec.values.get("surviving_parent_axes")
-        if isinstance(surviving, Sequence) and not isinstance(surviving, (str, bytes)):
-            surviving_axes = tuple(int(axis) for axis in surviving)
-            if len(child.shape) == len(surviving_axes):
-                parent_to_child = {
-                    parent_axis: child_axis for child_axis, parent_axis in enumerate(surviving_axes)
-                }
-        if parent_to_child is None:
-            parent_to_child = _engine._passthrough_axis_map(child, parent, result_spec)
-    if parent_to_child is None:
-        offset = len(child.shape) - len(parent.shape)
-        parent_to_child = {axis: axis + offset for axis in range(len(parent.shape))}
+    parent_to_child = _passthrough_parent_axes(child, parent, result_spec)
     result: list[_IndexSet | None] = [None] * len(child.shape)
     for parent_axis, source_set in enumerate(parent_sets):
         if source_set is None:
@@ -552,18 +540,7 @@ def _map_axis_forward(
         if isinstance(child_axis, int) and isinstance(parent_axis, int):
             if 0 <= child_axis < len(mapped) and 0 <= parent_axis < len(parent_sets):
                 source_set = parent_sets[parent_axis]
-                edge = edges.get(child_axis)
-                if source_set is not None and edge is not None:
-                    step, start = int(edge[0]), int(edge[1])
-                    source_set = _IndexSet.from_values(
-                        (
-                            (value - start) // step
-                            for value in source_set.values()
-                            if (value - start) % step == 0 and value >= start
-                        ),
-                        exact=source_set.exact,
-                    )
-                mapped[child_axis] = source_set
+                mapped[child_axis] = _inverse_slice_indices(source_set, edges.get(child_axis))
     for parent_axis in selected_axes:
         if not 0 <= parent_axis < len(parent_sets):
             continue
@@ -581,6 +558,22 @@ def _map_axis_forward(
             # image may be empty, so the non-pruned claim is an upper bound.
             exact = False
     return tuple(mapped), exact
+
+
+def _inverse_slice_indices(source_set: _IndexSet | None, edge: Any) -> _IndexSet | None:
+    """Invert a captured slice lattice while preserving unknown axis constraints."""
+
+    if source_set is None or edge is None:
+        return source_set
+    step, start = int(edge[0]), int(edge[1])
+    return _IndexSet.from_values(
+        (
+            (value - start) // step
+            for value in source_set.values()
+            if (value - start) % step == 0 and value >= start
+        ),
+        exact=source_set.exact,
+    )
 
 
 def _map_full_forward(

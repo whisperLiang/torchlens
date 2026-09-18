@@ -108,7 +108,7 @@ def test_split_training_matches_full_model_training() -> None:
     runtime.backward_prefix(boundary, grads, optimizer=prefix_opt)
 
     torch.testing.assert_close(loss.detach(), full_loss.detach(), atol=1e-5, rtol=1e-4)
-    for left, right in zip(_params(split_model), _params(model)):
+    for left, right in zip(_params(split_model), _params(model), strict=True):
         torch.testing.assert_close(left, right, atol=1e-5, rtol=1e-4)
 
 
@@ -148,7 +148,7 @@ def test_split_points_enumerates_every_compute_boundary() -> None:
     for candidate in report.unsupported:
         assert candidate.unsupported_reason is not None
     reused = runtime.at(report.supported[0].point)
-    assert reused.trace is runtime.trace
+    assert not reused.retains_trace and not runtime.retains_trace
     assert reused.trace_graph is runtime.trace_graph
     assert reused.graph_identity == runtime.graph_identity
 
@@ -165,7 +165,8 @@ def test_every_valid_boundary_replays_across_batches_from_one_capture() -> None:
 
     for candidate in report.supported:
         runtime = seed.at(candidate.point)
-        assert runtime.trace is seed.trace
+        assert not runtime.retains_trace and not seed.retains_trace
+        assert runtime.trace_graph is seed.trace_graph
         for batch in (1, 3, 8):
             x = torch.randn(batch, 4)
             with torch.no_grad():

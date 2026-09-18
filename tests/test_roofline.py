@@ -127,9 +127,16 @@ def test_roofline_properties_are_absent_from_all_field_orders() -> None:
     assert property_names.isdisjoint(state)
 
 
-def test_roofline_access_does_not_change_pickle_or_tlspec_bytes(tmp_path: Path) -> None:
+def test_roofline_access_does_not_change_pickle_or_tlspec_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Property access adds no cached state to pickle or portable bundles."""
 
+    from torchlens._io import tlspec
+
+    # The artifact records SAVE time, not property-access state. Crossing a
+    # wall-clock second must not masquerade as a roofline serialization mutation.
+    monkeypatch.setattr(tlspec, "_utc_timestamp", lambda: "2026-09-17T00:00:00Z")
     trace = tl.trace(nn.Linear(2, 2), torch.ones(1, 2))
     op = _op(trace, "linear")
     before_pickle = pickle.dumps(trace)

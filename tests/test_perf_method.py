@@ -9,6 +9,10 @@ phase-local peaks.
 
 from __future__ import annotations
 
+import json
+import sys
+import textwrap
+
 import pytest
 import torch
 from torch import nn
@@ -20,6 +24,7 @@ from benchmarks.perf_runner import (
     _run_timing,
     _select_fastlog_names,
 )
+from torchlens.utils._subprocess import run_bounded_subprocess
 
 
 def _tiny_model() -> tuple[nn.Module, torch.Tensor]:
@@ -317,29 +322,38 @@ def test_run_memory_detects_transient_inside_measured_call() -> None:
     advertised phase-local peak field.
     """
 
-    def _touch(buffer: bytearray) -> None:
-        for index in range(0, len(buffer), 4096):
-            buffer[index] = 1
-
-    # Prime the process-lifetime high water ABOVE anything the measured
-    # phase will reach, so lifetime-subtract semantics read 0.0.
-    primer = bytearray(256 * 1024 * 1024)
-    _touch(primer)
-    del primer
-
     transient_mb = 128
+    # The runner's real memory lane uses a fresh process. Match that scope:
+    # unrelated allocator pools and late reclamation from earlier tests can
+    # offset a live allocation in a whole-pytest-process RSS delta.
+    probe = textwrap.dedent("""
+        import json
+        from benchmarks.perf_runner import _run_memory
 
-    def _transient() -> None:
-        buffer = bytearray(transient_mb * 1024 * 1024)
-        _touch(buffer)
-        del buffer
+        def touch(buffer: bytearray) -> None:
+            for index in range(0, len(buffer), 4096):
+                buffer[index] = 1
 
-    metrics = _run_memory(_transient, "cpu", memory_runs=3)
+        # Put the lifetime peak above the measured phase. A lifetime-subtract
+        # implementation still reads zero and must fail the parent assertion.
+        primer = bytearray(256 * 1024 * 1024)
+        touch(primer)
+        del primer
+
+        def transient() -> None:
+            buffer = bytearray(128 * 1024 * 1024)
+            touch(buffer)
+            del buffer
+
+        print(json.dumps(_run_memory(transient, "cpu", memory_runs=3)))
+    """)
+    child = run_bounded_subprocess([sys.executable, "-c", probe], timeout=30, text=True)
+    metrics = json.loads(child.stdout)
 
     if not metrics.get("rss_high_water_phase_local"):
         pytest.skip("RSS high-water reset unavailable on this platform")
     observed = metrics["phase_rss_high_water_delta_mb"]
     assert observed >= transient_mb * 0.8, (
         f"phase-local RSS peak {observed:.1f} MB missed a {transient_mb} MB "
-        "allocate-touch-free transient inside the measured call"
+        f"allocate-touch-free transient inside the measured call: {metrics}"
     )

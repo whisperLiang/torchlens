@@ -934,6 +934,16 @@ DEVICE_GATED_SKIPIF_LEDGER: dict[str, str] = {
         "model's CUDA inputs silently computed on CPU); dark on CPU-only CI, "
         "executed on the Fellows-cluster CUDA leg"
     ),
+    "split/test_split_compact_runtime.py::test_compact_preparation_releases_cuda_activation_archive": (
+        "[2026-09-15] CUDA allocator bytes measure physical activation-archive release; "
+        "CPU weak-reference lifetime coverage cannot simulate device allocations. "
+        "Not run on CPU-only CI; requires a CUDA-capable environment"
+    ),
+    "split/test_split_memory_lifetime.py::test_cuda_replay_peak_tracks_frontier_not_chain_length": (
+        "[2026-09-15] CUDA allocator peak bounds live replay storage independently of chain "
+        "length; CPU tensor-lifetime coverage cannot simulate the device allocator peak. "
+        "Not run on CPU-only CI; requires a CUDA-capable environment"
+    ),
     "test_hash_determinism.py::test_graph_shape_hash_matches_between_cpu_and_cuda": _CUDA_DARK,
     "test_kernel_telemetry.py::test_real_cuda_cupti_correlation_matrix": (
         "[2026-08-17] L3 telemetry OPTIONAL_INTEGRATION: the exact Kineto CUDA/CUPTI "

@@ -821,6 +821,39 @@ def _shape_dtype_for_input(example: Any) -> tuple[str, str]:
     return shape_text, dtype_text or "unknown"
 
 
+def _classics_input_metadata(name: str, entry: Mapping[str, Any]) -> tuple[str, str]:
+    """Describe an input without running factories that declare their metadata.
+
+    Parameters
+    ----------
+    name:
+        Canonical entry name, used in malformed-declaration diagnostics.
+    entry:
+        Registry entry with an optional static shape/dtype declaration.
+
+    Returns
+    -------
+    tuple[str, str]
+        Catalog shape and dtype text, with the same format as runtime inspection.
+
+    Raises
+    ------
+    ValueError
+        If a supplied declaration is incomplete or malformed.
+    """
+
+    metadata = entry.get("input_metadata")
+    if metadata is None:
+        return _shape_dtype_for_input(entry["example_input"]())
+    if (
+        not isinstance(metadata, Mapping)
+        or set(metadata) != {"input_shape", "input_dtype"}
+        or any(not isinstance(value, str) or not value.strip() for value in metadata.values())
+    ):
+        raise ValueError(f"Invalid MENAGERIE_INPUT_METADATA for {name!r}: {metadata!r}")
+    return metadata["input_shape"], metadata["input_dtype"]
+
+
 def _classics_source_rows() -> list[dict[str, str]]:
     """Build virtual source rows for local historical reimplementations.
 
@@ -843,8 +876,7 @@ def _classics_source_rows() -> list[dict[str, str]]:
         # variant rather than always pointing at ``build()`` (which may not even
         # exist for multi-variant modules such as espnet_speech).
         build_name = getattr(entry["build"], "__name__", "build")
-        example = entry["example_input"]()
-        input_shape, input_dtype = _shape_dtype_for_input(example)
+        input_shape, input_dtype = _classics_input_metadata(name, entry)
         paper = str(entry["paper"])
         zoo = str(entry.get("zoo") or CLASSIC_ZOO)
         origin = {

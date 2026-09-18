@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from ..backends.registry import JAX_BACKEND_NAME
 from ..postprocess._site_key import ROOT_CALL_INSTANCE, SITE_KEY_PREFIX, parse_site_key
 
 if TYPE_CHECKING:
@@ -39,7 +40,7 @@ def _check_site_key_invariants(ml: Trace) -> None:
     if not any(getattr(op, "site_key", None) is not None for op in ops):
         return  # legacy artifact: out of the invariant's declared domain
     _check_site_key_totality(ops, name)
-    _check_site_key_uniqueness(ops, name)
+    _check_site_key_uniqueness(ops, name, backend=getattr(ml, "backend", None))
     _check_layer_site_coherence(ml, name)
 
 
@@ -74,15 +75,23 @@ def _check_site_key_totality(ops: list, name: str) -> None:
                 )
 
 
-def _check_site_key_uniqueness(ops: list, name: str) -> None:
+def _check_site_key_uniqueness(ops: list, name: str, *, backend: str | None = None) -> None:
     """I-S2: (site_key, pass-qualified innermost call instance) unique."""
 
     from .invariants import MetadataInvariantError
 
     seen: dict[tuple[str, str], str] = {}
     for op in ops:
-        stack = tuple(getattr(op, "module_call_stack", ()) or ())
-        call_instance = stack[-1] if stack else ROOT_CALL_INSTANCE
+        if backend == JAX_BACKEND_NAME:
+            # The JAX minter scopes ordinals by the iteration-qualified jaxpr
+            # path, not the function-root module stack. Validate that same
+            # identity without merging distinct scan/while invocations.
+            from ..backends.jax._site_dialect import _jax_site_components
+
+            _, call_instance = _jax_site_components(op)
+        else:
+            stack = tuple(getattr(op, "module_call_stack", ()) or ())
+            call_instance = stack[-1] if stack else ROOT_CALL_INSTANCE
         identity = (str(op.site_key), str(call_instance))
         if identity in seen:
             raise MetadataInvariantError(

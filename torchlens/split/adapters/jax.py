@@ -11,7 +11,7 @@ from ...backends.jax.jaxpr import (
     _evaluate_closed_jaxpr_no_capture,
     replay_equation,
 )
-from ...ir.container import rebuild_container_from_spec, reorder_container_leaves
+from ...ir.container import TupleIndex, rebuild_container_from_spec, reorder_container_leaves
 from ..boundary import ReplayBoundary
 from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
@@ -56,48 +56,13 @@ def _slice_output_by_path(output: Any, path: tuple[Any, ...]) -> Any:
 def _jax_tree_key(component: Any) -> Any:
     """Convert a JAX tree path entry to a native container key."""
 
+    if isinstance(component, TupleIndex):
+        return component.index
     if hasattr(component, "key"):
         return component.key
     if hasattr(component, "idx"):
         return component.idx
     return component
-
-
-def _rebuild_output_container(
-    leaves: list[tuple[tuple[Any, ...], Any]],
-) -> Any:
-    """Rebuild a JAX output pytree from its recorded leaf paths."""
-
-    def build(items: list[tuple[tuple[Any, ...], Any]]) -> Any:
-        """Reconstruct one pytree level from its leaf paths."""
-
-        if len(items) == 1 and not items[0][0]:
-            return items[0][1]
-        keys: list[Any] = []
-        for path, _value in items:
-            if path:
-                key = _jax_tree_key(path[0])
-                if key not in keys:
-                    keys.append(key)
-        if not keys:
-            return tuple(value for _path, value in items)
-        children = {
-            key: build(
-                [
-                    (tuple(_jax_tree_key(item) for item in path[1:]), value)
-                    for path, value in items
-                    if path and _jax_tree_key(path[0]) == key
-                ]
-            )
-            for key in keys
-        }
-        if all(isinstance(key, str) for key in keys):
-            return children
-        if all(isinstance(key, int) for key in keys):
-            return tuple(children[index] for index in sorted(children))
-        return children
-
-    return build(leaves)
 
 
 def _is_jax_tensor(value: Any) -> bool:
@@ -420,20 +385,31 @@ class JaxGeneratedSuffix(_JaxGeneratedSegmentBase):
 
         if node.canonical_id in overlay:
             return overlay[node.canonical_id]
-        for parent in node.parents:
-            parent_id = self._label_to_id.get(parent)
-            if parent_id in overlay:
-                return overlay[parent_id]
-        return getattr(node.op, "out", None)
+        if node.target is None:
+            if not node.parents:
+                return self._source_value(node)
+            if len(node.parents) == 1:
+                parent_id = self._label_to_id.get(node.parents[0])
+                if parent_id in overlay:
+                    return overlay[parent_id]
+        raise SplitUnsupportedError(
+            f"Final output {node.canonical_id!r} has no available replay value.",
+            context=self._context(node, "missing output replay value"),
+        )
 
     def _reconstruct_output(self, overlay: dict[str, Any]) -> Any:
         """Reconstruct the traced model output value."""
 
         output_nodes = [self._node_by_id[node_id] for node_id in self.graph.output_node_ids]
         if not output_nodes:
-            if not overlay:
-                return None
-            return overlay[next(reversed(overlay))]
+            raise SplitUnsupportedError(
+                "JAX split replay requires explicitly recorded final outputs.",
+                context=SplitErrorContext(
+                    backend="jax",
+                    split_point=self.spec.boundary,
+                    reason="missing output records",
+                ),
+            )
         leaves = [
             (node.output_container_path, self._output_leaf(node, overlay)) for node in output_nodes
         ]
@@ -442,13 +418,22 @@ class JaxGeneratedSuffix(_JaxGeneratedSegmentBase):
             None,
         )
         if spec is not None:
-            return rebuild_container_from_spec(
-                spec,
-                reorder_container_leaves(spec, leaves),
-            )
+            try:
+                return rebuild_container_from_spec(
+                    spec,
+                    reorder_container_leaves(spec, leaves),
+                )
+            except ValueError as exc:
+                raise SplitUnsupportedError(
+                    "JAX output records do not match the recorded container specification.",
+                    context=self._context(output_nodes[0], "invalid output container records"),
+                ) from exc
         if len(leaves) == 1 and not leaves[0][0]:
             return leaves[0][1]
-        return _rebuild_output_container(leaves)
+        raise SplitUnsupportedError(
+            "JAX container outputs require an explicitly recorded container specification.",
+            context=self._context(output_nodes[0], "missing output container specification"),
+        )
 
 
 class JaxSplitAdapter(SplitPolicyMixin):

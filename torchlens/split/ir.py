@@ -523,6 +523,11 @@ class SplitFeatures:
     Rank-zero and rank-one inputs are not auto-inferred as batched. A runtime batch
     is accepted after an empirical B=2 replay probe, subject to shape guards.
     Untested batches are extrapolations, not universally verified executions.
+
+    ``retain_trace`` controls diagnostic capture retention, not replay values.
+    ``None`` uses a compact Torch inference runtime and retains complete traces
+    for training and other backends. ``True`` retains the full diagnostic Trace.
+    Explicit ``False`` is supported only for Torch inference.
     """
 
     replay: bool = True
@@ -531,10 +536,13 @@ class SplitFeatures:
     batch_axes: Mapping[str, int] | None = None
     cross_device: bool = False
     live_param_sources: bool | None = None
+    retain_trace: bool | None = None
 
     def __post_init__(self) -> None:
         """Validate declared batch-axis semantics."""
 
+        if self.retain_trace is not None and not isinstance(self.retain_trace, bool):
+            raise TypeError("retain_trace must be a bool or None")
         for path, axis in (self.batch_axes or {}).items():
             if not isinstance(path, str) or not (
                 path.startswith("/args/") or path.startswith("/kwargs/")
@@ -553,6 +561,7 @@ class SplitFeatures:
             "batch_axes": None if self.batch_axes is None else dict(self.batch_axes),
             "cross_device": self.cross_device,
             "live_param_sources": self.live_param_sources,
+            "retain_trace": self.retain_trace,
         }
 
 

@@ -361,7 +361,8 @@ _HELD_REF_TARGETS: tuple[str, ...] = tuple(
 )
 
 
-@pytest.mark.smoke
+# The complete 64-channel inventory costs 13.2 s in the unified backstop.
+@pytest.mark.heavy
 @pytest.mark.parametrize("target", _HELD_REF_TARGETS)
 def test_held_ref_registry_channel_marks(target: str) -> None:
     """Every module-patched registry row marks through a PRE-WINDOW held reference.

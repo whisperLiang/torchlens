@@ -974,6 +974,8 @@ def test_synthetic_control_parent_is_retained_by_orphan_pruning() -> None:
             orphan = _fake_raw_node("orphan")
             decision.children.append("child")
             self._raw_graph_ws.raw_layer_labels_list = ["decision", "child", "output", "orphan"]
+            self.internal_sink_ops = []
+            self.internally_terminated_bool_ops = []
             self._raw_graph_ws.raw_layer_dict = OrderedDict(
                 (node._label_raw, node) for node in (decision, child, output, orphan)
             )
@@ -1247,62 +1249,63 @@ def test_jax_region_summary_pandas_and_draw_work(tmp_path: Path) -> None:
     assert "jax_region" in dot
 
 
-def test_jax_trace_accepts_s0j_extended_corpus_subset() -> None:
-    """Representative S0.J corpus cases should capture through public JAX tracing."""
-
-    cases: tuple[tuple[str, Callable[..., Any], tuple[Any, ...], set[str]], ...] = (
+# The 14 real capture/validation cells cost 13.4s combined on the CPU baseline.
+@pytest.mark.heavy
+@pytest.mark.parametrize(
+    ("name", "fn", "args_factory", "expected_primitives"),
+    [
         (
             "attention",
             _attention_block,
-            (_attention_params(), jnp.ones((2, 3, 4), dtype=jnp.float32)),
+            lambda: (_attention_params(), jnp.ones((2, 3, 4), dtype=jnp.float32)),
             {"dot_general", "div"},
         ),
         (
             "operator_heavy",
             _operator_heavy,
-            (None, jnp.linspace(1.0, 3.0, 6, dtype=jnp.float32).reshape(2, 3)),
+            lambda: (None, jnp.linspace(1.0, 3.0, 6, dtype=jnp.float32).reshape(2, 3)),
             {"add", "mul", "div", "max"},
         ),
         (
             "method_spellings",
             _method_spellings,
-            (None, jnp.arange(6, dtype=jnp.float32)),
+            lambda: (None, jnp.arange(6, dtype=jnp.float32)),
             {"reshape", "transpose", "reduce_sum"},
         ),
         (
             "reductions",
             _reductions,
-            (None, jnp.arange(6, dtype=jnp.float32).reshape(2, 3)),
+            lambda: (None, jnp.arange(6, dtype=jnp.float32).reshape(2, 3)),
             {"reduce_sum", "div"},
         ),
         (
             "broadcasting",
             _broadcasting,
-            (None, jnp.ones((2, 3), dtype=jnp.float32)),
+            lambda: (None, jnp.ones((2, 3), dtype=jnp.float32)),
             {"add"},
         ),
         (
             "slicing",
             _slicing,
-            (None, jnp.arange(8, dtype=jnp.float32).reshape(2, 4)),
+            lambda: (None, jnp.arange(8, dtype=jnp.float32).reshape(2, 4)),
             {"slice", "mul"},
         ),
         (
             "einsum",
             _einsum,
-            (None, jnp.arange(6, dtype=jnp.float32).reshape(2, 3)),
+            lambda: (None, jnp.arange(6, dtype=jnp.float32).reshape(2, 3)),
             {"dot_general"},
         ),
         (
             "dtype_cast",
             _dtype_cast,
-            (None, jnp.arange(4, dtype=jnp.int32)),
+            lambda: (None, jnp.arange(4, dtype=jnp.int32)),
             {"convert_element_type", "add"},
         ),
         (
             "depthwise_conv",
             _depthwise_conv,
-            (
+            lambda: (
                 {"kernel": jnp.ones((3, 3, 1, 2), dtype=jnp.float32) / 9.0},
                 jnp.ones((1, 4, 4, 2), dtype=jnp.float32),
             ),
@@ -1311,7 +1314,7 @@ def test_jax_trace_accepts_s0j_extended_corpus_subset() -> None:
         (
             "pointwise_conv_relu",
             _pointwise_relu,
-            (
+            lambda: (
                 {"kernel": jnp.ones((1, 1, 2, 3), dtype=jnp.float32) / 2.0},
                 jnp.ones((1, 4, 4, 2), dtype=jnp.float32),
             ),
@@ -1320,13 +1323,13 @@ def test_jax_trace_accepts_s0j_extended_corpus_subset() -> None:
         (
             "dropout_like_explicit_key",
             _dropout_like,
-            (None, random.key(42), jnp.ones((2, 3), dtype=jnp.float32)),
+            lambda: (None, random.key(42), jnp.ones((2, 3), dtype=jnp.float32)),
             {"random_bits", "lt", "select_n"},
         ),
         (
             "randint_index_explicit_key",
             _randint_index,
-            (
+            lambda: (
                 None,
                 random.PRNGKey(7),
                 jnp.arange(12, dtype=jnp.float32).reshape(4, 3),
@@ -1336,7 +1339,7 @@ def test_jax_trace_accepts_s0j_extended_corpus_subset() -> None:
         (
             "layer_norm",
             _layer_norm,
-            (
+            lambda: (
                 {"scale": jnp.ones((4,), dtype=jnp.float32), "bias": jnp.zeros((4,))},
                 jnp.arange(8, dtype=jnp.float32).reshape(2, 4),
             ),
@@ -1345,17 +1348,27 @@ def test_jax_trace_accepts_s0j_extended_corpus_subset() -> None:
         (
             "one_hot_take",
             _one_hot_take,
-            ({"indices": jnp.asarray([0, 2, 1], dtype=jnp.int32)}, jnp.eye(4, dtype=jnp.float32)),
+            lambda: (
+                {"indices": jnp.asarray([0, 2, 1], dtype=jnp.int32)},
+                jnp.eye(4, dtype=jnp.float32),
+            ),
             {"broadcast_in_dim", "eq", "dot_general"},
         ),
-    )
+    ],
+)
+def test_jax_trace_accepts_s0j_extended_corpus_subset(
+    name: str,
+    fn: Callable[..., Any],
+    args_factory: Callable[[], tuple[Any, ...]],
+    expected_primitives: set[str],
+) -> None:
+    """Representative S0.J corpus cases should capture through public JAX tracing."""
 
-    for name, fn, args, expected_primitives in cases:
-        trace = _trace_jax(fn, args)
-        primitive_names = {op.func_name for op in trace.layer_list}
+    trace = _trace_jax(fn, args_factory())
+    primitive_names = {op.func_name for op in trace.layer_list}
 
-        assert expected_primitives <= primitive_names, name
-        assert trace.validate_forward_pass([]), name
+    assert expected_primitives <= primitive_names, name
+    assert trace.validate_forward_pass([]), name
 
 
 def test_jax_trace_rejects_save_shaping_kwargs() -> None:
@@ -1506,7 +1519,8 @@ def test_jax_trace_unrolls_scan_and_groups_body_iterations() -> None:
     assert trace.validate_forward_pass([]) is True
 
 
-def test_jax_trace_keeps_two_scan_groups_separate() -> None:
+@pytest.mark.parametrize("x64", [False, True])
+def test_jax_trace_keeps_two_scan_groups_separate(x64: bool) -> None:
     """Two scan sites with the same body primitive should not overgroup."""
 
     def two_scans(params: dict[str, Any], xs: Any) -> Any:
@@ -1522,13 +1536,17 @@ def test_jax_trace_keeps_two_scan_groups_separate() -> None:
         _carry_b, ys_b = lax.scan(body, params["carry1"], xs)
         return ys_a + ys_b
 
-    trace = _trace_jax(
-        two_scans,
-        (
-            {"carry0": jnp.asarray(0.0), "carry1": jnp.asarray(10.0)},
-            jnp.arange(3, dtype=jnp.float32),
-        ),
-    )
+    with jax.enable_x64(x64):
+        trace = _trace_jax(
+            two_scans,
+            (
+                {
+                    "carry0": jnp.asarray(0.0, dtype=jnp.float32),
+                    "carry1": jnp.asarray(10.0, dtype=jnp.float32),
+                },
+                jnp.arange(3, dtype=jnp.float32),
+            ),
+        )
     first_scan_adds = [
         op
         for op in trace.layer_list
@@ -1652,7 +1670,8 @@ def test_jax_trace_unrolls_cond_executed_branch_with_control_edge() -> None:
     assert trace.validate_forward_pass([]) is True
 
 
-def test_jax_trace_unrolls_while_and_groups_iterations() -> None:
+@pytest.mark.parametrize("x64", [False, True])
+def test_jax_trace_unrolls_while_and_groups_iterations(x64: bool) -> None:
     """``lax.while_loop`` should unroll cond/body frames and group repeated body ops."""
 
     def uses_while(params: dict[str, Any], x: Any) -> Any:
@@ -1672,13 +1691,17 @@ def test_jax_trace_unrolls_while_and_groups_iterations() -> None:
 
         return lax.while_loop(condition, body, (jnp.asarray(0, dtype=jnp.int32), x))[1]
 
-    trace = _trace_jax(
-        uses_while,
-        (
-            {"limit": jnp.asarray(3, dtype=jnp.int32), "step": jnp.ones((2, 3))},
-            jnp.zeros((2, 3), dtype=jnp.float32),
-        ),
-    )
+    with jax.enable_x64(x64):
+        trace = _trace_jax(
+            uses_while,
+            (
+                {
+                    "limit": jnp.asarray(3, dtype=jnp.int32),
+                    "step": jnp.ones((2, 3), dtype=jnp.float32),
+                },
+                jnp.zeros((2, 3), dtype=jnp.float32),
+            ),
+        )
     decisions = [
         op for op in trace.layer_list if op.annotations.get("jax_capture_kind") == "while_decision"
     ]

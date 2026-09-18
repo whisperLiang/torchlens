@@ -104,9 +104,12 @@ def _torchlens_imports(tree: ast.AST) -> list[tuple[str, str | None]]:
             imports.extend(
                 (alias.name, None) for alias in node.names if alias.name.startswith("torchlens")
             )
-        elif isinstance(node, ast.ImportFrom) and node.module is not None:
-            if node.module.startswith("torchlens"):
-                imports.extend((node.module, alias.name) for alias in node.names)
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.module is not None
+            and node.module.startswith("torchlens")
+        ):
+            imports.extend((node.module, alias.name) for alias in node.names)
     return imports
 
 

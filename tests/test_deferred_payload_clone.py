@@ -273,7 +273,7 @@ def test_grad_connected_payload_gradients_match_eager_clones():
     assert set(eager) == set(deferred)
     assert eager, "no graph-connected payload was reachable by backward"
     for k in eager:
-        for ge, gd in zip(eager[k], deferred[k]):
+        for ge, gd in zip(eager[k], deferred[k], strict=True):
             assert (ge is None) == (gd is None), k
             if ge is not None:
                 assert torch.equal(ge, gd), k

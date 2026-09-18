@@ -393,7 +393,7 @@ def test_nested_tensor_output_never_aborts_capture_with_raw_torch_error() -> Non
         warnings.simplefilter("ignore")
         try:
             trace = tl.trace(_NestedTensorOutput().eval(), torch.randn(2, 3))
-        except Exception as exc:
+        except TorchLensError as exc:
             assert isinstance(exc, TorchLensError), (
                 "nested-tensor output aborted capture with a raw non-TorchLens "
                 f"error: {type(exc).__name__}: {exc}"

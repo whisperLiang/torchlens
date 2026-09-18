@@ -305,6 +305,49 @@ class TestPreJoinLineageAudit:
 
 
 class TestCollectiveRecognizer:
+    @pytest.mark.parametrize("snapshot_name,vetted", recognizer_mod.VETTED_NAMESPACE_SNAPSHOTS)
+    def test_every_reviewed_snapshot_matches_exactly(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        snapshot_name: str,
+        vetted: dict[str, frozenset[str]],
+    ) -> None:
+        """Admitted snapshots still require exact equality across all five namespaces."""
+
+        runtime = {namespace: set(ops) for namespace, ops in vetted.items()}
+        monkeypatch.setattr(recognizer_mod, "_runtime_namespace_sets", lambda: runtime)
+        recognizer = derive_collective_recognizer()
+        assert recognizer.snapshot_name == snapshot_name
+        assert recognizer.namespace_ops == vetted
+
+    @pytest.mark.parametrize("snapshot_name,vetted", recognizer_mod.VETTED_NAMESPACE_SNAPSHOTS)
+    @pytest.mark.parametrize("namespace", recognizer_mod.COLLECTIVE_NAMESPACES)
+    @pytest.mark.parametrize("mutation", ["added", "removed"])
+    def test_every_reviewed_snapshot_refuses_namespace_mutation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        snapshot_name: str,
+        vetted: dict[str, frozenset[str]],
+        namespace: str,
+        mutation: str,
+    ) -> None:
+        """A single unreviewed addition or deletion cannot inherit lane admission."""
+
+        runtime = {namespace: set(ops) for namespace, ops in vetted.items()}
+        if mutation == "added":
+            changed = "unreviewed_collective_for_test"
+            runtime[namespace].add(changed)
+        else:
+            changed = min(runtime[namespace])
+            runtime[namespace].remove(changed)
+        monkeypatch.setattr(recognizer_mod, "_runtime_namespace_sets", lambda: runtime)
+        with pytest.raises(UncapturedCollectiveOpError) as excinfo:
+            derive_collective_recognizer()
+        assert excinfo.value.fields["kind"] == "uncaptured_collective_op"
+        assert excinfo.value.fields["layer"] == 1
+        mismatch = excinfo.value.fields["mismatches"][snapshot_name][namespace]
+        assert mismatch[mutation] == [changed]
+
     def test_derivation_matches_vetted_snapshot_on_pinned_torch(self):
         recognizer = derive_collective_recognizer()
         assert recognizer.snapshot_name
@@ -329,20 +372,26 @@ class TestCollectiveRecognizer:
         mismatches = excinfo.value.fields["mismatches"]["tampered"]
         assert "allreduce_" in mismatches["c10d"]["added"]
 
-    def test_layer2_c10d_typed_schema_outside_five_refuses_typed(self, monkeypatch):
-        # SymmetricMemory is deliberately OUTSIDE the three-type rule; widening
-        # the marker list to include it proves the layer-2 scan fires on real
-        # dispatcher contents rather than on a synthetic fixture.
-        monkeypatch.setattr(
-            recognizer_mod,
-            "_LAYER2_TYPE_MARKERS",
-            (".c10d.SymmetricMemory",),
-        )
-        with pytest.raises(UncapturedCollectiveOpError) as excinfo:
-            derive_collective_recognizer()
+    def test_layer2_c10d_typed_schema_outside_five_refuses_typed(self) -> None:
+        """An unreviewed real dispatcher schema refuses under the production rule."""
+
+        # Install a real dispatcher schema outside the five namespaces instead
+        # of depending on newer builds' incidental SymmetricMemory schemas.
+        # The production c10d type-marker rule must catch this unmodified.
+        library = torch.library.Library("torchlens_collective_recognizer_test", "FRAGMENT")
+        try:
+            library.define(
+                "unreviewed_collective(__torch__.torch.classes.c10d.ProcessGroup group) -> Tensor"
+            )
+            with pytest.raises(UncapturedCollectiveOpError) as excinfo:
+                derive_collective_recognizer()
+        finally:
+            library._destroy()
         assert excinfo.value.fields["kind"] == "uncaptured_collective_op"
         assert excinfo.value.fields["layer"] == 2
-        assert any(name.startswith("symm_mem::") for name in excinfo.value.fields["offending_ops"])
+        assert excinfo.value.fields["offending_ops"] == [
+            "torchlens_collective_recognizer_test::unreviewed_collective"
+        ]
 
 
 @pytest.fixture()

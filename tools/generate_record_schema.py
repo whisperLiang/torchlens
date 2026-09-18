@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from types import UnionType
+from typing import Any, Union, get_args, get_origin
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
@@ -130,6 +131,13 @@ def _annotation_for(cls: type, name: str) -> str | None:
         annotations = mro_cls.__dict__.get("__annotations__", {})
         if name in annotations:
             annotation = annotations[name]
+            # Without postponed annotations, Any | None evaluates to a typing
+            # Optional on 3.10 but a UnionType on 3.11. Render both through the
+            # typing alias so the committed schema does not depend on the host.
+            if get_origin(annotation) is UnionType and any(
+                arg is Any for arg in get_args(annotation)
+            ):
+                annotation = Union[get_args(annotation)]  # noqa: UP007 — canonical runtime repr
             return annotation if isinstance(annotation, str) else repr(annotation)
     return None
 

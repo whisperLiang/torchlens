@@ -591,6 +591,13 @@ def example_input_deepsfm_psnet():
 
 
 MENAGERIE_ZOO = "vendored-pytorch"
+# Catalog enumeration must not execute this CUDA-only input recipe.
+MENAGERIE_INPUT_METADATA = {
+    "DeepSFM_PSNet": {
+        "input_shape": "[(1, 3, 128, 128), 'list', (1, 1, 3, 4), (1, 3, 3), (1, 3, 3)]",
+        "input_dtype": "float32",
+    },
+}
 MENAGERIE_ENTRIES = [
     (
         "DeepSFM_PSNet",

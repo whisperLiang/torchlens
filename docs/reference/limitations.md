@@ -112,6 +112,23 @@ HYPOTHESIS until discharged against a real capture.
 | Point-to-point pipeline graphs or DTensor topologies are passed to rank merge. | Typed C3/C2 construction refusal; merged replay does not exist. | Keep rank-local traces for inspection or capture a supported dense explicit-collective SPMD program. |
 | Distributed state is hidden behind descriptor-only/slots-only holders, opaque wrapped TP hooks, beyond the bounded walk, or created inside `forward`. | These are disclosed scan residuals; preflight cannot positively certify absence through opaque state. | Expose registered state/hooks through inspectable module attributes and run `tl.compat.report()` on the concrete inputs. |
 
+## Hugging Face dependency compatibility
+
+The `hf` and `test` extras share the Transformers range `>=4.45,<6`, including
+Transformers 5. The `detection` extra's RFDETR 1.8 dependency requires Transformers
+5.1 or newer, so installing `.[dev,test,hf,detection]` resolves a single 5.x version
+instead of requiring conflicting 4.x/5.x environments. PyTorch, torchvision, and
+torchaudio still need mutually compatible native builds.
+
+Upstream Transformers versions can change the executed model graph even for the
+same configuration. Such changes can legitimately change layer counts and collapse
+cuts; compatibility tests keep version-specific structural checks alongside native
+output comparisons, rather than treating different graphs as identical.
+Multi-output attention facets use retained module-exit path evidence to identify
+the attention result, not the chronological output-op inventory. If that evidence
+is unavailable (for example after loading an artifact without capture events),
+the ambiguous facet refuses explicitly rather than returning attention weights.
+
 ## Preview backends
 
 Backend-neutral split replay is broader than true backward capture. TensorFlow, Paddle,
@@ -121,6 +138,39 @@ and split-training boundary gradients. JAX uses functional gradients;
 TensorFlow and Paddle can update parameters only when generated replay reaches the live
 parameter objects; tinygrad uses live UOp autograd for an uncached `run_training_prefix`.
 MLX currently gates split replay and split training entirely.
+
+Split boundary caches are signed local caches, not portable artifacts. Loading verifies an
+HMAC over the exact bytes before restoring native backend tensors; the signing key is kept
+in the private capture-cache root, never taken from the boundary directory. Unsigned older
+caches, modified payloads, and caches from a different key are refused and must be regenerated
+with `save_boundary()`. There is no unsigned-pickle fallback. The shared cache writer limits
+serialized payloads to 2 GiB; manifest reads are bounded and checked against the signed payload.
+
+JAX split output reconstruction requires explicit output records and a complete container
+specification. Missing output values or container paths raise `SplitUnsupportedError`; the
+runtime never substitutes the last intermediate or a capture-time activation. Returning the
+same JAX tensor at multiple container positions can currently lose occurrence paths during
+capture and is refused with `context.reason="invalid output container records"`. Return each
+tensor once and rebuild the repeated positions outside split replay until capture preserves
+all output occurrences.
+
+Torch inference defaults to a **compact runtime**: the canonical capture is normalized
+into execution metadata, then its ordinary activation and argument snapshots are released
+before the B=2 probe. Preparation still temporarily performs a value-retaining capture;
+this is not a value-free or structure-only capture mode. Replay retains necessary model
+state, source constants, graph/shape/call templates and RNG/autocast context. Segment-local
+values are released after their last use; boundaries carry all crossing dependencies
+(including residuals, masks, indices and early outputs), not just one layer's output.
+
+`runtime.retains_trace` is `False` in compact mode. Accessing `runtime.trace` refuses with
+`SplitUnsupportedError` (context reason `diagnostic_trace_not_retained`); historical
+activation inspection is unavailable, not silently served from stale values. Request
+`SplitFeatures(retain_trace=True)` to retain the complete diagnostic Trace. Recutting with
+`.at()`, moving segment state with `.with_placement()`, and inspecting `trace_graph` do
+not require diagnostic retention. Training and other backends retain full captures when
+`retain_trace=None`; explicit `False` is supported only for Torch inference and otherwise
+refuses. Compact retention does not change the caller's grad mode: use `torch.no_grad()`
+around inference preparation and replay to avoid autograd storage.
 
 `SplitFeatures(batch_axes=None)` (the default) uses conservative auto-inference:
 only top-level tensors of rank at least two with matching leading extents are candidates.
@@ -148,6 +198,12 @@ the B=2 output comparison to pass. This is disclosed in the probe's `reason`.
 Torch numerical probes use the same capture seed and the B=2 oracle's aligned per-call RNG
 states, including multiple random draws; this temporary replay does not modify retained B=1
 RNG metadata or caller RNG state.
+The Torch B=2 witness is captured once without activation/argument archives. A
+normalization failure marks the probe failed and restricts replay to the captured
+batch; there is no full-retention retry. Torch output reconstruction requires
+declared final outputs and their executed dependencies. Missing output data raises
+`SplitUnsupportedError` rather than returning a historical activation or the last
+intermediate tensor. Explicit source constants remain supported.
 
 Explicit prefix/suffix device placement (`SplitRequest(placement=PlacementPlan.across(...))`,
 `SplitRuntime.with_placement()`) binds SEGMENT STATE on the requested devices and is

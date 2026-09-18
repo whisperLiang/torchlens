@@ -140,7 +140,7 @@ def test_explain_and_audit_diagnose_real_partial_failure() -> None:
         tl.trace(FailingShapeModel(), torch.randn(2, 4))
     partial = tl.partial.from_failed_capture(exc_info.value)
     last = partial.raw_layers[-1]
-    last_label = str(getattr(last, "_label_raw"))
+    last_label = str(last._label_raw)
 
     text = tl.report.explain(partial)
     report = tl.report.explain(partial, format="json")

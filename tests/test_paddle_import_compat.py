@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from importlib.machinery import ExtensionFileLoader, ModuleSpec, PathFinder, SourceFileLoader
 from types import ModuleType, SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 
@@ -23,6 +23,7 @@ _GUARD_ID = "torchlens.paddle_llvm.v1"
 _EXTENSION = "paddle.base.libpaddle"
 _EXTENSION_PATH = "/mock/site-packages/paddle/base/libpaddle.so"
 _CINN_PATH = "/mock/site-packages/paddle/libs/libcinnapi.so"
+_PHI_PATH = "/mock/site-packages/paddle/libs/libphi_core.so"
 
 
 @pytest.fixture(autouse=True)
@@ -266,8 +267,10 @@ def test_nonstandard_extension_is_not_wrapped(
     file_check.assert_not_called()
 
 
-def test_extension_without_bundled_cinn_is_not_wrapped(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Builds without Paddle's adjacent CINN library retain their original loader.
+def test_extension_without_bundled_native_libraries_is_not_wrapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Builds without adjacent CINN/Phi libraries retain their original loader.
 
     Parameters
     ----------
@@ -281,8 +284,20 @@ def test_extension_without_bundled_cinn_is_not_wrapped(monkeypatch: pytest.Monke
     file_check = Mock(return_value=False)
     monkeypatch.setattr(os.path, "isfile", file_check)
     assert compat._PaddleImportGuard().find_spec(_EXTENSION) is None
-    file_check.assert_called_once_with(_CINN_PATH)
+    assert file_check.call_args_list == [call(_CINN_PATH), call(_PHI_PATH)]
     assert spec.loader is original
+
+
+def test_cpu_phi_build_receives_local_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CPU Paddle's bundled protobuf also requires isolation after TensorFlow."""
+
+    spec, original = _extension_spec()
+    monkeypatch.setitem(sys.modules, "tensorflow", ModuleType("tensorflow"))
+    monkeypatch.setattr(PathFinder, "find_spec", Mock(return_value=spec))
+    monkeypatch.setattr(os.path, "isfile", lambda path: path == _PHI_PATH)
+    assert compat._PaddleImportGuard().find_spec(_EXTENSION) is spec
+    assert isinstance(spec.loader, compat._PaddleExtensionLoader)
+    assert spec.loader.original is original
 
 
 def test_guard_preserves_spec_and_original_loader(monkeypatch: pytest.MonkeyPatch) -> None:

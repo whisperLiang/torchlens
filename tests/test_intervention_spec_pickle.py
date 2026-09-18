@@ -158,6 +158,7 @@ def test_every_minted_builtin_helper_name_is_rebuildable() -> None:
 
     from torchlens._errors import InvalidArgumentError
     from torchlens.intervention import helpers as helpers_module, predicates as predicates_module
+    from torchlens.intervention.errors import HookValueError
     from torchlens.intervention.helpers import rebuild_builtin_helper
 
     minted: set[str] = set()
@@ -191,10 +192,10 @@ def test_every_minted_builtin_helper_name_is_rebuildable() -> None:
         except InvalidArgumentError as exc:
             if exc.fields.get("code") == "intervention_helper_unknown":
                 unknown.append(name)
-        except Exception:
+        except (TypeError, HookValueError):
             # Known constructor rejecting the canned empty args is fine; the
             # gate only proves the NAME resolves.
-            pass
+            continue
     assert not unknown, (
         f"builtin helper constructors mint names the rebuild registry cannot "
         f"restore (dead saved artifacts): {unknown}"

@@ -129,9 +129,12 @@ def _default_loss(torch: Any, output: Any, targets: Any) -> Any:
                 reason="default loss requires tensor output and target",
             ),
         )
-    if targets.dtype in (torch.int8, torch.int16, torch.int32, torch.int64, torch.long):
-        if output.ndim >= 2 and targets.ndim == output.ndim - 1:
-            return torch.nn.functional.cross_entropy(output, targets)
+    if (
+        targets.dtype in (torch.int8, torch.int16, torch.int32, torch.int64, torch.long)
+        and output.ndim >= 2
+        and targets.ndim == output.ndim - 1
+    ):
+        return torch.nn.functional.cross_entropy(output, targets)
     return torch.nn.functional.mse_loss(output, targets)
 
 
@@ -251,30 +254,12 @@ def _train_suffix_torch(
     return loss, gradients, optimizer is not None
 
 
-def _is_diff_tf_tensor(tf: Any, value: Any) -> bool:
-    """Return whether ``value`` is differentiable for TensorFlow."""
-
-    if not isinstance(value, (tf.Tensor, tf.Variable)):
-        return False
-    dtype = getattr(value, "dtype", None)
-    return bool(getattr(dtype, "is_floating", False) or getattr(dtype, "is_complex", False))
-
-
-def _tf_gradient_source(tf: Any, value: Any) -> Any:
-    """Return the TensorFlow variable/tensor watched by ``GradientTape``."""
-
-    if isinstance(value, (tf.Tensor, tf.Variable)):
-        return value
-    keras_value = getattr(value, "value", None)
-    if isinstance(keras_value, (tf.Tensor, tf.Variable)):
-        return keras_value
-    return value
-
-
 def _default_tf_loss(tf: Any, output: Any, targets: Any) -> Any:
     """Compute a default TensorFlow split-training loss."""
 
-    if not _is_diff_tf_tensor(tf, output):
+    from .adapters.tf import _is_diff_tf_tensor
+
+    if not _is_diff_tf_tensor(output, tf):
         raise SplitUnsupportedError(
             "Non-tensor TensorFlow split-training outputs require an explicit loss_fn.",
             context=SplitErrorContext(
@@ -306,11 +291,13 @@ def _train_suffix_tf(
 
     import tensorflow as tf
 
+    from .adapters.tf import _is_diff_tf_tensor, _tf_gradient_source
+
     runtime.validate_boundary(boundary)
     root_tensors: dict[str, Any] = {}
     replay_tensors: dict[str, Any] = {}
     for key, value in boundary.tensors.items():
-        if _is_diff_tf_tensor(tf, value):
+        if _is_diff_tf_tensor(value, tf):
             root = tf.identity(value)
             root_tensors[key] = root
             replay_tensors[key] = root
@@ -323,7 +310,7 @@ def _train_suffix_tf(
         metadata={**boundary.metadata, "suffix_training_roots": tuple(root_tensors)},
     )
     suffix_vars = _trainable_param_handles(runtime, runtime.plan.suffix_node_ids)
-    suffix_sources = [_tf_gradient_source(tf, var) for var in suffix_vars]
+    suffix_sources = [_tf_gradient_source(var) for var in suffix_vars]
     with tf.GradientTape(persistent=True) as tape:
         for root in root_tensors.values():
             tape.watch(root)
@@ -506,16 +493,10 @@ def _train_suffix_jax(
     )
 
 
-def _tinygrad_tensor_type() -> Any:
-    """Return the tinygrad Tensor class."""
-
-    from tinygrad import Tensor
-
-    return Tensor
-
-
 def _is_diff_tinygrad_tensor(value: Any) -> bool:
     """Return whether ``value`` is differentiable for tinygrad."""
+
+    from .adapters.tinygrad import _tinygrad_tensor_type
 
     Tensor = _tinygrad_tensor_type()
     if not isinstance(value, Tensor):
@@ -526,6 +507,8 @@ def _is_diff_tinygrad_tensor(value: Any) -> bool:
 
 def _default_tinygrad_loss(output: Any, targets: Any) -> Any:
     """Compute a default tinygrad split-training loss."""
+
+    from .adapters.tinygrad import _tinygrad_tensor_type
 
     Tensor = _tinygrad_tensor_type()
     if not isinstance(output, Tensor):
@@ -558,6 +541,8 @@ def _require_tinygrad_optimizer(runtime: Any, optimizer: Any) -> None:
 
 def _tinygrad_optimizer_step(runtime: Any, optimizer: Any | None, *, before: bool = False) -> None:
     """Run a tinygrad optimizer method with Tensor.training temporarily enabled."""
+
+    from .adapters.tinygrad import _tinygrad_tensor_type
 
     if optimizer is None:
         return
@@ -903,7 +888,7 @@ def _backward_prefix_tf(
 ) -> dict[str, Any]:
     """Backpropagate TensorFlow suffix gradients through a prefix tape."""
 
-    import tensorflow as tf
+    from .adapters.tf import _tf_gradient_source
 
     runtime.validate_boundary(boundary, validate_state=False)
     _require_training_boundary(runtime, boundary)
@@ -919,7 +904,7 @@ def _backward_prefix_tf(
     if not targets:
         return {}
     sources = _trainable_param_handles(runtime, runtime.plan.prefix_node_ids)
-    gradient_sources = [_tf_gradient_source(tf, source) for source in sources]
+    gradient_sources = [_tf_gradient_source(source) for source in sources]
     if not gradient_sources:
         return {}
     if tape is None:

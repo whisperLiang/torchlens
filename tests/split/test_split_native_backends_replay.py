@@ -129,16 +129,28 @@ def test_jax_split_replay_preserves_integer_dict_and_list_containers() -> None:
     def model(x: Any) -> Any:
         hidden = jnp.maximum(x, 0)
         result = hidden * 2.0
-        return {0: result, 1: [result + 1.0]}
+        return {0: result, 1: [result + 1.0, (result + 2.0, {3: result + 3.0})]}
 
     x = jnp.ones((2, 3))
     runtime = tl.split.prepare(model, x, split_request("after:max", backend="jax"))
-    output = runtime.replay(x)
-    assert isinstance(output, dict)
-    assert isinstance(output[1], list)
-    expected = jnp.maximum(x, 0) * 2.0
-    assert bool(jnp.allclose(output[0], expected))
-    assert bool(jnp.allclose(output[1][0], expected + 1.0))
+    assert runtime.batch_validation["status"] == "passed"
+    for batch in (1, 2, 4):
+        replay_x = jnp.arange(batch * 3, dtype=jnp.float32).reshape(batch, 3) - 2.0
+        output = runtime.replay(replay_x)
+        assert isinstance(output, dict)
+        assert isinstance(output[1], list)
+        assert isinstance(output[1][1], tuple)
+        assert isinstance(output[1][1][1], dict)
+        expected = jnp.maximum(replay_x, 0) * 2.0
+        for actual, value in (
+            (output[0], expected),
+            (output[1][0], expected + 1.0),
+            (output[1][1][0], expected + 2.0),
+            (output[1][1][1][3], expected + 3.0),
+        ):
+            assert actual.shape == value.shape
+            assert actual.dtype == value.dtype
+            assert bool(jnp.allclose(actual, value))
 
 
 def test_tf_split_replay_preserves_integer_dict_and_list_containers() -> None:

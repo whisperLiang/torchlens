@@ -709,7 +709,7 @@ def _compare_outputs(
     if len(reference) != len(candidate):
         failures.append(f"output arity differs ({label}): {len(reference)} vs {len(candidate)}")
         return failures
-    for index, (ref, cand) in enumerate(zip(reference, candidate)):
+    for index, (ref, cand) in enumerate(zip(reference, candidate, strict=True)):
         if not torch.equal(ref, cand):
             failures.append(f"output {index} not bit-identical ({label})")
     return failures

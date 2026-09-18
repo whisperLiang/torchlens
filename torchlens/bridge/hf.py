@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import torch
 
+from torchlens._deprecations import MISSING
 from torchlens.data_classes.trace import ResolvedPreprocessing, Trace
 
 _MODALITY_KEYS = frozenset({"text", "image", "images", "audio", "videos"})
@@ -278,7 +279,13 @@ def trace_text(
     tokenizer_was_explicit = tokenizer is not None
     tok = tokenizer or _resolve_tokenizer(model)
     transform, transform_state = _make_text_transform(tok, chat_template=chat_template)
-    kwargs.setdefault("output_style", "hf_text")
+    # Autoroute forwards its unset flat sentinel. Respect explicit settings,
+    # including None (no decoding), in both the flat and grouped APIs.
+    capture = kwargs.get("capture")
+    if kwargs.get("output_style", MISSING) is MISSING and (
+        capture is None or not capture.is_field_explicit("output_style")
+    ):
+        kwargs["output_style"] = "hf_text"
     had_tokenizer = hasattr(model, "_torchlens_output_tokenizer")
     previous_tokenizer = getattr(model, "_torchlens_output_tokenizer", None)
     model._torchlens_output_tokenizer = tok

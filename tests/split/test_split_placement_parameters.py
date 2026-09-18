@@ -81,9 +81,9 @@ def test_placed_prefix_optimizer_uses_training_state(
         assert [id(value) for value in runtime.prefix_parameters()] == [
             id(value) for value in prefix_parameters
         ]
-        for actual, expected in zip(prefix_parameters, reference.fc1.parameters()):
+        for actual, expected in zip(prefix_parameters, reference.fc1.parameters(), strict=True):
             torch.testing.assert_close(actual.cpu(), expected, atol=1e-5, rtol=1e-4)
-        for actual, expected in zip(model.fc1.parameters(), original_prefix):
+        for actual, expected in zip(model.fc1.parameters(), original_prefix, strict=True):
             torch.testing.assert_close(actual, expected, atol=0, rtol=0)
         with torch.no_grad():
             torch.testing.assert_close(runtime.replay(x), reference(x), atol=1e-5, rtol=1e-4)
@@ -113,4 +113,6 @@ def test_training_prefix_parameters_with_captured_inference_sources() -> None:
         optimizer=optimizer,
     )
     assert all(value.grad is not None for value in parameters)
-    assert any(not torch.equal(value, initial) for value, initial in zip(parameters, before))
+    assert any(
+        not torch.equal(value, initial) for value, initial in zip(parameters, before, strict=True)
+    )

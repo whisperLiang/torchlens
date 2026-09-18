@@ -33,6 +33,14 @@ The canonical rows add:
 - `family_normalized`: canonical family label.
 - `input_is_real`, `verification_expectation`, and `quarantine`: typed reporting flags.
 
+Classics modules whose example-input factory needs an accelerator or other runtime-only
+resource must declare `MENAGERIE_INPUT_METADATA`, keyed by their canonical entry name.
+Each value contains the two nonempty strings `input_shape` and `input_dtype`, in the
+same format as `catalog._shape_dtype_for_input`. Catalog enumeration reads these
+declarations without executing the input factory; actual model construction and
+validation still use the original factory and retain its device requirements.
+Entries without a declaration continue to derive metadata from their example input.
+
 `verification.db` is separate from `catalog.db`: it is the append-only ledger for
 verification runs and sweep provenance. The catalog intentionally keeps distinct rows
 when the same model name appears in different zoos or has a real `variant` value.

@@ -374,7 +374,7 @@ def test_trace_with_transformerlens_gpt2_string_if_available() -> None:
             first_n_layers=1,
             local_files_only=True,
         )
-    except Exception as exc:
+    except OSError as exc:
         pytest.skip(f"TransformerLens GPT-2 weights/tokenizer are not available locally: {exc}")
 
     trace = tl.trace(model, "hello world", layers_to_save=None)

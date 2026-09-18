@@ -1816,22 +1816,9 @@ def _call_site_argcount(frame: Any) -> int | None:
 def _call_site_explicit_time_value(frame: Any, time_arg_index: int) -> bool:
     """Return whether a held-alias ``c_call`` site passes an explicit non-None time.
 
-    Reads the caller frame's bytecode at ``f_lasti``. A plain ``CALL``
-    (py3.11+) / ``CALL_FUNCTION`` / ``CALL_METHOD`` (py3.10) oparg carries the
-    exact positional count; the instruction that pushed the time argument is
-    then decodable when every pushed argument is a simple single-push load,
-    and its RUNTIME VALUE is resolved from the frame (constants directly;
-    names from the frame's locals/globals, still bound at ``c_call`` time).
-
-    The previous argcount-only decode was VALUE-BLIND (r5 b8-fable R57): a
-    held alias called with an explicit ``None`` (``localtime(None)``, or the
-    common idiom ``def fmt(ts=None): return ctime(ts)``) decoded as
-    "explicit time" and read the current clock unmarked -- a false VERIFIED.
-    Resolving the value keeps a genuine held ``localtime(t)`` a pure
-    transform (no over-ceiling) while a ``None`` value, a star-call, a
-    non-simple argument expression, or any decode failure marks fail-closed
-    -- over-marking, never under-marking. The module-attr wrapper path is
-    unaffected: it sees the argument value directly and stays exact.
+    Uses the value-resolving proof in :func:`_call_site_time_arg_proof`.
+    Explicit ``None`` reads the clock; undecodable calls also return ``False``
+    so a caller never mistakes an unproven call for a pure time transform.
 
     Parameters
     ----------
@@ -1890,7 +1877,14 @@ def _call_site_time_arg_proof(frame: Any, argcount: int, time_arg_index: int) ->
             (index for index, ins in enumerate(instructions) if ins.offset == lasti),
             None,
         )
-        if call_position is None or call_position < argcount:
+        if call_position is None:
+            return "unknown"
+        # Skip only CPython 3.11's arity-matched PRECALL, not arbitrary intervening ops.
+        if call_position > 0 and instructions[call_position - 1].opname == "PRECALL":
+            if instructions[call_position - 1].arg != argcount:
+                return "unknown"
+            call_position -= 1
+        if call_position < argcount:
             return "unknown"
         arg_instructions = instructions[call_position - argcount : call_position]
         if any(ins.opname not in _SINGLE_PUSH_LOAD_OPNAMES for ins in arg_instructions):
@@ -1899,14 +1893,14 @@ def _call_site_time_arg_proof(frame: Any, argcount: int, time_arg_index: int) ->
         if time_instruction.opname == "LOAD_CONST":
             return "now_read" if time_instruction.argval is None else "transform"
         name = time_instruction.argval
-        if time_instruction.opname in {"LOAD_FAST", "LOAD_DEREF"}:
-            frame_locals = frame.f_locals
-            if name in frame_locals:
-                return "now_read" if frame_locals[name] is None else "transform"
-            return "unknown"
-        # LOAD_GLOBAL / LOAD_NAME: module global (falls back through locals
-        # for class-body/exec frames first, mirroring name resolution).
-        for namespace in (frame.f_locals, frame.f_globals):
+        # Local/cell loads cannot fall through to globals; the other name
+        # loads retain the existing locals-then-globals resolution order.
+        namespaces = (
+            (frame.f_locals,)
+            if time_instruction.opname in {"LOAD_FAST", "LOAD_DEREF"}
+            else (frame.f_locals, frame.f_globals)
+        )
+        for namespace in namespaces:
             if name in namespace:
                 return "now_read" if namespace[name] is None else "transform"
         return "unknown"
@@ -4507,8 +4501,14 @@ class host_nondeterminism_monitor:
         # os.urandom channels and permanently ceilinged a pure deterministic
         # model's first runnable artifact to UNVERIFIABLE. A failed warm is
         # benign: the in-window retry's draws are then honestly marked.
+        from .._state import pause_logging
+
         try:
-            warm_lazy_torch_imports()
+            # Monitor entry may be inside active_logging() and the witness.
+            # Pause import-time probes (including failing meta-device probes),
+            # never real user calls or later import retries.
+            with pause_logging():
+                warm_lazy_torch_imports()
         except Exception:
             pass
         try:

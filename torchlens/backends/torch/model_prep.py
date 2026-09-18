@@ -16,7 +16,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Iterable
 from dataclasses import replace
 from functools import wraps
-from types import ModuleType
+from types import BuiltinFunctionType, FunctionType, ModuleType
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -2849,10 +2849,26 @@ def _clear_session_tensor_metadata(
             # requires type-inspecting every item, which IS the rebuild, so
             # the filter runs fresh each walk (one isinstance pass per
             # reachable module namespace per session end).
+            # Exact known leaves cannot be tensors or containers. Skipping their
+            # isinstance/hostile-shim checks saves the dominant namespace cost;
+            # subclasses and every mutable slot are still inspected afresh.
+            leaf_types = (
+                FunctionType,
+                BuiltinFunctionType,
+                ModuleType,
+                type,
+                str,
+                bytes,
+                int,
+                float,
+                bool,
+                type(None),
+            )
             slot_names = tuple(
                 name
                 for name, item in namespace.items()
-                if not _is_isinstance_hostile_deprecation_shim(item)
+                if type(item) not in leaf_types
+                and not _is_isinstance_hostile_deprecation_shim(item)
                 and isinstance(
                     item,
                     (torch.Tensor, dict, list, tuple, set, frozenset, deque),

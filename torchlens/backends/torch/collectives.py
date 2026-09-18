@@ -850,10 +850,26 @@ def install_collective_wraps(originals: dict[tuple[Any, str], Any]) -> None:
         return
     from torchlens.distributed._lifecycle import _patch_modules
 
+    canonical_modules = (torch.distributed, torch.distributed.distributed_c10d)
+    # Snapshot before mutating either canonical namespace: auxiliary modules
+    # retain aliases to the ORIGINAL callables, not to wrappers installed below.
+    # A matching name alone is not evidence of a collective (Torch 2.8's
+    # device_mesh.reduce, for example, is functools.reduce).
+    canonical_refs = {
+        site.attr: tuple(
+            originals.get((module, site.attr), getattr(module, site.attr, None))
+            for module in canonical_modules
+        )
+        for site in COLLECTIVE_SITES
+    }
     for module in _patch_modules():
         for site in COLLECTIVE_SITES:
             current = getattr(module, site.attr, None)
             if current is None or (module, site.attr) in originals:
+                continue
+            if not any(module is canonical for canonical in canonical_modules) and not any(
+                current is original for original in canonical_refs[site.attr]
+            ):
                 continue
             originals[(module, site.attr)] = current
             setattr(module, site.attr, _make_collective_wrap(site, current))

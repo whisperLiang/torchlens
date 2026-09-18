@@ -595,7 +595,7 @@ def test_r69_key_codec_is_injective_and_round_trips() -> None:
     ]
     tokens = [encode_mapping_key(key) for key in keys]
     assert len(set(tokens)) == len(tokens), "codec must be injective over admitted keys"
-    for key, token in zip(keys, tokens):
+    for key, token in zip(keys, tokens, strict=True):
         assert isinstance(token, (str, int))
         decoded = decode_mapping_key(token)
         if isinstance(key, float) and math.isnan(key):

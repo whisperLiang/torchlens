@@ -382,7 +382,8 @@ def test_negative_selector_projects_to_disk_and_callback(tmp_path: Path) -> None
     loaded_saved = [op for op in loaded.layer_list if op.has_saved_activation]
     assert disk_saved and len(loaded_saved) == len(disk_saved)
     assert all(
-        torch.equal(expected.out, actual.out) for expected, actual in zip(disk_saved, loaded_saved)
+        torch.equal(expected.out, actual.out)
+        for expected, actual in zip(disk_saved, loaded_saved, strict=True)
     )
 
     callback_values: list[torch.Tensor] = []
@@ -402,7 +403,8 @@ def test_negative_selector_projects_to_disk_and_callback(tmp_path: Path) -> None
     assert callback_values
     assert len(callback_values) == len(expected_values)
     assert all(
-        torch.equal(expected, actual) for expected, actual in zip(expected_values, callback_values)
+        torch.equal(expected, actual)
+        for expected, actual in zip(expected_values, callback_values, strict=True)
     )
 
 

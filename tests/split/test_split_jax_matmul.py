@@ -52,11 +52,10 @@ def test_jax_matmul_scope_delegates_broadcasts_and_restores_on_error() -> None:
         a = jnp.arange(6, dtype=jnp.float32).reshape(1, 2, 3)
         b = jnp.arange(12, dtype=jnp.float32).reshape(2, 3, 2)
         expected = public(a, b)
-        with pytest.raises(RuntimeError, match="sentinel"):
-            with batch_stable_matmul():
-                np.testing.assert_allclose(jnp.matmul(a, b), expected)
-                mixed = jnp.ones((1, 3, 2), dtype=jnp.float16)
-                np.testing.assert_allclose(jnp.matmul(a, mixed), public(a, mixed))
-                raise RuntimeError("sentinel")
+        with pytest.raises(RuntimeError, match="sentinel"), batch_stable_matmul():
+            np.testing.assert_allclose(jnp.matmul(a, b), expected)
+            mixed = jnp.ones((1, 3, 2), dtype=jnp.float16)
+            np.testing.assert_allclose(jnp.matmul(a, mixed), public(a, mixed))
+            raise RuntimeError("sentinel")
         assert jnp.matmul is public
         assert tensor_contractions.matmul is operator

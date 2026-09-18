@@ -11,7 +11,8 @@ from typing import Any
 import pytest
 
 from menagerie import envs
-from menagerie.catalog import CatalogRow, build_canonical_rows
+from menagerie.catalog import CatalogRow
+from support.menagerie_catalog import menagerie_rows as menagerie_rows
 
 
 def _registry(tmp_path: Path) -> envs.EnvRegistry:
@@ -32,11 +33,15 @@ def _registry(tmp_path: Path) -> envs.EnvRegistry:
     return replace(registry, cache_root=tmp_path / "envs")
 
 
-def test_assign_is_one_to_one_over_catalog(tmp_path: Path) -> None:
+# Either catalog test can pay the shared fixture's 7-9 s setup cost.
+@pytest.mark.heavy
+def test_assign_is_one_to_one_over_catalog(
+    tmp_path: Path, menagerie_rows: tuple[CatalogRow, ...]
+) -> None:
     """Every canonical catalog row maps to exactly one validation island."""
 
     registry = _registry(tmp_path)
-    rows = build_canonical_rows()
+    rows = menagerie_rows
     assignments = envs.assign(rows, registry)
 
     assert len(assignments) == len(rows)
@@ -52,11 +57,14 @@ def test_assign_is_one_to_one_over_catalog(tmp_path: Path) -> None:
     assert all(assignments[row.stable_id] == "base" for row in base_capable)
 
 
-def test_forecast_tab_assignment_examples(tmp_path: Path) -> None:
+@pytest.mark.heavy
+def test_forecast_tab_assignment_examples(
+    tmp_path: Path, menagerie_rows: tuple[CatalogRow, ...]
+) -> None:
     """Known forecast/tabular rows route to the forecast_tab island."""
 
     registry = _registry(tmp_path)
-    rows_by_id = {row.stable_id: row for row in build_canonical_rows()}
+    rows_by_id = {row.stable_id: row for row in menagerie_rows}
 
     assert envs.env_for_row(rows_by_id["m3392"], registry) == "forecast_tab"
     assert envs.env_for_row(rows_by_id["m1907"], registry) == "forecast_tab"

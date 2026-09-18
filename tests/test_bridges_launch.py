@@ -362,7 +362,7 @@ def test_hf_compat_loaders_match_direct_calls(monkeypatch: pytest.MonkeyPatch) -
         direct_hf = transformers.AutoModel.from_pretrained(
             "distilbert-base-uncased", local_files_only=True
         )
-    except Exception:
+    except OSError:
 
         class FakeAutoModel:
             """Offline Transformers AutoModel fixture."""

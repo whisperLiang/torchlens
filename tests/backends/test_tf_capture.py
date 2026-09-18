@@ -91,7 +91,21 @@ def test_tf_capture_hand_built_op_chain_edges_and_saved_values() -> None:
 
     assert trace.backend == "tf"
     assert {"AddV2", "Mul"} <= {op.func_name for op in trace.layer_list}
-    assert by_func["Mul"].parents == (by_func["AddV2"]._label_raw,)
+    assert by_func["Mul"].parents == (by_func["AddV2"].label,)
+    # Public edges use finalized Op labels; raw labels belong only to capture
+    # records and validation sidecars, even when every layer has one pass.
+    by_label = {op.label: op for op in trace.layer_list}
+    for op in trace.layer_list:
+        for parent_label in op.parents:
+            assert parent_label in by_label
+            parent = trace[parent_label]
+            assert parent is by_label[parent_label]
+            assert op.label in parent.children
+        for child_label in op.children:
+            assert child_label in by_label
+            child = trace[child_label]
+            assert child is by_label[child_label]
+            assert op.label in child.parents
     assert np.allclose(trace[by_func["Mul"].label].out, np.array([9.0, 20.0], dtype=np.float32))
     assert np.isfinite(trace[by_func["AddV2"].label].out).all()
 

@@ -492,14 +492,14 @@ _PUBLIC_REGISTRATION_STATE = frozenset(
         ("torchlens/semantic/facets.py", "_REGISTRY"),
         ("torchlens/semantic/facets.py", "_REGISTRY_VERSION"),
         ("torchlens/semantic/facets.py", "_TRANSFORMERLENS_ALIASES_ENABLED"),
-        # L6/S4 predicate runtime extension point: the public registration hook
-        # mutates this table, so a leaked entry changes predicate resolution for
-        # the rest of the process exactly like a registered facet or RF rule.
+        # Explicit profile registration persists metadata (never checkpoints)
+        # under _PROFILE_LOCK and changes future split profile resolution.
+        ("torchlens/split/profiles.py", "_PROFILES"),
+        # L6/S4 registrations persistently change predicate resolution, like facets/RF rules.
         ("torchlens/ir/predicate_registry.py", "_USER_PREDICATES"),
     }
 )
 """Process state a PUBLIC API mutates: registries, rule tables, feature toggles.
-
 Distinct from a cache because a user call CHANGES capture behavior for the rest
 of the process (a registered facet, an RF rule, an enabled alias set). These are
 the members whose leakage across a test session can silently change results, so

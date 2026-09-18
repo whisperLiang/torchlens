@@ -201,6 +201,21 @@ menagerie/data/verification.db*
 tests/**/goldens/env-*/
 tests/golden/env-*/
 
+# Reviewed Python 3.11 / torch 2.13.0 baselines: byte-identical to the
+# Python 3.10 canonical snapshots. Keep these visible for review; unknown
+# environments still stay ignored and fail closed until deliberately enrolled.
+!tests/godobject_oracle/goldens/env-py3.11-torch2.13.0/
+!tests/godobject_oracle/goldens/env-py3.11-torch2.13.0-graphviz0.21/
+!tests/surface_oracle/goldens/env-py3.11-torch2.13.0/
+!tests/golden/env-py3.11-torch2.13.0-graphviz0.21-pydot4.0.1/
+
+# Unified Transformers 5/RFDETR environment. Reviewed against canonical and
+# unchanged HEAD on this runtime; see tests/oracle_environments.md.
+!tests/godobject_oracle/goldens/env-py3.11-torch2.8.0/
+!tests/godobject_oracle/goldens/env-py3.11-torch2.8.0-graphviz0.21/
+!tests/surface_oracle/goldens/env-py3.11-torch2.8.0/
+!tests/golden/env-py3.11-torch2.8.0-graphviz0.21-pydot4.0.1/
+
 # Sprint lane result reports are INTERNAL notes (repo is public); never track them.
 # (The repo no-internal-notes hook is bypassed when a global core.hooksPath is set.)
 results/

@@ -31,6 +31,7 @@ from ..data_classes._state_adapter import state_items, state_new, state_restore
 from ..data_classes.trace import Trace, _scrubbed_transform_repr
 from ..errors._base import TorchLensWarning
 from . import TLSPEC_VERSION, BlobRef, FieldPolicy, TorchLensIOError, prerelease as _prerelease
+from ._blob_metadata import _blob_kind_for_field, _blob_label_for_owner
 from .payload_codec import PayloadCodec, get_payload_codec
 
 # Replay-safe literals that must round-trip BYTE-EXACT through scrub/save/load.
@@ -2393,58 +2394,3 @@ def _next_blob_id(blob_counter: list[int]) -> str:
 
     blob_counter[0] += 1
     return f"{blob_counter[0]:010d}"
-
-
-def _blob_kind_for_field(owner: Any, field_name: str) -> str:
-    """Map an object field name to the portable manifest tensor kind."""
-
-    if field_name == "out":
-        return "out"
-    if field_name == "transformed_out":
-        return "transformed_out"
-    if field_name == "grad":
-        return "grad"
-    if field_name == "transformed_grad":
-        return "transformed_grad"
-    if field_name in {"saved_args", "saved_kwargs"}:
-        return "captured_arg"
-    if field_name == "out_versions_by_child":
-        return "child_version"
-    if field_name == "func_rng_states":
-        return "rng_state"
-    if field_name in {"forward_args", "forward_kwargs"}:
-        return "module_arg"
-    if field_name in {"_args", "_kwargs", "payload"} and type(owner).__name__ in {
-        "ModuleInputSnapshot",
-        "TensorInputObservation",
-    }:
-        return "pre_hook_input"
-    if field_name == "func_config":
-        return "func_config"
-    if field_name == "custom_attributes":
-        return "module_meta"
-    if field_name in {"grad_inputs", "grad_outputs"}:
-        return "grad_fn_grad"
-    if field_name == "_buffer_initial_values":
-        return "buffer_initial_value"
-    if field_name == "_annotation_blobs":
-        return "annotation_blob"
-    if field_name == "orphan_records":
-        return "orphan_payload"
-    if field_name == "edge_substitutions":
-        # L6 stage 3: tier-(ii) occurrence-granular substituted-value payloads
-        # (BLOB_RECURSIVE under the pre-release switch / from the wave-3 bump).
-        return "edge_substitution"
-    raise TorchLensIOError(f"No blob kind mapping defined for {type(owner).__name__}.{field_name}.")
-
-
-def _blob_label_for_owner(owner: Any) -> str:
-    """Return the human-readable label stored alongside a blob spec."""
-
-    if hasattr(owner, "label") and getattr(owner, "label") is not None:
-        return str(getattr(owner, "label"))
-    if hasattr(owner, "call_label") and getattr(owner, "call_label") is not None:
-        return str(getattr(owner, "call_label"))
-    if hasattr(owner, "address") and getattr(owner, "address") is not None:
-        return str(getattr(owner, "address"))
-    return type(owner).__name__

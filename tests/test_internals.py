@@ -699,7 +699,7 @@ class TestNestedTupleArgs:
 
         # Identity: the saved container and its tensors must be copies, not references.
         assert saved_list is not live_pair
-        assert all(saved is not live for saved, live in zip(saved_list, live_pair))
+        assert all(saved is not live for saved, live in zip(saved_list, live_pair, strict=True))
 
         before = [t.clone() for t in saved_list]
 
@@ -708,7 +708,7 @@ class TestNestedTupleArgs:
         for t in live_pair:
             t.add_(1000.0)
 
-        for pre_mutation, post_mutation in zip(before, saved_list):
+        for pre_mutation, post_mutation in zip(before, saved_list, strict=True):
             assert torch.equal(pre_mutation, post_mutation), (
                 "saved_args nested-list tensors changed after mutating the live source "
                 "tensors -- saved_args is not holding independent copies"
@@ -718,7 +718,7 @@ class TestNestedTupleArgs:
         live_before_second_mutation = [t.clone() for t in live_pair]
         for t in saved_list:
             t.add_(-5000.0)
-        for pre_mutation, post_mutation in zip(live_before_second_mutation, live_pair):
+        for pre_mutation, post_mutation in zip(live_before_second_mutation, live_pair, strict=True):
             assert torch.equal(pre_mutation, post_mutation), (
                 "live tensors changed after mutating the saved_args copy -- saved_args is "
                 "not holding independent copies"

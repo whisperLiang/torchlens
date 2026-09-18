@@ -470,10 +470,10 @@ def equinox_param_logs(tree: EquinoxModuleTree, trace: Any) -> dict[str, Param]:
         existing_address = param_address_by_value_id.get(id(value))
         if existing_address is not None:
             param = param_logs[existing_address]
+            # Aliases name this same tensor; co_parent_params instead records
+            # distinct parameters consumed together by an op during finalization.
             if address not in param.all_addresses:
                 param.all_addresses.append(address)
-            if address not in param.co_parent_params:
-                param.co_parent_params.append(address)
             for alias in tree.metadata.get(module_address, {}).get(
                 "all_addresses", [module_address]
             ):
@@ -566,8 +566,6 @@ def nnx_param_logs(tree: NnxModuleTree, trace: Any) -> dict[str, Param]:
         for alias_address in _nnx_param_alias_addresses(tree, address, module_address):
             if alias_address not in param.all_addresses:
                 param.all_addresses.append(alias_address)
-            if alias_address != address and alias_address not in param.co_parent_params:
-                param.co_parent_params.append(alias_address)
         param_logs[address] = param
     return param_logs
 
@@ -859,8 +857,6 @@ def _attach_param_aliases(
     for alias_address in _nnx_param_alias_addresses(tree, address, module_address):
         if alias_address not in param.all_addresses:
             param.all_addresses.append(alias_address)
-        if alias_address not in param.co_parent_params:
-            param.co_parent_params.append(alias_address)
     for alias in tree.metadata.get(module_address, {}).get("all_addresses", [module_address]):
         if alias not in param.all_module_addresses:
             param.all_module_addresses.append(alias)

@@ -33,7 +33,7 @@ class SplitRuntime:
     """Prepared split runtime for prefix/suffix replay."""
 
     model: Any
-    trace: Any
+    _trace: Any | None
     trace_graph: SplitTraceGraph
     request: SplitRequest
     plan: SplitPlan
@@ -68,7 +68,7 @@ class SplitRuntime:
         """Create a prepared split runtime."""
 
         self.model = model
-        self.trace = trace
+        self._trace = trace
         self.trace_graph = trace_graph
         self.request = request
         self.plan = plan
@@ -81,6 +81,37 @@ class SplitRuntime:
         self.model_profile = model_profile
         self.prepared_input_kwargs = dict(prepared_input_kwargs or {})
         self.batch_spec = batch_spec
+
+    @property
+    def retains_trace(self) -> bool:
+        """Return whether the runtime owns a complete diagnostic capture."""
+
+        return self._trace is not None
+
+    @property
+    def trace(self) -> Any:
+        """Return the optional diagnostic Trace, refusing compact-runtime access.
+
+        Raises
+        ------
+        SplitUnsupportedError
+            If preparation discarded the diagnostic capture. Prepare with
+            ``SplitFeatures(retain_trace=True)`` to inspect saved activations.
+            Graph metadata remains available through ``trace_graph`` in either mode.
+        """
+
+        if self._trace is None:
+            raise SplitUnsupportedError(
+                "This compact split runtime does not retain a diagnostic Trace. "
+                "Prepare with SplitFeatures(retain_trace=True) to inspect historical "
+                "activations, or use runtime.trace_graph for execution graph metadata.",
+                context=SplitErrorContext(
+                    backend=self.trace_graph.backend,
+                    split_point=self.request.boundary,
+                    reason="diagnostic_trace_not_retained",
+                ),
+            )
+        return self._trace
 
     @property
     def split_id(self) -> str:
@@ -150,8 +181,8 @@ class SplitRuntime:
     def at(self, point: SplitPoint) -> SplitRuntime:
         """Return a runtime at another boundary in the captured graph.
 
-        The complete backend capture and normalized Split IR are immutable for
-        a model/input pair.  Reusing them lets a contract test validate every
+        The normalized Split IR and optional diagnostic capture are immutable
+        for a model/input pair. Reusing them lets a contract test validate every
         compute-node ``before``/``after`` boundary without recapturing the
         model for each point.  Backend lowering and capability analysis still
         run independently for the requested boundary.
@@ -205,7 +236,7 @@ class SplitRuntime:
         self._inherit_segment_state(segments, recut=True)
         return SplitRuntime(
             model=self.model,
-            trace=self.trace,
+            trace=self._trace,
             trace_graph=self.trace_graph,
             request=request,
             plan=plan,
@@ -234,7 +265,7 @@ class SplitRuntime:
         self._inherit_segment_state(segments, recut=False)
         return SplitRuntime(
             model=self.model,
-            trace=self.trace,
+            trace=self._trace,
             trace_graph=self.trace_graph,
             request=request,
             plan=self.plan,
@@ -264,25 +295,7 @@ class SplitRuntime:
                 if callable(getter):
                     snapshots[name] = getter()
             if recut:
-                old_prefix_state = getattr(previous["prefix"], "_state", None)
-                suffix_node_ids: frozenset[str] = getattr(segments.suffix, "node_ids", frozenset())
-                training_values = snapshots.get("training_prefix", {})
-                if isinstance(old_prefix_state, SegmentState):
-                    for key, value in snapshots.get("prefix", {}).items():
-                        node_id = key.removesuffix(":source").rsplit(":literal:", 1)[0]
-                        if node_id not in suffix_node_ids or key not in training_values:
-                            continue
-                        if not old_prefix_state._same_value(value, training_values[key]):
-                            raise SplitUnsupportedError(
-                                "Cannot recut divergent inference and training prefix state "
-                                "into one shared suffix; synchronize the prefix values or "
-                                "keep those operations in the prefix.",
-                                context=SplitErrorContext(
-                                    backend=self.adapter.name,
-                                    split_point=self.request.boundary,
-                                    reason="divergent prefix state replicas",
-                                ),
-                            )
+                self._validate_recut_prefix_state(previous, snapshots, segments)
             seen: set[int] = set()
             for name in previous:
                 target = getattr(segments, name)
@@ -297,27 +310,43 @@ class SplitRuntime:
                         if name == "training_prefix"
                         else ("prefix", "suffix")
                     )
-                inherited: list[StateEntry] = []
-                for origin in origins:
-                    old_state = getattr(previous[origin], "_state", None)
-                    if not isinstance(old_state, SegmentState):
-                        continue
-                    used_values = {
-                        id(value)
-                        for key, value in snapshots.get(origin, {}).items()
-                        if not recut
-                        or key.removesuffix(":source").rsplit(":literal:", 1)[0] in target.node_ids
-                    }
-                    inherited.extend(
-                        entry for entry in old_state.entries() if id(entry.value) in used_values
-                    )
-                state.inherit_entries(inherited)
+                state.inherit_entries(
+                    _inherited_segment_entries(previous, snapshots, target, origins, recut)
+                )
             # Settle migration now, including a typed refusal for incompatible
             # replicas of a tied value that the new cut would have to coalesce.
             for name in previous:
                 getter = getattr(getattr(segments, name), "bound_state_values", None)
                 if callable(getter):
                     getter()
+
+    def _validate_recut_prefix_state(
+        self,
+        previous: dict[str, Any],
+        snapshots: dict[str, dict[str, Any]],
+        segments: SegmentBundle,
+    ) -> None:
+        """Refuse combining distinct inference/training values in a shared suffix."""
+
+        old_prefix_state = getattr(previous["prefix"], "_state", None)
+        suffix_node_ids: frozenset[str] = getattr(segments.suffix, "node_ids", frozenset())
+        training_values = snapshots.get("training_prefix", {})
+        if isinstance(old_prefix_state, SegmentState):
+            for key, value in snapshots.get("prefix", {}).items():
+                node_id = key.removesuffix(":source").rsplit(":literal:", 1)[0]
+                if node_id not in suffix_node_ids or key not in training_values:
+                    continue
+                if not old_prefix_state._same_value(value, training_values[key]):
+                    raise SplitUnsupportedError(
+                        "Cannot recut divergent inference and training prefix state "
+                        "into one shared suffix; synchronize the prefix values or "
+                        "keep those operations in the prefix.",
+                        context=SplitErrorContext(
+                            backend=self.adapter.name,
+                            split_point=self.request.boundary,
+                            reason="divergent prefix state replicas",
+                        ),
+                    )
 
     def _state_fingerprint(self, prefix_kind: str) -> str | None:
         """Hash the state that actually executes, including device-owned replicas."""
@@ -641,6 +670,29 @@ class SplitRuntime:
 
 
 __all__ = ["SplitRuntime"]
+
+
+def _inherited_segment_entries(
+    previous: dict[str, Any],
+    snapshots: dict[str, dict[str, Any]],
+    target: Any,
+    origins: tuple[str, ...],
+    recut: bool,
+) -> list[StateEntry]:
+    """Select existing entries consumed by the target's executed node identities."""
+
+    inherited: list[StateEntry] = []
+    for origin in origins:
+        old_state = getattr(previous[origin], "_state", None)
+        if not isinstance(old_state, SegmentState):
+            continue
+        used_values = {
+            id(value)
+            for key, value in snapshots.get(origin, {}).items()
+            if not recut or key.removesuffix(":source").rsplit(":literal:", 1)[0] in target.node_ids
+        }
+        inherited.extend(entry for entry in old_state.entries() if id(entry.value) in used_values)
+    return inherited
 
 
 def _model_state_fingerprint(model: Any) -> str | None:

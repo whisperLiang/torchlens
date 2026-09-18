@@ -69,7 +69,10 @@ def test_fresh_split_captures_held_activation_once_per_batch(
 
         for index in range(2):
             runtime = tl.split.prepare(
-                model, example, tl.split.SplitRequest(point=tl.split.percent(50))
+                model, example, tl.split.SplitRequest(
+                    point=tl.split.percent(50),
+                    features=tl.split.SplitFeatures(retain_trace=True),
+                )
             )
             assert calls == [1, 2] * (index + 1), calls
             assert model.activation.act is held

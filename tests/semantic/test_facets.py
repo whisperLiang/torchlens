@@ -281,10 +281,10 @@ def test_structural_output_facets_expose_namedtuple_and_dataclass_names() -> Non
     log = tl.trace(Model(), torch.randn(2, 3), layers_to_save="all")
     facets = log.modules["block"].facets
 
-    assert "out0.values" in facets.keys()
-    assert "out0.indices" in facets.keys()
-    assert "out1.first" in facets.keys()
-    assert "out1.second" in facets.keys()
+    assert "out0.values" in facets
+    assert "out0.indices" in facets
+    assert "out1.first" in facets
+    assert "out1.second" in facets
 
 
 def test_structseq_output_facets_expose_torch_return_type_names() -> None:

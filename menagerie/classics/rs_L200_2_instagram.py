@@ -1263,6 +1263,16 @@ def example_input_instagram():
 
 
 MENAGERIE_ZOO = "vendored-pytorch"
+# Catalog enumeration must not execute this CUDA-only input recipe.
+MENAGERIE_INPUT_METADATA = {
+    "InstaGraM": {
+        "input_shape": (
+            "[(1, 6, 3, 128, 352), (1, 6, 3), (1, 6, 3, 3), (1, 6, 3, 3), "
+            "(1, 6, 3), (1, 6, 3, 3), (1, 1, 1), (1, 1, 1), (1, 3), (1, 3)]"
+        ),
+        "input_dtype": "float32",
+    },
+}
 MENAGERIE_ENTRIES = [
     ("InstaGraM", "build_instagram", "example_input_instagram", 2023, "vendored"),
 ]

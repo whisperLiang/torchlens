@@ -54,7 +54,7 @@ def _undecorated_targets() -> list[str]:
         namespace_key = namespace_name.replace("torch.", "")
         try:
             holder = nested_getattr(torch, namespace_key)
-        except Exception:
+        except AttributeError:
             continue
         if not hasattr(holder, func_name):
             continue
@@ -212,7 +212,7 @@ def test_escape_detector_teardown_frees_the_tool_id_and_clears_the_guard(
     for candidate in range(6):
         try:
             monitoring.use_tool_id(candidate, "torchlens-test")
-        except Exception:
+        except ValueError:
             continue
         tool_id = candidate
         break
@@ -258,11 +258,11 @@ def test_call_execution_context_unwind_exits_every_context() -> None:
     # Drive the finally body directly with a controlled stack: the unwind contract is
     # "every context gets its chance, the first failure is re-raised".
     stack = [_Ctx("outer", False), _Ctx("inner", True)]
-    first_error: BaseException | None = None
+    first_error: RuntimeError | None = None
     for ctx in reversed(stack):
         try:
             ctx.__exit__(None, None, None)
-        except BaseException as error:
+        except RuntimeError as error:
             if first_error is None:
                 first_error = error
     assert exited == ["inner", "outer"]

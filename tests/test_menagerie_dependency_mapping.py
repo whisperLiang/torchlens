@@ -7,8 +7,9 @@ import subprocess
 
 import pytest
 
-from menagerie.catalog import CatalogRow, build_canonical_rows
+from menagerie.catalog import CatalogRow
 from menagerie.runtime import dependency_plan, install_dependency_plan
+from support.menagerie_catalog import menagerie_rows as menagerie_rows
 
 
 def _row(**overrides: object) -> CatalogRow:
@@ -92,10 +93,12 @@ def test_effdet_dependency_has_pip_mapping_and_does_not_no_mapping_skip(
     assert commands[0][-1] == "effdet"
 
 
-def test_effdet_d6_catalog_row_has_pip_mapping() -> None:
+# Includes the full-catalog integration fixture (7.5 s in the combined suite).
+@pytest.mark.heavy
+def test_effdet_d6_catalog_row_has_pip_mapping(menagerie_rows: tuple[CatalogRow, ...]) -> None:
     """The canonical effdet D6 row maps to the installable effdet package."""
 
-    rows_by_id = {row.stable_id: row for row in build_canonical_rows()}
+    rows_by_id = {row.stable_id: row for row in menagerie_rows}
     plan = dependency_plan(rows_by_id["m4525"])
 
     assert plan.cluster_key == "effdet"

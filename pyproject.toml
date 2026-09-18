@@ -128,7 +128,7 @@ tf = ["tensorflow>=2.16"]
 tensorflow = ["tensorflow>=2.16"]
 tf-gpu = ["tensorflow[and-cuda]>=2.16"]
 tensorflow-gpu = ["tensorflow[and-cuda]>=2.16"]
-hf = ["transformers~=4.45", "timm~=1.0"]
+hf = ["transformers>=4.45,<6", "timm~=1.0"]
 detection = ["ultralytics>=8.4,<8.5", "rfdetr>=1.8,<1.9"]
 detection-tf = ["keras-cv>=0.9,<1"]
 gradcam = ["grad-cam~=1.5"]
@@ -204,10 +204,10 @@ test = [
     # BAND COHERENCE (r7 R83-2): the four ML packages the bridge/ adapters
     # wrap are banded HERE to the exact ranges this file's own extras declare
     # as supported (lightning :106, hf :117, vision-shims :128). Before this,
-    # the eight .[dev,test,tabular] CI legs validated whatever resolved --
-    # transformers 5.x landed while the hf extra called ~=4.45 supported, and
-    # the fleet recorded reds from exactly that fork. Widen an adapter band
-    # and this extra IN THE SAME CHANGE, never one side alone.
+    # the eight .[dev,test,tabular] CI legs validated whatever resolved.
+    # Transformers 5 is admitted together with the hf extra so RFDETR 1.8's
+    # >=5.1 requirement can coexist with the test environment. Widen an adapter
+    # band and this extra IN THE SAME CHANGE, never one side alone.
     "lightning~=2.4",
     "pandas>=2.0",
     # TRIPWIRE_GUARD deps (tests/test_skip_audit.py): absence silently disarms
@@ -250,7 +250,7 @@ test = [
     "pydantic>=2.0",
     "PyYAML>=6.0",
     "psutil>=5.9",
-    "transformers~=4.45",
+    "transformers>=4.45,<6",
     "visualpriors",
 ]
 

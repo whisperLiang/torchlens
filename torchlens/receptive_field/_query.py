@@ -555,13 +555,10 @@ def _standard_window_index_set(
     return _IndexSet.from_values(values, exact=output_set.exact)
 
 
-def _map_passthrough(
-    op: Op,
-    parent: Op,
-    output_sets: _AxisSets,
-    result_spec: _RuleResult | None = None,
-) -> _AxisSets:
-    """Map identity, reduction, broadcast, and concatenation coordinates to one parent."""
+def _passthrough_parent_axes(
+    op: Op, parent: Op, result_spec: _RuleResult | None
+) -> Mapping[int, int]:
+    """Resolve surviving or broadcast parent axes for either query direction."""
 
     parent_to_child: Mapping[int, int] | None = None
     if result_spec is not None:
@@ -577,6 +574,18 @@ def _map_passthrough(
     if parent_to_child is None:
         offset = len(op.shape) - len(parent.shape)
         parent_to_child = {axis: axis + offset for axis in range(len(parent.shape))}
+    return parent_to_child
+
+
+def _map_passthrough(
+    op: Op,
+    parent: Op,
+    output_sets: _AxisSets,
+    result_spec: _RuleResult | None = None,
+) -> _AxisSets:
+    """Map identity, reduction, broadcast, and concatenation coordinates to one parent."""
+
+    parent_to_child = _passthrough_parent_axes(op, parent, result_spec)
     result: list[_IndexSet | None] = [None] * len(parent.shape)
     for parent_axis in range(len(parent.shape)):
         output_axis = parent_to_child.get(parent_axis, -1)
@@ -599,11 +608,7 @@ def _map_passthrough(
     if selected is None:
         return tuple(result)
     if bool(result_spec.values.get("stack", False)):
-        routed = any(index in offsets for index in selected.values())
-        if not routed:
-            empty_axis = next((axis for axis, value in enumerate(result) if value is not None), 0)
-            result[empty_axis] = _IndexSet.empty()
-        return tuple(result)
+        return _route_stacked_parent(result, selected, offsets)
     routed_parent_axis = next(
         (axis for axis, child_axis in parent_to_child.items() if child_axis == concat_axis),
         None,
@@ -619,6 +624,18 @@ def _map_passthrough(
     )
     result[routed_parent_axis] = _IndexSet.from_values(values, exact=selected.exact)
     return tuple(result)
+
+
+def _route_stacked_parent(
+    mapped: list[_IndexSet | None], selected: _IndexSet, offsets: Sequence[int]
+) -> _AxisSets:
+    """Prune a stacked parent's support when its output slice is not selected."""
+
+    routed = any(index in offsets for index in selected.values())
+    if not routed:
+        empty_axis = next((axis for axis, value in enumerate(mapped) if value is not None), 0)
+        mapped[empty_axis] = _IndexSet.empty()
+    return tuple(mapped)
 
 
 def _map_axis_mapping(

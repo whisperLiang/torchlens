@@ -341,14 +341,14 @@ def test_eager_forward_hits_torch_ops_call_zero_times() -> None:
 
     for cls in classes:
         saved[cls] = cls.__dict__["__call__"]
-        setattr(cls, "__call__", _make_counter(saved[cls]))
+        cls.__call__ = _make_counter(saved[cls])
     try:
         model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 8)).eval()
         with torch.no_grad():
             model(torch.randn(2, 8))
     finally:
         for cls, original in saved.items():
-            setattr(cls, "__call__", original)
+            cls.__call__ = original
     assert hits["n"] == 0
 
 

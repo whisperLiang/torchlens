@@ -10,6 +10,11 @@ from typing import Any, Literal, TypeAlias, cast
 
 from ...ir.events import JaxEquationKind
 from ..registry import BackendUnsupportedError
+from ._jit_call_policy import (
+    _has_donated_invars,
+    _jit_call_params_are_known,
+    _jit_shardings_are_unspecified,
+)
 from .modules import decode_module_call_scope, decode_module_scope
 
 SAFE_JIT_NAMES = frozenset(
@@ -37,21 +42,6 @@ REJECTED_NESTED_PRIMITIVES = frozenset(
 )
 EFFECT_PRIMITIVES = frozenset({"debug_callback", "io_callback", "pure_callback"})
 PURE_JIT_CALL_PRIMITIVES = frozenset({"jit", "pjit"})
-JIT_CALL_PARAM_NAMES = frozenset(
-    {
-        "compiler_options_kvs",
-        "ctx_mesh",
-        "donated_invars",
-        "in_layouts",
-        "in_shardings",
-        "inline",
-        "jaxpr",
-        "keep_unused",
-        "name",
-        "out_layouts",
-        "out_shardings",
-    }
-)
 _ITERATION_COMPONENT_RE = re.compile(
     r"^(?P<prefix>(?:scan|while)[_\-:]?)?(?:iter|iteration)(?P<sep>[:=_-])\d+$"
 )
@@ -2408,82 +2398,6 @@ def _nested_jaxpr_is_pure_inlinable(eqn: Any, closed_jaxpr: Any, core: Any) -> b
     if not _jit_shardings_are_unspecified(eqn.params.get("out_shardings", ())):
         return False
     return _closed_jaxpr_is_effect_free_and_const_free(closed_jaxpr, core)
-
-
-def _jit_call_params_are_known(eqn: Any) -> bool:
-    """Return whether a JIT-shaped call uses only audited parameters.
-
-    Parameters
-    ----------
-    eqn
-        Candidate call equation.
-
-    Returns
-    -------
-    bool
-        True when all parameter names are part of the audited JIT-call frame.
-    """
-
-    return set(eqn.params) <= JIT_CALL_PARAM_NAMES
-
-
-def _has_donated_invars(donated_invars: Any) -> bool:
-    """Return whether any nested JIT input is donated.
-
-    Parameters
-    ----------
-    donated_invars
-        Donation flags from the JAX call equation.
-
-    Returns
-    -------
-    bool
-        True when any donation flag is truthy.
-    """
-
-    if isinstance(donated_invars, bool):
-        return donated_invars
-    if isinstance(donated_invars, Sequence):
-        return any(bool(flag) for flag in donated_invars)
-    return bool(donated_invars)
-
-
-def _jit_shardings_are_unspecified(shardings: Any) -> bool:
-    """Return whether a JIT sharding parameter is fully unspecified.
-
-    Parameters
-    ----------
-    shardings
-        JAX ``in_shardings`` or ``out_shardings`` parameter value.
-
-    Returns
-    -------
-    bool
-        True when every entry is JAX's unspecified sharding sentinel.
-    """
-
-    if shardings is None:
-        return True
-    if not isinstance(shardings, Sequence) or isinstance(shardings, str):
-        shardings = (shardings,)
-    return all(_is_unspecified_jax_sharding(sharding) for sharding in shardings)
-
-
-def _is_unspecified_jax_sharding(sharding: Any) -> bool:
-    """Return whether a value is JAX's unspecified sharding sentinel.
-
-    Parameters
-    ----------
-    sharding
-        Candidate sharding value.
-
-    Returns
-    -------
-    bool
-        True for the JAX ``UnspecifiedValue`` sentinel.
-    """
-
-    return type(sharding).__name__ == "UnspecifiedValue"
 
 
 def _closed_jaxpr_is_effect_free_and_const_free(closed_jaxpr: Any, core: Any) -> bool:

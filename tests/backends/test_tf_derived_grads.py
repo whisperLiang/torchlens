@@ -237,11 +237,14 @@ def test_tf_duplicate_trace_signature_group_is_ambiguous() -> None:
     signature = TFIntermediateSignature(
         func_call_id=relu_ops[0].func_call_id,
         op_name=relu_ops[0].func_name,
-        parent_labels=tuple(relu_ops[0].parents),
+        # Replay callbacks retain capture identities even though finalized graph
+        # edges use pass-qualified labels. Match the raw callback signature.
+        parent_labels=tuple(trace[parent]._label_raw for parent in relu_ops[0].parents),
         module_stack=tuple(relu_ops[0].modules),
     )
 
-    assert len(groups[signature]) == 2
+    assert signature.parent_labels != tuple(relu_ops[0].parents)
+    assert groups[signature] == relu_ops
 
 
 def test_tf_max_intermediate_grads_cap_raises() -> None:

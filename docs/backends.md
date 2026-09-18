@@ -315,6 +315,12 @@ combination, `import tensorflow; import paddle` can terminate Python with `SIGSE
 before any TorchLens capture runs. Disabling CINN graph compilation does not prevent
 its native library from loading.
 
+The CPU Paddle 3.3.1 / TensorFlow 2.21.0 combination is also affected, without CINN:
+the native backtrace reaches Phi's bundled protobuf `RepeatedPtrFieldBase` during
+Paddle operator registration. The same local-binding guard covers builds bundling
+`libphi_core.so`. Changing the Python `protobuf` package does not replace those
+compiled-in native symbols.
+
 The repository's pytest startup installs a **lazy, extension-specific** compatibility
 guard. For ordinary Python processes in the same virtual environment, install the
 same opt-in guard from this checkout:
@@ -332,7 +338,7 @@ TensorFlow is already imported, the finder locally preloads the resolved
 `paddle.base.libpaddle` extension with `RTLD_LOCAL | RTLD_NOW | RTLD_DEEPBIND` before
 delegating to Python's original loader. The interpreter-wide `sys.getdlopenflags()`
 setting stays unchanged. Unrelated modules, earlier custom import finders, non-CINN
-Paddle builds, and unsupported platforms are left alone; native load errors propagate.
+and non-Phi Paddle builds, and unsupported platforms are left alone; native load errors propagate.
 
 This is a Linux compatibility workaround, not a patched upstream library. Validation
 covers both import orders, CPU forward/backward computation, TorchLens capture, and

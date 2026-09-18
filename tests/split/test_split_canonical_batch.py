@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import gc
 import os
 import subprocess
 import sys
+import weakref
 from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
@@ -191,7 +193,8 @@ def test_native_canonical_capture(backend: str) -> None:
 def test_rebatch_failure_does_not_capture_original_batch(monkeypatch: pytest.MonkeyPatch) -> None:
     """A broken backend resize implementation cannot silently use a large batch."""
 
-    torch = pytest.importorskip("torch")
+    import torch
+
     from torchlens.split.adapters.torch import TorchSplitAdapter
 
     adapter = TorchSplitAdapter()
@@ -217,13 +220,44 @@ def test_rebatch_failure_does_not_capture_original_batch(monkeypatch: pytest.Mon
     assert captures == []
 
 
+def test_canonical_retry_does_not_retain_prior_exception_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unused error history must not pin failed-capture tensors during B=2."""
+
+    import torch
+
+    from torchlens.split.adapters.torch import TorchSplitAdapter
+
+    payload_refs: list[weakref.ReferenceType[Any]] = []
+    result = object()
+
+    def capture(model: Any, inputs: tuple[Any, ...], spec: Any, **kwargs: Any) -> Any:
+        """Attach a tensor to the failed attempt and inspect its actual lifetime."""
+
+        if inputs[0].shape[0] == 1:
+            payload = torch.ones(16)
+            payload_refs.append(weakref.ref(payload))
+            raise ValueError(payload)
+        gc.collect()
+        assert payload_refs and payload_refs[0]() is None
+        return result
+
+    monkeypatch.setattr(pipeline, "capture_model", capture)
+    captured, _, _, _ = pipeline.capture_canonical_model(
+        object(), (torch.ones(4, 4),), split_request("50%"), adapter=TorchSplitAdapter()
+    )
+    assert captured is result
+
+
 @pytest.mark.parametrize("accept_two", [False, True])
 def test_canonical_capture_only_retries_at_two(
     monkeypatch: pytest.MonkeyPatch, accept_two: bool
 ) -> None:
     """Only a real B=1 capture failure permits B=2, never the original B=32."""
 
-    torch = pytest.importorskip("torch")
+    import torch
+
     from torchlens.split.adapters.torch import TorchSplitAdapter
 
     captures: list[int] = []

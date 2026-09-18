@@ -10,7 +10,9 @@ and, for the runnable artifact, a VERIFIED faithful run.
 from __future__ import annotations
 
 import difflib
+import json
 import os
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -28,6 +30,23 @@ _UPDATE_ENV = "TORCHLENS_UPDATE_LEGACY_ARTIFACT_ORACLE"
 _ANALYSIS_ARTIFACT = _GOLDEN_DIR / "legacy_baseline_cnn.tlspec"
 _RUNNABLE_ARTIFACT = _GOLDEN_DIR / "legacy_baseline_cnn_runnable.tlspec"
 _LOADED_SURFACE_GOLDEN = _GOLDEN_DIR / "legacy_baseline_cnn_loaded.json"
+
+
+def _load_legacy_artifact(path: Path) -> tl.Trace:
+    """Assert the expected cross-minor warning without suppressing other warnings."""
+
+    manifest = json.loads((path / "manifest.json").read_text())
+    recorded_minor = manifest["torch_version"].split(".")[:2]
+    current_minor = torch.__version__.split(".")[:2]
+    expected_warning = (
+        pytest.warns(
+            tl.errors.TorchLensWarning, match=r"Bundle torch_version=.*minor version mismatch"
+        )
+        if recorded_minor != current_minor
+        else nullcontext()
+    )
+    with expected_warning:
+        return tl.load(str(path))
 
 
 @pytest.mark.smoke
@@ -53,7 +72,7 @@ def test_legacy_analysis_artifact_loads_byte_identically() -> None:
         guard_wrap_state_for_golden_update(_UPDATE_ENV)
         require_update_reason(_UPDATE_ENV)
     assert _ANALYSIS_ARTIFACT.exists(), "frozen legacy artifact missing"
-    loaded = tl.load(str(_ANALYSIS_ARTIFACT))
+    loaded = _load_legacy_artifact(_ANALYSIS_ARTIFACT)
     actual = canonical_dump(snapshot_trace_surface(loaded))
 
     if regen:
@@ -109,7 +128,7 @@ def test_legacy_artifact_site_key_refusal_teaches() -> None:
 
     from torchlens._errors import InvalidArgumentError
 
-    loaded = tl.load(str(_ANALYSIS_ARTIFACT))
+    loaded = _load_legacy_artifact(_ANALYSIS_ARTIFACT)
     layer = loaded[loaded.layer_labels[0]]
     with pytest.raises(InvalidArgumentError) as site_exc:
         _ = layer.site_key
@@ -143,7 +162,7 @@ def test_legacy_runnable_artifact_runs_verified() -> None:
     """
 
     assert _RUNNABLE_ARTIFACT.exists(), "frozen runnable artifact missing"
-    loaded = tl.load(str(_RUNNABLE_ARTIFACT))
+    loaded = _load_legacy_artifact(_RUNNABLE_ARTIFACT)
     assert loaded.archived_activations, "legacy archived-activation family failed to load"
     torch.manual_seed(_SEED)
     x = torch.linspace(-0.5, 0.5, 16).reshape(1, 1, 4, 4)

@@ -1325,6 +1325,24 @@ _TAXONOMY_INTERNAL_ALLOWLIST: dict[str, str] = {
     "torchlens.ir.predicate.MLXValueUnavailableError": (
         "MLX preview value-access refusal; preview-backend surface, not yet in the stable registry"
     ),
+    # Split's documented-unstable errors already have a public submodule home.
+    # Central registration/rebasing would change its published catch hierarchy.
+    "torchlens.split.errors.SplitError": (
+        "public base in torchlens.split.errors.__all__; documented-unstable split "
+        "surface retains its Exception lineage and context contract"
+    ),
+    "torchlens.split.errors.SplitRequestError": (
+        "public request refusal in torchlens.split.errors.__all__; catchable as "
+        "SplitError and ValueError without central taxonomy rebasing"
+    ),
+    "torchlens.split.errors.SplitBoundaryError": (
+        "public boundary-ABI refusal in torchlens.split.errors.__all__; catchable as "
+        "SplitError and ValueError without central taxonomy rebasing"
+    ),
+    "torchlens.split.errors.SplitUnsupportedError": (
+        "public capability refusal in torchlens.split.errors.__all__; catchable as "
+        "SplitError and NotImplementedError without central taxonomy rebasing"
+    ),
     # -- Post-tour sprint (2026-08-19). All five ARE user-facing refusals from
     # newly shipped features, so registering them on torchlens.errors is the
     # right end state -- but that publishes five names, and the naming slate is
@@ -1353,6 +1371,39 @@ _TAXONOMY_INTERNAL_ALLOWLIST: dict[str, str] = {
         "deferred to the UI/API naming slate"
     ),
 }
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    ("name", "builtin_base", "code"),
+    [
+        ("SplitError", Exception, "split_error"),
+        ("SplitRequestError", ValueError, "split_request_error"),
+        ("SplitBoundaryError", ValueError, "split_boundary_error"),
+        ("SplitUnsupportedError", NotImplementedError, "split_unsupported"),
+    ],
+)
+def test_split_exception_submodule_contract(
+    name: str, builtin_base: type[Exception], code: str
+) -> None:
+    """Split exceptions keep their public home, catch lineage, code, and context."""
+
+    from torchlens.split import errors as split_errors
+
+    cls = getattr(split_errors, name)
+    assert name in split_errors.__all__
+    assert issubclass(cls, split_errors.SplitError)
+    assert issubclass(cls, builtin_base)
+    context = split_errors.SplitErrorContext(
+        backend="torch", split_point="before:relu", reason="test boundary"
+    )
+    error = cls("split refused", context=context)
+    assert error.code == code
+    assert error.context is context
+    restored = pickle.loads(pickle.dumps(error))
+    assert type(restored) is cls
+    assert restored.context == context
+    assert str(restored) == str(error)
 
 
 def _exception_class_definitions() -> dict[str, tuple[str, ...]]:

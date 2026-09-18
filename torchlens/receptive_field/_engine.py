@@ -37,10 +37,12 @@ from ._engine_geometry import (
     _InputState,
     _join_axis_kinds,
     _Mapped,
+    _RuleApplication,
     _select_full_axes,
     _unique_notes,
+    _WindowMapping,
 )
-from ._errors import ReceptiveFieldConfigurationError
+from ._errors import ReceptiveFieldConfigurationError, ReceptiveFieldUnavailableError
 from ._rules import _RF_RULES, ReceptiveFieldRuleContext, _rf_rules_epoch, _RuleResult
 from ._types import (
     ReceptiveField,
@@ -298,10 +300,26 @@ def _solve_uncached(
             for role, role_states in branches.items()
         }
 
+    return _materialize_solution(operations, states_by_op, epoch, graph_revision)
+
+
+def _materialize_solution(
+    operations: Sequence[Op],
+    states_by_op: Mapping[str, Mapping[str, _BranchState]],
+    epoch: int,
+    graph_revision: tuple[object, ...],
+) -> _ReceptiveFieldSolution:
+    """Publish tensor-grid descriptors after all graph states have propagated."""
+
     descriptors: dict[tuple[str, str], ReceptiveField] = {}
     per_op: dict[str, Mapping[str, ReceptiveField]] = {}
     flattened_states: dict[tuple[str, str], _InputState] = {}
     for op in operations:
+        # Region/control records have graph edges but no tensor grid. Keep their
+        # states in the traversal so uncertainty propagates across data edges,
+        # without publishing a fictitious scalar descriptor for the boundary.
+        if op.shape is None:
+            continue
         op_branches = states_by_op.get(op.label, {})
         if op_branches and all(branch.geometry_neutral for branch in op_branches.values()):
             continue
@@ -339,6 +357,10 @@ def _seed_input(op: Op) -> _InputState:
         Unclassified identity seed.
     """
 
+    if op.shape is None:
+        raise ReceptiveFieldUnavailableError(
+            f"Operation {op.label!r} has no tensor output grid to seed receptive geometry."
+        )
     shape = tuple(op.shape)
     role = op.io_role or op.label
     identity = _Mapped(_Affine(Fraction(1), Fraction(0)), _Affine(Fraction(1), Fraction(0)))
@@ -481,6 +503,11 @@ def _rule_result_uncached(op: Op) -> tuple[_RuleResult, str]:
         Opaque local result and normalized rule name.
     """
 
+    if op.shape is None:
+        return (
+            ReceptiveFieldRuleContext(op).unknown(f"{op.label}: no tensor output grid"),
+            "shape_unavailable",
+        )
     if op.func_name in {None, "none"}:
         return ReceptiveFieldRuleContext(op).passthrough(), "graph_identity"
     name = _normalize_func_name(op.func_name)
@@ -529,9 +556,12 @@ def _apply_rule(
         return replace(state, axes=None, taint=status, notes=notes, rule=rule_name)
 
     if state.taint is not None:
-        if result.kind == "full" and _select_full_axes(
-            result.values.get("axes"), parent, op
-        ) == set(range(len(parent.shape))):
+        if (
+            parent.shape is not None
+            and result.kind == "full"
+            and _select_full_axes(result.values.get("axes"), parent, op)
+            == set(range(len(parent.shape)))
+        ):
             recovered = tuple(
                 _AxisState(_Full(exact=False), None, "full", op.label) for _ in state.input_shape
             )
@@ -550,14 +580,26 @@ def _apply_rule(
 
     if state.axes is None:
         return replace(state, notes=notes, rule=rule_name)
-    if result.kind == "window":
-        return _apply_window(op, parent, state, result, rule_name, notes)
-    if result.kind == "window_edges":
-        return _apply_window_edges(op, parent, state, result, rule_name, notes)
-    if result.kind == "full":
-        return _apply_full(op, parent, state, result, rule_name, notes)
-    if result.kind == "axis_map":
-        return _apply_axis_map(op, parent, state, result, rule_name, notes)
+    application = _RuleApplication(result, rule_name, notes)
+    handler = {
+        "window": _apply_window,
+        "window_edges": _apply_window_edges,
+        "full": _apply_full,
+        "axis_map": _apply_axis_map,
+    }.get(result.kind)
+    if handler is not None:
+        return handler(op, parent, state, application)
+    return _apply_unmapped_rule(op, parent, state, application)
+
+
+def _apply_unmapped_rule(
+    op: Op, parent: Op, state: _InputState, application: _RuleApplication
+) -> _InputState:
+    """Apply degradation or passthrough when no explicit coordinate map is registered."""
+
+    result, rule_name, notes = application.result, application.name, application.notes
+    if state.axes is None:
+        return replace(state, notes=notes, rule=rule_name)
     if result.kind == "dissolve":
         axes = tuple(
             replace(
@@ -579,21 +621,20 @@ def _apply_rule(
             for axis in state.axes
         )
         return replace(state, axes=axes, notes=notes + (degradation,), rule=rule_name)
-    return _apply_passthrough(op, parent, state, result, rule_name, notes)
+    return _apply_passthrough(op, parent, state, application)
 
 
 def _apply_passthrough(
     op: Op,
     parent: Op,
     state: _InputState,
-    result: _RuleResult,
-    rule_name: str,
-    notes: tuple[str, ...],
+    application: _RuleApplication,
     *,
     parent_to_child: Mapping[int, int] | None = None,
 ) -> _InputState:
     """Compose identity or broadcast geometry using an explicit axis correspondence."""
 
+    result, rule_name, notes = application.result, application.name, application.notes
     assert state.axes is not None
     child_rank = len(op.shape)
     if parent_to_child is None:
@@ -789,12 +830,11 @@ def _apply_window(
     op: Op,
     parent: Op,
     state: _InputState,
-    result: _RuleResult,
-    rule_name: str,
-    notes: tuple[str, ...],
+    application: _RuleApplication,
 ) -> _InputState:
     """Compose a standard kernel/stride/padding/dilation local recurrence."""
 
+    result = application.result
     kernels = _as_tuple(result.values["kernel"])
     rank = len(kernels)
     strides = _as_tuple(result.values.get("stride", 1), rank)
@@ -814,10 +854,11 @@ def _apply_window(
         op,
         parent,
         state,
-        local_maps,
-        rule_name,
-        notes,
-        channel_dependency=str(result.values.get("channel_dependency", "full_exact")),
+        _WindowMapping(
+            local_maps,
+            channel_dependency=str(result.values.get("channel_dependency", "full_exact")),
+        ),
+        application,
     )
 
 
@@ -825,12 +866,11 @@ def _apply_window_edges(
     op: Op,
     parent: Op,
     state: _InputState,
-    result: _RuleResult,
-    rule_name: str,
-    notes: tuple[str, ...],
+    application: _RuleApplication,
 ) -> _InputState:
     """Compose raw registered two-edge maps."""
 
+    result, rule_name, notes = application.result, application.name, application.notes
     raw_edges = result.values.get("per_axis_edges")
     if not isinstance(raw_edges, Sequence) or isinstance(raw_edges, (str, bytes)):
         return replace(
@@ -864,10 +904,11 @@ def _apply_window_edges(
         op,
         parent,
         state,
-        tuple(maps),
-        rule_name,
-        notes,
-        preserve_non_window_axes=bool(result.values.get("preserve_non_window_axes", False)),
+        _WindowMapping(
+            tuple(maps),
+            preserve_non_window_axes=bool(result.values.get("preserve_non_window_axes", False)),
+        ),
+        application,
     )
 
 
@@ -875,15 +916,15 @@ def _compose_window_maps(
     op: Op,
     parent: Op,
     state: _InputState,
-    local_maps: tuple[_Mapped, ...],
-    rule_name: str,
-    notes: tuple[str, ...],
-    *,
-    preserve_non_window_axes: bool = False,
-    channel_dependency: str = "full_exact",
+    window: _WindowMapping,
+    application: _RuleApplication,
 ) -> _InputState:
     """Compose window maps and derive axis roles from their registered semantics."""
 
+    local_maps = window.maps
+    preserve_non_window_axes = window.preserve_non_window_axes
+    channel_dependency = window.channel_dependency
+    rule_name, notes = application.name, application.notes
     assert state.axes is not None
     spatial_rank = len(local_maps)
     parent_rank = len(parent.shape)
@@ -959,12 +1000,11 @@ def _apply_full(
     op: Op,
     parent: Op,
     state: _InputState,
-    result: _RuleResult,
-    rule_name: str,
-    notes: tuple[str, ...],
+    application: _RuleApplication,
 ) -> _InputState:
     """Apply whole-extent dependence on selected parent axes."""
 
+    result, rule_name, notes = application.result, application.name, application.notes
     assert state.axes is not None
     selected = _select_full_axes(result.values.get("axes"), parent, op)
     exact = bool(result.values.get("exact", True))
@@ -984,9 +1024,7 @@ def _apply_full(
         op,
         parent,
         state,
-        result,
-        rule_name,
-        notes,
+        application,
         parent_to_child=parent_to_child,
     )
     if passthrough.axes is None and selected == set(range(parent_rank)):
@@ -1038,12 +1076,11 @@ def _apply_axis_map(
     op: Op,
     parent: Op,
     state: _InputState,
-    result: _RuleResult,
-    rule_name: str,
-    notes: tuple[str, ...],
+    application: _RuleApplication,
 ) -> _InputState:
     """Apply an exact registered output-to-parent axis remapping."""
 
+    result, rule_name, notes = application.result, application.name, application.notes
     raw_mapping = result.values.get("out_to_parent_axis", {})
     if not isinstance(raw_mapping, Mapping):
         return replace(
@@ -1170,17 +1207,19 @@ def _compute_schema_operand_slots(canonical: str) -> _SchemaOperandSlots | None:
         overload_names = list(overloads_method())
     except Exception:
         return None
+    schemas = tuple(
+        schema
+        for overload_name in overload_names
+        if (schema := getattr(getattr(packet, overload_name, None), "_schema", None)) is not None
+    )
+    if not schemas:
+        return None
     operand_positions: set[int] = set()
     operand_names: set[str] = set()
     seen_positions: set[int] = set()
     seen_names: set[str] = set()
     int_list_positions: set[int] = set()
-    found_schema = False
-    for overload_name in overload_names:
-        schema = getattr(getattr(packet, overload_name, None), "_schema", None)
-        if schema is None:
-            continue
-        found_schema = True
+    for schema in schemas:
         for index, schema_arg in enumerate(getattr(schema, "arguments", ()) or ()):
             arg_name = getattr(schema_arg, "name", None)
             seen_positions.add(index)
@@ -1195,8 +1234,6 @@ def _compute_schema_operand_slots(canonical: str) -> _SchemaOperandSlots | None:
                 operand_positions.add(index)
                 if isinstance(arg_name, str):
                     operand_names.add(arg_name)
-    if not found_schema:
-        return None
     return _SchemaOperandSlots(
         operand_positions=frozenset(operand_positions),
         operand_names=frozenset(operand_names),
@@ -1206,16 +1243,13 @@ def _compute_schema_operand_slots(canonical: str) -> _SchemaOperandSlots | None:
     )
 
 
-def _schema_edge_is_metadata_only(func_name: str, arg_kind: str, arg_path: object) -> bool:
-    """Return whether an edge is schema-proven shape/control metadata, failing closed."""
+def _cached_schema_operand_slots(canonical: str) -> _SchemaOperandSlots | None:
+    """Resolve operand slots once, with bounded negative caching for missing packets."""
 
-    if _normalize_func_name(func_name) in VARIADIC_TENSOR_ARG_FUNCS:
-        return False
-    canonical = func_name.strip("_")
     slots = _SCHEMA_OPERAND_SLOTS_CACHE.get(canonical)
     if slots is None:
         if canonical in _SCHEMA_OPERAND_MISS_NAMES:
-            return False
+            return None
         computed_slots = _compute_schema_operand_slots(canonical)
         if computed_slots is None:
             # Bounded negative cache: torch does not memoize a FAILED
@@ -1224,24 +1258,33 @@ def _schema_edge_is_metadata_only(func_name: str, arg_kind: str, arg_path: objec
             while len(_SCHEMA_OPERAND_MISS_NAMES) >= _SCHEMA_OPERAND_MISS_NAMES_MAX_ENTRIES:
                 _SCHEMA_OPERAND_MISS_NAMES.pop(next(iter(_SCHEMA_OPERAND_MISS_NAMES)))
             _SCHEMA_OPERAND_MISS_NAMES[canonical] = None
-            return False
+            return None
         _SCHEMA_OPERAND_SLOTS_CACHE[canonical] = computed_slots
         slots = computed_slots
+    return slots
+
+
+def _schema_edge_is_metadata_only(func_name: str, arg_kind: str, arg_path: object) -> bool:
+    """Return whether an edge is schema-proven shape/control metadata, failing closed."""
+
+    if _normalize_func_name(func_name) in VARIADIC_TENSOR_ARG_FUNCS:
+        return False
+    slots = _cached_schema_operand_slots(func_name.strip("_"))
+    if slots is None:
+        return False
     if not isinstance(arg_path, tuple) or not arg_path:
         return False
     top = arg_path[0]
     if arg_kind == "keyword" and isinstance(top, str):
         normalized = _normalize_func_name(top)
-        if any(_normalize_func_name(name) == normalized for name in slots.operand_names):
-            return False
-        return any(_normalize_func_name(name) == normalized for name in slots.seen_names)
+        return not any(
+            _normalize_func_name(name) == normalized for name in slots.operand_names
+        ) and any(_normalize_func_name(name) == normalized for name in slots.seen_names)
     if arg_kind != "positional" or not isinstance(top, int):
         return False
-    if top in slots.operand_positions:
-        return False
-    if top in slots.seen_positions:
-        return True
-    return any(position <= top for position in slots.int_list_positions)
+    return top not in slots.operand_positions and (
+        top in slots.seen_positions or any(position <= top for position in slots.int_list_positions)
+    )
 
 
 def _edge_record_parent_label(record: object) -> str | None:
@@ -1323,7 +1366,11 @@ def _edge_is_geometry_neutral(
     edge_kinds = tuple(getattr(record, "edge_use", None) for record in records)
     if all(kind == "control" for kind in edge_kinds):
         return True
-    if tuple(parent.shape) or getattr(op.source_trace, "backend", None) != TORCH_BACKEND_NAME:
+    if (
+        parent.shape is None
+        or tuple(parent.shape)
+        or getattr(op.source_trace, "backend", None) != TORCH_BACKEND_NAME
+    ):
         return False
     for record, edge_kind in zip(records, edge_kinds):
         if edge_kind == "control":
@@ -1578,7 +1625,7 @@ def _graph_revision(trace: Trace) -> tuple[object, ...]:
             op.label,
             tuple(op.parents),
             tuple(op.children),
-            tuple(op.shape),
+            None if op.shape is None else tuple(op.shape),
             op.io_role,
             op.func_name,
             _geometry_args_snapshot(op),

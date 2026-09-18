@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-import platform
 import os
+import platform
 import socket
 import sqlite3
 import subprocess
 import sys
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Mapping
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from menagerie.catalog import CatalogRow
@@ -534,6 +535,7 @@ def base_env_hash() -> str:
     """
 
     import torch
+
     import torchlens as tl
 
     identity = {
@@ -668,8 +670,12 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
     resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(resolved_db_path, timeout=BUSY_TIMEOUT_MS / 1000, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    configure_connection(conn)
-    initialize(conn)
+    try:
+        configure_connection(conn)
+        initialize(conn)
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -688,7 +694,10 @@ def configure_connection(conn: sqlite3.Connection) -> None:
 
 
 def initialize(conn: sqlite3.Connection) -> None:
-    """Create the verification ledger schema if needed.
+    """Atomically create or migrate the verification ledger schema.
+
+    Independent writers serialize before inspecting the schema. Existing caller
+    transactions retain ownership; a savepoint isolates initialization failures.
 
     Parameters
     ----------
@@ -696,7 +705,68 @@ def initialize(conn: sqlite3.Connection) -> None:
         SQLite connection.
     """
 
-    conn.executescript(
+    owns_transaction = not conn.in_transaction
+    if owns_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    else:
+        conn.execute("SAVEPOINT menagerie_initialize")
+    try:
+        _create_ledger_schema(conn)
+        _migrate_peak_rss_column(conn)
+        _migrate_identity_columns(conn)
+        _migrate_machine_columns(conn)
+        _migrate_tlspec_columns(conn)
+        _migrate_status_constraint(conn)
+        _create_current_verification_view(conn)
+        _create_current_verification_real_view(conn)
+        if owns_transaction:
+            conn.commit()
+        else:
+            conn.execute("RELEASE SAVEPOINT menagerie_initialize")
+    except BaseException:
+        if owns_transaction:
+            conn.rollback()
+        else:
+            conn.execute("ROLLBACK TO SAVEPOINT menagerie_initialize")
+            conn.execute("RELEASE SAVEPOINT menagerie_initialize")
+        raise
+
+
+def _execute_schema_script(conn: sqlite3.Connection, script: str) -> None:
+    """Execute line-separated schema statements without an implicit commit.
+
+    Parameters
+    ----------
+    conn:
+        Connection holding the initialization transaction.
+    script:
+        Ledger-owned SQL, with each statement ending on its own line. SQLite's
+        completeness check preserves semicolons within trigger bodies/literals.
+    """
+
+    # Connection.executescript() commits an existing transaction before running
+    # its statements, which would reopen the DROP/CREATE and migration races.
+    statement = ""
+    for line in script.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            conn.execute(statement)
+            statement = ""
+    if statement.strip():
+        conn.execute(statement)
+
+
+def _create_ledger_schema(conn: sqlite3.Connection) -> None:
+    """Create the table, indexes, and append-only triggers when absent.
+
+    Parameters
+    ----------
+    conn:
+        Connection holding the initialization transaction.
+    """
+
+    _execute_schema_script(
+        conn,
         """
         CREATE TABLE IF NOT EXISTS verification_runs(
             run_id TEXT PRIMARY KEY,
@@ -776,15 +846,8 @@ def initialize(conn: sqlite3.Connection) -> None:
         BEGIN
             SELECT RAISE(ABORT, 'verification_runs is append-only');
         END;
-        """
+        """,
     )
-    _migrate_peak_rss_column(conn)
-    _migrate_identity_columns(conn)
-    _migrate_machine_columns(conn)
-    _migrate_tlspec_columns(conn)
-    _migrate_status_constraint(conn)
-    _create_current_verification_view(conn)
-    _create_current_verification_real_view(conn)
 
 
 def _create_current_verification_view(conn: sqlite3.Connection) -> None:
@@ -796,7 +859,8 @@ def _create_current_verification_view(conn: sqlite3.Connection) -> None:
         SQLite connection.
     """
 
-    conn.executescript(
+    _execute_schema_script(
+        conn,
         """
         DROP VIEW IF EXISTS current_verification;
         CREATE VIEW current_verification AS
@@ -856,7 +920,7 @@ def _create_current_verification_view(conn: sqlite3.Connection) -> None:
             error_message
         FROM ranked
         WHERE rn = 1;
-        """
+        """,
     )
 
 
@@ -882,7 +946,8 @@ def _create_current_verification_real_view(conn: sqlite3.Connection) -> None:
         SQLite connection.
     """
 
-    conn.executescript(
+    _execute_schema_script(
+        conn,
         f"""
         DROP VIEW IF EXISTS current_verification_real;
         CREATE VIEW current_verification_real AS
@@ -945,7 +1010,7 @@ def _create_current_verification_real_view(conn: sqlite3.Connection) -> None:
             error_message
         FROM ranked
         WHERE rn = 1;
-        """
+        """,
     )
 
 
@@ -982,7 +1047,6 @@ def _migrate_peak_rss_column(conn: sqlite3.Connection) -> None:
     if _has_column(conn, "verification_runs", "peak_rss_mb"):
         return
     conn.execute("ALTER TABLE verification_runs ADD COLUMN peak_rss_mb INTEGER")
-    initialize(conn)
 
 
 def _migrate_identity_columns(conn: sqlite3.Connection) -> None:
@@ -994,24 +1058,18 @@ def _migrate_identity_columns(conn: sqlite3.Connection) -> None:
         SQLite connection.
     """
 
-    migrated = False
     if not _has_column(conn, "verification_runs", "lock_hash"):
         conn.execute(
             "ALTER TABLE verification_runs "
             f"ADD COLUMN lock_hash TEXT NOT NULL DEFAULT '{LEGACY_UNKNOWN}'"
         )
-        migrated = True
     if not _has_column(conn, "verification_runs", "torchlens_source_hash"):
         conn.execute(
             "ALTER TABLE verification_runs "
             f"ADD COLUMN torchlens_source_hash TEXT NOT NULL DEFAULT '{LEGACY_UNKNOWN}'"
         )
-        migrated = True
     if not _has_column(conn, "verification_runs", "input_scale"):
         conn.execute("ALTER TABLE verification_runs ADD COLUMN input_scale REAL")
-        migrated = True
-    if migrated:
-        initialize(conn)
 
 
 _MACHINE_COLUMN_DDL: tuple[tuple[str, str], ...] = (
@@ -1042,14 +1100,10 @@ def _migrate_machine_columns(conn: sqlite3.Connection) -> None:
         SQLite connection.
     """
 
-    migrated = False
     for column, sql_type in _MACHINE_COLUMN_DDL:
         if _has_column(conn, "verification_runs", column):
             continue
         conn.execute(f"ALTER TABLE verification_runs ADD COLUMN {column} {sql_type}")
-        migrated = True
-    if migrated:
-        initialize(conn)
 
 
 def _migrate_tlspec_columns(conn: sqlite3.Connection) -> None:
@@ -1061,14 +1115,10 @@ def _migrate_tlspec_columns(conn: sqlite3.Connection) -> None:
         SQLite connection.
     """
 
-    migrated = False
     for column in ("tlspec_path", "tlspec_sha256"):
         if _has_column(conn, "verification_runs", column):
             continue
         conn.execute(f"ALTER TABLE verification_runs ADD COLUMN {column} TEXT")
-        migrated = True
-    if migrated:
-        initialize(conn)
 
 
 def _migrate_status_constraint(conn: sqlite3.Connection) -> None:
@@ -1122,9 +1172,11 @@ def _migrate_status_constraint(conn: sqlite3.Connection) -> None:
         for column, _sql_type in _MACHINE_COLUMN_DDL
     )
     machine_insert_columns = ",\n            ".join(column for column, _ in _MACHINE_COLUMN_DDL)
-    conn.executescript(
+    _execute_schema_script(
+        conn,
         f"""
         DROP VIEW IF EXISTS current_verification;
+        DROP VIEW IF EXISTS current_verification_real;
         DROP TRIGGER IF EXISTS verification_runs_no_update;
         DROP TRIGGER IF EXISTS verification_runs_no_delete;
 
@@ -1271,9 +1323,9 @@ def _migrate_status_constraint(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_vr_finished_at ON verification_runs(finished_at);
         CREATE INDEX IF NOT EXISTS idx_vr_torchlens_version
             ON verification_runs(torchlens_version);
-        """
+        """,
     )
-    initialize(conn)
+    _create_ledger_schema(conn)
 
 
 def append_verification_run(conn: sqlite3.Connection, run: VerificationRun) -> str:

@@ -206,9 +206,8 @@ def test_installed_torch_tree_identity_checks_are_reviewed():
                 id(target) in wrapper_ids
                 or id(target) in orig_ids
                 or (wrapped_wrapper is not None and id(wrapped_wrapper) in orig_ids)
-            ):
-                if (rel_path, attr) not in _GREP_ALLOWLIST:
-                    unreviewed.add((rel_path, attr))
+            ) and (rel_path, attr) not in _GREP_ALLOWLIST:
+                unreviewed.add((rel_path, attr))
     assert not unreviewed, (
         f"New torch-tree identity check(s) against wrapped callables: "
         f"{sorted(unreviewed)}. Each needs an identity shim or a reviewed "

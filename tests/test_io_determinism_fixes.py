@@ -483,25 +483,137 @@ def test_jax_codec_refuses_unknown_logical_dtype() -> None:
         JaxPayloadCodec().from_numpy(np.ones(1, dtype=np.float32), entry, map_location=None)
 
 
-def test_jax_codec_restores_weak_type() -> None:
-    """JAX weak scalar semantics survive codec encode/decode when JAX is available."""
+@pytest.mark.parametrize("scalar", [1, 1.5, 1 + 2j])
+@pytest.mark.parametrize("shape", [(), (2, 3), (0, 2)])
+@pytest.mark.parametrize("committed", [False, True])
+def test_jax_codec_restores_weak_type(
+    scalar: object, shape: tuple[int, ...], committed: bool
+) -> None:
+    """Weak scalars and arrays preserve values, dtype, shape, and commitment."""
 
     jax = pytest.importorskip("jax")
     jnp = pytest.importorskip("jax.numpy")
     from torchlens._io.payload_codec import JaxPayloadCodec
 
     codec = JaxPayloadCodec()
-    value = jnp.asarray(1)
-    encoded = codec.to_numpy(value)
-    entry = {
-        "logical_dtype": encoded.logical_dtype,
-        "codec_metadata": encoded.codec_metadata,
-    }
-    restored = codec.from_numpy(encoded.array, entry, map_location=None)
+    # This matrix includes complex64; complex128 is outside the codec contract.
+    # Scope the setting so ambient x64 configuration neither widens it nor leaks.
+    with jax.enable_x64(False):
+        value = jnp.broadcast_to(jnp.asarray(scalar), shape)
+        if committed:
+            value = jax.device_put(value, jax.devices("cpu")[0])
+        encoded = codec.to_numpy(value)
+        entry = {
+            "logical_dtype": encoded.logical_dtype,
+            "codec_metadata": encoded.codec_metadata,
+        }
+        # The transport loader restores logical_shape before calling the codec.
+        restored = codec.from_numpy(encoded.array.reshape(shape), entry, map_location=None)
 
     assert value.weak_type is True
     assert restored.weak_type is True
-    assert jax.device_get(restored) == jax.device_get(value)
+    assert restored.shape == value.shape
+    assert restored.dtype == value.dtype
+    assert restored.committed is committed
+    np.testing.assert_array_equal(jax.device_get(restored), jax.device_get(value))
+
+
+@pytest.mark.parametrize("lazy", [False, True])
+def test_jax_portable_roundtrip_preserves_weak_activations(tmp_path: Path, lazy: bool) -> None:
+    """Portable eager/lazy loads preserve weak inputs, intermediates, and outputs."""
+
+    jax = pytest.importorskip("jax")
+    jnp = pytest.importorskip("jax.numpy")
+
+    def model(value: object) -> object:
+        """Return a weak-type arithmetic chain.
+
+        Parameters
+        ----------
+        value:
+            Weakly typed input array.
+
+        Returns
+        -------
+        object
+            Weakly typed output array.
+        """
+
+        hidden = jnp.add(value, 1.0)
+        return jnp.multiply(hidden, 2.0)
+
+    with jax.enable_x64(False), jax.default_device(jax.devices("cpu")[0]):
+        value = jnp.broadcast_to(jnp.asarray(1.5), (2, 3))
+        trace = tl.trace(model, (value,), backend="jax")
+        saved = {op.label: op for op in trace.layer_list if op.has_saved_activation}
+        assert len(saved) == 3
+        assert {op.func_name for op in saved.values()} >= {"add", "mul"}
+        assert set(trace.input_ops.keys()) <= saved.keys()
+
+        path = tmp_path / "jax-weak-activations.tlspec"
+        trace.save(path, level="portable")
+        loaded = tl.load(path, lazy=lazy)
+        restored_ops = {op.label: op for op in loaded.layer_list if op.has_saved_activation}
+        assert restored_ops.keys() == saved.keys()
+
+        for label, original in saved.items():
+            restored_op = restored_ops[label]
+            if lazy:
+                assert restored_op.out is None
+                assert restored_op.out_ref is not None
+                restored = restored_op.materialize_out()
+            else:
+                restored = restored_op.out
+            assert isinstance(restored, jax.Array)
+            assert original.out.weak_type is True
+            assert restored.weak_type is True
+            assert restored.dtype == original.out.dtype
+            assert restored.shape == original.out.shape == (2, 3)
+            assert {device.platform for device in restored.devices()} == {"cpu"}
+            np.testing.assert_array_equal(np.asarray(restored), np.asarray(original.out))
+
+
+@pytest.mark.parametrize("behavior", ["missing", "raises", "ignores_flag"])
+def test_jax_weak_type_restoration_refuses_incompatible_runtime(
+    monkeypatch: pytest.MonkeyPatch, behavior: str
+) -> None:
+    """A missing, failing, or ineffective semantic cast never silently loses the flag."""
+
+    pytest.importorskip("jax")
+    jnp = pytest.importorskip("jax.numpy")
+    from jax._src.lax import lax
+
+    from torchlens._io.payload_codec import JaxPayloadCodec
+    from torchlens.backends.registry import BackendRuntimeCompatibilityError
+
+    codec = JaxPayloadCodec()
+    value = jnp.asarray(1)
+    encoded = codec.to_numpy(value)
+    entry = {"logical_dtype": encoded.logical_dtype, "codec_metadata": encoded.codec_metadata}
+    real_cast = lax._convert_element_type
+
+    def incompatible_cast(operand: object, *args: object, **kwargs: object) -> object:
+        """Leave normal strong casts intact but sabotage the requested weak conversion."""
+
+        if kwargs.get("weak_type") is True:
+            if behavior == "raises":
+                raise TypeError("unsupported weak conversion")
+            return operand
+        return real_cast(operand, *args, **kwargs)
+
+    if behavior == "missing":
+        # Exercise the helper directly so a missing JAX internal does not also
+        # break jnp.asarray's independent use of the same cast during decoding.
+        from torchlens._io.payload_codec import _restore_jax_scalar_semantics
+
+        strong_value = jnp.asarray(encoded.array, dtype=value.dtype)
+        monkeypatch.delattr(lax, "_convert_element_type")
+        with pytest.raises(BackendRuntimeCompatibilityError, match="weak_type=True"):
+            _restore_jax_scalar_semantics(None, strong_value, entry)
+    else:
+        monkeypatch.setattr(lax, "_convert_element_type", incompatible_cast)
+        with pytest.raises(BackendRuntimeCompatibilityError, match="weak_type=True"):
+            codec.from_numpy(encoded.array, entry, map_location=None)
 
 
 def test_codec_metadata_preserves_explicit_none_values() -> None:

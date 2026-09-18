@@ -415,6 +415,10 @@ def example_input_epcot():
     return torch.randn(1, 5, 1600).cuda()
 
 
+# Catalog enumeration must not execute this CUDA-only input recipe.
+MENAGERIE_INPUT_METADATA = {
+    "EPCOT-pretraining": {"input_shape": "(1, 5, 1600)", "input_dtype": "float32"},
+}
 MENAGERIE_ENTRIES = [
     (
         "EPCOT-pretraining",

@@ -48,9 +48,8 @@ from ._ledger import (
 from ._models import SCENARIOS
 from ._snapshot import run_scenario
 
-# No file-wide tier: the runtime-battery test stays heavy, but the AST-only
-# artifact diff below is smoke so a producer-site drift is visible to the
-# commit-level gate (the tracked-scan red at tip was invisible to -m smoke).
+# No file-wide tier: the runtime battery and the AST-only scan are heavy;
+# the latter's measured 9-10s cost exceeds the smoke budget.
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PACKAGE_ROOT = _REPO_ROOT / "torchlens"
@@ -72,6 +71,9 @@ EXPECTED_APPEND_AMENDMENT_CALLER_FILES = {
     # neutral absorber by the b5-parity R46-1 wave (5290caa7): same channel,
     # one shared site instead of three per-backend copies.
     "torchlens/backends/_finalize.py",  # preview_output_parent_mark (hoisted)
+    # cf17ea886 retained TF output container paths through the existing
+    # registered rebind family; the static completeness roster already pins it.
+    "torchlens/backends/tf/backend.py",  # preview_output_parent_rebind
     "torchlens/backends/tf/interventions.py",  # module_exit_intervention (site fire)
     "torchlens/backends/jax/backend.py",  # preview_output_parent_rebind
     "torchlens/backends/tinygrad/backend.py",  # preview_output_parent_rebind

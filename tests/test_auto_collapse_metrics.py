@@ -1880,6 +1880,8 @@ def test_cold_collapse_optimizations_are_byte_identical_across_modes(
         trace.cleanup()
 
 
+# Six full render/reference comparisons cost 12.1 s as an aggregate family.
+@pytest.mark.heavy
 @pytest.mark.parametrize(
     ("case_name", "builder", "x"),
     (

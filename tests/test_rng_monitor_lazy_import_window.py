@@ -21,13 +21,31 @@ import sys
 
 import pytest
 
-from torchlens.utils import _torch_compat
+from torchlens import _state
+from torchlens.utils import _torch_compat, rng as rng_utils
 from torchlens.utils.rng import host_nondeterminism_monitor
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 
 _FIRST_SELECTIVE_CAPTURE_IS_CLEAN = """
 import sys
+
+imports = {"torch._dynamo": [], "torch.backends.opt_einsum": []}
+
+
+class ObserveTorchImports:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in imports:
+            rng_module = sys.modules.get("torchlens.utils.rng")
+            imports[fullname].append(getattr(rng_module, "_ACTIVE_MONITOR", None) is not None)
+        return None
+
+
+# Torch 2.14 loads opt_einsum from torch.backends during import torch; 2.8
+# leaves it lazy. Observe both paths from process startup, without unloading
+# modules or requiring a particular torch import order.
+finder = ObserveTorchImports()
+sys.meta_path.insert(0, finder)
 
 import torch
 from torch import nn
@@ -38,8 +56,16 @@ assert "torch._dynamo" not in sys.modules, (
     "precondition broken: torch._dynamo was imported before the first capture, "
     "so this child cannot exercise the lazy-import-in-window path"
 )
+class DeterministicModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.block = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
 
-model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
+    def forward(self, x):
+        return torch.einsum("bi->bi", self.block(x))
+
+
+model = DeterministicModel()
 x = torch.randn(1, 4)
 log = tl.trace(
     model,
@@ -54,6 +80,20 @@ assert channels == (), (
 )
 assert log._runnable.host_rng_unreplayable is False, (
     "deterministic first selective capture settled unreplayable"
+)
+assert log._runnable.rng_monitor_uncertain is False, (
+    "deterministic first capture exhausted the RNG monitor: "
+    f"{log._runnable.rng_monitor_uncertain_detail!r}"
+)
+assert imports["torch.backends.opt_einsum"] == [False], (
+    "torch.einsum's dependency entered an armed RNG monitor: "
+    f"{imports['torch.backends.opt_einsum']!r}"
+)
+# find_spec also observes availability probes, so dynamo can have multiple
+# lookups before execution. Every lookup must still precede the armed window.
+assert imports["torch._dynamo"] and not any(imports["torch._dynamo"]), (
+    "torch._dynamo was not resolved outside the RNG monitor: "
+    f"{imports['torch._dynamo']!r}"
 )
 assert "torch._dynamo" in sys.modules, (
     "the capture never triggered (or pre-warmed) the dynamo import; "
@@ -90,4 +130,68 @@ def test_monitor_entry_warms_lazy_torch_imports() -> None:
     with host_nondeterminism_monitor(nn.Identity()):
         assert _torch_compat._LAZY_TORCH_IMPORTS_WARMED is True
         assert "torch._dynamo" in sys.modules
+        assert "torch.backends.opt_einsum" in sys.modules
     assert torch is not None
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("warm_raises", (False, True))
+def test_monitor_warmup_is_paused_and_restores_logging(
+    monkeypatch: pytest.MonkeyPatch, warm_raises: bool
+) -> None:
+    """Setup is outside the dispatch ledger; even failed setup restores the gate."""
+
+    observed: list[bool] = []
+
+    def warm_probe() -> None:
+        """Observe the logging gate at the actual lazy-import call site."""
+
+        observed.append(_state._logging_enabled)
+        if warm_raises:
+            raise RuntimeError("import-time probe failed")
+
+    monkeypatch.setattr(rng_utils, "warm_lazy_torch_imports", warm_probe)
+    # Isolate entry/exit sequencing from the unrelated process-wide RNG patches.
+    monkeypatch.setattr(host_nondeterminism_monitor, "_install_steps", lambda self: ())
+    monkeypatch.setattr(_state, "_logging_enabled", True)
+    with host_nondeterminism_monitor(None):
+        assert observed == [False]
+        assert _state._logging_enabled is True
+    assert _state._logging_enabled is True
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("warm_raises", (False, True))
+def test_lazy_import_probes_use_cpu_without_changing_caller_device(
+    monkeypatch: pytest.MonkeyPatch, warm_raises: bool
+) -> None:
+    """A failed warm stays retryable and never leaks its setup device scope."""
+
+    import torch
+
+    observed: list[tuple[str, str]] = []
+    original_import = _torch_compat.importlib.import_module
+
+    def import_probe(module_name: str, package: str | None = None) -> object:
+        """Stand in for import-time tensor construction on the active device."""
+
+        if module_name not in {"torch._compile", "torch._dynamo", "torch.backends.opt_einsum"}:
+            return original_import(module_name, package)
+        observed.append((module_name, str(torch.empty(0).device)))
+        if warm_raises:
+            raise RuntimeError("import-time probe failed")
+        return None
+
+    monkeypatch.setattr(_torch_compat, "_LAZY_TORCH_IMPORTS_WARMED", False)
+    monkeypatch.setattr(_torch_compat.importlib, "import_module", import_probe)
+    before = _torch_compat.get_current_function_mode_stack()
+    with torch.device("meta"):
+        _torch_compat.warm_lazy_torch_imports()
+        assert str(torch.empty(0).device) == "meta"
+    assert _torch_compat.get_current_function_mode_stack() == before
+    assert observed == [
+        ("torch._compile", "cpu"),
+        ("torch._dynamo", "cpu"),
+        ("torch.backends.opt_einsum", "cpu"),
+    ]
+    assert _torch_compat._LAZY_TORCH_IMPORTS_WARMED is not warm_raises

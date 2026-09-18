@@ -226,7 +226,7 @@ def _first_state_difference(
     if isinstance(left, (list, tuple)):
         if len(left) != len(right):
             return f"{path}: len {len(left)} != {len(right)}"
-        for index, (left_item, right_item) in enumerate(zip(left, right)):
+        for index, (left_item, right_item) in enumerate(zip(left, right, strict=True)):
             diff = _first_state_difference(left_item, right_item, f"{path}[{index}]", seen)
             if diff is not None:
                 return diff

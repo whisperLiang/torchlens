@@ -75,9 +75,12 @@ class TestArmEpochProbeFailClosed:
         class NoPgMap:
             """Registry holder without a readable pg_map (private-API drift)."""
 
-        monkeypatch.setattr(torch.distributed.distributed_c10d, "_world", NoPgMap())
-        record = lifecycle.arm()
-        assert record.install_epoch == "seeded"
+        real_world = torch.distributed.distributed_c10d._world
+        with monkeypatch.context() as patch:
+            patch.setattr(torch.distributed.distributed_c10d, "_world", NoPgMap())
+            record = lifecycle.arm()
+            assert record.install_epoch == "seeded"
+        assert torch.distributed.distributed_c10d._world is real_world
 
     def test_clean_empty_registry_still_proves_the_negative(self, clean_lifecycle):
         record = lifecycle.arm()
@@ -92,18 +95,18 @@ class TestEnumerationGapsFailClosed:
         def raising_ranks(group):
             raise RuntimeError("membership unreadable")
 
-        monkeypatch.setattr(torch.distributed, "get_process_group_ranks", raising_ranks)
-        with pytest.warns(UserWarning, match="could not be enumerated"):
-            extra = dist.new_group([0])
-        state = lifecycle.armed_state()
-        assert state is not None
-        assert state.ledger_gaps, "the dropped creation must be recorded as a gap"
-        assert id(extra) not in state.identities, "no identity may be minted on a gap"
-        # The gapped group itself refuses typed (previously the raw torch
-        # error leaked out of the seeding path mid-capture).
-        with pytest.raises(AmbiguousGroupLifetimeError):
-            lifecycle.resolve_group_identity(extra)
-        monkeypatch.undo()
+        with monkeypatch.context() as patch:
+            patch.setattr(torch.distributed, "get_process_group_ranks", raising_ranks)
+            with pytest.warns(UserWarning, match="could not be enumerated"):
+                extra = dist.new_group([0])
+            state = lifecycle.armed_state()
+            assert state is not None
+            assert state.ledger_gaps, "the dropped creation must be recorded as a gap"
+            assert id(extra) not in state.identities, "no identity may be minted on a gap"
+            # The gapped group itself refuses typed (previously the raw torch
+            # error leaked out of the seeding path mid-capture).
+            with pytest.raises(AmbiguousGroupLifetimeError):
+                lifecycle.resolve_group_identity(extra)
         # Restricted seeding is disabled rank-wide while a gap is open: the
         # dropped event may have been a generation of ANY membership, so even
         # the world group's generation-0 claim is unprovable.
@@ -120,12 +123,13 @@ class TestEnumerationGapsFailClosed:
         def raising_ranks(group):
             raise RuntimeError("membership unreadable")
 
-        monkeypatch.setattr(torch.distributed, "get_process_group_ranks", raising_ranks)
-        with pytest.warns(UserWarning, match="could not be enumerated"):
-            dist.destroy_process_group(pre_arm_group)
-        state = lifecycle.armed_state()
-        assert state is not None
-        assert state.ledger_gaps, "the dropped destroy must be recorded as a gap"
+        with monkeypatch.context() as patch:
+            patch.setattr(torch.distributed, "get_process_group_ranks", raising_ranks)
+            with pytest.warns(UserWarning, match="could not be enumerated"):
+                dist.destroy_process_group(pre_arm_group)
+            state = lifecycle.armed_state()
+            assert state is not None
+            assert state.ledger_gaps, "the dropped destroy must be recorded as a gap"
 
     def test_unreadable_registry_refuses_seeding(self, gloo_world, monkeypatch):
         lifecycle.arm()
@@ -139,11 +143,16 @@ class TestEnumerationGapsFailClosed:
                     raise AttributeError(name)
                 return getattr(real_world, name)
 
-        monkeypatch.setattr(torch.distributed.distributed_c10d, "_world", WorldWithoutPgMap())
-        # Seeding needs the same-membership ALIVE count; an unreadable
-        # registry is not a provable zero.
-        with pytest.raises(AmbiguousGroupLifetimeError, match="cannot be read"):
-            lifecycle.resolve_group_identity(None)
+        # Restore the registry before gloo_world tears down, independently of
+        # when another fixture first requested the shared monkeypatch fixture.
+        with monkeypatch.context() as patch:
+            patch.setattr(torch.distributed.distributed_c10d, "_world", WorldWithoutPgMap())
+            # Seeding needs the same-membership ALIVE count; an unreadable
+            # registry is not a provable zero.
+            with pytest.raises(AmbiguousGroupLifetimeError, match="cannot be read"):
+                lifecycle.resolve_group_identity(None)
+        assert torch.distributed.distributed_c10d._world is real_world
+        assert gloo_world.is_initialized()
 
 
 class TestAutoArmProbeDisclosure:

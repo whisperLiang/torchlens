@@ -161,7 +161,7 @@ def test_distilbert_eager_attention_q_shape_and_head_view() -> None:
     assert view.head(1).q.shape == (2, 3, 4)
     assert torch.equal(view.head(1).q, view.q[:, :, 1, :])
     # Eager omits ``pattern`` (consistent with other eager recipes).
-    assert "pattern" not in view.keys()
+    assert "pattern" not in view
 
 
 @pytest.mark.slow

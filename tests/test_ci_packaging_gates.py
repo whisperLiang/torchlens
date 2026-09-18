@@ -209,6 +209,37 @@ def test_capture_oracle_version_gate_strips_the_build_tag() -> None:
     assert not _recording_torch_matches(None, "2.13.0+cpu")
 
 
+def test_transformers_compatibility_lanes_attest_real_offline_execution() -> None:
+    """Both supported majors execute real models, with RFDETR sharing the 5.x lane."""
+
+    jobs = _load_yaml(_WORKFLOWS / "nightly.yml")["jobs"]
+    job = jobs["transformers-compat"]
+    rows = {str(row["major"]): row for row in job["strategy"]["matrix"]["include"]}
+    assert set(rows) == {"4", "5"}
+    assert rows["4"]["transformers"] == "transformers>=4.45,<5"
+    assert rows["5"]["transformers"] == "transformers>=5.1,<6"
+    assert "detection" not in rows["4"]["extras"]
+    assert "detection" in rows["5"]["extras"]
+    install = next(step for step in job["steps"] if "uv pip install" in step.get("run", ""))
+    assert '"${{ matrix.extras }}" "${{ matrix.transformers }}"' in install["run"]
+    assert "uv pip check" in install["run"]
+    rfdetr = next(step for step in job["steps"] if "from rfdetr import" in step.get("run", ""))
+    assert rfdetr.get("if") == "matrix.major == '5'"
+
+    execution = next(
+        step
+        for step in job["steps"]
+        if "tests/test_transformers_version_compat.py" in step.get("run", "")
+    )
+    assert execution["env"]["HF_HUB_OFFLINE"] == "1"
+    for report, floor in (("transformers-real.xml", 8), ("transformers-collapse.xml", 2)):
+        assert f"--junitxml={report}" in execution["run"]
+        assert f"check_ci_executed_tests.py {report} {floor} 0" in execution["run"], (
+            "the compatibility lane must attest every promised real-model case executed "
+            "and refuse optional-dependency skip cascades"
+        )
+
+
 def test_release_app_token_is_permission_scoped() -> None:
     """The minted GitHub App token carries an explicit minimal permission set.
 

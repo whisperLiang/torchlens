@@ -214,7 +214,9 @@ def _autograd_leaf_variable_ids(activations: tuple[Tensor, ...]) -> set[int]:
     """
 
     found: set[int] = {id(activation) for activation in activations}
-    seen: set[int] = set()
+    # grad_fn Python wrappers may be freed as traversal advances. Keep the
+    # wrappers alive for this walk so their ids cannot be reused by ancestors.
+    seen: dict[int, Any] = {}
     stack: list[Any] = [
         activation.grad_fn for activation in activations if activation.grad_fn is not None
     ]
@@ -222,7 +224,7 @@ def _autograd_leaf_variable_ids(activations: tuple[Tensor, ...]) -> set[int]:
         node = stack.pop()
         if node is None or id(node) in seen:
             continue
-        seen.add(id(node))
+        seen[id(node)] = node
         variable = getattr(node, "variable", None)
         if isinstance(variable, Tensor):
             found.add(id(variable))

@@ -137,20 +137,7 @@ def _probe_batch_replay(
     phase = "construct probe"
     try:
         with _probe_state_scope(model, adapter):
-            if adapter.name == "torch" and not isinstance(model, types.FunctionType):
-                from .._capture_state_helpers import _model_for_validation_replay
-
-                witness_model, _snapshot, copied = _model_for_validation_replay(model)
-                if not copied:
-                    raise SplitUnsupportedError("Cannot copy the model for an isolated B=2 probe.")
-            else:
-                witness_model = deepcopy(model)
-                if witness_model is model and not isinstance(model, types.FunctionType):
-                    raise SplitUnsupportedError("The model copy aliases the original model.")
-                if adapter.name == "tf":
-                    from ._tf_capture import preserve_probe_layer_names
-
-                    preserve_probe_layer_names(model, witness_model)
+            witness_model = _isolated_probe_model(model, adapter)
             witness_inputs, witness_kwargs = rebatch_inputs(
                 inputs,
                 input_kwargs,
@@ -182,22 +169,15 @@ def _probe_batch_replay(
                 input_kwargs=witness_kwargs,
                 output_observer=observe_output,
                 random_seed=random_seed,
+                shape_witness=adapter.name == "torch",
             )
             if not outputs:
                 raise SplitUnsupportedError("The backend did not expose the native probe output.")
             phase = "compare topology"
+            # A failed lean witness cannot authorize extrapolation. Do not
+            # recapture with a larger activation/argument archive to hide it.
             witness_graph = split_graph_from_trace(witness_capture)
-            try:
-                witness_shapes = _align_shape_witness(graph, witness_graph, batch_size=2)
-            except SplitUnsupportedError as exc:
-                if adapter.name != "tinygrad":
-                    raise
-                # Lazy UOp optimization can fold singleton shape operations at
-                # B=1. Do not invent cross-graph shape correspondences: retain
-                # semantic shape lowering and still require the B=2 replay and
-                # exact output structure/shape/dtype plus numeric comparison.
-                witness_shapes = None
-                alignment_note = f"Shape witness alignment unavailable: {exc}"
+            witness_shapes, alignment_note = _probe_shape_alignment(graph, witness_graph, adapter)
             if witness_shapes is not None:
                 phase = "infer sampled shapes"
                 candidate = compile_shape_program(
@@ -216,19 +196,16 @@ def _probe_batch_replay(
             )
             if adapter.name == "torch":
                 probe_graph = _with_probe_rng_states(probe_graph, witness_graph)
-            # Probe the same split without creating optimizer-owned placement
-            # replicas or consuming live training state.
-            probe_request = replace(
-                request,
-                placement=PlacementPlan(),
-                features=replace(request.features, training=False, live_param_sources=False),
+                # The temporary graph now owns the B=2 RNG dictionaries;
+                # shapes and the detached native output were copied above.
+                # Release the witness's temporary capture metadata/model
+                # before generated replay, without modifying B=1 execution data.
+                witness_capture.cleanup()
+                witness_capture = None
+                del witness_graph, witness_model
+            actual = _execute_batch_probe(
+                adapter, probe_graph, request, replay_inputs, replay_kwargs
             )
-            probe_plan = plan_split(probe_graph, probe_request)
-            segments = execute_split_runtime(adapter, probe_graph, probe_plan, probe_request)
-            boundary = segments.prefix(
-                *replay_inputs, input_kwargs=replay_kwargs, detach_boundary=True
-            )
-            actual = segments.suffix(boundary)
             phase = "compare outputs"
             mismatch = _probe_output_mismatch(adapter, outputs[-1], actual)
             if mismatch is not None:
@@ -245,10 +222,64 @@ def _probe_batch_replay(
         # Trace.cleanup currently assumes Torch parameter .grad attributes.
         # Native preview captures are temporary locals and release normally.
         if witness_capture is not None and adapter.name == "torch":
-            cleanup = getattr(witness_capture, "cleanup", None)
-            if callable(cleanup):
-                cleanup()
+            witness_capture.cleanup()
     return replace(candidate, batch_probe=result)
+
+
+def _probe_shape_alignment(
+    graph: SplitTraceGraph, witness: SplitTraceGraph, adapter: Any
+) -> tuple[dict[str, tuple[int, ...] | None] | None, str | None]:
+    """Align the probe topology, disclosing tinygrad's singleton-folding exception."""
+
+    try:
+        return _align_shape_witness(graph, witness, batch_size=2), None
+    except SplitUnsupportedError as exc:
+        if adapter.name != "tinygrad":
+            raise
+        # Lazy UOp optimization can fold singleton shape operations at B=1.
+        # Never invent correspondences: semantic lowering still requires B=2
+        # replay and exact structure/shape/dtype plus numeric comparison.
+        return None, f"Shape witness alignment unavailable: {exc}"
+
+
+def _isolated_probe_model(model: Any, adapter: Any) -> Any:
+    """Copy the probe model with backend-specific identity and naming checks."""
+
+    if adapter.name == "torch" and not isinstance(model, types.FunctionType):
+        from .._capture_state_helpers import _model_for_validation_replay
+
+        witness_model, _snapshot, copied = _model_for_validation_replay(model)
+        if not copied:
+            raise SplitUnsupportedError("Cannot copy the model for an isolated B=2 probe.")
+    else:
+        witness_model = deepcopy(model)
+        if witness_model is model and not isinstance(model, types.FunctionType):
+            raise SplitUnsupportedError("The model copy aliases the original model.")
+        if adapter.name == "tf":
+            from ._tf_capture import preserve_probe_layer_names
+
+            preserve_probe_layer_names(model, witness_model)
+    return witness_model
+
+
+def _execute_batch_probe(
+    adapter: Any,
+    graph: SplitTraceGraph,
+    request: SplitRequest,
+    inputs: tuple[Any, ...],
+    input_kwargs: dict[str, Any],
+) -> Any:
+    """Replay the split without placement replicas or live optimizer-owned state."""
+
+    probe_request = replace(
+        request,
+        placement=PlacementPlan(),
+        features=replace(request.features, training=False, live_param_sources=False),
+    )
+    probe_plan = plan_split(graph, probe_request)
+    segments = execute_split_runtime(adapter, graph, probe_plan, probe_request)
+    boundary = segments.prefix(*inputs, input_kwargs=input_kwargs, detach_boundary=True)
+    return segments.suffix(boundary)
 
 
 @dataclass(frozen=True)
@@ -344,22 +375,7 @@ def _probe_output_mismatch(
     """Compare exact output structure, shape and dtype before numeric tolerance."""
 
     if adapter.is_tensor(expected) or adapter.is_tensor(actual):
-        if not (adapter.is_tensor(expected) and adapter.is_tensor(actual)):
-            return f"{path}: tensor/non-tensor mismatch"
-        if adapter.shape(expected) != adapter.shape(actual):
-            return f"{path}: shape mismatch {adapter.shape(expected)} != {adapter.shape(actual)}"
-        if adapter.dtype_name(expected) != adapter.dtype_name(actual):
-            return f"{path}: dtype mismatch"
-        dtype = str(adapter.dtype_name(expected))
-        if "bool" in dtype or "int" in dtype:
-            # Integer labels/masks need exact equality; TF's allclose-style
-            # subtraction is not defined for boolean tensors.
-            left = expected.tolist() if hasattr(expected, "tolist") else expected.numpy().tolist()
-            right = actual.tolist() if hasattr(actual, "tolist") else actual.numpy().tolist()
-            return None if left == right else f"{path}: numeric mismatch"
-        if not adapter.allclose(expected, actual, atol=1e-5, rtol=1e-4):
-            return f"{path}: numeric mismatch"
-        return None
+        return _probe_tensor_mismatch(adapter, expected, actual, path)
     if type(expected) is not type(actual):
         return f"{path}: output container/type mismatch"
     if isinstance(expected, dict):
@@ -377,11 +393,32 @@ def _probe_output_mismatch(
         ]
     else:
         return None if expected == actual else f"{path}: literal mismatch"
+    mismatch = None
     for key, left, right in pairs:
         mismatch = _probe_output_mismatch(adapter, left, right, f"{path}/{key}")
         if mismatch is not None:
-            return mismatch
-    return None
+            break
+    return mismatch
+
+
+def _probe_tensor_mismatch(adapter: Any, expected: Any, actual: Any, path: str) -> str | None:
+    """Compare one tensor leaf with exact integer/boolean and tolerant float semantics."""
+
+    if not (adapter.is_tensor(expected) and adapter.is_tensor(actual)):
+        return f"{path}: tensor/non-tensor mismatch"
+    if adapter.shape(expected) != adapter.shape(actual):
+        return f"{path}: shape mismatch {adapter.shape(expected)} != {adapter.shape(actual)}"
+    if adapter.dtype_name(expected) != adapter.dtype_name(actual):
+        return f"{path}: dtype mismatch"
+    dtype = str(adapter.dtype_name(expected))
+    if "bool" in dtype or "int" in dtype:
+        # TF subtraction is undefined for boolean tensors; labels/masks are exact.
+        left = expected.tolist() if hasattr(expected, "tolist") else expected.numpy().tolist()
+        right = actual.tolist() if hasattr(actual, "tolist") else actual.numpy().tolist()
+        equal = left == right
+    else:
+        equal = adapter.allclose(expected, actual, atol=1e-5, rtol=1e-4)
+    return None if equal else f"{path}: numeric mismatch"
 
 
 def capture_model(
@@ -392,8 +429,14 @@ def capture_model(
     input_kwargs: dict[str, Any] | None = None,
     output_observer: Callable[[Any], None] | None = None,
     random_seed: int | None = None,
+    shape_witness: bool = False,
 ) -> Any:
-    """Capture one complete model execution with the native backend."""
+    """Capture a native execution, optionally omitting temporary witness payloads.
+
+    ``shape_witness`` is internal to the Torch B=2 probe: only topology,
+    shape/dtype, per-call RNG and the independent output observer are needed.
+    It never changes the forward's grad mode or the public B=1 Trace.
+    """
 
     backend_spec = resolve_backend_spec(spec.backend, model, inputs, input_kwargs)
     from ..user_funcs import trace
@@ -409,14 +452,16 @@ def capture_model(
     if random_seed is not None:
         common["random_seed"] = random_seed
     if str(backend_spec.name) == TORCH_BACKEND_NAME:
+        if shape_witness:
+            common["layers_to_save"] = "none"
         common.update(
             {
                 "intervention_ready": True,
                 "capture_container_structure": True,
-                "save_arg_values": True,
+                "save_arg_values": not shape_witness,
                 "save_rng_states": True,
                 "detach_saved_activations": False,
-                "backward_ready": spec.trainable,
+                "backward_ready": spec.trainable and not shape_witness,
             }
         )
     if str(backend_spec.name) == TINYGRAD_BACKEND_NAME:
@@ -475,25 +520,7 @@ def _torch_capture_state(model: Any) -> Iterator[None]:
         ignored_names=frozenset({"_tl", "forward"}),
     )
     try:
-        # Split capture can encounter modules (notably transformer activation
-        # helpers) that stored a torch builtin before TorchLens installed its
-        # wrappers. Prepare first so the wrapper epoch ledger is populated,
-        # then bind only direct stale function attrs for this transaction.
-        # Ordinary ``tl.trace`` does not pass through this split-only scope.
-        import torch
-
-        if isinstance(model, torch.nn.Module):
-            from ..backends.torch._held_refs import scoped_held_torch_function_refs
-            from ..backends.torch.wrappers import wrap_torch
-
-            # ``trace`` performs model preparation after entering this state
-            # scope. Install wrappers here first so stale direct references can
-            # be rebound before that preparation and the forward; the native
-            # preparation call remains the single owner of model metadata.
-            wrap_torch()
-            with scoped_held_torch_function_refs(model):
-                yield
-        else:
+        with _prepared_torch_capture(model):
             yield
     finally:
         active_error = sys.exc_info()[1]
@@ -539,6 +566,26 @@ def _torch_capture_state(model: Any) -> Iterator[None]:
             raise cleanup_errors[0]
 
 
+@contextmanager
+def _prepared_torch_capture(model: Any) -> Iterator[None]:
+    """Rebind direct stale Torch functions only inside a split capture transaction."""
+
+    import torch
+
+    if isinstance(model, torch.nn.Module):
+        from ..backends.torch._held_refs import scoped_held_torch_function_refs
+        from ..backends.torch.wrappers import wrap_torch
+
+        # Transformer helpers may store builtins before wrappers are installed.
+        # Populate the wrapper epoch ledger before rebinding those references;
+        # native model preparation remains the single owner of model metadata.
+        wrap_torch()
+        with scoped_held_torch_function_refs(model):
+            yield
+    else:
+        yield
+
+
 def capture_canonical_model(
     model: Any,
     inputs: tuple[Any, ...],
@@ -574,7 +621,6 @@ def capture_canonical_model(
     attempts: list[int] = [canonical]
     if FALLBACK_TRACE_BATCH not in attempts:
         attempts.append(FALLBACK_TRACE_BATCH)
-    errors: dict[int, Exception] = {}
     for index, attempt in enumerate(attempts):
         is_last = index == len(attempts) - 1
         if batch_spec.user_batch_size == attempt:
@@ -595,27 +641,23 @@ def capture_canonical_model(
                 ) from exc
         try:
             capture = capture_model(model, canonical_inputs, spec, input_kwargs=canonical_kwargs)
-        except Exception as exc:  # noqa: BLE001 - a model may genuinely reject a small batch
+        except Exception:  # noqa: BLE001 - a model may genuinely reject a small batch
             # The last attempt propagates verbatim: a capture failure there is
             # the real diagnosis, not "no small batch worked".
             if is_last:
                 raise
-            errors[attempt] = exc
             continue
-        return (
-            capture,
-            canonical_inputs,
-            canonical_kwargs,
-            BatchSpec(
-                axes=batch_spec.axes,
-                inference=batch_spec.inference,
-                user_batch_size=batch_spec.user_batch_size,
-                canonical_batch_size=attempt,
-            ),
-        )
-    raise SplitUnsupportedError(
-        f"Canonical split capture failed at every small batch {tuple(attempts)!r}: "
-        f"{ {batch: repr(exc) for batch, exc in errors.items()} }."
+        break
+    return (
+        capture,
+        canonical_inputs,
+        canonical_kwargs,
+        BatchSpec(
+            axes=batch_spec.axes,
+            inference=batch_spec.inference,
+            user_batch_size=batch_spec.user_batch_size,
+            canonical_batch_size=attempt,
+        ),
     )
 
 
@@ -630,6 +672,7 @@ def normalize_to_split_ir(
     model_profile: SplitModelProfile | None = None,
     model: Any | None = None,
     batch_spec: BatchSpec | None = None,
+    _release_capture: bool = False,
 ) -> tuple[SplitTraceGraph, SplitGraphIR]:
     """Normalize a backend capture into the runtime graph and portable Split IR.
 
@@ -642,6 +685,16 @@ def normalize_to_split_ir(
         from .adapters import resolve_split_adapter
 
         adapter = resolve_split_adapter(graph.backend)
+    random_seed = getattr(capture, "random_seed", None) if adapter.name == "torch" else None
+    if _release_capture:
+        if adapter.name != "torch" or isinstance(capture, SplitTraceGraph):
+            raise SplitUnsupportedError("Only an owned Torch capture can be compacted.")
+        from ._torch_compact import compact_torch_graph
+
+        graph = compact_torch_graph(graph)
+        # The normalized graph now owns only execution metadata and necessary
+        # state/constants. Free diagnostic values before allocating the B=2 probe.
+        capture.cleanup()
     resolved_axes = None if batch_spec is None else dict(batch_spec.axes)
     inference_mode: Literal["explicit", "conservative_auto"] | None = None
     if batch_spec is not None:
@@ -664,7 +717,7 @@ def normalize_to_split_ir(
             graph,
             shape_program,
             adapter,
-            random_seed=getattr(capture, "random_seed", None) if adapter.name == "torch" else None,
+            random_seed=random_seed,
         )
     if shape_program is not None:
         if shape_program.batch_probe is not None:

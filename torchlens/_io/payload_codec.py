@@ -1124,12 +1124,19 @@ def _restore_jax_scalar_semantics(jax_module: Any, value: Any, entry: Any) -> An
         return value
     if metadata.get("weak_type") is True and getattr(value, "weak_type", False) is not True:
         try:
-            value = jax_module.lax.convert_element_type(
+            # The public cast always sets weak_type=False and does not accept
+            # this keyword. Use JAX's own semantic cast, which also supplies
+            # version-specific primitive parameters (e.g. sharding).
+            from jax._src.lax.lax import _convert_element_type
+
+            value = _convert_element_type(
                 value,
                 value.dtype,
                 weak_type=True,
             )
-        except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+            if getattr(value, "weak_type", False) is not True:
+                raise ValueError("JAX semantic cast did not restore weak_type=True")
+        except (ImportError, AttributeError, TypeError, ValueError, RuntimeError) as exc:
             raise BackendRuntimeCompatibilityError(
                 "Portable JAX payload could not restore weak_type=True."
             ) from exc

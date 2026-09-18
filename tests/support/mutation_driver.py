@@ -447,9 +447,11 @@ def while_exit_arm_keys(src: str, func: str) -> set[tuple[int, int, int]]:
             for stmt in node.orelse:
                 _collect(stmt, in_while_body)
             return
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            if node is not target:
-                return
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+            and node is not target
+        ):
+            return
         for child in ast.iter_child_nodes(node):
             _collect(child, in_while_body)
 

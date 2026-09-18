@@ -357,7 +357,8 @@ assert collisions == {
     "fastlog": ["dry_run", "recover"], "intervention": ["replay", "rerun", "sites"],
     "hash": [], "io": [], "ir": [], "merged": [], "observers": [], "options": [],
     "partial": [], "quantities": [], "report": [], "repgeom": [],
-    "receptive_field": ["rules"], "stats": [], "user_funcs": [], "validation": [], "viz": [],
+    "receptive_field": ["rules"], "split": [], "stats": [], "user_funcs": [],
+    "validation": [], "viz": [],
 }
 
 """

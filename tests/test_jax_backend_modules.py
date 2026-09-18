@@ -11,6 +11,7 @@ import pytest
 
 import torchlens as tl
 from torchlens.backends import BackendUnsupportedError
+from torchlens.intervention.errors import MultiMatchWarning
 from torchlens.validation.invariants import check_metadata_invariants
 
 jax = pytest.importorskip("jax")
@@ -339,7 +340,8 @@ def test_jax_equinox_simple_mlp_uses_pytree_module_hierarchy() -> None:
     assert trace.modules["fc1"].params
     assert {param.module_address for param in trace.modules["fc1"].params} == {"fc1"}
     assert trace.params["fc1.weight"].is_trainable is True
-    fc1_labels = trace.resolve_sites(tl.in_module("fc1"), max_fanout=8).labels()
+    with pytest.warns(MultiMatchWarning, match="matched 2 sites"):
+        fc1_labels = trace.resolve_sites(tl.in_module("fc1"), max_fanout=8).labels()
     assert fc1_labels
     assert all("fc1:1" in trace[label].modules for label in fc1_labels)
     check_metadata_invariants(trace)
@@ -360,7 +362,8 @@ def test_jax_nnx_simple_mlp_uses_pytree_module_hierarchy() -> None:
     assert trace.modules["fc1"].params
     assert {param.module_address for param in trace.modules["fc1"].params} == {"fc1"}
     assert trace.params["fc1.kernel"].is_trainable is True
-    fc1_labels = trace.resolve_sites(tl.in_module("fc1"), max_fanout=8).labels()
+    with pytest.warns(MultiMatchWarning, match="matched 2 sites"):
+        fc1_labels = trace.resolve_sites(tl.in_module("fc1"), max_fanout=8).labels()
     assert fc1_labels
     assert all("fc1:1" in trace[label].modules for label in fc1_labels)
     check_metadata_invariants(trace)
@@ -388,10 +391,13 @@ def test_jax_equinox_nested_modules_preserve_address_tree_and_selectors() -> Non
     assert {param.module_address for param in trace.modules["encoder.proj"].params} == {
         "encoder.proj"
     }
-    proj_labels = trace.resolve_sites(tl.in_module("encoder.proj"), max_fanout=8).labels()
-    encoder_labels = trace.resolve_sites(tl.in_module("encoder"), max_fanout=8).labels()
+    with pytest.warns(MultiMatchWarning, match="matched 2 sites"):
+        proj_labels = trace.resolve_sites(tl.in_module("encoder.proj"), max_fanout=8).labels()
+    with pytest.warns(MultiMatchWarning, match="will fan out"):
+        encoder_labels = trace.resolve_sites(tl.in_module("encoder"), max_fanout=8).labels()
     assert set(proj_labels) < set(encoder_labels)
     assert all("encoder.proj:1" in trace[label].modules for label in proj_labels)
+    assert trace.module_calls["encoder.proj:1"].module_call_stack == ["encoder:1"]
     check_metadata_invariants(trace)
     assert trace.validate_forward_pass([]) is True
 
@@ -418,16 +424,19 @@ def test_jax_nnx_nested_modules_preserve_address_tree_and_selectors() -> None:
         "encoder.proj"
     }
     assert trace.params["encoder.scale"].module_address == "encoder"
-    proj_labels = trace.resolve_sites(tl.in_module("encoder.proj"), max_fanout=8).labels()
-    encoder_labels = trace.resolve_sites(tl.in_module("encoder"), max_fanout=8).labels()
+    with pytest.warns(MultiMatchWarning, match="matched 2 sites"):
+        proj_labels = trace.resolve_sites(tl.in_module("encoder.proj"), max_fanout=8).labels()
+    with pytest.warns(MultiMatchWarning, match="will fan out"):
+        encoder_labels = trace.resolve_sites(tl.in_module("encoder"), max_fanout=8).labels()
     assert set(proj_labels) < set(encoder_labels)
     assert all("encoder.proj:1" in trace[label].modules for label in proj_labels)
+    assert trace.module_calls["encoder.proj:1"].module_call_stack == ["encoder:1"]
     check_metadata_invariants(trace)
     assert trace.validate_forward_pass([]) is True
 
 
 def test_jax_equinox_shared_submodule_aliases_and_multicall() -> None:
-    """Shared Equinox module instances should mirror torch alias semantics."""
+    """Shared Equinox modules retain both addresses and one repeated-call identity."""
 
     model = SharedEquinoxMlp()
     trace = tl.trace(model, jnp.ones(3, dtype=jnp.float32), backend="jax")
@@ -448,19 +457,24 @@ def test_jax_equinox_shared_submodule_aliases_and_multicall() -> None:
     assert all(f"left:{call_index}" in trace.modules._pass_dict for call_index in (1, 2))
     assert all("left" in trace[op_label].modules[-1] for op_label in first_call.ops)
 
-    assert trace.modules["self"].address_children == ["left"]
+    # Static addresses retain both aliases; they resolve to one module object.
+    assert trace.modules["self"].address_children == ["left", "right"]
+    assert trace.modules["self"].call_children == ["left"]
     assert {param.module_address for param in shared.params} == {"left"}
     assert {tuple(param.all_module_addresses) for param in shared.params} == {("left", "right")}
     assert {tuple(param.all_addresses) for param in shared.params} == {
         ("left.weight", "right.weight"),
         ("left.bias", "right.bias"),
     }
+    assert all(
+        not (set(param.co_parent_params) & set(param.all_addresses)) for param in shared.params
+    )
     check_metadata_invariants(trace)
     assert trace.validate_forward_pass([]) is True
 
 
 def test_jax_nnx_shared_submodule_aliases_and_multicall() -> None:
-    """Shared Flax NNX module instances should mirror torch alias semantics."""
+    """Shared Flax NNX modules retain both addresses and one repeated-call identity."""
 
     model = SharedNnxMlp()
     trace = tl.trace(model, jnp.ones(3, dtype=jnp.float32), backend="jax")
@@ -480,13 +494,18 @@ def test_jax_nnx_shared_submodule_aliases_and_multicall() -> None:
     assert second_call.ops
     assert all(f"left:{call_index}" in trace.modules._pass_dict for call_index in (1, 2))
 
-    assert trace.modules["self"].address_children == ["left"]
+    # Static addresses retain both aliases; they resolve to one module object.
+    assert trace.modules["self"].address_children == ["left", "right"]
+    assert trace.modules["self"].call_children == ["left"]
     assert {param.module_address for param in shared.params} == {"left"}
     assert {tuple(param.all_module_addresses) for param in shared.params} == {("left", "right")}
     assert {tuple(param.all_addresses) for param in shared.params} == {
         ("left.weight", "right.weight"),
         ("left.bias", "right.bias"),
     }
+    assert all(
+        not (set(param.co_parent_params) & set(param.all_addresses)) for param in shared.params
+    )
     check_metadata_invariants(trace)
     assert trace.validate_forward_pass([]) is True
 
@@ -604,7 +623,8 @@ def _assert_pytree_modules_surface(trace: Any, tmp_path: Path) -> None:
     assert trace.module_identity_mode == "pytree_module"
     assert len(trace.modules) > 1
     assert trace.modules["fc1"].address == "fc1"
-    assert trace.resolve_sites(tl.in_module("fc1"), max_fanout=8).labels()
+    with pytest.warns(MultiMatchWarning, match="matched 2 sites"):
+        assert trace.resolve_sites(tl.in_module("fc1"), max_fanout=8).labels()
 
 
 def _assert_pytree_module_children_surface(trace: Any, tmp_path: Path) -> None:

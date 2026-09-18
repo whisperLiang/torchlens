@@ -521,7 +521,7 @@ def test_jax_old_style_prng_key_tlspec_round_trips_as_uint32_array(tmp_path: Pat
     loaded = tl.load(path)
     loaded_key = _first_saved_op(loaded).out
     input_entries = [
-        entry for entry in manifest["tensors"] if entry.get("label") == "input_1_1_raw:1"
+        entry for entry in manifest["tensors"] if entry.get("label") in trace.input_ops.keys()
     ]
 
     assert str(loaded_key.dtype) == "uint32"

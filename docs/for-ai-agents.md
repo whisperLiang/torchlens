@@ -27,6 +27,12 @@ results even after the sample passes. See [preview limitations](reference/limita
 `SplitFeatures.batch_axes` distinguishes `None` (automatic), `{}` (no batch axes), and a
 nonempty path-to-axis mapping (explicit). Vectors/scalars are not automatically batched;
 unbatched inputs retain their shapes, skip canonical resizing/probing, and replay at fixed shapes.
+Torch split inference defaults to compact retention: `runtime.retains_trace` is false and
+`runtime.trace` refuses with `SplitUnsupportedError` (`diagnostic_trace_not_retained`).
+Use `SplitFeatures(retain_trace=True)` for historical activation inspection; graph metadata,
+recutting, and placement remain available without it. Training and other backends retain
+complete traces by default. Preparation still uses a temporary value-retaining capture;
+compact retention does not force `no_grad()` or weaken the B=2 verification.
 JAX leaf gradients are requested with `tl.backends.jax.GradOptions`; they are derived by a
 second functional AD run and never populate backward-pass or op-gradient surfaces.
 JAX intermediate derived gradients are requested with

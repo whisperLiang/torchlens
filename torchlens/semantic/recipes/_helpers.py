@@ -7,6 +7,7 @@ from typing import Any
 import torch
 from torch.nn import functional as F
 
+from ...ir.container import TupleIndex
 from ..facets import _MISSING_CONTRIBUTION_KEY, AbsenceReason, Facet, FacetSpec, MissingFacet
 from ..reconstruction import ReconstructionFacet, sdpa_reconstruction_spec
 
@@ -144,14 +145,64 @@ def module_output(module: Any) -> Any | None:
         return None
 
 
-def module_output_spec(module: Any, recipe_id: str) -> FacetSpec | AbsenceReason:
-    """Return an op-anchored spec for a module's single output."""
+def _tuple_output_label(module: Any, call: Any, index: int) -> str | AbsenceReason:
+    """Resolve a tuple output from this exact call's captured exit evidence.
+
+    ModuleCall.output_ops is in execution order, not tuple order; neither its
+    position nor an Op's outermost multi_output_name proves this call's path.
+    Missing exit evidence (including on loaded traces) must remain a refusal.
+    """
+
+    events = getattr(module.trace, "event_stream", None)
+    exits = [
+        event
+        for event in getattr(events, "module_exit_events", ())
+        if event.call_label == call.call_label
+    ]
+    if len(exits) != 1:
+        return structural("module tuple output requires retained call-exit path evidence")
+    event = exits[0]
+    if len(event.output_paths) != len(event.output_tensor_labels_raw):
+        return structural("module tuple output path evidence is incomplete")
+    labels = [
+        raw_label
+        for path, raw_label in zip(event.output_paths, event.output_tensor_labels_raw, strict=True)
+        if path == (TupleIndex(index),)
+    ]
+    if len(labels) != 1:
+        return structural("module tuple output path is absent or ambiguous")
+    label = module.trace._raw_to_final_op_labels.get(labels[0])
+    if label is None or label not in call.output_ops:
+        return structural("module tuple output op is unavailable")
+    return str(label)
+
+
+def module_output_spec(
+    module: Any, recipe_id: str, *, tuple_index: int | None = None
+) -> FacetSpec | AbsenceReason:
+    """Return a single output, or a recipe-declared tuple element proven at exit.
+
+    Parameters
+    ----------
+    module:
+        Captured module record.
+    recipe_id:
+        Owning semantic recipe.
+    tuple_index:
+        Known tensor position for multi-output calls; no positional guess is made.
+    """
 
     try:
         call = module._single_call_or_error()
-        if len(call.output_ops) != 1:
+        if len(call.output_ops) == 1:
+            label = call.output_ops[0]
+        elif tuple_index is not None:
+            label = _tuple_output_label(module, call, tuple_index)
+            if isinstance(label, AbsenceReason):
+                return label
+        else:
             return structural("module has ambiguous outputs")
-        op = module.trace.ops[call.output_ops[0]]
+        op = module.trace.ops[label]
     except (AttributeError, KeyError, IndexError, RuntimeError, ValueError):
         return structural("module output op is unavailable")
     if not op_output_readable(op):

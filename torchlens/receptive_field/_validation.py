@@ -469,6 +469,14 @@ def _complete_corner_choices(
         count *= len(axis_choices)
     if count > _ADJOINT_CORNER_BUDGET:
         return None
+    return _widen_corner_choices(choices, widenable, count)
+
+
+def _widen_corner_choices(
+    choices: list[tuple[int, ...]], widenable: list[tuple[int, int, int]], count: int
+) -> tuple[tuple[int, ...], ...]:
+    """Add full-axis endpoints narrowest-first within the fixed probe budget."""
+
     for _width, position, last in sorted(widenable):
         if count * 2 > _ADJOINT_CORNER_BUDGET:
             break
@@ -623,6 +631,36 @@ def _exact_box_adjoint_violations(
     return tuple(violations)
 
 
+def _cross_batch_kind(
+    undeclared_batch: bool, geometric_batch: bool
+) -> Literal["none", "geometric", "undeclared"]:
+    """Classify cross-batch evidence with undeclared influence taking precedence."""
+
+    if undeclared_batch:
+        return "undeclared"
+    if geometric_batch:
+        return "geometric"
+    return "none"
+
+
+def _first_violation_message(
+    first: ReceptiveFieldViolation, descriptors: Mapping[str, ReceptiveField]
+) -> str:
+    """Describe the first listed violation using its exact clipped geometric bounds."""
+
+    descriptor = descriptors[first.io_role]
+    bounds = tuple(
+        (axis.clipped_start, axis.clipped_stop)
+        if axis.kind != "pointwise"
+        else ("same-index", "same-index")
+        for axis in cast(ReceptiveFieldBox, first.box).axes
+    )
+    return (
+        f" First violation: role={first.io_role!r}, index={first.index}, "
+        f"magnitude={first.magnitude}, rule={descriptor.rule!r}, bounds={bounds}."
+    )
+
+
 def _validation_result(
     *,
     target: Op,
@@ -686,13 +724,7 @@ def _validation_result(
         excess_rows.append(role_excess)
         slack_rows.append(role_slack)
 
-    cross_batch: Literal["none", "geometric", "undeclared"]
-    if undeclared_batch:
-        cross_batch = "undeclared"
-    elif geometric_batch:
-        cross_batch = "geometric"
-    else:
-        cross_batch = "none"
+    cross_batch = _cross_batch_kind(undeclared_batch, geometric_batch)
     if n_violations or undeclared_batch:
         status = ReceptiveFieldValidationStatus.FAIL
         message = (
@@ -709,18 +741,7 @@ def _validation_result(
         if undeclared_batch:
             message += " Cross-batch influence was not declared geometrically."
         if listed:
-            first = listed[0]
-            descriptor = descriptors[first.io_role]
-            bounds = tuple(
-                (axis.clipped_start, axis.clipped_stop)
-                if axis.kind != "pointwise"
-                else ("same-index", "same-index")
-                for axis in cast(ReceptiveFieldBox, first.box).axes
-            )
-            message += (
-                f" First violation: role={first.io_role!r}, index={first.index}, "
-                f"magnitude={first.magnitude}, rule={descriptor.rule!r}, bounds={bounds}."
-            )
+            message += _first_violation_message(listed[0], descriptors)
         per_axis_excess = _merge_diagnostic_rows(excess_rows, maximum=True)
         slack_per_axis = None
     elif gradient_error is not None or not descriptors or indeterminate_roles or nonfinite:

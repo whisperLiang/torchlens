@@ -960,80 +960,78 @@ def test_atomic_single_op_module_collapse_preserves_op_render(tmp_path: Path) ->
 
 
 @pytest.mark.heavy
-def test_render_loop_module_rolling_demos() -> None:
-    """Render SVG, PDF, and PNG demos into the committed test-output folder."""
-
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    demos: list[tuple[str, nn.Module, dict[str, object], str]] = [
-        ("inside_outside_relu", InsideOutsideRelu(), {"vis_call_depth": 1}, "init+forward"),
+@pytest.mark.parametrize(
+    ("name", "model_type", "kwargs"),
+    [
+        ("inside_outside_relu", InsideOutsideRelu, {"vis_call_depth": 1}),
         (
             "inside_outside_relu_separable",
-            InsideOutsideReluSeparable(),
+            InsideOutsideReluSeparable,
             {"vis_call_depth": 1},
-            "init+forward",
         ),
         (
             "inside_outside_block_collapsed",
-            InsideOutsideBlock(),
+            InsideOutsideBlock,
             {"vis_call_depth": 1},
-            "init+forward",
         ),
         (
             "inside_outside_block_expanded",
-            InsideOutsideBlock(),
+            InsideOutsideBlock,
             {"vis_call_depth": 1000},
-            "init+forward",
         ),
-        ("deep_loop_body", DeepLoopBody(), {"vis_call_depth": 1000}, "init+forward"),
-        ("rnn_cell", TanhRNNCellLoop(), {"vis_call_depth": 1000}, "init+forward"),
+        ("deep_loop_body", DeepLoopBody, {"vis_call_depth": 1000}),
+        ("rnn_cell", TanhRNNCellLoop, {"vis_call_depth": 1000}),
         (
             "repeated_block_stack_collapsed",
-            RepeatedBlockStack(),
+            RepeatedBlockStack,
             {"vis_call_depth": 1},
-            "init+forward",
         ),
         (
             "repeated_block_stack_expanded",
-            RepeatedBlockStack(),
+            RepeatedBlockStack,
             {"vis_call_depth": 1000},
-            "init+forward",
         ),
-        ("two_distinct_loops", TwoDistinctLoops(), {"vis_call_depth": 1}, "init+forward"),
+        ("two_distinct_loops", TwoDistinctLoops, {"vis_call_depth": 1}),
         (
             "buffer_loop",
-            BufferRewriteLoops(),
+            BufferRewriteLoops,
             {"show_buffer_layers": "always"},
-            "init+forward",
         ),
-        ("nested_loop", NestedLoopBlock(), {"vis_call_depth": 1}, "init+forward"),
-        ("parallel_fanout", ParallelFanout(), {"vis_call_depth": 1}, "init+forward"),
-    ]
+        ("nested_loop", NestedLoopBlock, {"vis_call_depth": 1}),
+        ("parallel_fanout", ParallelFanout, {"vis_call_depth": 1}),
+    ],
+)
+def test_render_loop_module_rolling_demos(
+    name: str, model_type: type[nn.Module], kwargs: dict[str, object]
+) -> None:
+    """Render every model in SVG, PDF, and PNG into the session-private output folder."""
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     # Magic-byte / markup signatures so a no-op renderer (no file, or an empty
     # one) cannot pass: PDF starts with %PDF, PNG with the 8-byte PNG header,
     # and SVG payloads contain an <svg element.
     _format_signature = {"pdf": b"%PDF", "png": b"\x89PNG\r\n\x1a\n"}
-    for name, model, kwargs, code_panel in demos:
-        trace = _trace(model)
-        for file_format in ("svg", "pdf", "png"):
-            artifact = OUTPUT_DIR / f"{name}.{file_format}"
-            artifact.unlink(missing_ok=True)
-            dot = trace.draw(
-                vis_mode="rolled",
-                vis_save_only=True,
-                vis_fileformat=file_format,
-                vis_outpath=str(OUTPUT_DIR / name),
-                code_panel=code_panel,
-                **kwargs,
+    trace = _trace(model_type())
+    for file_format in ("svg", "pdf", "png"):
+        artifact = OUTPUT_DIR / f"{name}.{file_format}"
+        artifact.unlink(missing_ok=True)
+        dot = trace.draw(
+            vis_mode="rolled",
+            vis_save_only=True,
+            vis_fileformat=file_format,
+            vis_outpath=str(OUTPUT_DIR / name),
+            code_panel="init+forward",
+            **kwargs,
+        )
+        assert isinstance(dot, str) and "digraph" in dot, (
+            f"expected non-empty DOT source for {name} ({file_format})"
+        )
+        assert artifact.exists(), f"expected render artifact at {artifact}"
+        blob = artifact.read_bytes()
+        assert blob, f"expected non-empty artifact at {artifact}"
+        if file_format in _format_signature:
+            assert blob.startswith(_format_signature[file_format]), (
+                f"expected {artifact} to be a valid {file_format} artifact"
             )
-            assert isinstance(dot, str) and "digraph" in dot, (
-                f"expected non-empty DOT source for {name} ({file_format})"
-            )
-            assert artifact.exists(), f"expected render artifact at {artifact}"
-            blob = artifact.read_bytes()
-            assert blob, f"expected non-empty artifact at {artifact}"
-            if file_format in _format_signature:
-                assert blob.startswith(_format_signature[file_format]), (
-                    f"expected {artifact} to be a valid {file_format} artifact"
-                )
-            else:  # svg
-                assert b"<svg" in blob, f"expected {artifact} to contain SVG markup"
+        else:  # svg
+            assert b"<svg" in blob, f"expected {artifact} to contain SVG markup"

@@ -187,10 +187,10 @@ def test_pre_forward_failure_resets_capture_runtime_context(monkeypatch):
         with pytest.raises(RuntimeError, match="boom-in-ctor"):
             tl.trace(model, x, intervention_ready=True)
         # The pre-forward failure window must have reset the capture-global state.
-        assert getattr(_state, "_capture_replay_templates") is False
-        assert getattr(_state, "_relationship_model_id") is None
-        assert getattr(_state, "_relationship_model_class") is None
-        assert getattr(_state, "_relationship_input_id") is None
+        assert _state._capture_replay_templates is False
+        assert _state._relationship_model_id is None
+        assert _state._relationship_model_class is None
+        assert _state._relationship_input_id is None
     finally:
         _state.reset_capture_runtime_context()
 

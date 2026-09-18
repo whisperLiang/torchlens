@@ -12,7 +12,8 @@ from menagerie.crawler.status import assert_partition
 from menagerie.crawler.tests.conftest import make_model
 from menagerie.crawler.tests.test_slice_f_doctor import FakeDoctorProbes
 from menagerie.crawler.tools.verify_pool_prompts import verify_prompt_surface
-from .support import fabricated_crawler_locks, repository_root
+
+from .support import crawler_lock_provenance_errors, repository_root
 
 
 def _terminal_record(stable_id: str, status_code: str) -> dict[str, Any]:
@@ -63,7 +64,7 @@ def test_frozen_prompts_and_generated_lock_boundary_pass_release_gate() -> None:
         "claude_crawler_author_v2.txt",
         "codex_accuracy_checker_v2.txt",
     } | {path.name for path in pool_root.glob("*.md")}
-    assert fabricated_crawler_locks(repo_root) == ()
+    assert crawler_lock_provenance_errors(repo_root) == ()
 
 
 def test_doctor_is_go_on_clean_preflight_and_no_go_when_tripped(tmp_path: Path) -> None:

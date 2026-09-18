@@ -15,6 +15,57 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  transformers-compat:
+    name: Real offline Transformers ${{ matrix.major }} compatibility
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - major: "4"
+            transformers: "transformers>=4.45,<5"
+            extras: ".[dev,hf,tabular]"
+          - major: "5"
+            transformers: "transformers>=5.1,<6"
+            extras: ".[dev,hf,tabular,detection]"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      - name: Install one coherent HF environment
+        run: |
+          # Exact +cpu pins come only from the trusted PyTorch index; other
+          # dependencies resolve from PyPI, as in the canonical benchmark lane.
+          uv pip install --system \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e "${{ matrix.extras }}" "${{ matrix.transformers }}" \
+            "torch==2.8.0+cpu" "torchvision==0.23.0+cpu"
+          uv pip check --system
+      - name: Verify RFDETR imports in the same Transformers 5 environment
+        if: matrix.major == '5'
+        run: python -c "from rfdetr import RFDETRNano; import transformers; assert transformers.__version__.split('.')[0] == '5'"
+      - name: Exercise real tiny models without Hub downloads
+        env:
+          HF_HUB_OFFLINE: "1"
+          CUDA_VISIBLE_DEVICES: ""
+          OMP_NUM_THREADS: "2"
+        run: |
+          pytest tests/test_transformers_version_compat.py \
+            --junitxml=transformers-real.xml --tb=short
+          python scripts/check_ci_executed_tests.py transformers-real.xml 8 0
+          pytest tests/test_transformers_dependency_contract.py \
+            tests/test_hf_output_style_defaults.py \
+            tests/semantic/test_tuple_output_evidence.py --tb=short
+          pytest tests/test_collapse_optimizer.py -k small_config \
+            --junitxml=transformers-collapse.xml --tb=short
+          python scripts/check_ci_executed_tests.py transformers-collapse.xml 2 0
+
   perf-gate:
     name: Same-run performance regression gate
     runs-on: ubuntu-24.04

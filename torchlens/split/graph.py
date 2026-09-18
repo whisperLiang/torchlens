@@ -91,22 +91,6 @@ class SplitTraceGraph:
         return {node.canonical_id: node for node in self.nodes}
 
     @cached_property
-    def node_by_label(self) -> dict[str, SplitTraceNode]:
-        """Return nodes keyed by unique final display label."""
-
-        labels: dict[str, SplitTraceNode] = {}
-        duplicates: set[str] = set()
-        for node in self.nodes:
-            existing = labels.get(node.label)
-            if existing is None:
-                labels[node.label] = node
-            elif existing.canonical_id != node.canonical_id:
-                duplicates.add(node.label)
-        for label in duplicates:
-            labels.pop(label, None)
-        return labels
-
-    @cached_property
     def node_id_by_alias(self) -> dict[str, str]:
         """Return unique raw/display/canonical label aliases to canonical IDs."""
 
@@ -316,7 +300,7 @@ def _attach_paddle_capture_templates(
 
     captures = {
         str(getattr(capture, "label_raw")): capture
-        for capture in getattr(trace, "_paddle_op_captures", ()) or ()
+        for capture in trace._paddle_op_captures or ()
         if getattr(capture, "label_raw", None) is not None
     }
     if not captures:
@@ -342,7 +326,7 @@ def _attach_paddle_capture_templates(
 def _attach_jax_captures(trace: Any, nodes: list[SplitTraceNode]) -> list[SplitTraceNode]:
     """Attach JAX runtime captures to their split graph nodes."""
 
-    raw_by_index = getattr(trace, "_jax_capture_index_to_raw_op_label", {}) or {}
+    raw_by_index = trace._jax_capture_index_to_raw_op_label or {}
     captures = {
         str(raw_by_index.get(getattr(capture, "index"))): capture
         for capture in getattr(trace, "jax_ordered_captures", ()) or ()
@@ -387,7 +371,7 @@ def _attach_tf_captures(trace: Any, nodes: list[SplitTraceNode]) -> list[SplitTr
 
     captures = {
         str(getattr(capture, "label_raw")): capture
-        for capture in getattr(trace, "_tf_op_captures", ()) or ()
+        for capture in trace._tf_op_captures or ()
         if getattr(capture, "label_raw", None) is not None
     }
     if not captures:
@@ -819,7 +803,9 @@ def split_graph_from_trace(trace: Any) -> SplitTraceGraph:
     if output_aliases:
         nodes = [
             replace(node, is_output=True)
-            if node.raw_label in output_aliases or node.label in output_aliases
+            if any(
+                alias in output_aliases for alias in (node.raw_label, node.label, node.canonical_id)
+            )
             else node
             for node in nodes
         ]

@@ -79,7 +79,7 @@ class _ConditionalModel(nn.Module):
     reason="_get_col_offset is a no-op on Python < 3.11",
 )
 class TestColOffsetCache:
-    """Cache should reuse the disassembled offset map per code object."""
+    """Cache should reuse the native position map per code object."""
 
     def setup_method(self) -> None:
         introspection._clear_col_offset_cache()
@@ -92,35 +92,35 @@ class TestColOffsetCache:
 
         return types.SimpleNamespace(f_code=code, f_lasti=lasti)
 
-    def test_repeated_calls_reuse_disassembly(self) -> None:
-        """Two lookups for the same code object disassemble it only once."""
+    def test_repeated_calls_reuse_position_map(self) -> None:
+        """Repeated lookups for the same code object build its map only once."""
 
         code = (lambda x, y: x + y).__code__
 
         with mock.patch.object(
-            introspection.dis,
-            "get_instructions",
-            wraps=introspection.dis.get_instructions,
+            introspection,
+            "_build_col_offset_map",
+            wraps=introspection._build_col_offset_map,
         ) as wrapped:
             introspection._get_col_offset(self._make_frame_at_offset(code, 0))
             introspection._get_col_offset(self._make_frame_at_offset(code, 0))
             introspection._get_col_offset(self._make_frame_at_offset(code, 2))
 
         assert wrapped.call_count == 1, (
-            "Expected dis.get_instructions to run once per code object, "
+            "Expected the position-map builder to run once per code object, "
             f"observed {wrapped.call_count} calls."
         )
 
-    def test_different_code_objects_each_disassembled_once(self) -> None:
+    def test_different_code_objects_each_mapped_once(self) -> None:
         """Each unique code object gets its own cache entry."""
 
         code_a = (lambda: 1).__code__
         code_b = (lambda: 2).__code__
 
         with mock.patch.object(
-            introspection.dis,
-            "get_instructions",
-            wraps=introspection.dis.get_instructions,
+            introspection,
+            "_build_col_offset_map",
+            wraps=introspection._build_col_offset_map,
         ) as wrapped:
             introspection._get_col_offset(self._make_frame_at_offset(code_a, 0))
             introspection._get_col_offset(self._make_frame_at_offset(code_b, 0))
@@ -128,7 +128,7 @@ class TestColOffsetCache:
             introspection._get_col_offset(self._make_frame_at_offset(code_b, 0))
 
         assert wrapped.call_count == 2, (
-            "Expected dis.get_instructions to run once per unique code object, "
+            "Expected the position-map builder to run once per unique code object, "
             f"observed {wrapped.call_count} calls."
         )
 
@@ -141,7 +141,9 @@ class TestColOffsetCache:
         code = sample.__code__
 
         # Pick a real instruction offset by walking the bytecode directly.
-        instructions = list(introspection.dis.get_instructions(code))
+        import dis
+
+        instructions = list(dis.get_instructions(code))
         assert instructions, "Sample function must compile to at least one instruction."
         first_offset = instructions[0].offset
         expected = (

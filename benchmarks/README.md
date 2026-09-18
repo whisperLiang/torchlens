@@ -3,6 +3,25 @@
 This directory contains standalone benchmark scripts and generated benchmark
 artifacts.
 
+## Split memory
+
+`split_memory.py` measures RF-DETR-N preparation and representative split replays
+in a fresh process, with numerical checks against native outputs. It requires
+the already-cached official checkpoint and never downloads weights.
+
+```bash
+CUDA_VISIBLE_DEVICES='' python benchmarks/split_memory.py --device cpu
+python benchmarks/split_memory.py --device cuda
+```
+
+Use `--source-root /path/to/another/checkout` for a same-environment comparison
+between revisions supporting the `SplitRuntime.retains_trace` API.
+Use `--capture-grad` to measure caller-enabled autograd instead of inference
+capture. Default Torch inference is compact; use `--retain-trace` to measure the
+complete diagnostic capture on revisions supporting that option. Compare modes
+in separate processes with identical inputs and runtime versions; process RSS
+includes libraries and allocator caches, not just retained tensor storage.
+
 ## Performance benchmark suite
 
 `perf_suite.py` drives the 2026-05-14 performance benchmark matrix described in

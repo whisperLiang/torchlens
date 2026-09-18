@@ -191,7 +191,7 @@ def test_autograd_saved_fields_roundtrip_through_bundle_save_load(tmp_path: Path
     loaded = tl.load(bundle_path)
 
     assert loaded.total_autograd_memory == trace.total_autograd_memory
-    for original_layer, loaded_layer in zip(trace.layer_list, loaded.layer_list):
+    for original_layer, loaded_layer in zip(trace.layer_list, loaded.layer_list, strict=True):
         assert loaded_layer.autograd_memory == original_layer.autograd_memory
         assert loaded_layer.num_autograd_tensors == original_layer.num_autograd_tensors
     for label, original_layer in trace.layer_logs.items():

@@ -32,7 +32,7 @@ def _assert_close(left: Any, right: Any) -> None:
             _assert_close(left[key], right[key])
     elif isinstance(left, (tuple, list)):
         assert len(left) == len(right)
-        for l_item, r_item in zip(left, right):
+        for l_item, r_item in zip(left, right, strict=True):
             _assert_close(l_item, r_item)
     else:
         assert left == right

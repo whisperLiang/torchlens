@@ -71,7 +71,7 @@ def test_suffix_only_training_parity() -> None:
 
     assert grads
     assert torch.allclose(split_loss.detach(), full_loss.detach(), atol=1e-5, rtol=1e-4)
-    for left, right in zip(_params(split_model.fc2), _params(model.fc2)):
+    for left, right in zip(_params(split_model.fc2), _params(model.fc2), strict=True):
         assert torch.allclose(left, right, atol=1e-5, rtol=1e-4)
 
 
@@ -97,7 +97,7 @@ def test_full_split_training_gradient_handoff() -> None:
     runtime.backward_prefix(boundary, grads, optimizer=prefix_opt)
 
     assert torch.allclose(loss.detach(), full_loss.detach(), atol=1e-5, rtol=1e-4)
-    for left, right in zip(_params(split_model), _params(model)):
+    for left, right in zip(_params(split_model), _params(model), strict=True):
         assert torch.allclose(left, right, atol=1e-5, rtol=1e-4)
 
 

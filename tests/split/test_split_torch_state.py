@@ -67,10 +67,9 @@ def test_capture_state_restores_registered_state_after_reload_failure() -> None:
             raise RuntimeError("reload failed")
 
     model = MutatingModule().eval()
-    with pytest.raises(RuntimeError, match="reload failed"):
-        with _torch_capture_state(model):
-            model(torch.ones(1))
-            model.train()
+    with pytest.raises(RuntimeError, match="reload failed"), _torch_capture_state(model):
+        model(torch.ones(1))
+        model.train()
 
     assert not hasattr(model, "temporary_buffer")
     assert model.marker == "before"
