@@ -224,9 +224,14 @@ def _train_suffix_torch(
     runtime.validate_boundary(boundary)
     root_tensors: dict[str, Any] = {}
     replay_tensors: dict[str, Any] = {}
+    suffix_placement = runtime.request.placement.suffix
     for key, value in boundary.tensors.items():
         if _is_diff_tensor(torch, value):
             root = value.detach().clone().requires_grad_(True)
+            if suffix_placement.is_explicit and root.device != torch.device(
+                suffix_placement.device
+            ):
+                root = root.to(suffix_placement.device).detach().requires_grad_(True)
             root_tensors[key] = root
             replay_tensors[key] = root
         else:
@@ -821,9 +826,31 @@ def train_suffix_result(
     targets: Any,
     loss_fn: Callable[[Any, Any], Any] | None = None,
     optimizer: Any | None = None,
+    *,
+    microbatch_size: int | None = None,
+    microbatch_reduction: str = "mean",
+    target_slicer: Callable[[Any, int, int, int], Any] | None = None,
 ) -> TrainingStepResult:
     """Train or differentiate a backend split suffix and return structured metadata."""
 
+    if microbatch_size is not None:
+        if runtime.adapter.name != "torch":
+            raise SplitUnsupportedError(
+                f"backend={runtime.adapter.name!r} does not support suffix microbatch training.",
+                context=_context(runtime, "unsupported suffix microbatch training"),
+            )
+        from ._microbatch import train_torch_microbatches
+
+        return train_torch_microbatches(
+            runtime,
+            boundary,
+            targets,
+            loss_fn=loss_fn,
+            optimizer=optimizer,
+            microbatch_size=microbatch_size,
+            microbatch_reduction=microbatch_reduction,
+            target_slicer=target_slicer,
+        )
     return training_engine_for(runtime.adapter.name).train_suffix(
         runtime,
         boundary,
@@ -839,6 +866,10 @@ def train_suffix(
     targets: Any,
     loss_fn: Callable[[Any, Any], Any] | None = None,
     optimizer: Any | None = None,
+    *,
+    microbatch_size: int | None = None,
+    microbatch_reduction: str = "mean",
+    target_slicer: Callable[[Any, int, int, int], Any] | None = None,
 ) -> tuple[Any, BoundaryGradients]:
     """Train or differentiate a backend split suffix."""
 
@@ -848,6 +879,9 @@ def train_suffix(
         targets,
         loss_fn=loss_fn,
         optimizer=optimizer,
+        microbatch_size=microbatch_size,
+        microbatch_reduction=microbatch_reduction,
+        target_slicer=target_slicer,
     ).as_tuple()
 
 

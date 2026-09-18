@@ -74,6 +74,13 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
   `tl.split.prepare(...)`. `runtime.retains_trace` discloses diagnostic retention;
   `runtime.trace` refuses with `SplitUnsupportedError` when compact preparation discarded
   the capture. `trace_graph`, `.at()`, and `.with_placement()` remain available.
+  `runtime.train_suffix(..., microbatch_size=N)` adds Torch suffix microbatch training for
+  uneven logical batches. It zeroes a caller-owned optimizer once, accumulates each suffix
+  graph's gradients, and steps once. Mean-reduced losses use chunk-size weighting (`b_i / B`),
+  and boundary gradients are reconstructed in logical batch order for one `backward_prefix`
+  call. Tensor-leading-batch and nested target structures are sliced automatically; an
+  optional `target_slicer` handles task-specific containers. Unsupported backends refuse
+  explicitly rather than falling back to full-batch execution.
   Split refusals live in `torchlens.split.errors`: `SplitError`, `SplitRequestError`,
   `SplitBoundaryError`, and `SplitUnsupportedError`. These documented-unstable exceptions
   keep their own catch hierarchy, `code`, and structured `context`; they are not aliases

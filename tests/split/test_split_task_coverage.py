@@ -77,7 +77,11 @@ def test_image_classification_resnet18_replay_and_train() -> None:
             _assert_close(runtime.replay(x), model(x))
         y = torch.randint(0, 10, (batch,))
         boundary = runtime.run_training_prefix(x)
-        loss, grads = runtime.train_suffix(boundary, y)
+        loss, grads = runtime.train_suffix(
+            boundary,
+            y,
+            microbatch_size=2 if batch >= 2 else None,
+        )
         assert torch.isfinite(loss.detach())
         assert grads
         runtime.backward_prefix(boundary, grads)
@@ -124,7 +128,12 @@ def test_text_classification_distilbert_replay_and_train() -> None:
             return torch.nn.functional.cross_entropy(output.logits, target)
 
         boundary = runtime.run_training_prefix(ids, input_kwargs={"attention_mask": mask})
-        loss, grads = runtime.train_suffix(boundary, labels, loss_fn=_loss)
+        loss, grads = runtime.train_suffix(
+            boundary,
+            labels,
+            loss_fn=_loss,
+            microbatch_size=2 if batch >= 2 else None,
+        )
         assert torch.isfinite(loss.detach())
         assert grads
         runtime.backward_prefix(boundary, grads)

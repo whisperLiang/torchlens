@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
@@ -603,7 +604,13 @@ class SplitRuntime:
     ) -> Any:
         """Run prefix then suffix."""
 
-        return self.run_suffix(self.run_prefix(*inputs, input_kwargs=input_kwargs))
+        boundary = self.run_prefix(*inputs, input_kwargs=input_kwargs)
+        self.validate_boundary(boundary)
+        # This boundary belongs to replay(), so replacing the reference after
+        # transport releases the source payload before the suffix starts. The
+        # public run_suffix(boundary) path continues to borrow caller state.
+        boundary = self._transport_boundary(boundary, self.placement.suffix)
+        return self.segments.suffix(boundary)
 
     def validate_equivalence(
         self,
@@ -626,12 +633,50 @@ class SplitRuntime:
         targets: Any,
         loss_fn: Any = None,
         optimizer: Any = None,
+        *,
+        microbatch_size: int | None = None,
+        microbatch_reduction: str = "mean",
+        target_slicer: Callable[[Any, int, int, int], Any] | None = None,
     ) -> tuple[Any, dict[str, Any]]:
-        """Train the suffix and return boundary gradients."""
+        """Train the suffix and return logical-batch boundary gradients.
+
+        Parameters
+        ----------
+        boundary, targets
+            Logical boundary and task targets, with targets on the suffix device.
+        loss_fn
+            Optional scalar loss. With microbatching, it must reduce independent
+            samples using ``microbatch_reduction``.
+        optimizer
+            Caller-owned optimizer; zeroed and stepped once per logical batch.
+        microbatch_size
+            Optional positive Torch suffix batch size. The final chunk may be smaller.
+        microbatch_reduction
+            ``"mean"`` weights chunk losses by chunk size / logical size;
+            ``"sum"`` adds custom sum-reduced losses without scaling.
+        target_slicer
+            Optional ``(targets, start, end, logical_batch) -> chunk`` callback
+            for target structures whose sample axis cannot be inferred.
+
+        Returns
+        -------
+        tuple
+            Loss and boundary gradients suitable for one ``backward_prefix`` call.
+            The microbatch loss is detached; suffix graphs are freed per chunk.
+        """
 
         from .training import train_suffix
 
-        return train_suffix(self, boundary, targets, loss_fn=loss_fn, optimizer=optimizer)
+        return train_suffix(
+            self,
+            boundary,
+            targets,
+            loss_fn=loss_fn,
+            optimizer=optimizer,
+            microbatch_size=microbatch_size,
+            microbatch_reduction=microbatch_reduction,
+            target_slicer=target_slicer,
+        )
 
     def train_suffix_result(
         self,
@@ -639,12 +684,25 @@ class SplitRuntime:
         targets: Any,
         loss_fn: Any = None,
         optimizer: Any = None,
+        *,
+        microbatch_size: int | None = None,
+        microbatch_reduction: str = "mean",
+        target_slicer: Callable[[Any, int, int, int], Any] | None = None,
     ) -> Any:
         """Train the suffix and return a structured training result."""
 
         from .training import train_suffix_result
 
-        return train_suffix_result(self, boundary, targets, loss_fn=loss_fn, optimizer=optimizer)
+        return train_suffix_result(
+            self,
+            boundary,
+            targets,
+            loss_fn=loss_fn,
+            optimizer=optimizer,
+            microbatch_size=microbatch_size,
+            microbatch_reduction=microbatch_reduction,
+            target_slicer=target_slicer,
+        )
 
     def backward_prefix(
         self,

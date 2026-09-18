@@ -7,6 +7,10 @@ between devices, so each segment resolves the state it needs through a
 state keeps one identity per binding: two references to the same live object
 resolve to the same replica, so tied weights are never silently duplicated
 into two independent tensors.
+
+Generated Torch segments may also share a runtime-scoped replica pool. Only
+explicitly shareable, non-trainable copies are pooled across distinct bindings;
+mutable buffers and independently owned trainable replicas remain separate.
 """
 
 from __future__ import annotations
@@ -19,6 +23,43 @@ from .errors import SplitErrorContext, SplitUnsupportedError
 from .placement import DevicePlacement
 
 StateOwnership = Literal["referenced", "owned"]
+
+
+class _StateReplicaPool:
+    """Reuse explicitly immutable copies within one runtime's segment bundle.
+
+    Retaining the effective source alongside its replica makes identity keys
+    safe against object-ID reuse. Nothing outside the runtime owns this pool,
+    so its sources and replicas are collectible with the runtime.
+    """
+
+    def __init__(self) -> None:
+        """Create an empty pool with no process-global references."""
+
+        self._replicas: dict[tuple[str, int, str], tuple[Any, Any]] = {}
+
+    def replicate(
+        self, adapter: Any, source: Any, device: Any, *, trainable: bool, shareable: bool
+    ) -> Any:
+        """Copy state with separate ownership unless sharing is explicitly safe."""
+
+        key = (
+            str(getattr(adapter, "name", type(adapter).__name__)),
+            id(source),
+            _device_key(adapter, device),
+        )
+        share = shareable and not trainable
+        if share and key in self._replicas:
+            return self._replicas[key][1]
+        replicate = getattr(adapter, "replicate_state", None)
+        value = (
+            replicate(source, device, trainable=trainable)
+            if callable(replicate)
+            else adapter.to_device(source, device)
+        )
+        if share:
+            self._replicas[key] = (source, value)
+        return value
 
 
 @dataclass(frozen=True)
@@ -53,11 +94,13 @@ class SegmentState:
         *,
         adapter: Any,
         placement: DevicePlacement,
+        replica_pool: _StateReplicaPool | None = None,
     ) -> None:
         """Create an empty segment state binding."""
 
         self.adapter = adapter
         self.placement = placement
+        self._replica_pool = replica_pool
         self._entries: dict[int, StateEntry] = {}
         self._inherited: dict[int, tuple[StateEntry, ...]] = {}
 
@@ -92,7 +135,7 @@ class SegmentState:
 
         return any(entry.ownership == "owned" for entry in self._entries.values())
 
-    def resolve(self, value: Any, *, trainable: bool | None = None) -> Any:
+    def resolve(self, value: Any, *, trainable: bool | None = None, shareable: bool = False) -> Any:
         """Return the segment-local value for one live or captured tensor.
 
         Parameters
@@ -102,6 +145,11 @@ class SegmentState:
         trainable:
             Whether the resolved replica should carry gradients.  Defaults to
             the source value's own autograd flag.
+        shareable:
+            Whether this source is immutable during replay and safe to share
+            across segment bindings. Non-trainability alone is insufficient:
+            mutable buffers still need independent segment ownership. Trainable
+            replicas are always excluded from cross-binding pooling.
         """
 
         if not self.adapter.is_tensor(value):
@@ -115,7 +163,7 @@ class SegmentState:
         )
         inherited = self._inherited.get(source_id, ())
         if inherited:
-            entry = self._rebind(value, inherited, trainable=wants_grad)
+            entry = self._rebind(value, inherited, trainable=wants_grad, shareable=shareable)
         elif not self.placement.is_explicit or self._already_placed(value):
             entry = StateEntry(
                 ownership="referenced",
@@ -124,7 +172,7 @@ class SegmentState:
                 trainable=wants_grad,
             )
         else:
-            replica = self._replicate(value, trainable=wants_grad)
+            replica = self._replicate(value, trainable=wants_grad, shareable=shareable)
             entry = StateEntry(
                 ownership="owned",
                 value=replica,
@@ -135,7 +183,12 @@ class SegmentState:
         return entry.value
 
     def _rebind(
-        self, source: Any, candidates: tuple[StateEntry, ...], *, trainable: bool
+        self,
+        source: Any,
+        candidates: tuple[StateEntry, ...],
+        *,
+        trainable: bool,
+        shareable: bool,
     ) -> StateEntry:
         """Keep an effective value or copy it to a new device without source writes."""
 
@@ -158,18 +211,17 @@ class SegmentState:
         if target is None and callable(device_of):
             target = device_of(source)
         current = device_of(selected.value) if callable(device_of) else None
-        if target is None or (current is not None and _devices_match(current, target)):
+        if target is None or (current is not None and self._devices_match(current, target)):
             return StateEntry(
                 ownership=selected.ownership,
                 value=selected.value,
                 source_id=id(source),
                 trainable=trainable,
             )
-        replicate = getattr(self.adapter, "replicate_state", None)
-        replica = (
-            replicate(selected.value, target, trainable=trainable)
-            if callable(replicate)
-            else self.adapter.to_device(selected.value, target)
+        # Pool the inherited effective value, never its original source handle:
+        # an earlier runtime may have updated the owned replica independently.
+        replica = self._replicate(
+            selected.value, trainable=trainable, shareable=shareable, device=target
         )
         return StateEntry(
             ownership="owned", value=replica, source_id=id(source), trainable=trainable
@@ -198,15 +250,27 @@ class SegmentState:
         current = device_of(value)
         if current is None:
             return False
-        return _devices_match(current, self.placement.device)
+        return self._devices_match(current, self.placement.device)
 
-    def _replicate(self, value: Any, *, trainable: bool) -> Any:
+    def _devices_match(self, left: Any, right: Any) -> bool:
+        """Compare concrete devices using backend normalization when available."""
+
+        return _device_key(self.adapter, left) == _device_key(self.adapter, right)
+
+    def _replicate(
+        self, value: Any, *, trainable: bool, shareable: bool, device: Any = None
+    ) -> Any:
         """Create a device-local replica that can own its own gradients."""
 
+        target = self.placement.device if device is None else device
+        if self._replica_pool is not None:
+            return self._replica_pool.replicate(
+                self.adapter, value, target, trainable=trainable, shareable=shareable
+            )
         replicate = getattr(self.adapter, "replicate_state", None)
         if callable(replicate):
-            return replicate(value, self.placement.device, trainable=trainable)
-        return self.adapter.to_device(value, self.placement.device)
+            return replicate(value, target, trainable=trainable)
+        return self.adapter.to_device(value, target)
 
     def owned_entries(self) -> tuple[StateEntry, ...]:
         """Return the device-local replicas this binding owns."""
@@ -237,14 +301,23 @@ class SegmentState:
         }
 
 
-def _devices_match(left: Any, right: Any) -> bool:
-    """Compare two backend device descriptors by normalized text."""
+def _device_key(adapter: Any, device: Any) -> str:
+    """Resolve backend device aliases before looking up a state replica."""
 
-    left_text = str(left)
-    right_text = str(right)
-    if left_text == right_text:
-        return True
-    return _normalize_device_text(left_text) == _normalize_device_text(right_text)
+    normalize = getattr(adapter, "normalize_device", None)
+    if callable(normalize):
+        return str(normalize(device))
+    return _normalize_device_text(str(device))
+
+
+def _devices_match(left: Any, right: Any) -> bool:
+    """Compare backend device descriptors by normalized text.
+
+    Kept as a small compatibility helper for adapters that do not expose a
+    device normalizer; ``SegmentState`` uses the adapter-aware variant above.
+    """
+
+    return _normalize_device_text(str(left)) == _normalize_device_text(str(right))
 
 
 def _normalize_device_text(text: str) -> str:

@@ -25,7 +25,7 @@ from ..ir import SplitRequest
 from ..placement import DevicePlacement, SegmentName
 from ..planner import SplitPlan
 from ..shape_program import ShapeBinding, shape_semantic_for_node
-from ..state import SegmentState
+from ..state import SegmentState, _StateReplicaPool
 from .base import SegmentBundle, SplitPolicyMixin, boundary_overlay
 
 
@@ -326,7 +326,10 @@ class _GeneratedSegmentBase:
                     f"Cannot resolve live parameter source for {node.label!r}.",
                     context=self._context(node, "missing live parameter source"),
                 )
-            handle = self._state.resolve(handle)
+            handle = self._state.resolve(
+                handle,
+                shareable=not bool(getattr(handle, "requires_grad", False)),
+            )
             if id(handle) not in seen_handles:
                 handles.append(handle)
                 seen_handles.add(id(handle))
@@ -658,7 +661,13 @@ class GeneratedPrefix(_GeneratedSegmentBase):
                 backend="torch",
                 split_point=self.spec.boundary,
             )
-        self._execute_nodes(overlay)
+        # The detached path owns this policy: detaching only at the boundary
+        # would still save every prefix activation during forward. Keep normal
+        # tensors here because public run_suffix() may build an autograd graph
+        # directly from this boundary (inference tensors cannot be saved).
+        del input_leaves, inputs, input_kwargs
+        with torch.no_grad() if detach_boundary else nullcontext():
+            self._execute_nodes(overlay)
         boundary_tensors: dict[str, Any] = {}
         prefix_tensors: dict[str, Any] = {}
         for node_id in self.plan.boundary_node_ids:
@@ -815,10 +824,24 @@ class TorchSplitAdapter(SplitPolicyMixin):
 
         return getattr(value, "device", None)
 
+    def normalize_device(self, device: Any) -> Any:
+        """Resolve device aliases using the active Torch device context."""
+
+        torch = _torch()
+        normalized = torch.device(device)
+        if normalized.type == "cuda" and normalized.index is None:
+            return torch.device("cuda", torch.cuda.current_device())
+        if normalized.type == "cpu":
+            return torch.device("cpu")
+        return normalized
+
     def replicate_state(self, value: Any, device: Any, *, trainable: bool) -> Any:
         """Create a device-local replica that can own its own gradients."""
 
-        replica = self.to_device(self.clone(self.detach(value)), device)
+        # A device transfer already allocates independent storage. copy=True
+        # also gives independent ownership on the source device, without first
+        # allocating a redundant full-size source clone on cross-device moves.
+        replica = value.detach().to(device=device, copy=True)
         if trainable and hasattr(replica, "requires_grad_"):
             replica.requires_grad_(True)
         return replica
@@ -868,12 +891,17 @@ class TorchSplitAdapter(SplitPolicyMixin):
         use_live = (
             spec.trainable if spec.use_live_param_sources is None else spec.use_live_param_sources
         )
+        replica_pool = _StateReplicaPool()
+        prefix_state = SegmentState(
+            adapter=self, placement=spec.placement.prefix, replica_pool=replica_pool
+        )
         prefix = GeneratedPrefix(
             graph=graph,
             plan=plan,
             spec=spec,
             node_ids=plan.prefix_node_ids,
             use_live_param_sources=use_live,
+            state=prefix_state,
         )
         training_spec = replace(
             spec,
@@ -887,7 +915,13 @@ class TorchSplitAdapter(SplitPolicyMixin):
             spec=training_spec,
             node_ids=plan.prefix_node_ids,
             use_live_param_sources=True,
-            state=prefix._state if use_live else None,
+            state=(
+                prefix._state
+                if use_live
+                else SegmentState(
+                    adapter=self, placement=spec.placement.prefix, replica_pool=replica_pool
+                )
+            ),
         )
         suffix = GeneratedSuffix(
             graph=graph,
@@ -895,6 +929,9 @@ class TorchSplitAdapter(SplitPolicyMixin):
             spec=spec,
             node_ids=plan.suffix_node_ids,
             use_live_param_sources=use_live,
+            state=SegmentState(
+                adapter=self, placement=spec.placement.suffix, replica_pool=replica_pool
+            ),
         )
         return SegmentBundle(prefix=prefix, training_prefix=training_prefix, suffix=suffix)
 
