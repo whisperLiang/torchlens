@@ -347,3 +347,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 05148a3b1f93b4dbd45da4e20abde6f8873abe91 (dirty)
 recorded: 2026-08-19T17:38:36.052984+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: Reviewed PyTorch 2.14 FlexGEMM compatibility: one new sys.modules lookup in identity_shims.py increments only the ambiguous modules static-read site count; no producer or mutation semantics change.
+env: py3.11-torch2.14.0
+torch: 2.14.0+cpu
+source: 25b9dc9817a8a5740aa031d5e64e8defdbb8b034 (dirty)
+recorded: 2026-09-18T02:28:35.259324+00:00

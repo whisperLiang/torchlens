@@ -49,6 +49,7 @@ from ...utils._torch_compat import (
 from ...utils._torch_symbols import torch_attr
 from ...utils.introspection import _get_code_qualname, _get_col_offset
 from ...utils.tensor_utils import synchronize_pending_cpu_async_copies
+from ._saved_tensors_hook import SavedTensorsHookWrapper
 from ._tl import detached_saved_activation_label, get_tensor_label
 from .escape_detection import expected_original_call
 from .tensor_tracking import (
@@ -3778,10 +3779,10 @@ def _token_bearing_pack_hook(
                 record["pack_count"] += 1
         return inner(value)
 
-    pack_hook.__tl_saved_tensors_hook_scoped__ = True  # type: ignore[attr-defined]
-    pack_hook.__tl_checkpoint_token__ = token  # type: ignore[attr-defined]
-    pack_hook.__tl_token_inner__ = inner  # type: ignore[attr-defined]
-    return pack_hook
+    wrapped_hook = SavedTensorsHookWrapper(pack_hook, inner)
+    wrapped_hook.__tl_checkpoint_token__ = token
+    wrapped_hook.__tl_token_inner__ = inner
+    return wrapped_hook
 
 
 def _token_bearing_unpack_hook(
@@ -3820,10 +3821,10 @@ def _token_bearing_unpack_hook(
                     record["unpack_evidence"].append(point)
         return inner(value)
 
-    unpack_hook.__tl_saved_tensors_hook_scoped__ = True  # type: ignore[attr-defined]
-    unpack_hook.__tl_checkpoint_token__ = token  # type: ignore[attr-defined]
-    unpack_hook.__tl_token_inner__ = inner  # type: ignore[attr-defined]
-    return unpack_hook
+    wrapped_hook = SavedTensorsHookWrapper(unpack_hook, inner)
+    wrapped_hook.__tl_checkpoint_token__ = token
+    wrapped_hook.__tl_token_inner__ = inner
+    return wrapped_hook
 
 
 def _observe_saved_tensors_hooks_enter(context: Any) -> None:
@@ -3981,12 +3982,7 @@ def _scoped_saved_tensors_hook(hook: Callable[[Any], Any]) -> Callable[[Any], An
                 return hook(value)
         return hook(value)
 
-    try:
-        functools.update_wrapper(scoped_hook, hook)
-    except (AttributeError, TypeError):
-        pass
-    scoped_hook.__tl_saved_tensors_hook_scoped__ = True  # type: ignore[attr-defined]
-    return scoped_hook
+    return SavedTensorsHookWrapper(scoped_hook, hook)
 
 
 def _install_saved_tensors_hooks_scope() -> None:

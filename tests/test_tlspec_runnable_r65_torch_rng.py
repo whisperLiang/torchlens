@@ -41,6 +41,7 @@ from __future__ import annotations
 import shutil
 import sys
 import types
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +57,7 @@ from torchlens.runnable import (
     PathFaithfulness,
     WitnessCompleteness,
 )
-from torchlens.utils._torch_compat import HAS_GENERATOR_CLONE_STATE
+from torchlens.utils._torch_compat import HAS_GENERATOR_CLONE_STATE, HAS_GENERATOR_PHILOX_STATE
 from torchlens.utils.rng import (
     _DEFAULT_GENERATOR_HOLDER_MODULES,
     _TORCH_RNG_DEVICE_SPEC,
@@ -84,7 +85,7 @@ _CEILING_DISPOSITIONS = frozenset({"entropy", "mutation", "instance_read"})
 # capability raise never under-marks; the live return-family check skips them when
 # the scratch engine cannot execute them.
 _CAPABILITY_GATED_METHODS = frozenset(
-    {"get_offset", "set_offset", "graphsafe_get_state", "graphsafe_set_state"}
+    {"get_offset", "set_offset", "graphsafe_get_state", "graphsafe_set_state", "philox_state"}
 )
 
 # Pre-window held references (module import time), the r41 held-ref spelling.
@@ -255,6 +256,26 @@ def test_mtia_mutation_spelling_marks_fail_closed() -> None:
 
 
 @pytest.mark.smoke
+def test_accelerator_initial_seed_held_and_module_reads_are_replayable() -> None:
+    """The accelerator frontend's scalar read is witnessed through either spelling."""
+
+    accelerator_random = _torch_rng_holder_module("torch.accelerator.random")
+    if accelerator_random is None or not hasattr(accelerator_random, "initial_seed"):
+        pytest.skip("torch.accelerator.random.initial_seed is absent on this torch")
+    held_initial_seed = accelerator_random.initial_seed
+    for held in (False, True):
+        with host_nondeterminism_monitor(None) as result:
+            try:
+                (held_initial_seed if held else accelerator_random.initial_seed)()
+            except (RuntimeError, NotImplementedError):
+                # An accelerator-free runtime must still witness the read at entry.
+                pass
+        assert "torch.accelerator.random.initial_seed" in result.replayable_reads
+        assert not result.channels, sorted(result.channels)
+        assert not result.uncertain, result.uncertain_detail
+
+
+@pytest.mark.smoke
 def test_default_generator_resolver_covers_every_device_spec_module() -> None:
     """The dynamic-membership resolver spans exactly the device-spec base modules.
 
@@ -378,7 +399,7 @@ def test_generator_method_table_return_closure() -> None:
                 "receivers (instance history is untracked; replayable is "
                 "default-column-only)"
             )
-        elif row.return_family == "state_tensor":
+        elif row.return_family in ("state_tensor", "state_tensor_tuple"):
             if row.default_disposition is None or row.nondefault_disposition is None:
                 assert "r39" in row.note, (
                     f"{row.method}: structural state-tensor column without a named "
@@ -411,6 +432,8 @@ def test_generator_method_table_live_return_families() -> None:
             return (scratch.get_state(),)
         if method == "set_offset":
             return (0,)
+        if method == "philox_state":
+            return (4,)
         if method == "graphsafe_set_state":
             return (scratch.clone_state(),)
         return ()
@@ -431,6 +454,9 @@ def test_generator_method_table_live_return_families() -> None:
             assert isinstance(result, int) and not isinstance(result, bool), row
         elif row.return_family == "state_tensor":
             assert isinstance(result, torch.Tensor), row
+        elif row.return_family == "state_tensor_tuple":
+            assert isinstance(result, tuple) and len(result) == 3, row
+            assert all(isinstance(value, torch.Tensor) for value in result), row
         elif row.return_family == "self_generator":
             assert result is scratch, row
         else:  # generator
@@ -597,6 +623,47 @@ def test_get_offset_marks_fail_closed_at_entry() -> None:
         except RuntimeError:
             pass
     assert "torch.Generator.get_offset" in result.channels
+
+
+@pytest.mark.smoke
+@pytest.mark.skipif(not HAS_GENERATOR_PHILOX_STATE, reason="Generator.philox_state is absent")
+def test_philox_reservation_marks_default_mutation_at_entry() -> None:
+    """Reserving a global Philox stream is a mutation, including unsupported calls."""
+
+    for generator, is_default in ((torch.default_generator, True), (torch.Generator(), False)):
+        with (
+            host_nondeterminism_monitor(None) as result,
+            suppress(RuntimeError, NotImplementedError),
+        ):
+            generator.philox_state(4)
+        assert ("torch.default_generator.philox_state" in result.channels) is is_default
+        assert not result.replayable_reads
+        assert not result.uncertain, result.uncertain_detail
+        if not is_default:
+            assert not result.channels
+
+
+@pytest.mark.skipif(
+    not HAS_GENERATOR_PHILOX_STATE or not torch.cuda.is_available(),
+    reason="needs a CUDA generator with philox_state",
+)
+def test_cuda_philox_reservation_advances_and_marks_default(_torch_rng_state_guard) -> None:
+    """The successful CUDA path advances the offset and returns three state tensors."""
+
+    torch.cuda.init()
+    generator = torch.cuda.default_generators[0]
+    prior_state = generator.get_state()
+    try:
+        offset = generator.get_offset()
+        with host_nondeterminism_monitor(None) as result:
+            state = generator.philox_state(4)
+        assert generator.get_offset() == offset + 4
+        assert isinstance(state, tuple) and len(state) == 3
+        assert all(value.shape == (1,) and value.dtype == torch.int64 for value in state)
+        assert "torch.default_generator.philox_state" in result.channels
+        assert not result.uncertain, result.uncertain_detail
+    finally:
+        generator.set_state(prior_state)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA default generator")

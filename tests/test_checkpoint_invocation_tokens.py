@@ -13,7 +13,10 @@ DOCUMENTED-UNSTABLE.
 
 from __future__ import annotations
 
+import inspect
 import warnings
+import weakref
+from typing import Any
 
 import pytest
 import torch
@@ -255,6 +258,108 @@ def test_token_wrappers_unwrap_prior_layer_instead_of_stacking() -> None:
     assert state["tokens"][1]["pack_count"] == 0, "stale token layer still counting"
     assert state["tokens"][2]["pack_count"] == 1
     assert calls == ["base"]
+
+
+def test_checkpoint_hook_metadata_cleanup_reaches_every_wrapper_layer() -> None:
+    """Native temporary hook metadata must disappear from retained closures."""
+    trace = tl.trace(nn.Linear(4, 2), torch.randn(3, 4))
+
+    def base(value: Any) -> Any:
+        """Return a saved value unchanged."""
+        return value
+
+    class HookState:
+        """Stand in for user hook state that can retain an autograd graph."""
+
+    base._checkpoint_internal = True
+    scoped = backward_mod._scoped_saved_tensors_hook(base)
+    state = HookState()
+    state_ref = weakref.ref(state)
+    scoped._user_hooks = state
+    first = backward_mod._token_bearing_pack_hook(trace, 1, scoped)
+    second = backward_mod._token_bearing_pack_hook(trace, 2, first.__tl_token_inner__)
+    assert first._checkpoint_internal is second._checkpoint_internal is True
+    assert first._user_hooks is second._user_hooks is state
+
+    # PyTorch 2.14 deletes this attribute before popping its native hook
+    # stack. Copying it onto wrappers would keep stale graph references.
+    del second._user_hooks
+    del state
+    assert state_ref() is None
+    assert all(not hasattr(hook, "_user_hooks") for hook in (base, scoped, first, second))
+
+    # Re-entry must see fresh state without reviving an earlier invocation.
+    next_state = HookState()
+    second._user_hooks = next_state
+    assert base._user_hooks is first._user_hooks is next_state
+    del second._user_hooks
+
+
+def test_nested_checkpoint_preserves_user_hooks_gradients_and_stack() -> None:
+    """Nested checkpoint hooks retain native metadata and leave no TLS leak."""
+    from torch.utils import checkpoint as checkpoint_module
+
+    create_selective_checkpoint_contexts = getattr(
+        checkpoint_module, "create_selective_checkpoint_contexts", None
+    )
+    if create_selective_checkpoint_contexts is None:
+        pytest.skip("This torch build does not expose selective checkpoint contexts")
+
+    packed: list[tuple[int, ...]] = []
+    checkpoint_options = (
+        {"respect_saved_tensors_hooks": True}
+        if "respect_saved_tensors_hooks" in inspect.signature(checkpoint).parameters
+        else {}
+    )
+
+    def pack(value: torch.Tensor) -> torch.Tensor:
+        """Record a genuine user hook invocation and offload a detached copy."""
+        packed.append(tuple(value.shape))
+        return value.detach().clone()
+
+    class Nested(nn.Module):
+        """Exercise selective checkpoint's search through internal hook layers."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def inner(self, x: torch.Tensor) -> torch.Tensor:
+            return checkpoint(
+                lambda value: self.lin(value).relu(),
+                x,
+                use_reentrant=False,
+                context_fn=lambda: create_selective_checkpoint_contexts(
+                    [torch.ops.aten.addmm.default]
+                ),
+                **checkpoint_options,
+            )
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            with torch.autograd.graph.saved_tensors_hooks(pack, lambda value: value):
+                return checkpoint(self.inner, x, use_reentrant=False)
+
+    model = Nested()
+    x = torch.randn(3, 4, requires_grad=True)
+    expected = model(x)
+    expected_grads = torch.autograd.grad(expected.sum(), (x, *model.parameters()))
+    packed.clear()
+    trace = tl.trace(
+        model,
+        x,
+        capture=tl.options.CaptureOptions(backward_ready=True),
+        save_mode="reference",
+    )
+    output = trace.output_ops[0].out
+    actual_grads = torch.autograd.grad(output.sum(), (x, *model.parameters()))
+    torch.testing.assert_close(output, expected)
+    for actual, target in zip(actual_grads, expected_grads, strict=True):
+        torch.testing.assert_close(actual, target)
+    assert packed
+    assert trace.checkpoint_invocation_witness["token_count"] == 2
+    # torch.func refuses any leaked saved-tensor hook, even for an unrelated
+    # function. Check it in the same process after both checkpoint contexts.
+    torch.testing.assert_close(torch.func.grad(lambda value: value.square().sum())(x), 2 * x)
 
 
 # ---------------------------------------------------------------------------

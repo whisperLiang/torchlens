@@ -349,7 +349,7 @@ string value fails the gate exactly like an inline code.
 | Kind | Refusal | Remedy class |
 |---|---|---|
 | `ambiguous_group_lifetime` | A collective used a process group whose pre-arming lifetime cannot be proven | Call `tl.distributed.arm()` at process start, before any group is created |
-| `uncaptured_collective_op` | Arm-time recognizer set-inequality or dispatcher schema scan found a collective the wraps would not capture | Upgrade TorchLens to a build whose recognizer covers the installed torch, or avoid the unrecognized collective in the traced forward |
+| `uncaptured_collective_op` | Arm-time recognizer set-inequality, dispatcher schema scan, or capture-time unsupported collective geometry (including Torch 2.14 `gather_single` / `gather_into_tensor`) | Upgrade TorchLens to a build whose recognizer covers the installed torch; for single-tensor gather, use `torch.distributed.gather` with a per-rank tensor list |
 | `wildcard_recv_unsupported` | A point-to-point receive from `ANY_SOURCE` cannot be attributed to a sender | Pass an explicit source rank to `recv`/`irecv` |
 | `intervention_fire_results_unrecordable` | An intervention changed execution but its tensor accepts neither transient metadata nor storage-backed fire-result evidence | Intervene on ordinary tensor outputs, or drop the intervention for this op |
 | `intervention_fire_results_cleanup_failed` | Intervention fire metadata could not be cleared after consumption; refusing prevents stale evidence entering a later capture | Re-run the capture; report the tensor type if it recurs |

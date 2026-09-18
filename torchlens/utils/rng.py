@@ -66,10 +66,17 @@ try:  # ``resource`` is POSIX-only; feature-detected for the clock family.
 except ImportError:  # pragma: no cover - non-POSIX platforms
     _resource_module = None  # type: ignore[assignment]
 
+from ._rng_module_specs import (
+    _TORCH_RNG_ACCELERATOR_SPEC as _TORCH_RNG_ACCELERATOR_SPEC,
+    _TORCH_RNG_CORE_SPEC as _TORCH_RNG_CORE_SPEC,
+    _TORCH_RNG_DEVICE_SPEC as _TORCH_RNG_DEVICE_SPEC,
+    _TORCH_RNG_MODULE_SPECS,
+)
 from ._torch_compat import (
     HAS_GENERATOR_CLONE_STATE,
     HAS_GENERATOR_GRAPHSAFE_GET_STATE,
     HAS_GENERATOR_GRAPHSAFE_SET_STATE,
+    HAS_GENERATOR_PHILOX_STATE,
     autocast_get_dtype,
     autocast_is_enabled,
     warm_lazy_torch_imports,
@@ -887,42 +894,6 @@ class TorchRngSurfaceRow:
     note: str
 
 
-# Per-module endpoint specs, feature-detected at build. ``get_rng_state`` family rows are
-# deliberately structurally_covered (NO monitor row): the returned state TENSOR is already
-# covered by the r39 tensor->host escape belt (branch-on-state-bytes ->
-# INCOMPLETE_SCALAR_ESCAPE, never VERIFIED; a store-only read stays VERIFIED), and a row
-# would over-ceiling ``torch.utils.checkpoint(preserve_rng_state=True)``, which
-# round-trips VERIFIED+ATTESTED today (r65 probe za4).
-_TORCH_RNG_CORE_SPEC: tuple[tuple[str, str, str], ...] = (
-    ("seed", "entropy", "draws OS entropy and reseeds the global engine"),
-    ("manual_seed", "mutation", "in-forward host mutation of the global engine"),
-    ("initial_seed", "replayable_read", "scalar read fully determined by the capture seed"),
-    ("set_rng_state", "mutation", "in-forward host mutation of the global engine"),
-    ("get_rng_state", "structurally_covered", "state-tensor return; r39 escape belt"),
-)
-_TORCH_RNG_DEVICE_SPEC: tuple[tuple[str, str, str], ...] = _TORCH_RNG_CORE_SPEC + (
-    ("seed_all", "entropy", "draws OS entropy and reseeds every device engine"),
-    ("manual_seed_all", "mutation", "in-forward host mutation of every device engine"),
-    ("set_rng_state_all", "mutation", "in-forward host mutation of every device engine"),
-    ("get_rng_state_all", "structurally_covered", "state-tensor return; r39 escape belt"),
-)
-_TORCH_RNG_MODULE_SPECS: tuple[tuple[str, tuple[tuple[str, str, str], ...]], ...] = (
-    ("torch", _TORCH_RNG_CORE_SPEC),
-    ("torch.random", _TORCH_RNG_CORE_SPEC),
-    ("torch.cuda", _TORCH_RNG_DEVICE_SPEC),
-    ("torch.cuda.random", _TORCH_RNG_DEVICE_SPEC),
-    ("torch.mps", _TORCH_RNG_CORE_SPEC),
-    # r67 C1 (hon1-F6): ``torch.mtia`` carries the full feature-detected device RNG
-    # spec -- on torch 2.8 only ``get_rng_state``/``set_rng_state`` resolve, and any
-    # torch upgrade that grows the mtia surface lights up through the same
-    # ``hasattr`` feature detection instead of a hand-list edit.
-    ("torch.mtia", _TORCH_RNG_DEVICE_SPEC),
-    ("torch.xpu", _TORCH_RNG_DEVICE_SPEC),
-    # r67 C1: ``torch.xpu.random`` re-exports the xpu RNG surface exactly like
-    # ``torch.cuda.random`` does for cuda; found by the independent no-list module
-    # discovery immunizer (the same shared-blind-spot class as mtia).
-    ("torch.xpu.random", _TORCH_RNG_DEVICE_SPEC),
-)
 # Non-function endpoints the enumeration meta-test still demands dispositions for.
 _TORCH_RNG_STRUCTURAL_EXTRAS: tuple[tuple[str, str], ...] = (
     (
@@ -1062,11 +1033,19 @@ structurally covered there (the row's ``note`` names the covering mechanism).
 """
 
 GENERATOR_RETURN_FAMILIES: frozenset[str] = frozenset(
-    {"host_scalar", "state_tensor", "generator", "self_generator", "device_attr"}
+    {
+        "host_scalar",
+        "state_tensor",
+        "state_tensor_tuple",
+        "generator",
+        "self_generator",
+        "device_attr",
+    }
 )
 """Closed return-family vocabulary for :data:`GENERATOR_METHOD_TABLE` rows.
 
 ``host_scalar`` -- Python int; ``state_tensor`` -- ``torch.Tensor`` engine state;
+``state_tensor_tuple`` -- a tuple of engine-state tensors;
 ``generator`` -- a NEW ``torch.Generator``; ``self_generator`` -- returns the
 receiver (fluent setter); ``device_attr`` -- non-callable getset attribute.
 """
@@ -1164,6 +1143,16 @@ _GENERATOR_METHOD_ROWS: tuple[GeneratorMethodRow, ...] = (
         "torch.utils.checkpoint(preserve_rng_state=True) (pinned za4)",
     ),
     GeneratorMethodRow(
+        "philox_state",
+        "state_tensor_tuple",
+        "mutation",
+        None,
+        "default: reserves and advances the global Philox stream, a host mutation "
+        "not replayed by the tensor DAG. Non-default: instance state only; the "
+        "returned seed/offset/intragraph-offset tensors ride the r39 escape belt. "
+        "Capability-gated (raises on CPU)",
+    ),
+    GeneratorMethodRow(
         "graphsafe_get_state",
         "generator",
         None,
@@ -1194,6 +1183,7 @@ _OPTIONAL_GENERATOR_METHOD_CAPABILITIES: dict[str, bool] = {
     "clone_state": HAS_GENERATOR_CLONE_STATE,
     "graphsafe_get_state": HAS_GENERATOR_GRAPHSAFE_GET_STATE,
     "graphsafe_set_state": HAS_GENERATOR_GRAPHSAFE_SET_STATE,
+    "philox_state": HAS_GENERATOR_PHILOX_STATE,
 }
 
 GENERATOR_METHOD_TABLE: tuple[GeneratorMethodRow, ...] = tuple(

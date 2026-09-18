@@ -457,6 +457,7 @@ def test_torch_capability_snapshot_contract() -> None:
         "HAS_GENERATOR_CLONE_STATE": hasattr(torch.Generator, "clone_state"),
         "HAS_GENERATOR_GRAPHSAFE_GET_STATE": hasattr(torch.Generator, "graphsafe_get_state"),
         "HAS_GENERATOR_GRAPHSAFE_SET_STATE": hasattr(torch.Generator, "graphsafe_set_state"),
+        "HAS_GENERATOR_PHILOX_STATE": hasattr(torch.Generator, "philox_state"),
         # CVE-2025-32434 fix presence (feature-detected; version-dependent, so mirror
         # the live capability like AUTOCAST rather than hardcoding a boolean).
         "HAS_SAFE_WEIGHTS_ONLY_LOAD": tc.HAS_SAFE_WEIGHTS_ONLY_LOAD,

@@ -97,6 +97,7 @@ __all__ = [
     "HAS_GENERATOR_CLONE_STATE",
     "HAS_GENERATOR_GRAPHSAFE_GET_STATE",
     "HAS_GENERATOR_GRAPHSAFE_SET_STATE",
+    "HAS_GENERATOR_PHILOX_STATE",
     "HAS_JIT_BUILTIN_TABLE",
     "HAS_JIT_BOOLEAN_DISPATCH_TABLE",
     "HAS_JIT_OVERLOAD_RESOLVER",
@@ -254,7 +255,7 @@ _RUNNABLE_TORCH_ALIASES: tuple[RunnableTorchAlias, ...] = (
         "linear",
         "private_to_public:_C._nn.linear->torch.nn.functional.linear",
         (2, 1),
-        (2, 13),
+        (2, 14),
     ),
     RunnableTorchAlias(
         "_C._nn.linear",
@@ -262,7 +263,7 @@ _RUNNABLE_TORCH_ALIASES: tuple[RunnableTorchAlias, ...] = (
         "linear",
         "private_to_public:_C._nn.linear->torch.nn.functional.linear",
         (2, 1),
-        (2, 13),
+        (2, 14),
     ),
     RunnableTorchAlias(
         "torch._VF.linear",
@@ -328,7 +329,7 @@ _RUNNABLE_TORCH_ALIASES: tuple[RunnableTorchAlias, ...] = (
         None,
         "private_to_public:_C._linalg.linalg_*->torch.linalg.*",
         (2, 1),
-        (2, 13),
+        (2, 14),
         "linalg_",
     ),
     RunnableTorchAlias(
@@ -1269,6 +1270,7 @@ HAS_DYNAMO_EXPLAIN: bool = _probe_dynamo_explain_module()
 HAS_GENERATOR_CLONE_STATE: bool = hasattr(torch.Generator, "clone_state")
 HAS_GENERATOR_GRAPHSAFE_GET_STATE: bool = hasattr(torch.Generator, "graphsafe_get_state")
 HAS_GENERATOR_GRAPHSAFE_SET_STATE: bool = hasattr(torch.Generator, "graphsafe_set_state")
+HAS_GENERATOR_PHILOX_STATE: bool = hasattr(torch.Generator, "philox_state")
 HAS_SAFE_WEIGHTS_ONLY_LOAD: bool = _probe_safe_weights_only_load()
 HAS_TENSOR_SEQUENCE_SLOT_FIX: bool = _probe_tensor_sequence_slot_fix()
 HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE: bool = _probe_parameter_as_subclass_in_dispatch_mode()
@@ -1408,6 +1410,7 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_GENERATOR_CLONE_STATE",
     "HAS_GENERATOR_GRAPHSAFE_GET_STATE",
     "HAS_GENERATOR_GRAPHSAFE_SET_STATE",
+    "HAS_GENERATOR_PHILOX_STATE",
     "HAS_SAFE_WEIGHTS_ONLY_LOAD",
     "HAS_TENSOR_SEQUENCE_SLOT_FIX",
     "HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE",
@@ -1572,7 +1575,7 @@ OPTIONAL_CAPABILITY_FLAGS: frozenset[str] = frozenset(
         # torch's own public surface, so there is nothing for TorchLens to
         # degrade on -- named-dim metadata simply cannot exist on such builds.
         "HAS_NAMED_TENSOR_API",
-        # r7 R26 (opus b4 LM): the three ``torch.Generator`` method probes gate
+        # r7 R26 (opus b4 LM): the optional ``torch.Generator`` method probes gate
         # rows of the RNG GENERATOR_METHOD_TABLE (utils/rng.py); a ``False``
         # DROPS the row, so there is no method left to monitor and NOTHING
         # degrades. Absent on the older half of the declared torch>=2.1 matrix
@@ -1580,6 +1583,7 @@ OPTIONAL_CAPABILITY_FLAGS: frozenset[str] = frozenset(
         "HAS_GENERATOR_CLONE_STATE",
         "HAS_GENERATOR_GRAPHSAFE_GET_STATE",
         "HAS_GENERATOR_GRAPHSAFE_SET_STATE",
+        "HAS_GENERATOR_PHILOX_STATE",
     }
 )
 """Capability flags whose ``False`` is an absent OPTIONAL feature, not a degradation.

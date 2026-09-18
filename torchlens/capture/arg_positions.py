@@ -1708,6 +1708,7 @@ for _name in [
     "lppool3d",
     "lufactor",
     "lufactorex",
+    "matrixsqrth",
     "modifiedbesseli0",
     "modifiedbesseli1",
     "modifiedbesselk0",

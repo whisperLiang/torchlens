@@ -141,6 +141,20 @@ VETTED_NAMESPACE_SNAPSHOTS: tuple[tuple[str, dict[str, frozenset[str]]], ...] = 
     ),
 )
 
+# Torch 2.14's materialized dispatcher census adds exactly one c10d op.
+# Its new public gather entry points are explicitly refused during capture:
+# the frozen boundary schema cannot represent their root-only aggregate buffer.
+# The two renamed, supported single-tensor APIs retain their existing kinds.
+VETTED_NAMESPACE_SNAPSHOTS += (
+    (
+        "torch-2.14",
+        {
+            namespace: ops | {"gather_into_tensor_"} if namespace == "c10d" else ops
+            for namespace, ops in VETTED_NAMESPACE_SNAPSHOTS[0][1].items()
+        },
+    ),
+)
+
 
 class UncapturedCollectiveOpError(CompatibilityError, RuntimeError):
     """Raised when the collective recognizer cannot vouch for this runtime.
@@ -148,7 +162,8 @@ class UncapturedCollectiveOpError(CompatibilityError, RuntimeError):
     Structured context is retained on ``fields``: ``kind`` is always
     ``"uncaptured_collective_op"``; ``layer`` names which derivation layer
     refused (``1`` for allowlist set-inequality, ``2`` for the dispatcher
-    schema scan); ``mismatches`` / ``offending_ops`` carry the evidence.
+    schema scan, ``3`` for an unsupported public boundary at capture time);
+    ``mismatches`` / ``offending_ops`` / ``func`` carry the evidence.
     Callers branch on these fields, never on message text.
     """
 

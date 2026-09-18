@@ -1740,7 +1740,7 @@
   "field": "modules",
   "file": "torchlens/backends/torch/identity_shims.py",
   "has_default": false,
-  "sites": 2,
+  "sites": 3,
   "via_getattr": false
  },
  {

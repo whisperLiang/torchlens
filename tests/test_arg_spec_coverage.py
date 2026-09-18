@@ -328,6 +328,7 @@ _EXPECTED_KWARGS = {
     "ldlsolve": ("LD", "pivots", "B"),
     "lobpcg": ("A", "B", "X", "iK"),
     "map": ("self", "tensor"),
+    "matrixsqrth": ("input",),
     "moduleload": ("self", "other"),
     "orgqr": ("input", "tau"),
     "ormqr": ("input", "tau", "other"),
@@ -388,6 +389,53 @@ def test_high_confidence_static_fills_remain_covered() -> None:
     assert decorated_names >= _HIGH_CONFIDENCE_STATIC_NAMES
     assert set(FUNC_ARG_SPECS) >= _HIGH_CONFIDENCE_STATIC_NAMES
     assert not (_HIGH_CONFIDENCE_STATIC_NAMES & _KNOWN_UNSUPPORTED_ARG_SPECS)
+
+
+@pytest.mark.skipif(not hasattr(torch.linalg, "matrix_sqrth"), reason="requires matrix_sqrth")
+@pytest.mark.parametrize("keyword_call", [False, True])
+def test_matrix_sqrth_keeps_its_graph_parent(keyword_call: bool) -> None:
+    """The matrix square root keeps its operand in either calling convention.
+
+    Parameters
+    ----------
+    keyword_call:
+        Whether to pass the matrix by its public keyword name.
+    """
+    import torchlens as tl
+
+    class MatrixSquareRoot(torch.nn.Module):
+        """Exercise the newly exposed linalg operator."""
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            """Return the principal square root of the input matrix.
+
+            Parameters
+            ----------
+            value:
+                Positive definite input matrix.
+
+            Returns
+            -------
+            torch.Tensor
+                Principal matrix square root.
+            """
+            if keyword_call:
+                return torch.linalg.matrix_sqrth(input=value)
+            return torch.linalg.matrix_sqrth(value)
+
+    trace = tl.trace(
+        MatrixSquareRoot(),
+        torch.diag(torch.tensor([4.0, 9.0])),
+        capture=tl.options.CaptureOptions(save_arg_values=True),
+    )
+    sqrt_ops = [
+        op for op in trace.layer_list if _normalize_func_name(op.func_name) == "matrixsqrth"
+    ]
+    assert len(sqrt_ops) == 1
+    assert set(sqrt_ops[0].parents) == {op.layer_label for op in trace.input_ops}
+    expected = torch.diag(torch.tensor([2.0, 3.0]))
+    torch.testing.assert_close(sqrt_ops[0].out, expected)
+    assert trace.validate_forward_pass(expected) is True
 
 
 def test_full_specs_extract_tensor_fill_values_but_not_literal_scalars() -> None:

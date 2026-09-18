@@ -119,6 +119,8 @@ class CollectiveSite:
         Whether the site carries a ``ReduceOp`` argument.
     tensorless:
         Journal-only boundary (object collectives, barrier): no op node.
+    unsupported:
+        Refuse capture before execution when the boundary schema lacks this geometry.
     """
 
     attr: str
@@ -129,6 +131,7 @@ class CollectiveSite:
     p2p: str | None = None
     has_reduce_op: bool = False
     tensorless: bool = False
+    unsupported: bool = False
 
 
 @dataclass(frozen=True)
@@ -192,6 +195,13 @@ COLLECTIVE_SITES: tuple[CollectiveSite, ...] = (
         _arg("output_tensor"),
     ),
     CollectiveSite(
+        "all_gather_single",
+        "all_gather_into_tensor",
+        "allgatherintotensor",
+        _arg("input_tensor"),
+        _arg("output_tensor"),
+    ),
+    CollectiveSite(
         "reduce_scatter",
         "reduce_scatter",
         "reducescatter",
@@ -201,6 +211,14 @@ COLLECTIVE_SITES: tuple[CollectiveSite, ...] = (
     ),
     CollectiveSite(
         "reduce_scatter_tensor",
+        "reduce_scatter_tensor",
+        "reducescattertensor",
+        _arg("input"),
+        _arg("output"),
+        has_reduce_op=True,
+    ),
+    CollectiveSite(
+        "reduce_scatter_single",
         "reduce_scatter_tensor",
         "reducescattertensor",
         _arg("input"),
@@ -224,6 +242,14 @@ COLLECTIVE_SITES: tuple[CollectiveSite, ...] = (
         "all_to_all_single", "all_to_all_single", "alltoallsingle", _arg("input"), _arg("output")
     ),
     CollectiveSite("gather", "gather", "gather", _arg("tensor"), _arg_if_root("gather_list")),
+    # Single-tensor gather needs new root-buffer evidence, unlike list gather.
+    # Arm-time admission must never let either public spelling escape capture.
+    *(
+        CollectiveSite(
+            attr, "gather_into_tensor", "gatherintotensor", _nothing, _nothing, unsupported=True
+        )
+        for attr in ("gather_single", "gather_into_tensor")
+    ),
     CollectiveSite("scatter", "scatter", "scatter", _arg_if_root("scatter_list"), _arg("tensor")),
     CollectiveSite("send", "send", "send", _arg("tensor"), _nothing, p2p="send"),
     CollectiveSite("isend", "send", "isend", _arg("tensor"), _nothing, p2p="send"),
@@ -658,6 +684,21 @@ def _make_collective_wrap(site: CollectiveSite, original: Callable[..., Any]) ->
             and _state._active_trace is not None
             and _state._active_owner_thread_id == threading.get_ident()
         )
+        if capturing and site.unsupported:
+            from torchlens.distributed._recognizer import (
+                UNCAPTURED_COLLECTIVE_OP,
+                UncapturedCollectiveOpError,
+            )
+
+            raise UncapturedCollectiveOpError(
+                f"torchlens cannot capture torch.distributed.{site.attr}: the collective "
+                "boundary schema does not support a root-only aggregate tensor. "
+                "Use torch.distributed.gather with a per-rank tensor list.",
+                kind=UNCAPTURED_COLLECTIVE_OP,
+                layer=3,
+                func=f"torch.distributed.{site.attr}",
+                reason="single_tensor_gather_unsupported",
+            )
         group = bound.get("group")
 
         # Wildcard recv has no determinate peer: refuse during capture.

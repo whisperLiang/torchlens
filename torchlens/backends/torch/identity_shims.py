@@ -42,6 +42,9 @@ bodies dispatch ``handle_torch_function(<module-global self-reference>,
 every host module's ``handle_torch_function`` global gets a translating
 shim presenting the ledger ORIGINAL to user ``__torch_function__`` handlers
 -- the same identity basis C builtins and unwrapped eager torch present.
+FlexGEMM's callable-alias table (torch 2.14+) likewise needs normalization:
+the shared ``FlexGemm.__call__`` entry maps either alias to the native ATen
+overload before upstream validation, including calls through held frontends.
 
 Strategy: NEVER re-implement torch's decision logic. Each shim normalizes
 the identity operand to the basis the immediately-following torch comparison
@@ -49,7 +52,7 @@ uses (the call-time namespace read, or the import-time table key), then
 delegates to the original torch code, so the decision itself always runs
 upstream logic. Shims install with ``wrap_torch()`` and are removed by
 ``unwrap_torch()``; with wrappers absent every normalization is an identity
-no-op. The one lazily-importable site (causal bias) is additionally covered
+no-op. Causal bias and FlexGEMM are additionally covered
 by a meta-path import hook, so a module first imported WHILE wrappers are
 installed is shimmed the moment it executes — never left broken until the
 next capture entry. Site availability is feature-detected in
@@ -107,16 +110,16 @@ lifetime.
 # (the SF-53 fastpath bug re-created through the lifecycle seam).
 _family_installed = False
 
-# Live import hook covering the lazily-importable causal-bias site, or None.
+# Live import hook covering causal bias and FlexGEMM, or None.
 _import_hook: _CausalBiasShimImportHook | None = None
 
 _import_hook_local = threading.local()
 
 
 class _CausalBiasShimImportHook:
-    """Meta-path finder shimming CausalBias the moment its module executes.
+    """Meta-path finder shimming lazy identity sites when their modules execute.
 
-    The causal-bias site is the ONE census entry that resolves lazily through
+    The causal-bias and FlexGEMM sites resolve lazily through
     ``sys.modules`` (importing it drags the dynamo tree into every wrap), so a
     user import of ``torch.nn.attention.bias`` WHILE wrappers are installed
     used to leave the fresh class unshimmed until the next capture entry
@@ -127,12 +130,12 @@ class _CausalBiasShimImportHook:
     closing the window; the capture-entry re-pickup stays as the belt.
     """
 
-    _WATCHED = "torch.nn.attention.bias"
+    _WATCHED = {"torch.nn.attention.bias", "torch._higher_order_ops.flex_gemm"}
 
     def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> Any:
         """Return the watched module's spec with a shim-installing loader."""
 
-        if fullname != self._WATCHED or getattr(_import_hook_local, "busy", False):
+        if fullname not in self._WATCHED or getattr(_import_hook_local, "busy", False):
             return None
         # find_spec below walks sys.meta_path again (including this finder);
         # the thread-local busy flag breaks the recursion so the real finders
@@ -162,7 +165,7 @@ class _ShimOnExecLoader:
         return self._loader.create_module(spec)
 
     def exec_module(self, module: Any) -> None:
-        """Execute the module, then shim the freshly-defined CausalBias.
+        """Execute the module, then shim the freshly defined identity sites.
 
         Mirrors ``install_identity_shims``'s failure contract: an error while
         shimming restores what this call patched and re-raises loudly — a
@@ -190,6 +193,7 @@ class _ShimOnExecLoader:
             records: list[tuple[Any, str, Any]] = []
             try:
                 _install_causal_bias_shim(records)
+                _install_flex_gemm_shim(records)
             except Exception:
                 _restore(records)
                 raise
@@ -305,6 +309,7 @@ def install_identity_shims() -> None:
         late_records: list[tuple[Any, str, Any]] = []
         try:
             _install_causal_bias_shim(late_records)
+            _install_flex_gemm_shim(late_records)
         except Exception:
             _restore(late_records)
             raise
@@ -314,6 +319,7 @@ def install_identity_shims() -> None:
     try:
         _install_transformer_ctor_shims(records)
         _install_causal_bias_shim(records)
+        _install_flex_gemm_shim(records)
         _install_expanded_weights_shims(records)
         _install_resolve_name_shim(records)
         _install_jit_overload_shim(records)
@@ -532,6 +538,52 @@ def _install_causal_bias_shim(records: list[tuple[Any, str, Any]]) -> None:
     _register_shim(causal_bias_shim)
     causal_bias.__torch_function__ = classmethod(causal_bias_shim)
     records.append((causal_bias, "__torch_function__", orig_classmethod))
+
+
+# ---------------------------------------------------------------------------
+# FlexGEMM: import-time callable aliases (torch 2.14+)
+# ---------------------------------------------------------------------------
+
+
+def _install_flex_gemm_shim(records: list[tuple[Any, str, Any]]) -> None:
+    """Normalize GEMM aliases at the shared entry, including held frontend refs.
+
+    The frontend's import-time alias table may hold originals or wrappers.
+    Resolving the operand against that table preserves upstream validation
+    and works even when the caller retained the frontend before wrapping.
+    Only inspect loaded modules so ordinary capture never imports a compiler.
+    """
+
+    module = sys.modules.get("torch._higher_order_ops.flex_gemm")
+    if module is None:
+        return
+    cls = getattr(module, "FlexGemm", None)
+    if cls is None:
+        return
+    original = vars(cls).get("__call__")
+    if not callable(original) or _is_shimmed(original):
+        return
+    # A module imported/reloaded while wrapped builds its table from wrappers.
+    # Keep native table keys on the original basis after shim teardown too.
+    aliases = module.FLEX_GEMM_OP_ALIASES
+    normalized = {_resolve(alias): overload for alias, overload in aliases.items()}
+    aliases.clear()
+    aliases.update(normalized)
+
+    @functools.wraps(original)
+    def flex_gemm_shim(self: Any, gemm_op: Any, *args: Any, **kwargs: Any) -> Any:
+        """Pass the corresponding ATen overload to the native GEMM validator."""
+
+        operand = _resolve(gemm_op)
+        for alias, overload in module.FLEX_GEMM_OP_ALIASES.items():
+            if _resolve(alias) is operand:
+                gemm_op = overload
+                break
+        return original(self, gemm_op, *args, **kwargs)
+
+    _register_shim(flex_gemm_shim)
+    cls.__call__ = flex_gemm_shim
+    records.append((cls, "__call__", original))
 
 
 # ---------------------------------------------------------------------------

@@ -809,6 +809,15 @@ def test_import_callback_unwrap_race_cannot_corrupt_shim_state(
 # import-time container holding a WRAPPED-ORIGINAL torch callable must be a
 # reviewed entry here; a new torch release adding one fails this gate.
 _MEMBERSHIP_TABLE_REVIEWED: dict[tuple[str, str], str] = {
+    ("torch._higher_order_ops.flex_gemm", "FLEX_GEMM_OP_ALIASES"): (
+        "FlexGemm.__call__ identity shim normalizes wrapper/original aliases to "
+        "the table's ATen overload before native validation, including held frontend refs."
+    ),
+    ("torch.utils.dlpack", "ReadOnlyTensorWrapper._DLPACK_ALLOWED"): (
+        "Eagerly imported DLPack export allowlist; the protocol identity shim "
+        "presents the ORIGINAL Tensor.__dlpack__/__dlpack_device__ to "
+        "__torch_function__. Export and rejection behavior are regression-tested."
+    ),
     ("torch._library.utils", "_RANDOM_FUNCTIONS"): (
         "is_impure()/fx DCE authority; eagerly imported with torch so keys are "
         "pre-wrap originals. fx records the protocol-supplied ORIGINAL as the "
