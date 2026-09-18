@@ -1,0 +1,15 @@
+generator: tests/test_viz_render_identity_oracle.py
+flag: TORCHLENS_UPDATE_VIZ_RENDER_ORACLE=1
+reason: Add Python 3.11 / torch 2.13.0 / graphviz 0.21 / pydot 4.0.1 coverage: independent comparison found full payload including DOT and sha256_chunks and environment-invariant projection identical to canonical Python 3.10 golden; no rendering change.
+env: py3.11-torch2.13.0
+torch: 2.13.0+cu130
+source: 25b9dc9817a8a5740aa031d5e64e8defdbb8b034 (dirty)
+recorded: 2026-09-14T11:22:53.286814+00:00
+---
+generator: tests/test_rank_render_ir_semantic_goldens.py
+flag: TORCHLENS_UPDATE_RANK_RENDER_IR=1
+reason: Add Python 3.11 / torch 2.13.0 / graphviz 0.21 / pydot 4.0.1 coverage: rank semantic JSON independently compared byte-for-byte equal to committed Python 3.10 golden; no node, edge, region, or rendering expectation changed.
+env: py3.11-torch2.13.0
+torch: 2.13.0+cu130
+source: 25b9dc9817a8a5740aa031d5e64e8defdbb8b034 (dirty)
+recorded: 2026-09-14T11:38:11.483025+00:00

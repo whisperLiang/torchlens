@@ -1,0 +1,86 @@
+{
+ "edges": [
+  {
+   "arrowsize": ".7",
+   "color": "black",
+   "source": "input_1pass1",
+   "style": "solid",
+   "target": "linear_1_1pass1"
+  },
+  {
+   "arrowsize": ".7",
+   "color": "black",
+   "source": "linear_1_1pass1",
+   "style": "solid",
+   "target": "relu_1_2pass1"
+  },
+  {
+   "arrowsize": ".7",
+   "color": "black",
+   "source": "linear_2_3pass1",
+   "style": "solid",
+   "target": "output_1pass1"
+  },
+  {
+   "arrowsize": ".7",
+   "color": "black",
+   "source": "relu_1_2pass1",
+   "style": "solid",
+   "target": "linear_2_3pass1"
+  }
+ ],
+ "nodes": [
+  {
+   "fillcolor": "#98FB98",
+   "name": "input_1pass1",
+   "shape": "oval",
+   "style": "filled,solid"
+  },
+  {
+   "fillcolor": "#D9D9D9",
+   "name": "linear_1_1pass1",
+   "shape": "box",
+   "style": "filled,solid"
+  },
+  {
+   "fillcolor": "#D9D9D9",
+   "name": "linear_2_3pass1",
+   "shape": "box",
+   "style": "filled,solid"
+  },
+  {
+   "fillcolor": "#ff9999",
+   "name": "output_1pass1",
+   "shape": "oval",
+   "style": "filled,solid"
+  },
+  {
+   "fillcolor": "white",
+   "name": "relu_1_2pass1",
+   "shape": "box",
+   "style": "filled,solid"
+  }
+ ],
+ "regions": [
+  {
+   "name": "cluster_heads_a\\\"b_0_pass1",
+   "penwidth": "3.5",
+   "style": "filled,solid"
+  },
+  {
+   "name": "cluster_heads_a\\\"b_1_pass1",
+   "penwidth": "3.5",
+   "style": "filled,solid"
+  },
+  {
+   "name": "cluster_heads_a\\\"b_2_pass1",
+   "penwidth": "3.5",
+   "style": "filled,solid"
+  },
+  {
+   "name": "cluster_heads_a\\\"b_pass1",
+   "penwidth": "5.0",
+   "style": "filled,solid"
+  }
+ ]
+}

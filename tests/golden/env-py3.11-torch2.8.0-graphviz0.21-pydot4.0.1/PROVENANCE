@@ -1,0 +1,15 @@
+generator: tests/test_rank_render_ir_semantic_goldens.py
+flag: TORCHLENS_UPDATE_RANK_RENDER_IR=1
+reason: Review new unified Python 3.11 Torch 2.8 rank render semantics against canonical; keep canonical untouched
+env: py3.11-torch2.8.0
+torch: 2.8.0+cu128
+source: 25b9dc9817a8a5740aa031d5e64e8defdbb8b034 (dirty)
+recorded: 2026-09-15T12:25:33.701886+00:00
+---
+generator: tests/test_viz_render_identity_oracle.py
+flag: TORCHLENS_UPDATE_VIZ_RENDER_ORACLE=1
+reason: Review new unified Python 3.11 Torch 2.8 render identity against canonical; keep canonical untouched
+env: py3.11-torch2.8.0
+torch: 2.8.0+cu128
+source: 25b9dc9817a8a5740aa031d5e64e8defdbb8b034 (dirty)
+recorded: 2026-09-15T12:25:37.993509+00:00

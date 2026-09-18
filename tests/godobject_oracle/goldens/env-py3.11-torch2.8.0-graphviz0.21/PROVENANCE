@@ -1,0 +1,31 @@
+generator: tests/godobject_oracle viz
+flag: TORCHLENS_UPDATE_GODOBJECT_VIZ_ORACLE=1
+reason: Review new unified Python 3.11 Torch 2.8 environment against canonical bytes; no canonical files regenerated
+env: py3.11-torch2.8.0
+torch: 2.8.0+cu128
+source: 25b9dc9817a8a5740aa031d5e64e8defdbb8b034 (dirty)
+recorded: 2026-09-15T12:23:30.094609+00:00
+---
+generator: tests/godobject_oracle viz
+flag: TORCHLENS_UPDATE_GODOBJECT_VIZ_ORACLE=1
+reason: Review new unified Python 3.11 Torch 2.8 environment against canonical bytes; no canonical files regenerated
+env: py3.11-torch2.8.0
+torch: 2.8.0+cu128
+source: 25b9dc9817a8a5740aa031d5e64e8defdbb8b034 (dirty)
+recorded: 2026-09-15T12:23:30.116312+00:00
+---
+generator: tests/godobject_oracle viz
+flag: TORCHLENS_UPDATE_GODOBJECT_VIZ_ORACLE=1
+reason: Review new unified Python 3.11 Torch 2.8 environment against canonical bytes; no canonical files regenerated
+env: py3.11-torch2.8.0
+torch: 2.8.0+cu128
+source: 25b9dc9817a8a5740aa031d5e64e8defdbb8b034 (dirty)
+recorded: 2026-09-15T12:23:30.135233+00:00
+---
+generator: tests/godobject_oracle viz
+flag: TORCHLENS_UPDATE_GODOBJECT_VIZ_ORACLE=1
+reason: Review new unified Python 3.11 Torch 2.8 environment against canonical bytes; no canonical files regenerated
+env: py3.11-torch2.8.0
+torch: 2.8.0+cu128
+source: 25b9dc9817a8a5740aa031d5e64e8defdbb8b034 (dirty)
+recorded: 2026-09-15T12:23:36.189894+00:00

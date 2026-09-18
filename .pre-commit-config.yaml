@@ -42,8 +42,17 @@ repos:
         exclude: *generated_artifacts
       - id: check-yaml
       - id: check-added-large-files
-        # canonical perf baselines + the menagerie catalog are intentional large data artifacts
-        exclude: ^(benchmarks/perf_baselines/.*\.json|menagerie/data/master_catalog\.jsonl|menagerie/data/routing_manifest\.tsv|menagerie/data/stable_ids\.jsonl|menagerie/data/crawl_roster\.jsonl)$
+        # Canonical perf baselines, oracle goldens, and the menagerie catalog
+        # are intentional generated data artifacts.
+        exclude: >-
+          (?x)^(
+            benchmarks/perf_baselines/.*\.json|
+            tests/.*goldens/.*|
+            menagerie/data/master_catalog\.jsonl|
+            menagerie/data/routing_manifest\.tsv|
+            menagerie/data/stable_ids\.jsonl|
+            menagerie/data/crawl_roster\.jsonl
+          )$
       - id: detect-private-key
   - repo: https://github.com/gitleaks/gitleaks
     # Repo-portable secret scanning: this is what makes .gitleaks.toml (the
