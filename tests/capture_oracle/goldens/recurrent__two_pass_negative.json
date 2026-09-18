@@ -21,14 +21,14 @@
           "input_value_after": {
             "dtype": "float32",
             "sha256_chunks": [
-              "e558859f",
-              "f57abd6b",
-              "de8990bb",
-              "3c180065",
-              "af6bc56e",
-              "7a0be4cc",
-              "04178f94",
-              "428f64cc"
+              "eee7acb1",
+              "289e2abf",
+              "8be912f0",
+              "7576fda0",
+              "6670baeb",
+              "3a9ad790",
+              "e2063710",
+              "884ff89a"
             ],
             "shape": [
               2,
@@ -38,14 +38,14 @@
           "input_value_before": {
             "dtype": "float32",
             "sha256_chunks": [
-              "e558859f",
-              "f57abd6b",
-              "de8990bb",
-              "3c180065",
-              "af6bc56e",
-              "7a0be4cc",
-              "04178f94",
-              "428f64cc"
+              "eee7acb1",
+              "289e2abf",
+              "8be912f0",
+              "7576fda0",
+              "6670baeb",
+              "3a9ad790",
+              "e2063710",
+              "884ff89a"
             ],
             "shape": [
               2,
@@ -1178,14 +1178,14 @@
           "tensor": {
             "dtype": "float32",
             "sha256_chunks": [
-              "03685a23",
-              "83bcefe8",
-              "8ba52424",
-              "90f10ec8",
-              "59810f31",
-              "e73ccbc6",
-              "9d02ba9b",
-              "a0a06d3d"
+              "31c62452",
+              "ed705dd9",
+              "2cf88596",
+              "bee7c9cb",
+              "21a812ff",
+              "4ef4dbdc",
+              "14651d86",
+              "18ce1881"
             ],
             "shape": [
               2,
@@ -1199,14 +1199,14 @@
           "tensor": {
             "dtype": "float32",
             "sha256_chunks": [
-              "03685a23",
-              "83bcefe8",
-              "8ba52424",
-              "90f10ec8",
-              "59810f31",
-              "e73ccbc6",
-              "9d02ba9b",
-              "a0a06d3d"
+              "31c62452",
+              "ed705dd9",
+              "2cf88596",
+              "bee7c9cb",
+              "21a812ff",
+              "4ef4dbdc",
+              "14651d86",
+              "18ce1881"
             ],
             "shape": [
               2,
@@ -1222,20 +1222,20 @@
     "schema_version": 1,
     "tracking": {
       "cuda_peak_memory_median_bytes": null,
-      "python_peak_memory_median_bytes": 634372,
+      "python_peak_memory_median_bytes": 627675,
       "sample_count": 3,
-      "torch_version": "2.13.0+cu130",
-      "wall_time_median_ms": 106.60848999395967
+      "torch_version": "2.13.0+cpu",
+      "wall_time_median_ms": 52.51927999779582
     }
   },
   "sha256_chunks": [
-    "3348aec2",
-    "cf589d64",
-    "0a44649d",
-    "4405bda1",
-    "2db59585",
-    "11cc3e22",
-    "144db5b0",
-    "315298ad"
+    "8382eb39",
+    "83dbe958",
+    "3d417bcd",
+    "e4cc5965",
+    "5488b5d7",
+    "64042b1c",
+    "2899abc5",
+    "84f79032"
   ]
 }

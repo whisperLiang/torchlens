@@ -58,6 +58,23 @@ def test_tensor_op_observer_restores_method(raise_in_scope: bool) -> None:
     assert sum(len(names) for names in observed_ops.values()) == recorded_count
 
 
+def test_tinygrad_python_add_has_semantic_function_name() -> None:
+    """Anonymous Tensor helpers retain their UOp identity for public selectors."""
+
+    trace = tl.trace(
+        lambda value: value + 1.0,
+        Tensor([1.0, 2.0, 3.0], device="PYTHON"),
+        backend="tinygrad",
+        save=tl.func("add"),
+    )
+
+    saved_ops = list(trace.saved_ops.values())
+    assert len(saved_ops) == 1
+    assert saved_ops[0].func_name == "add"
+    assert saved_ops[0].annotations["tinygrad_uop"] == "ADD"
+    np.testing.assert_array_equal(saved_ops[0].out.numpy(), [2.0, 3.0, 4.0])
+
+
 def _tiny_block(x: Any) -> Any:
     """Return a small tinygrad expression.
 

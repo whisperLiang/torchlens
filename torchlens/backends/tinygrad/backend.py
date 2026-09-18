@@ -2458,6 +2458,10 @@ class _observe_tensor_ops:
 
             result = self.original(tensor, fxn, *args, **kwargs)
             name = getattr(fxn, "__name__", _uop_name(result.uop).lower())
+            if name == "<lambda>":
+                # Tensor._binop uses anonymous helpers on the Python runtime;
+                # retain the semantic UOp name for selectors and RF rules.
+                name = _uop_name(result.uop).lower()
             self.observed_ops.setdefault(id(result.uop), []).append(str(name))
             if self.observed_module_stacks is not None:
                 self.observed_module_stacks.setdefault(

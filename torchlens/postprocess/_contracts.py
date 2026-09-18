@@ -1111,7 +1111,7 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         "Clear CUDA cache",
         "Runs optional CUDA allocator cleanup; leaves Trace metadata unchanged.",
         writes=frozenset(),
-        reads=frozenset(),
+        reads=frozenset(("device_ref", "label", "raw_index")),
         trace_state=tokens("r:payload_tensors", "w:cuda_cache"),
     ),
     "14": PostprocessStepContract(
@@ -3047,6 +3047,8 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
             frozenset(("token:payload_tensors",)),
             "step 13 depends on token:payload_tensors produced by step 12",
         ),
+        ("1", "13"): PinnedPair("columns", frozenset(("raw_index",)), "step 13 raw-index scan"),
+        ("8", "13"): PinnedPair("columns", frozenset(("label",)), "step 13 label scan"),
         ("12", "18"): PinnedPair(
             "tokens",
             frozenset(("token:payload_tensors",)),

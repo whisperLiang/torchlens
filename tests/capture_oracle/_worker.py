@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from collections.abc import Sequence
-
-from ._characterize import characterize_case
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -44,13 +43,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     args = _parse_args(argv)
 
-    # Pin the execution environment the seeds alone do not cover: thread
-    # count and kernel selection both steer float bytes, and the goldens
-    # compare raw sha256 chunks (b10 R78-7). Pinning lives HERE so the regen
-    # path and the enforce path run under identical settings by construction.
+    # These must precede torch (including _characterize's transitive import):
+    # MKL and ATen choose CPU-specific kernels at initialization. A seeded,
+    # single-threaded convolution still differed byte-for-byte between the
+    # recording host's AVX512 kernel and the nightly runner's CPU kernel.
+    # Override inherited settings so regeneration and verification use the
+    # same portable CPU paths even on differently configured developer hosts.
+    os.environ["MKL_CBWR"] = "COMPATIBLE"
+    os.environ["ATEN_CPU_CAPABILITY"] = "default"
+
     import torch
 
+    from ._characterize import characterize_case
+
     torch.set_num_threads(1)
+    torch.backends.mkldnn.enabled = False
     torch.use_deterministic_algorithms(True, warn_only=True)
 
     print(json.dumps(characterize_case(args.case), sort_keys=True))

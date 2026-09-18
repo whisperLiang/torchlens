@@ -105,9 +105,8 @@ IMPORTORSKIP_LEDGER: dict[str, tuple[str, str]] = {
         "release-defenses job)",
     ),
     "google.protobuf.json_format": (
-        UNAVAILABLE_OK,
-        "protobuf JSON parser for the netron-export acceptance contract; ships "
-        "with the undeclared onnx contract dependency",
+        TEST_EXTRA,
+        "protobuf JSON parser for the netron-export acceptance contract",
     ),
     "graphviz": (TEST_EXTRA, "core torchlens dependency (dist 'graphviz')"),
     "jax": (OPTIONAL_PREVIEW, "jax extra"),
@@ -136,9 +135,8 @@ IMPORTORSKIP_LEDGER: dict[str, tuple[str, str]] = {
         "export-bridge target with no declared extra; extras-gap candidate reported 2026-08-15",
     ),
     "onnx": (
-        UNAVAILABLE_OK,
-        "netron-export acceptance-contract dependency (strict ModelProto JSON "
-        "parse), deliberately undeclared",
+        TEST_EXTRA,
+        "netron-export acceptance-contract dependency (strict ModelProto JSON parse)",
     ),
     "paddle": (OPTIONAL_PREVIEW, "paddle extra (paddlepaddle dist)"),
     "pandas": (OPTIONAL_PREVIEW, "tabular extra"),
@@ -1107,15 +1105,6 @@ TRIPWIRE_GUARD_TARGETS: dict[str, str] = {
     ),
     "matplotlib.pyplot": (
         "per-test guards in tests/test_node_plots.py (tensor-display rendering checks)"
-    ),
-    "onnx": (
-        "tests/test_exports.py::test_netron_export_is_valid_onnx_modelproto_json "
-        "(the netron-export external acceptance contract; without it the "
-        "'artifact opens in Netron' claim reverts to unverified)"
-    ),
-    "google.protobuf.json_format": (
-        "strict protobuf JSON parse inside the netron-export acceptance gate "
-        "(same test as the onnx target)"
     ),
 }
 

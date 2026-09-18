@@ -21,14 +21,14 @@
           "input_value_after": {
             "dtype": "float32",
             "sha256_chunks": [
-              "e558859f",
-              "f57abd6b",
-              "de8990bb",
-              "3c180065",
-              "af6bc56e",
-              "7a0be4cc",
-              "04178f94",
-              "428f64cc"
+              "eee7acb1",
+              "289e2abf",
+              "8be912f0",
+              "7576fda0",
+              "6670baeb",
+              "3a9ad790",
+              "e2063710",
+              "884ff89a"
             ],
             "shape": [
               2,
@@ -38,14 +38,14 @@
           "input_value_before": {
             "dtype": "float32",
             "sha256_chunks": [
-              "e558859f",
-              "f57abd6b",
-              "de8990bb",
-              "3c180065",
-              "af6bc56e",
-              "7a0be4cc",
-              "04178f94",
-              "428f64cc"
+              "eee7acb1",
+              "289e2abf",
+              "8be912f0",
+              "7576fda0",
+              "6670baeb",
+              "3a9ad790",
+              "e2063710",
+              "884ff89a"
             ],
             "shape": [
               2,
@@ -698,20 +698,20 @@
     "schema_version": 1,
     "tracking": {
       "cuda_peak_memory_median_bytes": null,
-      "python_peak_memory_median_bytes": 518649,
+      "python_peak_memory_median_bytes": 510622,
       "sample_count": 3,
-      "torch_version": "2.13.0+cu130",
-      "wall_time_median_ms": 63.74011200387031
+      "torch_version": "2.13.0+cpu",
+      "wall_time_median_ms": 57.43773700669408
     }
   },
   "sha256_chunks": [
-    "894dc9dc",
-    "bb9b25a3",
-    "d496c03f",
-    "e76a3f28",
-    "4d2d0176",
-    "16006989",
-    "0dce8289",
-    "08158a5d"
+    "78073ec8",
+    "5bc9dc4b",
+    "a512b0f5",
+    "18f16c7e",
+    "e995bd3a",
+    "780f4121",
+    "dc84334e",
+    "f97bc297"
   ]
 }

@@ -253,3 +253,251 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 9fb0dac87004c577c24a6803dd6faf0c89067069 (dirty)
 recorded: 2026-08-17T10:55:51.644719+00:00
+---
+generator: tests/capture_oracle (plain_cnn__exhaustive)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:01:56.312950+00:00
+---
+generator: tests/capture_oracle (plain_cnn__predicate_live)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:02:00.176416+00:00
+---
+generator: tests/capture_oracle (plain_cnn__record)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:02:03.750482+00:00
+---
+generator: tests/capture_oracle (plain_cnn__two_pass_negative)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:02:07.600912+00:00
+---
+generator: tests/capture_oracle (plain_cnn__mixed_selector)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:02:11.447551+00:00
+---
+generator: tests/capture_oracle (plain_cnn__lookback)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:02:15.267322+00:00
+---
+generator: tests/capture_oracle (plain_cnn__intervene_trace)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:02:19.141450+00:00
+---
+generator: tests/capture_oracle (plain_cnn__intervene_record)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:02:22.660935+00:00
+---
+generator: tests/capture_oracle (plain_cnn__halt_trace)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:02:26.969751+00:00
+---
+generator: tests/capture_oracle (plain_cnn__halt_record)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:02:30.847249+00:00
+---
+generator: tests/capture_oracle (plain_cnn__backward_trace)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:02:34.771315+00:00
+---
+generator: tests/capture_oracle (plain_cnn__backward_record)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:02:38.472393+00:00
+---
+generator: tests/capture_oracle (plain_cnn__disk_exhaustive)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:02:42.605971+00:00
+---
+generator: tests/capture_oracle (plain_cnn__disk_predicate)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:02:46.895447+00:00
+---
+generator: tests/capture_oracle (plain_cnn__disk_record)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:02:50.731703+00:00
+---
+generator: tests/capture_oracle (train_batchnorm__exhaustive)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:02:54.726648+00:00
+---
+generator: tests/capture_oracle (train_batchnorm__predicate_live)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:02:58.693140+00:00
+---
+generator: tests/capture_oracle (train_batchnorm__two_pass_negative)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:03:02.644602+00:00
+---
+generator: tests/capture_oracle (recurrent__exhaustive)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:03:06.562748+00:00
+---
+generator: tests/capture_oracle (recurrent__record)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:03:10.179416+00:00
+---
+generator: tests/capture_oracle (recurrent__two_pass_negative)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:03:14.128746+00:00
+---
+generator: tests/capture_oracle (conditional__exhaustive)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:03:18.217613+00:00
+---
+generator: tests/capture_oracle (conditional__predicate_live)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:03:22.116976+00:00
+---
+generator: tests/capture_oracle (in_place__exhaustive)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:03:26.038437+00:00
+---
+generator: tests/capture_oracle (in_place__predicate_live)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:03:30.016880+00:00
+---
+generator: tests/capture_oracle (mutating_pre_hook__exhaustive)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:03:34.294400+00:00
+---
+generator: tests/capture_oracle (mutating_pre_hook__two_pass_negative)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:03:38.691251+00:00
+---
+generator: tests/capture_oracle (tiny_transformer__exhaustive)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:03:43.587043+00:00
+---
+generator: tests/capture_oracle (tiny_transformer__record)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:03:47.326268+00:00
+---
+generator: tests/capture_oracle (failing_conditional__trace)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:03:51.005015+00:00
+---
+generator: tests/capture_oracle (failing_conditional__record)
+flag: TORCHLENS_UPDATE_CAPTURE_ORACLE=1
+reason: Pin ATen and MKL CPU dispatch so strict payload hashes are portable across nightly runners
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9127e3d45564abdd81105da2d57a61174d72a15a (dirty)
+recorded: 2026-09-18T10:03:54.526511+00:00

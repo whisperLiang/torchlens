@@ -149,7 +149,9 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/backends/torch/wrappers.py": 3400,
     "torchlens/backends/tinygrad/backend.py": 3300,
     "torchlens/backends/mlx/backend.py": 3250,
-    "torchlens/postprocess/_contracts.py": 3250,
+    # 3250 -> 3300: the CUDA-touch audit now declares its retained-row
+    # lookups and reviewed producer/consumer pins (nightly CI fix).
+    "torchlens/postprocess/_contracts.py": 3300,
     "torchlens/backends/torch/model_prep.py": 3200,
     "torchlens/data_classes/module.py": 2950,
     "torchlens/visualization/auto_collapse.py": 2450,

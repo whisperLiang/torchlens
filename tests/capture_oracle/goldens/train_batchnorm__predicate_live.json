@@ -725,14 +725,14 @@
           "tensor": {
             "dtype": "float32",
             "sha256_chunks": [
-              "a55e8cee",
-              "55116b53",
-              "4e87fc71",
-              "0ab1c038",
-              "20d1351b",
-              "5db1ff85",
-              "321067f2",
-              "efbd3a77"
+              "8d8ff58f",
+              "2c087922",
+              "136acb50",
+              "240e0666",
+              "99f296da",
+              "90e5327e",
+              "1be1c101",
+              "61885d7e"
             ],
             "shape": [
               2,
@@ -842,14 +842,14 @@
           "tensor": {
             "dtype": "float32",
             "sha256_chunks": [
-              "ed125255",
-              "669ace21",
-              "6a2c0b1b",
-              "9f3f089b",
-              "22f012b5",
-              "14ec658e",
-              "1cccc71e",
-              "586d6fea"
+              "948c21bc",
+              "b20c436c",
+              "3376b709",
+              "d1cfa3b0",
+              "75a05bea",
+              "a61348a9",
+              "6537f8b3",
+              "9b921c96"
             ],
             "shape": [
               2,
@@ -905,14 +905,14 @@
           "tensor": {
             "dtype": "float32",
             "sha256_chunks": [
-              "c908ae77",
-              "8754512b",
-              "626c49a0",
-              "4c54a8ab",
-              "1fad3eb6",
-              "00a99407",
-              "635b7ddd",
-              "dd3691a1"
+              "764551fd",
+              "464dc7e8",
+              "9490fe14",
+              "5fe49c36",
+              "90bb8ce0",
+              "c40ab5db",
+              "228db314",
+              "8831ca10"
             ],
             "shape": [
               2,
@@ -928,14 +928,14 @@
           "tensor": {
             "dtype": "float32",
             "sha256_chunks": [
-              "c908ae77",
-              "8754512b",
-              "626c49a0",
-              "4c54a8ab",
-              "1fad3eb6",
-              "00a99407",
-              "635b7ddd",
-              "dd3691a1"
+              "764551fd",
+              "464dc7e8",
+              "9490fe14",
+              "5fe49c36",
+              "90bb8ce0",
+              "c40ab5db",
+              "228db314",
+              "8831ca10"
             ],
             "shape": [
               2,
@@ -1062,14 +1062,14 @@
         "input_value_after": {
           "dtype": "float32",
           "sha256_chunks": [
-            "a55e8cee",
-            "55116b53",
-            "4e87fc71",
-            "0ab1c038",
-            "20d1351b",
-            "5db1ff85",
-            "321067f2",
-            "efbd3a77"
+            "8d8ff58f",
+            "2c087922",
+            "136acb50",
+            "240e0666",
+            "99f296da",
+            "90e5327e",
+            "1be1c101",
+            "61885d7e"
           ],
           "shape": [
             2,
@@ -1081,14 +1081,14 @@
         "input_value_before": {
           "dtype": "float32",
           "sha256_chunks": [
-            "a55e8cee",
-            "55116b53",
-            "4e87fc71",
-            "0ab1c038",
-            "20d1351b",
-            "5db1ff85",
-            "321067f2",
-            "efbd3a77"
+            "8d8ff58f",
+            "2c087922",
+            "136acb50",
+            "240e0666",
+            "99f296da",
+            "90e5327e",
+            "1be1c101",
+            "61885d7e"
           ],
           "shape": [
             2,
@@ -1126,20 +1126,20 @@
     "schema_version": 1,
     "tracking": {
       "cuda_peak_memory_median_bytes": null,
-      "python_peak_memory_median_bytes": 674218,
+      "python_peak_memory_median_bytes": 669112,
       "sample_count": 3,
-      "torch_version": "2.13.0+cu130",
-      "wall_time_median_ms": 85.72566299699247
+      "torch_version": "2.13.0+cpu",
+      "wall_time_median_ms": 64.94752201251686
     }
   },
   "sha256_chunks": [
-    "7907c13f",
-    "2895acaa",
-    "e76ae726",
-    "69203e59",
-    "be1108b5",
-    "fc1ca012",
-    "5db9e820",
-    "e47a917b"
+    "33aa3bb0",
+    "5475b6bd",
+    "98b94fd0",
+    "c0bcf173",
+    "9dd8a723",
+    "834d5a1f",
+    "da68514a",
+    "79cba977"
   ]
 }

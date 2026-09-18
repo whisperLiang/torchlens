@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
+import yaml
 from torch import nn
 
 import torchlens as tl
@@ -202,13 +203,18 @@ def test_ci_workflows_pin_torch_and_scope_lint_to_owned_paths() -> None:
     weekly_text = project_root.joinpath(".github", "workflows", "weekly.yml").read_text()
     lint_text = project_root.joinpath(".github", "workflows", "lint.yml").read_text()
 
-    for workflow_text in (nightly_text, weekly_text):
-        assert "torch==2.7.*" in workflow_text
-        assert 'uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt"' in (
-            workflow_text
-        )
-        assert "uv pip check" in workflow_text
-        assert 'assert torch.__version__.startswith("2.7.")' in workflow_text
+    assert "torch==2.7.*" in weekly_text
+    assert (
+        'uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt"' in weekly_text
+    )
+    assert 'assert torch.__version__.startswith("2.7.")' in weekly_text
+    assert "uv pip check" in weekly_text
+
+    fast_tier = yaml.safe_load(nightly_text)["jobs"]["fast-tier"]
+    install = next(step for step in fast_tier["steps"] if "uv pip install" in step.get("run", ""))
+    assert '"torch==2.8.0+cpu" "torchvision==0.23.0+cpu"' in install["run"]
+    assert "--index-url https://download.pytorch.org/whl/cpu" in install["run"]
+    assert "uv pip check" in install["run"]
 
     # Pin the FULL widened scope (grind r3, R70 / OL#41), not a prefix of it: a
     # prefix assertion still passes when the contributor-facing trees are dropped

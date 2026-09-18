@@ -297,10 +297,12 @@ def _recording_torch_matches(recorded: str | None, current: str) -> bool:
 
     The build tag is stripped from both sides, mirroring
     ``_oracle_env.env_fingerprint``: a ``2.13.0+cu130``-recorded golden IS
-    enforceable on a ``2.13.0+cpu`` CI runtime (same source version, same CPU
-    kernels), and comparing full build strings made the nightly enforcement
-    leg skip the whole matrix forever (T13.2). Kernel float drift the gate
-    exists for happens across VERSIONS, which still mismatch after the strip.
+    enforceable on a ``2.13.0+cpu`` CI runtime under the worker's portable
+    CPU-kernel policy, and comparing full build strings made the nightly enforcement
+    leg skip the whole matrix forever (T13.2). The worker separately pins
+    ATen/MKL dispatch: the same torch version alone does not fix float bytes
+    across different CPU instruction sets. Versions still mismatch after
+    the build-tag strip.
 
     Parameters
     ----------

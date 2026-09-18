@@ -34,6 +34,7 @@ hand-edit them:
 
 ```bash
 TORCHLENS_UPDATE_CAPTURE_ORACLE=1 PYTHONPATH="$PWD/tests:$PWD" \
+  TORCHLENS_GOLDEN_REASON="Explain the reviewed behavior or recording-policy change" \
   python -m pytest tests/capture_oracle/test_capture_oracle.py \
   -k capture_characterization_matches_golden -q
 ```
@@ -56,6 +57,13 @@ re-pinned from them alike. Two guards keep that honest:
 Timing and Python memory are retained for regression tracking as broad ratios to the committed
 baseline, not as machine-specific absolute gates. CUDA peak memory is normalized to `None` so
 device visibility cannot change the oracle result. RNG, model, and input construction are seeded
-for every sample. The `followed_by` lookback case is trace-only because current
+for every sample. Before importing torch, the subprocess worker pins `MKL_CBWR=COMPATIBLE`
+and `ATEN_CPU_CAPABILITY=default`; it also disables oneDNN dispatch and uses one torch thread.
+This policy applies to both regeneration and verification. Seeds and deterministic algorithms
+alone do not make float-byte hashes portable between CPU instruction sets: the original AVX512
+convolution baseline differed from the nightly runner's result even on the same torch version.
+The byte comparisons remain exact under the pinned CPU policy.
+
+The `followed_by` lookback case is trace-only because current
 `record(save=followed_by(...))` rejects that selector explicitly; the matrix does not weaken
 that validation.

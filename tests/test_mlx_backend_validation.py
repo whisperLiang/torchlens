@@ -20,6 +20,11 @@ class _TwoLayerMLP(nn.Module):
         super().__init__()
         self.l1 = nn.Linear(4, 3)
         self.l2 = nn.Linear(3, 2)
+        # Keep ReLU active so the healthy oracle always proves a perturbation.
+        self.l1.weight = mx.ones((3, 4))
+        self.l1.bias = mx.zeros((3,))
+        self.l2.weight = mx.ones((2, 3))
+        self.l2.bias = mx.zeros((2,))
 
     def __call__(self, x: mx.array) -> mx.array:
         return self.l2(nn.relu(self.l1(x)))
@@ -123,7 +128,12 @@ def test_mlx_validation_fails_incoherent_wrong_parent_attribution() -> None:
     trace, add_index, relu_label, sigmoid_label = _branch_trace_and_add_tamper_material()
     add_label = trace._mlx_op_captures[add_index].labels_raw[0]
     add_op = next(op for op in trace.layer_list if op._label_raw == add_label)
-    add_op.parents = [sigmoid_label if p == relu_label else p for p in add_op.parents]
+    raw_to_final = {op._label_raw: op.label for op in trace.layer_list}
+    relu_final = raw_to_final[relu_label]
+    sigmoid_final = raw_to_final[sigmoid_label]
+    assert relu_final in add_op.parents
+    add_op.parents = [sigmoid_final if p == relu_final else p for p in add_op.parents]
+    assert relu_final not in add_op.parents
 
     assert MLXBackend().validate_trace(trace) is False
 
@@ -149,7 +159,12 @@ def test_mlx_validation_fails_coherent_wrong_parent_attribution() -> None:
         ),
     )
     add_op = next(op for op in trace.layer_list if op._label_raw == capture.labels_raw[0])
-    add_op.parents = [sigmoid_label if p == relu_label else p for p in add_op.parents]
+    raw_to_final = {op._label_raw: op.label for op in trace.layer_list}
+    relu_final = raw_to_final[relu_label]
+    sigmoid_final = raw_to_final[sigmoid_label]
+    assert relu_final in add_op.parents
+    add_op.parents = [sigmoid_final if p == relu_final else p for p in add_op.parents]
+    assert relu_final not in add_op.parents
 
     assert MLXBackend().validate_trace(trace) is False
 
@@ -213,7 +228,7 @@ def test_mlx_split_container_outputs_wire_into_graph() -> None:
     """
 
     trace = tl.trace(_SplitMergeNet(), mx.ones((1, 4)), backend="mlx")
-    split_labels = [op._label_raw for op in trace.layer_list if op._label_raw.startswith("split")]
+    split_labels = [op.label for op in trace.layer_list if op._label_raw.startswith("split")]
     assert len(split_labels) == 2, "both split output arrays must materialize as ops"
     add_op = next(op for op in trace.layer_list if op._label_raw.startswith("add"))
     assert set(add_op.parents) == set(split_labels)

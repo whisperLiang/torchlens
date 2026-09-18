@@ -1112,14 +1112,14 @@
           "tensor": {
             "dtype": "float32",
             "sha256_chunks": [
-              "e558859f",
-              "f57abd6b",
-              "de8990bb",
-              "3c180065",
-              "af6bc56e",
-              "7a0be4cc",
-              "04178f94",
-              "428f64cc"
+              "eee7acb1",
+              "289e2abf",
+              "8be912f0",
+              "7576fda0",
+              "6670baeb",
+              "3a9ad790",
+              "e2063710",
+              "884ff89a"
             ],
             "shape": [
               2,
@@ -1133,14 +1133,14 @@
           "tensor": {
             "dtype": "float32",
             "sha256_chunks": [
-              "c4c1777f",
-              "cc0b6ee7",
-              "6586e7e9",
-              "c14db702",
-              "9738e3d7",
-              "2d74c7fd",
-              "0b191045",
-              "b4815c68"
+              "bc39c321",
+              "6f7a2b5a",
+              "677f0c02",
+              "2a71f4c3",
+              "02e2263b",
+              "606f97df",
+              "9594d708",
+              "30adfe36"
             ],
             "shape": [
               2,
@@ -1154,14 +1154,14 @@
           "tensor": {
             "dtype": "float32",
             "sha256_chunks": [
-              "e30a8aff",
-              "4c12496b",
-              "bb5226d4",
-              "720c902c",
-              "6300b403",
-              "872bebe1",
-              "801d257e",
-              "f92d2852"
+              "ff014df9",
+              "2a088cbb",
+              "99cbf626",
+              "14852eeb",
+              "eeb9a2be",
+              "efbaf6ec",
+              "a44988be",
+              "c29eb169"
             ],
             "shape": [
               2,
@@ -1175,14 +1175,14 @@
           "tensor": {
             "dtype": "float32",
             "sha256_chunks": [
-              "4e328957",
-              "a8311459",
-              "33951904",
-              "4237b222",
-              "00a0f7ed",
-              "f9139b13",
-              "1033c355",
-              "457bcdd8"
+              "d7b277aa",
+              "11dc8c1e",
+              "47e31d1a",
+              "0ad4ac61",
+              "e6693c92",
+              "efed1183",
+              "78d5922d",
+              "b5188b27"
             ],
             "shape": [
               2,
@@ -1196,14 +1196,14 @@
           "tensor": {
             "dtype": "float32",
             "sha256_chunks": [
-              "c47f22db",
-              "d9538b0c",
-              "4da1e9e6",
-              "24d8a76b",
-              "57f6a1b3",
-              "b488a0a8",
-              "559a83b2",
-              "f4f55cbf"
+              "91792f64",
+              "926c144b",
+              "626e964e",
+              "d34faa6a",
+              "1be087e3",
+              "3f1fcb9c",
+              "4b7bc893",
+              "e925ee1c"
             ],
             "shape": [
               2,
@@ -1217,14 +1217,14 @@
           "tensor": {
             "dtype": "float32",
             "sha256_chunks": [
-              "3cb8d98d",
-              "f820eb42",
-              "8e63e3d2",
-              "14025783",
-              "468f0baf",
-              "8f6ac7e6",
-              "3b45e79b",
-              "b306b638"
+              "e83cddab",
+              "56992791",
+              "74fcc99b",
+              "5d26fb4a",
+              "b3b28332",
+              "cc9faca4",
+              "ef2d5ecb",
+              "43392071"
             ],
             "shape": [
               2,
@@ -1238,14 +1238,14 @@
           "tensor": {
             "dtype": "float32",
             "sha256_chunks": [
-              "03685a23",
-              "83bcefe8",
-              "8ba52424",
-              "90f10ec8",
-              "59810f31",
-              "e73ccbc6",
-              "9d02ba9b",
-              "a0a06d3d"
+              "31c62452",
+              "ed705dd9",
+              "2cf88596",
+              "bee7c9cb",
+              "21a812ff",
+              "4ef4dbdc",
+              "14651d86",
+              "18ce1881"
             ],
             "shape": [
               2,
@@ -1259,14 +1259,14 @@
           "tensor": {
             "dtype": "float32",
             "sha256_chunks": [
-              "03685a23",
-              "83bcefe8",
-              "8ba52424",
-              "90f10ec8",
-              "59810f31",
-              "e73ccbc6",
-              "9d02ba9b",
-              "a0a06d3d"
+              "31c62452",
+              "ed705dd9",
+              "2cf88596",
+              "bee7c9cb",
+              "21a812ff",
+              "4ef4dbdc",
+              "14651d86",
+              "18ce1881"
             ],
             "shape": [
               2,
@@ -1283,14 +1283,14 @@
         "input_value_after": {
           "dtype": "float32",
           "sha256_chunks": [
-            "e558859f",
-            "f57abd6b",
-            "de8990bb",
-            "3c180065",
-            "af6bc56e",
-            "7a0be4cc",
-            "04178f94",
-            "428f64cc"
+            "eee7acb1",
+            "289e2abf",
+            "8be912f0",
+            "7576fda0",
+            "6670baeb",
+            "3a9ad790",
+            "e2063710",
+            "884ff89a"
           ],
           "shape": [
             2,
@@ -1300,14 +1300,14 @@
         "input_value_before": {
           "dtype": "float32",
           "sha256_chunks": [
-            "e558859f",
-            "f57abd6b",
-            "de8990bb",
-            "3c180065",
-            "af6bc56e",
-            "7a0be4cc",
-            "04178f94",
-            "428f64cc"
+            "eee7acb1",
+            "289e2abf",
+            "8be912f0",
+            "7576fda0",
+            "6670baeb",
+            "3a9ad790",
+            "e2063710",
+            "884ff89a"
           ],
           "shape": [
             2,
@@ -1343,20 +1343,20 @@
     "schema_version": 1,
     "tracking": {
       "cuda_peak_memory_median_bytes": null,
-      "python_peak_memory_median_bytes": 633716,
+      "python_peak_memory_median_bytes": 624510,
       "sample_count": 3,
-      "torch_version": "2.13.0+cu130",
-      "wall_time_median_ms": 77.02194000012241
+      "torch_version": "2.13.0+cpu",
+      "wall_time_median_ms": 52.14405106380582
     }
   },
   "sha256_chunks": [
-    "f5045cbb",
-    "4ffe4a4e",
-    "e49b17ca",
-    "59d0b55a",
-    "1f96b3a2",
-    "93fb8b55",
-    "af5b8e41",
-    "d2406fd7"
+    "4e8b22c8",
+    "11f273f2",
+    "d8647e35",
+    "c37e505c",
+    "fb5131aa",
+    "04301a75",
+    "e1d72b5d",
+    "b5b9bb28"
   ]
 }
