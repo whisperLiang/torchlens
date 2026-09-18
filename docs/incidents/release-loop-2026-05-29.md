@@ -1,7 +1,7 @@
 ---
 name: incident-release-loop-2026-05-29
 description: Runaway semantic-release loop (1599 commits) root cause + fix; LFS tag-push + missing skip-ci
-metadata: 
+metadata:
   node_type: memory
   type: project
   originSessionId: 41945be0-4dae-41fe-bb6b-db977cb13d8f
