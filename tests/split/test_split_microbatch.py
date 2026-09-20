@@ -44,7 +44,7 @@ class CountingSgd(torch.optim.SGD):
         super().step(*args, **kwargs)
 
 
-def test_b7_mb3_matches_full_suffix_and_prefix_update() -> None:
+def test_uneven_microbatches_match_full_suffix_and_prefix_update() -> None:
     """Uneven 3+3+1 chunks match one full logical mean objective."""
 
     torch.manual_seed(17)
