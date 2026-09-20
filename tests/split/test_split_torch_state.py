@@ -29,6 +29,7 @@ def test_missing_param_module_does_not_drop_live_parameter_handle() -> None:
 
     segment = object.__new__(_GeneratedSegmentBase)
     segment.use_live_param_sources = True
+    segment._shareable_param_ids = frozenset()
     segment._state = SegmentState(
         adapter=TorchSplitAdapter(),
         placement=DevicePlacement(),
