@@ -810,6 +810,16 @@ print(tl.compat.report(model, x).to_markdown())
   Crash-safety is pinned by a hard-process-death test.
 - Appliance packages `notebook` and `neuro` reserve extras boundaries and enforce
   import gating for their optional dependencies.
+- TORCH SPLIT MEMORY (DOCUMENTED-UNSTABLE): `run_prefix` runs under `no_grad`;
+  `run_training_prefix` keeps the connected graph. `train_suffix` / `train_suffix_result`
+  accept keyword-only `microbatch_size=None`, `microbatch_reduction="mean"`, and
+  `target_slicer=None`. Mean chunks weight by `b_i/B`; sum requires a custom sum loss.
+  One optimizer zero/step per logical batch; schema-based boundary slices reconstruct
+  full gradients for one prefix backward. The logical boundary transports once; chunk
+  graphs release after backward. Microbatch size never changes graph/cache identity.
+  Runtime-local state pools share only frozen parameters with certified read-only,
+  nonaliasing uses; mutation, unknown uses, buffers, and trainable replicas stay separate.
+  Doc and runnable example: `docs/reference/split_memory.md`.
 - BATCH-POLYMORPHIC SPLIT RUNTIME (`torchlens/split/`; spellings DOCUMENTED-UNSTABLE):
   `tl.split.prepare(model, example, SplitRequest(...))` retains one canonical B=1
   graph and runs ONE B=2 probe comparing generated replay with native output structure,

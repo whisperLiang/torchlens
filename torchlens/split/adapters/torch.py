@@ -115,6 +115,79 @@ def _module_for_param_ref(param_ref: Any) -> Any | None:
         return None
 
 
+def _shareable_param_sources(graph: SplitTraceGraph) -> frozenset[int]:
+    """Certify frozen sources whose every captured use is read-only and nonaliasing.
+
+    Parameters
+    ----------
+    graph
+        Complete replay graph, including both sides of the cut.
+
+    Returns
+    -------
+    frozenset
+        Source identities eligible for runtime-local replica sharing. Unknown
+        calls, views (including detach), mutable buffers, and trainable aliases
+        disqualify their entire storage. Freezing alone is not an immutability
+        proof: embedding renormalization, for example, writes a detached weight.
+    """
+
+    torch = _torch()
+    # These calls produce fresh outputs and never mutate parameter arguments.
+    # Keep this deliberately small; expanding it requires the same guarantee.
+    read_only = {
+        (namespace, name)
+        for namespace in ("torch", "torch.nn.functional")
+        for name in (
+            "linear",
+            "conv1d",
+            "conv2d",
+            "conv3d",
+            "conv_transpose1d",
+            "conv_transpose2d",
+            "conv_transpose3d",
+        )
+    }
+    sources: dict[int, tuple[str, int]] = {}
+    unsafe: set[tuple[str, int]] = set()
+
+    def storage_key(value: Any) -> tuple[str, int]:
+        """Identify live storage, including distinct parameter views of it."""
+
+        return str(value.device), value.untyped_storage().data_ptr()
+
+    for node in graph.nodes:
+        func_id = getattr(node.args_template, "func_id", None)
+        call_key = (getattr(func_id, "namespace", ""), getattr(func_id, "qualname", ""))
+        safe_call = call_key in read_only
+        for ref in node.param_refs:
+            handle = getattr(ref, "handle", None)
+            if (
+                handle is None
+                or not isinstance(handle, torch.Tensor)
+                or handle.layout != torch.strided
+            ):
+                continue
+            key = storage_key(handle)
+            sources[id(handle)] = key
+            if (
+                not safe_call
+                or handle.requires_grad
+                or type(handle) not in (torch.Tensor, torch.nn.Parameter)
+            ):
+                unsafe.add(key)
+            module = _module_for_param_ref(ref)
+            for buffer in (getattr(module, "buffers", None) or {}).values():
+                value = getattr(buffer, "handle", None)
+                if isinstance(value, torch.Tensor) and value.layout == torch.strided:
+                    unsafe.add(storage_key(value))
+        for ref in node.buffer_refs:
+            value = getattr(ref, "handle", None)
+            if isinstance(value, torch.Tensor) and value.layout == torch.strided:
+                unsafe.add(storage_key(value))
+    return frozenset(source_id for source_id, key in sources.items() if key not in unsafe)
+
+
 def _rewrite_placement_device_args(
     node: SplitTraceNode,
     args: tuple[Any, ...],
@@ -208,6 +281,7 @@ class _GeneratedSegmentBase:
         self._node_by_id = graph.node_by_id
         self._label_to_id = graph.node_id_by_alias
         self._shape_binding: ShapeBinding | None = None
+        self._shareable_param_ids = _shareable_param_sources(graph)
         retained_ids = set(plan.boundary_node_ids)
         if self.segment == "suffix":
             retained_ids = set(graph.output_node_ids)
@@ -328,7 +402,7 @@ class _GeneratedSegmentBase:
                 )
             handle = self._state.resolve(
                 handle,
-                shareable=not bool(getattr(handle, "requires_grad", False)),
+                shareable=id(handle) in self._shareable_param_ids,
             )
             if id(handle) not in seen_handles:
                 handles.append(handle)

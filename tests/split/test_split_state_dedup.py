@@ -55,6 +55,9 @@ def test_tied_replicas_share_only_frozen_state(
     )
     prefix = runtime.segments.prefix._state
     suffix = runtime.segments.suffix._state
+    # Exercise the adapter's sharing proof before inspecting its cached binding.
+    runtime.segments.prefix.bound_state_values()
+    runtime.segments.suffix.bound_state_values()
     prefix_weight = prefix.resolve(model.shared.weight, shareable=True)
     suffix_weight = suffix.resolve(model.shared.weight, shareable=True)
     assert prefix_weight is not model.shared.weight

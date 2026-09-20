@@ -544,6 +544,16 @@ pytest tests/ -m "not rare and not slow" -x --tb=short
   any inequality. Frozen enums + error/finding codes: `torchlens.merged` +
   `docs/reference/merged_trace_contract.md` (ordered-equality gated). p2p/pipeline (C3) and
   DTensor topologies (C2) refuse typed; merged replay does not exist.
+- TORCH SPLIT MEMORY (DOCUMENTED-UNSTABLE): `run_prefix` runs under `no_grad`;
+  `run_training_prefix` keeps the connected graph. `train_suffix` / `train_suffix_result`
+  accept keyword-only `microbatch_size=None`, `microbatch_reduction="mean"`, and
+  `target_slicer=None`. Mean chunks weight by `b_i/B`; sum requires a custom sum loss.
+  One optimizer zero/step per logical batch; schema-based boundary slices reconstruct
+  full gradients for one prefix backward. The logical boundary transports once; chunk
+  graphs release after backward. Microbatch size never changes graph/cache identity.
+  Runtime-local state pools share only frozen parameters with certified read-only,
+  nonaliasing uses; mutation, unknown uses, buffers, and trainable replicas stay separate.
+  Doc and runnable example: `docs/reference/split_memory.md`.
 - BATCH-POLYMORPHIC SPLIT RUNTIME (`torchlens/split/`, spellings DOCUMENTED-UNSTABLE):
   `tl.split.prepare()` retains a canonical `B=1` capture plus ONE empirical `B=2` probe.
   The probe checks generated replay against native output structure, exact shape/dtype and

@@ -97,6 +97,9 @@ def _run_chunk(
             # clone isolates public boundary storage from replay's in-place ops.
             sliced = sliced.detach().clone().requires_grad_(True)
             roots[key] = sliced
+        else:
+            # Integer/index payloads can also be mutated by a suffix call.
+            sliced = sliced.detach().clone()
         values[key] = sliced
     replay = ReplayBoundary(
         backend=boundary.backend,

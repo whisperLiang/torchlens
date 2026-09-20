@@ -80,7 +80,9 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
   and boundary gradients are reconstructed in logical batch order for one `backward_prefix`
   call. Tensor-leading-batch and nested target structures are sliced automatically; an
   optional `target_slicer` handles task-specific containers. Unsupported backends refuse
-  explicitly rather than falling back to full-batch execution.
+  explicitly rather than falling back to full-batch execution. See
+  [Split execution memory and microbatch training](split_memory.md) for loss assumptions,
+  target slicing, placement, and state-sharing rules.
   Split refusals live in `torchlens.split.errors`: `SplitError`, `SplitRequestError`,
   `SplitBoundaryError`, and `SplitUnsupportedError`. These documented-unstable exceptions
   keep their own catch hierarchy, `code`, and structured `context`; they are not aliases

@@ -224,14 +224,9 @@ def _train_suffix_torch(
     runtime.validate_boundary(boundary)
     root_tensors: dict[str, Any] = {}
     replay_tensors: dict[str, Any] = {}
-    suffix_placement = runtime.request.placement.suffix
     for key, value in boundary.tensors.items():
         if _is_diff_tensor(torch, value):
             root = value.detach().clone().requires_grad_(True)
-            if suffix_placement.is_explicit and root.device != torch.device(
-                suffix_placement.device
-            ):
-                root = root.to(suffix_placement.device).detach().requires_grad_(True)
             root_tensors[key] = root
             replay_tensors[key] = root
         else:
