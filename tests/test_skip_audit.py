@@ -937,10 +937,25 @@ DEVICE_GATED_SKIPIF_LEDGER: dict[str, str] = {
         "CPU weak-reference lifetime coverage cannot simulate device allocations. "
         "Not run on CPU-only CI; requires a CUDA-capable environment"
     ),
+    "split/test_split_memory_cuda.py::<pytestmark>": (
+        "[2026-09-20] Optional Phase 1 allocated-peak comparison needs CUDA and exclusive "
+        "GPU use (TORCHLENS_CUDA_MEMORY_TESTS=1); CPU lifetime checks remain unconditional. "
+        "Executed twice per process on H100 PCIe; skipped on CPU-only CI"
+    ),
     "split/test_split_memory_lifetime.py::test_cuda_replay_peak_tracks_frontier_not_chain_length": (
         "[2026-09-15] CUDA allocator peak bounds live replay storage independently of chain "
         "length; CPU tensor-lifetime coverage cannot simulate the device allocator peak. "
         "Not run on CPU-only CI; requires a CUDA-capable environment"
+    ),
+    "split/test_split_microbatch_contract.py::test_cpu_prefix_cuda_suffix_microbatch_gradient_handoff": (
+        "[2026-09-20] CPU-to-CUDA transport and backward handoff require an actual device; "
+        "the same microbatch numerical contracts have unconditional CPU coverage. "
+        "Executed on H100 PCIe; skipped on CPU-only CI"
+    ),
+    "split/test_split_state_dedup.py::test_same_source_on_distinct_devices_has_distinct_replicas": (
+        "[2026-09-20] Distinct CPU/CUDA state ownership requires two real device types; "
+        "forced CPU-copy tests separately cover pooling and independent trainable state. "
+        "Executed on H100 PCIe; skipped on CPU-only CI"
     ),
     "test_hash_determinism.py::test_graph_shape_hash_matches_between_cpu_and_cuda": _CUDA_DARK,
     "test_kernel_telemetry.py::test_real_cuda_cupti_correlation_matrix": (
