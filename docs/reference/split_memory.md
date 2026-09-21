@@ -124,6 +124,10 @@ policy is identical. A captured-state inference prefix remains separate from its
 training prefix. Recutting and placement changes preserve effective, possibly updated
 state; pooling never substitutes the original source for an inherited updated value.
 Existing same-device live references keep their established sharing semantics.
+Live registered buffers follow replacements made by `model.to(...)` without growing
+the state table. Independently owned buffer replicas retain their effective values
+when the source model moves, including across recuts. Compact runtimes use weak owner
+references, so following live buffers does not retain the source module or its Trace.
 
 Microbatch size does not enter graph identity, split identity, the shape program, or the
 semantic boundary cache ABI. A saved logical boundary can be loaded and trained with a

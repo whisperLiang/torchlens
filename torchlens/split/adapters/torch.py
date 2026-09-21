@@ -415,7 +415,9 @@ class _GeneratedSegmentBase:
             for buffer in buffers.values():
                 buffer_handle = getattr(buffer, "handle", None)
                 if buffer_handle is not None:
-                    buffer_handle = self._state.resolve(buffer_handle)
+                    buffer_handle = self._state.resolve(
+                        buffer_handle, source_id=getattr(buffer, "source_id", id(buffer))
+                    )
                     if id(buffer_handle) not in seen_handles:
                         handles.append(buffer_handle)
                         seen_handles.add(id(buffer_handle))
@@ -628,8 +630,9 @@ class _GeneratedSegmentBase:
         """Return a replay value for an input/buffer/source node."""
 
         if self.use_live_param_sources and node.buffer_refs:
-            handle = getattr(node.buffer_refs[0], "handle", node.buffer_refs[0])
-            return self._state.resolve(handle)
+            buffer = node.buffer_refs[0]
+            handle = getattr(buffer, "handle", buffer)
+            return self._state.resolve(handle, source_id=getattr(buffer, "source_id", id(buffer)))
         value = getattr(node.op, "out", None)
         if value is None:
             raise SplitUnsupportedError(

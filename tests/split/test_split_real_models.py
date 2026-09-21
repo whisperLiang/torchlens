@@ -290,7 +290,7 @@ def test_yolo26_detection_split_replay_cross_batch_and_device() -> None:
 
 
 def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
-    """YOLOv8n replays all 558 boundaries across batch and device."""
+    """YOLOv8n replays every before/after boundary across batch and device."""
 
     _skip_unless_enabled()
     _skip_unless_yolov8_exhaustive()
@@ -307,6 +307,7 @@ def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
 
         torch.set_num_threads(1)
         get_dynamo_optimized_module_type(force_probe=True)
+        import ultralytics
         from ultralytics import YOLO
 
         def assert_same(actual, expected):
@@ -356,8 +357,17 @@ def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
             torch.zeros(2, 3, 160, 160),
             request,
         )
-        # The canonical B=1 capture retains 279 compute nodes for this graph.
-        assert len(cpu_seed.trace_graph.compute_nodes) == 279
+        # The verified 8.4.152 anchor helper allocates arange(out=new_full)
+        # for both axes at three scales: six extra nodes over the 279-node
+        # legacy graph. Keep this enrollment version-specific; every added
+        # boundary receives the same native-output and device checks below.
+        # Source: ultralytics/ultralytics v8.4.152, utils/tal.py::make_anchors.
+        expected_compute_nodes = 285 if ultralytics.__version__ == "8.4.152" else 279
+        assert len(cpu_seed.trace_graph.compute_nodes) == expected_compute_nodes
+        if ultralytics.__version__ == "8.4.152":
+            assert sum(
+                node.op_type == "newfull" for node in cpu_seed.trace_graph.compute_nodes
+            ) == 9
         assert cpu_seed.trace_graph.shape_program.unresolved == {}
         assert cpu_seed.traced_batch_size == 1
         assert cpu_seed.trace_graph.shape_program.witness_batch_sizes == (2,)
@@ -379,7 +389,7 @@ def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
             for node in cpu_seed.trace_graph.compute_nodes
             for point in (tl.split.before(node.canonical_id), tl.split.after(node.canonical_id))
         ]
-        assert len(all_points) == 558
+        assert len(all_points) == 2 * expected_compute_nodes
         partition_count = int(os.environ.get("TORCHLENS_YOLOV8_PARTITIONS", "1"))
         partition_index = int(os.environ.get("TORCHLENS_YOLOV8_PARTITION", "0"))
         assert partition_count >= 1

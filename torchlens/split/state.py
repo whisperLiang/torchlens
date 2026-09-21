@@ -135,7 +135,14 @@ class SegmentState:
 
         return any(entry.ownership == "owned" for entry in self._entries.values())
 
-    def resolve(self, value: Any, *, trainable: bool | None = None, shareable: bool = False) -> Any:
+    def resolve(
+        self,
+        value: Any,
+        *,
+        trainable: bool | None = None,
+        shareable: bool = False,
+        source_id: int | None = None,
+    ) -> Any:
         """Return the segment-local value for one live or captured tensor.
 
         Parameters
@@ -150,20 +157,31 @@ class SegmentState:
             across segment bindings. Non-trainability alone is insufficient:
             mutable buffers still need independent segment ownership. Trainable
             replicas are always excluded from cross-binding pooling.
+        source_id:
+            Stable identity of a replaceable live source, such as a registered
+            Torch buffer. Referenced entries follow its current value; owned
+            replicas remain independent when the live model moves devices.
         """
 
         if not self.adapter.is_tensor(value):
             return value
-        source_id = id(value)
+        source_id = id(value) if source_id is None else source_id
         cached = self._entries.get(source_id)
         if cached is not None:
-            return cached.value
+            if cached.ownership == "owned":
+                return cached.value
+            if cached.value is value and (
+                not self.placement.is_explicit or self._already_placed(value)
+            ):
+                return cached.value
         wants_grad = (
             bool(self.adapter.requires_grad(value)) if trainable is None else bool(trainable)
         )
-        inherited = self._inherited.get(source_id, ())
+        inherited = self._inherited.get(source_id, ()) if cached is None else ()
         if inherited:
-            entry = self._rebind(value, inherited, trainable=wants_grad, shareable=shareable)
+            entry = self._rebind(
+                value, inherited, trainable=wants_grad, shareable=shareable, source_id=source_id
+            )
         elif not self.placement.is_explicit or self._already_placed(value):
             entry = StateEntry(
                 ownership="referenced",
@@ -189,6 +207,7 @@ class SegmentState:
         *,
         trainable: bool,
         shareable: bool,
+        source_id: int,
     ) -> StateEntry:
         """Keep an effective value or copy it to a new device without source writes."""
 
@@ -215,7 +234,7 @@ class SegmentState:
             return StateEntry(
                 ownership=selected.ownership,
                 value=selected.value,
-                source_id=id(source),
+                source_id=source_id,
                 trainable=trainable,
             )
         # Pool the inherited effective value, never its original source handle:
@@ -224,7 +243,7 @@ class SegmentState:
             selected.value, trainable=trainable, shareable=shareable, device=target
         )
         return StateEntry(
-            ownership="owned", value=replica, source_id=id(source), trainable=trainable
+            ownership="owned", value=replica, source_id=source_id, trainable=trainable
         )
 
     def _same_value(self, left: Any, right: Any) -> bool:

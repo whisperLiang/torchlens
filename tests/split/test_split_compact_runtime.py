@@ -287,6 +287,84 @@ def test_compact_placement_preserves_live_parameter_identity_and_model_device(de
     assert all(parameter.device.type == "cpu" for parameter in model.parameters())
 
 
+@pytest.mark.parametrize("retain_trace", [False, True])
+def test_live_buffer_replacement_updates_replay_without_growing_state(retain_trace: bool) -> None:
+    """Module device conversion replaces buffers, which live replay must resolve anew."""
+
+    model = torch.nn.Sequential(torch.nn.BatchNorm1d(4), torch.nn.ReLU()).eval()
+    inputs = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    with torch.no_grad():
+        runtime = tl.split.prepare(
+            model, inputs, _request(retain_trace=retain_trace, live_param_sources=True)
+        )
+        runtime.replay(inputs)
+        entry_counts = [
+            len(segment._state.entries())
+            for segment in (runtime.segments.prefix, runtime.segments.suffix)
+        ]
+        for offset in (1.0, 2.0):
+            old_mean = weakref.ref(model[0].running_mean)
+            # Like Module.to(device), _apply replaces registered buffers while
+            # retaining Parameter objects. This also exercises CPU-only CI.
+            model._apply(lambda value: value.clone())
+            model[0].running_mean.fill_(offset)
+            torch.testing.assert_close(runtime.replay(inputs), model(inputs))
+            assert [
+                len(segment._state.entries())
+                for segment in (runtime.segments.prefix, runtime.segments.suffix)
+            ] == entry_counts
+            if not retain_trace:
+                gc.collect()
+                assert old_mean() is None
+        if retain_trace:
+            runtime.trace.cleanup()
+
+
+def test_compact_buffer_lookup_keeps_last_value_without_retaining_owner() -> None:
+    """Buffer lookups survive owner collection without retaining the module or Trace."""
+
+    model = torch.nn.Sequential(torch.nn.BatchNorm1d(4), torch.nn.ReLU()).eval()
+    inputs = torch.ones(3, 4)
+    with torch.no_grad():
+        runtime = tl.split.prepare(model, inputs, _request(live_param_sources=True))
+        references = [buffer for node in runtime.trace_graph.nodes for buffer in node.buffer_refs]
+        assert references
+        owner = weakref.ref(model[0])
+        model._apply(lambda value: value.clone())
+        model[0].running_mean.fill_(2)
+        values = [buffer.handle for buffer in references]
+        del runtime, model
+        gc.collect()
+        assert owner() is None
+        assert all(buffer.handle is value for buffer, value in zip(references, values))
+
+
+@pytest.mark.parametrize("retain_trace", [False, True])
+def test_owned_buffer_replacement_preserves_effective_state_and_recut(
+    monkeypatch: pytest.MonkeyPatch,
+    retain_trace: bool,
+) -> None:
+    """Moving the source model must not reset independently owned buffer replicas."""
+
+    from torchlens.split.state import SegmentState
+
+    monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
+    model = torch.nn.Sequential(torch.nn.BatchNorm1d(4), torch.nn.ReLU()).eval()
+    inputs = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    request = _request(retain_trace=retain_trace, live_param_sources=True)
+    with torch.no_grad():
+        runtime = tl.split.prepare(model, inputs, request).with_placement(PlacementPlan.on("cpu"))
+        expected = runtime.replay(inputs)
+        model._apply(lambda value: value.clone())
+        model[0].running_mean.fill_(20)
+        assert not torch.equal(expected, model(inputs))
+        torch.testing.assert_close(runtime.replay(inputs), expected)
+        recut = runtime.at(tl.split.before(runtime.trace_graph.compute_nodes[0].canonical_id))
+        torch.testing.assert_close(recut.replay(inputs), expected)
+        if retain_trace:
+            runtime.trace.cleanup()
+
+
 @pytest.mark.parametrize("retain_trace", [None, True])
 def test_training_automatically_retains_trace_and_preserves_input_and_parameter_gradients(
     retain_trace: bool | None,

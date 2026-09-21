@@ -4,17 +4,31 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from typing import Any
+from weakref import ReferenceType, ref
 
 from ..backends.registry import TORCH_BACKEND_NAME
+from ..data_classes._runtime_handles import source_model_from_trace
 from ..ir.refs import TensorRef
 from .graph import SplitTraceGraph, SplitTraceNode
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _BufferHandle:
-    """Keep a live buffer without retaining its Trace-owned metadata."""
+    """Follow buffer replacement without retaining Trace metadata or the owner."""
 
-    handle: Any
+    _value: Any
+    source_id: int
+    _owner_ref: ReferenceType[Any] | None = None
+    _name: str = ""
+
+    @property
+    def handle(self) -> Any:
+        """Resolve the current registered value after ``Module.to`` replaces it."""
+
+        owner = None if self._owner_ref is None else self._owner_ref()
+        if owner is not None:
+            self._value = owner._buffers.get(self._name)
+        return self._value
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,11 +101,21 @@ def compact_torch_graph(graph: SplitTraceGraph) -> SplitTraceGraph:
     buffers: dict[int, _BufferHandle] = {}
 
     def buffer_handle(buffer: Any) -> _BufferHandle:
-        """Resolve each buffer once without copying its live tensor."""
+        """Keep a weak owner lookup and stable binding identity for each buffer."""
 
         key = id(buffer)
         if key not in buffers:
-            buffers[key] = _BufferHandle(getattr(buffer, "handle", buffer))
+            value = getattr(buffer, "handle", buffer)
+            model = source_model_from_trace(getattr(buffer, "source_trace", None))
+            owner = None
+            name = ""
+            address = getattr(buffer, "address", None)
+            if model is not None and isinstance(address, str):
+                module_path, _, name = address.rpartition(".")
+                owner = model.get_submodule(module_path) if module_path else model
+            buffers[key] = _BufferHandle(
+                value, id(value), None if owner is None else ref(owner), name
+            )
         return buffers[key]
 
     def param_handle(param: Any) -> _ParamHandle:

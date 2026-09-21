@@ -79,7 +79,10 @@ def _run_backend_subprocess(
     if env_overrides:
         env.update(env_overrides)
     gc.collect()
-    if torch.cuda.is_available():
+    # Cleanup must not create a parent CUDA context: ipc_collect() initializes
+    # CUDA even when this process has never allocated a tensor. That otherwise
+    # reserves device memory needed by the isolated backend subprocess.
+    if torch.cuda.is_initialized():
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
     result = subprocess.run(
