@@ -14,6 +14,19 @@ set `XLA_FLAGS=--xla_gpu_cuda_data_dir=.../site-packages/nvidia/cuda_nvcc` to th
 installed compiler directory. Keep backend CUDA package versions compatible;
 installing several framework GPU extras together can request conflicting versions.
 
+For a reproducible model-package setup with Torch 2.10, install these versions
+alongside the required native backend runtimes:
+
+```bash
+python -m pip install 'rfdetr==1.8.3' 'ultralytics==8.4.152' 'keras-cv==0.9.0'
+```
+
+RF-DETR 1.8.3 follows the repository's declared `>=1.8,<1.9` dependency range.
+Its measured Torch 2.10 capture contains 860 compute nodes (1,720 before/after
+boundaries), which the inventory assertion explicitly admits for this version
+pair. The complete replay matrix below must still pass. Other version pairs
+retain their existing inventory expectations.
+
 Enable the complete suite, including all YOLOv8 and RF-DETR boundaries and allocated
 memory comparisons:
 

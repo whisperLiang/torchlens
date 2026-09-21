@@ -555,6 +555,7 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
         import copy
         import os
         import hashlib
+        from importlib.metadata import version
         from pathlib import Path
 
         import torch
@@ -640,11 +641,24 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
         # B=1 capture and B=2 probe alongside both CPU and GPU runtimes.
         with torch.no_grad():
             cpu_seed = tl.split.prepare(cpu_model, cpu_example, request)
-        # The admitted Torch 2.8 lane captures two additional operations.
-        # Both inventories are replay-checked against the official
-        # core below; do not treat the Torch 2.13 count as cross-version identity.
-        expected_compute_nodes = 860 if torch.__version__.split('.')[:2] == ['2', '8'] else 858
-        assert len(cpu_seed.trace_graph.compute_nodes) == expected_compute_nodes
+        # Keep the established Torch 2.8 inventory and explicitly admit the
+        # measured Torch 2.10 / RF-DETR 1.8.3 inventory. The full numeric matrix
+        # below remains required; the historical Torch 2.13 count is not a
+        # cross-version graph identity.
+        torch_release = tuple(torch.__version__.split('.')[:2])
+        rfdetr_version = version("rfdetr")
+        expected_compute_nodes = (
+            860
+            if torch_release == ("2", "8")
+            or (torch_release == ("2", "10") and rfdetr_version == "1.8.3")
+            else 858
+        )
+        actual_compute_nodes = len(cpu_seed.trace_graph.compute_nodes)
+        assert actual_compute_nodes == expected_compute_nodes, (
+            f"RF-DETR compute inventory: torch={torch.__version__}, "
+            f"rfdetr={rfdetr_version}, actual={actual_compute_nodes}, "
+            f"expected={expected_compute_nodes}"
+        )
         assert cpu_seed.trace_graph.shape_program.unresolved == {}
         assert cpu_seed.traced_batch_size == 1
         assert cpu_seed.trace_graph.shape_program.witness_batch_sizes == (2,)
