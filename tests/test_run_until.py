@@ -140,13 +140,18 @@ def test_live_truncation_leaves_source_outcome_complete():
 
 
 def test_live_truncation_leaves_no_halted_trace_registered():
-    """No HALTED trace is enumerable after a truncated live run; the result IS."""
+    """A truncated live run registers its result but no internal HALTED trace."""
 
     from torchlens import io as tlio
     from torchlens.capture.outcome import CaptureStatus
 
+    previous_logs = tlio.list_logs()
     _model, _log, result = _live_until_relu()
-    logs = tlio.list_logs()
+    logs = tuple(
+        entry
+        for entry in tlio.list_logs()
+        if not any(entry is previous for previous in previous_logs)
+    )
     assert not any(
         getattr(entry, "outcome", None) is not None and entry.outcome.status is CaptureStatus.HALTED
         for entry in logs

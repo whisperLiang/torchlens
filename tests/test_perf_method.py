@@ -17,6 +17,7 @@ import pytest
 import torch
 from torch import nn
 
+from benchmarks import perf_suite
 from benchmarks.perf_gate import compare_gate_payloads, normalize_gate_payload
 from benchmarks.perf_runner import (
     _operation,
@@ -292,6 +293,59 @@ def test_run_timing_records_cpu_time_alongside_wall_time() -> None:
     assert isinstance(stats["cpu_median_ms"], float)
     assert isinstance(stats["cpu_iqr_ms"], float)
     assert len(stats["cpu_samples_ms"]) == 5
+
+
+@pytest.mark.smoke
+def test_startup_cell_uses_independent_process_trials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One-shot startup timings need fresh processes on both sides of the gate."""
+
+    tags: list[str] = []
+
+    def fake_run_cell_once(
+        operation: str,
+        model: str,
+        device: str,
+        pass_type: str,
+        *,
+        samples: int,
+        timeout: int,
+        tag: str,
+        threads: int,
+    ) -> dict[str, object]:
+        """Return one distinct cold-start observation."""
+
+        tags.append(tag)
+        index = len(tags)
+        assert samples == 1
+        return {
+            "operation": operation,
+            "model": model,
+            "device": device,
+            "pass_type": pass_type,
+            "status": "ok",
+            "elapsed_s": 1.0,
+            "timing": {
+                "samples_ms": [1000.0 + index * 100],
+                "cpu_samples_ms": [900.0 + index * 100],
+            },
+        }
+
+    monkeypatch.setattr(perf_suite, "_run_cell_once", fake_run_cell_once)
+    result = perf_suite._run_cell(
+        "first_capture_target",
+        "tinynet",
+        "cpu",
+        "timing",
+        samples=10,
+        timeout=180,
+        tag="baseline",
+    )
+
+    assert len(tags) == perf_suite.STARTUP_TRIALS == len(set(tags))
+    assert result["timing"]["sample_count"] == perf_suite.STARTUP_TRIALS
+    assert result["timing"]["cpu_median_ms"] == 1200.0
+    assert result["timing"]["cpu_iqr_ms"] == 200.0
+    assert result["metadata"]["independent_startup_trials"] == perf_suite.STARTUP_TRIALS
 
 
 @pytest.mark.smoke

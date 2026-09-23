@@ -29,10 +29,13 @@ from benchmarks.perf_gate import (  # noqa: E402
     write_comparison,
 )
 from benchmarks.perf_models import available_devices  # noqa: E402
+from benchmarks.perf_runner import _stats  # noqa: E402
 
 RESULT_JSON = REPO_ROOT / "benchmarks" / "perf_results_2026-05-14.json"
 RESULT_MD = REPO_ROOT / "benchmarks" / "perf_results_2026-05-14.md"
 CELL_DIR = REPO_ROOT / "benchmarks" / ".perf_cells"
+STARTUP_OPS = frozenset({"global_wrap_dummy", "first_capture_target"})
+STARTUP_TRIALS = 5
 
 CORE_OPS = [
     "raw_forward",
@@ -311,7 +314,7 @@ def _run_cell(
     tag: str,
     threads: int = 4,
 ) -> dict[str, Any]:
-    """Run one benchmark subprocess.
+    """Run a benchmark cell with independent processes for one-shot startup timing.
 
     Parameters
     ----------
@@ -331,6 +334,89 @@ def _run_cell(
         Output filename tag.
     threads:
         Torch intra-op thread pin forwarded to the runner (0 = unpinned).
+
+    Returns
+    -------
+    dict[str, Any]
+        Cell result.
+    """
+
+    if pass_type != "timing" or operation not in STARTUP_OPS:
+        return _run_cell_once(
+            operation,
+            model,
+            device,
+            pass_type,
+            samples=samples,
+            timeout=timeout,
+            tag=tag,
+            threads=threads,
+        )
+    trials = [
+        _run_cell_once(
+            operation,
+            model,
+            device,
+            pass_type,
+            samples=1,
+            timeout=timeout,
+            tag=f"{tag}-startup-{index}",
+            threads=threads,
+        )
+        for index in range(STARTUP_TRIALS)
+    ]
+    first_failure = next((trial for trial in trials if trial["status"] != "ok"), None)
+    if first_failure is not None:
+        return first_failure
+    timing = {
+        **_stats([trial["timing"]["samples_ms"][0] / 1000 for trial in trials]),
+        **_stats(
+            [trial["timing"]["cpu_samples_ms"][0] / 1000 for trial in trials],
+            prefix="cpu_",
+        ),
+    }
+    return {
+        **trials[0],
+        "timing": timing,
+        "elapsed_s": sum(trial["elapsed_s"] for trial in trials),
+        "metadata": {
+            **trials[0].get("metadata", {}),
+            "independent_startup_trials": STARTUP_TRIALS,
+        },
+    }
+
+
+def _run_cell_once(
+    operation: str,
+    model: str,
+    device: str,
+    pass_type: str,
+    *,
+    samples: int,
+    timeout: int,
+    tag: str,
+    threads: int = 4,
+) -> dict[str, Any]:
+    """Run one benchmark subprocess and return its result.
+
+    Parameters
+    ----------
+    operation:
+        Operation identifier.
+    model:
+        Model identifier.
+    device:
+        Device name.
+    pass_type:
+        ``"timing"`` or ``"memory"``.
+    samples:
+        Timing sample count.
+    timeout:
+        Subprocess timeout in seconds.
+    tag:
+        Output filename tag.
+    threads:
+        Torch intra-op thread pin forwarded to the runner.
 
     Returns
     -------

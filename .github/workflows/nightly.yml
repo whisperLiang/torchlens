@@ -128,6 +128,11 @@ jobs:
         env:
           PERF_PYTHON: ${{ runner.temp }}/perf-venv/bin/python
         run: |
+          # Use the same benchmark orchestration for every checkout. Its
+          # startup rows require independent fresh processes; each checkout's
+          # own perf_runner still exercises that revision's implementation.
+          cp "$GITHUB_WORKSPACE/benchmarks/perf_suite.py" "${{ runner.temp }}/perf-base/benchmarks/perf_suite.py"
+          cp "$GITHUB_WORKSPACE/benchmarks/perf_suite.py" "${{ runner.temp }}/perf-anchor/benchmarks/perf_suite.py"
           cd "${{ runner.temp }}/perf-base"
           PYTHONPATH=. "$PERF_PYTHON" -m benchmarks.perf_suite \
             --smoke --samples 10 --timeout 180 \
