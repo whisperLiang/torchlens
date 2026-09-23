@@ -231,14 +231,21 @@ class TestCensusReportGenerator:
         )
         assert payload["rows"][0]["product"] == "row green"
 
-    def test_criteria_2_through_4_refuse_without_plane_p(self):
+    def test_criteria_2_through_4_refuse_without_plane_p(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A green can never be vacuous: unarmed captures carry no plane-P
         journal, so requesting criteria 2-4 on one raises instead of
         silently passing (the wave-0 honesty property, wave-1 form)."""
 
         lifecycle.disarm()
+        # Other tests may leave a process group initialized. Capture entry
+        # would then auto-arm again, so hold this test on the explicitly
+        # unarmed path it is meant to exercise.
+        monkeypatch.setattr(lifecycle, "maybe_auto_arm", lambda: None)
         with pytest.raises(NotImplementedError, match="C2"):
             run_census_row("A1", _dense_model, _dense_input, criteria=(1, 2, 3, 4))
+        assert not lifecycle.is_armed()
 
 
 # ===========================================================================
