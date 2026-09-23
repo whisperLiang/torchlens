@@ -5,9 +5,12 @@ This package snapshots every declared FIELD_ORDER field and every public
 ``Module``, ``ModuleCall``, ``Param``, ``Buffer``, ``GradFn``, ``GradFnCall``,
 ``BackwardPass``, ``FuncCallLocation``) across the capture, pickle round-trip,
 ``.tlspec`` save/load, fork, and run lifecycle stages, and compares the
-canonical serialization byte-for-byte against committed goldens. Storage
-re-plumbing phases are judged against these goldens: any diff is a public
-behavior change and must be root-caused, never re-snapshotted to pass.
+canonical serialization byte-for-byte against committed goldens after masking
+only floating tensor byte hashes, which vary with CPU kernels across machines.
+Digest presence, non-floating values, and the rest of the public surface
+remain exact; independent same-run workers must still agree on the full raw
+snapshot. Storage re-plumbing diffs must be root-caused, never re-snapshotted
+merely to pass.
 """
 
 from __future__ import annotations

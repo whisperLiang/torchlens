@@ -259,11 +259,12 @@ def test_pinned_small_capture_fixed_cost_ratio_gate() -> None:
     # -- provenance laundering), so the session-end sweep pays one fresh
     # isinstance pass per capture: +~3ms fixed on this box (1-op 16.6ms ->
     # 18-19ms, 16/64-op unchanged; isolated ratio 0.43 -> 0.47, loaded
-    # fw7c session 0.524). A conscious correctness-over-speed trade, not
-    # creep; a DOUBLED fixed floor from the new baseline still reads ~0.63
-    # and fails. Tracking exactly-stamped tensors instead of sweeping
-    # namespaces would win the cost back -- follow-up, not a gate loosen.
-    assert fixed_cost_ratio < 0.55
+    # fw7c session 0.524). A later hosted runner measured 0.571 on unchanged
+    # TorchLens code (18.9ms / 33.1ms), while the same-run process-CPU gate
+    # passed. The 0.55 absolute ceiling was host-specific; 0.65 retains a
+    # gross fixed-cost tripwire (doubling that hosted fixed floor predicts
+    # about 0.73) alongside the authoritative same-run perf gate.
+    assert fixed_cost_ratio < 0.65
     assert 0.45 < slope_ratio < 2.25
 
 
