@@ -963,14 +963,17 @@ def test_in_forward_mutation_ceilings_every_run(model_cls: type, tmp_path: Path)
     The held-reference spelling and the ``fork_rng`` restore are witnessed identically
     to the module-attr spelling.
     """
-    trace = _capture(model_cls(), torch.tensor([2.0]), seed=1)
+    x = torch.tensor([2.0])
+    trace = _capture(model_cls(), x, seed=1)
     profile = build_sparse_run_descriptor(trace).rng_profile
     assert profile.host_rng_consumed is True
     assert profile.capture_seed is None
     assert trace._runnable.host_rng_channels
-    result = _roundtrip_run(
-        model_cls(), torch.tensor([2.0]), capture_seed=1, run_seed=1, tmp=tmp_path
-    )
+    # Reuse the profiled capture; a second identical capture made this whole
+    # three-cell smoke family exceed its aggregate CPU budget on CI.
+    path = tmp_path / "torch_rng.tlspec"
+    trace.save(path, level="runnable", include_activations=True)
+    result = tl.load(path).run(inputs=x, seed=1)
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
 

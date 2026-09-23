@@ -29,6 +29,15 @@ def _run_worker(model_axes: tuple[str, ...]) -> dict[str, str]:
     """Generate canonical dumps in one isolated Python subprocess."""
 
     env = dict(os.environ)
+    # The committed 2.8 CPU goldens were recorded with AVX2 kernels. A runner
+    # offering a newer ISA can produce different float bytes for convolution
+    # and attention while all structural fields remain identical. Pin both
+    # ATen and oneDNN before the worker imports torch.
+    import torch
+
+    if torch.__version__ == "2.8.0+cpu":
+        env["ATEN_CPU_CAPABILITY"] = "avx2"
+        env["ONEDNN_MAX_CPU_ISA"] = "AVX2"
     existing_pythonpath = env.get("PYTHONPATH")
     python_paths = (str(_ROOT / "tests"), str(_ROOT))
     env["PYTHONPATH"] = os.pathsep.join(
