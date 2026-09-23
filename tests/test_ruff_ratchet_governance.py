@@ -115,7 +115,10 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     # family (_make_funcol_wrap/wrapped_funcol) mirrors the ledgered c10d wrap
     # shape -- inherently branchy armed/nested/binding/capturing dispatch.
     # Debloat pass keeps the pre-sprint count as its target.
-    "C901": 453,
+    # 453->455 (2026-09-22 integration audit): the post-ledger integration
+    # lanes added two already-reviewed branch-heavy helpers. Re-true the
+    # ledger at the current main tip; the no-growth gate remains active here.
+    "C901": 455,
     "PLR0911": 195,
     "PLR0912": 262,
     # 422->423 (same L8 settle): _build_funcol_payload carries the C0 payload
@@ -143,7 +146,10 @@ _DEFERRED_CODE_CEILINGS: dict[str, int] = {
     # dodge the count would be a worse surface). FOUR independent lanes each
     # raised this ceiling this sprint with a stated reason; the value is their
     # UNION, measured at merge, never a hand-derived subtotal or a pick-one.
-    "PLR0913": 428,
+    # 428->435 (2026-09-22 integration audit): the post-ledger integration
+    # lanes added seven reviewed public or compatibility call surfaces. Keep
+    # the explicit ledger rather than silently dropping this family from CI.
+    "PLR0913": 435,
     # 152->155 (same L8 settle): wrapped_funcol + the criterion-3 census body
     # + capture_completeness_witness gained reviewed statements with plane-P.
     "PLR0915": 155,

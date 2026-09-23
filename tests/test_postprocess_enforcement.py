@@ -45,6 +45,13 @@ EXPECTED_PHANTOM_WRITES = {
 #: reviewed, never silent.
 EXPECTED_PHANTOM_READS = {
     ("6", "equivalence_class"),
+    # Step 13 keeps these identity fields available to the row-finalization
+    # contract, but the exercised matrix paths do not materialize a row that
+    # reads them.  Keep the residual explicit so a future read-coverage change
+    # is surfaced instead of silently widening the declaration.
+    ("13", "device_ref"),
+    ("13", "label"),
+    ("13", "raw_index"),
 }
 
 #: Writers whose intercepted writes are never content-effective on ANY

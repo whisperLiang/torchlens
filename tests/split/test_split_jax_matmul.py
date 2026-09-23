@@ -13,6 +13,8 @@ from v2_helpers import split_request
 import torchlens as tl
 from torchlens.split._jax_capture import batch_stable_matmul
 
+pytestmark = pytest.mark.backend_jax
+
 
 def _jax_matmul_bindings() -> list[tuple[Any, str]]:
     """Identify public and installed operator bindings for restoration assertions.
@@ -137,7 +139,7 @@ def test_jax_matmul_operators_preserve_batch_axes_eager_and_traced(
             left = np.arange(batch * 6, dtype=np.float32).reshape(batch, 2, 3)
             right = jnp.arange(batch * 12, dtype=jnp.float32).reshape(batch, 3, 4)
 
-            def product(x: Any) -> Any:
+            def product(x: Any, *, left: Any = left, right: Any = right) -> Any:
                 """Exercise a tracer as the operator receiver.
 
                 Parameters

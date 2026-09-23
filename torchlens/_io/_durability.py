@@ -32,7 +32,11 @@ def fsync_file(path: Path) -> None:
         File whose contents must be durable. Failures propagate as ``OSError``.
     """
 
-    fd = os.open(path, os.O_RDONLY)
+    # Windows rejects ``FlushFileBuffers`` on a read-only descriptor (the
+    # ``os.fsync`` wrapper reports ``EBADF``). Staging files are writable, so
+    # use a read/write handle there; Unix keeps the cheaper read-only open.
+    flags = os.O_RDWR if os.name == "nt" else os.O_RDONLY
+    fd = os.open(path, flags)
     try:
         os.fsync(fd)
     finally:

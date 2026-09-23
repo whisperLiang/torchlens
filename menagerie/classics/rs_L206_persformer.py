@@ -75,11 +75,27 @@ def homography_crop_resize(org_img_size, crop_y, resize_img_size):
 
 
 def homography_ipmnorm2g(top_view_region):
-    import cv2
-
     src = np.float32([[0, 0], [1, 0], [0, 1], [1, 1]])
-    H_ipmnorm2g = cv2.getPerspectiveTransform(src, np.float32(top_view_region))
-    return H_ipmnorm2g
+    dst = np.float32(top_view_region)
+    try:
+        import cv2
+    except ModuleNotFoundError:
+        # OpenCV is only a convenience dependency for this four-point
+        # transform.  Keep catalog/model construction usable in the base
+        # environment with the equivalent normalized DLT solve.
+        matrix = []
+        rhs = []
+        for (x, y), (u, v) in zip(src, dst):
+            matrix.extend(
+                (
+                    [x, y, 1, 0, 0, 0, -u * x, -u * y],
+                    [0, 0, 0, x, y, 1, -v * x, -v * y],
+                )
+            )
+            rhs.extend((u, v))
+        coefficients = np.linalg.solve(np.asarray(matrix), np.asarray(rhs))
+        return np.append(coefficients, 1.0).reshape(3, 3)
+    return cv2.getPerspectiveTransform(src, dst)
 
 
 def weights_init_normal(m):

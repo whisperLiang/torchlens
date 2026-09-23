@@ -819,7 +819,11 @@ _TORCHLENS_PKG_DIR = Path(__file__).resolve().parent.parent
 # C-backed user-op failures surface with the wrapper trampoline as their
 # innermost Python frame; those lines execute the USER's op, so they classify
 # as USER_OP, not TORCHLENS. Matched on source text to survive line drift.
-_TRAMPOLINE_SOURCE_MARKER = "out_orig = func("
+# Both the ordinary wrapper and the optional completeness witness invoke the
+# user's callable from a TorchLens frame.  A failure raised by a C-backed
+# operator has no user frame of its own, so these source markers are the
+# bridge that keeps the failure attributed to the user's operation.
+_USER_OP_BRIDGE_MARKERS = ("out_orig = func(", "result = func(*args")
 
 
 def _frame_zone(filename: str) -> str:
@@ -897,7 +901,7 @@ def classify_failure_origin(exc: BaseException) -> FailureOrigin:
             return FailureOrigin.USER_OP
         if zone == "torchlens":
             line = frame.line or ""
-            if _TRAMPOLINE_SOURCE_MARKER in line:
+            if any(marker in line for marker in _USER_OP_BRIDGE_MARKERS):
                 return FailureOrigin.USER_OP
             return FailureOrigin.TORCHLENS
     return FailureOrigin.UNKNOWN

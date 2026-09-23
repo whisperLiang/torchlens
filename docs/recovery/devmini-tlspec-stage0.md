@@ -60,7 +60,7 @@ values, and arbitrary enums.
 
 Frozen future signatures:
 
-```python
+```text
 Trace.run(
     inputs: Any,
     *,

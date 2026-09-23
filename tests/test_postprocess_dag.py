@@ -277,6 +277,18 @@ PHANTOM_READ_EXEMPTIONS = {
         "strip), guarded by the same unreachability as the ('6', 'address') "
         "phantom write — the two rows retire together"
     ),
+    ("13", "device_ref"): (
+        "step 13 declares the identity field for row-finalization compatibility, "
+        "but no exercised matrix path materializes a row that reads it"
+    ),
+    ("13", "label"): (
+        "step 13 declares the identity field for row-finalization compatibility, "
+        "but no exercised matrix path materializes a row that reads it"
+    ),
+    ("13", "raw_index"): (
+        "step 13 declares the identity field for row-finalization compatibility, "
+        "but no exercised matrix path materializes a row that reads it"
+    ),
 }
 
 

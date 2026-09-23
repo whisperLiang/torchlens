@@ -6000,6 +6000,14 @@
   "via_getattr": false
  },
  {
+  "ambiguous": false,
+  "field": "source_trace",
+  "file": "torchlens/split/_torch_compact.py",
+  "has_default": true,
+  "sites": 1,
+  "via_getattr": true
+ },
+ {
   "ambiguous": true,
   "field": "parents",
   "file": "torchlens/split/_torch_liveness.py",

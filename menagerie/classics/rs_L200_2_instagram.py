@@ -53,7 +53,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import cv2
 from copy import deepcopy
 from torch import Tensor
 from torchvision.models.resnet import resnet18
@@ -303,6 +302,8 @@ class IPM(nn.Module):
         tri_mask = np.zeros((self.h, self.w))
         vertices = np.array([[0, 0], [0, self.h], [self.w, self.h]], np.int32)
         pts = vertices.reshape((-1, 1, 2))
+        import cv2
+
         cv2.fillPoly(tri_mask, [pts], color=1.0)
         self.tri_mask = torch.tensor(tri_mask[None, :, :, None])
         self.flipped_tri_mask = torch.flip(self.tri_mask, [2]).bool()

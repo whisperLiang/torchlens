@@ -379,3 +379,11 @@ env: py3.11-torch2.14.0
 torch: 2.14.0+cpu
 source: 25b9dc9817a8a5740aa031d5e64e8defdbb8b034 (dirty)
 recorded: 2026-09-18T02:28:35.259324+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: Refresh the reviewed producer static scan after the current source tree changed.
+env: py3.11-torch2.8.0
+torch: 2.8.0+cpu
+source: 281aa36c6e63874dd39c259fdc85f832a2d1569c (dirty)
+recorded: 2026-09-22T11:01:22.162824+00:00

@@ -45,7 +45,8 @@ jobs:
             --extra-index-url https://pypi.org/simple \
             --index-strategy unsafe-best-match \
             -e "${{ matrix.extras }}" "${{ matrix.transformers }}" \
-            "torch==2.8.0+cpu" "torchvision==0.23.0+cpu"
+            "torch==2.8.0+cpu" "torchvision==0.23.0+cpu" "torchaudio==2.8.0+cpu" \
+            "opencv-python-headless>=4.8,<5"
           uv pip check --system
       - name: Verify RFDETR imports in the same Transformers 5 environment
         if: matrix.major == '5'
@@ -200,7 +201,8 @@ jobs:
             --extra-index-url https://pypi.org/simple \
             --index-strategy unsafe-best-match \
             -e ".[dev,test,tabular]" \
-            "torch==2.8.0+cpu" "torchvision==0.23.0+cpu"
+            "torch==2.8.0+cpu" "torchvision==0.23.0+cpu" "torchaudio==2.8.0+cpu" \
+            "opencv-python-headless>=4.8,<5"
           uv pip check
           python -c 'import torch, torchvision; assert torch.__version__ == "2.8.0+cpu", torch.__version__; assert torchvision.__version__ == "0.23.0+cpu", torchvision.__version__'
 
@@ -307,7 +309,9 @@ jobs:
             --index-strategy unsafe-best-match \
             -e ".[dev,test,tabular]" \
             "torch==2.8.0+cpu" \
-            "torchvision==0.23.0+cpu"
+            "torchvision==0.23.0+cpu" \
+            "torchaudio==2.8.0+cpu" \
+            "opencv-python-headless>=4.8,<5"
           uv pip check
 
       - name: Run the smoke tier under coverage with a floor
@@ -809,7 +813,9 @@ jobs:
           # CPU, so MPS had ZERO executable coverage while device-specific
           # claims ship. On the Apple-silicon runner the capability assertion
           # is HARD (it cannot vacuously skip): MPS must be available, and a
-          # capture + save/load round-trip must work on it. CUDA remains
+          # capture must work on it. Portable save/load remains covered by
+          # the CPU trace above because MPS payloads are not a supported
+          # bundle format. CUDA remains
           # CI-dark by disclosed limitation (no GPU runners; see
           # docs/reference/limitations.md "CI-attested platforms").
           import platform
@@ -823,11 +829,6 @@ jobs:
               mps_input = torch.randn(2, 4, device="mps")
               mps_trace = tl.trace(mps_model, mps_input, save=tl.func("relu"))
               assert mps_trace["relu_1_2"].out.device.type == "mps"
-              with tempfile.TemporaryDirectory() as tmp:
-                  mps_path = os.path.join(tmp, "canary-mps.tlspec")
-                  tl.save(mps_trace, mps_path)
-                  mps_loaded = tl.load(mps_path)
-                  assert mps_loaded.layer_labels == mps_trace.layer_labels
               print("mps canary OK")
 
           print("platform canary OK:", tl.__version__)
@@ -866,7 +867,9 @@ jobs:
             --index-strategy unsafe-best-match \
             -e ".[dev,test,tabular]" \
             "torch==2.8.0+cpu" \
-            "torchvision==0.23.0+cpu"
+            "torchvision==0.23.0+cpu" \
+            "torchaudio==2.8.0+cpu" \
+            "opencv-python-headless>=4.8,<5"
           uv pip check
 
       - name: Smoke tier under three fresh shuffle seeds

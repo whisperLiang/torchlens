@@ -238,6 +238,10 @@ test = [
     "soxr",
     "timm~=1.0",
     "torchaudio",
+    # The menagerie classics include a CPU-importable OpenCV preprocessing
+    # path. Keep the headless wheel in the full test extra so catalog tests
+    # cannot fail merely because the optional GUI wheel was omitted.
+    "opencv-python-headless>=4.8,<5",
     "torch_geometric",
     "torchvision>=0.18,<1",
     # menagerie catalog machinery (menagerie/schema.py, menagerie/envs.py,

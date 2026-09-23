@@ -2,13 +2,51 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from functools import wraps
 from threading import RLock
 from typing import Any
 
 _MATMUL_CAPTURE_LOCK = RLock()
+
+
+def _operator_dispatch(operators: Any, name: str, matmul: Callable[..., Any]) -> Any:
+    """Build the installed JAX dispatch wrapper for a matmul direction.
+
+    Parameters
+    ----------
+    operators:
+        JAX's private array-methods module.
+    name:
+        ``matmul`` or ``rmatmul``.
+    matmul:
+        Scoped batch-stable matmul implementation.
+
+    Returns
+    -------
+    Any
+        A callable suitable for an array or abstract-value descriptor.
+    """
+
+    defer = getattr(operators, "_defer_to_unrecognized_arg", None)
+    if defer is not None:
+        return defer("@", matmul, swap=name == "rmatmul")
+
+    # JAX 0.11 removed the private closure factory and exposes the already
+    # installed operators instead. They resolve tensor_contractions.matmul at
+    # call time, so they naturally use the scoped implementation above. Wrap
+    # them to give each capture a fresh descriptor and preserve restoration
+    # checks, while retaining JAX's accepted-operand policy.
+    native_operator = getattr(operators, f"_operator_{name}")
+
+    @wraps(native_operator)
+    def dispatch(a: Any, b: Any) -> Any:
+        """Delegate operands to JAX's native operator implementation."""
+
+        return native_operator(a, b)
+
+    return dispatch
 
 
 @contextmanager
@@ -99,10 +137,15 @@ def _patched_matmul() -> Iterator[None]:
     try:
         contractions.matmul = matmul
         jnp.matmul = matmul
-        for name, swap in (("matmul", False), ("rmatmul", True)):
+        for name in ("matmul", "rmatmul"):
             # Reuse JAX's operand dispatch so reflected operations, __jax_array__,
             # rejected container types and NotImplemented retain native behavior.
-            operator = operators._defer_to_unrecognized_arg("@", matmul, swap=swap)
+            # JAX 0.11 removed the private ``_defer_to_unrecognized_arg`` helper
+            # and replaced it with the explicit ``_operator_*`` functions.  The
+            # latter are preferable where available: they contain JAX's current
+            # accepted-operand and ``__jax_array__`` policy, while their matmul
+            # call still resolves through the patched tensor_contractions module.
+            operator = _operator_dispatch(operators, name, matmul)
             for owner, attribute, replacement in (
                 (ArrayImpl, f"__{name}__", operator),
                 (getattr(core, "ShapedArray", None), f"_{name}", staticmethod(operator)),

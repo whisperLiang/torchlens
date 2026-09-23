@@ -36,6 +36,7 @@ DOC_FILES = (
     "reference/export.md",
     "reference/attribution.md",
     "reference/collapse.md",
+    "reference/split_memory.md",
 )
 BLOCK_RE = re.compile(r"```python\n(?P<code>.*?)\n```", re.DOTALL)
 
