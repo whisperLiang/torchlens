@@ -198,7 +198,9 @@ def compare_gate_payloads(
                 uncomparable.append(_key_dict(key))
             continue
         checks.append(check)
-        if not check["passed"]:
+        # Pure-torch and peer rows diagnose runner drift; they do not exercise
+        # TorchLens and cannot establish a TorchLens performance regression.
+        if not check["passed"] and _is_torchlens_operation(key[2]):
             regressions.append(check)
     # R28: the per-row wall-clock fallback exists for pre-CPU-metric
     # payloads, but a STALE baseline with zero cpu_* rows silently judged

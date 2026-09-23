@@ -268,7 +268,7 @@ def _measure_deferred_codes() -> Counter[str]:
 
     excludes: list[str] = []
     for pattern in _configured_extend_excludes():
-        excludes.extend(("--extend-exclude", pattern))
+        excludes.extend(("--extend-exclude", str(_PROJECT_ROOT / pattern)))
     counts: Counter[str] = Counter()
     scoped = {
         "ci-scope": [code for code in _DEFERRED_CODE_CEILINGS if code not in _PACKAGE_ONLY_CODES],
@@ -277,7 +277,8 @@ def _measure_deferred_codes() -> Counter[str]:
     for scope_name, codes in scoped.items():
         if not codes:
             continue
-        paths = _CI_SCOPE if scope_name == "ci-scope" else ("torchlens",)
+        relative_paths = _CI_SCOPE if scope_name == "ci-scope" else ("torchlens",)
+        paths = [str(_PROJECT_ROOT / path) for path in relative_paths]
         completed = subprocess.run(
             [
                 sys.executable,
@@ -295,7 +296,10 @@ def _measure_deferred_codes() -> Counter[str]:
             ],
             capture_output=True,
             text=True,
-            cwd=_PROJECT_ROOT,
+            # Ruff runs after frameworks may have started native threads.
+            # Absolute paths plus inherited cwd/FDs let subprocess use
+            # posix_spawn instead of forking that multithreaded process.
+            close_fds=False,
             timeout=300,
         )
         assert completed.returncode in (0, 1), (

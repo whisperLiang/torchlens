@@ -492,6 +492,34 @@ def test_perf_gate_compare_fails_regression_beyond_tolerance() -> None:
     assert comparison["regressions"][0]["delta_ms"] == 30.0
 
 
+def test_pure_torch_slowdown_is_diagnostic_without_blocking() -> None:
+    """A noisy raw-forward control cannot fail a passing TorchLens comparison."""
+
+    baseline = _payload(
+        [
+            _row("resnet18", "cpu", "raw_forward", 4.0, cpu_median_ms=4.0, cpu_iqr_ms=0.1),
+            _row("resnet18", "cpu", "tl_trace", 100.0, cpu_median_ms=100.0, cpu_iqr_ms=1.0),
+        ]
+    )
+    current = _payload(
+        [
+            _row("resnet18", "cpu", "raw_forward", 6.0, cpu_median_ms=6.0, cpu_iqr_ms=0.1),
+            _row("resnet18", "cpu", "tl_trace", 100.0, cpu_median_ms=100.0, cpu_iqr_ms=1.0),
+        ]
+    )
+
+    comparison = compare_gate_payloads(baseline, current)
+
+    assert comparison["passed"] is True
+    assert comparison["regressions"] == []
+    assert (
+        next(check for check in comparison["checks"] if check["operation"] == "raw_forward")[
+            "passed"
+        ]
+        is False
+    )
+
+
 def test_perf_gate_requires_current_torchlens_rows_ok() -> None:
     """Regression gate rejects skipped or errored current TorchLens rows."""
 
