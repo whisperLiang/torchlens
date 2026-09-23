@@ -134,6 +134,7 @@ def _pixel_similarity(candidate_path: Path, reference_path: Path) -> float:
     return max(0.0, 1.0 - (mean_abs / 255.0))
 
 
+@pytest.mark.heavy
 @pytest.mark.xfail(
     strict=False,
     reason=(
