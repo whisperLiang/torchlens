@@ -20,6 +20,7 @@ measurably (140 → 141 → 143 across three hunt passes) with nobody measuring.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -300,6 +301,9 @@ def _measure_deferred_codes() -> Counter[str]:
             # Absolute paths plus inherited cwd/FDs let subprocess use
             # posix_spawn instead of forking that multithreaded process.
             close_fds=False,
+            # A parallel Ruff scan intermittently SIGSEGVs on high-core CI
+            # hosts; one worker yields the same counts deterministically.
+            env={**os.environ, "RAYON_NUM_THREADS": "1"},
             timeout=300,
         )
         assert completed.returncode in (0, 1), (
