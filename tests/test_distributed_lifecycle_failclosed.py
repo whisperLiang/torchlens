@@ -18,6 +18,8 @@ Two fail-open holes are pinned shut here:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -82,7 +84,15 @@ class TestArmEpochProbeFailClosed:
             assert record.install_epoch == "seeded"
         assert torch.distributed.distributed_c10d._world is real_world
 
-    def test_clean_empty_registry_still_proves_the_negative(self, clean_lifecycle):
+    def test_clean_empty_registry_still_proves_the_negative(
+        self, clean_lifecycle, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Disarming TorchLens does not clear groups left by another test.
+        # Control both PyTorch probes so this case exercises the empty branch.
+        monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+        monkeypatch.setattr(
+            torch.distributed.distributed_c10d, "_world", SimpleNamespace(pg_map={})
+        )
         record = lifecycle.arm()
         assert record.install_epoch == "armed_before_any_group"
 
