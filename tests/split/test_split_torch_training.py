@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 
+import pytest
 import torch
 from torch import nn
 from v2_helpers import split_request
@@ -99,6 +100,28 @@ def test_full_split_training_gradient_handoff() -> None:
     assert torch.allclose(loss.detach(), full_loss.detach(), atol=1e-5, rtol=1e-4)
     for left, right in zip(_params(split_model), _params(model), strict=True):
         assert torch.allclose(left, right, atol=1e-5, rtol=1e-4)
+
+
+def test_training_reuses_strict_boundary_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The optimized training path fingerprints a borrowed boundary only once."""
+
+    model = TrainMlp()
+    x = torch.randn(4, 4)
+    y = torch.randn(4, 3)
+    runtime = tl.split.prepare(model, x, split_request("after:relu", trainable=True))
+    boundary = runtime.run_prefix(x)
+    calls = 0
+    original = runtime._state_fingerprint
+
+    def counted(prefix_kind: str) -> str | None:
+        nonlocal calls
+        calls += 1
+        return original(prefix_kind)
+
+    monkeypatch.setattr(runtime, "_state_fingerprint", counted)
+    runtime.train_suffix(boundary, y)
+
+    assert calls == 1
 
 
 def test_nondifferentiable_boundary_is_skipped() -> None:

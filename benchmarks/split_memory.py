@@ -14,9 +14,11 @@ import gc
 import json
 import os
 import resource
+import statistics
 import sys
 import time
 from contextlib import nullcontext
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +53,64 @@ def _storage_bytes(values: list[Any]) -> int:
     return sum(storages.values())
 
 
+def _latency_samples(
+    workloads: dict[str, Any], *, torch: Any, cuda: bool, runs: int
+) -> dict[str, Any]:
+    """Time warmed workloads in interleaved rounds with device synchronization.
+
+    Parameters
+    ----------
+    workloads
+        Named zero-argument execution paths.
+    torch
+        Active PyTorch module.
+    cuda
+        Whether GPU work must be synchronized around each sample.
+    runs
+        Number of timed samples per path.
+
+    Returns
+    -------
+    dict
+        Per-path samples and median/p5/p95 wall-clock milliseconds.
+    """
+
+    def sync() -> None:
+        """Drain pending GPU kernels before reading the host clock."""
+
+        if cuda:
+            torch.cuda.synchronize()
+
+    for _ in range(3):
+        for workload in workloads.values():
+            workload()
+    sync()
+    gc.collect()
+    samples: dict[str, list[float]] = {name: [] for name in workloads}
+    gc.disable()
+    try:
+        for _ in range(runs):
+            for name, workload in workloads.items():
+                sync()
+                started = time.perf_counter()
+                output = workload()
+                sync()
+                samples[name].append((time.perf_counter() - started) * 1000)
+                del output
+    finally:
+        gc.enable()
+    result: dict[str, Any] = {}
+    for name, values in samples.items():
+        ordered = sorted(values)
+        result[name] = {
+            "median_ms": statistics.median(values),
+            "p5_ms": ordered[int(0.05 * (runs - 1))],
+            "p95_ms": ordered[int(0.95 * (runs - 1))],
+            "samples_ms": values,
+        }
+    return result
+
+
 def main() -> None:
     """Capture once, measure representative replays, and compare native output."""
 
@@ -59,7 +119,29 @@ def main() -> None:
     parser.add_argument("--source-root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--capture-grad", action="store_true")
     parser.add_argument("--retain-trace", action="store_true")
+    parser.add_argument(
+        "--latency-runs",
+        type=int,
+        default=0,
+        help="Measure warmed forward/prefix/suffix/replay latency at the 50%% split point.",
+    )
+    parser.add_argument(
+        "--compare-replay-fingerprint",
+        action="store_true",
+        help="Also time replay with the prior one-fingerprint path.",
+    )
+    parser.add_argument(
+        "--compare-trusted-boundary",
+        action="store_true",
+        help="Also time public prefix/suffix calls with explicit state checks disabled.",
+    )
     args = parser.parse_args()
+    if args.latency_runs < 0:
+        parser.error("--latency-runs must be nonnegative")
+    if args.compare_replay_fingerprint and not args.latency_runs:
+        parser.error("--compare-replay-fingerprint requires --latency-runs")
+    if args.compare_trusted_boundary and not args.latency_runs:
+        parser.error("--compare-trusted-boundary requires --latency-runs")
     sys.path.insert(0, str(args.source_root.resolve()))
     weights_dir = Path(
         os.environ.setdefault(
@@ -178,6 +260,62 @@ def main() -> None:
                 "replay", point=point.as_boundary(), elapsed_seconds=time.perf_counter() - started
             )
             del actual, replay
+        if args.latency_runs:
+            latency_input = inputs
+            expected_latency = model(latency_input)
+            latency_boundary = runtime.run_prefix(latency_input)
+            actual_latency = runtime.run_suffix(latency_boundary)
+            expected_leaves = _tensor_leaves(expected_latency, torch)
+            actual_leaves = _tensor_leaves(actual_latency, torch)
+            if len(expected_leaves) != len(actual_leaves):
+                raise AssertionError("Split output tensor count differs from native forward.")
+            for left, right in zip(actual_leaves, expected_leaves, strict=True):
+                torch.testing.assert_close(left, right, atol=1e-4, rtol=1e-3)
+            workloads = {
+                "forward": partial(model, latency_input),
+                "prefix": partial(runtime.run_prefix, latency_input),
+                "suffix": partial(runtime.run_suffix, latency_boundary),
+                "replay": partial(runtime.replay, latency_input),
+            }
+            if args.compare_trusted_boundary:
+                trusted_boundary = runtime.run_prefix(latency_input, check_state=False)
+                trusted_output = runtime.run_suffix(trusted_boundary, check_state=False)
+                for left, right in zip(
+                    _tensor_leaves(trusted_output, torch), expected_leaves, strict=True
+                ):
+                    torch.testing.assert_close(left, right, atol=1e-4, rtol=1e-3)
+                workloads["prefix_trusted"] = partial(
+                    runtime.run_prefix, latency_input, check_state=False
+                )
+                workloads["suffix_trusted"] = partial(
+                    runtime.run_suffix, trusted_boundary, check_state=False
+                )
+            if args.compare_replay_fingerprint:
+
+                def replay_with_state_fingerprint(target_runtime: Any = runtime) -> Any:
+                    """Run the previous replay path with one state hash."""
+
+                    boundary = target_runtime.run_prefix(latency_input)
+                    target_runtime.validate_boundary(boundary, validate_state=False)
+                    boundary = target_runtime._transport_boundary(
+                        boundary, target_runtime.placement.suffix
+                    )
+                    return target_runtime.segments.suffix(boundary)
+
+                workloads["replay_with_state_fingerprint"] = replay_with_state_fingerprint
+            timings = _latency_samples(workloads, torch=torch, cuda=cuda, runs=args.latency_runs)
+            snapshot(
+                "latency",
+                batch_size=int(latency_input.shape[0]),
+                split_point=runtime.request.boundary,
+                output_tensor_leaves=len(expected_leaves),
+                max_abs_error=max(
+                    float((left - right).abs().max())
+                    for left, right in zip(actual_leaves, expected_leaves, strict=True)
+                ),
+                runs=args.latency_runs,
+                timings=timings,
+            )
     del expected, replay_input
     if retained_trace:
         runtime.trace.cleanup()

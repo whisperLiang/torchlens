@@ -359,6 +359,8 @@ class SplitRuntime:
         suffix_getter = getattr(self.segments.suffix, "bound_state_values", None)
         with pause_logging():
             if callable(prefix_getter) and callable(suffix_getter):
+                # Tensor versions do not cover writes through .data or storage
+                # aliases. Strict boundary reuse must inspect the actual values.
                 return _state_values_fingerprint({**prefix_getter(), **suffix_getter()})
             return _model_state_fingerprint(self.model)
 
@@ -438,8 +440,24 @@ class SplitRuntime:
         self,
         *inputs: Any,
         input_kwargs: dict[str, Any] | None = None,
+        check_state: bool = True,
     ) -> ReplayBoundary:
-        """Run the detached inference prefix."""
+        """Run the detached inference prefix.
+
+        ``check_state=False`` omits the reusable boundary's state fingerprint.
+        Use it only with ``run_suffix(..., check_state=False)`` when the caller
+        controls state changes between the two calls.
+        """
+
+        return self._run_prefix(*inputs, input_kwargs=input_kwargs, stamp_state=check_state)
+
+    def _run_prefix(
+        self,
+        *inputs: Any,
+        input_kwargs: dict[str, Any] | None,
+        stamp_state: bool,
+    ) -> ReplayBoundary:
+        """Build a prefix boundary, stamping state only when it may escape."""
 
         placed_inputs, placed_kwargs = self._place_inputs(inputs, input_kwargs)
         return self._annotate_boundary(
@@ -447,7 +465,8 @@ class SplitRuntime:
                 *placed_inputs,
                 input_kwargs=placed_kwargs,
                 detach_boundary=True,
-            )
+            ),
+            stamp_state=stamp_state,
         )
 
     def run_training_prefix(
@@ -493,8 +512,10 @@ class SplitRuntime:
         }
         return placed_inputs, placed_kwargs
 
-    def _annotate_boundary(self, boundary: ReplayBoundary) -> ReplayBoundary:
-        """Attach v2 graph/profile/state identity to a backend boundary."""
+    def _annotate_boundary(
+        self, boundary: ReplayBoundary, *, stamp_state: bool = True
+    ) -> ReplayBoundary:
+        """Attach graph/profile identity and optional state identity to a boundary."""
 
         metadata = dict(boundary.metadata)
         if self.graph_ir is not None:
@@ -502,9 +523,10 @@ class SplitRuntime:
             metadata["profile_hash"] = self.graph_ir.profile_hash
         prefix_kind = "training" if metadata.get("supports_prefix_backward") else "inference"
         metadata["state_prefix_kind"] = prefix_kind
-        state_fingerprint = self._state_fingerprint(prefix_kind)
-        if state_fingerprint is not None:
-            metadata["state_fingerprint"] = state_fingerprint
+        if stamp_state:
+            state_fingerprint = self._state_fingerprint(prefix_kind)
+            if state_fingerprint is not None:
+                metadata["state_fingerprint"] = state_fingerprint
         metadata["batch_symbol"] = self.request.batch_symbol
         if self.batch_validation:
             metadata["batch_validation"] = self.batch_validation
@@ -543,18 +565,26 @@ class SplitRuntime:
             program.batch_probe.require_batch(
                 int(batch), backend=self.adapter.name, split_point=self.request.boundary
             )
+        state_fingerprint = (
+            self._state_fingerprint(str(boundary.metadata.get("state_prefix_kind", "inference")))
+            if validate_state
+            else None
+        )
+        if state_fingerprint is not None and "state_fingerprint" not in boundary.metadata:
+            raise SplitBoundaryError(
+                "Replay boundary is missing the state_fingerprint required for strict reuse.",
+                context=SplitErrorContext(
+                    backend=self.adapter.name,
+                    split_point=self.request.boundary,
+                    reason="state_fingerprint missing",
+                ),
+            )
         boundary.validate(
             self.boundary_spec,
             split_id=self.split_id,
             graph_hash=None if self.graph_ir is None else self.graph_ir.graph_hash,
             profile_hash=None if self.graph_ir is None else self.graph_ir.profile_hash,
-            state_fingerprint=(
-                self._state_fingerprint(
-                    str(boundary.metadata.get("state_prefix_kind", "inference"))
-                )
-                if validate_state
-                else None
-            ),
+            state_fingerprint=state_fingerprint,
             shape_program_hash=(
                 None
                 if self.trace_graph.shape_program is None
@@ -564,11 +594,29 @@ class SplitRuntime:
             adapter=self.adapter,
         )
 
-    def run_suffix(self, boundary: ReplayBoundary) -> Any:
-        """Validate and run the suffix from a replay boundary."""
+    def run_suffix(self, boundary: ReplayBoundary, *, check_state: bool = True) -> Any:
+        """Validate and run the suffix from a replay boundary.
 
-        self.validate_boundary(boundary)
-        return self.segments.suffix(self._transport_boundary(boundary, self.placement.suffix))
+        ``check_state=False`` trusts the caller to keep effective state stable
+        since the prefix ran. Structural and tensor boundary checks still run.
+        """
+
+        self.validate_boundary(boundary, validate_state=check_state)
+        return self._run_suffix_unchecked(boundary)
+
+    def _run_suffix_unchecked(self, boundary: ReplayBoundary, *, transported: bool = False) -> Any:
+        """Execute a boundary that was already validated by this runtime.
+
+        This is the internal suffix fast path.  The public ``run_suffix`` keeps
+        all boundary and state checks, while replay and split-training can avoid
+        revalidating a boundary that they created and checked in the same call.
+        """
+
+        # Rebind before entering the suffix so a transported replay does not
+        # retain the source boundary through this helper's argument frame.
+        if not transported:
+            boundary = self._transport_boundary(boundary, self.placement.suffix)
+        return self.segments.suffix(boundary)
 
     def _transport_boundary(
         self,
@@ -604,13 +652,16 @@ class SplitRuntime:
     ) -> Any:
         """Run prefix then suffix."""
 
-        boundary = self.run_prefix(*inputs, input_kwargs=input_kwargs)
-        self.validate_boundary(boundary)
+        boundary = self._run_prefix(*inputs, input_kwargs=input_kwargs, stamp_state=False)
+        # This boundary cannot escape replay(), so state cannot become stale
+        # between the prefix and suffix. Public run_suffix() still rehashes
+        # borrowed or cached boundaries, where state may have changed.
+        self.validate_boundary(boundary, validate_state=False)
         # This boundary belongs to replay(), so replacing the reference after
         # transport releases the source payload before the suffix starts. The
         # public run_suffix(boundary) path continues to borrow caller state.
         boundary = self._transport_boundary(boundary, self.placement.suffix)
-        return self.segments.suffix(boundary)
+        return self._run_suffix_unchecked(boundary, transported=True)
 
     def validate_equivalence(
         self,
@@ -793,14 +844,25 @@ def _state_values_fingerprint(values: dict[str, Any]) -> str:
                 detached = detached.cpu()
             if hasattr(detached, "numpy"):
                 try:
-                    payload = detached.numpy().tobytes()
+                    payload = detached.numpy()
                 except TypeError:
                     # NumPy has no bfloat16 dtype; hash the raw Torch bytes so
                     # updates outside the abbreviated tensor repr stay visible.
                     import torch
 
-                    payload = detached.contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
-                digest.update(payload)
+                    payload = detached.contiguous().reshape(-1).view(torch.uint8).numpy()
+                # hashlib accepts a contiguous buffer directly. Avoid making a
+                # second full-size copy of every parameter on each boundary
+                # stamp and validation; retain the old byte order and digest.
+                if payload.flags.c_contiguous:
+                    try:
+                        digest.update(memoryview(payload))
+                    except (TypeError, ValueError, BufferError):
+                        # Some NumPy dtypes cannot expose a hashable buffer.
+                        # Their previous byte representation remains the ABI.
+                        digest.update(payload.tobytes())
+                else:
+                    digest.update(payload.tobytes())
             else:
                 digest.update(repr(detached).encode("utf-8"))
         except Exception:

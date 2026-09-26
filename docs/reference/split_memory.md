@@ -40,6 +40,14 @@ returns detached boundary tensors. They are ordinary tensors that suffix autogra
 save. `run_training_prefix` preserves the caller's grad mode and graph connection for
 prefix backward, so call it with grad mode enabled when training the prefix.
 
+For repeated inference where the caller keeps model and segment state stable between
+calls, `runtime.run_prefix(x, check_state=False)` followed by
+`runtime.run_suffix(boundary, check_state=False)` skips the full state fingerprint on
+both sides. Graph, shape, dtype, and boundary identity checks still run. The default
+`check_state=True` detects stale reusable boundaries after a state update; it rejects
+a boundary created with `check_state=False`. Use the default for cached boundaries
+and training.
+
 Both `train_suffix` and `train_suffix_result` accept keyword-only options:
 
 | Option | Default | Meaning |
@@ -51,6 +59,17 @@ Both `train_suffix` and `train_suffix_result` accept keyword-only options:
 Microbatch execution returns a detached logical loss. `train_suffix_result` provides the
 same loss and gradients in `TrainingStepResult`, together with optimizer-step status.
 Other backends reject a non-`None` microbatch size with `SplitUnsupportedError`.
+
+The default full-batch `train_suffix` path validates the caller-owned boundary once,
+then runs the root-swapped suffix directly. It does not rehash or revalidate that
+internal boundary for the same step. Public `run_suffix` keeps strict validation for
+boundaries that may have been cached or reused after a state update.
+
+Strict prefix/suffix calls compute a value-sensitive state digest on each call, so
+updates through `.data` or storage aliases still invalidate reusable boundaries.
+This requires reading the effective state, including a device-to-host copy for CUDA
+state. For one-shot inference with stable state, use `replay()` or explicitly opt
+into `check_state=False` on both public calls to skip that cost.
 
 ## Loss and slicing semantics
 

@@ -130,7 +130,7 @@ def test_internal_replay_releases_source_boundary_before_transported_suffix(
     model = LifetimeMlp()
     inputs = torch.randn(3, 4)
     runtime = tl.split.prepare(model, inputs, split_request("after:cut", trainable=True))
-    run_prefix = runtime.run_prefix
+    run_prefix = runtime._run_prefix
     suffix = runtime.segments.suffix
     source_refs: list[weakref.ReferenceType[Any]] = []
     checked = False
@@ -162,7 +162,7 @@ def test_internal_replay_releases_source_boundary_before_transported_suffix(
         checked = True
         return suffix(boundary)
 
-    monkeypatch.setattr(runtime, "run_prefix", observe_prefix)
+    monkeypatch.setattr(runtime, "_run_prefix", observe_prefix)
     monkeypatch.setattr(runtime, "_transport_boundary", copy_transport)
     monkeypatch.setattr(
         runtime,

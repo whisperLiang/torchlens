@@ -13,6 +13,7 @@ from v2_helpers import split_request
 
 import torchlens as tl
 from torchlens.split import BoundarySchema
+from torchlens.split.adapters import torch as torch_adapter
 from torchlens.split.adapters.torch import GeneratedSuffix, _is_template_dict
 from torchlens.split.boundary import ReplayBoundary
 from torchlens.split.errors import SplitUnsupportedError
@@ -57,6 +58,132 @@ class TinyMlp(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc2(self.relu(self.fc1(x)))
+
+
+def test_rng_fast_path_keeps_pure_ops_and_guards_random_ops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deterministic builtins avoid RNG work while random replay remains isolated."""
+
+    class RandomHead(nn.Module):
+        """Place a random draw after a deterministic affine operation."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = nn.Linear(4, 4)
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            """Return a captured random suffix value."""
+
+            return self.linear(value) + torch.rand_like(value)
+
+    inputs = torch.ones(2, 4)
+    runtime = tl.split.prepare(RandomHead().eval(), inputs, split_request("after:linear"))
+    guarded: list[str] = []
+    original = torch_adapter.execute_with_restored_rng_autocast
+
+    def observe(func: Any, args: tuple[Any, ...], kwargs: dict[str, Any], **options: Any) -> Any:
+        """Record calls that still use full RNG isolation."""
+
+        guarded.append(getattr(func, "__name__", ""))
+        return original(func, args, kwargs, **options)
+
+    monkeypatch.setattr(torch_adapter, "execute_with_restored_rng_autocast", observe)
+    before = torch.random.get_rng_state().clone()
+    runtime.replay(inputs)
+    assert torch.equal(torch.random.get_rng_state(), before)
+    assert "rand_like" in guarded
+    assert "linear" not in guarded
+    assert "__add__" not in guarded
+
+
+def test_rng_fast_path_falls_back_under_custom_dispatch_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A user dispatch mode may add side effects to an otherwise pure builtin."""
+
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    class ForwardMode(TorchDispatchMode):
+        """Pass calls through while making custom dispatch visible to replay."""
+
+        def __torch_dispatch__(
+            self, func: Any, types: Any, args: tuple[Any, ...] = (), kwargs: Any = None
+        ) -> Any:
+            """Preserve numerical output while intercepting the call."""
+
+            del types
+            return func(*args, **(kwargs or {}))
+
+    inputs = torch.ones(2, 4)
+    model = TinyMlp().eval()
+    runtime = tl.split.prepare(model, inputs, split_request("after:relu"))
+    guarded: list[str] = []
+    original = torch_adapter.execute_with_restored_rng_autocast
+
+    def observe(func: Any, args: tuple[Any, ...], kwargs: dict[str, Any], **options: Any) -> Any:
+        """Record replay calls routed through the guarded execution path."""
+
+        guarded.append(getattr(func, "__name__", ""))
+        return original(func, args, kwargs, **options)
+
+    monkeypatch.setattr(torch_adapter, "execute_with_restored_rng_autocast", observe)
+    with ForwardMode():
+        actual = runtime.replay(inputs)
+    torch.testing.assert_close(actual, model(inputs))
+    assert "linear" in guarded
+
+
+def test_pure_ops_restore_disabled_autocast_under_enabled_caller() -> None:
+    """A fast deterministic call must still shield capture from caller autocast."""
+
+    model = TinyMlp().eval()
+    inputs = torch.ones(2, 4)
+    runtime = tl.split.prepare(model, inputs, split_request("after:relu"))
+    expected = model(inputs)
+
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        actual = runtime.replay(inputs)
+        assert torch.is_autocast_enabled("cpu")
+
+    assert actual.dtype == expected.dtype == torch.float32
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+def test_conditional_rng_fast_path_requires_disabled_dropout() -> None:
+    """Dropout and attention bypass RNG isolation only with dropout disabled."""
+
+    inputs = torch.ones(2, 4)
+    runtime = tl.split.prepare(TinyMlp().eval(), inputs, split_request("after:relu"))
+    segment = runtime.segments.prefix
+    assert segment._can_skip_rng_guard(segment._dropout_target, (inputs, 0.5, False), {})
+    assert not segment._can_skip_rng_guard(segment._dropout_target, (inputs, 0.5, True), {})
+
+    query = torch.ones(1, 2, 3, 4)
+    args = (query, query, query)
+    assert segment._can_skip_rng_guard(segment._attention_target, args, {"dropout_p": 0.0})
+    assert not segment._can_skip_rng_guard(segment._attention_target, args, {"dropout_p": 0.2})
+
+
+def test_certified_plain_segment_skips_per_call_mode_checks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A certified segment enters the fast path and preserves its output."""
+
+    model = TinyMlp().eval()
+    inputs = torch.ones(2, 4)
+    runtime = tl.split.prepare(model, inputs, split_request("after:relu"))
+    assert runtime.segments.prefix._fast_guard_certified
+    assert runtime.segments.suffix._fast_guard_certified
+
+    def refuse_per_call_guard(*_args: Any, **_kwargs: Any) -> bool:
+        """Expose a missed fast path without changing the replay result."""
+
+        raise AssertionError("Per-call RNG guard ran in a certified segment")
+
+    monkeypatch.setattr(runtime.segments.prefix, "_can_skip_rng_guard", refuse_per_call_guard)
+    monkeypatch.setattr(runtime.segments.suffix, "_can_skip_rng_guard", refuse_per_call_guard)
+    torch.testing.assert_close(runtime.replay(inputs), model(inputs), atol=0, rtol=0)
 
 
 def test_multi_output_boundaries_bind_canonical_values_not_display_labels() -> None:

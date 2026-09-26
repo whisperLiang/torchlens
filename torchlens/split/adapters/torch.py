@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import replace
+from types import BuiltinFunctionType, MethodDescriptorType, WrapperDescriptorType
 from typing import Any
 
+from ... import _state
 from ...intervention.types import LiteralTensor, LiteralValue, ParentRef, Unsupported
 from ...ir.container import (
     DataclassField,
@@ -15,7 +17,12 @@ from ...ir.container import (
     TupleIndex,
     rebuild_container_from_spec,
 )
-from ...utils.rng import execute_with_restored_rng_autocast
+from ...utils._torch_compat import (
+    autocast_is_enabled,
+    get_current_dispatch_mode_stack,
+    get_torch_function_mode_stack_length,
+)
+from ...utils.rng import AutocastRestore, execute_with_restored_rng_autocast
 from .._torch_liveness import release_schedule
 from ..boundary import ReplayBoundary
 from ..errors import SplitErrorContext, SplitUnsupportedError
@@ -95,6 +102,147 @@ def _dtype_name(value: Any) -> str | None:
 
     dtype = getattr(value, "dtype", None)
     return None if dtype is None else str(dtype)
+
+
+def _plain_torch_arguments(value: Any, torch: Any) -> bool:
+    """Accept only built-in argument trees without user tensor dispatch hooks."""
+
+    if isinstance(value, torch.Tensor):
+        return type(value) in (torch.Tensor, torch.nn.Parameter)
+    if type(value) in (tuple, list, torch.Size):
+        return all(_plain_torch_arguments(item, torch) for item in value)
+    if type(value) is dict:
+        return all(
+            _plain_torch_arguments(key, torch) and _plain_torch_arguments(item, torch)
+            for key, item in value.items()
+        )
+    if type(value) is slice:
+        return all(
+            _plain_torch_arguments(item, torch) for item in (value.start, value.stop, value.step)
+        )
+    return value is Ellipsis or type(value) in (
+        bool,
+        int,
+        float,
+        str,
+        type(None),
+        torch.dtype,
+        torch.device,
+        torch.layout,
+        torch.memory_format,
+    )
+
+
+def _plain_replay_template(component: Any, torch: Any) -> bool:
+    """Certify a captured argument tree without resolving any runtime values."""
+
+    if isinstance(component, (ParentRef, ReplayValueRef)):
+        return True
+    if isinstance(component, LiteralTensor):
+        value = component.value
+        return type(value) in (torch.Tensor, torch.nn.Parameter)
+    if isinstance(component, LiteralValue):
+        return _plain_torch_arguments(component.value, torch)
+    if isinstance(component, Unsupported):
+        return False
+    if isinstance(component, tuple):
+        if _is_template_dict(component):
+            return all(
+                _plain_torch_arguments(key, torch) and _plain_replay_template(value, torch)
+                for key, value in component
+            )
+        return all(_plain_replay_template(value, torch) for value in component)
+    return _plain_torch_arguments(component, torch)
+
+
+def _rng_free_torch_targets(torch: Any) -> tuple[Any, ...]:
+    """Resolve a small, exact-identity set of deterministic Torch builtins."""
+
+    from ...utils.display import identity
+
+    variable_functions = getattr(getattr(torch, "_C", None), "_VariableFunctionsClass", None)
+    functions = (
+        getattr(torch.nn.functional, "linear", None),
+        getattr(torch.nn.functional, "gelu", None),
+        getattr(variable_functions, "meshgrid", None),
+        *(
+            getattr(torch, name, None)
+            for name in (
+                "relu",
+                "conv2d",
+                "layer_norm",
+                "cat",
+                "stack",
+                "concat",
+                "sum",
+                "split_with_sizes",
+                "arange",
+                "floor_divide",
+                "pow",
+                "linspace",
+                "meshgrid",
+                "topk",
+                "gather",
+                "grid_sampler",
+                "zeros",
+                "ones_like",
+                "_shape_as_tensor",
+            )
+        ),
+    )
+    tensor_methods = (
+        "view",
+        "permute",
+        "__getitem__",
+        "__mul__",
+        "__rmul__",
+        "__add__",
+        "__sub__",
+        "__truediv__",
+        "__invert__",
+        "__eq__",
+        "contiguous",
+        "transpose",
+        "reshape",
+        "flatten",
+        "unbind",
+        "chunk",
+        "unsqueeze",
+        "sin",
+        "cos",
+        "masked_fill",
+        "sum",
+        "expand",
+        "repeat",
+        "cumsum",
+        "exp",
+        "max",
+        "softmax",
+        "float",
+        "to",
+        "new_zeros",
+        "prod",
+        "__gt__",
+        "__lt__",
+        "__and__",
+        "all",
+        "detach",
+    )
+    candidates = (*functions, *(getattr(torch.Tensor, name, None) for name in tensor_methods))
+    originals = (_state._decorated_to_orig.get(id(target), target) for target in candidates)
+    builtins = tuple(
+        target
+        for target in originals
+        if type(target) in (BuiltinFunctionType, MethodDescriptorType, WrapperDescriptorType)
+    )
+    # The TorchLens identity placeholder only returns its argument. PyTorch's
+    # SiLU and interpolate wrappers are deterministic for plain tensors; the
+    # replay fast path separately excludes custom tensor dispatch and modes.
+    python_targets = (identity, torch.nn.functional.silu, torch.nn.functional.interpolate)
+    return (
+        *builtins,
+        *(_state._decorated_to_orig.get(id(target), target) for target in python_targets),
+    )
 
 
 def _module_for_param_ref(param_ref: Any) -> Any | None:
@@ -291,6 +439,39 @@ class _GeneratedSegmentBase:
                     for parent in graph.node_by_id[node_id].parents
                 )
         self._release_after = release_schedule(graph, node_ids, frozenset(retained_ids))
+        self._execution_steps = self._prepare_execution_steps()
+        shape_program = graph.shape_program
+        self._shape_rewrite_node_ids = (
+            frozenset(shape_program.recipes) if shape_program is not None else frozenset()
+        )
+        self._reshape_node_ids = (
+            frozenset(
+                node.canonical_id
+                for node in graph.nodes
+                if shape_semantic_for_node(node) == "reshape"
+            )
+            if shape_program is not None
+            else frozenset()
+        )
+        self._empty_param_cursor = _LiveParamCursor([])
+        self._rng_free_targets = _rng_free_torch_targets(_torch())
+        self._rng_free_target_ids = frozenset(id(target) for target in self._rng_free_targets)
+        torch = _torch()
+        self._dropout_target = _state._decorated_to_orig.get(id(torch.dropout), torch.dropout)
+        attention = torch.nn.functional.scaled_dot_product_attention
+        self._attention_target = _state._decorated_to_orig.get(id(attention), attention)
+        function_stack_len = getattr(torch.overrides, "_len_torch_function_stack", None)
+        self._function_mode_stack_len = (
+            function_stack_len
+            if callable(function_stack_len)
+            else get_torch_function_mode_stack_length
+        )
+        try:
+            from torch.utils._python_dispatch import _get_current_dispatch_mode_stack
+        except ImportError:
+            self._dispatch_mode_stack = get_current_dispatch_mode_stack
+        else:
+            self._dispatch_mode_stack = _get_current_dispatch_mode_stack
         resolved_placement = (
             placement if placement is not None else spec.placement.for_segment(self.segment)
         )
@@ -299,6 +480,141 @@ class _GeneratedSegmentBase:
             if state is not None
             else SegmentState(adapter=TorchSplitAdapter(), placement=resolved_placement)
         )
+        self._fast_guard_state_refs: tuple[Any, ...] = ()
+        self._fast_guard_certified = self._prepare_fast_guard()
+
+    def _prepare_fast_guard(self) -> bool:
+        """Certify a segment whose plain builtins cannot change execution modes."""
+
+        torch = _torch()
+        state_refs: dict[int, Any] = {}
+        for node, group, executor in self._execution_steps:
+            if group is None:
+                if node.is_buffer:
+                    return False
+                value = getattr(node.op, "out", None)
+                if value is None or not _plain_torch_arguments(value, torch):
+                    return False
+                continue
+            if executor is None or executor.target is None or executor.buffer_refs:
+                return False
+            template = executor.args_template
+            if template is None or not self._static_rng_free(executor.target, template):
+                return False
+            autocast_state = getattr(executor.op, "func_autocast_state", None) or {}
+            if any(
+                state["enabled"]
+                for device, state in autocast_state.items()
+                if not device.startswith("__")
+            ):
+                return False
+            for ref in executor.param_refs:
+                handle = getattr(ref, "handle", None)
+                if type(handle) not in (torch.Tensor, torch.nn.Parameter):
+                    return False
+                state_refs[id(ref)] = ref
+                module = _module_for_param_ref(ref)
+                for buffer in (getattr(module, "buffers", None) or {}).values():
+                    buffer_handle = getattr(buffer, "handle", None)
+                    if type(buffer_handle) not in (torch.Tensor, torch.nn.Parameter):
+                        return False
+                    state_refs[id(buffer)] = buffer
+            if not all(
+                _plain_replay_template(component, torch) for component in template.args
+            ) or not all(
+                _plain_torch_arguments(key, torch) and _plain_replay_template(component, torch)
+                for key, component in template.kwargs
+            ):
+                return False
+        self._fast_guard_state_refs = tuple(state_refs.values())
+        return True
+
+    def _static_rng_free(self, target: Any, template: Any) -> bool:
+        """Recognize pure targets including statically disabled dropout."""
+
+        if id(target) in self._rng_free_target_ids:
+            return True
+        if target is self._dropout_target:
+            component = (
+                template.args[2] if len(template.args) > 2 else dict(template.kwargs).get("train")
+            )
+            return isinstance(component, LiteralValue) and component.value is False
+        if target is self._attention_target:
+            component = (
+                template.args[4]
+                if len(template.args) > 4
+                else dict(template.kwargs).get("dropout_p", LiteralValue(0.0))
+            )
+            return (
+                isinstance(component, LiteralValue)
+                and type(component.value) in (int, float)
+                and component.value == 0
+            )
+        return False
+
+    def _can_fast_execute(self, values: Any) -> bool:
+        """Check runtime inputs and thread-local modes for the certified path."""
+
+        if not self._fast_guard_certified or self.placement.is_explicit:
+            return False
+        torch = _torch()
+        if not all(_plain_torch_arguments(value, torch) for value in values):
+            return False
+        if any(
+            type(getattr(ref, "handle", None)) not in (torch.Tensor, torch.nn.Parameter)
+            for ref in self._fast_guard_state_refs
+        ):
+            return False
+        for entry in self._state._entries.values():
+            if type(entry.value) not in (torch.Tensor, torch.nn.Parameter):
+                return False
+        for entries in self._state._inherited.values():
+            if any(
+                type(entry.value) not in (torch.Tensor, torch.nn.Parameter) for entry in entries
+            ):
+                return False
+        try:
+            if self._function_mode_stack_len() != 0 or self._dispatch_mode_stack() != []:
+                return False
+            return not autocast_is_enabled("cpu") and not autocast_is_enabled("cuda")
+        except Exception:
+            return False
+
+    def _prepare_execution_steps(
+        self,
+    ) -> tuple[
+        tuple[SplitTraceNode, tuple[SplitTraceNode, ...] | None, SplitTraceNode | None], ...
+    ]:
+        """Resolve segment calls and multi-output groups once at preparation."""
+
+        steps: list[
+            tuple[SplitTraceNode, tuple[SplitTraceNode, ...] | None, SplitTraceNode | None]
+        ] = []
+        executed_call_ids: set[str] = set()
+        call_by_output = self.graph.replay_call_by_output_id
+        for node in self.graph.nodes:
+            if node.canonical_id not in self.node_ids or node.is_input or node.is_output:
+                continue
+            if node.is_buffer or (node.target is None and self._is_replay_source_node(node)):
+                steps.append((node, None, None))
+                continue
+            call = call_by_output.get(node.canonical_id)
+            call_id = node.canonical_id if call is None else call.call_id
+            if call_id in executed_call_ids:
+                continue
+            executed_call_ids.add(call_id)
+            group = (
+                (node,)
+                if call is None
+                else tuple(
+                    self._node_by_id[node_id]
+                    for node_id in call.output_node_ids
+                    if node_id in self.node_ids
+                )
+            )
+            executor = next((member for member in group if member.target is not None), None)
+            steps.append((node, group, executor))
+        return tuple(steps)
 
     @property
     def placement(self) -> DevicePlacement:
@@ -502,6 +818,8 @@ class _GeneratedSegmentBase:
 
         if self.graph.shape_program is None or self._shape_binding is None:
             return value
+        if node.canonical_id not in self._shape_rewrite_node_ids:
+            return value
         return self.graph.shape_program.rewrite(node.canonical_id, value, self._shape_binding)
 
     def _rewrite_dynamic_call_args(
@@ -514,20 +832,15 @@ class _GeneratedSegmentBase:
 
         if self.graph.shape_program is None or self._shape_binding is None:
             return args, kwargs
-        rewritten_args = self.graph.shape_program.rewrite(
-            node.canonical_id,
-            args,
-            self._shape_binding,
-        )
-        rewritten_kwargs = self.graph.shape_program.rewrite(
-            node.canonical_id,
-            kwargs,
-            self._shape_binding,
-        )
-        if shape_semantic_for_node(node) != "reshape":
+        node_id = node.canonical_id
+        if node_id not in self._shape_rewrite_node_ids and node_id not in self._reshape_node_ids:
+            return args, kwargs
+        rewritten_args = self.graph.shape_program.rewrite(node_id, args, self._shape_binding)
+        rewritten_kwargs = self.graph.shape_program.rewrite(node_id, kwargs, self._shape_binding)
+        if node_id not in self._reshape_node_ids:
             return rewritten_args, rewritten_kwargs
         runtime_shape = self.graph.shape_program.value_shape(
-            node.canonical_id,
+            node_id,
             self._shape_binding,
         )
         if runtime_shape is None or not rewritten_args:
@@ -565,7 +878,11 @@ class _GeneratedSegmentBase:
                 f"{node.label!r} has no captured args_template.",
                 context=self._context(node, "missing args_template"),
             )
-        param_cursor = _LiveParamCursor(self._param_handles_for_node(node))
+        param_cursor = (
+            _LiveParamCursor(self._param_handles_for_node(node))
+            if node.param_refs
+            else self._empty_param_cursor
+        )
         args = tuple(
             self._resolve_component(
                 component,
@@ -592,6 +909,8 @@ class _GeneratedSegmentBase:
         node: SplitTraceNode,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
+        *,
+        fast_guard: bool = False,
     ) -> Any:
         """Execute one captured operation function."""
 
@@ -604,19 +923,13 @@ class _GeneratedSegmentBase:
             # Factory calls without a device argument must also allocate on
             # the segment's device. Explicit captured destinations are handled
             # separately during argument reconstruction above.
-            device_scope = (
-                _torch().device(self.placement.device)
-                if self.placement.is_explicit
-                else nullcontext()
-            )
-            with device_scope:
-                output = execute_with_restored_rng_autocast(
-                    node.target,
-                    args,
-                    kwargs,
-                    rng_states=getattr(node.op, "func_rng_states", None),
-                    autocast_state=getattr(node.op, "func_autocast_state", None),
-                )
+            if fast_guard:
+                output = node.target(*args, **kwargs)
+            elif self.placement.is_explicit:
+                with _torch().device(self.placement.device):
+                    output = self._invoke_func(node, args, kwargs)
+            else:
+                output = self._invoke_func(node, args, kwargs)
         except Exception as exc:
             raise SplitUnsupportedError(
                 f"Torch replay failed at {node.canonical_id!r} ({node.op_type}): {exc}",
@@ -625,6 +938,62 @@ class _GeneratedSegmentBase:
         if output is None and args:
             return args[0]
         return output
+
+    def _invoke_func(
+        self, node: SplitTraceNode, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> Any:
+        """Call one target under only the state guards it actually needs."""
+
+        target = node.target
+        assert target is not None
+        autocast_state = getattr(node.op, "func_autocast_state", None)
+        if self._can_skip_rng_guard(target, args, kwargs):
+            if self._can_skip_autocast_restore(autocast_state):
+                return target(*args, **kwargs)
+            with AutocastRestore(autocast_state or {}):
+                return target(*args, **kwargs)
+        return execute_with_restored_rng_autocast(
+            target,
+            args,
+            kwargs,
+            rng_states=getattr(node.op, "func_rng_states", None),
+            autocast_state=autocast_state,
+        )
+
+    def _can_skip_rng_guard(
+        self, target: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> bool:
+        """Use the pure-op path only when custom dispatch cannot alter it."""
+
+        rng_free = id(target) in getattr(self, "_rng_free_target_ids", frozenset())
+        if target is getattr(self, "_dropout_target", None):
+            rng_free = (args[2] if len(args) > 2 else kwargs.get("train")) is False
+        elif target is getattr(self, "_attention_target", None):
+            dropout_p = args[4] if len(args) > 4 else kwargs.get("dropout_p", 0.0)
+            rng_free = type(dropout_p) in (int, float) and dropout_p == 0
+        if not rng_free:
+            return False
+        if not _plain_torch_arguments(args, _torch()) or not _plain_torch_arguments(
+            kwargs, _torch()
+        ):
+            return False
+        try:
+            function_modes = self._function_mode_stack_len()
+            dispatch_modes = self._dispatch_mode_stack()
+        except Exception:
+            return False
+        return function_modes == 0 and dispatch_modes == []
+
+    @staticmethod
+    def _can_skip_autocast_restore(autocast_state: dict[str, Any] | None) -> bool:
+        """Skip disabled autocast contexts when the caller is already disabled."""
+
+        for device, state in (autocast_state or {}).items():
+            if device.startswith("__"):
+                continue
+            if state["enabled"] or autocast_is_enabled(device):
+                return False
+        return True
 
     def _source_value(self, node: SplitTraceNode) -> Any:
         """Return a replay value for an input/buffer/source node."""
@@ -650,46 +1019,36 @@ class _GeneratedSegmentBase:
     def _execute_nodes(self, overlay: dict[str, Any]) -> dict[str, Any]:
         """Execute this segment's node set into ``overlay``."""
 
-        executed_call_ids: set[str] = set()
-        call_by_output = self.graph.replay_call_by_output_id
-        for node in self.graph.nodes:
-            if node.canonical_id not in self.node_ids:
-                continue
-            if node.is_input:
-                continue
-            if node.is_output:
-                continue
-            if node.is_buffer or (node.target is None and self._is_replay_source_node(node)):
+        execute = self._execute_func
+        fast_guard = getattr(
+            execute, "__func__", None
+        ) is _GeneratedSegmentBase._execute_func and self._can_fast_execute(overlay.values())
+        torch = _torch() if fast_guard else None
+        for node, group, executor in self._execution_steps:
+            if group is None:
                 if node.canonical_id not in overlay:
-                    overlay[node.canonical_id] = self._source_value(node)
+                    value = self._source_value(node)
+                    overlay[node.canonical_id] = value
+                    if fast_guard and not _plain_torch_arguments(value, torch):
+                        fast_guard = False
                 for value_id in self._release_after.get(node.canonical_id, ()):
                     overlay.pop(value_id, None)
                 continue
-            call = call_by_output.get(node.canonical_id)
-            call_id = node.canonical_id if call is None else call.call_id
-            if call_id in executed_call_ids:
-                continue
-            group = (
-                [node]
-                if call is None
-                else [
-                    self._node_by_id[node_id]
-                    for node_id in call.output_node_ids
-                    if node_id in self.node_ids
-                ]
-            )
-            executor = next((member for member in group if member.target is not None), None)
             if executor is None:
                 raise SplitUnsupportedError(
                     f"{node.label!r} has no callable target for split replay.",
                     context=self._context(node, "missing callable target"),
                 )
-            executed_call_ids.add(call_id)
             args, kwargs = self._reconstruct_args(executor, overlay)
-            output = self._execute_func(executor, args, kwargs)
+            if fast_guard:
+                output = execute(executor, args, kwargs, fast_guard=True)
+            else:
+                output = execute(executor, args, kwargs)
             for member in group:
                 value = _slice_output_by_path(output, member.output_container_path)
                 overlay[member.canonical_id] = value
+                if fast_guard and not _plain_torch_arguments(value, torch):
+                    fast_guard = False
             # Do not let loop locals retain the previous call's input/output
             # storage during the next kernel. Autograd keeps what it needs
             # independently when this is a graph-connected training segment.

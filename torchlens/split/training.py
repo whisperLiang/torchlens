@@ -239,7 +239,10 @@ def _train_suffix_torch(
     )
     if optimizer is not None:
         optimizer.zero_grad(set_to_none=True)
-    output = runtime.run_suffix(replay_boundary)
+    # The caller boundary was strictly validated above.  ``replay_boundary``
+    # only swaps differentiable roots, so re-running state and structural
+    # validation here would add a full model fingerprint to every train step.
+    output = runtime._run_suffix_unchecked(replay_boundary)
     loss = (
         loss_fn(output, targets) if loss_fn is not None else _default_loss(torch, output, targets)
     )
@@ -316,7 +319,7 @@ def _train_suffix_tf(
             tape.watch(root)
         for source in suffix_sources:
             tape.watch(source)
-        output = runtime.run_suffix(replay_boundary)
+        output = runtime._run_suffix_unchecked(replay_boundary)
         loss = (
             loss_fn(output, targets)
             if loss_fn is not None
@@ -405,7 +408,7 @@ def _train_suffix_paddle(
     )
     if optimizer is not None:
         _optimizer_clear_grad(optimizer)
-    output = runtime.run_suffix(replay_boundary)
+    output = runtime._run_suffix_unchecked(replay_boundary)
     loss = (
         loss_fn(output, targets)
         if loss_fn is not None
@@ -477,7 +480,7 @@ def _train_suffix_jax(
             spec=boundary.spec,
             metadata={**boundary.metadata, "suffix_training_roots": tuple(keys)},
         )
-        output = runtime.run_suffix(replay_boundary)
+        output = runtime._run_suffix_unchecked(replay_boundary)
         if loss_fn is not None:
             return loss_fn(output, targets)
         return _default_jax_loss(output, targets)
@@ -595,7 +598,7 @@ def _train_suffix_tinygrad(
         metadata={**boundary.metadata, "suffix_training_roots": tuple(root_tensors)},
     )
     _tinygrad_optimizer_step(runtime, optimizer, before=True)
-    output = runtime.run_suffix(replay_boundary)
+    output = runtime._run_suffix_unchecked(replay_boundary)
     loss = (
         loss_fn(output, targets) if loss_fn is not None else _default_tinygrad_loss(output, targets)
     )

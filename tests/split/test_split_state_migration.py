@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
@@ -10,7 +12,9 @@ from torch import nn
 from v2_helpers import split_request
 
 import torchlens as tl
+import torchlens.split.runtime as split_runtime
 from torchlens.split import PlacementPlan
+from torchlens.split.boundary import ReplayBoundary
 from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
 from torchlens.split.runtime import _state_values_fingerprint
 from torchlens.split.state import SegmentState
@@ -282,3 +286,129 @@ def test_bfloat16_state_fingerprint_hashes_unabridged_payload() -> None:
     previous = _state_values_fingerprint({"weight": values})
     values[1000] = 2
     assert _state_values_fingerprint({"weight": values}) != previous
+
+
+def test_state_fingerprint_preserves_existing_digest_for_tensor_layouts() -> None:
+    """The buffer-based hash matches the prior byte-based portable digest."""
+
+    values = {
+        "contiguous": torch.arange(30, dtype=torch.float32).reshape(5, 6),
+        "transposed": torch.arange(12, dtype=torch.int64).reshape(3, 4).T,
+        "bfloat16": torch.arange(8, dtype=torch.bfloat16),
+    }
+    previous = sha256()
+    for name in sorted(values):
+        value = values[name]
+        previous.update(name.encode("utf-8"))
+        previous.update(repr(value.shape).encode("utf-8"))
+        previous.update(str(value.dtype).encode("utf-8"))
+        try:
+            payload = value.numpy().tobytes()
+        except TypeError:
+            payload = value.contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
+        previous.update(payload)
+    assert _state_values_fingerprint(values) == previous.hexdigest()
+
+
+def test_replay_skips_state_hash_but_public_suffix_rechecks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One-shot replay avoids state hashing without weakening reusable boundaries."""
+
+    model = StateMigrationMlp().eval()
+    inputs = torch.ones(3, 4)
+    runtime = tl.split.prepare(model, inputs, split_request("after:relu"))
+    original = runtime._state_fingerprint
+    validate = runtime.validate_boundary
+    calls: list[str] = []
+    internal_metadata: list[dict[str, object]] = []
+
+    def fingerprint(prefix_kind: str) -> str | None:
+        """Count effective-state checks while preserving their result."""
+
+        calls.append(prefix_kind)
+        return original(prefix_kind)
+
+    def observe_validation(boundary: ReplayBoundary, *, validate_state: bool = True) -> None:
+        """Inspect the ephemeral boundary before it reaches the suffix."""
+
+        internal_metadata.append(dict(boundary.metadata))
+        validate(boundary, validate_state=validate_state)
+
+    monkeypatch.setattr(runtime, "_state_fingerprint", fingerprint)
+    monkeypatch.setattr(runtime, "validate_boundary", observe_validation)
+    torch.testing.assert_close(runtime.replay(inputs), model(inputs))
+    assert calls == []
+    assert len(internal_metadata) == 1
+    assert "state_fingerprint" not in internal_metadata[0]
+    boundary = runtime.run_prefix(inputs)
+    assert calls == ["inference"]
+    runtime.run_suffix(boundary)
+    assert calls == ["inference", "inference"]
+    with torch.no_grad():
+        model.fc2.weight.add_(1)
+    with pytest.raises(SplitBoundaryError, match="state_fingerprint"):
+        runtime.run_suffix(boundary)
+
+
+def test_trusted_public_boundary_skips_hash_only_when_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Trusted segmented inference is fast while strict reuse still refuses it."""
+
+    model = StateMigrationMlp().eval()
+    inputs = torch.ones(3, 4)
+    runtime = tl.split.prepare(model, inputs, split_request("after:relu"))
+    calls: list[str] = []
+    original = runtime._state_fingerprint
+
+    def fingerprint(prefix_kind: str) -> str | None:
+        """Observe state reads without changing their result."""
+
+        calls.append(prefix_kind)
+        return original(prefix_kind)
+
+    monkeypatch.setattr(runtime, "_state_fingerprint", fingerprint)
+    boundary = runtime.run_prefix(inputs, check_state=False)
+    assert "state_fingerprint" not in boundary.metadata
+    assert calls == []
+    torch.testing.assert_close(runtime.run_suffix(boundary, check_state=False), model(inputs))
+    assert calls == []
+    with pytest.raises(SplitBoundaryError, match="state_fingerprint"):
+        runtime.run_suffix(boundary)
+    assert calls == ["inference"]
+
+
+def test_strict_prefix_suffix_rehashes_state_and_rejects_unversioned_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Strict calls catch state writes that leave tensor versions unchanged."""
+
+    model = StateMigrationMlp().eval()
+    inputs = torch.ones(3, 4)
+    runtime = tl.split.prepare(model, inputs, split_request("after:relu"))
+    calls = 0
+    original = split_runtime._state_values_fingerprint
+
+    def counted(values: dict[str, Any]) -> str:
+        nonlocal calls
+        calls += 1
+        return original(values)
+
+    monkeypatch.setattr(split_runtime, "_state_values_fingerprint", counted)
+    boundary = runtime.run_prefix(inputs)
+    runtime.run_suffix(boundary)
+    runtime.run_suffix(boundary)
+    assert calls == 3
+
+    version = model.fc2.weight._version
+    model.fc2.weight.data.add_(1)
+    assert model.fc2.weight._version == version
+    with pytest.raises(SplitBoundaryError, match="state_fingerprint"):
+        runtime.run_suffix(boundary)
+    assert calls == 4
+
+    updated = runtime.run_prefix(inputs)
+    assert updated.metadata["state_fingerprint"] != boundary.metadata["state_fingerprint"]
+    runtime.run_suffix(updated)
+    assert calls == 6
