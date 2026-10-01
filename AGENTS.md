@@ -575,7 +575,9 @@ pytest tests/ -m "not rare and not slow" -x --tb=short
   over unproven relations refuses typed (`ShapeProgram.require_batch_resolvable`); replaying at
   the captured batch stays allowed. `SplitRuntime.split_points()` enumerates every valid
   `before:`/`after:` cut as `SplitCandidate` rows carrying boundary IDs/schema and a
-  deterministic `unsupported_reasons` (never silently skipped); `.at(point)` re-plans on the
+  deterministic `unsupported_reasons` (never silently skipped); diagnosis analyzes points
+  without building segments. `.analyze(point)` returns `SplitPointAnalysis`,
+  `.materialize(analysis)` builds the selected point, and `.at(point)` combines both on the
   same capture. `PlacementPlan.across(prefix, suffix)` / `SplitRuntime.with_placement()` bind
   segment state per device through `SegmentState` (`referenced` vs `owned`, one replica per
   source identity so tied params keep one identity; `prefix_parameters()` /
@@ -585,8 +587,8 @@ pytest tests/ -m "not rare and not slow" -x --tb=short
   split identity and cache keys exclude batch entirely. MLX stays an unsupported shell.
   Rebinding/recutting preserves effective owned state (same-device values shared, moved values
   replicated without source-model writes); merging divergent tied replicas or divergent
-  inference/training prefix values into a shared suffix refuses. Boundary state fingerprints
-  cover actual segment values, including cached training boundaries.
+  inference/training prefix values into a shared suffix refuses. ReplayBoundary validates
+  structural compatibility without comparing model parameter values.
   Torch placement relocates device arguments and implicit factories. Canonical input resizing
   preserves repeated objects and identical-geometry Torch aliases; other overlapping/unprovable
   views refuse before capture. Probe replay uses aligned B=2 per-call RNG in a temporary graph,

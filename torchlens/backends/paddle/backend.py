@@ -960,7 +960,14 @@ class PaddleBackend:
             replacement tensors.
         """
 
-        outputs = tuple(self._iter_tensors_with_paths(output))
+        # Native GPU kernels may return uninitialized tensors for unused
+        # optional outputs (for example batch_norm's saved statistics in eval
+        # mode). They have no storage/place and are not captured tensor values.
+        outputs = tuple(
+            (path, tensor)
+            for path, tensor in self._iter_tensors_with_paths(output)
+            if cast(Any, tensor)._is_initialized()
+        )
         if not outputs:
             return output
         events = getattr(trace, "capture_events", None)

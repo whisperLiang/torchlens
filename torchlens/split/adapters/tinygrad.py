@@ -183,6 +183,19 @@ class _TinygradGeneratedSegmentBase:
         program = self.graph.shape_program
         return program is not None and bool(program.input_batch_axes)
 
+    @property
+    def _dynamic_batch_rewrite_required(self) -> bool:
+        """Return whether this call changes an audited symbolic batch extent."""
+
+        program = self.graph.shape_program
+        binding = self._shape_binding
+        return bool(
+            program is not None
+            and program.input_batch_axes
+            and binding is not None
+            and binding.batch_size != program.traced_batch_size
+        )
+
     def _context(self, node: SplitTraceNode, reason: str) -> SplitErrorContext:
         """Build an error context for ``node``."""
 
@@ -214,44 +227,28 @@ class _TinygradGeneratedSegmentBase:
                 return handle
         return None
 
-    def _live_child_param_source_value(self, node: SplitTraceNode) -> Any | None:
-        """Return a unique live parameter handle represented by a source buffer."""
+    def _live_buffer_value(self, node: SplitTraceNode) -> Any | None:
+        """Resolve a BUFFER's capture-time live handle without graph traversal."""
 
         if node.op_type != "buffer":
             return None
         capture = node.target
+        handle = self._live_param_value(node)
+        if handle is None:
+            handle = getattr(capture, "live_tensor", None)
+        if handle is None or not self._backend.is_tensor(handle):
+            return None
         captured_shape = _tinygrad_uop_shape(getattr(capture, "uop", None))
-        handles: list[Any] = []
-        seen: set[int] = set()
-        captured_uop = getattr(capture, "uop", None)
-        captured_uop_id = id(captured_uop)
-        for candidate in self.graph.nodes:
-            candidate_uop = getattr(getattr(candidate, "target", None), "uop", None)
-            if candidate_uop is None or not candidate.param_refs:
-                continue
-            try:
-                contains_buffer = any(
-                    id(item) == captured_uop_id for item in candidate_uop.toposort()
-                )
-            except Exception:
-                contains_buffer = False
-            if not contains_buffer:
-                continue
-            handle = self._live_param_value(candidate)
-            if handle is None or id(handle) in seen:
-                continue
-            handle_shape = _tinygrad_uop_shape(handle)
-            if captured_shape is not None and handle_shape != captured_shape:
-                if (
-                    handle_shape is None
-                    or prod(handle_shape) != prod(captured_shape)
-                    or not hasattr(handle, "reshape")
-                ):
-                    continue
-                handle = handle.reshape(captured_shape)
-            seen.add(id(handle))
-            handles.append(handle)
-        return handles[0] if len(handles) == 1 else None
+        handle_shape = _tinygrad_uop_shape(handle)
+        if captured_shape is not None and handle_shape != captured_shape:
+            if (
+                handle_shape is None
+                or prod(handle_shape) != prod(captured_shape)
+                or not hasattr(handle, "reshape")
+            ):
+                return None
+            return handle.reshape(captured_shape)
+        return handle
 
     def _tensor_device(self, value: Any) -> str | None:
         """Return a tinygrad tensor device name, if available."""
@@ -294,7 +291,7 @@ class _TinygradGeneratedSegmentBase:
             live_param = self._live_param_value(node)
             if live_param is not None:
                 return live_param
-            live_param = self._live_child_param_source_value(node)
+            live_param = self._live_buffer_value(node)
             if live_param is not None:
                 return live_param
         value = getattr(node.op, "out", None)
@@ -344,7 +341,7 @@ class _TinygradGeneratedSegmentBase:
 
         if getattr(getattr(node.target, "uop", None), "op", None) not in GroupOp.ALU:
             return getattr(value, "uop", value)
-        if self.graph.shape_program is None or self._shape_binding is None:
+        if not self._dynamic_batch_rewrite_required or self.graph.shape_program is None:
             return getattr(value, "uop", value)
         if not self._is_parameter_lineage(parent) or not self._backend.is_tensor(value):
             return getattr(value, "uop", value)
@@ -547,16 +544,6 @@ class _TinygradGeneratedSegmentBase:
 
         from tinygrad.uop import GroupOp
 
-        if preserve_autograd and node.op_type == "buffer":
-            live_param = self._live_child_param_source_value(node)
-            if live_param is None:
-                candidate = getattr(getattr(node, "op", None), "out", None)
-                if self._backend.is_tensor(candidate) and getattr(
-                    candidate, "requires_grad", False
-                ):
-                    live_param = candidate
-            if live_param is not None:
-                return live_param
         capture = node.target
         if not isinstance(capture, TinygradUOpCapture):
             raise SplitUnsupportedError(
@@ -569,10 +556,7 @@ class _TinygradGeneratedSegmentBase:
             # allocation as CUDA memory.  Bind the live parameter when one is
             # available; otherwise use the captured realized payload and copy
             # it through the backend device path.
-            live_param = self._live_child_param_source_value(node)
-            captured_live = getattr(capture, "live_tensor", None)
-            if live_param is None and self._backend.is_tensor(captured_live):
-                live_param = captured_live
+            live_param = self._live_buffer_value(node)
             if live_param is not None:
                 bound = self._move_source_to_device(live_param, target_device)
                 return bound if preserve_autograd else self._backend._realized_copy(bound)
@@ -594,7 +578,8 @@ class _TinygradGeneratedSegmentBase:
         # tensor's already-bound shape.  Rewrite before inserting replay
         # parents: otherwise a runtime shape such as (B, 1, 4) can match the
         # captured (1, 4) suffix and spuriously acquire a second batch axis.
-        src = self._rewrite_dynamic_uop_src(node, src, overlay)
+        if self._dynamic_batch_rewrite_required:
+            src = self._rewrite_dynamic_uop_src(node, src, overlay)
         replay_uop = capture.uop.replace(src=tuple(src))
         for position, parent_label in capture.parent_arg_positions:
             if isinstance(position, tuple):

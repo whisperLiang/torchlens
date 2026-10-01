@@ -1,10 +1,8 @@
-"""Owned split state survives placement changes and guards stale boundaries."""
+"""Owned split state survives placement changes and structural boundary reuse."""
 
 from __future__ import annotations
 
-from hashlib import sha256
 from pathlib import Path
-from typing import Any
 
 import pytest
 import torch
@@ -12,12 +10,12 @@ from torch import nn
 from v2_helpers import split_request
 
 import torchlens as tl
-import torchlens.split.runtime as split_runtime
 from torchlens.split import PlacementPlan
 from torchlens.split.boundary import ReplayBoundary
+from torchlens.split.cache import _cache_secret
 from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
-from torchlens.split.runtime import _state_values_fingerprint
 from torchlens.split.state import SegmentState
+from torchlens.user_funcs import _store_authenticated_capture_cache
 
 
 class StateMigrationMlp(nn.Module):
@@ -90,10 +88,10 @@ def test_trained_state_survives_replacement_and_recut(
 
 
 @pytest.mark.parametrize("training_boundary", [False, True])
-def test_owned_updates_invalidate_direct_and_cached_boundaries(
+def test_owned_suffix_updates_allow_direct_and_cached_boundaries(
     training_boundary: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A replica update changes the execution fingerprint, including saved training roots."""
+    """A suffix update can consume an old boundary with the same structural ABI."""
 
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
     model = StateMigrationMlp()
@@ -109,29 +107,26 @@ def test_owned_updates_invalidate_direct_and_cached_boundaries(
     cache_path = tmp_path / "boundary"
     runtime.save_boundary(boundary, cache_path)
     cached = runtime.load_boundary(cache_path)
-    assert cached.metadata["state_fingerprint"] == boundary.metadata["state_fingerprint"]
-    assert cached.metadata["state_prefix_kind"] == boundary.metadata["state_prefix_kind"]
-    runtime.run_suffix(cached)
+    assert "state_fingerprint" not in cached.metadata
+    assert "state_prefix_kind" not in cached.metadata
+    previous = runtime.run_suffix(cached).detach().clone()
 
-    parameters = runtime.prefix_parameters()
+    parameters = runtime.suffix_parameters()
     optimizer = torch.optim.SGD(parameters, lr=0.1)
     for value in parameters:
         value.grad = torch.ones_like(value)
     optimizer.step()
-    updated = runtime.run_prefix(inputs)
-    assert updated.metadata["state_fingerprint"] != boundary.metadata["state_fingerprint"]
-    runtime.run_suffix(updated)
-    for stale in (boundary, cached):
-        with pytest.raises(SplitBoundaryError, match="state_fingerprint"):
-            runtime.run_suffix(stale)
-        with pytest.raises(SplitBoundaryError, match="state_fingerprint"):
-            runtime.train_suffix(stale, torch.zeros(3, 3))
+    expected = runtime.run_suffix(runtime.run_prefix(inputs))
+    assert not torch.equal(expected, previous)
+    for old in (boundary, cached):
+        torch.testing.assert_close(runtime.run_suffix(old), expected)
+        runtime.train_suffix(old, torch.zeros(3, 3))
 
 
-def test_captured_and_training_prefix_fingerprints_remain_distinct(
+def test_cached_training_boundary_keeps_backward_metadata_without_state_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A cached training boundary retains its source kind when backward state is removed."""
+    """Cached training boundaries retain their graph ABI after dropping backward state."""
 
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
     runtime = tl.split.prepare(
@@ -146,7 +141,9 @@ def test_captured_and_training_prefix_fingerprints_remain_distinct(
         for value in parameters:
             value.add_(1)
     training = runtime.run_training_prefix(inputs)
-    assert training.metadata["state_fingerprint"] != inference.metadata["state_fingerprint"]
+    assert "state_fingerprint" not in training.metadata
+    assert "state_prefix_kind" not in training.metadata
+    assert "state_fingerprint" not in inference.metadata
     runtime.run_suffix(inference)
     cache_path = tmp_path / "training-boundary"
     runtime.save_boundary(training, cache_path)
@@ -264,151 +261,103 @@ def test_recut_preserves_tied_identity_or_refuses_divergent_replicas(
         inputs,
         split_request("after:relu", trainable=True, placement=PlacementPlan.on("cpu")),
     )
+    analysis = runtime.analyze(tl.split.after("tail"))
+    target_node_id = analysis.plan.target_node_id
     if divergent:
         with torch.no_grad():
             runtime.prefix_parameters()[0].add_(1)
+    candidate = next(
+        candidate
+        for candidate in runtime.split_points(diagnose=True).candidates
+        if candidate.kind == "after" and candidate.node_id == target_node_id
+    )
+    assert candidate.replay_supported is not divergent
+    if divergent:
+        assert "divergent replicas" in candidate.unsupported_reason
+        with pytest.raises(SplitUnsupportedError, match="divergent replicas"):
+            runtime.analyze(tl.split.after("tail"))
     expected = runtime.replay(inputs)
     same_cut = runtime.at(runtime.request.point)
     torch.testing.assert_close(same_cut.replay(inputs), expected)
     if divergent:
         with pytest.raises(SplitUnsupportedError, match="divergent replicas"):
             runtime.at(tl.split.after("tail"))
+        with pytest.raises(SplitUnsupportedError, match="divergent replicas"):
+            runtime.materialize(analysis)
     else:
         recut = runtime.at(tl.split.after("tail"))
         assert len(recut.prefix_parameters()) == 1
         torch.testing.assert_close(recut.replay(inputs), expected)
 
 
-def test_bfloat16_state_fingerprint_hashes_unabridged_payload() -> None:
-    """An update outside the printed tensor summary must still invalidate a boundary."""
-
-    values = torch.ones(2000, dtype=torch.bfloat16)
-    previous = _state_values_fingerprint({"weight": values})
-    values[1000] = 2
-    assert _state_values_fingerprint({"weight": values}) != previous
-
-
-def test_state_fingerprint_preserves_existing_digest_for_tensor_layouts() -> None:
-    """The buffer-based hash matches the prior byte-based portable digest."""
-
-    values = {
-        "contiguous": torch.arange(30, dtype=torch.float32).reshape(5, 6),
-        "transposed": torch.arange(12, dtype=torch.int64).reshape(3, 4).T,
-        "bfloat16": torch.arange(8, dtype=torch.bfloat16),
-    }
-    previous = sha256()
-    for name in sorted(values):
-        value = values[name]
-        previous.update(name.encode("utf-8"))
-        previous.update(repr(value.shape).encode("utf-8"))
-        previous.update(str(value.dtype).encode("utf-8"))
-        try:
-            payload = value.numpy().tobytes()
-        except TypeError:
-            payload = value.contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
-        previous.update(payload)
-    assert _state_values_fingerprint(values) == previous.hexdigest()
-
-
-def test_replay_skips_state_hash_but_public_suffix_rechecks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """One-shot replay avoids state hashing without weakening reusable boundaries."""
+def test_boundary_metadata_discards_legacy_state_fields(tmp_path: Path) -> None:
+    """Legacy cached metadata cannot impose value-state compatibility checks."""
 
     model = StateMigrationMlp().eval()
     inputs = torch.ones(3, 4)
     runtime = tl.split.prepare(model, inputs, split_request("after:relu"))
-    original = runtime._state_fingerprint
-    validate = runtime.validate_boundary
-    calls: list[str] = []
-    internal_metadata: list[dict[str, object]] = []
-
-    def fingerprint(prefix_kind: str) -> str | None:
-        """Count effective-state checks while preserving their result."""
-
-        calls.append(prefix_kind)
-        return original(prefix_kind)
-
-    def observe_validation(boundary: ReplayBoundary, *, validate_state: bool = True) -> None:
-        """Inspect the ephemeral boundary before it reaches the suffix."""
-
-        internal_metadata.append(dict(boundary.metadata))
-        validate(boundary, validate_state=validate_state)
-
-    monkeypatch.setattr(runtime, "_state_fingerprint", fingerprint)
-    monkeypatch.setattr(runtime, "validate_boundary", observe_validation)
-    torch.testing.assert_close(runtime.replay(inputs), model(inputs))
-    assert calls == []
-    assert len(internal_metadata) == 1
-    assert "state_fingerprint" not in internal_metadata[0]
     boundary = runtime.run_prefix(inputs)
-    assert calls == ["inference"]
-    runtime.run_suffix(boundary)
-    assert calls == ["inference", "inference"]
-    with torch.no_grad():
-        model.fc2.weight.add_(1)
-    with pytest.raises(SplitBoundaryError, match="state_fingerprint"):
-        runtime.run_suffix(boundary)
-
-
-def test_trusted_public_boundary_skips_hash_only_when_explicit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Trusted segmented inference is fast while strict reuse still refuses it."""
-
-    model = StateMigrationMlp().eval()
-    inputs = torch.ones(3, 4)
-    runtime = tl.split.prepare(model, inputs, split_request("after:relu"))
-    calls: list[str] = []
-    original = runtime._state_fingerprint
-
-    def fingerprint(prefix_kind: str) -> str | None:
-        """Observe state reads without changing their result."""
-
-        calls.append(prefix_kind)
-        return original(prefix_kind)
-
-    monkeypatch.setattr(runtime, "_state_fingerprint", fingerprint)
-    boundary = runtime.run_prefix(inputs, check_state=False)
     assert "state_fingerprint" not in boundary.metadata
-    assert calls == []
-    torch.testing.assert_close(runtime.run_suffix(boundary, check_state=False), model(inputs))
-    assert calls == []
-    with pytest.raises(SplitBoundaryError, match="state_fingerprint"):
-        runtime.run_suffix(boundary)
-    assert calls == ["inference"]
+    assert "state_prefix_kind" not in boundary.metadata
+
+    old_metadata = dict(boundary.metadata)
+    old_metadata.update(state_fingerprint="obsolete", state_prefix_kind="inference")
+    legacy = ReplayBoundary(boundary.backend, boundary.tensors, boundary.spec, old_metadata)
+    assert "state_fingerprint" not in legacy.metadata
+    assert "state_prefix_kind" not in legacy.metadata
+    torch.testing.assert_close(runtime.run_suffix(legacy), runtime.run_suffix(boundary))
+
+    # Simulate an authenticated pickle produced by an older release, whose
+    # unpickler does not call the dataclass constructor.
+    object.__setattr__(legacy, "metadata", old_metadata)
+    cache_path = tmp_path / "old-boundary"
+    runtime.save_boundary(boundary, cache_path)
+    assert _store_authenticated_capture_cache(legacy, cache_path / "payload.pkl", _cache_secret())
+    cached = runtime.load_boundary(cache_path)
+    assert "state_fingerprint" not in cached.metadata
+    assert "state_prefix_kind" not in cached.metadata
 
 
-def test_strict_prefix_suffix_rehashes_state_and_rejects_unversioned_writes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Strict calls catch state writes that leave tensor versions unchanged."""
+def test_replay_boundary_still_refuses_structural_mismatches() -> None:
+    """Removing value checks leaves split, graph, dtype, and shape checks intact."""
+
+    runtime = tl.split.prepare(
+        StateMigrationMlp().eval(), torch.ones(3, 4), split_request("after:relu")
+    )
+    boundary = runtime.run_prefix(torch.ones(3, 4))
+    for field, replacement in (("split_id", "other"), ("graph_shape_hash", "other")):
+        bad_metadata = dict(boundary.metadata)
+        bad_metadata[field] = replacement
+        with pytest.raises(SplitBoundaryError):
+            runtime.run_suffix(
+                ReplayBoundary(boundary.backend, boundary.tensors, boundary.spec, bad_metadata)
+            )
+    key = next(iter(boundary.tensors))
+    bad_tensors = dict(boundary.tensors)
+    bad_tensors[key] = bad_tensors[key].to(torch.float64)
+    with pytest.raises(SplitBoundaryError, match="dtype"):
+        runtime.run_suffix(
+            ReplayBoundary(boundary.backend, bad_tensors, boundary.spec, dict(boundary.metadata))
+        )
+    bad_tensors[key] = boundary.tensors[key][:1]
+    with pytest.raises(SplitBoundaryError, match="shape"):
+        runtime.run_suffix(
+            ReplayBoundary(boundary.backend, bad_tensors, boundary.spec, dict(boundary.metadata))
+        )
+
+
+def test_explicit_replay_does_not_read_model_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit prefix and suffix calls rely on the structural boundary ABI."""
 
     model = StateMigrationMlp().eval()
     inputs = torch.ones(3, 4)
     runtime = tl.split.prepare(model, inputs, split_request("after:relu"))
-    calls = 0
-    original = split_runtime._state_values_fingerprint
 
-    def counted(values: dict[str, Any]) -> str:
-        nonlocal calls
-        calls += 1
-        return original(values)
+    def unexpected_state_read(*args: object, **kwargs: object) -> None:
+        raise AssertionError("split replay must not scan model state")
 
-    monkeypatch.setattr(split_runtime, "_state_values_fingerprint", counted)
+    monkeypatch.setattr(model, "state_dict", unexpected_state_read)
+    monkeypatch.setattr(runtime.segments.prefix, "bound_state_values", unexpected_state_read)
+    monkeypatch.setattr(runtime.segments.suffix, "bound_state_values", unexpected_state_read)
     boundary = runtime.run_prefix(inputs)
-    runtime.run_suffix(boundary)
-    runtime.run_suffix(boundary)
-    assert calls == 3
-
-    version = model.fc2.weight._version
-    model.fc2.weight.data.add_(1)
-    assert model.fc2.weight._version == version
-    with pytest.raises(SplitBoundaryError, match="state_fingerprint"):
-        runtime.run_suffix(boundary)
-    assert calls == 4
-
-    updated = runtime.run_prefix(inputs)
-    assert updated.metadata["state_fingerprint"] != boundary.metadata["state_fingerprint"]
-    runtime.run_suffix(updated)
-    assert calls == 6
+    torch.testing.assert_close(runtime.run_suffix(boundary), runtime.replay(inputs))

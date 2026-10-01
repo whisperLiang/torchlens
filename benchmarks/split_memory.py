@@ -125,23 +125,9 @@ def main() -> None:
         default=0,
         help="Measure warmed forward/prefix/suffix/replay latency at the 50%% split point.",
     )
-    parser.add_argument(
-        "--compare-replay-fingerprint",
-        action="store_true",
-        help="Also time replay with the prior one-fingerprint path.",
-    )
-    parser.add_argument(
-        "--compare-trusted-boundary",
-        action="store_true",
-        help="Also time public prefix/suffix calls with explicit state checks disabled.",
-    )
     args = parser.parse_args()
     if args.latency_runs < 0:
         parser.error("--latency-runs must be nonnegative")
-    if args.compare_replay_fingerprint and not args.latency_runs:
-        parser.error("--compare-replay-fingerprint requires --latency-runs")
-    if args.compare_trusted_boundary and not args.latency_runs:
-        parser.error("--compare-trusted-boundary requires --latency-runs")
     sys.path.insert(0, str(args.source_root.resolve()))
     weights_dir = Path(
         os.environ.setdefault(
@@ -277,32 +263,6 @@ def main() -> None:
                 "suffix": partial(runtime.run_suffix, latency_boundary),
                 "replay": partial(runtime.replay, latency_input),
             }
-            if args.compare_trusted_boundary:
-                trusted_boundary = runtime.run_prefix(latency_input, check_state=False)
-                trusted_output = runtime.run_suffix(trusted_boundary, check_state=False)
-                for left, right in zip(
-                    _tensor_leaves(trusted_output, torch), expected_leaves, strict=True
-                ):
-                    torch.testing.assert_close(left, right, atol=1e-4, rtol=1e-3)
-                workloads["prefix_trusted"] = partial(
-                    runtime.run_prefix, latency_input, check_state=False
-                )
-                workloads["suffix_trusted"] = partial(
-                    runtime.run_suffix, trusted_boundary, check_state=False
-                )
-            if args.compare_replay_fingerprint:
-
-                def replay_with_state_fingerprint(target_runtime: Any = runtime) -> Any:
-                    """Run the previous replay path with one state hash."""
-
-                    boundary = target_runtime.run_prefix(latency_input)
-                    target_runtime.validate_boundary(boundary, validate_state=False)
-                    boundary = target_runtime._transport_boundary(
-                        boundary, target_runtime.placement.suffix
-                    )
-                    return target_runtime.segments.suffix(boundary)
-
-                workloads["replay_with_state_fingerprint"] = replay_with_state_fingerprint
             timings = _latency_samples(workloads, torch=torch, cuda=cuda, runs=args.latency_runs)
             snapshot(
                 "latency",

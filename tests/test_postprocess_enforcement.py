@@ -369,6 +369,10 @@ def test_matrix_union_reports(monkeypatch: pytest.MonkeyPatch) -> None:
 
     import torchlens.postprocess as pp
 
+    # This matrix captures CPU inputs. Keep its read census independent of
+    # host CUDA availability: the step-13 device scan otherwise primes the
+    # op lookup cache before step 16. CUDA cleanup has separate arming tests.
+    monkeypatch.setattr(pp, "_is_cuda_available", lambda: False)
     monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
     monkeypatch.setenv("TORCHLENS_POSTPROCESS_WRITE_AUDIT", "record")
     monkeypatch.setenv("TORCHLENS_POSTPROCESS_READ_AUDIT", "record")

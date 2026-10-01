@@ -533,8 +533,13 @@ payload validation and derived gradients, run with `DEV=PYTHON`.
 tinygrad raw callables use `module_identity_mode="function_root"`. Callable object graphs with
 discoverable tinygrad module attributes default to `module_identity_mode="object_module"`; pass
 `module_identity_mode="function_root"` to force the older root-only surface. Discovery walks object
-attributes for callable children that own `Tensor` attributes or are known `tinygrad.nn.*` layer
-objects, records shared children under the first address with later aliases, and attributes UOps
+attributes and nested mappings, lists, tuples, sets, and frozensets for callable children that own
+`Tensor` attributes or are known `tinygrad.nn.*` layer objects. Mapping paths follow iteration order
+(insertion order for a `dict`); unordered set members use primitive values or distinct public string
+`name` attributes for stable addresses. Indistinguishable set members refuse discovery; use a list
+or tuple to give them an explicit order. Unrelated set members without discoverable modules or
+Tensor state are ignored. Discovery records shared children under the first address
+with later aliases, and attributes UOps
 from the live module stack observed at construction time. If tinygrad reuses an existing UOp
 identity, the UOp keeps its first observed module attribution rather than being duplicated for a
 later call.

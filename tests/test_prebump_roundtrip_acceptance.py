@@ -494,16 +494,16 @@ def test_l3_kernel_telemetry_family_roundtrip(tmp_path) -> None:
 
     trace = _telemetry_trace()
     live_payload = trace.annotations["_kernel_telemetry"]
+    live_kernels = [op.gpu_kernels for op in trace.ops]
     loaded = _plain_roundtrip(trace, tmp_path, "telemetry")
     assert _persisted_eq(loaded.annotations["_kernel_telemetry"], live_payload)
     telemetry._bind_trace_telemetry(loaded)
-    assert loaded.ops[0].gpu_kernels[0].attribution_status in (
-        "unavailable",
-        "exact",
-        "ambiguous",
-    )
+    # A CPU capture on a CUDA host legitimately has no kernel launches.
+    assert _persisted_eq([op.gpu_kernels for op in loaded.ops], live_kernels)
     gen2 = _second_generation(loaded, tmp_path, "telemetry")
     assert _persisted_eq(gen2.annotations["_kernel_telemetry"], live_payload)
+    telemetry._bind_trace_telemetry(gen2)
+    assert _persisted_eq([op.gpu_kernels for op in gen2.ops], live_kernels)
 
 
 def test_l6_selection_family_roundtrip(tmp_path) -> None:

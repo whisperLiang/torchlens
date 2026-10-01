@@ -179,10 +179,14 @@ def test_step_13_clears_cuda_cache_exactly_once_when_armed(
 
     import torchlens as tl
     import torchlens.postprocess as pp
+    from torchlens.backends.torch import backend as torch_backend
     from torchlens.utils import tensor_utils
 
     calls: list[bool] = []
     monkeypatch.setattr(pp, "_is_cuda_available", lambda: True)
+    # The shared touched-CUDA predicate also arms forward teardown on CUDA
+    # hosts. Keep that separate lifecycle site outside this step-13 check.
+    monkeypatch.setattr(torch_backend, "_is_cuda_available", lambda: False)
     monkeypatch.setattr(tensor_utils, "capture_touched_cuda", lambda _trace: True)
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append(True))
 
@@ -215,10 +219,12 @@ def test_step_13_never_flushes_the_allocator_ungated(
 
     import torchlens as tl
     import torchlens.postprocess as pp
+    from torchlens.backends.torch import backend as torch_backend
     from torchlens.utils import tensor_utils
 
     calls: list[bool] = []
     monkeypatch.setattr(pp, "_is_cuda_available", lambda: cuda_available)
+    monkeypatch.setattr(torch_backend, "_is_cuda_available", lambda: False)
     monkeypatch.setattr(tensor_utils, "capture_touched_cuda", lambda _trace: touched_cuda)
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append(True))
 

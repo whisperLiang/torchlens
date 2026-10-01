@@ -158,6 +158,57 @@ def test_paddle_suffix_boundary_gradients() -> None:
 
 
 @pytest.mark.heavy
+def test_tinygrad_live_tied_buffer_survives_parameter_update() -> None:
+    """Inference and suffix training read one updated live tied parameter."""
+
+    _run_tinygrad_subprocess(
+        """
+        import pytest
+        from tinygrad import Tensor
+        import torchlens as tl
+
+        class Shared:
+            def __init__(self):
+                # Lazy parameter UOps can sit above the source BUFFER.
+                self.weight = Tensor([2.0, 3.0])
+                self.weight.requires_grad = True
+                self.tied = self.weight
+
+            def __call__(self, x):
+                hidden = x.relu()
+                return hidden * self.weight + hidden * self.tied
+
+        model = Shared()
+        x = Tensor([[-1.0, 2.0], [3.0, -4.0]]).realize()
+        runtime = tl.split.prepare(
+            model,
+            x,
+            split_request("after:where", backend="tinygrad", trainable=True, batch_axes={}),
+        )
+        buffers = [
+            node for node in runtime.trace_graph.nodes
+            if node.op_type == "buffer" and node.target is not None
+            and node.target.live_tensor is model.weight
+        ]
+        assert len(buffers) == 1
+        boundary = runtime.run_prefix(x)
+        training_boundary = runtime.run_training_prefix(x)
+        assert runtime.run_suffix(boundary).tolist() == [[0.0, 12.0], [12.0, 0.0]]
+
+        model.weight.assign(Tensor([4.0, 5.0])).realize()
+        assert runtime.run_suffix(boundary).tolist() == model(x).tolist()
+        assert runtime.run_suffix(boundary).tolist() == [[0.0, 20.0], [24.0, 0.0]]
+        loss, gradients = runtime.train_suffix(
+            training_boundary, Tensor.zeros(2, 2).realize()
+        )
+        assert gradients
+        assert loss.tolist() == pytest.approx(244.0)
+        assert model.weight.grad.tolist() == pytest.approx([72.0, 40.0])
+        """
+    )
+
+
+@pytest.mark.heavy
 def test_tinygrad_suffix_boundary_gradients() -> None:
     """tinygrad split training returns suffix boundary gradients."""
 

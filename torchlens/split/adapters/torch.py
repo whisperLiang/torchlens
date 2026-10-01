@@ -21,7 +21,9 @@ from ...utils._torch_compat import (
     autocast_is_enabled,
     get_current_dispatch_mode_stack,
     get_torch_function_mode_stack_length,
+    get_variable_functions_class,
 )
+from ...utils._torch_symbols import torch_attr
 from ...utils.rng import AutocastRestore, execute_with_restored_rng_autocast
 from .._torch_liveness import release_schedule
 from ..boundary import ReplayBoundary
@@ -137,22 +139,25 @@ def _plain_replay_template(component: Any, torch: Any) -> bool:
     """Certify a captured argument tree without resolving any runtime values."""
 
     if isinstance(component, (ParentRef, ReplayValueRef)):
-        return True
-    if isinstance(component, LiteralTensor):
+        result = True
+    elif isinstance(component, LiteralTensor):
         value = component.value
-        return type(value) in (torch.Tensor, torch.nn.Parameter)
-    if isinstance(component, LiteralValue):
-        return _plain_torch_arguments(component.value, torch)
-    if isinstance(component, Unsupported):
-        return False
-    if isinstance(component, tuple):
+        result = type(value) in (torch.Tensor, torch.nn.Parameter)
+    elif isinstance(component, LiteralValue):
+        result = _plain_torch_arguments(component.value, torch)
+    elif isinstance(component, Unsupported):
+        result = False
+    elif isinstance(component, tuple):
         if _is_template_dict(component):
-            return all(
+            result = all(
                 _plain_torch_arguments(key, torch) and _plain_replay_template(value, torch)
                 for key, value in component
             )
-        return all(_plain_replay_template(value, torch) for value in component)
-    return _plain_torch_arguments(component, torch)
+        else:
+            result = all(_plain_replay_template(value, torch) for value in component)
+    else:
+        result = _plain_torch_arguments(component, torch)
+    return result
 
 
 def _rng_free_torch_targets(torch: Any) -> tuple[Any, ...]:
@@ -160,13 +165,13 @@ def _rng_free_torch_targets(torch: Any) -> tuple[Any, ...]:
 
     from ...utils.display import identity
 
-    variable_functions = getattr(getattr(torch, "_C", None), "_VariableFunctionsClass", None)
+    variable_functions = get_variable_functions_class()
     functions = (
         getattr(torch.nn.functional, "linear", None),
         getattr(torch.nn.functional, "gelu", None),
         getattr(variable_functions, "meshgrid", None),
         *(
-            getattr(torch, name, None)
+            torch_attr(name)
             for name in (
                 "relu",
                 "conv2d",
@@ -229,7 +234,8 @@ def _rng_free_torch_targets(torch: Any) -> tuple[Any, ...]:
         "detach",
     )
     candidates = (*functions, *(getattr(torch.Tensor, name, None) for name in tensor_methods))
-    originals = (_state._decorated_to_orig.get(id(target), target) for target in candidates)
+    decorated_to_orig, _ = _state.wrap_epoch_ledgers()
+    originals = (decorated_to_orig.get(id(target), target) for target in candidates)
     builtins = tuple(
         target
         for target in originals
@@ -241,7 +247,7 @@ def _rng_free_torch_targets(torch: Any) -> tuple[Any, ...]:
     python_targets = (identity, torch.nn.functional.silu, torch.nn.functional.interpolate)
     return (
         *builtins,
-        *(_state._decorated_to_orig.get(id(target), target) for target in python_targets),
+        *(decorated_to_orig.get(id(target), target) for target in python_targets),
     )
 
 
@@ -457,9 +463,10 @@ class _GeneratedSegmentBase:
         self._rng_free_targets = _rng_free_torch_targets(_torch())
         self._rng_free_target_ids = frozenset(id(target) for target in self._rng_free_targets)
         torch = _torch()
-        self._dropout_target = _state._decorated_to_orig.get(id(torch.dropout), torch.dropout)
+        decorated_to_orig, _ = _state.wrap_epoch_ledgers()
+        self._dropout_target = decorated_to_orig.get(id(torch.dropout), torch.dropout)
         attention = torch.nn.functional.scaled_dot_product_attention
-        self._attention_target = _state._decorated_to_orig.get(id(attention), attention)
+        self._attention_target = decorated_to_orig.get(id(attention), attention)
         function_stack_len = getattr(torch.overrides, "_len_torch_function_stack", None)
         self._function_mode_stack_len = (
             function_stack_len
@@ -558,21 +565,20 @@ class _GeneratedSegmentBase:
         if not self._fast_guard_certified or self.placement.is_explicit:
             return False
         torch = _torch()
-        if not all(_plain_torch_arguments(value, torch) for value in values):
-            return False
-        if any(
-            type(getattr(ref, "handle", None)) not in (torch.Tensor, torch.nn.Parameter)
+        state_types = (torch.Tensor, torch.nn.Parameter)
+        if not all(_plain_torch_arguments(value, torch) for value in values) or any(
+            type(getattr(ref, "handle", None)) not in state_types
             for ref in self._fast_guard_state_refs
         ):
             return False
-        for entry in self._state._entries.values():
-            if type(entry.value) not in (torch.Tensor, torch.nn.Parameter):
-                return False
-        for entries in self._state._inherited.values():
-            if any(
-                type(entry.value) not in (torch.Tensor, torch.nn.Parameter) for entry in entries
-            ):
-                return False
+        if any(
+            type(entry.value) not in state_types for entry in self._state._entries.values()
+        ) or any(
+            type(entry.value) not in state_types
+            for entries in self._state._inherited.values()
+            for entry in entries
+        ):
+            return False
         try:
             if self._function_mode_stack_len() != 0 or self._dispatch_mode_stack() != []:
                 return False
@@ -625,9 +631,9 @@ class _GeneratedSegmentBase:
     def trainable_parameters(self) -> list[Any]:
         """Bind and return owned parameters before an optimizer or forward runs."""
 
-        for node in self.graph.nodes:
-            if node.canonical_id in self.node_ids and not (node.is_input or node.is_output):
-                self._param_handles_for_node(node)
+        # Captured literal parameters can be owned even when live source
+        # substitution is disabled. Bind them on this explicit state request.
+        self.bound_state_values()
         return self._state.trainable_values()
 
     def state_report(self) -> dict[str, Any]:
@@ -643,7 +649,7 @@ class _GeneratedSegmentBase:
         dict
             Tensor state keyed by stable node ID and template occurrence. Live
             parameter substitution follows the same cursor as argument replay,
-            so unused captured copies do not contribute to state fingerprints.
+            so unused captured copies are not bound.
         """
 
         values: dict[str, Any] = {}
@@ -945,7 +951,11 @@ class _GeneratedSegmentBase:
         """Call one target under only the state guards it actually needs."""
 
         target = node.target
-        assert target is not None
+        if target is None:
+            raise SplitUnsupportedError(
+                f"Torch replay node {node.canonical_id!r} has no callable target.",
+                context=self._context(node, "missing replay target"),
+            )
         autocast_state = getattr(node.op, "func_autocast_state", None)
         if self._can_skip_rng_guard(target, args, kwargs):
             if self._can_skip_autocast_restore(autocast_state):

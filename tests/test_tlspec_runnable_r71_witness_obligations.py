@@ -762,6 +762,7 @@ def test_r71_completeness_forgery_never_strengthens(tmp_path: Path) -> None:
 # ======================================================================================
 
 
+@pytest.mark.heavy
 def test_r71_no_over_trigger_greens(tmp_path: Path) -> None:
     """Honest artifacts keep their verdicts: tensor-only, literal-only, normal
     branch/loop, metadata-oblivious changed layout, no-state-read, mode-insensitive

@@ -81,6 +81,18 @@ def test_boundary_collate_rejects_mismatched_abi() -> None:
         ReplayBoundary.collate([_boundary(), _boundary(spec=_spec(label="other"))])
 
 
+def test_boundary_collate_ignores_legacy_state_fingerprints() -> None:
+    """Old value-state metadata is not part of the collation ABI."""
+
+    first = _boundary(torch.ones(3))
+    second = _boundary(torch.zeros(3))
+    object.__setattr__(first, "metadata", {**first.metadata, "state_fingerprint": "old-a"})
+    object.__setattr__(second, "metadata", {**second.metadata, "state_fingerprint": "old-b"})
+    collated = ReplayBoundary.collate([first, second])
+    assert "state_fingerprint" not in collated.metadata
+    assert collated.tensors["h"].shape == (2, 3)
+
+
 def test_boundary_validation_mismatch_errors() -> None:
     """Boundary ABI mismatches raise structured errors."""
 

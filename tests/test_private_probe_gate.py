@@ -105,6 +105,17 @@ _ALLOWED_PRIVATE_TOUCHES: dict[str, frozenset[str]] = {
     "torchlens/backends/torch/prehook_provenance.py": frozenset(
         {"torch.nn.modules.module._global_forward_pre_hooks"}
     ),
+    # Split replay binds Torch's mode-stack queries once per segment for its
+    # hot RNG guards. Missing probes use the compat helpers; raising queries
+    # and nonempty/unknown stacks decline the fast path, so absence never
+    # certifies a context as plain eager execution.
+    "torchlens/split/adapters/torch.py": frozenset(
+        {
+            "getattr(torch.overrides, '_len_torch_function_stack')",
+            "from torch.utils._python_dispatch",
+            "from torch.utils._python_dispatch import _get_current_dispatch_mode_stack",
+        }
+    ),
     # isinstance classification against torch's own module-taxonomy base
     # classes (``_BatchNorm``, ``_DropoutNd``): the private base IS the
     # identity basis torch uses for the whole variant family

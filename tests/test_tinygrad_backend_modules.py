@@ -10,6 +10,7 @@ import pytest
 
 import torchlens as tl
 from torchlens.backends import BackendUnsupportedError
+from torchlens.backends.tinygrad.backend import discover_tinygrad_module_tree
 from torchlens.intervention.errors import MultiMatchWarning
 from torchlens.validation import check_metadata_invariants
 from torchlens.validation.invariants import MetadataInvariantError
@@ -20,6 +21,217 @@ nn = pytest.importorskip("tinygrad.nn")
 
 
 pytestmark = pytest.mark.backend_tinygrad
+
+
+class _NamedSetLayer:
+    """Tinygrad layer whose display repr is unrelated to its stable name."""
+
+    def __init__(self, name: str, display: str) -> None:
+        """Store a semantic name and a deliberately volatile display value."""
+
+        self.name = name
+        self.display = display
+        self.weight = Tensor([1.0])
+
+    def __call__(self, x: Any) -> Any:
+        """Apply the trainable leaf."""
+
+        return x * self.weight
+
+    def __repr__(self) -> str:
+        """Return an ordering hint that must not determine module addresses."""
+
+        return self.display
+
+
+def test_tinygrad_set_addresses_ignore_object_repr_order() -> None:
+    """A named member keeps its address across equivalent unordered containers."""
+
+    class Model:
+        """Hold two named layers in an unordered set."""
+
+        def __init__(self, reverse_display: bool) -> None:
+            """Construct the same semantic members with opposite repr ordering."""
+
+            a = _NamedSetLayer("a", "z" if reverse_display else "a")
+            b = _NamedSetLayer("b", "a" if reverse_display else "z")
+            self.group = {a, b}
+
+        def __call__(self, x: Any) -> Any:
+            """Return an input; discovery does not need to execute it."""
+
+            return x
+
+    for reverse_display in (False, True):
+        tree = discover_tinygrad_module_tree(Model(reverse_display))
+        assert tree is not None
+        assert tuple(
+            tree.metadata[f"group.{index}"]["_module_object"].name for index in (0, 1)
+        ) == ("a", "b")
+
+
+def test_tinygrad_set_refuses_indistinguishable_module_addresses() -> None:
+    """Two same-type members with the same stable name cannot receive ordinals."""
+
+    class Model:
+        """Hold members that have no stable relative order."""
+
+        def __init__(self) -> None:
+            """Create semantically ambiguous set members."""
+
+            self.group = {_NamedSetLayer("same", "a"), _NamedSetLayer("same", "z")}
+
+        def __call__(self, x: Any) -> Any:
+            """Return an input; discovery does not need to execute it."""
+
+            return x
+
+    with pytest.raises(BackendUnsupportedError, match="stable address"):
+        discover_tinygrad_module_tree(Model())
+
+
+def test_tinygrad_ignores_unordered_metadata_without_module_state() -> None:
+    """Unrelated set members cannot prevent module discovery or capture."""
+
+    class Marker:
+        """An identity-hashed model annotation without Tensor state."""
+
+    class Model:
+        """Mix one set-owned layer with unnamed metadata markers."""
+
+        def __init__(self) -> None:
+            """Create ordinary state beside unrelated unordered metadata."""
+
+            self.weight = Tensor([2.0])
+            self.markers = {Marker(), Marker()}
+            self.blocks = {Marker(), _NamedSetLayer("scale", "display"), Marker()}
+            self.scale = next(item for item in self.blocks if isinstance(item, _NamedSetLayer))
+
+        def __call__(self, x: Any) -> Any:
+            """Execute the discovered layer and direct parameter."""
+
+            return self.scale(x) * self.weight
+
+    model = Model()
+    tree = discover_tinygrad_module_tree(model)
+    assert tree is not None
+    assert set(tree.metadata) == {"self", "blocks.0"}
+    assert tree.metadata["blocks.0"]["all_addresses"] == ["blocks.0", "scale"]
+    trace = tl.trace(model, Tensor([3.0]), backend="tinygrad")
+    assert "weight" in trace.param_logs
+
+
+def test_tinygrad_nonstring_mapping_keys_follow_insertion_order() -> None:
+    """Custom-key dict paths keep insertion order even when repr order changes."""
+
+    class Key:
+        """Identity key with an unstable display repr."""
+
+        def __init__(self, display: str) -> None:
+            """Store the display value."""
+
+            self.display = display
+
+        def __repr__(self) -> str:
+            """Expose a display value unrelated to insertion order."""
+
+            return self.display
+
+    class Model:
+        """Hold a dict with two nonstring keys."""
+
+        def __init__(self, reverse_display: bool) -> None:
+            """Insert equivalent values in a fixed order."""
+
+            first = Key("z" if reverse_display else "a")
+            second = Key("a" if reverse_display else "z")
+            self.parts = {
+                first: _NamedSetLayer("a", "unused"),
+                second: _NamedSetLayer("b", "unused"),
+            }
+
+        def __call__(self, x: Any) -> Any:
+            """Return an input; discovery does not need to execute it."""
+
+            return x
+
+    for reverse_display in (False, True):
+        tree = discover_tinygrad_module_tree(Model(reverse_display))
+        assert tree is not None
+        assert tuple(
+            tree.metadata[f"parts.key_{index}"]["_module_object"].name for index in (0, 1)
+        ) == ("a", "b")
+
+
+def test_tinygrad_container_modules_and_parameters_are_discovered() -> None:
+    """List, tuple, mapping, and cyclic containers retain module and tensor addresses."""
+
+    class Affine:
+        """One tinygrad object module with a trainable tensor."""
+
+        def __init__(self) -> None:
+            """Create an identity projection."""
+
+            self.weight = Tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+
+        def __call__(self, x: Any) -> Any:
+            """Apply the projection."""
+
+            return x @ self.weight
+
+    class ContainerModel:
+        """Compose nested modules and direct container parameters."""
+
+        def __init__(self) -> None:
+            """Build nested and aliased object references."""
+
+            shared = Affine()
+            self.layers = [shared, Affine()]
+            self.blocks = {"a": Affine(), "b": shared}
+            self.parts = (Affine(),)
+            self.group = {Affine()}
+            self.frozen = frozenset({Affine()})
+            self.weights = [Tensor([1.0, 1.0, 1.0]), Tensor([0.0, 0.0, 0.0])]
+            self.extra_weights = (self.weights[0],)
+            self.loop: list[Any] = []
+            self.loop.append(self.loop)
+
+        def __call__(self, x: Any) -> Any:
+            """Use both nested modules and container parameters."""
+
+            return (
+                self.blocks["a"](self.layers[1](self.layers[0](x))) * self.weights[0]
+                + self.weights[1]
+            )
+
+    model = ContainerModel()
+    tree = discover_tinygrad_module_tree(model)
+    assert tree is not None
+    assert set(tree.metadata) == {
+        "self",
+        "layers.0",
+        "layers.1",
+        "blocks.a",
+        "parts.0",
+        "group.0",
+        "frozen.0",
+    }
+    assert tree.metadata["self"]["address_children"] == [
+        "layers.0",
+        "layers.1",
+        "blocks.a",
+        "parts.0",
+        "group.0",
+        "frozen.0",
+    ]
+    assert tree.metadata["layers.0"]["all_addresses"] == ["layers.0", "blocks.b"]
+    assert {"weights.0", "weights.1"} <= set(tree.param_owner_by_address)
+    assert tree.param_address_by_uop_id[id(model.weights[0].uop)] == "weights.0"
+    trace = tl.trace(model, Tensor.ones(1, 3, device="PYTHON"), backend="tinygrad")
+    assert {module.address for module in trace.modules} == set(tree.metadata)
+    assert {"weights.0", "weights.1"} <= {param.address for param in trace.param_logs}
+    assert "extra_weights.0" in trace.param_logs["weights.0"].all_addresses
+    assert trace.modules["blocks.b"] is trace.modules["layers.0"]
 
 
 class TinyLinearModel:

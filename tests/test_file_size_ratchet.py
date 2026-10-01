@@ -147,7 +147,7 @@ _GOD_FILE_CEILINGS: dict[str, int] = {
     # unchanged (3450-eve at 75439a67); the debloat pass keeps it as target.
     "torchlens/utils/_torch_compat.py": 3800,
     "torchlens/backends/torch/wrappers.py": 3400,
-    "torchlens/backends/tinygrad/backend.py": 3300,
+    "torchlens/backends/tinygrad/backend.py": 3200,
     "torchlens/backends/mlx/backend.py": 3250,
     # 3250 -> 3300: the CUDA-touch audit now declares its retained-row
     # lookups and reviewed producer/consumer pins (nightly CI fix).

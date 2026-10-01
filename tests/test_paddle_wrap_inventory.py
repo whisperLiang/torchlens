@@ -765,7 +765,15 @@ def _assert_inventory_matches_snapshot(inventory: PaddleInventory) -> None:
     """
 
     assert inventory.wrapped == EXPECTED_WRAPPED, SNAPSHOT_MESSAGE
-    assert inventory.denied == EXPECTED_DENIED, SNAPSHOT_MESSAGE
+    # CUDA wheels expose an import-time shared-library loader, not a tensor
+    # operation. Its reviewed classification stays denied when it is present.
+    bootstrap_denied = (
+        ("_preload_nvidia_lib",)
+        if hasattr(_paddle_runtime_or_skip(), "_preload_nvidia_lib")
+        else ()
+    )
+    expected_denied = tuple(sorted((*EXPECTED_DENIED, *bootstrap_denied)))
+    assert inventory.denied == expected_denied, SNAPSHOT_MESSAGE
 
 
 def test_paddle_wrapper_inventory_matches_static_snapshot() -> None:

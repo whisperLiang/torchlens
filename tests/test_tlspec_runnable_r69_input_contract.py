@@ -755,6 +755,7 @@ _BELT_LEAVES: dict[str, Any] = {
 _BELT_POSITIONS = ("top_level", "mapping_value", "dataclass_field", "tuple_element")
 
 
+@pytest.mark.heavy
 @pytest.mark.parametrize("position", _BELT_POSITIONS)
 @pytest.mark.parametrize("leaf_name", sorted(_BELT_LEAVES))
 def test_r69_no_untyped_error_input_boundary_save_sweep(

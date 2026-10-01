@@ -66,7 +66,8 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
 
 **BoundarySchema / ReplayBoundary**
 : `BoundarySchema` describes one value crossing the split boundary (including its shape, dtype,
-  device, and alias group). `ReplayBoundary` carries concrete boundary values for a replay.
+  device, and alias group). `ReplayBoundary` carries concrete values and validates structural
+  compatibility, without asserting that model parameter values stayed unchanged.
 
 **SplitRuntime / prepare**
 : `tl.prepare(model, inputs, request)` produces a `SplitRuntime` that can replay the prepared
@@ -74,6 +75,9 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
   `tl.split.prepare(...)`. `runtime.retains_trace` discloses diagnostic retention;
   `runtime.trace` refuses with `SplitUnsupportedError` when compact preparation discarded
   the capture. `trace_graph`, `.at()`, and `.with_placement()` remain available.
+  `split_points(diagnose=True)` performs planning, lowering, and capability analysis
+  without building executable segments; `analyze(point)` returns a `SplitPointAnalysis`
+  that `materialize(analysis)` turns into a full runtime.
   `runtime.train_suffix(..., microbatch_size=N)` adds Torch suffix microbatch training for
   uneven logical batches. It zeroes a caller-owned optimizer once, accumulates each suffix
   graph's gradients, and steps once. Mean-reduced losses use chunk-size weighting (`b_i / B`),

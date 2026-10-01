@@ -40,6 +40,8 @@ def single_rank_mesh():
     if dist.is_initialized():
         pytest.skip("a process group is already initialized in this process")
     lifecycle.disarm()
+    # Record every lifetime before the world and device-mesh groups are created.
+    lifecycle.arm()
     import os
 
     saved_env = {
@@ -56,12 +58,12 @@ def single_rank_mesh():
         _probe.bind(("127.0.0.1", 0))
         os.environ["MASTER_PORT"] = str(_probe.getsockname()[1])
     try:
-        dist.init_process_group(backend="gloo", rank=0, world_size=1)
-    except Exception as error:  # pragma: no cover - environment dependent
-        pytest.skip(f"gloo init failed: {error}")
-    from torch.distributed.device_mesh import init_device_mesh
+        try:
+            dist.init_process_group(backend="gloo", rank=0, world_size=1)
+        except Exception as error:  # pragma: no cover - environment dependent
+            pytest.skip(f"gloo init failed: {error}")
+        from torch.distributed.device_mesh import init_device_mesh
 
-    try:
         yield init_device_mesh("cpu", (1,))
     finally:
         lifecycle.disarm()

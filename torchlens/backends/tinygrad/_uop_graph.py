@@ -176,13 +176,15 @@ def _uop_name(uop: Any) -> str:
     return str(getattr(op, "name", op)).removeprefix("Ops.")
 
 
-def _uop_signature(uop: Any) -> str:
+def _uop_signature(uop: Any, memo: dict[int, str] | None = None) -> str:
     """Return a structural UOp signature string.
 
     Parameters
     ----------
     uop
         tinygrad UOp.
+    memo
+        Identity-keyed cache shared across one graph's signature calculations.
 
     Returns
     -------
@@ -190,9 +192,17 @@ def _uop_signature(uop: Any) -> str:
         Recursive operation/dtype/arg signature.
     """
 
+    signatures = {} if memo is None else memo
+    key = id(uop)
+    if key in signatures:
+        return signatures[key]
     src = getattr(uop, "src", ()) or ()
-    children = ",".join(_uop_signature(child) for child in src)
-    return f"{_uop_name(uop)}:{getattr(uop, 'dtype', None)}:{getattr(uop, 'arg', None)}[{children}]"
+    children = ",".join(_uop_signature(child, signatures) for child in src)
+    signature = (
+        f"{_uop_name(uop)}:{getattr(uop, 'dtype', None)}:{getattr(uop, 'arg', None)}[{children}]"
+    )
+    signatures[key] = signature
+    return signature
 
 
 def _tinygrad_signature_key(

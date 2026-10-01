@@ -55,10 +55,12 @@ def _tensor_for_dtype(dtype_name: str) -> Any:
     """
 
     if dtype_name == "bool":
-        return paddle.to_tensor([[True, False], [False, True]], dtype="bool")
+        return paddle.to_tensor(
+            [[True, False], [False, True]], dtype="bool", place=paddle.CPUPlace()
+        )
     if dtype_name == "int64":
-        return paddle.to_tensor([[-3, 0], [7, 11]], dtype="int64")
-    base = paddle.to_tensor([[-1.5, -0.25], [0.125, 3.5]], dtype="float32")
+        return paddle.to_tensor([[-3, 0], [7, 11]], dtype="int64", place=paddle.CPUPlace())
+    base = paddle.to_tensor([[-1.5, -0.25], [0.125, 3.5]], dtype="float32", place=paddle.CPUPlace())
     return base.cast(dtype_name)
 
 

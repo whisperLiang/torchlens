@@ -1475,13 +1475,31 @@ def _resolve_jax_mesh_devices(
 
 
 def _resolve_jax_device(jax_module: Any, map_location: Any) -> Any | None:
-    """Resolve a JAX device from a user map-location value when possible."""
+    """Resolve a JAX device from a user map-location value when possible.
+
+    Parameters
+    ----------
+    jax_module:
+        Imported JAX runtime.
+    map_location:
+        Requested platform or device spelling.
+
+    Returns
+    -------
+    Any | None
+        Matching device, including devices outside JAX's default platform,
+        or ``None`` when the spelling cannot be resolved.
+    """
 
     if not isinstance(map_location, str):
         return None
     requested = map_location.lower()
     try:
-        devices = list(jax_module.devices())
+        devices = list(
+            jax_module.devices(requested)
+            if requested in {"cpu", "gpu", "tpu"}
+            else jax_module.devices()
+        )
     except RuntimeError:
         return None
     for device in devices:

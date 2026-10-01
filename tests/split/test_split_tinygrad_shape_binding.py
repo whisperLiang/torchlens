@@ -3,12 +3,51 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 from v2_helpers import split_request
 
 import torchlens as tl
+from torchlens.split.errors import SplitBoundaryError
+
+
+def test_tinygrad_fixed_batch_skips_dynamic_uop_rewrite() -> None:
+    """Captured batch reuses fixed UOps; changed batch uses audited shape recipes."""
+
+    Tensor = pytest.importorskip("tinygrad").Tensor
+
+    def model(x: Any) -> Any:
+        """Exercise shape-bearing reduction UOps."""
+
+        return x.mean(axis=1)
+
+    runtime = tl.split.prepare(
+        model,
+        Tensor.ones(1, 4, 4, device="CPU").realize(),
+        split_request("50%", backend="tinygrad"),
+    )
+    prefix = runtime.segments.prefix
+    suffix = runtime.segments.suffix
+    with (
+        patch.object(
+            prefix, "_rewrite_dynamic_uop_src", wraps=prefix._rewrite_dynamic_uop_src
+        ) as prefix_rewrite,
+        patch.object(
+            suffix, "_rewrite_dynamic_uop_src", wraps=suffix._rewrite_dynamic_uop_src
+        ) as suffix_rewrite,
+    ):
+        fixed = Tensor.ones(1, 4, 4, device="CPU").realize()
+        np.testing.assert_allclose(runtime.replay(fixed).numpy(), model(fixed).numpy())
+        assert prefix_rewrite.call_count == suffix_rewrite.call_count == 0
+
+        dynamic = Tensor.ones(3, 4, 4, device="CPU").realize()
+        np.testing.assert_allclose(runtime.replay(dynamic).numpy(), model(dynamic).numpy())
+        assert prefix_rewrite.call_count + suffix_rewrite.call_count > 0
+
+    with pytest.raises(SplitBoundaryError, match="non-batch dimension"):
+        runtime.replay(Tensor.ones(1, 5, 4, device="CPU").realize())
 
 
 def test_tinygrad_reduce_does_not_rewrite_bound_parent_shape() -> None:

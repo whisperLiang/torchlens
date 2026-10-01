@@ -23,8 +23,6 @@ _CACHE_METADATA_KEYS = (
     "device_policy",
     "batch_validation",
     "runtime_batch_validation",
-    "state_fingerprint",
-    "state_prefix_kind",
     "profile_hash",
 )
 
@@ -138,7 +136,15 @@ def save_boundary(
                 reason="unsupported boundary cache",
             ),
         )
-    cache_boundary = _cacheable_boundary(boundary, resolved_adapter)
+    cache_boundary = _cacheable_boundary(
+        ReplayBoundary(
+            backend=boundary.backend,
+            tensors=boundary.tensors,
+            spec=boundary.spec,
+            metadata=boundary.metadata,
+        ),
+        resolved_adapter,
+    )
     cache_dir = Path(path)
     cache_dir.mkdir(parents=True, exist_ok=True)
     manifest = _boundary_manifest(cache_boundary)
@@ -174,6 +180,12 @@ def load_boundary(
         raise TypeError("Boundary cache payload did not contain a ReplayBoundary.")
     if manifest != _boundary_manifest(boundary):
         raise SplitBoundaryError("Boundary cache manifest does not match authenticated payload.")
+    boundary = ReplayBoundary(
+        backend=boundary.backend,
+        tensors=boundary.tensors,
+        spec=boundary.spec,
+        metadata=boundary.metadata,
+    )
     resolved_adapter = adapter or resolve_split_adapter(boundary.backend)
     boundary.validate(split_id=manifest.get("split_id"), adapter=resolved_adapter)
     return boundary

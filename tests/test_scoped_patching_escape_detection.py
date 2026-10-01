@@ -660,6 +660,7 @@ def test_scoped_and_legacy_match_on_in_scope_standard_model() -> None:
     assert scoped.layer_labels == legacy.layer_labels
 
 
+@pytest.mark.heavy
 @pytest.mark.parametrize(
     "model_type",
     [

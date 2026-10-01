@@ -30,19 +30,22 @@ def classify_boundary_role(
     """Classify a crossing dependency into a public boundary role."""
 
     dtype_text = dtype or ""
+    role: BoundaryRole
     if is_source:
-        return "passthrough"
-    if node_id == target_node_id and boundary_kind == "after":
-        return "primary"
-    if boundary_kind == "before" and node_id in direct_target_parent_ids:
-        return "primary"
-    if "int" in dtype_text or "bool" in dtype_text:
-        return "index"
-    if shape is not None and len(shape) <= 1 and ("int" in dtype_text or dtype_text == ""):
-        return "shape_value"
-    if shape is not None and len(shape) >= 4 and len(spatial_shapes) > 1:
-        return "multi_scale_feature"
-    return "skip"
+        role = "passthrough"
+    elif (node_id == target_node_id and boundary_kind == "after") or (
+        boundary_kind == "before" and node_id in direct_target_parent_ids
+    ):
+        role = "primary"
+    elif "int" in dtype_text or "bool" in dtype_text:
+        role = "index"
+    elif shape is not None and len(shape) <= 1 and ("int" in dtype_text or dtype_text == ""):
+        role = "shape_value"
+    elif shape is not None and len(shape) >= 4 and len(spatial_shapes) > 1:
+        role = "multi_scale_feature"
+    else:
+        role = "skip"
+    return role
 
 
 def make_boundary_schema(

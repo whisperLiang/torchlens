@@ -189,12 +189,15 @@ def test_paddle_halted_capture_settles_halted() -> None:
         def forward(self, x):  # noqa: D102
             return paddle_nn.functional.relu(self.fc(x))
 
-    trace = tl.trace(
-        Tiny(),
-        paddle.ones([1, 3]),
-        backend="paddle",
-        halt=tl.func("functional.relu"),
-    )
+    # This status contract is device-independent. CUDA wheels default to GPU;
+    # keep the fixture on CPU when other frameworks share the process/device.
+    with paddle.device.device_guard("cpu"):
+        trace = tl.trace(
+            Tiny(),
+            paddle.ones([1, 3]),
+            backend="paddle",
+            halt=tl.func("functional.relu"),
+        )
     assert trace.halted is True
     assert trace.outcome is not None
     assert trace.outcome.status is CaptureStatus.HALTED

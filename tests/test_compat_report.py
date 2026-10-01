@@ -343,10 +343,14 @@ def test_report_surfaces_every_runtime_capability() -> None:
     assert surfaced == expected
 
 
-def test_report_detects_known_scope_and_broken_rows() -> None:
+def test_report_detects_known_scope_and_broken_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     """Wrappers with known semantics produce the expected row statuses."""
 
-    data_parallel_report = report(nn.DataParallel(SmallCnn()), torch.randn(2, 1, 4, 4))
+    # Build this CPU metadata fixture without DataParallel's automatic CUDA move.
+    with monkeypatch.context() as patches:
+        patches.setattr(torch.cuda, "is_available", lambda: False)
+        data_parallel = nn.DataParallel(SmallCnn())
+    data_parallel_report = report(data_parallel, torch.randn(2, 1, 4, 4))
     fsdp_report = report(FullyShardedDataParallel(), torch.randn(2, 4))
     tied_report = report(TiedEmbeddingModel(), torch.tensor([1, 2, 3]))
 

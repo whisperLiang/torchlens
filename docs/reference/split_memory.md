@@ -40,13 +40,20 @@ returns detached boundary tensors. They are ordinary tensors that suffix autogra
 save. `run_training_prefix` preserves the caller's grad mode and graph connection for
 prefix backward, so call it with grad mode enabled when training the prefix.
 
-For repeated inference where the caller keeps model and segment state stable between
-calls, `runtime.run_prefix(x, check_state=False)` followed by
-`runtime.run_suffix(boundary, check_state=False)` skips the full state fingerprint on
-both sides. Graph, shape, dtype, and boundary identity checks still run. The default
-`check_state=True` detects stale reusable boundaries after a state update; it rejects
-a boundary created with `check_state=False`. Use the default for cached boundaries
-and training.
+`ReplayBoundary` validates split, graph, schema, and shape compatibility. It does not
+guarantee that model parameter values are identical to those present when the boundary
+was produced. A cached or caller-held boundary may be passed to `run_suffix()` after
+suffix parameters change, provided its structural ABI is still compatible.
+
+`runtime.split_points(diagnose=True)` plans, lowers, and checks capabilities for each
+candidate without constructing backend executable segments. Use `runtime.analyze(point)`
+to inspect one candidate's `SplitPointAnalysis`, then `runtime.materialize(analysis)`
+to build its executable runtime. `runtime.at(point)` performs both steps and remains
+the direct way to build a runtime at another cut from the same capture.
+Analysis also checks whether current segment state can migrate to the selected cut:
+divergent tied replicas or inference/training prefix values are reported as unsupported.
+Diagnostic inspection preserves lazy state bindings and shared replica caches;
+materialization checks the current values again if state changed after analysis.
 
 Both `train_suffix` and `train_suffix_result` accept keyword-only options:
 
@@ -61,15 +68,8 @@ same loss and gradients in `TrainingStepResult`, together with optimizer-step st
 Other backends reject a non-`None` microbatch size with `SplitUnsupportedError`.
 
 The default full-batch `train_suffix` path validates the caller-owned boundary once,
-then runs the root-swapped suffix directly. It does not rehash or revalidate that
-internal boundary for the same step. Public `run_suffix` keeps strict validation for
-boundaries that may have been cached or reused after a state update.
-
-Strict prefix/suffix calls compute a value-sensitive state digest on each call, so
-updates through `.data` or storage aliases still invalidate reusable boundaries.
-This requires reading the effective state, including a device-to-host copy for CUDA
-state. For one-shot inference with stable state, use `replay()` or explicitly opt
-into `check_state=False` on both public calls to skip that cost.
+then runs the root-swapped suffix directly. Public `run_suffix` performs the same
+structural and tensor checks for borrowed and cached boundaries.
 
 ## Loss and slicing semantics
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from .api import prepare
 from .boundary import ReplayBoundary
-from .candidates import SplitCandidate, SplitCandidateReport
+from .candidates import SplitCandidate, SplitCandidateReport, SplitPointAnalysis
 from .ir import (
     BackendHandle,
     BoundarySchema,
@@ -67,6 +67,7 @@ __all__ = [
     "TensorShapeIR",
     "SplitCandidate",
     "SplitCandidateReport",
+    "SplitPointAnalysis",
     "SplitCapabilityReport",
     "SplitFeatures",
     "SplitGraphIR",

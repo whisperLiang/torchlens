@@ -752,6 +752,7 @@ def test_same_op_repeat(vector_input):
     )
 
 
+@pytest.mark.heavy
 def test_repeated_op_type_in_loop(default_input1):
     model = example_models.RepeatedOpTypeInLoop()
     assert validate_forward_pass(model, default_input1)
@@ -906,6 +907,7 @@ def test_looping_inputs_and_outputs(default_input1, default_input2, default_inpu
     )
 
 
+@pytest.mark.heavy
 def test_stochastic_loop():
     model = example_models.StochasticLoop()
     model_input = torch.full((2, 2), 98.0)

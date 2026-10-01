@@ -436,7 +436,10 @@ def test_paddle_official_resnet_cross_batch_and_device() -> None:
             paddle.set_device("cpu")
             model = paddle.vision.models.resnet18(pretrained=False, num_classes=10)
             model.eval()
-            trace_x = paddle.ones([2, 3, 32, 32], dtype="float32")
+            # FP32 CPU and GPU kernels differ more than the split replay error
+            # budget here. FP64 isolates boundary transport and replay fidelity.
+            model.to(dtype="float64")
+            trace_x = paddle.ones([2, 3, 32, 32], dtype="float64")
             runtime = tl.split.prepare(
                 model,
                 trace_x,
@@ -445,21 +448,24 @@ def test_paddle_official_resnet_cross_batch_and_device() -> None:
             for batch in (1, 3):
                 paddle.set_device("cpu")
                 model.to("cpu")
-                replay_x_cpu = paddle.ones([batch, 3, 32, 32], dtype="float32")
+                replay_x_cpu = paddle.ones([batch, 3, 32, 32], dtype="float64")
                 boundary_cpu = runtime.run_prefix(replay_x_cpu)
                 for value in boundary_cpu.tensors.values():
                     assert_place(value, "cpu")
+                cpu_split_output = runtime.run_suffix(boundary_cpu)
+                cpu_full_output = model(replay_x_cpu)
+                assert float(paddle.max(paddle.abs(cpu_split_output - cpu_full_output)).item()) < 1e-9
 
                 model.to("gpu:0")
                 paddle.set_device("gpu:0")
                 boundary_gpu = boundary_cpu.to("gpu:0", adapter=runtime.adapter)
                 for value in boundary_gpu.tensors.values():
                     assert_place(value, "gpu")
-                replay_x_gpu = paddle.ones([batch, 3, 32, 32], dtype="float32")
+                replay_x_gpu = paddle.ones([batch, 3, 32, 32], dtype="float64")
                 split_output = runtime.run_suffix(boundary_gpu)
                 full_output = model(replay_x_gpu)
                 assert_place(split_output, "gpu")
-                assert float(paddle.max(paddle.abs(split_output - full_output)).item()) < 5e-4
+                assert float(paddle.max(paddle.abs(split_output - full_output)).item()) < 1e-9
         """,
         timeout=300,
     )

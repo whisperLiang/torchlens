@@ -18,18 +18,31 @@ _COLLATE_METADATA_KEYS = (
     "shape_program_hash",
     "device_policy",
     "profile_hash",
-    "state_fingerprint",
 )
 
 
 @dataclass(frozen=True)
 class ReplayBoundary:
-    """Immutable split replay boundary payload."""
+    """Split/graph/schema/shape ABI payload, independent of model parameter values."""
 
     backend: str
     tensors: dict[str, Any]
     spec: dict[str, BoundarySchema]
     metadata: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        """Drop value-state fields from callers constructing old cached boundaries."""
+
+        if "state_fingerprint" in self.metadata or "state_prefix_kind" in self.metadata:
+            object.__setattr__(
+                self,
+                "metadata",
+                {
+                    key: value
+                    for key, value in self.metadata.items()
+                    if key not in {"state_fingerprint", "state_prefix_kind"}
+                },
+            )
 
     @staticmethod
     def _collate_metadata_abi(boundary: ReplayBoundary) -> tuple[Any, ...]:
@@ -51,7 +64,6 @@ class ReplayBoundary:
         split_id: str | None = None,
         graph_hash: str | None = None,
         profile_hash: str | None = None,
-        state_fingerprint: str | None = None,
         shape_program_hash: str | None = None,
         shape_program: Any | None = None,
         adapter: SplitBackendAdapter | None = None,
@@ -82,7 +94,6 @@ class ReplayBoundary:
         expected_metadata = (
             ("graph_shape_hash", graph_hash),
             ("profile_hash", profile_hash),
-            ("state_fingerprint", state_fingerprint),
             ("shape_program_hash", shape_program_hash),
         )
         for field_name, expected_value in expected_metadata:

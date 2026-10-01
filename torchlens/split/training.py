@@ -892,7 +892,7 @@ def _backward_prefix_torch(
     """Backpropagate suffix boundary gradients through a graph-connected prefix."""
 
     torch = _require_torch(runtime)
-    runtime.validate_boundary(boundary, validate_state=False)
+    runtime.validate_boundary(boundary)
     _require_training_boundary(runtime, boundary)
     prefix_tensors = boundary.metadata.get("prefix_boundary_tensors", {})
     transported = _transport_boundary_grads(runtime, boundary_grads)
@@ -922,7 +922,7 @@ def _backward_prefix_tf(
 
     from .adapters.tf import _tf_gradient_source
 
-    runtime.validate_boundary(boundary, validate_state=False)
+    runtime.validate_boundary(boundary)
     _require_training_boundary(runtime, boundary)
     tape = boundary.metadata.get("tf_tape")
     prefix_tensors = boundary.metadata.get("prefix_boundary_tensors", {})
@@ -967,7 +967,7 @@ def _backward_prefix_paddle(
 
     import paddle
 
-    runtime.validate_boundary(boundary, validate_state=False)
+    runtime.validate_boundary(boundary)
     _require_training_boundary(runtime, boundary)
     prefix_tensors = boundary.metadata.get("prefix_boundary_tensors", {})
     tensors: list[Any] = []
@@ -1002,7 +1002,7 @@ def _backward_prefix_jax(
         )
     import jax
 
-    runtime.validate_boundary(boundary, validate_state=False)
+    runtime.validate_boundary(boundary)
     _require_training_boundary(runtime, boundary)
     keys = [key for key in boundary.spec if key in boundary_grads]
     if not keys:
@@ -1028,7 +1028,7 @@ def _backward_prefix_tinygrad(
 ) -> dict[str, Any]:
     """Backpropagate tinygrad suffix gradients through a graph-connected prefix."""
 
-    runtime.validate_boundary(boundary, validate_state=False)
+    runtime.validate_boundary(boundary)
     _require_training_boundary(runtime, boundary)
     prefix_tensors = boundary.metadata.get("prefix_boundary_tensors", {})
     _tinygrad_optimizer_step(runtime, optimizer, before=True)

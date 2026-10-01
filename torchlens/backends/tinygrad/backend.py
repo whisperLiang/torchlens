@@ -47,7 +47,6 @@ from .._finalize import (
     attach_function_root_module,
     attach_object_module_logs,
     finalize_single_pass_trace,
-    join_module_address as _join_module_address,
     mirror_param_derived_grads,
     module_source_metadata as _module_source_metadata,
     new_preview_function_trace,
@@ -66,6 +65,15 @@ from .._options import (
 )
 from .._selective_save import apply_static_label_save_policy, pop_static_label_save_predicate
 from .._validation_shared import float_replay_tolerances_for_dtype_name, scalar_replay_close
+from ._live_tensors import (
+    live_tinygrad_buffer_tensors_by_uop,
+    live_tinygrad_tensors_by_uop,
+)
+from ._module_discovery import (
+    _is_tinygrad_module_like,
+    _iter_tinygrad_model_leaves,
+    _iter_tinygrad_tensor_attrs,
+)
 from ._uop_graph import (
     _is_materializable_uop,
     _replace_uop_source_at_path,
@@ -78,67 +86,6 @@ from ._uop_graph import (
 )
 
 _ACTIVE_TINYGRAD_MODULE_STACK: list[TinygradModuleFrame] = []
-
-
-def _live_tinygrad_tensors_by_uop(model: Any) -> dict[int, Any]:
-    """Collect live Tensor handles reachable from a tinygrad callable.
-
-    UOp snapshots do not retain the Python ``Tensor`` object on which
-    ``requires_grad`` and ``grad`` are stored.  Closure/global references are
-    common for functional tinygrad models, so capture them explicitly for
-    training-time parameter rebinding.  Module parameters are included too;
-    the traversal is identity guarded and stops at Tensor leaves.
-    """
-
-    try:
-        from tinygrad import Tensor
-    except ImportError:
-        return {}
-
-    found: dict[int, Any] = {}
-    visited: set[int] = set()
-
-    def visit(value: Any) -> None:
-        """Record reachable tensor leaves once, following supported containers."""
-
-        value_id = id(value)
-        if value_id in visited:
-            return
-        visited.add(value_id)
-        if isinstance(value, Tensor):
-            uop = getattr(value, "uop", None)
-            if uop is not None:
-                found.setdefault(id(uop), value)
-            return
-        if inspect.ismodule(value) or inspect.isclass(value):
-            return
-        if isinstance(value, Mapping):
-            for item in value.values():
-                visit(item)
-            return
-        if isinstance(value, (tuple, list, set, frozenset)):
-            for item in value:
-                visit(item)
-            return
-        closure = getattr(value, "__closure__", None)
-        for cell in closure or ():
-            try:
-                visit(cell.cell_contents)
-            except ValueError:
-                continue
-        code = getattr(value, "__code__", None)
-        globals_dict = getattr(value, "__globals__", {})
-        for name in getattr(code, "co_names", ()):
-            if name in globals_dict:
-                visit(globals_dict[name])
-        defaults = getattr(value, "__defaults__", None) or ()
-        for item in defaults:
-            visit(item)
-        for item in getattr(value, "__dict__", {}).values():
-            visit(item)
-
-    visit(model)
-    return found
 
 
 @dataclass(frozen=True)
@@ -498,7 +445,10 @@ class TinygradBackend:
         trace.capture_start_time = time.time()
         observed_ops: dict[int, list[str]] = {}
         observed_module_stacks: dict[int, tuple[TinygradModuleFrame, ...]] = {}
-        live_tensors_by_uop = _live_tinygrad_tensors_by_uop(model)
+        live_tensors_by_uop = live_tinygrad_tensors_by_uop(model)
+        live_buffer_tensors_by_uop = live_tinygrad_buffer_tensors_by_uop(
+            live_tensors_by_uop, module_tree
+        )
         input_identities = self._input_identities(args)
         module_call_context = (
             scoped_tinygrad_module_calls(module_tree, observed_module_stacks)
@@ -533,6 +483,7 @@ class TinygradBackend:
             observed_module_stacks,
             module_tree if use_object_module else None,
             live_tensors_by_uop,
+            live_buffer_tensors_by_uop,
         )
         self._mark_output_events(trace, outputs, uop_labels, captures)
         if use_object_module and module_tree is not None:
@@ -790,6 +741,7 @@ class TinygradBackend:
         observed_module_stacks: Mapping[int, tuple[TinygradModuleFrame, ...]],
         module_tree: TinygradModuleTree | None,
         live_tensors_by_uop: Mapping[int, Any] | None = None,
+        live_buffer_tensors_by_uop: Mapping[int, Any] | None = None,
     ) -> tuple[TinygradUOpCapture, ...]:
         """Emit one event for each tensor-shaped UOp reachable from outputs.
 
@@ -809,6 +761,8 @@ class TinygradBackend:
             Discovered tinygrad module tree for object-module captures, if any.
         live_tensors_by_uop
             Optional live Tensor handles keyed by UOp identity.
+        live_buffer_tensors_by_uop
+            Capture-time BUFFER lineage bindings keyed by UOp identity.
 
         Returns
         -------
@@ -818,6 +772,7 @@ class TinygradBackend:
 
         captures: list[TinygradUOpCapture] = []
         uops = _unique_uops(outputs)
+        signature_memo: dict[int, str] = {}
         for uop in uops:
             if id(uop) in uop_labels or not _is_materializable_uop(uop):
                 continue
@@ -848,9 +803,9 @@ class TinygradBackend:
                 container_path=(),
                 annotations={
                     "tinygrad_uop": op_name,
-                    "tinygrad_uop_signature": _uop_signature(uop),
+                    "tinygrad_uop_signature": _uop_signature(uop, signature_memo),
                     "tinygrad_observed_tensor_ops": tuple(observed_ops.get(id(uop), ())),
-                    "tinygrad_identity": _identity(tensor),
+                    "tinygrad_identity": _identity(tensor, signature_memo),
                 },
             )
             uop_labels[id(uop)] = event.label_raw
@@ -862,7 +817,9 @@ class TinygradBackend:
                     parent_labels=tuple(edge.parent_label_raw for edge in parents),
                     parent_arg_positions=parent_paths,
                     payload_snapshot=payload,
-                    live_tensor=(live_tensors_by_uop or {}).get(id(uop)),
+                    live_tensor=(live_buffer_tensors_by_uop or {}).get(
+                        id(uop), (live_tensors_by_uop or {}).get(id(uop))
+                    ),
                 )
             )
         return tuple(captures)
@@ -1161,15 +1118,16 @@ class TinygradBackend:
             Output-parent flags are updated in place.
         """
 
+        signature_memo: dict[int, str] = {}
         labels_by_signature = {
-            _uop_signature(capture.uop): capture.label_raw for capture in captures
+            _uop_signature(capture.uop, signature_memo): capture.label_raw for capture in captures
         }
         output_labels: list[str] = []
         for output in outputs:
             output_uop = cast(Any, output).uop
             label = uop_labels.get(id(output_uop))
             if label is None:
-                label = labels_by_signature.get(_uop_signature(output_uop))
+                label = labels_by_signature.get(_uop_signature(output_uop, signature_memo))
             if label is None:
                 label = _fallback_output_label(output, captures, output_labels)
             if label is not None:
@@ -1742,6 +1700,7 @@ def discover_tinygrad_module_tree(model: Any) -> TinygradModuleTree | None:
     _walk_tinygrad_modules(
         module=model,
         address="self",
+        parent_address=None,
         metadata=metadata,
         address_by_id=address_by_id,
         modules_by_class=modules_by_class,
@@ -1866,14 +1825,20 @@ def tinygrad_param_logs(tree: TinygradModuleTree, trace: Trace) -> dict[str, Par
     """
 
     param_logs: dict[str, Param] = {}
-    tensor_by_uop_id: dict[int, Any] = {}
+    primary_by_tensor_id: dict[int, str] = {}
+    primary_by_uop_id: dict[int, str] = {}
     for address, metadata in tree.metadata.items():
         module = metadata.get("_module_object")
         if module is None:
             continue
         for param_address, tensor in _iter_tinygrad_tensor_attrs(module, address):
-            existing_address = tree.param_address_by_uop_id.get(id(tensor.uop))
-            tensor_by_uop_id.setdefault(id(tensor.uop), tensor)
+            # Realization may replace a Tensor's UOp after tree discovery. Keep
+            # aliases of the same live Tensor together even when that happens.
+            existing_address = primary_by_tensor_id.get(id(tensor)) or primary_by_uop_id.get(
+                id(tensor.uop)
+            )
+            primary_by_tensor_id.setdefault(id(tensor), existing_address or param_address)
+            primary_by_uop_id.setdefault(id(tensor.uop), existing_address or param_address)
             if existing_address is not None and existing_address in param_logs:
                 param = param_logs[existing_address]
                 if param_address not in param.all_addresses:
@@ -1917,6 +1882,7 @@ def _walk_tinygrad_modules(
     *,
     module: Any,
     address: str,
+    parent_address: str | None,
     metadata: dict[str, dict[str, Any]],
     address_by_id: dict[int, str],
     modules_by_class: defaultdict[type[Any], dict[int, str]],
@@ -1931,6 +1897,8 @@ def _walk_tinygrad_modules(
         Module-like object instance.
     address
         TorchLens address for ``module``.
+    parent_address
+        Owning module address, which may skip container path components.
     metadata
         Metadata mapping being populated.
     address_by_id
@@ -1952,9 +1920,9 @@ def _walk_tinygrad_modules(
     primary = address_by_id.get(module_id)
     if primary is not None:
         metadata[primary].setdefault("all_addresses", [primary]).append(address)
-        parent_address = address.rpartition(".")[0] or "self"
-        parent_children = metadata[parent_address]["address_children"]
-        parent_children.remove(address)
+        if parent_address is not None:
+            parent_children = metadata[parent_address]["address_children"]
+            parent_children.remove(address)
         return
 
     address_by_id[module_id] = address
@@ -1985,6 +1953,7 @@ def _walk_tinygrad_modules(
         _walk_tinygrad_modules(
             module=child_module,
             address=child_address,
+            parent_address=address,
             metadata=metadata,
             address_by_id=address_by_id,
             modules_by_class=modules_by_class,
@@ -1994,7 +1963,7 @@ def _walk_tinygrad_modules(
 
 
 def _iter_tinygrad_module_children(module: Any, address: str) -> list[tuple[str, Any]]:
-    """Return direct callable tinygrad module-like children.
+    """Return callable module children through supported containers.
 
     Parameters
     ----------
@@ -2010,106 +1979,10 @@ def _iter_tinygrad_module_children(module: Any, address: str) -> list[tuple[str,
     """
 
     children: list[tuple[str, Any]] = []
-    for name, value in getattr(module, "__dict__", {}).items():
-        if name.startswith("_") or not callable(value):
-            continue
+    for path, value in _iter_tinygrad_model_leaves(module, address):
         if _is_tinygrad_module_like(value):
-            children.append((_join_module_address(address, name), value))
+            children.append((path, value))
     return children
-
-
-def _iter_tinygrad_tensor_attrs(module: Any, address: str) -> list[tuple[str, Any]]:
-    """Return direct tinygrad tensor attributes for one object.
-
-    Parameters
-    ----------
-    module
-        Candidate module object.
-    address
-        TorchLens module address.
-
-    Returns
-    -------
-    list[tuple[str, Any]]
-        Parameter address and tensor pairs.
-    """
-
-    return [
-        (_join_module_address(address, name), value)
-        for name, value in getattr(module, "__dict__", {}).items()
-        if not name.startswith("_") and _is_tinygrad_tensor(value)
-    ]
-
-
-def _is_tinygrad_module_like(value: Any) -> bool:
-    """Return whether ``value`` is a tinygrad module-like callable object.
-
-    Parameters
-    ----------
-    value
-        Candidate object.
-
-    Returns
-    -------
-    bool
-        True when the object matches the tinygrad module discovery heuristic.
-    """
-
-    if inspect.isfunction(value) or inspect.ismethod(value) or not callable(value):
-        return False
-    if _is_known_tinygrad_nn_type(value):
-        return True
-    if any(_is_tinygrad_tensor(child) for child in getattr(value, "__dict__", {}).values()):
-        return True
-    return any(
-        callable(child) and _is_tinygrad_module_like(child)
-        for child in getattr(value, "__dict__", {}).values()
-    )
-
-
-def _is_known_tinygrad_nn_type(value: Any) -> bool:
-    """Return whether ``value`` is an instance of a known ``tinygrad.nn`` class.
-
-    Parameters
-    ----------
-    value
-        Candidate object.
-
-    Returns
-    -------
-    bool
-        True for known tinygrad neural-network helper classes.
-    """
-
-    try:
-        import tinygrad.nn as tinygrad_nn
-    except ImportError:
-        return False
-    known_types = tuple(
-        attr for name in dir(tinygrad_nn) if isinstance((attr := getattr(tinygrad_nn, name)), type)
-    )
-    return isinstance(value, known_types)
-
-
-def _is_tinygrad_tensor(value: Any) -> bool:
-    """Return whether ``value`` is a tinygrad Tensor.
-
-    Parameters
-    ----------
-    value
-        Candidate object.
-
-    Returns
-    -------
-    bool
-        True when ``value`` is a tinygrad ``Tensor``.
-    """
-
-    try:
-        from tinygrad import Tensor
-    except ImportError:
-        return False
-    return isinstance(value, Tensor)
 
 
 def _module_stack_for_uop(
@@ -2261,6 +2134,8 @@ def _synthetic_stack_for_address(
     addresses = ["self", *[".".join(parts[: index + 1]) for index in range(len(parts))]]
     frames: list[TinygradModuleFrame] = []
     for current in addresses:
+        if current not in module_tree.metadata:
+            continue
         metadata = module_tree.metadata.get(current, {})
         frames.append(
             TinygradModuleFrame(
@@ -2331,16 +2206,16 @@ def _tinygrad_metadata_top_level(
     metadata:
         Metadata for ``address``, unused by tinygrad.
     metadata_by_address:
-        Complete module metadata mapping, unused by tinygrad.
+        Complete module metadata, including the root's direct children.
 
     Returns
     -------
     bool
-        True for non-root addresses with no dotted parent component.
+        True for modules directly owned by the root, including container paths.
     """
 
-    del metadata, metadata_by_address
-    return address != "self" and "." not in address
+    del metadata
+    return address in metadata_by_address.get("self", {}).get("address_children", ())
 
 
 def _tinygrad_op_top_level(address: str) -> bool:
@@ -2617,14 +2492,17 @@ def _tinygrad_trace_op_signatures(
 
     uop_by_label = {capture.label_raw: capture.uop for capture in captures}
     grouped: dict[tuple[Any, ...], list[Any]] = defaultdict(list)
+    signature_memo: dict[int, str] = {}
     for ordinal, op in enumerate(ops):
         uop = uop_by_label.get(op._label_raw)
         if uop is None:
             continue
         key = _tinygrad_signature_key(
-            uop_signature=_uop_signature(uop),
+            uop_signature=_uop_signature(uop, signature_memo),
             ordinal=ordinal,
-            parent_signatures=tuple(_uop_signature(src) for src in getattr(uop, "src", ())),
+            parent_signatures=tuple(
+                _uop_signature(src, signature_memo) for src in getattr(uop, "src", ())
+            ),
             shape=tuple(getattr(op, "shape", ()) or ()),
             dtype=str(getattr(op, "dtype", "")),
         )
@@ -2658,6 +2536,7 @@ def _tinygrad_live_intermediate_candidates(
 
     grouped: dict[tuple[Any, ...], list[TinygradIntermediateCandidate]] = defaultdict(list)
     ordinal = 0
+    signature_memo: dict[int, str] = {}
     for uop in _unique_uops(outputs):
         tensors = observed_tensors.get(id(uop), ())
         for tensor in tensors:
@@ -2666,9 +2545,11 @@ def _tinygrad_live_intermediate_candidates(
             shape = tuple(getattr(tensor, "shape", ()) or ())
             dtype = str(getattr(tensor, "dtype", ""))
             key = _tinygrad_signature_key(
-                uop_signature=_uop_signature(uop),
+                uop_signature=_uop_signature(uop, signature_memo),
                 ordinal=ordinal,
-                parent_signatures=tuple(_uop_signature(src) for src in getattr(uop, "src", ())),
+                parent_signatures=tuple(
+                    _uop_signature(src, signature_memo) for src in getattr(uop, "src", ())
+                ),
                 shape=shape,
                 dtype=dtype,
             )
@@ -2685,13 +2566,15 @@ def _tinygrad_live_intermediate_candidates(
     return grouped
 
 
-def _identity(tensor: Any) -> str:
+def _identity(tensor: Any, signature_memo: dict[int, str] | None = None) -> str:
     """Return the versioned tinygrad identity string used for audit metadata.
 
     Parameters
     ----------
     tensor
         tinygrad Tensor.
+    signature_memo
+        Per-capture structural signature cache.
 
     Returns
     -------
@@ -2702,7 +2585,7 @@ def _identity(tensor: Any) -> str:
     uop = getattr(tensor, "uop", None)
     base = getattr(uop, "base", None)
     view = getattr(uop, "st", None)
-    lineage_hash = hash(_uop_signature(uop)) if uop is not None else 0
+    lineage_hash = hash(_uop_signature(uop, signature_memo)) if uop is not None else 0
     return (
         f"obj={id(tensor)};uop={id(uop)};lineage={lineage_hash};"
         f"buffer={id(base)};view={id(view)};mutation=0"

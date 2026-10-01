@@ -217,8 +217,9 @@ values are shared with the derived runtime; moving devices creates new replicas,
 optimizers from that runtime's parameter accessors. A recut that would merge different values
 of one tied parameter refuses until those replicas agree. Moving a node into the shared suffix
 also refuses when its frozen inference-prefix and live training-prefix state differ.
-Boundary state fingerprints cover the effective prefix and suffix state, including owned
-values and cached training boundaries; updates invalidate old boundaries. Empty non-batch
+Replay boundaries check split, graph, schema, shape, and dtype compatibility, but do not
+assert that model parameter values have stayed unchanged. An old boundary can be replayed
+after a suffix parameter update when its structural ABI still matches. Empty non-batch
 dimensions remain zero in cached schemas.
 
 | When it can occur | What you see | Remedy |

@@ -10,10 +10,25 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from .ir import BoundarySchema, SplitPoint, after, before
+from .ir import BoundarySchema, SplitGraphIR, SplitPoint, SplitRequest, after, before
+from .planner import SplitPlan
+from .program import ReplayProgram, SplitCapabilityReport
 
 if TYPE_CHECKING:
     from .graph import SplitTraceGraph
+
+
+@dataclass(frozen=True)
+class SplitPointAnalysis:
+    """Validated point-specific plan and programs, with no backend executables."""
+
+    source_graph: SplitTraceGraph = field(repr=False, compare=False)
+    request: SplitRequest
+    plan: SplitPlan
+    graph_ir: SplitGraphIR
+    prefix_program: ReplayProgram
+    suffix_program: ReplayProgram
+    capability_report: SplitCapabilityReport
 
 
 @dataclass(frozen=True)
@@ -148,6 +163,7 @@ def point_for(kind: str, node_id: str) -> SplitPoint:
 __all__ = [
     "SplitCandidate",
     "SplitCandidateReport",
+    "SplitPointAnalysis",
     "iter_candidate_sites",
     "point_for",
 ]
