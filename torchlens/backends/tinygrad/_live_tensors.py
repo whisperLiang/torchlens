@@ -121,6 +121,37 @@ def _tinygrad_parameter_tensors(
     ]
 
 
+def _safe_tinygrad_buffer_ancestor(tensor: Any, ops: Any) -> tuple[int, Any] | None:
+    """Find a BUFFER only through value-preserving tensor operations.
+
+    Parameters
+    ----------
+    tensor
+        Live model tensor that may be backed by one BUFFER.
+    ops
+        The installed tinygrad operation enum.
+
+    Returns
+    -------
+    tuple[int, Any] | None
+        Binding priority and BUFFER UOp, or None when values may have changed.
+    """
+
+    uop = getattr(tensor, "uop", None)
+    rank = 0
+    while uop is not None:
+        if uop.op is ops.BUFFER:
+            return rank, uop
+        if uop.op not in {ops.COPY, ops.CONTIGUOUS, ops.RESHAPE}:
+            return None
+        src = tuple(getattr(uop, "src", ()) or ())
+        if not src:
+            return None
+        uop = src[0]
+        rank = 1
+    return None
+
+
 def live_tinygrad_buffer_tensors_by_uop(
     tensors_by_uop: Mapping[int, Any], module_tree: Any | None
 ) -> dict[int, Any]:
@@ -136,7 +167,7 @@ def live_tinygrad_buffer_tensors_by_uop(
     Returns
     -------
     dict[int, Any]
-        Unambiguous BUFFER identity to live Tensor bindings.
+        Unambiguous, value-preserving BUFFER identity to live Tensor bindings.
     """
 
     try:
@@ -144,28 +175,22 @@ def live_tinygrad_buffer_tensors_by_uop(
     except ImportError:
         return {}
 
-    bindings: dict[int, Any] = {}
-    ambiguous: set[int] = set()
+    candidates: dict[int, list[tuple[int, Any]]] = {}
     for tensor in _tinygrad_parameter_tensors(tensors_by_uop, module_tree):
-        try:
-            lineage = tensor.uop.toposort()
-        except Exception:
-            continue
-        for uop in lineage:
-            if uop.op is not Ops.BUFFER:
-                continue
-            key = id(uop)
-            existing = bindings.get(key)
-            if existing is None:
-                bindings[key] = tensor
-            elif existing is not tensor:
-                ambiguous.add(key)
+        ancestor = _safe_tinygrad_buffer_ancestor(tensor, Ops)
+        if ancestor is not None:
+            rank, uop = ancestor
+            candidates.setdefault(id(uop), []).append((rank, tensor))
     for tensor in tensors_by_uop.values():
         uop = getattr(tensor, "uop", None)
         if uop is not None and uop.op is Ops.BUFFER:
-            bindings.setdefault(id(uop), tensor)
-    for key in ambiguous:
-        bindings.pop(key, None)
+            candidates.setdefault(id(uop), []).append((0, tensor))
+    bindings: dict[int, Any] = {}
+    for key, matches in candidates.items():
+        best_rank = min(rank for rank, _tensor in matches)
+        best = {id(tensor): tensor for rank, tensor in matches if rank == best_rank}
+        if len(best) == 1:
+            bindings[key] = next(iter(best.values()))
     return bindings
 
 

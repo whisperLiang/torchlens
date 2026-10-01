@@ -79,23 +79,61 @@ def _is_tinygrad_literal_uop(uop: Any) -> bool:
     return getattr(uop, "op", None) in {ops.CONST, ops.STACK}
 
 
-def _rewrite_tinygrad_uop_device(uop: Any, target_device: str | None) -> Any:
-    """Rewrite captured tinygrad DEVICE leaves to the requested replay device."""
+def _rewrite_tinygrad_uop_device(
+    uop: Any, target_device: str | None, memo: dict[int, Any] | None = None
+) -> Any:
+    """Rewrite captured DEVICE leaves, visiting each shared UOp once.
+
+    Parameters
+    ----------
+    uop
+        Root of the captured UOp graph to rewrite.
+    target_device
+        Device requested for this replay, or None to preserve the graph.
+    memo
+        Per-replay-node cache shared by source and final-root rewrites.
+
+    Returns
+    -------
+    Any
+        Rewritten root, with shared subgraphs retained.
+    """
 
     if target_device is None or not hasattr(uop, "replace"):
         return uop
     ops = _tinygrad_ops()
-    if getattr(uop, "op", None) is ops.DEVICE:
-        if getattr(uop, "arg", None) == target_device:
-            return uop
-        return uop.replace(arg=target_device)
-    src = tuple(getattr(uop, "src", ()) or ())
-    if not src:
-        return uop
-    rewritten_src = tuple(_rewrite_tinygrad_uop_device(item, target_device) for item in src)
-    if rewritten_src == src:
-        return uop
-    return uop.replace(src=rewritten_src)
+    rewritten = {} if memo is None else memo
+    stack = [(uop, False)]
+    while stack:
+        node, expanded = stack.pop()
+        key = id(node)
+        if key in rewritten:
+            continue
+        if not hasattr(node, "replace"):
+            rewritten[key] = node
+            continue
+        if getattr(node, "op", None) is ops.DEVICE:
+            result = (
+                node
+                if getattr(node, "arg", None) == target_device
+                else node.replace(arg=target_device)
+            )
+        else:
+            src = tuple(getattr(node, "src", ()) or ())
+            if not expanded and src:
+                stack.append((node, True))
+                stack.extend((child, False) for child in reversed(src))
+                continue
+            rewritten_src = tuple(rewritten[id(child)] for child in src)
+            result = (
+                node
+                if all(child is source for child, source in zip(rewritten_src, src, strict=True))
+                else node.replace(src=rewritten_src)
+            )
+        rewritten[key] = result
+        # The final-root pass may encounter a source replacement again.
+        rewritten[id(result)] = result
+    return rewritten[id(uop)]
 
 
 def _tinygrad_shape_tuple(uop: Any) -> tuple[int, ...] | None:
@@ -568,8 +606,9 @@ class _TinygradGeneratedSegmentBase:
             if payload is not None:
                 bound = self._move_source_to_device(payload, target_device)
                 return bound if preserve_autograd else self._backend._realized_copy(bound)
+        device_rewrites: dict[int, Any] = {}
         src = [
-            _rewrite_tinygrad_uop_device(item, target_device)
+            _rewrite_tinygrad_uop_device(item, target_device, device_rewrites)
             for item in (getattr(capture.uop, "src", ()) or ())
         ]
         if not src and not capture.parent_arg_positions:
@@ -622,6 +661,7 @@ class _TinygradGeneratedSegmentBase:
             replay_uop = _rewrite_tinygrad_uop_device(
                 replay_uop,
                 target_device,
+                device_rewrites,
             )
             value = self._backend._tensor_from_uop(replay_uop)
             return value if preserve_autograd else self._backend._realized_copy(value)

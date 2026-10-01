@@ -78,6 +78,33 @@ def test_tinygrad_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
     )
 
 
+def test_tinygrad_split_does_not_bind_derived_weight_to_its_buffers() -> None:
+    """A derived model tensor must not replace each of its BUFFER operands."""
+
+    Tensor = pytest.importorskip("tinygrad").Tensor
+
+    class Model:
+        """Hold one lazy weight formed from two independent buffers."""
+
+        def __init__(self) -> None:
+            """Leave the weight computation in the captured UOp graph."""
+
+            self.weight = (
+                Tensor([1.0, 2.0], device="CPU").realize()
+                + Tensor([10.0, 20.0], device="CPU").realize()
+            )
+
+        def __call__(self, x: Any) -> Any:
+            """Add the derived weight to the input."""
+
+            return x + self.weight
+
+    model = Model()
+    x = Tensor([3.0, 4.0], device="CPU").realize()
+    runtime = tl.split.prepare(model, x, split_request("50%", backend="tinygrad"))
+    assert runtime.replay(x).tolist() == model(x).tolist() == [14.0, 26.0]
+
+
 def test_tf_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
     """TensorFlow raw-op prefix + suffix replay matches the original callable."""
 

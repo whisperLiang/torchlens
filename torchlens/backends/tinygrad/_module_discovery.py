@@ -107,6 +107,15 @@ def _tinygrad_container_children(value: Any, path: str) -> list[tuple[str, Any]]
                 "indistinguishable set members; use a list/tuple or give members distinct names."
             )
         return [(str(index), item) for index, item in enumerate(items)]
+    if isinstance(value, tuple):
+        fields = getattr(type(value), "_fields", None)
+        if (
+            isinstance(fields, tuple)
+            and len(fields) == len(value)
+            and all(isinstance(field, str) and field.isidentifier() for field in fields)
+            and len(set(fields)) == len(fields)
+        ):
+            return list(zip(fields, value, strict=True))
     if isinstance(value, (list, tuple)):
         return [(str(index), item) for index, item in enumerate(value)]
     return None

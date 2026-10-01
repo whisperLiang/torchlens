@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import namedtuple
 from pathlib import Path
 from typing import Any
 
@@ -232,6 +233,31 @@ def test_tinygrad_container_modules_and_parameters_are_discovered() -> None:
     assert {"weights.0", "weights.1"} <= {param.address for param in trace.param_logs}
     assert "extra_weights.0" in trace.param_logs["weights.0"].all_addresses
     assert trace.modules["blocks.b"] is trace.modules["layers.0"]
+
+
+def test_tinygrad_namedtuple_uses_field_names_for_model_state() -> None:
+    """Named module and parameter addresses retain namedtuple field names."""
+
+    class Model:
+        """Keep two model layers in a namedtuple."""
+
+        def __init__(self) -> None:
+            """Build named child modules."""
+
+            parts_type = namedtuple("Parts", "stem head")
+            self.parts = parts_type(_NamedSetLayer("stem", "stem"), _NamedSetLayer("head", "head"))
+
+        def __call__(self, x: Any) -> Any:
+            """Run both named layers."""
+
+            return self.parts.head(self.parts.stem(x))
+
+    trace = tl.trace(Model(), Tensor([1.0], device="CPU").realize(), backend="tinygrad")
+    assert {module.address for module in trace.modules} == {"self", "parts.stem", "parts.head"}
+    assert {param.address for param in trace.param_logs} == {
+        "parts.stem.weight",
+        "parts.head.weight",
+    }
 
 
 class TinyLinearModel:

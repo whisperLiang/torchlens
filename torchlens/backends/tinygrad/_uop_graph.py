@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
@@ -177,7 +179,7 @@ def _uop_name(uop: Any) -> str:
 
 
 def _uop_signature(uop: Any, memo: dict[int, str] | None = None) -> str:
-    """Return a structural UOp signature string.
+    """Return a bounded structural UOp digest.
 
     Parameters
     ----------
@@ -189,20 +191,30 @@ def _uop_signature(uop: Any, memo: dict[int, str] | None = None) -> str:
     Returns
     -------
     str
-        Recursive operation/dtype/arg signature.
+        Digest of the operation, dtype, argument, and ordered child digests.
     """
 
     signatures = {} if memo is None else memo
-    key = id(uop)
-    if key in signatures:
-        return signatures[key]
-    src = getattr(uop, "src", ()) or ()
-    children = ",".join(_uop_signature(child, signatures) for child in src)
-    signature = (
-        f"{_uop_name(uop)}:{getattr(uop, 'dtype', None)}:{getattr(uop, 'arg', None)}[{children}]"
-    )
-    signatures[key] = signature
-    return signature
+    stack = [(uop, False)]
+    while stack:
+        node, expanded = stack.pop()
+        key = id(node)
+        if key in signatures:
+            continue
+        src = tuple(getattr(node, "src", ()) or ())
+        if not expanded:
+            stack.append((node, True))
+            stack.extend((child, False) for child in reversed(src))
+            continue
+        fields = (
+            _uop_name(node),
+            str(getattr(node, "dtype", None)),
+            str(getattr(node, "arg", None)),
+            tuple(signatures[id(child)] for child in src),
+        )
+        encoded = json.dumps(fields, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+        signatures[key] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    return signatures[id(uop)]
 
 
 def _tinygrad_signature_key(
@@ -218,13 +230,13 @@ def _tinygrad_signature_key(
     Parameters
     ----------
     uop_signature
-        Recursive structural UOp signature.
+        Bounded structural UOp digest.
     ordinal
         Legacy topological ordinal retained in the internal call signature for
         compatibility. tinygrad 0.13's graph normalization introduces
         unobserved UOps, so this value is intentionally excluded from matching.
     parent_signatures
-        Direct parent structural signatures.
+        Direct parent structural digests.
     shape
         Tensor shape.
     dtype
