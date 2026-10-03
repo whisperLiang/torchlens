@@ -387,3 +387,43 @@ env: py3.11-torch2.8.0
 torch: 2.8.0+cpu
 source: 281aa36c6e63874dd39c259fdc85f832a2d1569c (dirty)
 recorded: 2026-09-22T11:01:22.162824+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: MLX split replay adds four graph-parent reads and preserves final output containers through one registered preview_output_parent_rebind site (event output and seq reads); reviewed static additions only, no new mutation family or legacy channel.
+env: py3.11-torch2.8.0
+torch: 2.8.0+cu128
+source: 3a40087c676a4ade1e128c0b6c57fed5aa882a33 (dirty)
+recorded: 2026-10-01T18:27:59.984963+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: Reviewed MLX split state binding adds one structural source-node parent read in _mlx_state.py; no new event amendments or mutation families.
+env: py3.11-torch2.8.0
+torch: 2.8.0+cu128
+source: 3a40087c676a4ade1e128c0b6c57fed5aa882a33 (dirty)
+recorded: 2026-10-03T08:04:54.553277+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: MLX replay validation preserves pre-call module and PRNG sidecars via dataclass replacement; removes the obsolete ambiguous capture.output read without adding producer mutation channels
+env: py3.11-torch2.8.0
+torch: 2.8.0+cu128
+source: 3a40087c676a4ade1e128c0b6c57fed5aa882a33 (dirty)
+recorded: 2026-10-03T12:12:43.670543+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: Reviewed MLX repeated-output fix moves the existing preview_output_parent_rebind site and its output/seq reads from backend.py into containers.py; root ModuleCall.output_paths preserves every occurrence with no new mutation family or legacy channel.
+env: py3.11-torch2.8.0
+torch: 2.8.0+cu128
+source: 3a40087c676a4ade1e128c0b6c57fed5aa882a33 (dirty)
+recorded: 2026-10-03T18:20:38.472674+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: Reviewed MLX output-occurrence metadata keeps native producers distinct from final container positions and moves the registered rebind site into containers.py; source preflight recognizes input/output aliases, adding one existing is_input read in split/program.py; amendment families and legacy mutation channels are unchanged.
+env: py3.11-torch2.8.0
+torch: 2.8.0+cu128
+source: 3a40087c676a4ade1e128c0b6c57fed5aa882a33 (dirty)
+recorded: 2026-10-03T18:24:32.719008+00:00

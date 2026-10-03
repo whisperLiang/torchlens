@@ -635,9 +635,12 @@ class SplitRuntime:
         placement = self.placement.prefix
         if not placement.is_explicit:
             return inputs, dict(runtime_kwargs or {})
-        placed_inputs = tuple(move_tree(self.adapter, value, placement) for value in inputs)
+        memo: dict[int, Any] = {}
+        placed_inputs = tuple(
+            move_tree(self.adapter, value, placement, memo=memo) for value in inputs
+        )
         placed_kwargs = {
-            key: move_tree(self.adapter, value, placement)
+            key: move_tree(self.adapter, value, placement, memo=memo)
             for key, value in dict(runtime_kwargs or {}).items()
         }
         return placed_inputs, placed_kwargs
@@ -774,6 +777,11 @@ class SplitRuntime:
         """Return whether full model and split replay outputs match."""
 
         runtime_kwargs = self.prepared_input_kwargs if input_kwargs is None else input_kwargs
+        validator = getattr(self.adapter, "validate_equivalence", None)
+        if callable(validator):
+            return bool(
+                validator(self, model, inputs, atol=atol, rtol=rtol, input_kwargs=runtime_kwargs)
+            )
         full_output = model(*inputs, **(runtime_kwargs or {}))
         replay_output = self.replay(*inputs, input_kwargs=runtime_kwargs)
         return nested_allclose(self.adapter, full_output, replay_output, atol=atol, rtol=rtol)

@@ -8,7 +8,12 @@ from functools import cached_property
 from hashlib import sha256
 from typing import Any, Literal
 
-from ..backends.registry import JAX_BACKEND_NAME, PADDLE_BACKEND_NAME, TINYGRAD_BACKEND_NAME
+from ..backends.registry import (
+    JAX_BACKEND_NAME,
+    MLX_BACKEND_NAME,
+    PADDLE_BACKEND_NAME,
+    TINYGRAD_BACKEND_NAME,
+)
 from ..intervention.types import CapturedArgTemplate, LiteralTensor, LiteralValue, ParentRef
 from ..utils.tensor_utils import safe_copy
 from .shape import SymbolicShape, infer_traced_batch_size, symbolic_shape_from_tensor_ref
@@ -54,6 +59,7 @@ class SplitTraceNode:
     replay_source_policy: ReplaySourcePolicy
     op: Any
     buffer_refs: tuple[Any, ...] = ()
+    output_container_paths: tuple[tuple[Any, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -364,6 +370,44 @@ def _attach_tinygrad_captures(trace: Any, nodes: list[SplitTraceNode]) -> list[S
         else node
         for node in nodes
     ]
+
+
+def _attach_mlx_captures(trace: Any, nodes: list[SplitTraceNode]) -> list[SplitTraceNode]:
+    """Attach MLX wrapper captures and replay templates to graph nodes."""
+
+    captures: dict[str, Any] = {}
+    for capture in trace._mlx_op_captures or ():
+        for label_raw in getattr(capture, "labels_raw", ()) or ():
+            captures[str(label_raw)] = capture
+    paths_by_label: dict[str, list[tuple[Any, ...]]] = {}
+    root = trace.modules["self"].ops[0]
+    for label, path in zip(root.output_ops, root.output_paths, strict=True):
+        paths_by_label.setdefault(label, []).append(tuple(path))
+    updated: list[SplitTraceNode] = []
+    for node in nodes:
+        paths = next(
+            (
+                paths_by_label[alias]
+                for alias in (node.raw_label, node.label, node.canonical_id)
+                if alias in paths_by_label
+            ),
+            (),
+        )
+        node = replace(node, output_container_paths=tuple(paths))
+        raw_label = str(getattr(node.op, "_label_raw", node.raw_label or ""))
+        capture = captures.get(raw_label)
+        if capture is None:
+            updated.append(node)
+            continue
+        updated.append(
+            replace(
+                node,
+                target=capture,
+                args_template=tuple(getattr(capture, "args", ()) or ()),
+                kwargs_template=dict(getattr(capture, "kwargs", {}) or {}),
+            )
+        )
+    return updated
 
 
 def _attach_tf_captures(trace: Any, nodes: list[SplitTraceNode]) -> list[SplitTraceNode]:
@@ -795,6 +839,8 @@ def split_graph_from_trace(trace: Any) -> SplitTraceGraph:
         nodes = _attach_jax_captures(trace, nodes)
     elif backend == TINYGRAD_BACKEND_NAME:
         nodes = _attach_tinygrad_captures(trace, nodes)
+    elif backend == MLX_BACKEND_NAME:
+        nodes = _attach_mlx_captures(trace, nodes)
     elif backend in {"tf", "tensorflow"}:
         nodes = _attach_tf_captures(trace, nodes)
     nodes = _repair_node_templates(nodes)

@@ -33,6 +33,7 @@ from ...data_classes.trace import Trace
 from ...fastlog._halt import HaltSignal
 from ...fastlog.types import CaptureSpec
 from ...ir.capture_events import CaptureEvents
+from ...ir.container import ContainerSpec
 from ...ir.events import (
     ArgTemplateRef,
     FunctionCallRef,
@@ -55,7 +56,6 @@ from .._finalize import (
     attach_object_module_logs,
     finalize_single_pass_trace,
     join_module_address as _join_module_address,
-    mark_output_label,
     mirror_param_derived_grads,
     nearest_metadata_parent,
     normalize_op_module_calls,
@@ -66,6 +66,13 @@ from .._finalize import (
 from .._options import MLX_PREVIEW_TRACE_OPTION_POLICY, reject_unsupported_trace_options
 from .._validation_shared import float_replay_tolerances
 from . import capabilities
+from ._call_state import MLXCallState
+from .containers import (
+    iter_arrays_with_paths,
+    mark_output_occurrences,
+    output_container_spec,
+    rebuild_mlx_module,
+)
 from .model_prep import (
     MLXModuleTree,
     cleanup_model_session,
@@ -1023,6 +1030,8 @@ class MLXBackend:
         events: list[OpEvent] = []
         policy = self._capture_policy(session)
         output_by_site = tuple(output_sites)
+        output_paths = tuple(path for _value, path in self._iter_arrays_with_paths(isolated_output))
+        output_container_spec = self._output_container_spec(isolated_output)
         for site_index, (output, reserved) in enumerate(
             zip(output_by_site, reserved_block, strict=True)
         ):
@@ -1048,6 +1057,10 @@ class MLXBackend:
                 policy=policy,
                 is_input=False,
                 fire_results=fire_results,
+                output_container_path=(
+                    output_paths[site_index] if site_index < len(output_paths) else ()
+                ),
+                output_container_spec=output_container_spec,
             )
             events.append(event)
         return tuple(events)
@@ -1274,7 +1287,7 @@ class MLXBackend:
             else:
                 trace.raw_output = output_transform(output) if callable(output_transform) else None
             self.finalize_forward_session(trace, trace._raw_graph_ws)
-            self._mark_outputs(trace, output)
+            output_paths = self._mark_outputs(trace, output)
             materialize_from_events(trace, trace.capture_events)
             delattr(trace, "capture_events")
             if use_object_module and module_tree is not None:
@@ -1294,6 +1307,7 @@ class MLXBackend:
                 trace.num_params_frozen = 0
                 trace.param_source = "none"
             self._finish_trace(trace, module_tree if use_object_module else None)
+            trace.modules["self"].ops[0].output_paths = output_paths
             if halt_signal is not None:
                 self._restrict_halted_param_logs(trace)
             if grad_options is not None:
@@ -1718,6 +1732,7 @@ class MLXBackend:
         output: object,
         *,
         module_stack: tuple[ModuleFrame, ...] | None = None,
+        call_state: MLXCallState | None = None,
     ) -> Any:
         """Append one MLX operation event and return the effective output.
 
@@ -1845,6 +1860,11 @@ class MLXBackend:
                 kwarg_leaf_labels=kwarg_leaf_labels,
                 interventions=intervention_slots,
                 appliers=intervention_appliers,
+                module_ref=rebuild_mlx_module(args[0], dict(args[0]))
+                if args and isinstance(args[0], cast(Any, self.nn).Module)
+                else None,
+                source_ids=() if call_state is None else call_state.source_ids,
+                rng_state=None if call_state is None else call_state.rng_state,
             )
         )
         # Independent replay inventory: the validation oracle's denominator.
@@ -1972,29 +1992,25 @@ class MLXBackend:
     def _label_source_arrays(self, trace: Trace, args: list[Any], kwargs: dict[Any, Any]) -> None:
         """Emit resolvable input source events for MLX source arrays."""
 
-        for index, arg in enumerate(args):
-            if self.is_tensor(arg):
-                label = f"input.arg_{index}"
-                self.tensor_store.set_label(arg, label)
-                raw_index = trace.capture_events.raw_layer_counter + 1
-                trace.capture_events.raw_layer_counter = raw_index
-                trace.capture_events.append(
-                    self._build_source_event(trace, label, arg, raw_index=raw_index)
-                )
-        for key, value in kwargs.items():
-            if self.is_tensor(value):
-                label = f"input.{key}"
-                self.tensor_store.set_label(value, label)
-                raw_index = trace.capture_events.raw_layer_counter + 1
-                trace.capture_events.raw_layer_counter = raw_index
-                trace.capture_events.append(
-                    self._build_source_event(
-                        trace,
-                        label,
-                        value,
-                        raw_index=raw_index,
-                    )
-                )
+        for value, path in self._iter_arrays_with_paths(tuple(args), sort_dict=True):
+            suffix = ".".join(str(part) for part in path)
+            label = f"input.arg_{suffix}"
+            self._append_source_array(trace, label, value)
+        for key in sorted(kwargs, key=repr):
+            for array, path in self._iter_arrays_with_paths(kwargs[key], sort_dict=True):
+                suffix = ".".join(str(part) for part in path)
+                label = f"input.{key}" if not suffix else f"input.{key}.{suffix}"
+                self._append_source_array(trace, label, array)
+
+    def _append_source_array(self, trace: Trace, label: str, value: object) -> None:
+        """Label one MLX input array and append its source event."""
+
+        self.tensor_store.set_label(value, label)
+        raw_index = trace.capture_events.raw_layer_counter + 1
+        trace.capture_events.raw_layer_counter = raw_index
+        trace.capture_events.append(
+            self._build_source_event(trace, label, value, raw_index=raw_index)
+        )
 
     def _capture_policy(self, session: object) -> CapturePolicy:
         """Return the MLX capture policy for one event."""
@@ -2062,6 +2078,8 @@ class MLXBackend:
         policy: CapturePolicy,
         is_input: bool,
         fire_results: tuple[FireResult, ...] = (),
+        output_container_path: tuple[object, ...] = (),
+        output_container_spec: ContainerSpec | None = None,
     ) -> OpEvent:
         """Build one topology-complete MLX operation event."""
 
@@ -2124,9 +2142,9 @@ class MLXBackend:
                 detach_saved_activations=bool(getattr(session, "detach_saved_activations", False)),
                 visualizer_path=None,
                 multi_output_index=None,
-                in_multi_output=False,
-                container_path=(),
-                container_spec=None,
+                in_multi_output=bool(output_container_path),
+                container_path=output_container_path,
+                container_spec=output_container_spec,
                 child_versions=(),
             ),
             templates=ArgTemplateRef(
@@ -2217,14 +2235,10 @@ class MLXBackend:
                     _add(label, key, "kwarg")
         return tuple(edges), {"args": arg_positions, "kwargs": kwarg_positions}, tuple(edge_uses)
 
-    def _mark_outputs(self, trace: Trace, output: object) -> None:
-        """Mark final output-parent operations for an MLX trace."""
+    def _mark_outputs(self, trace: Trace, output: object) -> tuple[tuple[object, ...], ...]:
+        """Mark producers and return every final output occurrence's path."""
 
-        for value in self._iter_arrays(output):
-            label = self.tensor_store.get_label(value)
-            if label is None:
-                continue
-            mark_output_label(trace, label)
+        return mark_output_occurrences(self, trace, output)
 
     def _finish_trace(self, trace: Trace, module_tree: MLXModuleTree | None = None) -> None:
         """Finalize a manually captured MLX Trace.
@@ -2299,6 +2313,22 @@ class MLXBackend:
                 arrays.extend(self._iter_arrays(item))
             return arrays
         return []
+
+    def _iter_arrays_with_paths(
+        self,
+        value: object,
+        path: tuple[object, ...] = (),
+        *,
+        sort_dict: bool = False,
+    ) -> list[tuple[object, tuple[object, ...]]]:
+        """Return MLX array leaves paired with their container paths."""
+
+        return iter_arrays_with_paths(value, self.is_tensor, path, sort_dict=sort_dict)
+
+    def _output_container_spec(self, value: object) -> ContainerSpec | None:
+        """Build a portable spec for builtin MLX output containers."""
+
+        return output_container_spec(value, self.is_tensor)
 
     def _shape(self, value: object) -> tuple[int, ...] | None:
         """Return an MLX array shape without materializing data."""

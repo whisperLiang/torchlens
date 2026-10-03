@@ -283,8 +283,12 @@ def test_mlx_registry_wrap_install_raise_unwinds_installed_patches(
 
     original_add = lambda *args: "add"  # noqa: E731
     original_relu = lambda *args: "relu"  # noqa: E731
+    original_uniform = lambda *args: "uniform"  # noqa: E731
     stub_mx = types.ModuleType("stub_mx")
     stub_mx.add = original_add  # type: ignore[attr-defined]
+    stub_random = types.ModuleType("stub_random")
+    stub_random.uniform = original_uniform  # type: ignore[attr-defined]
+    stub_mx.random = stub_random  # type: ignore[attr-defined]
     stub_nn = types.ModuleType("stub_nn")
     stub_nn.relu = original_relu  # type: ignore[attr-defined]
     monkeypatch.setattr(mlx_wrappers, "_import_mlx", lambda: (stub_mx, stub_nn))
@@ -295,11 +299,13 @@ def test_mlx_registry_wrap_install_raise_unwinds_installed_patches(
     with pytest.raises(_InstallInterrupt):
         registry.wrap(SimpleNamespace(), module_tree=hostile_tree)  # type: ignore[arg-type]
 
-    # Every wrapper already landed (mx.add, nn.relu) came back off.
+    # Every wrapper already landed, including the random surface, came back off.
     assert stub_mx.add is original_add
+    assert stub_mx.random.uniform is original_uniform
     assert stub_nn.relu is original_relu
     assert registry.is_wrapped() is False
     assert registry._originals == {}
+    assert registry._state_sources == {}
 
 
 @pytest.mark.smoke

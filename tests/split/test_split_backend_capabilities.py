@@ -6,20 +6,18 @@ import pytest
 
 from torchlens.backends import get_backend_spec
 from torchlens.split.adapters import resolve_split_adapter
-from torchlens.split.errors import SplitUnsupportedError
 
 
-def test_mlx_adapter_reports_unsupported() -> None:
-    """MLX still gates replay explicitly when its native runtime is unavailable."""
+def test_mlx_adapter_advertises_replay_training_and_placement_capabilities() -> None:
+    """MLX exposes eager replay, functional training and native stream placement."""
 
     adapter = resolve_split_adapter(get_backend_spec("mlx"))
 
     assert adapter.name == "mlx"
-    assert adapter.supports_replay is False
-    assert adapter.supports_training is False
-    assert adapter.supports_boundary_cache is False
-    with pytest.raises(SplitUnsupportedError):
-        adapter.build_segments(None, None, None)  # type: ignore[arg-type]
+    assert adapter.supports_replay is True
+    assert adapter.supports_training is True
+    assert adapter.supports_boundary_cache is True
+    assert adapter.supports_state_placement is True
 
 
 @pytest.mark.parametrize("backend", ["jax", "tf"])

@@ -560,7 +560,8 @@ pytest tests/ -m "not rare and not slow" -x --tb=short
   numeric values; passing permits extrapolation subject to existing shape guards, NOT a proof
   for every positive B. Hidden Python branches at untested batches may silently return wrong
   results. Failed/unavailable probes restrict execution to the captured batch. A genuine B=1
-  failure may fall back to a B=2 capture, captured-only with no B=3 probe. `dynamic_batch`,
+  failure may fall back to a B=2 capture, captured-only on other backends. MLX probes B=3
+  after this fallback for native BatchNorm's minimum training batch. `dynamic_batch`,
   `supports_dynamic_batch`, and user-configured low/high ranges remain deleted. Inspect
   `runtime.batch_validation`, capability `shape_diagnostics.batch_validation`, and boundary
   `runtime_batch_validation` (captured/sampled/extrapolated). Declare axis SEMANTICS with
@@ -582,9 +583,17 @@ pytest tests/ -m "not rare and not slow" -x --tb=short
   segment state per device through `SegmentState` (`referenced` vs `owned`, one replica per
   source identity so tied params keep one identity; `prefix_parameters()` /
   `suffix_parameters()`), with runtime boundary and boundary-gradient transport. Segment-state
-  placement is torch-only (`adapter.supports_state_placement`); other backends refuse an
+  placement is supported by Torch and MLX (`adapter.supports_state_placement`); other backends refuse an
   explicit plan typed but still move boundaries with `ReplayBoundary.to(device)`. Semantic
-  split identity and cache keys exclude batch entirely. MLX stays an unsupported shell.
+  split identity and cache keys exclude batch entirely. MLX supports generated eager split
+  replay, boundary caches, functional split training with private native optimizer state, and
+  native device/stream placement (CPU/GPU requires the installed MLX backend). BatchNorm buffers,
+  Dropout/native PRNG keys, tied parameters across the cut, and suffix microbatch training are
+  supported. Connected steps commit optimizers at prefix backward, summing tied gradients once;
+  one shared optimizer steps once, separate optimizers assign tied state to the prefix owner.
+  Training
+  boundaries carry prefix identity/state-version evidence; cached or detached boundaries
+  refuse prefix backward. True backward capture remains unsupported.
   Rebinding/recutting preserves effective owned state (same-device values shared, moved values
   replicated without source-model writes); merging divergent tied replicas or divergent
   inference/training prefix values into a shared suffix refuses. ReplayBoundary validates

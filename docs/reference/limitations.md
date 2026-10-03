@@ -132,12 +132,22 @@ the ambiguous facet refuses explicitly rather than returning attention weights.
 ## Preview backends
 
 Backend-neutral split replay is broader than true backward capture. TensorFlow, Paddle,
-JAX, and tinygrad support `tl.split.prepare()` with `SplitRequest`, trusted local boundary
-caches, a batch-symbolic `ShapeProgram` (B=1 capture and one empirical B=2 probe),
-and split-training boundary gradients. JAX uses functional gradients;
+JAX, tinygrad, and MLX support `tl.split.prepare()` with `SplitRequest`, trusted local boundary
+caches, and a batch-symbolic `ShapeProgram` (B=1 capture and one empirical B=2 probe).
+JAX, TensorFlow, Paddle, tinygrad and MLX additionally support split-training boundary gradients.
+JAX uses functional gradients;
 TensorFlow and Paddle can update parameters only when generated replay reaches the live
 parameter objects; tinygrad uses live UOp autograd for an uncached `run_training_prefix`.
-MLX currently gates split replay and split training entirely.
+MLX uses functional suffix gradients and prefix VJP recomputation; native optimizers update
+private segment parameters. Native CPU/GPU device and stream placement is supported when
+the installed MLX build provides the requested backend. Cached or detached boundaries cannot
+drive prefix backward, and true backward capture remains unsupported.
+MLX train-mode BatchNorm, Dropout/native random replay, shared parameters spanning the cut,
+and suffix microbatch training are supported. Connected steps defer optimizer updates until
+prefix backward, then sum tied gradients and update each logical parameter once. A shared
+optimizer steps once; separate optimizers assign tied parameters to the prefix optimizer,
+falling back to the suffix optimizer. Microbatch state and random draws follow native sequential
+chunk execution, which can differ from a single full-batch call.
 
 Split boundary caches are signed local caches, not portable artifacts. Loading verifies an
 HMAC over the exact bytes before restoring native backend tensors; the signing key is kept
@@ -189,7 +199,9 @@ and numeric values. Passing permits empirical extrapolation, subject to shape gu
 does **not** prove correctness at every batch. A Python branch starting at B>=8 can remain
 undetected and silently produce incorrect results at that batch. Failed or unavailable probes
 restrict replay/training to the captured batch. If B=1 cannot run, the B=2 fallback capture
-also stays captured-only, with no B=3 probe. Runtime calls do not recapture or rerun the model.
+also stays captured-only on other backends. MLX performs an independent B=3 probe after a B=2
+fallback, supporting native train-mode BatchNorm versions that require at least two samples.
+Runtime calls do not recapture or rerun the model.
 Inspect `runtime.batch_validation`, `explain_capabilities()["shape_diagnostics"]["batch_validation"]`,
 and boundary `metadata["runtime_batch_validation"]` (captured/sampled/extrapolated).
 tinygrad may optimize away singleton UOps between these batches; if graph alignment fails,

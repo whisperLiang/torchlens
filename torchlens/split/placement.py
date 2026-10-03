@@ -126,19 +126,29 @@ def move_value(adapter: Any, value: Any, placement: DevicePlacement) -> Any:
     return adapter.to_device(value, placement.device)
 
 
-def move_tree(adapter: Any, value: Any, placement: DevicePlacement) -> Any:
+def move_tree(
+    adapter: Any,
+    value: Any,
+    placement: DevicePlacement,
+    *,
+    memo: dict[int, Any] | None = None,
+) -> Any:
     """Move every tensor leaf of a nested container to a placement."""
 
     if not placement.is_explicit:
         return value
+    if memo is None:
+        memo = {}
     if adapter.is_tensor(value):
-        return adapter.to_device(value, placement.device)
+        if id(value) not in memo:
+            memo[id(value)] = adapter.to_device(value, placement.device)
+        return memo[id(value)]
     if isinstance(value, dict):
         return type(value)(
-            {key: move_tree(adapter, item, placement) for key, item in value.items()}
+            {key: move_tree(adapter, item, placement, memo=memo) for key, item in value.items()}
         )
     if isinstance(value, (list, tuple)):
-        items = [move_tree(adapter, item, placement) for item in value]
+        items = [move_tree(adapter, item, placement, memo=memo) for item in value]
         if hasattr(type(value), "_fields"):
             return type(value)(*items)
         return type(value)(items)

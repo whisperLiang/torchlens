@@ -9,7 +9,6 @@ from _paddle_subprocess import run_paddle_subprocess
 from v2_helpers import split_request
 
 from torchlens.split.adapters import resolve_split_adapter
-from torchlens.split.errors import SplitUnsupportedError
 
 
 def _flatten_numbers(value: Any) -> list[float]:
@@ -71,14 +70,83 @@ def test_tinygrad_optional_adapter_gate() -> None:
 
 
 def test_mlx_optional_adapter_gate() -> None:
-    """MLX reports deferred replay explicitly, even when MLX is unavailable."""
+    """Installed MLX supports generated eager replay and boundary caching."""
 
+    mx = pytest.importorskip("mlx.core")
+    import torchlens as tl
+
+    def model(x: object) -> object:
+        hidden = mx.maximum(x, 0)
+        left, right = mx.split(hidden, 2, axis=-1)
+        return mx.add(mx.multiply(left, 2), right)
+
+    x = mx.arange(8, dtype=mx.float32).reshape((2, 4)) - 3
     adapter = resolve_split_adapter("mlx")
-    assert adapter.supports_replay is False
-    assert adapter.supports_training is False
-    assert adapter.supports_state_placement is False
-    with pytest.raises(SplitUnsupportedError):
-        adapter.build_segments(None, None, None)  # type: ignore[arg-type]
+
+    assert adapter.supports_replay is True
+    assert adapter.supports_boundary_cache is True
+    runtime = tl.split.prepare(model, x, split_request("after:maximum", backend="mlx"))
+    replayed = runtime.replay(x)
+    mx.eval(replayed)
+    expected = model(x)
+    mx.eval(expected)
+    assert bool(mx.allclose(replayed, expected))
+    assert adapter.supports_training is True
+    assert adapter.supports_state_placement is True
+    boundary = runtime.run_prefix(x).to("cpu")
+    assert bool(mx.allclose(runtime.run_suffix(boundary), expected))
+    training = tl.split.prepare(
+        model, x, split_request("after:maximum", backend="mlx", trainable=True)
+    )
+    assert training.run_training_prefix(x).metadata["supports_prefix_backward"]
+
+
+def test_mlx_split_reconstructs_direct_multi_output() -> None:
+    """MLX replay preserves a list returned directly by a split call."""
+
+    mx = pytest.importorskip("mlx.core")
+    import torchlens as tl
+
+    def model(x: object) -> object:
+        return list(mx.split(mx.maximum(x, 0), 2, axis=-1))
+
+    x = mx.arange(8, dtype=mx.float32).reshape((2, 4)) - 3
+    runtime = tl.split.prepare(model, x, split_request("after:maximum", backend="mlx"))
+    replayed = runtime.replay(x)
+    expected = model(x)
+    mx.eval(*replayed, *expected)
+    assert isinstance(replayed, list)
+    assert len(replayed) == len(expected) == 2
+    assert all(
+        bool(mx.allclose(left, right)) for left, right in zip(replayed, expected, strict=True)
+    )
+
+
+def test_mlx_split_reconstructs_nested_output_and_keeps_scalar_literals() -> None:
+    """MLX replay keeps final output paths distinct from call output paths."""
+
+    mx = pytest.importorskip("mlx.core")
+    import torchlens as tl
+
+    def model(x: object) -> object:
+        hidden = mx.maximum(x, 0)
+        left, right = mx.split(hidden, 2, axis=-1)
+        return {"left": left, "right": [right, mx.add(mx.multiply(left, 2), right)]}
+
+    x = mx.arange(8, dtype=mx.float32).reshape((2, 4)) - 3
+    runtime = tl.split.prepare(model, x, split_request("after:maximum", backend="mlx"))
+    replayed = runtime.replay(x)
+    expected = model(x)
+    assert isinstance(replayed, dict)
+    assert tuple(replayed) == tuple(expected)
+    assert isinstance(replayed["right"], list)
+    assert len(replayed["right"]) == len(expected["right"]) == 2
+    mx.eval(replayed["left"], *replayed["right"], expected["left"], *expected["right"])
+    assert bool(mx.allclose(replayed["left"], expected["left"]))
+    assert all(
+        bool(mx.allclose(left, right))
+        for left, right in zip(replayed["right"], expected["right"], strict=True)
+    )
 
 
 @pytest.mark.heavy

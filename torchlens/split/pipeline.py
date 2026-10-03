@@ -6,14 +6,19 @@ import json
 import sys
 import types
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, fields, is_dataclass, replace
 from hashlib import sha256
 from typing import Any, Literal
 
 from ..backends import resolve_backend_spec
-from ..backends.registry import JAX_BACKEND_NAME, TINYGRAD_BACKEND_NAME, TORCH_BACKEND_NAME
+from ..backends.registry import (
+    JAX_BACKEND_NAME,
+    MLX_BACKEND_NAME,
+    TINYGRAD_BACKEND_NAME,
+    TORCH_BACKEND_NAME,
+)
 from .adapters.base import SegmentBundle
 from .batch_probe import BatchProbeResult
 from .batching import (
@@ -110,14 +115,15 @@ def _probe_batch_replay(
     *,
     random_seed: int | None = None,
 ) -> ShapeProgram:
-    """Use one B=2 capture to infer shapes and compare generated replay outputs.
+    """Use one independent batch to infer shapes and compare generated replay outputs.
 
     Passing this sample authorizes empirical extrapolation, not a proof about
     untested Python branches. Failures retain the captured-batch runtime.
     """
 
     traced_batch = shape_program.traced_batch_size
-    probes = witness_probe_sizes(traced_batch)
+    probe_sizes = getattr(adapter, "batch_probe_sizes", witness_probe_sizes)
+    probes = probe_sizes(traced_batch)
     if not probes or not shape_program.input_batch_axes:
         return replace(
             shape_program,
@@ -132,6 +138,7 @@ def _probe_batch_replay(
         )
 
     witness_capture = None
+    probe_batch = probes[0]
     candidate = shape_program
     alignment_note = None
     phase = "construct probe"
@@ -142,7 +149,7 @@ def _probe_batch_replay(
                 inputs,
                 input_kwargs,
                 axes=shape_program.input_batch_axes,
-                batch_size=2,
+                batch_size=probe_batch,
                 adapter=adapter,
             )
             # Capture may modify its inputs. Replay uses independent, identical
@@ -151,7 +158,7 @@ def _probe_batch_replay(
                 witness_inputs,
                 witness_kwargs,
                 axes=shape_program.input_batch_axes,
-                batch_size=2,
+                batch_size=probe_batch,
                 adapter=adapter,
             )
             outputs: list[Any] = []
@@ -161,7 +168,7 @@ def _probe_batch_replay(
 
                 outputs.append(_snapshot_probe_output(adapter, output))
 
-            phase = "capture B=2"
+            phase = f"capture B={probe_batch}"
             witness_capture = capture_model(
                 witness_model,
                 witness_inputs,
@@ -177,7 +184,9 @@ def _probe_batch_replay(
             # A failed lean witness cannot authorize extrapolation. Do not
             # recapture with a larger activation/argument archive to hide it.
             witness_graph = split_graph_from_trace(witness_capture)
-            witness_shapes, alignment_note = _probe_shape_alignment(graph, witness_graph, adapter)
+            witness_shapes, alignment_note = _probe_shape_alignment(
+                graph, witness_graph, adapter, batch_size=probe_batch
+            )
             if witness_shapes is not None:
                 phase = "infer sampled shapes"
                 candidate = compile_shape_program(
@@ -188,9 +197,9 @@ def _probe_batch_replay(
                     adapter=adapter,
                     batch_axes=dict(shape_program.input_batch_axes),
                     inference_mode=shape_program.inference_mode,
-                    shape_witnesses={2: witness_shapes},
+                    shape_witnesses={probe_batch: witness_shapes},
                 )
-            phase = "replay B=2"
+            phase = f"replay B={probe_batch}"
             probe_graph = project_symbolic_shapes(
                 replace(graph, traced_batch_size=traced_batch), candidate
             )
@@ -203,6 +212,8 @@ def _probe_batch_replay(
                 witness_capture.cleanup()
                 witness_capture = None
                 del witness_graph, witness_model
+            elif adapter.name == MLX_BACKEND_NAME:
+                probe_graph = _with_mlx_probe_rng(probe_graph, witness_graph)
             actual = _execute_batch_probe(
                 adapter, probe_graph, request, replay_inputs, replay_kwargs
             )
@@ -210,11 +221,11 @@ def _probe_batch_replay(
             mismatch = _probe_output_mismatch(adapter, outputs[-1], actual)
             if mismatch is not None:
                 raise SplitUnsupportedError(mismatch)
-        result = BatchProbeResult(traced_batch, 2, "passed", alignment_note)
+        result = BatchProbeResult(traced_batch, probe_batch, "passed", alignment_note)
     except Exception as exc:  # noqa: BLE001 - probe failures restrict capability, not preparation
         result = BatchProbeResult(
             traced_batch,
-            2,
+            probe_batch,
             "unavailable" if phase == "construct probe" else "failed",
             f"{phase}: {type(exc).__name__}: {exc}",
         )
@@ -227,12 +238,12 @@ def _probe_batch_replay(
 
 
 def _probe_shape_alignment(
-    graph: SplitTraceGraph, witness: SplitTraceGraph, adapter: Any
+    graph: SplitTraceGraph, witness: SplitTraceGraph, adapter: Any, *, batch_size: int = 2
 ) -> tuple[dict[str, tuple[int, ...] | None] | None, str | None]:
     """Align the probe topology, disclosing tinygrad's singleton-folding exception."""
 
     try:
-        return _align_shape_witness(graph, witness, batch_size=2), None
+        return _align_shape_witness(graph, witness, batch_size=batch_size), None
     except SplitUnsupportedError as exc:
         if adapter.name != "tinygrad":
             raise
@@ -278,8 +289,26 @@ def _execute_batch_probe(
     )
     probe_plan = plan_split(graph, probe_request)
     segments = execute_split_runtime(adapter, graph, probe_plan, probe_request)
-    boundary = segments.prefix(*inputs, input_kwargs=input_kwargs, detach_boundary=True)
-    return segments.suffix(boundary)
+    scope = getattr(adapter, "batch_probe_scope", None)
+    with scope(segments) if callable(scope) else nullcontext():
+        boundary = segments.prefix(*inputs, input_kwargs=input_kwargs, detach_boundary=True)
+        return segments.suffix(boundary)
+
+
+def _with_mlx_probe_rng(graph: SplitTraceGraph, witness: SplitTraceGraph) -> SplitTraceGraph:
+    """Copy independent probe keys while keeping canonical recipes and state identities."""
+
+    from ..backends.mlx.validation import MLXOpCapture
+
+    return replace(
+        graph,
+        nodes=tuple(
+            replace(node, target=replace(node.target, rng_state=probe.target.rng_state))
+            if isinstance(node.target, MLXOpCapture) and isinstance(probe.target, MLXOpCapture)
+            else node
+            for node, probe in zip(graph.nodes, witness.nodes, strict=True)
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -331,6 +360,11 @@ def _probe_state_scope(model: Any, adapter: Any) -> Iterator[None]:
             from ._tinygrad_state import tinygrad_capture_state
 
             with tinygrad_capture_state(model):
+                yield
+        elif adapter.name == MLX_BACKEND_NAME:
+            from ._mlx_capture import mlx_capture_state
+
+            with mlx_capture_state(model):
                 yield
         elif isinstance(model, (types.FunctionType, types.MethodType)):
             from ._callable_state import callable_capture_state
@@ -478,6 +512,11 @@ def capture_model(
         from ._jax_capture import batch_stable_matmul
 
         with batch_stable_matmul():
+            return trace(model, inputs, **common)
+    if str(backend_spec.name) == MLX_BACKEND_NAME:
+        from ._mlx_capture import mlx_capture_state
+
+        with mlx_capture_state(model):
             return trace(model, inputs, **common)
     if str(backend_spec.name) != TORCH_BACKEND_NAME:
         return trace(model, inputs, **common)

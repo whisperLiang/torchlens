@@ -2164,10 +2164,9 @@ def test_child_process_capture_refusal_is_typed(monkeypatch: pytest.MonkeyPatch)
         daemon = False
 
     monkeypatch.setattr(mp, "current_process", lambda: _FakeChild())
-    # r-b6 R40-3b: the guard no longer trusts the user-assignable process
-    # name — child detection keys on ``parent_process()`` (plus the raw-fork
-    # PID stamp), so the fake must present a parent to read as a child.
+    # R40-3b: parent_process() identifies children; the process name is user-assigned.
     monkeypatch.setattr(mp, "parent_process", lambda: _FakeChild())
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
 
     with pytest.raises(tl.errors.CaptureContextError) as refusal:
         warn_parallel()
@@ -2199,6 +2198,7 @@ def test_child_process_guard_ignores_spoofed_main_process_name(
 
     monkeypatch.setattr(mp, "current_process", lambda: _SpoofedChild())
     monkeypatch.setattr(mp, "parent_process", lambda: _SpoofedChild())
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
 
     with pytest.raises(tl.errors.CaptureContextError) as refusal:
         warn_parallel()

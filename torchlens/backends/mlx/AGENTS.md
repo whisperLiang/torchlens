@@ -49,4 +49,7 @@ Tier-1 standalone spec (no `capture_backend`); the `BackendSpec` in
   `Trace.has_backward_pass = False`; RNG replay snapshots are `None`.
 - fastlog, streaming, and rng_replay stay refused (registry flags); unsupported
   trace options refuse typed through `.._options` policies.
+- Live eager call sidecars retain native pre-call module values, stable buffer identities,
+  and Dropout/random keys for split replay and validation; these are separate from public
+  true-backward capture and the trace-level `rng_replay` option.
 - `capabilities.py` only re-exports registry truth; never hardcode flags here.

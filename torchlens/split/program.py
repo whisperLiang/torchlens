@@ -164,7 +164,7 @@ def _target_kind(node: SplitTraceNode) -> str:
 def _is_source_like(node: SplitTraceNode) -> bool:
     """Return whether a node may be seeded from trace/source state."""
 
-    return node.is_buffer or (not node.parents and not node.is_output)
+    return node.is_input or node.is_buffer or (not node.parents and not node.is_output)
 
 
 def _group_has_executor(

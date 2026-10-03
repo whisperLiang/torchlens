@@ -75,6 +75,7 @@ EXPECTED_APPEND_AMENDMENT_CALLER_FILES = {
     # registered rebind family; the static completeness roster already pins it.
     "torchlens/backends/tf/backend.py",  # preview_output_parent_rebind
     "torchlens/backends/tf/interventions.py",  # module_exit_intervention (site fire)
+    "torchlens/backends/mlx/containers.py",  # preview_output_parent_rebind (output occurrences)
     "torchlens/backends/jax/backend.py",  # preview_output_parent_rebind
     "torchlens/backends/tinygrad/backend.py",  # preview_output_parent_rebind
     "torchlens/ir/capture_events.py",  # concat lane transport (re-append)

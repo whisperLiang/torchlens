@@ -217,8 +217,9 @@ typed split error rather than fabricating gradients.
 
 Across split backends, B=2 probing compares native and replay output structure, exact shapes/dtypes,
 and numeric values. A pass allows empirical extrapolation with shape guards; a failure or unavailable
-probe allows only the captured batch. B=1 capture failure may fall back to captured-only B=2, without
-a B=3 probe. `runtime.batch_validation` discloses this scope. Untested Python branches (for example
+probe allows only the captured batch. B=1 capture failure may fall back to captured-only B=2.
+MLX additionally probes B=3 after this fallback, accommodating native train-mode BatchNorm's
+minimum batch of two. `runtime.batch_validation` discloses the actual sampled batches. Untested Python branches (for example
 B>=8) can still return silently incorrect results; see [limitations](reference/limitations.md#preview-backends).
 `SplitFeatures(batch_axes={})` explicitly disables batching (fixed input shapes, no probe);
 the default `None` infers axes only for compatible top-level tensors of rank at least two.
@@ -266,6 +267,76 @@ perturbation oracle, and only records with `status == "exact"` reach
 
 These derived gradients are not true backward capture, and `op.grads` /
 `trace.saved_grad_ops` stay true-backward-only.
+
+MLX also supports generated-eager split replay, functional split training, native stream
+placement, and trusted local boundary caches:
+
+```python
+request = tl.split.SplitRequest(
+    point=tl.split.after("maximum"),
+    backend="mlx",
+)
+runtime = tl.split.prepare(model, x, request)
+boundary = runtime.run_prefix(x)
+replayed = runtime.run_suffix(boundary)
+```
+
+The split adapter replays the captured MLX call templates, preserves multi-output containers such
+as `mx.split`, and uses the shared ShapeProgram with a canonical B=1 capture plus one empirical B=2
+probe, or B=2 capture plus B=3 probe when the native model requires at least two samples.
+Arrays shared across example inputs must retain that shared identity during replay.
+Training differentiates suffix boundary roots and parameters with `mx.value_and_grad`, then
+recomputes the prefix VJP with `mx.vjp`. Native MLX optimizers update private segment parameters;
+subsequent replay, placement changes, and recuts use those updated values. Parameters shared
+across the cut retain one logical value; their two gradient contributions are summed before
+updating. The source model is not updated. One native optimizer can serve both segments:
+
+```python
+import mlx.core as mx
+import mlx.optimizers as optim
+
+request = tl.split.SplitRequest(
+    point=tl.split.after("maximum"),
+    backend="mlx",
+    features=tl.split.SplitFeatures(training=True),
+    placement=tl.split.PlacementPlan.on(mx.cpu),
+)
+runtime = tl.split.prepare(model, x, request)
+optimizer = optim.Adam(learning_rate=0.01)
+boundary = runtime.run_training_prefix(x)
+suffix = runtime.train_suffix_result(boundary, targets, optimizer=optimizer)
+prefix = runtime.backward_prefix(boundary, suffix.boundary_grads, optimizer=optimizer)
+```
+
+`suffix.parameter_grads` contains named suffix parameter gradients. The prefix result contains
+`inputs`, `input_kwargs`, `parameter_grads`, `all_parameter_grads`, `shared_parameter_grads`,
+`optimizer_applied`, and `optimizer_step_count`; input gradients retain the original nested
+container shape. `parameter_grads` contains each segment's local contribution;
+`all_parameter_grads` contains the combined gradients for every unique parameter.
+Connected suffix updates are deferred until `backward_prefix()` and report
+`optimizer_pending=True`. A shared optimizer receives one invocation per logical step. With
+separate optimizers, the prefix optimizer owns tied weights; if it is absent, the suffix
+optimizer owns them. Each exclusive parameter follows its segment's optimizer.
+Native optimizers, including `MultiOptimizer`, receive nested MLX parameter and gradient trees;
+updates are validated before publishing them to the segments' private state.
+Detached or cached boundaries support immediate suffix training but
+cannot drive prefix backward. A boundary from an updated or different prefix refuses.
+
+Train-mode BatchNorm running-stat updates commit once per actual forward call, including
+shared normalization modules spanning the cut. Prefix VJP recomputation restores the saved
+pre-forward buffers and Dropout/random-call keys without committing updates or advancing the
+ambient generator a second time. Preparation and `validate_equivalence()` preserve model
+state and native PRNG state. `train_suffix_result(..., microbatch_size=N)` supports uneven
+chunks, nested targets, and `microbatch_reduction="mean"|"sum"`, with one logical optimizer
+update. Microbatch BatchNorm statistics and random draws follow native sequential chunk
+execution; their values need not equal a single full-batch call.
+
+`PlacementPlan.across(mx.cpu, mx.gpu)` schedules the two segments on their respective native
+streams, including state, boundary values, and gradient return. MLX arrays do not expose a
+per-array device: placement controls execution scheduling. Native devices and streams, and
+`"cpu"`, `"gpu"`, `"metal"`, or `"cuda"` strings are accepted only when the requested backend is
+available. `"cuda"` never aliases Metal. Stream scopes restore the caller's defaults after
+success or failure. This functional split training does not enable true backward capture.
 
 MLX supports static-label live interventions and halt. `trace(intervene=tl.when(static_selector,
 action))` substitutes matched output arrays at the wrapper boundary — the replacement genuinely

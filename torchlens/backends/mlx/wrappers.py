@@ -8,6 +8,7 @@ from typing import Any
 
 from ... import _state
 from ...ir.events import ModuleFrame
+from ._call_state import capture_mlx_call_state
 from .model_prep import MLXModuleTree
 
 _ACTIVE_TAP_OBSERVER: object | None = None
@@ -20,6 +21,7 @@ class _MLXWrapperRegistry:
         """Initialize an empty wrapper registry."""
 
         self._originals: dict[tuple[object, str], object] = {}
+        self._state_sources: dict[Any, int] = {}
         self._wrapped = False
 
     def wrap(self, backend: object, module_tree: MLXModuleTree | None = None) -> None:
@@ -94,6 +96,7 @@ class _MLXWrapperRegistry:
             self.wrap_attr(mx, name, backend, name)
         for name in ("relu", "gelu", "sigmoid", "tanh", "softmax", "silu"):
             self.wrap_attr(nn, name, backend, name)
+        self._wrap_random(mx, backend)
         class_op_names = {
             "Linear": "linear",
             "Conv2d": "conv2d",
@@ -131,6 +134,24 @@ class _MLXWrapperRegistry:
                     module_instances=instances,
                 )
 
+    def _wrap_random(self, mx: Any, backend: object) -> None:
+        """Capture native random producers, including their pre-call generator keys."""
+
+        for name in (
+            "uniform",
+            "normal",
+            "bernoulli",
+            "randint",
+            "categorical",
+            "permutation",
+            "truncated_normal",
+            "gumbel",
+            "laplace",
+            "logistic",
+            "multivariate_normal",
+        ):
+            self.wrap_attr(mx.random, name, backend, f"random_{name}")
+
     def unwrap(self) -> None:
         """Restore all original MLX callables.
 
@@ -153,6 +174,7 @@ class _MLXWrapperRegistry:
             self._wrapped = bool(self._originals)
             raise first_failure
         self._originals.clear()
+        self._state_sources.clear()
         self._wrapped = False
 
     def is_wrapped(self) -> bool:
@@ -219,6 +241,7 @@ class _MLXWrapperRegistry:
                     return original(*args, **kwargs)
                 if getattr(trace, "_mlx_capture_depth", 0) > 0:
                     return original(*args, **kwargs)
+                call_state = capture_mlx_call_state(op_name, args, self._state_sources)
                 trace._mlx_capture_depth = getattr(trace, "_mlx_capture_depth", 0) + 1
                 try:
                     output = original(*args, **kwargs)
@@ -226,10 +249,22 @@ class _MLXWrapperRegistry:
                     trace._mlx_capture_depth -= 1
                 module_stack = tuple(getattr(trace, "_mlx_module_stack", ()))
                 emit = getattr(backend, "emit_mlx_operation")
+                emit_args = (
+                    (call_state.module_ref, *args[1:])
+                    if call_state.module_ref is not None
+                    else args
+                )
                 # emit returns the effective output: intervention-replaced
                 # leaves must be what the model consumes downstream.
                 return emit(
-                    trace, op_name, original, args, kwargs, output, module_stack=module_stack
+                    trace,
+                    op_name,
+                    original,
+                    emit_args,
+                    kwargs,
+                    output,
+                    module_stack=module_stack,
+                    call_state=call_state,
                 )
             finally:
                 if frame is not None:

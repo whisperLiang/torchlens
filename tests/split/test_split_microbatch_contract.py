@@ -332,9 +332,9 @@ def test_invalid_microbatch_sizes_refuse_before_optimizer_changes(size: Any) -> 
     assert not optimizer.state
 
 
-@pytest.mark.parametrize("backend", ["tf", "paddle", "jax", "tinygrad", "mlx"])
+@pytest.mark.parametrize("backend", ["tf", "paddle", "jax", "tinygrad"])
 def test_preview_backends_explicitly_refuse_microbatch_policy(backend: str) -> None:
-    """No preview engine receives a request it might silently execute full-batch."""
+    """Engines without microbatch support cannot silently execute the full batch."""
 
     runtime = SimpleNamespace(
         adapter=SimpleNamespace(name=backend), request=SimpleNamespace(boundary="cut")

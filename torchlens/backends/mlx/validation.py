@@ -12,12 +12,13 @@ observe unwrapped internals, and that scope is documented rather than hidden.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
 
 from .._validation_shared import float_replay_tolerances, ops_by_label as _ops_by_label
+from .containers import rebuild_mlx_module
 
 
 class _ReplaySlot:
@@ -79,6 +80,13 @@ class MLXOpCapture:
         used by replay to reproduce the declared substitution. Never part of
         the fingerprint; a record whose declared interventions lack a
         matching applier fails closed.
+    module_ref:
+        Native module snapshot for restoring its type during generated split replay.
+        Captured argument templates remain the authority for array values.
+    source_ids:
+        Current module-array identities paired with their stable initial state identities.
+    rng_state:
+        Evaluated native keys before a random call; replay restores the ambient generator.
     """
 
     labels_raw: tuple[str, ...]
@@ -91,6 +99,9 @@ class MLXOpCapture:
     kwarg_leaf_labels: dict[str, tuple[str | None, ...]] = field(default_factory=dict)
     interventions: tuple[tuple[int, str], ...] = ()
     appliers: tuple[tuple[int, Any], ...] = ()
+    module_ref: Any = None
+    source_ids: tuple[tuple[int, int], ...] = ()
+    rng_state: tuple[Any, ...] | None = None
 
 
 def build_capture_template(
@@ -236,6 +247,21 @@ PERTURBATION_NO_PERTURBABLE_INPUT = "no_perturbable_input"
 PERTURBATION_UNPROVED = "unproved"
 
 
+def _replay_call(
+    capture: MLXOpCapture, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> tuple[Any, ...]:
+    """Replay and evaluate a native call with its original random keys when present."""
+
+    import mlx.core as mx
+
+    from ._call_state import mlx_rng_scope
+
+    with mlx_rng_scope(capture.rng_state):
+        output = _iter_output_arrays(capture.func(*args, **kwargs))
+        mx.eval(*output)
+    return output
+
+
 def _perturbation_evidence(capture: MLXOpCapture, baseline: tuple[Any, ...]) -> str:
     """Classify the parent-perturbation evidence for one replayed call.
 
@@ -260,8 +286,6 @@ def _perturbation_evidence(capture: MLXOpCapture, baseline: tuple[Any, ...]) -> 
         ``PERTURBATION_UNPROVED`` when every candidate left the output
         unchanged.
     """
-
-    import mlx.core as mx
 
     arg_position: int | None = next(
         (index for index, value in enumerate(capture.args) if _is_mlx_array(value)),
@@ -289,8 +313,7 @@ def _perturbation_evidence(capture: MLXOpCapture, baseline: tuple[Any, ...]) -> 
             else:
                 perturbed_args = capture.args
                 perturbed_kwargs = {**capture.kwargs, kwarg_key: candidate}
-            perturbed = _iter_output_arrays(capture.func(*perturbed_args, **perturbed_kwargs))
-            mx.eval(*perturbed)
+            perturbed = _replay_call(capture, perturbed_args, perturbed_kwargs)
         except Exception:
             continue
         if len(perturbed) != len(baseline):
@@ -502,6 +525,8 @@ def _reconstruct_call(
         )
         for key, value in capture.kwargs.items()
     }
+    if capture.module_ref is not None and args and isinstance(args[0], dict):
+        args = (rebuild_mlx_module(capture.module_ref, args[0]), *args[1:])
     return args, kwargs
 
 
@@ -605,8 +630,7 @@ def validate_mlx_captures(trace: Any) -> tuple[int, int, tuple[str, ...]]:
                 failed_count += 1
                 continue
             replay_args, replay_kwargs = _reconstruct_call(trace, ops_by_label, capture)
-            replayed = _iter_output_arrays(capture.func(*replay_args, **replay_kwargs))
-            mx.eval(*replayed)
+            replayed = _replay_call(capture, replay_args, replay_kwargs)
             if len(replayed) != len(capture.labels_raw) or not replayed:
                 failed_count += 1
                 continue
@@ -645,13 +669,10 @@ def validate_mlx_captures(trace: Any) -> tuple[int, int, tuple[str, ...]]:
             ):
                 failed_count += 1
                 continue
-            perturb_capture = MLXOpCapture(
-                labels_raw=capture.labels_raw,
-                op_name=capture.op_name,
-                func=capture.func,
+            perturb_capture = replace(
+                capture,
                 args=replay_args,
                 kwargs=replay_kwargs,
-                output=capture.output,
             )
             evidence = _perturbation_evidence(perturb_capture, replayed)
             if evidence == PERTURBATION_UNPROVED:

@@ -10,7 +10,7 @@ from .errors import SplitBoundaryError, SplitErrorContext
 
 @dataclass(frozen=True)
 class BatchProbeResult:
-    """Result of comparing one native B=2 forward against generated replay."""
+    """Result of comparing one independent native forward against generated replay."""
 
     traced_batch_size: int
     probe_batch_size: int | None
@@ -44,7 +44,7 @@ class BatchProbeResult:
             return
         raise SplitBoundaryError(
             f"Runtime batch {batch_size} differs from captured batch {self.traced_batch_size}; "
-            f"the B=2 replay probe did not pass ({self.status}): {self.reason}",
+            f"the replay probe did not pass ({self.status}): {self.reason}",
             context=SplitErrorContext(
                 backend=backend,
                 split_point=split_point,

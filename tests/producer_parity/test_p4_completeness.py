@@ -521,12 +521,13 @@ _GUARDED_CALLEES = frozenset(
 )
 # 7 torch sites (raw_hook_intervention's wrapped_hook site retired by
 # 8858793e, then revived narrowly by 56f8a29e -- genuine user raw-hook
-# replacements mint the amendment again) + 3 preview rebind sites (tf, jax,
-# tinygrad) + the ONE shared preview_output_parent_mark site in
+# replacements mint the amendment again) + 4 preview rebind sites (tf, mlx,
+# jax, tinygrad; MLX retains final output paths/specs for split replay)
+# + the ONE shared preview_output_parent_mark site in
 # backends/_finalize.py (the tf x2 / mlx / paddle per-backend mark copies
 # were hoisted there by R46-1, 5290caa7) + the tf module_exit_intervention
 # site fire in backends/tf/interventions.py (typed amendment lane, ef08d2a9).
-_EXPECTED_SITE_COUNT = 12
+_EXPECTED_SITE_COUNT = 13
 
 
 def _call_name(node: ast.Call) -> str | None:
@@ -550,7 +551,7 @@ def test_static_ast_guard_no_expansion_no_conditional_kwargs() -> None:
         "postprocess/graph_traversal.py",
         "backends/tf/backend.py",
         "backends/tf/interventions.py",
-        "backends/mlx/backend.py",
+        "backends/mlx/containers.py",
         "backends/paddle/backend.py",
         "backends/jax/backend.py",
         "backends/tinygrad/backend.py",

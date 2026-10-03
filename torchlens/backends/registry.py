@@ -28,6 +28,9 @@ in ``tests/test_backend_registry.py`` enforces it.
 JAX_BACKEND_NAME: Final[BackendName] = "jax"
 """Canonical registry name of the JAX preview backend."""
 
+MLX_BACKEND_NAME: Final[BackendName] = "mlx"
+"""Canonical registry name of the MLX preview backend."""
+
 TINYGRAD_BACKEND_NAME: Final[BackendName] = "tinygrad"
 """Canonical registry name of the tinygrad preview backend."""
 

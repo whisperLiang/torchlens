@@ -12,16 +12,23 @@ metadata lives on `Trace.backend`, `Trace.module_identity_mode`, `Trace.param_so
 `Trace.derived_grads`, `Trace.intermediate_derived_grads`, `Trace.payload_load_status`,
 `Trace.validation_replay_status`, `dtype_ref`, `device_ref`, `backend_address`, and
 `resolver_status`.
-Split replay is backend-neutral for torch, JAX, TF, Paddle, and tinygrad, with MLX still gated.
-TF/Paddle/JAX/tinygrad additionally support a batch-symbolic ShapeProgram (B=1 capture,
-one empirical B=2 probe) and split-training boundary gradients. JAX split training is functional
-and rejects `optimizer=`; TF/Paddle may step supplied mutable optimizers when generated replay
-reaches live trainable params. tinygrad uses live UOp autograd for uncached
-`run_training_prefix()` boundaries and may step tinygrad optimizers with `Tensor.training`
+Split replay is backend-neutral for torch, JAX, TF, Paddle, tinygrad, and MLX. MLX supports
+functional split training and native device/stream placement, including CPU/GPU splits when
+the requested MLX backend is available; native optimizers update private segment parameters.
+MLX split routes train-mode BatchNorm buffers, reuses Dropout/native random keys for prefix
+VJPs, sums tied-parameter gradients across the cut, and supports suffix microbatches. Connected
+optimizer commits occur at prefix backward; a shared optimizer advances once per logical batch.
+TF/Paddle/JAX/tinygrad/MLX additionally support a batch-symbolic ShapeProgram (B=1 capture,
+one empirical B=2 probe). TF/Paddle/JAX/tinygrad/MLX also support split-training boundary gradients.
+JAX split training is functional and rejects `optimizer=`; TF/Paddle may step supplied mutable
+optimizers when generated replay reaches live trainable params. tinygrad uses live UOp autograd for
+uncached `run_training_prefix()` boundaries and may step tinygrad optimizers with `Tensor.training`
 temporarily enabled.
 Batch extrapolation is empirical, not a universal correctness guarantee: the B=2 probe compares
 native and replay output structure, shapes/dtypes and values. Failed/unavailable probes (including
-fallback B=2 captures after B=1 failure) allow only the captured batch. Check `runtime.batch_validation`
+fallback B=2 captures after B=1 failure on other backends) allow only the captured batch.
+MLX probes B=3 after a B=2 fallback, supporting native BatchNorm's minimum training batch.
+Check `runtime.batch_validation`
 and boundary `runtime_batch_validation`; an untested branch such as B>=8 can silently return wrong
 results even after the sample passes. See [preview limitations](reference/limitations.md#preview-backends).
 `SplitFeatures.batch_axes` distinguishes `None` (automatic), `{}` (no batch axes), and a

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from ._mlx_training import MlxTrainingEngine
 from .boundary import ReplayBoundary
 from .errors import SplitErrorContext, SplitUnsupportedError
 
@@ -20,6 +21,8 @@ class TrainingStepResult:
     loss: Any
     boundary_grads: BoundaryGradients
     optimizer_applied: bool = False
+    parameter_grads: dict[str, Any] = field(default_factory=dict)
+    optimizer_pending: bool = False
 
     def as_tuple(self) -> tuple[Any, BoundaryGradients]:
         """Return the compact ``(loss, boundary_grads)`` result shape."""
@@ -799,6 +802,7 @@ _TRAINING_ENGINES: dict[str, BackendTrainingEngine] = {
     "paddle": PaddleTrainingEngine(),
     "jax": JaxTrainingEngine(),
     "tinygrad": TinygradTrainingEngine(),
+    "mlx": MlxTrainingEngine(),
 }
 
 
@@ -833,6 +837,19 @@ def train_suffix_result(
 
     if microbatch_size is not None:
         if runtime.adapter.name != "torch":
+            engine = training_engine_for(runtime.adapter.name)
+            native_microbatches = getattr(engine, "train_microbatches", None)
+            if callable(native_microbatches):
+                return native_microbatches(
+                    runtime,
+                    boundary,
+                    targets,
+                    loss_fn=loss_fn,
+                    optimizer=optimizer,
+                    microbatch_size=microbatch_size,
+                    microbatch_reduction=microbatch_reduction,
+                    target_slicer=target_slicer,
+                )
             raise SplitUnsupportedError(
                 f"backend={runtime.adapter.name!r} does not support suffix microbatch training.",
                 context=_context(runtime, "unsupported suffix microbatch training"),

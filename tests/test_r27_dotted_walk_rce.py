@@ -162,27 +162,26 @@ def test_legit_torch_types_still_admit() -> None:
 
 
 @pytest.mark.smoke
-def test_preview_backend_dotted_walk_escape_denied() -> None:
+def test_preview_backend_dotted_walk_escape_denied(monkeypatch: pytest.MonkeyPatch) -> None:
     """The preview-backend branch also requires the resolved type to be preview-owned.
 
     A fake ``mlx.core`` is injected so the branch is reachable without the real optional
     dependency; it re-exports a NON-preview type (``subprocess.Popen``) under a dotted
     name, which the ownership gate must refuse.
+
+    Restore any existing MLX imports afterward so later captures patch the same
+    module objects held by already-imported models.
     """
 
     fake_mlx = types.ModuleType("mlx")
     fake_core = types.ModuleType("mlx.core")
     fake_mlx.core = fake_core  # type: ignore[attr-defined]
     fake_core.subprocess = subprocess  # type: ignore[attr-defined]
-    sys.modules["mlx"] = fake_mlx
-    sys.modules["mlx.core"] = fake_core
-    try:
-        payload = _stop_global_pickle("mlx.core", "subprocess.Popen")
-        with pytest.raises(pickle.UnpicklingError, match="non-preview-owned"):
-            SafeBundleUnpickler(io.BytesIO(payload)).load()
-    finally:
-        sys.modules.pop("mlx.core", None)
-        sys.modules.pop("mlx", None)
+    monkeypatch.setitem(sys.modules, "mlx", fake_mlx)
+    monkeypatch.setitem(sys.modules, "mlx.core", fake_core)
+    payload = _stop_global_pickle("mlx.core", "subprocess.Popen")
+    with pytest.raises(pickle.UnpicklingError, match="non-preview-owned"):
+        SafeBundleUnpickler(io.BytesIO(payload)).load()
 
 
 # ---------------------------------------------------------------------------

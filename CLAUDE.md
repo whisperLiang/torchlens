@@ -826,7 +826,8 @@ print(tl.compat.report(model, x).to_markdown())
   exact shape/dtype and numeric values. A passed sample permits empirical extrapolation
   with shape guards, not universal proof: hidden branches such as B>=8 may still produce
   silent wrong results. Failed/unavailable probes restrict execution to the captured batch.
-  A genuine B=1 failure may fall back to B=2 capture, captured-only without B=3 probing.
+  A genuine B=1 failure may fall back to B=2 capture, captured-only on other backends.
+  MLX probes B=3 after this fallback for native BatchNorm's minimum training batch.
   The retained `SplitTraceGraph` / `SplitGraphIR` / `SplitPlan` / `ShapeProgram` are reused;
   runtime execution neither recaptures nor reruns the original model. There is NO configurable
   batch range: `dynamic_batch`, `supports_dynamic_batch`, and user low/high ranges remain
@@ -866,7 +867,13 @@ print(tl.compat.report(model, x).to_markdown())
   repeated-object/identical-geometry Torch aliases; unsupported overlap refuses. Temporary B=2
   replay aligns per-call RNG with its oracle without mutating retained B=1 state. Empty non-batch
   dimensions stay concrete zeros in the boundary ABI.
-  MLX remains an explicit unsupported shell.
+  MLX supports generated eager split replay and boundary caches, functional split training
+  with native optimizers over private segment parameters, and native device/stream placement
+  (CPU/GPU requires the installed MLX backend). Cached/detached or stale training boundaries
+  refuse prefix backward; true backward capture remains unsupported. MLX split also routes
+  BatchNorm buffer updates, replays saved Dropout/native PRNG keys during VJPs, coordinates
+  tied gradients across the cut, and supports suffix microbatches. Connected steps defer native
+  optimizer commits until prefix backward; a shared optimizer steps once per logical batch.
 
 ## Anti-Patterns
 
