@@ -10,6 +10,7 @@ import numpy as np
 
 from ... import _state
 from .._validation_shared import float_replay_tolerances, ops_by_label as _ops_by_label
+from ._cuda import paddle_cuda_scope
 
 _FACTORY_OR_SOURCE_OPS = {
     "arange",
@@ -153,6 +154,47 @@ def _rebuild_inputs(capture: Any, ops_by_label: Mapping[str, Any]) -> RebuiltPad
         parent_values,
         {label: tuple(paths) for label, paths in leaf_paths_by_parent.items()},
     )
+
+
+def _replay_capture_matches(
+    backend: Any,
+    capture: Any,
+    ops_by_label: Mapping[str, Any],
+    rebuilt: RebuiltPaddleInputs,
+    expected_output: Any,
+) -> bool:
+    """Compare one replay and parent perturbations in the tensors' owning CUDA context.
+
+    Parameters
+    ----------
+    backend
+        Live Paddle backend supplying native execution.
+    capture
+        Captured call and its output path.
+    ops_by_label
+        Materialized operations indexed by capture labels.
+    rebuilt
+        Coverage-checked concrete arguments for the replay.
+    expected_output
+        Saved output, or the corroborated pre-intervention output.
+
+    Returns
+    -------
+    bool
+        Whether replay agrees and the parent perturbations corroborate dataflow.
+    """
+
+    with paddle_cuda_scope(rebuilt.args, rebuilt.kwargs, expected_output):
+        with _state.pause_logging(), backend.paddle.no_grad():
+            replayed = capture.func(*rebuilt.args, **rebuilt.kwargs)
+        replayed_output = _value_at_path(replayed, _capture_output_path(capture))
+        return (
+            expected_output is not None
+            and _payloads_close(replayed_output, expected_output)
+            and _parent_perturbations_change_output(
+                backend, capture, ops_by_label, baseline_output=expected_output
+            )
+        )
 
 
 def _payloads_close(a: Any, b: Any) -> bool:

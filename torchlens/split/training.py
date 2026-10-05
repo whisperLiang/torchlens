@@ -702,13 +702,22 @@ class PaddleTrainingEngine:
     ) -> TrainingStepResult:
         """Train a Paddle suffix and return a structured result."""
 
-        loss, grads, optimizer_applied = _train_suffix_paddle(
-            runtime,
-            boundary,
-            targets,
-            loss_fn=loss_fn,
-            optimizer=optimizer,
+        from ..backends.paddle._cuda import paddle_cuda_scope
+
+        templates = tuple(
+            component
+            for node in runtime.trace_graph.nodes
+            if node.canonical_id in runtime.plan.suffix_node_ids
+            for component in (node.args_template, node.kwargs_template)
         )
+        with paddle_cuda_scope(boundary.tensors, targets, templates):
+            loss, grads, optimizer_applied = _train_suffix_paddle(
+                runtime,
+                boundary,
+                targets,
+                loss_fn=loss_fn,
+                optimizer=optimizer,
+            )
         return TrainingStepResult(loss, grads, optimizer_applied=optimizer_applied)
 
     def backward_prefix(
@@ -720,7 +729,10 @@ class PaddleTrainingEngine:
     ) -> Any:
         """Backpropagate Paddle boundary gradients through the prefix."""
 
-        return _backward_prefix_paddle(runtime, boundary, boundary_grads, optimizer=optimizer)
+        from ..backends.paddle._cuda import paddle_cuda_scope
+
+        with paddle_cuda_scope(boundary.metadata, boundary_grads):
+            return _backward_prefix_paddle(runtime, boundary, boundary_grads, optimizer=optimizer)
 
 
 class JaxTrainingEngine:

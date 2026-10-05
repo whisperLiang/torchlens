@@ -308,6 +308,40 @@ suffix = runtime.train_suffix_result(boundary, targets, optimizer=optimizer)
 prefix = runtime.backward_prefix(boundary, suffix.boundary_grads, optimizer=optimizer)
 ```
 
+The split state exchange spellings are DOCUMENTED-UNSTABLE. For an MLX `nn.Module`,
+export trained weights from `runtime.state_dict()`. Reading
+`model.parameters()` or calling `model.save_weights()` still reads the source model's
+original weights. The runtime snapshot is a flat mapping with native paths such as
+`"blocks.0.weight"`; it includes frozen and unused parameters, running buffers, and every
+tied name. Arrays are evaluated, detached copies; tied names share one snapshot array.
+
+Load aggregated weights with `runtime.load_state_dict(aggregated_state)`. It validates the
+complete key set, shapes, dtypes, and equality of tied values before copying and committing
+state to all segment bindings, including segments that have not run yet. Loading leaves the
+source model unchanged and invalidates earlier connected training boundaries. Use a fresh
+`run_training_prefix()` for the next step. Optimizer state remains caller-managed.
+
+```python
+from mlx.utils import tree_flatten, tree_unflatten
+
+local_state = runtime.state_dict()  # export after backward_prefix commits the step
+runtime.load_state_dict(aggregated_state)  # existing segments use the aggregate immediately
+
+# Explicitly update the source model too when native inference or saving needs it.
+model.update(tree_unflatten(list(runtime.state_dict().items())))
+
+# Loading weights into the source model alone does not refresh prepared runtimes.
+model.load_weights("aggregated.safetensors")
+loaded_state = dict(tree_flatten(model.parameters()))
+for prepared_runtime in existing_runtimes:
+    prepared_runtime.load_state_dict(loaded_state)
+```
+
+State snapshots and loaded values survive recuts and placement changes. Export refuses
+divergent replicas of tied state rather than choosing one segment silently. Other split
+backends and MLX plain callables currently refuse named state exchange with
+`SplitUnsupportedError`.
+
 `suffix.parameter_grads` contains named suffix parameter gradients. The prefix result contains
 `inputs`, `input_kwargs`, `parameter_grads`, `all_parameter_grads`, `shared_parameter_grads`,
 `optimizer_applied`, and `optimizer_step_count`; input gradients retain the original nested
@@ -476,6 +510,18 @@ local boundary caches, a batch-symbolic ShapeProgram (empirical batch extrapolat
 `train_suffix()` returns boundary gradients and steps a supplied Paddle optimizer when the generated
 suffix uses live parameters; `backward_prefix()` propagates gradients from a
 `run_training_prefix()` boundary.
+Parameterized Paddle split models use native `paddle.nn.Linear` layers in the validated
+training path. Captured native parameters and registered buffers bind by tensor identity,
+including `@`, positional functional calls, reused parameters, and calls using a child layer's
+weights without entering that layer. Each call's parameter inventory contains only its consumed
+parameters; unused state and identically shaped parameters cannot change operand binding.
+Native `set_state_dict()` updates remain visible to existing runtimes. Missing state provenance
+refuses with `SplitUnsupportedError`; uncaptured intermediates never become saved-value replay
+inputs. This state binding is session-only and does not make loaded `.tlspec` traces runnable.
+CUDA capture, split replay, training, and validation use the CUDA context owning the native
+Paddle tensors and restore the caller's context on success or failure. This prevents stale
+cuBLAS handles when another framework, such as tinygrad, leaves its private CUDA context current.
+ROCm builds retain Paddle's native GPU execution path without loading the NVIDIA driver.
 
 Paddle leaf gradients are a derived-gradient preview, not true backward capture:
 

@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 
-def run_paddle_subprocess(code: str, *, timeout: int = 180) -> None:
+def run_paddle_subprocess(code: str, *, timeout: int = 180, require_cuda: bool = False) -> None:
     """Run a Paddle split scenario in a backend-isolated subprocess."""
 
     if find_spec("paddle") is None:
@@ -21,6 +21,13 @@ def run_paddle_subprocess(code: str, *, timeout: int = 180) -> None:
     helper_path = str(Path(__file__).resolve().parent)
     env["PYTHONPATH"] = helper_path + os.pathsep + env.get("PYTHONPATH", "")
     source = "from v2_helpers import split_request\n" + textwrap.dedent(code)
+    cuda_skip_marker = "__torchlens_paddle_cuda_unavailable__"
+    if require_cuda:
+        source = (
+            "import sys\nimport paddle\n"
+            "if not paddle.is_compiled_with_cuda() or paddle.device.cuda.device_count() < 1:\n"
+            f"    print({cuda_skip_marker!r})\n    sys.exit(75)\n"
+        ) + source
     result = subprocess.run(
         [sys.executable, "-c", source],
         cwd=Path(__file__).resolve().parents[2],
@@ -30,6 +37,8 @@ def run_paddle_subprocess(code: str, *, timeout: int = 180) -> None:
         timeout=timeout,
         check=False,
     )
+    if require_cuda and result.returncode == 75 and cuda_skip_marker in result.stdout.splitlines():
+        pytest.skip("A CUDA-enabled Paddle runtime and GPU are required.")
     assert result.returncode == 0, (
         f"Paddle split subprocess failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )

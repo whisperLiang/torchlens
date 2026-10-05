@@ -61,6 +61,7 @@ from .._options import (
     reject_unsupported_trace_options,
 )
 from .._selective_save import apply_static_label_save_policy, pop_static_label_save_predicate
+from ._cuda import paddle_cuda_scope
 from .interventions import PaddleInterventionCapture, PaddleInterventionRuntime
 from .model_prep import (
     PaddleModuleTree,
@@ -273,6 +274,7 @@ class PaddleBackend:
         self._ensure_dynamic_runtime(paddle)
         self.paddle = paddle
         self.tensor_store = PaddleTensorLabelStore()
+        self._state_tensors: dict[int, Any] = {}
 
     def capture_trace(
         self,
@@ -465,62 +467,70 @@ class PaddleBackend:
         # empty) registry is safe, and the hook cleanup follows a completed
         # ``prepare_model_session``.
         try:
-            wrap_paddle(self)
-            self._label_source_tensors(trace, args, kwargs)
-            trace.capture_start_time = time.time()
-            halt_signal: HaltSignal | None = None
-            try:
-                with _state.active_logging(trace):
-                    output = cast(Any, prepared_model)(*args, **kwargs)
-            except HaltSignal as exc:
-                halt_signal = exc
-                output = exc.frontier_output
-            trace.forward_duration = Duration(time.time() - trace.capture_start_time)
-            if halt_signal is not None:
-                trace.halted = True
-                trace.halt_reason = halt_signal.reason
-                trace.halt_frontier = halt_signal.reason
-                trace.raw_output = None
-            elif intervention_runtime is not None:
-                intervention_runtime.warn_if_zero_matches()
-            if halt_signal is None:
-                trace.raw_output = output_transform(output) if callable(output_transform) else None
-            self._mark_outputs(trace, output)
-            materialize_from_events(trace, trace.capture_events)
-            delattr(trace, "capture_events")
-            if use_object_module and module_tree is not None:
-                trace.param_logs = ParamAccessor(paddle_param_logs(module_tree, trace))
-                trace.num_param_tensors = len(trace.param_logs)
-                trace.num_params = sum(param.num_params for param in trace.param_logs)
-                trace.num_params_trainable = sum(
-                    param.num_params for param in trace.param_logs if param.is_trainable
-                )
-                trace.num_params_frozen = trace.num_params - trace.num_params_trainable
-                trace.param_source = "native-module"
-            else:
-                trace.param_logs = ParamAccessor({})
-                trace.num_param_tensors = 0
-                trace.num_params = 0
-                trace.num_params_trainable = 0
-                trace.num_params_frozen = 0
-                trace.param_source = "none"
-            self._finish_trace(trace, module_tree if use_object_module else None)
-            apply_static_label_save_policy(trace, save_predicate, backend_name="paddle")
-            if grad_options is not None:
-                self._attach_derived_grads(
-                    trace=trace,
-                    model=cast(Callable[..., Any], prepared_model),
-                    args=args,
-                    kwargs=kwargs,
-                    captured_output=output,
-                    grad_options=grad_options,
-                    module_tree=module_tree if use_object_module else None,
-                )
-            if hasattr(trace, "_paddle_module_stack"):
-                delattr(trace, "_paddle_module_stack")
-            if hasattr(trace, "_paddle_intervention_runtime"):
-                delattr(trace, "_paddle_intervention_runtime")
-            freeze_trace_relation_views(trace)
+            if module_tree is not None:
+                for name in ("named_parameters", "named_buffers"):
+                    getter = getattr(module_tree.root, name, None)
+                    if callable(getter):
+                        self._state_tensors.update({id(value): value for _name, value in getter()})
+            with paddle_cuda_scope(args, kwargs, self._state_tensors):
+                wrap_paddle(self)
+                self._label_source_tensors(trace, args, kwargs)
+                trace.capture_start_time = time.time()
+                halt_signal: HaltSignal | None = None
+                try:
+                    with _state.active_logging(trace):
+                        output = cast(Any, prepared_model)(*args, **kwargs)
+                except HaltSignal as exc:
+                    halt_signal = exc
+                    output = exc.frontier_output
+                trace.forward_duration = Duration(time.time() - trace.capture_start_time)
+                if halt_signal is not None:
+                    trace.halted = True
+                    trace.halt_reason = halt_signal.reason
+                    trace.halt_frontier = halt_signal.reason
+                    trace.raw_output = None
+                elif intervention_runtime is not None:
+                    intervention_runtime.warn_if_zero_matches()
+                if halt_signal is None:
+                    trace.raw_output = (
+                        output_transform(output) if callable(output_transform) else None
+                    )
+                self._mark_outputs(trace, output)
+                materialize_from_events(trace, trace.capture_events)
+                delattr(trace, "capture_events")
+                if use_object_module and module_tree is not None:
+                    trace.param_logs = ParamAccessor(paddle_param_logs(module_tree, trace))
+                    trace.num_param_tensors = len(trace.param_logs)
+                    trace.num_params = sum(param.num_params for param in trace.param_logs)
+                    trace.num_params_trainable = sum(
+                        param.num_params for param in trace.param_logs if param.is_trainable
+                    )
+                    trace.num_params_frozen = trace.num_params - trace.num_params_trainable
+                    trace.param_source = "native-module"
+                else:
+                    trace.param_logs = ParamAccessor({})
+                    trace.num_param_tensors = 0
+                    trace.num_params = 0
+                    trace.num_params_trainable = 0
+                    trace.num_params_frozen = 0
+                    trace.param_source = "none"
+                self._finish_trace(trace, module_tree if use_object_module else None)
+                apply_static_label_save_policy(trace, save_predicate, backend_name="paddle")
+                if grad_options is not None:
+                    self._attach_derived_grads(
+                        trace=trace,
+                        model=cast(Callable[..., Any], prepared_model),
+                        args=args,
+                        kwargs=kwargs,
+                        captured_output=output,
+                        grad_options=grad_options,
+                        module_tree=module_tree if use_object_module else None,
+                    )
+                if hasattr(trace, "_paddle_module_stack"):
+                    delattr(trace, "_paddle_module_stack")
+                if hasattr(trace, "_paddle_intervention_runtime"):
+                    delattr(trace, "_paddle_intervention_runtime")
+                freeze_trace_relation_views(trace)
         finally:
             # Independently-owned resources: a raising hook cleanup must not
             # leave the process-global Paddle wrappers installed.
@@ -529,7 +539,10 @@ class PaddleBackend:
                     trace, prepared_model, module_tree if use_object_module else None
                 )
             finally:
-                unwrap_paddle()
+                try:
+                    unwrap_paddle()
+                finally:
+                    self._state_tensors.clear()
         # Settlement is the LAST act, after ALL teardown (the path-20 stamp
         # contract): a teardown raise escapes productless -- the object
         # derives UNATTESTED, never carrying a COMPLETE/HALTED stamp.
@@ -885,9 +898,8 @@ class PaddleBackend:
 
         from .validation import (
             _coverage_oracle,
-            _parent_perturbations_change_output,
-            _payloads_close,
             _rebuild_inputs,
+            _replay_capture_matches,
         )
 
         if not _coverage_oracle(trace):
@@ -920,17 +932,8 @@ class PaddleBackend:
                 if not rebuilt.ok:
                     failed_count += 1
                     continue
-                with _state.pause_logging(), self.paddle.no_grad():
-                    replayed = capture.func(*rebuilt.args, **rebuilt.kwargs)
-                replayed_output = _value_at_path(
-                    replayed,
-                    _first_output_path(capture),
-                )
-                if expected_output is None or not _payloads_close(replayed_output, expected_output):
-                    failed_count += 1
-                    continue
-                if not _parent_perturbations_change_output(
-                    self, capture, ops_by_label, baseline_output=expected_output
+                if not _replay_capture_matches(
+                    self, capture, ops_by_label, rebuilt, expected_output
                 ):
                     failed_count += 1
                     continue
@@ -1585,7 +1588,14 @@ class PaddleBackend:
         """Return a replay template value with tensor leaves tagged by labels."""
 
         if self.is_tensor(value):
-            return {"kind": "tensor", "label": self.tensor_store.get_label(value)}
+            label = self.tensor_store.get_label(value)
+            marker: dict[str, Any] = {"kind": "tensor", "label": label}
+            if label is None and id(value) in self._state_tensors:
+                # Session-only split replay needs the actual state operand, not
+                # a guess based on the owning module or the output's shape.
+                # Validation still treats an unlabeled input as a coverage gap.
+                marker["value"] = value
+            return marker
         if isinstance(value, tuple):
             return tuple(self._template_value(item) for item in value)
         if isinstance(value, list):
@@ -2004,48 +2014,6 @@ def _paddle_capture_is_factory_or_source(capture: Any) -> bool:
         "zeros",
         "zeros_like",
     }
-
-
-def _first_output_path(capture: Any) -> tuple[Any, ...]:
-    """Return the first tensor output path for a Paddle capture.
-
-    Parameters
-    ----------
-    capture
-        Paddle operation capture record.
-
-    Returns
-    -------
-    tuple[Any, ...]
-        First output leaf path, or empty path for scalar tensor outputs.
-    """
-
-    paths = tuple(getattr(capture, "output_leaf_paths", ()))
-    if not paths:
-        return ()
-    return tuple(paths[0])
-
-
-def _value_at_path(value: Any, path: tuple[Any, ...]) -> Any:
-    """Return ``value`` indexed by a nested container path.
-
-    Parameters
-    ----------
-    value
-        Root value.
-    path
-        Container path.
-
-    Returns
-    -------
-    Any
-        Nested value.
-    """
-
-    result = value
-    for part in path:
-        result = result[part]
-    return result
 
 
 def _default_if_missing(value: Any, default: Any) -> Any:

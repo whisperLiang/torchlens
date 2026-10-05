@@ -263,7 +263,14 @@ def _isolated_probe_model(model: Any, adapter: Any) -> Any:
         if not copied:
             raise SplitUnsupportedError("Cannot copy the model for an isolated B=2 probe.")
     else:
-        witness_model = deepcopy(model)
+        if adapter.name == "paddle":
+            from ..backends.paddle._cuda import paddle_cuda_scope
+
+            state_getter = getattr(model, "state_dict", None)
+            with paddle_cuda_scope(state_getter() if callable(state_getter) else None):
+                witness_model = deepcopy(model)
+        else:
+            witness_model = deepcopy(model)
         if witness_model is model and not isinstance(model, types.FunctionType):
             raise SplitUnsupportedError("The model copy aliases the original model.")
         if adapter.name == "tf":

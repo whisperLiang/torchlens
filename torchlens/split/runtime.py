@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -83,6 +83,10 @@ class SplitRuntime:
         self.model_profile = model_profile
         self.prepared_input_kwargs = dict(prepared_input_kwargs or {})
         self.batch_spec = batch_spec
+        initializer = getattr(adapter, "initialize_runtime_state", None)
+        if callable(initializer):
+            with pause_logging():
+                initializer(self)
 
     @property
     def retains_trace(self) -> bool:
@@ -378,6 +382,9 @@ class SplitRuntime:
                 getter = getattr(getattr(segments, name), "bound_state_values", None)
                 if callable(getter):
                     getter()
+            inheritor = getattr(self.adapter, "inherit_runtime_state", None)
+            if callable(inheritor):
+                inheritor(self, segments)
 
     def _segment_state_snapshots(self) -> dict[str, dict[str, Any]]:
         """Bind current effective state once without building new segments."""
@@ -750,6 +757,65 @@ class SplitRuntime:
         if not callable(getter):
             return []
         return list(getter())
+
+    def state_dict(self) -> dict[str, Any]:
+        """Export current named split state as independent array snapshots.
+
+        Returns
+        -------
+        dict[str, Any]
+            Full native flattened module state, including frozen parameters,
+            running buffers, and unused parameters. Currently supported for MLX
+            native modules. Training updates are read from the runtime's owned
+            state; the source model remains unchanged.
+
+        Raises
+        ------
+        SplitUnsupportedError
+            If the backend lacks named state exchange or tied replicas diverge.
+        """
+
+        getter = self._state_exchange_method("state_dict")
+        with pause_logging():
+            return dict(getter(self))
+
+    def load_state_dict(self, state_dict: Mapping[str, Any]) -> None:
+        """Load aggregated state into all segment bindings without writing the source model.
+
+        Parameters
+        ----------
+        state_dict
+            Full flattened state mapping compatible with :meth:`state_dict`.
+            MLX requires exact keys, shapes, dtypes, and consistent tied values.
+
+        Raises
+        ------
+        SplitUnsupportedError
+            If state exchange is unsupported or validation fails. Validation and
+            device copies finish before any state commits. Successful loading
+            invalidates previously connected training boundaries; generate a
+            fresh boundary before the next training step. Optimizer state is
+            managed by the caller and is not loaded by this method.
+        """
+
+        loader = self._state_exchange_method("load_state_dict")
+        with pause_logging():
+            loader(self, state_dict)
+
+    def _state_exchange_method(self, name: str) -> Callable[..., Any]:
+        """Resolve an optional adapter state method or refuse with backend context."""
+
+        method = getattr(self.adapter, name, None)
+        if not callable(method):
+            raise SplitUnsupportedError(
+                f"backend={self.adapter.name!r} does not support split {name}().",
+                context=SplitErrorContext(
+                    backend=self.adapter.name,
+                    split_point=self.request.boundary,
+                    reason="named_state_exchange_unsupported",
+                ),
+            )
+        return method
 
     def replay(
         self,

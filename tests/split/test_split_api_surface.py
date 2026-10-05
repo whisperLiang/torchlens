@@ -73,3 +73,21 @@ def test_split_features_has_no_batch_range_surface() -> None:
     assert not hasattr(features, "dynamic_batch")
     assert "dynamic_batch" not in features.as_dict()
     assert not hasattr(SplitRequest(point=after("relu")), "dynamic_batch")
+
+
+def test_split_named_state_exchange_refuses_unsupported_backend() -> None:
+    """Backends without named state exchange refuse instead of exporting stale model state."""
+
+    import torch
+
+    from torchlens.split.errors import SplitUnsupportedError
+
+    runtime = prepare(
+        torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.ReLU()),
+        torch.ones(2, 4),
+        SplitRequest(point=after("1")),
+    )
+    for method, args in ((runtime.state_dict, ()), (runtime.load_state_dict, ({},))):
+        with pytest.raises(SplitUnsupportedError) as exc:
+            method(*args)
+        assert exc.value.context.reason == "named_state_exchange_unsupported"

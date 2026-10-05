@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import Any
 
 from ... import _state
+from ...backends.paddle._cuda import paddle_cuda_scope
 from ..boundary import ReplayBoundary
 from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
@@ -13,6 +14,7 @@ from ..graph import SplitTraceGraph, SplitTraceNode
 from ..ir import SplitRequest
 from ..planner import SplitPlan
 from ..shape_program import ShapeBinding
+from ..validation import nested_allclose
 from .base import SegmentBundle, SplitPolicyMixin, boundary_overlay
 
 
@@ -62,49 +64,6 @@ def _flatten_tensor_leaves(value: Any, paddle: Any) -> list[Any]:
     return []
 
 
-def _param_ref_handle(param: Any) -> Any:
-    """Return the live backend handle for a captured Paddle parameter."""
-
-    handle = getattr(param, "_param_ref", None)
-    if handle is None:
-        handle = getattr(param, "handle", None)
-    return handle
-
-
-def _numel_from_shape(shape: Any) -> int | None:
-    """Return the product of a concrete shape-like value."""
-
-    try:
-        dims = tuple(int(dim) for dim in shape)
-    except (TypeError, ValueError):
-        return None
-    product = 1
-    for dim in dims:
-        product *= dim
-    return product
-
-
-class _LiveParamCursor:
-    """Resolve unlabeled positional Paddle parameter template leaves in order."""
-
-    def __init__(self, node: SplitTraceNode) -> None:
-        """Create a cursor over live parameter handles for ``node``."""
-
-        self._handles = [
-            handle for param in node.param_refs if (handle := _param_ref_handle(param)) is not None
-        ]
-        self._index = 0
-
-    def next(self) -> Any | None:
-        """Return the next live parameter handle, if any."""
-
-        if self._index >= len(self._handles):
-            return None
-        handle = self._handles[self._index]
-        self._index += 1
-        return handle
-
-
 class _PaddleGeneratedSegmentBase:
     """Shared generated-eager replay helpers for Paddle."""
 
@@ -140,84 +99,19 @@ class _PaddleGeneratedSegmentBase:
             dtype=node.dtype,
         )
 
-    def _param_component_value(self, key: Any, node: SplitTraceNode) -> Any:
-        """Resolve an unlabeled Paddle tensor template leaf from ``node.param_refs``."""
-
-        keyed_name = self._param_name_for_template_key(key, node)
-        key_text = str(keyed_name if keyed_name is not None else key)
-        for param in node.param_refs:
-            name = getattr(param, "name", None)
-            address = getattr(param, "address", None)
-            if name == key_text or (
-                isinstance(address, str) and address.rsplit(".", 1)[-1] == key_text
-            ):
-                handle = _param_ref_handle(param)
-                if handle is not None:
-                    return handle
-        raise SplitUnsupportedError(
-            f"{node.label!r} has an unlabeled Paddle tensor template leaf.",
-            context=self._context(node, "unlabeled tensor template"),
-        )
-
-    @staticmethod
-    def _param_name_for_template_key(key: Any, node: SplitTraceNode) -> str | None:
-        """Return the Paddle parameter name implied by a positional op argument."""
-
-        if not isinstance(key, int):
-            return None
-        if node.op_type in {"c_ops.conv2d", "c_ops.depthwise_conv2d"} and key == 1:
-            return "weight"
-        if node.op_type in {"c_ops.depthwise_conv2d_bias"}:
-            return {1: "weight", 2: "bias"}.get(key)
-        if node.op_type == "c_ops.batch_norm":
-            return {1: "_mean", 2: "_variance", 3: "weight", 4: "bias"}.get(key)
-        return None
-
-    def _shape_matched_param_component_value(self, node: SplitTraceNode) -> Any | None:
-        """Resolve an unlabeled parameter by matching this node's output shape."""
-
-        if node.output_shape is None:
-            return None
-        output_numel = _numel_from_shape(node.output_shape)
-        if output_numel is None:
-            return None
-        matches: list[Any] = []
-        for param in node.param_refs:
-            handle = _param_ref_handle(param)
-            if handle is None:
-                continue
-            if _numel_from_shape(getattr(handle, "shape", None)) == output_numel:
-                matches.append(handle)
-        if len(matches) == 1:
-            return matches[0]
-        return None
-
     def _resolve_component(
         self,
         component: Any,
         node: SplitTraceNode,
         overlay: dict[str, Any],
-        *,
-        param_cursor: _LiveParamCursor,
-        template_key: Any | None = None,
     ) -> Any:
         """Resolve one captured Paddle template component."""
 
         if _is_tensor_marker(component):
             label = component.get("label")
             if label is None:
-                keyed_name = (
-                    template_key
-                    if isinstance(template_key, str)
-                    else self._param_name_for_template_key(template_key, node)
-                )
-                if keyed_name is not None:
-                    return self._param_component_value(keyed_name, node)
-                value = self._shape_matched_param_component_value(node)
-                if value is not None:
-                    return value
-                value = param_cursor.next()
-                if value is not None:
+                value = component.get("value")
+                if self._is_paddle_tensor(value):
                     return value
             if not isinstance(label, str):
                 raise SplitUnsupportedError(
@@ -232,36 +126,12 @@ class _PaddleGeneratedSegmentBase:
                 )
             return overlay[node_id]
         if isinstance(component, tuple):
-            return tuple(
-                self._resolve_component(
-                    item,
-                    node,
-                    overlay,
-                    param_cursor=param_cursor,
-                    template_key=index,
-                )
-                for index, item in enumerate(component)
-            )
+            return tuple(self._resolve_component(item, node, overlay) for item in component)
         if isinstance(component, list):
-            return [
-                self._resolve_component(
-                    item,
-                    node,
-                    overlay,
-                    param_cursor=param_cursor,
-                    template_key=index,
-                )
-                for index, item in enumerate(component)
-            ]
+            return [self._resolve_component(item, node, overlay) for item in component]
         if isinstance(component, dict):
             return {
-                key: self._resolve_component(
-                    value,
-                    node,
-                    overlay,
-                    param_cursor=param_cursor,
-                    template_key=key,
-                )
+                key: self._resolve_component(value, node, overlay)
                 for key, value in component.items()
             }
         return component
@@ -300,25 +170,11 @@ class _PaddleGeneratedSegmentBase:
                 f"{node.label!r} has no captured Paddle args_template.",
                 context=self._context(node, "missing args_template"),
             )
-        param_cursor = _LiveParamCursor(node)
         args = tuple(
-            self._resolve_component(
-                component,
-                node,
-                overlay,
-                param_cursor=param_cursor,
-                template_key=index,
-            )
-            for index, component in enumerate(node.args_template)
+            self._resolve_component(component, node, overlay) for component in node.args_template
         )
         kwargs = {
-            str(key): self._resolve_component(
-                component,
-                node,
-                overlay,
-                param_cursor=param_cursor,
-                template_key=key,
-            )
+            str(key): self._resolve_component(component, node, overlay)
             for key, component in (node.kwargs_template or {}).items()
         }
         return self._rewrite_dynamic_args(node, args, kwargs, overlay)
@@ -362,6 +218,18 @@ class _PaddleGeneratedSegmentBase:
 
     def _execute_nodes(self, overlay: dict[str, Any]) -> dict[str, Any]:
         """Execute this segment's node set into ``overlay``."""
+
+        templates = tuple(
+            component
+            for node in self.graph.nodes
+            if node.canonical_id in self.node_ids
+            for component in (node.args_template, node.kwargs_template)
+        )
+        with paddle_cuda_scope(overlay, templates):
+            return self._execute_nodes_in_context(overlay)
+
+    def _execute_nodes_in_context(self, overlay: dict[str, Any]) -> dict[str, Any]:
+        """Execute segment calls with their tensors' owning CUDA context current."""
 
         executed_call_ids: set[str] = set()
         call_by_output = self.graph.replay_call_by_output_id
@@ -568,7 +436,8 @@ class PaddleSplitAdapter(SplitPolicyMixin):
         """Clone tensor values."""
 
         paddle = _paddle()
-        return paddle.clone(value) if self.is_tensor(value) else value
+        with paddle_cuda_scope(value):
+            return paddle.clone(value) if self.is_tensor(value) else value
 
     def resize_batch(self, value: Any, axis: int, batch_size: int) -> Any:
         """Select cyclic batch rows on the source Paddle device."""
@@ -579,10 +448,11 @@ class PaddleSplitAdapter(SplitPolicyMixin):
         if current <= 0:
             raise ValueError("Cannot resize an empty batch axis.")
         paddle = _paddle()
-        indexes = paddle.to_tensor(
-            [index % current for index in range(batch_size)], dtype="int64", place=value.place
-        )
-        return paddle.index_select(value, indexes, axis=axis)
+        with paddle_cuda_scope(value):
+            indexes = paddle.to_tensor(
+                [index % current for index in range(batch_size)], dtype="int64", place=value.place
+            )
+            return paddle.index_select(value, indexes, axis=axis)
 
     def to_device(self, value: Any, device: Any) -> Any:
         """Move tensor values to a device when Paddle exposes the method."""
@@ -590,10 +460,11 @@ class PaddleSplitAdapter(SplitPolicyMixin):
         if not self.is_tensor(value):
             return value
         device_text = str(device)
-        if device_text == "cpu" and hasattr(value, "cpu"):
-            return value.cpu()
-        if device_text.startswith(("gpu", "cuda")) and hasattr(value, "cuda"):
-            return value.cuda()
+        with paddle_cuda_scope(value):
+            if device_text == "cpu" and hasattr(value, "cpu"):
+                return value.cpu()
+            if device_text.startswith(("gpu", "cuda")) and hasattr(value, "cuda"):
+                return value.cuda()
         return value
 
     def collate(self, values: list[Any]) -> Any:
@@ -601,21 +472,46 @@ class PaddleSplitAdapter(SplitPolicyMixin):
 
         paddle = _paddle()
         if values and isinstance(values[0], paddle.Tensor):
-            return paddle.stack(values)
+            with paddle_cuda_scope(values):
+                return paddle.stack(values)
         return list(values)
 
     def zeros_like(self, value: Any) -> Any:
         """Return zeros like a tensor."""
 
-        return _paddle().zeros_like(value)
+        with paddle_cuda_scope(value):
+            return _paddle().zeros_like(value)
 
     def allclose(self, left: Any, right: Any, *, atol: float, rtol: float) -> bool:
         """Return whether two tensors are numerically close."""
 
         paddle = _paddle()
         if isinstance(left, paddle.Tensor) and isinstance(right, paddle.Tensor):
-            return bool(paddle.allclose(left, right, atol=atol, rtol=rtol).item())
+            with paddle_cuda_scope(left, right):
+                return bool(paddle.allclose(left, right, atol=atol, rtol=rtol).item())
         return left == right
+
+    def validate_equivalence(
+        self,
+        runtime: Any,
+        model: Any,
+        inputs: tuple[Any, ...],
+        **options: Any,
+    ) -> bool:
+        """Compare native and split outputs while restoring the caller's CUDA context."""
+
+        input_kwargs = options.get("input_kwargs")
+        state = model.state_dict() if isinstance(model, _paddle().nn.Layer) else None
+        with paddle_cuda_scope(inputs, input_kwargs, state):
+            full_output = model(*inputs, **(input_kwargs or {}))
+            replay_output = runtime.replay(*inputs, input_kwargs=input_kwargs)
+            return nested_allclose(
+                self,
+                full_output,
+                replay_output,
+                atol=options.get("atol", 1e-5),
+                rtol=options.get("rtol", 1e-4),
+            )
 
     def build_segments(
         self,

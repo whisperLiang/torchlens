@@ -27,20 +27,21 @@ class MlxStateCoordinator:
         self.bindings = bindings
         self.values: dict[int, Any] = {}
         self.mutable_sources: set[int] = set()
+        self.inventory: Any = None
         for binding in bindings:
             binding.coordinator = self
 
-    def publish(self, values: dict[int, Any], *, parameters: bool = False) -> None:
+    def publish(
+        self, values: dict[int, Any], *, parameters: bool = False, invalidate: bool = False
+    ) -> None:
         """Commit one logical update and transport it to each existing segment replica."""
 
         import mlx.core as mx
 
         mx.eval(*values.values())
-        self.values.update(values)
-        if not parameters:
-            self.mutable_sources.update(values)
+        staged = []
         for binding in self.bindings:
-            changed_parameters = False
+            entries = {}
             for source_id, value in values.items():
                 entry = binding.state._entries.get(source_id)
                 if entry is None:
@@ -50,10 +51,16 @@ class MlxStateCoordinator:
                         value, binding.state.placement.device, trainable=entry.trainable
                     )
                     mx.eval(local)
-                binding.state._entries[source_id] = replace(entry, ownership="owned", value=local)
-                changed_parameters |= parameters and entry.trainable
-            if changed_parameters:
-                binding.state.version += 1
+                entries[source_id] = replace(entry, ownership="owned", value=local)
+            staged.append((binding.state, entries))
+        # A failed evaluation or placement must leave every binding unchanged.
+        self.values.update(values)
+        if not parameters:
+            self.mutable_sources.update(values)
+        for state, entries in staged:
+            state._entries.update(entries)
+            if invalidate or (parameters and any(entry.trainable for entry in entries.values())):
+                state.version += 1
 
 
 __all__ = ["MlxStateCoordinator", "snapshot_mlx_values"]

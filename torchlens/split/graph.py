@@ -295,14 +295,13 @@ def _attach_paddle_capture_templates(
 ) -> list[SplitTraceNode]:
     """Attach Paddle replay templates that live on backend capture records."""
 
-    grouped_params: dict[str, list[Any]] = {}
+    params_by_id: dict[int, Any] = {}
     for param in getattr(trace, "param_logs", ()) or ():
-        module_address = getattr(param, "module_address", None)
-        if isinstance(module_address, str):
-            grouped_params.setdefault(module_address, []).append(param)
-    params_by_module: dict[str, tuple[Any, ...]] = {
-        address: tuple(params) for address, params in grouped_params.items()
-    }
+        handle = getattr(param, "_param_ref", None)
+        if handle is None:
+            handle = getattr(param, "handle", None)
+        if handle is not None:
+            params_by_id[id(handle)] = param
 
     captures = {
         str(getattr(capture, "label_raw")): capture
@@ -323,10 +322,49 @@ def _attach_paddle_capture_templates(
                 target=getattr(capture, "func", node.target),
                 args_template=tuple(getattr(capture, "args_template", ()) or ()),
                 kwargs_template=dict(getattr(capture, "kwargs_template", {}) or {}),
-                param_refs=node.param_refs or params_by_module.get(node.module_path or "", ()),
+                param_refs=_paddle_capture_parameter_refs(capture, params_by_id),
             )
         )
     return updated
+
+
+def _paddle_capture_parameter_refs(capture: Any, params_by_id: dict[int, Any]) -> tuple[Any, ...]:
+    """Return exactly the native parameters consumed by this captured Paddle call.
+
+    Parameters
+    ----------
+    capture
+        Session-only Paddle operation capture with live unlabeled tensor operands.
+    params_by_id
+        Native parameter records indexed by their live handle's identity.
+
+    Returns
+    -------
+    tuple[Any, ...]
+        Unique consumed parameter records in argument order.
+    """
+
+    consumed: dict[int, Any] = {}
+
+    def visit(component: Any) -> None:
+        """Collect live state operands without treating their owning module as consumption."""
+
+        if isinstance(component, dict):
+            if component.get("kind") == "tensor":
+                if component.get("label") is None:
+                    source_id = id(component.get("value"))
+                    if source_id in params_by_id:
+                        consumed.setdefault(source_id, params_by_id[source_id])
+                return
+            for value in component.values():
+                visit(value)
+        elif isinstance(component, (tuple, list)):
+            for value in component:
+                visit(value)
+
+    visit(capture.args_template)
+    visit(capture.kwargs_template)
+    return tuple(consumed.values())
 
 
 def _attach_jax_captures(trace: Any, nodes: list[SplitTraceNode]) -> list[SplitTraceNode]:

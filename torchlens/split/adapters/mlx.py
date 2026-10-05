@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from typing import Any
 
@@ -517,6 +517,34 @@ class MlxSplitAdapter(SplitPolicyMixin):
     supports_state_placement = True
     native_target_types = frozenset({"MLXOpCapture"})
     native_state_replay = True
+
+    def initialize_runtime_state(self, runtime: Any) -> None:
+        """Inventory native module state before callers can replace source-model arrays."""
+
+        from .._mlx_state_io import initialize_mlx_runtime_state
+
+        initialize_mlx_runtime_state(runtime)
+
+    def inherit_runtime_state(self, runtime: Any, segments: SegmentBundle) -> None:
+        """Preserve the capture-time named inventory and loaded, unconsumed state."""
+
+        from .._mlx_state_io import inherit_mlx_runtime_state
+
+        inherit_mlx_runtime_state(runtime, segments)
+
+    def state_dict(self, runtime: Any) -> dict[str, Any]:
+        """Export the runtime's effective native parameters and buffers."""
+
+        from .._mlx_state_io import mlx_runtime_state_dict
+
+        return mlx_runtime_state_dict(runtime)
+
+    def load_state_dict(self, runtime: Any, state_dict: Mapping[str, Any]) -> None:
+        """Synchronize every segment after validating a full native state snapshot."""
+
+        from .._mlx_state_io import load_mlx_runtime_state_dict
+
+        load_mlx_runtime_state_dict(runtime, state_dict)
 
     def batch_probe_sizes(self, traced_batch: int) -> tuple[int, ...]:
         """Probe B=3 when native train-mode BatchNorm requires a B=2 capture."""
