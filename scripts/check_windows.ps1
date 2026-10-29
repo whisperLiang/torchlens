@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$Broad,
-    [string]$Python = (Join-Path $PSScriptRoot '..\.venv\Scripts\python.exe')
+    [string]$Python = (Join-Path $PSScriptRoot '..\.venv\Scripts\python.exe'),
+    [string]$Proxy = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,6 +11,10 @@ $checkPython = (Resolve-Path -LiteralPath $Python).Path
 $env:PYTHONUTF8 = '1'
 $env:OMP_NUM_THREADS = '1'
 $env:MKL_NUM_THREADS = '1'
+if ($Proxy) {
+    $env:HTTPS_PROXY = $Proxy
+    $env:HTTP_PROXY = $Proxy
+}
 
 # Load existing compiler tools into this process only. No machine settings change.
 if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {

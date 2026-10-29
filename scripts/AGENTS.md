@@ -11,6 +11,7 @@
 | `check_no_breaking_markers.py` | Reject semantic-release major-bump markers (commit-msg / pre-push hooks + the lint release-defenses CI scan) |
 | `check_package_coverage_floors.py` | Per-package coverage-floor gate over a coverage JSON (live nightly gate, `nightly.yml`; floors pinned by `tests/test_coverage_floor_governance.py`) |
 | `check_plan_link_consistency.py` | Line-range citation checker for the documentation-megasprint plan markdown (`TORCHLENS_PLAN_PATH`, default `docs-plan-megasprint_PLAN.md`, not in-tree); NOT related to `Trace.collapse_plan` |
+| `check_windows.ps1` | Windows quality gates with UTF-8, existing MSVC tools, optional `-Broad` and `-Proxy URL` |
 | `no_major_parser.py` | Semantic-release parser layer that blocks major versions (behavioral tests: `tests/test_no_major_parser.py`) |
 | `normalize_sdist.py` | Deterministic sdist/wheel normalization for reproducible releases (invoked by `build_command` + the nightly double-build gate) |
 | `render_collapse_reference.py` | Regenerate the collapse reference images |

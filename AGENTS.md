@@ -364,7 +364,8 @@ pytest tests/ -m "not rare and not slow" -x --tb=short
 On Windows, `pwsh -File scripts/check_windows.ps1 -Broad` runs these gates with
 UTF-8 subprocesses and the existing Visual Studio C++ Build Tools environment
 loaded for `torch.compile` checks. It uses `.venv` by default (`-Python` overrides
-the interpreter); install the declared dev/test dependencies first. Golden
+the interpreter); install the declared dev/test dependencies first. Use `-Proxy URL`
+when model downloads need a proxy; it applies only to the check process. Golden
 environments are listed in `tests/oracle_environments.md`.
 
 ## Critical Invariants
