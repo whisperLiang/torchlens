@@ -881,17 +881,28 @@ def _emit_and_finish_forward(
     trace._last_sibling_ordering_decision = SiblingOrderDecision(0, 0, {}, ())
     if forward_render_ir.ordering_constraints:
         try:
-            source_override, decision = _verify_and_apply_sibling_ordering(
-                dot.source,
-                forward_render_ir.ordering_constraints,
-                work.captured_edges,
-                context.rankdir,
-            )
+            for _attempt in range(2):
+                try:
+                    source_override, decision = _verify_and_apply_sibling_ordering(
+                        dot.source,
+                        forward_render_ir.ordering_constraints,
+                        work.captured_edges,
+                        context.rankdir,
+                    )
+                    break
+                except subprocess.CalledProcessError:
+                    if not forward_render_ir.regions or dot.graph_attr.get("newrank") == "true":
+                        raise
+                    # Some dot builds reject cross-cluster rank groups under
+                    # recursive ranking. Retry once with the global solver,
+                    # applying the same structural and stretch checks.
+                    dot.graph_attr["newrank"] = "true"
             trace._last_sibling_ordering_decision = decision
         except (subprocess.SubprocessError, OSError) as exc:
             if _strict_sibling_order_checks_enabled():
                 raise
             _warn_sibling_order_fallback_once(exc)
+            source_override = _strip_sibling_rank_groups(dot.source)
 
     # r-b6 R19-6 / T9 (grind-p3): the visualizer scratch dir is created
     # LAZILY while nodes render (raw-input montages, feature maps). The root

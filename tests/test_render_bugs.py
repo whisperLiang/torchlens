@@ -449,6 +449,43 @@ def test_rank_layout_failure_preserves_dot_source(
     assert "digraph" in dot_path.read_text(encoding="utf-8")
 
 
+def test_sibling_verification_failure_renders_without_unverified_constraints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed optional layout check removes its rank constraints before rendering."""
+    from torchlens.visualization import _render_dot, _render_ordering
+
+    class Fanout(nn.Module):
+        """Give the renderer two orderable children of a shared source."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Merge two separate branches."""
+            shared = x + 1
+            return shared.sin() + shared.cos()
+
+    def fail_verification(*args: Any, **kwargs: Any) -> None:
+        """Simulate a bounded Graphviz verification failure."""
+        raise subprocess.CalledProcessError(1, ["dot", "-Tplain"])
+
+    monkeypatch.setenv("TORCHLENS_COLLAPSE_STRICT", "0")
+    monkeypatch.setattr(_render_dot, "_verify_and_apply_sibling_ordering", fail_verification)
+    monkeypatch.setattr(_render_ordering, "_SIBLING_ORDER_WARNING_EMITTED", False)
+    trace = tl.trace(Fanout(), torch.ones(1, 3))
+    try:
+        with pytest.warns(RuntimeWarning, match="without the optional sibling-order"):
+            source = trace.draw(
+                vis_outpath=str(tmp_path / "fallback"),
+                vis_fileformat="svg",
+                vis_save_only=True,
+            )
+        assert "tl:sibling-order" not in source
+        assert "sin_1_2" in source and "cos_1_3" in source
+        assert trace._last_sibling_ordering_decision.survivor_count == 0
+        assert "<svg" in (tmp_path / "fallback.svg").read_text(encoding="utf-8")
+    finally:
+        trace.cleanup()
+
+
 def _raise_timeout(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
     """Simulate a Graphviz timeout from the bounded render runner."""
 
