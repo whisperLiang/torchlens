@@ -32,7 +32,7 @@ import json
 import os
 import tempfile
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import pytest
@@ -112,12 +112,15 @@ def normalize_repo_location(location: str, repo_root: Path) -> str:
         Repo-relative path for an in-tree location, else :data:`_EXTERNAL`.
     """
 
-    path_text = location.rsplit(":", 1)[0] if ":" in location else location
-    candidate = Path(path_text)
+    path_text, separator, line = location.rpartition(":")
+    if not separator or not line.isdigit():
+        path_text = location
+    path_type = PureWindowsPath if PureWindowsPath(path_text).drive else PurePosixPath
+    candidate = path_type(path_text.replace("\\", "/"))
     if not candidate.is_absolute():
         return candidate.as_posix()
     try:
-        return candidate.relative_to(repo_root).as_posix()
+        return candidate.relative_to(path_type(repo_root.as_posix())).as_posix()
     except ValueError:
         return _EXTERNAL
 
@@ -590,3 +593,11 @@ class TestLedgerDiffGateIsRedCapable:
             normalize_repo_location("/somewhere/else/site-packages/torch/_tensor.py:623", repo_root)
             == _EXTERNAL
         )
+
+    @pytest.mark.parametrize("location", [r"C:\repo\torchlens\a.py:12", "C:/repo/torchlens/a.py"])
+    def test_windows_locations_keep_the_drive_separate_from_line_numbers(
+        self, location: str
+    ) -> None:
+        """Native Windows locations compare independently of the host path flavor."""
+        assert normalize_repo_location(location, Path("C:/repo")) == "torchlens/a.py"
+        assert normalize_repo_location("D:/elsewhere/a.py:12", Path("C:/repo")) == _EXTERNAL

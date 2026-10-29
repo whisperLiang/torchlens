@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 import safetensors  # noqa: F401
 import torch
+from support.filesystem import symlink_or_skip
 from torch import nn
 
 from torchlens import Trace, func, load, save, trace as trace_fn
@@ -1205,7 +1206,7 @@ def test_bundle_save_rejects_symlink_target(tmp_path: Path) -> None:
     real_path = tmp_path / "real_bundle"
     real_path.mkdir()
     symlink_path = tmp_path / "bundle_link"
-    symlink_path.symlink_to(real_path, target_is_directory=True)
+    symlink_or_skip(symlink_path, real_path, target_is_directory=True)
 
     with pytest.raises(TorchLensIOError, match="symlinked save target"):
         save(trace, symlink_path)
@@ -1239,7 +1240,7 @@ def test_unified_load_rejects_symlinked_metadata(tmp_path: Path) -> None:
     member = bundle_path / "metadata.pkl"
     target = tmp_path / "real_metadata.pkl"
     member.rename(target)
-    member.symlink_to(target)
+    symlink_or_skip(member, target)
 
     with pytest.raises(TorchLensIOError, match="Refusing symlinked metadata"):
         load(bundle_path)
@@ -1252,7 +1253,7 @@ def test_unified_load_rejects_symlinked_manifest(tmp_path: Path) -> None:
     member = bundle_path / "manifest.json"
     target = tmp_path / "real_manifest.json"
     member.rename(target)
-    member.symlink_to(target)
+    symlink_or_skip(member, target)
 
     # r29 F-r28-1: a symlinked manifest is now rejected even earlier, at
     # format-detection (before the loader's own symlink guard), so match the
@@ -1269,7 +1270,7 @@ def test_unified_load_rejects_symlinked_blobs_dir(tmp_path: Path) -> None:
     member = bundle_path / "blobs"
     target = tmp_path / "real_blobs"
     member.rename(target)
-    member.symlink_to(target, target_is_directory=True)
+    symlink_or_skip(member, target, target_is_directory=True)
 
     with pytest.raises(TorchLensIOError, match="Refusing symlinked blobs directory"):
         load(bundle_path)
@@ -1280,7 +1281,7 @@ def test_unified_load_rejects_symlinked_bundle_path(tmp_path: Path) -> None:
 
     bundle_path = _build_unified_bundle(tmp_path)
     link_path = tmp_path / "bundle_link.tlspec"
-    link_path.symlink_to(bundle_path, target_is_directory=True)
+    symlink_or_skip(link_path, bundle_path, target_is_directory=True)
 
     # r29 F-r28-1: a symlinked bundle path is now rejected earlier, at
     # format-detection, so match the symlink-refusal point-agnostically -- the
@@ -1307,7 +1308,7 @@ def test_resolve_bundle_blob_path_rejects_symlinked_blobs_dir(tmp_path: Path) ->
     outside_tree = tmp_path / "outside_tree"
     outside_tree.mkdir()
     (outside_tree / "0000000001.safetensors").write_bytes(b"payload")
-    (bundle_root / "blobs").symlink_to(outside_tree, target_is_directory=True)
+    symlink_or_skip(bundle_root / "blobs", outside_tree, target_is_directory=True)
 
     with pytest.raises(TorchLensIOError, match="Refusing symlinked blobs directory"):
         resolve_bundle_blob_path(bundle_root, "blobs/0000000001.safetensors")

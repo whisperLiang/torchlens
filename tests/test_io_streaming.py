@@ -461,8 +461,8 @@ def test_selective_out_sink_still_works() -> None:
     assert all("linear" in label for label, _ in received)
 
 
-def test_cleanup_tmp_removes_partial_dirs_and_rejects_symlinks(tmp_path: Path) -> None:
-    """``cleanup_tmp`` should remove partial dirs and refuse symlink temp entries."""
+def test_cleanup_tmp_removes_partial_dirs(tmp_path: Path) -> None:
+    """``cleanup_tmp`` removes unpublished partial directories."""
 
     bundle_path = tmp_path / "stream_bundle.tl"
     partial_dir = tmp_path / f"{bundle_path.name}.tmp.partial"
@@ -473,10 +473,16 @@ def test_cleanup_tmp_removes_partial_dirs_and_rejects_symlinks(tmp_path: Path) -
     assert removed == [partial_dir]
     assert not partial_dir.exists()
 
+
+def test_cleanup_tmp_rejects_symlinks(tmp_path: Path) -> None:
+    """``cleanup_tmp`` refuses symbolic links when native creation is available."""
+    from support.filesystem import symlink_or_skip
+
+    bundle_path = tmp_path / "stream_bundle.tl"
     target_dir = tmp_path / "real_tmp_dir"
     target_dir.mkdir()
     symlink_dir = tmp_path / f"{bundle_path.name}.tmp.symlink"
-    symlink_dir.symlink_to(target_dir, target_is_directory=True)
+    symlink_or_skip(symlink_dir, target_dir, target_is_directory=True)
 
     with pytest.raises(TorchLensIOError, match="symlink temp directory"):
         cleanup_tmp(bundle_path)

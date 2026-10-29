@@ -79,7 +79,7 @@ def test_intervention_template_ref_is_dead() -> None:
     package_root = Path(tl.__file__).resolve().parent
     readers: list[str] = []
     for path in package_files():
-        rel = str(path.relative_to(package_root.parent))
+        rel = path.relative_to(package_root.parent).as_posix()
         tree = package_ast(path)
         for node in ast.walk(tree):
             if (

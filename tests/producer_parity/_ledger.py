@@ -88,7 +88,7 @@ def static_scan(package_root: Path) -> list[ReadSite]:
     _require_corpus_root(package_root)
     sites: list[ReadSite] = []
     for path in package_files():
-        rel = str(path.relative_to(package_root.parent))
+        rel = path.relative_to(package_root.parent).as_posix()
         tree = package_ast(path)
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr in OPEVENT_FIELDS:
@@ -198,7 +198,7 @@ def mutator_inventory(package_root: Path) -> dict[str, list[str]]:
     amendment_callers: list[str] = []
     inplace_list_writes: list[str] = []
     for path in package_files():
-        rel = str(path.relative_to(package_root.parent))
+        rel = path.relative_to(package_root.parent).as_posix()
         tree = package_ast(path)
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):

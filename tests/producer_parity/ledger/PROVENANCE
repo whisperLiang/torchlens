@@ -443,3 +443,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cpu
 source: 2a073a86300b1bec736107c565b003f7d86920c2 (dirty)
 recorded: 2026-10-29T06:32:35.596972+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: Reviewed Native Split static inventory only: deleted SplitPoint/SplitCandidate kind reads (candidates 1->0, ir 9->5, planner 2->0), moved canonical graph ancestry reads (graph parents 4->6, planner parents 6->5). Windows path normalization preserves portable ledger keys; runtime reads, step-0 reads, mutation registry and model-output goldens must remain unchanged.
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: d2d5abc61872bdd97402c57ce40eb570d1717031 (dirty)
+recorded: 2026-10-29T17:37:31.427331+00:00

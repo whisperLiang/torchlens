@@ -6136,14 +6136,6 @@
   "via_getattr": false
  },
  {
-  "ambiguous": true,
-  "field": "kind",
-  "file": "torchlens/split/candidates.py",
-  "has_default": false,
-  "sites": 1,
-  "via_getattr": false
- },
- {
   "ambiguous": false,
   "field": "func_call_id",
   "file": "torchlens/split/graph.py",
@@ -6212,7 +6204,7 @@
   "field": "parents",
   "file": "torchlens/split/graph.py",
   "has_default": false,
-  "sites": 4,
+  "sites": 6,
   "via_getattr": false
  },
  {
@@ -6244,7 +6236,7 @@
   "field": "kind",
   "file": "torchlens/split/ir.py",
   "has_default": false,
-  "sites": 9,
+  "sites": 5,
   "via_getattr": false
  },
  {
@@ -6281,18 +6273,10 @@
  },
  {
   "ambiguous": true,
-  "field": "kind",
-  "file": "torchlens/split/planner.py",
-  "has_default": false,
-  "sites": 2,
-  "via_getattr": false
- },
- {
-  "ambiguous": true,
   "field": "parents",
   "file": "torchlens/split/planner.py",
   "has_default": false,
-  "sites": 6,
+  "sites": 5,
   "via_getattr": false
  },
  {
