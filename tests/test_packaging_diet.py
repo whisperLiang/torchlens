@@ -192,7 +192,8 @@ def test_precommit_and_conftest_guard_use_python3_safe_predicates() -> None:
     assert "entry: scripts/check_no_breaking_markers.py --pre-push" in precommit_text
     assert "if sys.version_info < (3, 11):" in conftest_text
     assert 'collect_ignore_glob.append("test_menagerie_*.py")' in conftest_text
-    assert 'collect_ignore_glob.append("crawler/*.py")' in conftest_text
+    # Exclude the directory before its Python-3.11-only conftest is imported.
+    assert 'collect_ignore_glob.append("crawler")' in conftest_text
 
 
 def test_ci_workflows_pin_torch_and_scope_lint_to_owned_paths() -> None:
