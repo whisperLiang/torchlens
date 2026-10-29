@@ -1,0 +1,22 @@
+{
+  "scope": "synthetic uncached plan_partition; no tensor execution",
+  "source_root": "D:\\ProgramCode\\torchlens",
+  "torchlens_module": "D:\\ProgramCode\\torchlens\\torchlens\\__init__.py",
+  "python": "3.10.18",
+  "torch": "2.10.0+cpu",
+  "compute_nodes": 60,
+  "writes": 30,
+  "prefix_compute_nodes": 30,
+  "warmup": 3,
+  "repeats": 5,
+  "cold_ms": 0.9252000018022954,
+  "median_ms": 0.3825000021606684,
+  "p95_ms": 0.40600000647827983,
+  "samples_ms": [
+    0.3971999976783991,
+    0.37750002229586244,
+    0.40600000647827983,
+    0.3825000021606684,
+    0.37860003067180514
+  ]
+}
