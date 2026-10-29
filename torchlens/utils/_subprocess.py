@@ -128,18 +128,18 @@ def _terminate_process_group(proc: subprocess.Popen[Any]) -> None:
     pgid: int | None = None
     if _HAS_PROCESS_GROUPS:
         try:
-            pgid = os.getpgid(proc.pid)
+            pgid = getattr(os, "getpgid")(proc.pid)
         except ProcessLookupError:
             pgid = None
     if pgid is None:
         proc.kill()
     else:
         with contextlib.suppress(ProcessLookupError):
-            os.killpg(pgid, signal.SIGTERM)
+            getattr(os, "killpg")(pgid, signal.SIGTERM)
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=_KILL_GRACE_SECONDS)
         with contextlib.suppress(ProcessLookupError):
-            os.killpg(pgid, signal.SIGKILL)
+            getattr(os, "killpg")(pgid, getattr(signal, "SIGKILL"))
     with contextlib.suppress(subprocess.TimeoutExpired):  # SIGKILL always lands
         proc.wait(timeout=_KILL_GRACE_SECONDS)
 

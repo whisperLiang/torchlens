@@ -532,7 +532,6 @@ def _populate_forward_ir(trace: "Trace", context: _ForwardRenderContext) -> _For
     pending_container_collapse_nodes: list[dict[str, Any]] = []
     container_clusters: list[ContainerClusterSpec] = []
     collapsed_container_nodes = _collapsed_container_leaf_nodes(
-        trace,
         context.source_graph.entries_to_plot,
         vis_mode=request.vis_mode,
         show_containers=request.show_containers,

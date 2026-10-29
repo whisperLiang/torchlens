@@ -154,7 +154,6 @@ def build_node_universe(
     request = source_graph.request
     show_buffers = _normalize_buffer_visibility(request.show_buffer_layers)
     collapsed_containers = _collapsed_container_leaf_nodes(
-        trace,
         source_graph.entries_to_plot,
         vis_mode=request.vis_mode,
         show_containers=request.show_containers,

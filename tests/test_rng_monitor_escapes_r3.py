@@ -38,9 +38,7 @@ from torchlens.utils.rng import (
 def test_uuid1_c_path_is_marked_and_restored() -> None:
     """In-window ``uuid.uuid1()`` marks its channel through the C funnel too."""
 
-    if getattr(uuid, "_generate_time_safe", None) is None and (
-        getattr(uuid, "_UuidCreate", None) is None
-    ):
+    if getattr(uuid, "_generate_time_safe", None) is None:
         pytest.skip("no platform C uuid1 funnel to exercise; fallback path is covered")
     pre_window_funnel = getattr(uuid, "_generate_time_safe", None)
 
@@ -52,6 +50,18 @@ def test_uuid1_c_path_is_marked_and_restored() -> None:
     )
     # Exact restoration: the module attr holds the pre-window funnel again.
     assert getattr(uuid, "_generate_time_safe", None) is pre_window_funnel
+
+
+@pytest.mark.smoke
+def test_windows_uuid_node_funnel_is_marked_and_restored() -> None:
+    """The native Windows UUID node-discovery call records its entropy channel."""
+    native = getattr(uuid, "_UuidCreate", None)
+    if native is None:
+        pytest.skip("no Windows UUID node-discovery funnel")
+    with host_nondeterminism_monitor(nn.Identity()) as result:
+        uuid._UuidCreate()
+    assert "uuid.uuid1" in result.channels
+    assert uuid._UuidCreate is native
 
 
 @pytest.mark.smoke

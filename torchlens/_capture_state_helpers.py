@@ -1676,7 +1676,8 @@ def _is_torchlens_instrumentation(func: Any) -> bool:
     # such as ``site-packages/torchlens_contrib/model.py``, silently EXCLUDING
     # a user-owned forward override from the implementation signature (edits
     # then hit the stale cache).
-    return code.co_filename.startswith(_TORCHLENS_PACKAGE_DIR + os.sep)
+    filename = os.path.normcase(os.path.normpath(code.co_filename))
+    return filename.startswith(os.path.normcase(_TORCHLENS_PACKAGE_DIR + os.sep))
 
 
 def _capture_cache_dir(cache_dir: str | Path | None) -> Path:

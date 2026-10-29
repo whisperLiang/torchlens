@@ -37,8 +37,17 @@ DOC_FILES = (
     "reference/attribution.md",
     "reference/collapse.md",
     "reference/split_memory.md",
+    "reference/split_native_runtime.md",
 )
 BLOCK_RE = re.compile(r"```python\n(?P<code>.*?)\n```", re.DOTALL)
+
+
+@pytest.fixture(autouse=True)
+def _keep_doc_renders_headless(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Render real artifacts without opening desktop viewers during snippet checks."""
+    from torchlens.visualization import _render_utils
+
+    monkeypatch.setattr(_render_utils, "_is_interactive_display_context", lambda: False)
 
 
 def _docs_dir() -> Path:

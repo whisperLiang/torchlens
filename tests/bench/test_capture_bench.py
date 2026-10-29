@@ -5,8 +5,6 @@ from __future__ import annotations
 import gc
 import importlib.util
 import math
-import os
-import resource
 import statistics
 import tempfile
 import time
@@ -21,6 +19,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+from torchlens.validation.consolidated import _rss_high_water_bytes
 
 pytestmark = pytest.mark.slow
 
@@ -137,10 +136,10 @@ class GradientRetentionBench(nn.Module):
 def _rss_mb() -> float:
     """Return process maximum resident set size in MiB."""
 
-    rss = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-    if os.uname().sysname == "Darwin":
-        return rss / (1024 * 1024)
-    return rss / 1024
+    rss = _rss_high_water_bytes()
+    if rss is None:
+        pytest.skip("native peak RSS measurement is unavailable")
+    return rss / (1024 * 1024)
 
 
 def _timed_median(

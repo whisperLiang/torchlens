@@ -50,7 +50,7 @@ def _give_user_feedback_about_lookup_key(
     if hasattr(self, "_module_logs") and key.rsplit(":", 1)[0] in self._module_logs:
         module, call_index = key.rsplit(":", 1)
         module_log = self._module_logs[module]
-        module_num_calls = getattr(module_log, "num_calls")
+        module_num_calls = module_log.num_calls
         raise InvalidArgumentError(
             f"You specified module {module} pass {call_index}, but {module} only has "
             f"{module_num_calls} ops; specify a lower number",

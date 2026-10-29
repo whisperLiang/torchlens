@@ -86,7 +86,7 @@ def collect_stem_collisions() -> dict[str, list[str]]:
     for path in _iter_test_files():
         rel = path.relative_to(_TESTS_DIR).as_posix()
         stripped = _ROUND_TOKEN.sub("", path.stem)
-        key = str(Path(rel).parent / stripped) if "/" in rel else stripped
+        key = (Path(rel).parent / stripped).as_posix() if "/" in rel else stripped
         key = key.removeprefix("./")
         groups[key].append(rel)
     return {stem: files for stem, files in groups.items() if len(files) > 1}

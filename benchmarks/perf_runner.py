@@ -7,7 +7,6 @@ import json
 import os
 import platform
 import random
-import resource
 import statistics
 import subprocess
 import sys
@@ -27,6 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from benchmarks._memory import peak_rss_bytes  # noqa: E402
 from benchmarks.perf_models import (  # noqa: E402
     build_tiny_dummy,
     input_summary,
@@ -683,7 +683,7 @@ def _read_rss_high_water() -> int:
                     return int(line.split()[1])
     except (OSError, ValueError, IndexError):
         pass
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak_rss_bytes() // 1024
 
 
 class _ConcurrentPeakSampler:
@@ -796,8 +796,7 @@ def _run_memory(fn: OperationFn, device: str, memory_runs: int) -> dict[str, Any
     if process is not None and baseline_rss is not None:
         sampled_rss_peak = max(sampler.rss_peak, baseline_rss)
         metrics["sampled_rss_peak_delta_mb"] = (sampled_rss_peak - baseline_rss) / 1024 / 1024
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    metrics["process_high_water_rss_mb"] = usage.ru_maxrss / 1024
+    metrics["process_high_water_rss_mb"] = peak_rss_bytes() / 1024 / 1024
     phase_rss_delta_kib = max(_read_rss_high_water() - rss_high_water_before, 0)
     metrics["phase_rss_high_water_delta_mb"] = phase_rss_delta_kib / 1024
     if device == "cuda":

@@ -17,6 +17,7 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from .._errors import InvalidArgumentError
+from .._io._durability import fsync_dir as _fsync_directory, fsync_file as _fsync_file
 from .._io._json import read_bounded
 from .._io.manifest import TensorEntry, sha256_of_file
 from .._io.paths import reject_symlink_path
@@ -2236,38 +2237,6 @@ def _read_json_file(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ReplayPreconditionError(f"{path} must contain a JSON object")
     return data
-
-
-def _fsync_file(path: Path) -> None:
-    """Fsync an existing file.
-
-    Parameters
-    ----------
-    path:
-        File path.
-    """
-
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def _fsync_directory(path: Path) -> None:
-    """Fsync a directory when the platform allows it.
-
-    Parameters
-    ----------
-    path:
-        Directory path.
-    """
-
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
 
 
 def _readme_text(spec_json: dict[str, Any], tensor_entries: list[TensorEntry]) -> str:

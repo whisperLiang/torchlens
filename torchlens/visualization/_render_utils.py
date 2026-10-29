@@ -116,7 +116,7 @@ def _open_file_quietly(filepath: str, *, announce_headless: bool = False) -> boo
         return False
     try:
         if sys.platform == "win32":
-            os.startfile(filepath)  # type: ignore[attr-defined]
+            os.startfile(filepath)
         else:
             opener = "open" if sys.platform == "darwin" else "xdg-open"
             # r-b6 R40-1/3a: retain the handle and reap prior viewer children

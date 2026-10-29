@@ -756,9 +756,7 @@ def _verification_for_node(node: SplitTraceNode) -> SplitVerificationStatus:
     return SplitVerificationStatus.EXACT
 
 
-def _shape_constraint_kind(
-    node: SplitTraceNode,
-) -> Literal[
+_OpShapeKind = Literal[
     "batch_axis",
     "broadcast",
     "reshape",
@@ -768,24 +766,24 @@ def _shape_constraint_kind(
     "index",
     "shape_producing",
     "opaque",
-]:
-    """Infer a conservative shape-constraint category from an op name."""
+]
 
+
+def _shape_constraint_kind(node: SplitTraceNode) -> _OpShapeKind:
+    """Infer a conservative shape-constraint category from an op name."""
     text = node.op_type.lower()
-    if "reshape" in text or "view" in text:
-        return "reshape"
-    if "flatten" in text:
-        return "flatten"
-    if "concat" in text or "cat" in text:
-        return "concat"
-    if "broadcast" in text or "expand" in text:
-        return "broadcast"
-    if "attn" in text or "attention" in text:
-        return "attention"
-    if "index" in text or "gather" in text:
-        return "index"
-    if "shape" in text or "size" in text:
-        return "shape_producing"
+    categories: tuple[tuple[tuple[str, ...], _OpShapeKind], ...] = (
+        (("reshape", "view"), "reshape"),
+        (("flatten",), "flatten"),
+        (("concat", "cat"), "concat"),
+        (("broadcast", "expand"), "broadcast"),
+        (("attn", "attention"), "attention"),
+        (("index", "gather"), "index"),
+        (("shape", "size"), "shape_producing"),
+    )
+    for markers, kind in categories:
+        if any(marker in text for marker in markers):
+            return kind
     return "batch_axis"
 
 

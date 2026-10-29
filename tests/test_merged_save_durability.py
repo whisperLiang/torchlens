@@ -11,6 +11,7 @@ import stat
 from pathlib import Path
 
 import pytest
+from support.filesystem import symlink_or_skip
 
 # Reuse the rank-core builder from the load-identity module.
 from test_merged_load_identity import _rank_trace
@@ -54,7 +55,7 @@ def test_load_rejects_symlinked_manifest(tmp_path: Path) -> None:
     real = art / "manifest.json"
     moved = art / "manifest.real.json"
     real.rename(moved)
-    (art / "manifest.json").symlink_to(moved)
+    symlink_or_skip(art / "manifest.json", moved)
     with pytest.raises(MergedArtifactError) as excinfo:
         load_merged(art)
     assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value
@@ -67,7 +68,7 @@ def test_load_rejects_symlinked_descriptor(tmp_path: Path) -> None:
     real = art / "merge" / "descriptor.json"
     moved = art / "merge" / "descriptor.real.json"
     real.rename(moved)
-    (art / "merge" / "descriptor.json").symlink_to(moved)
+    symlink_or_skip(art / "merge" / "descriptor.json", moved)
     with pytest.raises(MergedArtifactError) as excinfo:
         load_merged(art)
     assert excinfo.value.fields["code"] == MergedErrorCode.MERGED_SCHEMA_INVALID.value

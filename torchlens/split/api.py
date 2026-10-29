@@ -18,6 +18,9 @@ from .placement import PlacementPlan, require_placement_support
 from .profiles import resolve_model_profile
 from .runtime import SplitRuntime
 
+_DEFAULT_FEATURES = SplitFeatures()
+_DEFAULT_PLACEMENT = PlacementPlan()
+
 
 def _normalize_inputs(inputs: Any) -> tuple[Any, ...]:
     """Normalize public positional inputs into a tuple."""
@@ -146,9 +149,9 @@ def prepare_graph(
     inputs: Any,
     *,
     backend: str | None = None,
-    features: SplitFeatures = SplitFeatures(),
+    features: SplitFeatures = _DEFAULT_FEATURES,
     model_profile: str | SplitModelProfile | None = None,
-    placement: PlacementPlan = PlacementPlan(),
+    placement: PlacementPlan = _DEFAULT_PLACEMENT,
     validation: Literal["strict", "permissive"] = "strict",
     input_kwargs: dict[str, Any] | None = None,
 ) -> SplitGraph:

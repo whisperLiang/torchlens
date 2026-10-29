@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import gc
-import resource
 
 import pytest
 import torch
 
 import torchlens as tl
+from torchlens.validation.consolidated import _rss_high_water_bytes
 
 from .conftest import TwoLayerMlp
 
@@ -19,8 +19,10 @@ def _rss_bytes() -> int:
     try:
         import psutil
     except ImportError:
-        usage_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        return usage_kb * 1024
+        peak = _rss_high_water_bytes()
+        if peak is None:
+            pytest.skip("native RSS measurement is unavailable")
+        return peak
     process = psutil.Process()
     return int(process.memory_info().rss)
 

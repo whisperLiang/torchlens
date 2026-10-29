@@ -357,7 +357,7 @@ def _reset_backward_projection(log: Trace) -> None:
     log.__dict__.pop("_tl_grad_hook_owner_by_label", None)
     log.__dict__.pop("_active_backward_pass_index", None)
     log.__dict__.pop("_implicit_backward_pass_open", None)
-    getattr(log, "_warned_once", set()).discard("implicit_backward_pass")
+    getattr(log, "_warned_once", set[str]()).discard("implicit_backward_pass")
     log.__dict__.pop("_tl_backward_triggers_disarmed", None)
     log.__dict__.pop("_backward_gradfn_refs", None)
     log.__dict__.pop("_backward_projection_event_count", None)

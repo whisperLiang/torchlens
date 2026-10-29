@@ -157,7 +157,17 @@ def _import_probe_script() -> str:
     """
 
     return """
-import json, resource, sys, time, types
+import json, sys, time, types
+
+try:
+    import resource
+except ImportError:
+    import psutil
+    def _peak_rss():
+        return psutil.Process().memory_info().peak_wset // 1024
+else:
+    def _peak_rss():
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
 before_torch = set(sys.modules)
 import torch
@@ -166,7 +176,7 @@ after_torch = set(sys.modules)
 
 torch_ns_before = {k: id(v) for k, v in vars(torch).items()}
 functional_ns_before = {k: id(v) for k, v in vars(_torch_nn_functional).items()}
-rss_before_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+rss_before_kib = _peak_rss()
 
 # Warm the import-path machinery outside the timing window (P4 re-baseline):
 # on an editable-install venv the first find_spec("torchlens") imports pip's
@@ -181,7 +191,7 @@ import torchlens
 elapsed_cpu = time.process_time() - start_cpu
 elapsed_wall = time.perf_counter() - start_wall
 
-rss_after_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+rss_after_kib = _peak_rss()
 torch_ns_after = {k: id(v) for k, v in vars(torch).items()}
 functional_ns_after = {k: id(v) for k, v in vars(_torch_nn_functional).items()}
 

@@ -248,7 +248,7 @@ def _harden_capture_cache_dir(directory: Path) -> None:
 
     if os.name != "posix":  # pragma: no cover - POSIX mode bits are the checked signal
         return
-    euid = os.geteuid()
+    euid = getattr(os, "geteuid")()
     try:
         info = directory.stat()
     except OSError as exc:  # pragma: no cover - mkdir ran immediately before
@@ -345,7 +345,7 @@ def _capture_cache_secret(cache_root: Path) -> bytes:
                 "remove it (the cache refills automatically) or drop cache=True."
             )
         info = secret_path.stat()
-        if os.name == "posix" and info.st_uid != os.geteuid():
+        if os.name == "posix" and info.st_uid != getattr(os, "geteuid")():
             raise _capture_cache_io_error(
                 f"TorchLens capture cache secret {secret_path} is owned by uid "
                 f"{info.st_uid}, not this process; a tag keyed by it would prove "

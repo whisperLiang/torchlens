@@ -308,7 +308,7 @@ def _parsed_test_trees() -> tuple[tuple[str, ast.Module], ...]:
     tests_root = Path(__file__).resolve().parent
     return tuple(
         (
-            str(path.relative_to(tests_root)),
+            path.relative_to(tests_root).as_posix(),
             ast.parse(path.read_text(encoding="utf-8"), filename=str(path)),
         )
         for path in sorted(tests_root.rglob("*.py"))

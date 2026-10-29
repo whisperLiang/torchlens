@@ -41,7 +41,7 @@ def test_profile_reuses_capture_flops_without_tensor_payloads(compact: bool, bat
     assert conv.forward_flops == 2 * batch * 4 * 2 * 2 * 3 * 3 * 3 + batch * 4 * 2 * 2
     assert profile.backward_flops_estimated
     if batch == graph.traced_batch_size:
-        for cost, node in zip(profile.nodes, graph.trace_graph.compute_nodes, strict=True):
+        for cost, _node in zip(profile.nodes, graph.trace_graph.compute_nodes, strict=True):
             assert cost.captured_forward_flops == cost.forward_flops
 
 

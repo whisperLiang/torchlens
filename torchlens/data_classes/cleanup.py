@@ -967,7 +967,7 @@ def _scrub_op_label_collections(op: "Op", labels_to_remove: set[str]) -> None:
         if field_name in _OP_GROUP_FIELDS and core is not None:
             fid = core.layout.fid_by_name.get(field_name)
             raw = core.cell_get(op._row, fid) if fid is not None else None
-            if raw.__class__ is GroupRef:
+            if raw is not None and raw.__class__ is GroupRef:
                 view = raw.view()
                 if not labels_to_remove.isdisjoint(view):
                     raw.groups.replace(

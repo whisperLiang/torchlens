@@ -47,7 +47,7 @@ import json
 import os
 import warnings
 from collections.abc import Callable
-from functools import cache, lru_cache
+from functools import cache, lru_cache, partial
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -635,46 +635,58 @@ def _construct_cell(make_selector: Callable[[], Any]) -> Any:
         return _error_cell(exc)
 
 
-def _compute_matrix() -> dict[str, Any]:
-    if _REGEN:
-        # Regeneration is in-process: refuse to generate golden bytes on a
-        # torch already wrapped by earlier tests (SF-53), and require the
-        # WHY before any capture runs.
-        guard_wrap_state_for_golden_update(_UPDATE_ENV)
-        require_update_reason(_UPDATE_ENV)
-    matrix: dict[str, Any] = {}
+@cache
+def _cell_probes() -> dict[str, Callable[[], Any]]:
+    """Describe each oracle cell without executing any model captures."""
+    probes: dict[str, Callable[[], Any]] = {}
     for name, model_key, factory in FORWARD_CASES:
-        matrix[f"capture/{model_key}/{name}"] = _probe_capture(model_key, factory)
-        matrix[f"sites/{model_key}/{name}"] = _probe_sites(model_key, factory, backward=False)
-        matrix[f"live/{model_key}/{name}"] = _probe_live(model_key, factory)
-        matrix[f"spec/{name}"] = _probe_spec(factory, model_key=model_key)
+        probes[f"capture/{model_key}/{name}"] = partial(_probe_capture, model_key, factory)
+        probes[f"sites/{model_key}/{name}"] = partial(
+            _probe_sites, model_key, factory, backward=False
+        )
+        probes[f"live/{model_key}/{name}"] = partial(_probe_live, model_key, factory)
+        probes[f"spec/{name}"] = partial(_probe_spec, factory, model_key=model_key)
     for name, factory in BACKWARD_CASES:
-        matrix[f"sites_bwd/conv/{name}"] = _probe_sites("conv", factory, backward=True)
-        matrix[f"spec_bwd/{name}"] = _probe_spec(factory, model_key="conv", backward=True)
+        probes[f"sites_bwd/conv/{name}"] = partial(_probe_sites, "conv", factory, backward=True)
+        probes[f"spec_bwd/{name}"] = partial(_probe_spec, factory, model_key="conv", backward=True)
     for name, model_key, factory in BACKWARD_CONTAINER_CASES:
-        matrix[f"sites_bwd/{model_key}/{name}"] = _probe_sites(model_key, factory, backward=True)
+        probes[f"sites_bwd/{model_key}/{name}"] = partial(
+            _probe_sites, model_key, factory, backward=True
+        )
     for name, factory in CONSTRUCT_CASES:
-        matrix[f"construct/{name}"] = _construct_cell(factory)
+        probes[f"construct/{name}"] = partial(_construct_cell, factory)
     for name, model_key, factory in DEFAULT_FANOUT_CASES:
-        matrix[f"sites_default_fanout/{model_key}/{name}"] = _probe_sites_default_fanout(
-            model_key, factory
+        probes[f"sites_default_fanout/{model_key}/{name}"] = partial(
+            _probe_sites_default_fanout, model_key, factory
         )
     for name, factory in LIVE_BACKWARD_CASES:
-        matrix[f"live_bwd/conv/{name}"] = _probe_live_backward(factory)
+        probes[f"live_bwd/conv/{name}"] = partial(_probe_live_backward, factory)
     for name, model_key, factory, result in SHORT_CIRCUIT_CASES:
-        matrix[f"short_circuit/{model_key}/{name}"] = _probe_where_calls(
-            model_key, factory, result=result
+        probes[f"short_circuit/{model_key}/{name}"] = partial(
+            _probe_where_calls, model_key, factory, result=result
         )
     for name, model_key, factory in FLAT_SPEC_CASES:
-        matrix[f"flat_spec/{model_key}/{name}"] = _probe_sites(model_key, factory, backward=False)
+        probes[f"flat_spec/{model_key}/{name}"] = partial(
+            _probe_sites, model_key, factory, backward=False
+        )
     for name, factory in FACET_SPEC_CASES:
-        matrix[f"facet_spec/{name}"] = _probe_spec(factory)
-    return matrix
+        probes[f"facet_spec/{name}"] = partial(_probe_spec, factory)
+    return probes
+
+
+@cache
+def _cell_result(cell_key: str) -> Any:
+    """Compute only the addressed oracle cell, sharing its result across comparisons."""
+    return _cell_probes()[cell_key]()
 
 
 @lru_cache(maxsize=1)
 def _matrix() -> dict[str, Any]:
-    return _compute_matrix()
+    """Assemble all cells for the heavy inventory check or deliberate regeneration."""
+    if _REGEN:
+        guard_wrap_state_for_golden_update(_UPDATE_ENV)
+        require_update_reason(_UPDATE_ENV)
+    return {key: _cell_result(key) for key in _cell_probes()}
 
 
 _REGEN_WRITTEN = False
@@ -708,23 +720,7 @@ def _load_golden() -> dict[str, Any]:
     return json.loads(_GOLDEN_PATH.read_text())
 
 
-_CELL_KEYS: tuple[str, ...] = tuple(
-    [
-        f"{lifecycle}/{model_key}/{name}"
-        for name, model_key, _ in FORWARD_CASES
-        for lifecycle in ("capture", "sites", "live")
-    ]
-    + [f"spec/{name}" for name, _, _ in FORWARD_CASES]
-    + [f"sites_bwd/conv/{name}" for name, _ in BACKWARD_CASES]
-    + [f"sites_bwd/{model_key}/{name}" for name, model_key, _ in BACKWARD_CONTAINER_CASES]
-    + [f"spec_bwd/{name}" for name, _ in BACKWARD_CASES]
-    + [f"construct/{name}" for name, _ in CONSTRUCT_CASES]
-    + [f"sites_default_fanout/{model_key}/{name}" for name, model_key, _ in DEFAULT_FANOUT_CASES]
-    + [f"live_bwd/conv/{name}" for name, _ in LIVE_BACKWARD_CASES]
-    + [f"short_circuit/{model_key}/{name}" for name, model_key, _, _ in SHORT_CIRCUIT_CASES]
-    + [f"flat_spec/{model_key}/{name}" for name, model_key, _ in FLAT_SPEC_CASES]
-    + [f"facet_spec/{name}" for name, _ in FACET_SPEC_CASES]
-)
+_CELL_KEYS = tuple(_cell_probes())
 
 
 @pytest.mark.heavy
@@ -740,10 +736,10 @@ def test_selector_semantics_cell(cell_key: str) -> None:
     """One selector x lifecycle cell matches its committed characterization."""
 
     golden = _golden()
-    matrix = _matrix()
+    result = _cell_result(cell_key)
     assert cell_key in golden, f"cell {cell_key} missing from golden; regenerate deliberately"
-    assert matrix[cell_key] == golden[cell_key], (
+    assert result == golden[cell_key], (
         f"Behavior change in {cell_key}: golden={golden[cell_key]!r} "
-        f"current={matrix[cell_key]!r}. If intended, enumerate it in the "
+        f"current={result!r}. If intended, enumerate it in the "
         f"consolidation report and regenerate with {_UPDATE_ENV}=1."
     )

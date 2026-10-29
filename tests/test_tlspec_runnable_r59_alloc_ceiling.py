@@ -35,17 +35,15 @@ from __future__ import annotations
 
 import json
 import math
-import resource
 import time
 import types
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
 import torch
 import torch.nn as nn
+from support.resource_limits import address_space_limit as _rlimit_cap
 
 import torchlens as tl
 import torchlens._runnable_execution as rex
@@ -107,25 +105,6 @@ def _tamper_literal(bundle: Path, kind: str, target: Any, replacement: Any) -> i
                 break
     path.write_text(json.dumps(manifest))
     return count
-
-
-@contextmanager
-def _rlimit_cap(extra: int = 1 << 30) -> Iterator[None]:
-    """Cap address space so an un-refused bomb raises MemoryError, not an OOM-kill.
-
-    A refusal fires BEFORE any allocation, so under this cap a refused call raises the
-    typed ``RunCapabilityUnavailableError`` while an un-refused bomb would surface as an
-    allocator failure -- asserting the former (not a MemoryError) proves NO allocation.
-    """
-
-    with open("/proc/self/status", encoding="ascii") as handle:
-        vmsize_kb = next(int(line.split()[1]) for line in handle if line.startswith("VmSize"))
-    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-    resource.setrlimit(resource.RLIMIT_AS, (vmsize_kb * 1024 + extra, hard))
-    try:
-        yield
-    finally:
-        resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
 
 
 def _stub_call(n_outputs: int = 1) -> Any:

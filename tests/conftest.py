@@ -28,7 +28,8 @@ install_import_guard()
 collect_ignore_glob = []
 if sys.version_info < (3, 11):
     collect_ignore_glob.append("test_menagerie_*.py")
-    collect_ignore_glob.append("crawler/*.py")
+    # Ignore the directory before pytest imports its platform-specific conftest.
+    collect_ignore_glob.append("crawler")
 
 # Output directories are assigned under pytest's private basetemp in
 # ``pytest_configure`` before test modules import these constants.

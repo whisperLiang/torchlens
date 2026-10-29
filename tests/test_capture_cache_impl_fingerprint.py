@@ -12,6 +12,7 @@ implementation change is a cache miss and a recapture.
 
 from __future__ import annotations
 
+import os
 import types
 
 import pytest
@@ -363,6 +364,14 @@ def test_sibling_package_forward_is_not_torchlens_instrumentation() -> None:
 
     interior = _function_with_filename(_TORCHLENS_PACKAGE_DIR + "/wrapped.py")
     assert _is_torchlens_instrumentation(interior) is True
+    interior_alias = _function_with_filename(
+        os.path.join(_TORCHLENS_PACKAGE_DIR, "backends", "..", "wrapped.py")
+    )
+    assert _is_torchlens_instrumentation(interior_alias) is True
+    outside_alias = _function_with_filename(
+        os.path.join(_TORCHLENS_PACKAGE_DIR, "..", "torchlens_contrib", "model.py")
+    )
+    assert _is_torchlens_instrumentation(outside_alias) is False
 
 
 def test_tensor_content_hash_frames_logical_dtype_bf16_vs_fp32() -> None:

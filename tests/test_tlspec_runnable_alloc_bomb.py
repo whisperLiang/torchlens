@@ -20,9 +20,6 @@ layer and composes with the ``_preflight_run_allocation`` this suite exercises.
 from __future__ import annotations
 
 import json
-import resource
-from collections.abc import Iterator
-from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -30,6 +27,7 @@ from typing import Any
 import pytest
 import torch
 import torch.nn as nn
+from support.resource_limits import address_space_limit as _rlimit_cap
 
 import torchlens as tl
 from torchlens._io.runnable_load import _validate_literal_atom_value
@@ -121,20 +119,6 @@ def _tamper(bundle: Path, mutate: Any) -> None:
     mutate(manifest)
     _recompute_runtime_fingerprints(manifest)
     path.write_text(json.dumps(manifest))
-
-
-@contextmanager
-def _rlimit_cap(extra: int = 1 << 30) -> Iterator[None]:
-    """Cap address space so an un-refused bomb allocation raises instead of OOM-killing."""
-
-    with open("/proc/self/status", encoding="ascii") as handle:
-        vmsize_kb = next(int(line.split()[1]) for line in handle if line.startswith("VmSize"))
-    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-    resource.setrlimit(resource.RLIMIT_AS, (vmsize_kb * 1024 + extra, hard))
-    try:
-        yield
-    finally:
-        resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
 
 
 def _output_slot(shape: tuple[int, ...], dtype: str = "torch.float32") -> TensorSlotDescriptor:

@@ -16,7 +16,7 @@ delegated to the registries in ``exemptions.py``.
 
 import math
 from collections import Counter, defaultdict, deque
-from collections.abc import Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
@@ -1957,7 +1957,7 @@ def _check_layer_arguments_logged_correctly(
                 return ValidationCheckResult.unverified("missing_saved_args")
             return ValidationCheckResult.failed_result("arg_logging_mismatch")
 
-        argtype_dict = {
+        argtype_dict: dict[str, tuple[Callable[[Any], Iterable[tuple[Any, Any]]], str]] = {
             "args": (enumerate, "saved_args"),
             "kwargs": (lambda x: x.items(), "saved_kwargs"),
         }

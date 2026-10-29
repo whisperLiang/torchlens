@@ -484,6 +484,7 @@ _PUBLIC_REGISTRATION_STATE = frozenset(
     {
         ("torchlens/backends/registry.py", "_REGISTRY"),
         ("torchlens/capture/flops.py", "_CUSTOM_OP_RULES"),
+        ("torchlens/capture/flops.py", "_rule_revision"),
         ("torchlens/ir/container.py", "_CONTAINER_REGISTRY"),
         ("torchlens/receptive_field/_rules.py", "_BUILTIN_RF_RULES"),
         ("torchlens/receptive_field/_rules.py", "_RF_RULES"),
@@ -499,13 +500,12 @@ _PUBLIC_REGISTRATION_STATE = frozenset(
         ("torchlens/ir/predicate_registry.py", "_USER_PREDICATES"),
     }
 )
-"""Process state a PUBLIC API mutates: registries, rule tables, feature toggles.
+"""Public registries, rule tables, toggles and their cache-invalidation revisions.
 Distinct from a cache because a user call CHANGES capture behavior for the rest
 of the process (a registered facet, an RF rule, an enabled alias set). These are
 the members whose leakage across a test session can silently change results, so
 they carry an epoch/version counter where downstream caches must invalidate.
 """
-
 _PROCESS_CACHES = frozenset(
     {
         # Write-once memo of the CPython tuplegetter descriptor type, probed

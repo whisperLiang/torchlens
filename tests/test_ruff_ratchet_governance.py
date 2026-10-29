@@ -269,7 +269,9 @@ def _measure_deferred_codes() -> Counter[str]:
 
     excludes: list[str] = []
     for pattern in _configured_extend_excludes():
-        excludes.extend(("--extend-exclude", str(_PROJECT_ROOT / pattern)))
+        # Keep the glob attached to its option. On Windows Ruff expands bare
+        # wildcard arguments into extra input files before parsing options.
+        excludes.append(f"--extend-exclude={(_PROJECT_ROOT / pattern).as_posix()}")
     counts: Counter[str] = Counter()
     scoped = {
         "ci-scope": [code for code in _DEFERRED_CODE_CEILINGS if code not in _PACKAGE_ONLY_CODES],

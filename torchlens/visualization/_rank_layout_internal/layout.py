@@ -761,8 +761,11 @@ def render_rank_layout(
             stacklevel=user_stacklevel(),
         )
 
-    source_path = f"{vis_outpath}.dot"
-    with open(source_path, "w") as f:
+    # DOT is also a public output format. Keep its temporary input separate:
+    # Windows forbids writing over neato's open input, and cleanup must never
+    # remove the user's rendered artifact.
+    source_path = f"{vis_outpath}.source.dot"
+    with open(source_path, "w", encoding="utf-8") as f:
         f.write(dot_source)
 
     rendered_path = f"{vis_outpath}.{vis_fileformat}"

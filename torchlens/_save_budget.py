@@ -122,8 +122,9 @@ def _available_host_bytes() -> int | None:
     except Exception:
         pass
     try:
-        pages = os.sysconf("SC_AVPHYS_PAGES")
-        page_size = os.sysconf("SC_PAGE_SIZE")
+        sysconf = getattr(os, "sysconf")
+        pages = sysconf("SC_AVPHYS_PAGES")
+        page_size = sysconf("SC_PAGE_SIZE")
         if pages > 0 and page_size > 0:
             return int(pages) * int(page_size)
     except Exception:

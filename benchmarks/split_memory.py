@@ -13,7 +13,6 @@ import argparse
 import gc
 import json
 import os
-import resource
 import statistics
 import sys
 import time
@@ -22,14 +21,23 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from benchmarks._memory import peak_rss_bytes  # noqa: E402
+
 
 def _rss_bytes() -> int:
-    """Read this Linux process's current resident memory."""
+    """Read the current resident memory without requiring Linux procfs."""
 
-    for line in Path("/proc/self/status").read_text().splitlines():
-        if line.startswith("VmRSS:"):
-            return int(line.split()[1]) * 1024
-    raise RuntimeError("This benchmark requires Linux /proc/self/status.")
+    try:
+        for line in Path("/proc/self/status").read_text(encoding="ascii").splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    import psutil
+
+    return int(psutil.Process().memory_info().rss)
 
 
 def _tensor_leaves(value: Any, torch: Any) -> list[Any]:
@@ -159,7 +167,7 @@ def main() -> None:
             "capture_grad": args.capture_grad,
             "retain_trace_requested": args.retain_trace,
             "rss_bytes": _rss_bytes(),
-            "process_peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
+            "process_peak_rss_bytes": peak_rss_bytes(),
             **extra,
         }
         if cuda:

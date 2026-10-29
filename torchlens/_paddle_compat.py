@@ -57,7 +57,9 @@ class _PaddleExtensionLoader:
 
         self._handle = ctypes.CDLL(
             self.original.path,
-            mode=os.RTLD_LOCAL | os.RTLD_NOW | os.RTLD_DEEPBIND,
+            mode=(
+                getattr(os, "RTLD_LOCAL") | getattr(os, "RTLD_NOW") | getattr(os, "RTLD_DEEPBIND")
+            ),
         )
         return self.original.create_module(spec)
 

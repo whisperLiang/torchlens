@@ -87,7 +87,7 @@ def test_tracing_finished_writer_inventory_is_exact() -> None:
             flags=re.MULTILINE,
         )
         if hits:
-            writer_files[str(path.relative_to(TORCHLENS_DIR))] = len(hits)
+            writer_files[path.relative_to(TORCHLENS_DIR).as_posix()] = len(hits)
     assert writer_files == {
         "postprocess/finalization.py": 1,
         "backends/_finalize.py": 2,

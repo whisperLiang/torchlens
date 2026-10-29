@@ -406,6 +406,40 @@ def _torch_mutation_targets() -> _MutationTargets:
     return _MutationTargets(writes, fresh, batchnorm, permutations, out_writes, out_allocations)
 
 
+def _certify_source_write(
+    node: SplitTraceNode, producer: SplitTraceNode, proof: _MutationProof, *, has_out: bool
+) -> bool:
+    """Certify ordered writes to input, buffer or parameter source storage."""
+    prefix = proof.prefix
+    if producer.is_input or producer.is_buffer or producer.is_buffer_only_source:
+        # Native source writes are safe only in the unchanged execution order.
+        # An input must stay on its owning side; non-differentiable buffer writes
+        # may consume the source across a sequential frontier.
+        return (
+            not has_out
+            and node.canonical_id in proof.ordered
+            and (
+                (
+                    producer.is_input
+                    and not proof.training
+                    and (node.canonical_id in prefix or not proof.heterogeneous)
+                )
+                or (
+                    producer.is_buffer
+                    and producer.requires_grad is not True
+                    and (node.canonical_id in prefix or not proof.heterogeneous)
+                )
+            )
+        )
+    if producer.is_param_source:
+        return (
+            getattr(node.target, "__name__", "") == "embedding_renorm_"
+            and producer.requires_grad is False
+            and node.canonical_id in proof.ordered
+        )
+    return False
+
+
 def _certify_local_write(
     graph: SplitTraceGraph,
     node: SplitTraceNode,
@@ -439,32 +473,13 @@ def _certify_local_write(
     producer = graph.node_by_id.get(argument.value_id)
     if producer is None:
         return False
-    if producer.is_input or producer.is_buffer or producer.is_buffer_only_source:
-        # Native source writes are safe only in the unchanged execution order.
-        # An input must stay on its owning side; non-differentiable buffer writes
-        # may consume the source across a sequential frontier.
-        return (
-            not has_out
-            and node.canonical_id in proof.ordered
-            and (
-                (
-                    producer.is_input
-                    and not proof.training
-                    and (node.canonical_id in prefix or not proof.heterogeneous)
-                )
-                or (
-                    producer.is_buffer
-                    and producer.requires_grad is not True
-                    and (node.canonical_id in prefix or not proof.heterogeneous)
-                )
-            )
-        )
-    if producer.is_param_source:
-        return (
-            getattr(node.target, "__name__", "") == "embedding_renorm_"
-            and producer.requires_grad is False
-            and node.canonical_id in proof.ordered
-        )
+    if (
+        producer.is_input
+        or producer.is_buffer
+        or producer.is_buffer_only_source
+        or producer.is_param_source
+    ):
+        return _certify_source_write(node, producer, proof, has_out=has_out)
     if (
         getattr(node.target, "__name__", "") == "embedding_renorm_"
         and node.canonical_id in proof.ordered
@@ -518,6 +533,39 @@ def _certify_local_write(
     )
 
 
+def _crossed_operation_is_independent(
+    graph: SplitTraceGraph,
+    crossed: SplitTraceNode,
+    origin: SplitTraceNode,
+    proof: _MutationProof,
+    in_prefix: bool,
+) -> bool:
+    """Check a crossed native call's data and storage independence."""
+    if origin.canonical_id in graph.ancestors(crossed.canonical_id):
+        return False
+    args, kwargs = _partition_call_arguments(crossed)
+    if not _node_mutates(crossed, args, kwargs):
+        return True
+    argument = args[0] if args else kwargs.get("input")
+    if (
+        crossed.target not in proof.targets.writes
+        or kwargs.get("out") is not None
+        or not isinstance(argument, ReplayValueRef)
+    ):
+        return False
+    producer = graph.node_by_id.get(argument.value_id)
+    if producer is None or (producer.canonical_id in proof.prefix) == in_prefix:
+        return False
+    other = _local_storage_origin(graph, producer, proof, not in_prefix)
+    return (
+        other is not None
+        and other.target in proof.targets.fresh | proof.targets.batchnorm
+        and other.canonical_id != origin.canonical_id
+        and other.canonical_id not in graph.ancestors(origin.canonical_id)
+        and origin.canonical_id not in graph.ancestors(other.canonical_id)
+    )
+
+
 def _independent_crossings(
     graph: SplitTraceGraph, node: SplitTraceNode, origin: SplitTraceNode, proof: _MutationProof
 ) -> bool:
@@ -532,33 +580,12 @@ def _independent_crossings(
     order = graph.order_by_id
     index = order[node.canonical_id]
     in_prefix = node.canonical_id in proof.prefix
-    origin_ancestors = graph.ancestors(origin.canonical_id)
     for crossed in graph.compute_nodes:
         if (crossed.canonical_id in proof.prefix) == in_prefix:
             continue
         if (order[crossed.canonical_id] < index) != in_prefix:
             continue
-        if origin.canonical_id in graph.ancestors(crossed.canonical_id):
-            return False
-        args, kwargs = _partition_call_arguments(crossed)
-        if not _node_mutates(crossed, args, kwargs):
-            continue
-        argument = args[0] if args else kwargs.get("input")
-        if crossed.target not in proof.targets.writes or kwargs.get("out") is not None:
-            return False
-        if not isinstance(argument, ReplayValueRef):
-            return False
-        producer = graph.node_by_id.get(argument.value_id)
-        if producer is None or (producer.canonical_id in proof.prefix) == in_prefix:
-            return False
-        other = _local_storage_origin(graph, producer, proof, not in_prefix)
-        if other is None or other.target not in proof.targets.fresh | proof.targets.batchnorm:
-            return False
-        if (
-            other.canonical_id == origin.canonical_id
-            or other.canonical_id in origin_ancestors
-            or origin.canonical_id in graph.ancestors(other.canonical_id)
-        ):
+        if not _crossed_operation_is_independent(graph, crossed, origin, proof, in_prefix):
             return False
     return True
 

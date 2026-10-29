@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 import safetensors  # noqa: F401
 import torch
+from support.filesystem import symlink_or_skip
 from torch import nn
 
 import torchlens as tl
@@ -196,21 +197,18 @@ def test_corrupt_metadata_pickle_raises_with_metadata_path(tmp_path: Path) -> No
         load(bundle_path)
 
 
-def test_load_front_door_causes_carry_distinct_codes(tmp_path: Path) -> None:
-    """R65: the tl.load front-door causes carry distinct ``fields['code']`` values.
-
-    A caller could only tell the six front-door failure causes apart by parsing one
-    content-free message. Each now carries a stable code to branch on.
-    """
-
-    # (1) symlinked load path.
+def test_load_front_door_symlink_has_distinct_code(tmp_path: Path) -> None:
+    """A native symlink refusal has its own stable front-door code."""
     real = _save_bundle(tmp_path, "real.tl")
     link = tmp_path / "link.tl"
-    link.symlink_to(real, target_is_directory=True)
+    symlink_or_skip(link, real, target_is_directory=True)
     with pytest.raises(TorchLensIOError) as sym:
         load(link)
     assert sym.value.fields.get("code") == "load_path_symlink_rejected"
 
+
+def test_load_front_door_causes_carry_distinct_codes(tmp_path: Path) -> None:
+    """Independent load failures carry distinct stable ``fields['code']`` values."""
     # (2) missing manifest is its own cause, distinct from unreadable (R65).
     empty = tmp_path / "empty.tl"
     empty.mkdir()

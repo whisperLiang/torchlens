@@ -20,6 +20,7 @@ pre-fix behavior:
 from __future__ import annotations
 
 import os
+import re
 import stat
 from collections import OrderedDict, defaultdict
 from pathlib import Path
@@ -79,23 +80,23 @@ def test_bundle_sidecars_and_dirs_are_private(tmp_path: Path) -> None:
 
 
 def test_cleanup_tmp_does_not_sweep_siblings_via_glob_metachars(tmp_path: Path) -> None:
-    """A ``*`` in one bundle's name must not widen cleanup to a sibling bundle.
+    """Glob metacharacters must not widen cleanup to a sibling bundle.
 
     Fail-before: ``f"{name}.tmp.*"`` was globbed, so ``cleanup_tmp(root/"job*")``
     removed ``jobA.tmp.*`` and ``jobB.tmp.*`` alike.
     """
 
-    target_tmp = tmp_path / "job*.tmp.aaaa"
+    target_tmp = tmp_path / "job[B].tmp.aaaa"
     sibling_tmp = tmp_path / "jobB.tmp.bbbb"
     for directory in (target_tmp, sibling_tmp):
         directory.mkdir()
         (directory / bundle_mod.PARTIAL_SENTINEL).write_text("", encoding="utf-8")
 
-    removed = cleanup_tmp(tmp_path / "job*", force=True)
+    removed = cleanup_tmp(tmp_path / "job[B]", force=True)
 
     assert sibling_tmp.exists(), "cleanup swept a sibling bundle through a glob metachar"
     assert sibling_tmp not in removed
-    # The literal ``job*`` target itself is still swept (exact-name match).
+    # The literal ``job[B]`` target itself is still swept (exact-name match).
     assert not target_tmp.exists()
     assert target_tmp in removed
 
@@ -407,7 +408,7 @@ def test_double_fault_restore_discloses_stranded_backup(tmp_path: Path) -> None:
     original = Path.rename
     try:
         Path.rename = _failing_rename  # type: ignore[method-assign]
-        with pytest.warns(UserWarning, match=str(backup)):
+        with pytest.warns(UserWarning, match=re.escape(str(backup))):
             restored = b._restore_backup(backup, target)
     finally:
         Path.rename = original  # type: ignore[method-assign]

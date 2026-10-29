@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -22,23 +23,26 @@ if TYPE_CHECKING:
 
 
 def _rss_high_water_bytes() -> int | None:
-    """Return the process RSS high-water mark in bytes, or ``None`` off-POSIX.
+    """Return the native process RSS high-water mark in bytes when available.
 
     Returns
     -------
     int | None
-        ``ru_maxrss`` scaled to bytes (kilobytes on Linux, bytes on macOS),
-        or ``None`` when the ``resource`` module is unavailable.
+        ``ru_maxrss`` scaled to bytes on POSIX, or the peak working set on
+        Windows. Return ``None`` when native measurement support is unavailable.
     """
 
     try:
-        import resource
-    except ImportError:
-        return None
-    import sys as _sys
+        if sys.platform == "win32":
+            import psutil
 
-    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return int(peak) if _sys.platform == "darwin" else int(peak) * 1024
+            return int(psutil.Process().memory_info().peak_wset)
+        import resource
+
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return int(peak) if sys.platform == "darwin" else int(peak) * 1024
+    except (ImportError, AttributeError, OSError):
+        return None
 
 
 @dataclass(frozen=True)

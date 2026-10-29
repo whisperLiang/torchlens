@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import importlib
 import io
+import os
 import pickle
 import subprocess
 import sys
@@ -265,7 +266,7 @@ def test_unpickler_trusted_dotted_walk_to_os_denied(_trusted_os_module: str) -> 
     """Under trust, a dotted name walking off a trusted module to ``os.system`` is denied."""
 
     payload = _stop_global_pickle(_trusted_os_module, "os.system")
-    with pytest.raises(pickle.UnpicklingError, match="posix"):
+    with pytest.raises(pickle.UnpicklingError, match=os.system.__module__):
         SafeBundleUnpickler(io.BytesIO(payload), trust_custom_callables=True).load()
     # A narrow allowlist keyed on the trusted module is likewise not fooled.
     with pytest.raises(pickle.UnpicklingError):

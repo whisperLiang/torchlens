@@ -1946,7 +1946,7 @@ class Trace(
         self._raw_to_final_parent_layer_labels: dict[str, str] = {}
         self._raw_to_final_op_labels: dict[str, str] = {}
         self._final_to_raw_layer_labels: dict[str, str] = {}
-        self._lookup_keys_to_layer_num_dict: dict[str, int] = {}
+        self._lookup_keys_to_layer_num_dict: dict[str | int, int] = {}
         self._layer_num_to_lookup_keys_dict: dict[int, list[str]] = defaultdict(list)
         self._ambiguous_lookup_keys: dict[str, list[int]] = {}
 
@@ -2323,10 +2323,10 @@ class Trace(
             ``op:<op.label>``.
         """
 
-        layer_label = str(getattr(site, "layer_label"))
+        layer_label = str(site.layer_label)
         if self.layer_num_calls.get(layer_label, 1) == 1:
             return f"layer:{layer_label}"
-        return f"op:{getattr(site, 'label')}"
+        return f"op:{site.label}"
 
     #: Key namespaces of DERIVED render-time annotation blobs (computed from a
     #: specific run's activations). Bare ``layer:``/``op:`` keys are USER
@@ -2398,7 +2398,7 @@ class Trace(
         """
 
         self._user_annotation_dict(site.annotations)[name] = value
-        layer_log = self.layer_logs.get(str(getattr(site, "layer_label")))
+        layer_log = self.layer_logs.get(str(site.layer_label))
         if layer_log is not None:
             self._user_annotation_dict(layer_log.annotations)[name] = value
 

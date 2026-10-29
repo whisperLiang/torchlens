@@ -235,22 +235,37 @@ class _TensorMetadata:
     dtype: str | None = None
 
 
-def _cost_argument(
-    component: Any, shapes: dict[str, tuple[int, ...] | None], graph: SplitTraceGraph
-) -> Any:
-    """Decode replay templates once into pure shape/scalar/container metadata."""
+def _cost_tensor_metadata(
+    component: ReplayValueRef | LiteralTensor,
+    shapes: dict[str, tuple[int, ...] | None],
+    graph: SplitTraceGraph,
+) -> _TensorMetadata:
+    """Resolve a tensor argument's shape and dtype without reading its payload."""
     if isinstance(component, ReplayValueRef):
         shape = shapes.get(component.value_id)
         if shape is None:
             raise ValueError("argument shape unavailable")
-        return _TensorMetadata(shape, graph.node_by_id[component.value_id].dtype)
-    if isinstance(component, LiteralTensor):
+        dtype = graph.node_by_id[component.value_id].dtype
+    else:
         shape = _shape(component.value)
         if shape is None:
             raise ValueError("literal shape unavailable")
-        return _TensorMetadata(shape, str(getattr(component.value, "dtype", "")) or None)
-    if isinstance(component, LiteralValue):
-        return component.value
+        dtype = str(getattr(component.value, "dtype", "")) or None
+    return _TensorMetadata(shape, dtype)
+
+
+def _cost_argument(
+    component: Any, shapes: dict[str, tuple[int, ...] | None], graph: SplitTraceGraph
+) -> Any:
+    """Decode replay templates once into pure shape/scalar/container metadata."""
+    if (
+        isinstance(component, LiteralValue)
+        or component is None
+        or isinstance(component, (int, float, bool, str))
+    ):
+        return component.value if isinstance(component, LiteralValue) else component
+    if isinstance(component, (ReplayValueRef, LiteralTensor)):
+        return _cost_tensor_metadata(component, shapes, graph)
     if isinstance(component, tuple):
         if component and all(
             isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
@@ -262,8 +277,6 @@ def _cost_argument(
         return [_cost_argument(value, shapes, graph) for value in component]
     if isinstance(component, dict):
         return {key: _cost_argument(value, shapes, graph) for key, value in component.items()}
-    if component is None or isinstance(component, (int, float, bool, str)):
-        return component
     raise ValueError("argument metadata unavailable")
 
 

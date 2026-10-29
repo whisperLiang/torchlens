@@ -44,6 +44,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from support.filesystem import symlink_or_skip
 
 from torchlens._io._safe_unpickle import (
     _DENIED_FOREIGN_MODULES,
@@ -309,7 +310,7 @@ def test_detect_tlspec_format_rejects_symlinked_manifest(tmp_path: Path) -> None
     outside.write_text(json.dumps({"kind": "x", "tlspec_version": 1}), encoding="utf-8")
     bundle = tmp_path / "bundle.tlspec"
     bundle.mkdir()
-    (bundle / "manifest.json").symlink_to(outside)
+    symlink_or_skip(bundle / "manifest.json", outside)
     with pytest.raises(TorchLensIOError, match="symlink"):
         detect_tlspec_format(bundle)
 
@@ -323,7 +324,7 @@ def test_detect_tlspec_format_rejects_symlinked_root(tmp_path: Path) -> None:
     real_bundle = tmp_path / "real.tlspec"
     _write_bundle_manifest(real_bundle, {"kind": "x", "tlspec_version": 1})
     link = tmp_path / "link.tlspec"
-    link.symlink_to(real_bundle, target_is_directory=True)
+    symlink_or_skip(link, real_bundle, target_is_directory=True)
     with pytest.raises(TorchLensIOError, match="symlink"):
         detect_tlspec_format(link)
 
@@ -338,7 +339,7 @@ def test_inspect_tlspec_rejects_symlinked_spec(tmp_path: Path) -> None:
     outside.write_text(json.dumps({"format_version": 1}), encoding="utf-8")
     bundle = tmp_path / "spec_bundle.tlspec"
     bundle.mkdir()
-    (bundle / "spec.json").symlink_to(outside)
+    symlink_or_skip(bundle / "spec.json", outside)
     with pytest.raises(TorchLensIOError, match="symlink"):
         inspect_tlspec(bundle)
 

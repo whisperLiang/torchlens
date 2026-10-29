@@ -758,7 +758,6 @@ def _container_leaf_groups(
 
 
 def _collapsed_container_leaf_nodes(
-    trace: "Trace",
     entries_to_plot: Mapping[str, GraphNode],
     *,
     vis_mode: str,

@@ -22,10 +22,7 @@ nesting-depth guard (C4).
 from __future__ import annotations
 
 import json
-import resource
 import types
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +30,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from support.resource_limits import address_space_limit as _rlimit_cap
 
 import torchlens as tl
 import torchlens._runnable_execution as rex
@@ -120,26 +118,6 @@ def _tamper_literal(bundle: Path, kind: str, target: Any, replacement: Any) -> i
                 break
     path.write_text(json.dumps(manifest))
     return count
-
-
-@contextmanager
-def _rlimit_cap(extra: int = 1 << 30) -> Iterator[None]:
-    """Cap address space so an un-refused bomb raises MemoryError instead of OOM-killing.
-
-    A refusal at ``op_allocation_preflight`` fires BEFORE any allocation, so under this
-    cap a refused call raises the typed ``RunCapabilityUnavailableError`` while an
-    un-refused bomb would surface as a wrapped allocator failure -- the assertion that
-    the former (not the latter) is raised is the proof that NO allocation occurred.
-    """
-
-    with open("/proc/self/status", encoding="ascii") as handle:
-        vmsize_kb = next(int(line.split()[1]) for line in handle if line.startswith("VmSize"))
-    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-    resource.setrlimit(resource.RLIMIT_AS, (vmsize_kb * 1024 + extra, hard))
-    try:
-        yield
-    finally:
-        resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
 
 
 def _stub_call() -> Any:

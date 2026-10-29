@@ -1935,7 +1935,7 @@ def torch_func_decorator(
         # and container/intervention-site registration -- and stops right
         # after the call returns, so ``func_duration`` no longer
         # systematically overstates cheap ops in instrumented captures.
-        func_exec_start = time.time()
+        func_exec_start = time.perf_counter()
         mode_pause = pause_own_dispatch_modes() if pauses_owned_modes else nullcontext(())
         paused_modes: tuple[Any, ...] = ()
         try:
@@ -1957,7 +1957,7 @@ def torch_func_decorator(
 
                 _record_mode_paused_interior(trace, owner_func_call_id=func_call_id)
             _nvtx_range_pop(nvtx_pushed)
-        func_exec_duration = time.time() - func_exec_start
+        func_exec_duration = time.perf_counter() - func_exec_start
         if mutates_data_alias:
             record_data_alias_mutation(trace)
         return_value = out_orig

@@ -20,16 +20,14 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import resource
 import typing
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
 import torch
 import torch.nn as nn
+from support.resource_limits import address_space_limit as _rlimit_cap
 
 import torchlens as tl
 from torchlens import _runnable_state as runnable_state
@@ -80,20 +78,6 @@ def _tamper(bundle: Path, mutate: Any) -> None:
     manifest = json.loads(path.read_text())
     mutate(manifest)
     path.write_text(json.dumps(manifest))
-
-
-@contextmanager
-def _rlimit_cap(extra: int = 1 << 30) -> Iterator[None]:
-    """Cap address space at current VmSize + ``extra`` so a bomb allocation raises."""
-
-    with open("/proc/self/status", encoding="ascii") as handle:
-        vmsize_kb = next(int(line.split()[1]) for line in handle if line.startswith("VmSize"))
-    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-    resource.setrlimit(resource.RLIMIT_AS, (vmsize_kb * 1024 + extra, hard))
-    try:
-        yield
-    finally:
-        resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
 
 
 # --------------------------------------------------------------------------- #

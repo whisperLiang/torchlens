@@ -861,7 +861,6 @@ def _resolve_node_decision(
     module_nodes: dict[str, Any] = defaultdict(dict)
     show_buffers = _normalize_buffer_visibility(context.show_buffer_layers)
     collapsed_containers = _collapsed_container_leaf_nodes(
-        trace,
         inputs.universe.source_graph.entries_to_plot,
         vis_mode=context.vis_mode,
         show_containers=context.show_containers,

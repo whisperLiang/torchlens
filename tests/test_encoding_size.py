@@ -588,7 +588,7 @@ def test_size_attr_writer_sites_are_the_declared_allowlist() -> None:
             text = path.read_text(encoding="utf-8")
             count = len(key_pattern.findall(text)) + len(subscript_pattern.findall(text))
             if count:
-                found[str(path.relative_to(package_root))] = count
+                found[path.relative_to(package_root).as_posix()] = count
     expected = {
         # Record-derived image branches (2x fixedsize) + input-batch montage
         # (fixedsize/width/height) — non-encodable node classes.

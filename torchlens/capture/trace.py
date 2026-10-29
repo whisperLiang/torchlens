@@ -30,7 +30,7 @@ import time
 import warnings
 from collections.abc import Callable, Iterator
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from torch import get_default_dtype, nn
 
@@ -727,7 +727,7 @@ def save_new_outs(
 
 def _get_op_nums_from_user_labels(
     self: "Trace", which_layers: str | list[str | int] | None
-) -> list[int] | str:
+) -> list[int] | Literal["all"]:
     """Resolve user-provided layer identifiers to internal raw_index values.
 
     Supports exact key match, substring match across all lookup keys, and the
@@ -735,7 +735,7 @@ def _get_op_nums_from_user_labels(
     unique raw operation numbers for refresh projection.
     """
     if which_layers == "all":
-        return which_layers
+        return "all"
     elif which_layers is None or which_layers in ["none", "None", "NONE", []]:
         return []
 

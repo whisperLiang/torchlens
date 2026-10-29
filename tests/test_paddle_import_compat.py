@@ -21,9 +21,9 @@ pytestmark = pytest.mark.smoke
 
 _GUARD_ID = "torchlens.paddle_llvm.v1"
 _EXTENSION = "paddle.base.libpaddle"
-_EXTENSION_PATH = "/mock/site-packages/paddle/base/libpaddle.so"
-_CINN_PATH = "/mock/site-packages/paddle/libs/libcinnapi.so"
-_PHI_PATH = "/mock/site-packages/paddle/libs/libphi_core.so"
+_EXTENSION_PATH = os.path.join("/mock", "site-packages", "paddle", "base", "libpaddle.so")
+_CINN_PATH = os.path.join("/mock", "site-packages", "paddle", "libs", "libcinnapi.so")
+_PHI_PATH = os.path.join("/mock", "site-packages", "paddle", "libs", "libphi_core.so")
 
 
 @pytest.fixture(autouse=True)

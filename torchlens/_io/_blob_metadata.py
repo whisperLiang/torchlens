@@ -44,10 +44,8 @@ def _blob_kind_for_field(owner: Any, field_name: str) -> str:
 def _blob_label_for_owner(owner: Any) -> str:
     """Return the human-readable label stored alongside a blob spec."""
 
-    if hasattr(owner, "label") and getattr(owner, "label") is not None:
-        return str(getattr(owner, "label"))
-    if hasattr(owner, "call_label") and getattr(owner, "call_label") is not None:
-        return str(getattr(owner, "call_label"))
-    if hasattr(owner, "address") and getattr(owner, "address") is not None:
-        return str(getattr(owner, "address"))
+    for name in ("label", "call_label", "address"):
+        label = getattr(owner, name, None)
+        if label is not None:
+            return str(label)
     return type(owner).__name__

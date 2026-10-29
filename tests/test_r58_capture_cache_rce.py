@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn as nn
+from support.filesystem import symlink_or_skip
 
 import torchlens as tl
 from torchlens.errors import TorchLensIOError
@@ -97,6 +98,7 @@ def test_authenticated_cache_still_hits(cache_root: Path) -> None:
 
 
 @pytest.mark.smoke
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX owner-only mode bits")
 def test_cache_secret_is_private(cache_root: Path) -> None:
     """The HMAC secret is created 0600, so its tags actually prove something."""
 
@@ -194,7 +196,7 @@ def test_symlinked_entry_is_never_followed(cache_root: Path, tmp_path: Path) -> 
     elsewhere = tmp_path / "elsewhere.pkl"
     elsewhere.write_bytes(pickle.dumps(_CodeExecPayload(marker)))
     entry.unlink()
-    entry.symlink_to(elsewhere)
+    symlink_or_skip(entry, elsewhere)
 
     with pytest.warns(UserWarning, match="symlink"):
         tl.trace(model, inputs, layers_to_save="all", cache=True)

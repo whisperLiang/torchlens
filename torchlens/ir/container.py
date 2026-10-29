@@ -285,9 +285,14 @@ def _validate_container_spec(spec: ContainerSpec) -> None:
             raise ContainerReconstructionError(
                 f"ContainerSpec kind {kind!r} length {length} disagrees with {len(spec.keys)} keys."
             )
-        key_component = DictKey if kind == "dict" else HFKey
         for component in components:
-            if not isinstance(component, key_component) or component.key not in spec.keys:
+            if (
+                not (
+                    (isinstance(component, DictKey) and kind == "dict")
+                    or (isinstance(component, HFKey) and kind == "hf_model_output")
+                )
+                or component.key not in spec.keys
+            ):
                 raise ContainerReconstructionError(
                     f"ContainerSpec kind {kind!r} child component {component!r} is not among "
                     "the declared keys."
@@ -298,9 +303,14 @@ def _validate_container_spec(spec: ContainerSpec) -> None:
                 f"ContainerSpec kind {kind!r} length {length} disagrees with "
                 f"{len(spec.fields)} fields."
             )
-        field_component = NamedField if kind == "namedtuple" else DataclassField
         for component in components:
-            if not isinstance(component, field_component) or component.name not in spec.fields:
+            if (
+                not (
+                    (isinstance(component, NamedField) and kind == "namedtuple")
+                    or (isinstance(component, DataclassField) and kind == "dataclass")
+                )
+                or component.name not in spec.fields
+            ):
                 raise ContainerReconstructionError(
                     f"ContainerSpec kind {kind!r} child component {component!r} is not among "
                     "the declared fields."

@@ -361,6 +361,12 @@ For changes touching module boundaries or public API, also run:
 pytest tests/ -m "not rare and not slow" -x --tb=short
 ```
 
+On Windows, `pwsh -File scripts/check_windows.ps1 -Broad` runs these gates with
+UTF-8 subprocesses and the existing Visual Studio C++ Build Tools environment
+loaded for `torch.compile` checks. It uses `.venv` by default (`-Python` overrides
+the interpreter); install the declared dev/test dependencies first. Golden
+environments are listed in `tests/oracle_environments.md`.
+
 ## Critical Invariants
 1. `_state.py` imports no torchlens modules EXCEPT the one sanctioned cycle-safe leaf
    import of `CaptureError` from `.errors._base` (documented in `_state.py` itself).
