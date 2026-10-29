@@ -10,14 +10,17 @@ from typing import Any
 
 import pytest
 import torch
-from v2_helpers import split_request
+from v2_helpers import (
+    plan_fixture,
+    resolved_request,
+    split_request,
+)
 
 from torchlens.ir.refs import TensorRef
 from torchlens.split._torch_compact import compact_torch_graph
 from torchlens.split.adapters.torch import TorchSplitAdapter
 from torchlens.split.graph import SplitTraceGraph, split_graph_from_trace
 from torchlens.split.pipeline import capture_model
-from torchlens.split.planner import plan_split
 
 
 class StatefulBranches(torch.nn.Module):
@@ -110,13 +113,15 @@ def test_compact_graph_replays_every_cut_after_original_capture_cleanup(
         trace.cleanup()
         expected = model(x)
         for node in graph.compute_nodes:
-            for location in ("before", "after"):
+            for location in ("until", "through"):
                 spec = split_request(
                     f"{location}:{node.canonical_id}",
                     live_param_sources=live_sources,
                     batch_axes={},
                 )
-                segments = TorchSplitAdapter().build_segments(graph, plan_split(graph, spec), spec)
+                segments = TorchSplitAdapter().build_segments(
+                    graph, plan_fixture(graph, spec), resolved_request(graph, spec)
+                )
                 actual = segments.suffix(segments.prefix(x, detach_boundary=True))
                 assert actual.keys() == expected.keys()
                 for key in actual:
@@ -138,7 +143,9 @@ def test_compact_graph_preserves_live_parameter_buffer_and_gradient_identity() -
     assert buffer_handles and {id(handle) for handle in buffer_handles} <= buffer_ids
     trace.cleanup()
     spec = split_request("50%", live_param_sources=True, batch_axes={})
-    segments = TorchSplitAdapter().build_segments(graph, plan_split(graph, spec), spec)
+    segments = TorchSplitAdapter().build_segments(
+        graph, plan_fixture(graph, spec), resolved_request(graph, spec)
+    )
     actual = segments.suffix(segments.training_prefix(x, detach_boundary=False))
     expected = model(x)
     parameters = tuple(model.parameters())

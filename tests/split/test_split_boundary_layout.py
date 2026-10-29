@@ -8,8 +8,13 @@ from unittest.mock import patch
 import pytest
 import torch
 from torch import nn
+from v2_helpers import (
+    analyze_fixture,
+    prepare_fixture,
+    request_fixture,
+)
 
-from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, after, prepare
+from torchlens.split import GraphPartition, SplitFeatures
 from torchlens.split.boundary_layout import build_boundary_layout
 from torchlens.split.graph_profile import partition_metrics
 
@@ -26,11 +31,11 @@ class ChunkBranches(nn.Module):
 def test_layout_uses_canonical_bindings_and_static_shapes() -> None:
     """ABI keys with paths map to canonical values without executing a model."""
     model = ChunkBranches()
-    runtime = prepare(model, torch.randn(2, 8), SplitRequest(after("chunk_1_1")))
+    runtime = prepare_fixture(model, torch.randn(2, 8), request_fixture("through:" + "chunk_1_1"))
     partition = GraphPartition(
         frozenset(n.canonical_id for n in runtime.trace_graph.compute_nodes if n.op_type == "chunk")
     )
-    runtime = runtime.partition(partition)
+    runtime = runtime.repartition(partition)
     with patch.object(model, "forward", side_effect=AssertionError("must not execute")):
         layout = build_boundary_layout(
             runtime.graph_profile(batch_size=8), runtime.plan, training=True
@@ -50,8 +55,10 @@ def test_layout_uses_canonical_bindings_and_static_shapes() -> None:
 
 def test_unknown_layout_bytes_and_inference_backward_requirement() -> None:
     """Unresolved tensor sizes stay unknown instead of pretending to cost zero."""
-    runtime = prepare(
-        nn.Sequential(nn.Linear(4, 4), nn.ReLU()), torch.randn(2, 4), SplitRequest(after("linear"))
+    runtime = prepare_fixture(
+        nn.Sequential(nn.Linear(4, 4), nn.ReLU()),
+        torch.randn(2, 4),
+        request_fixture("through:" + "linear"),
     )
     profile = runtime.graph_profile()
     profile = replace(
@@ -81,8 +88,8 @@ def test_training_integer_boundary_isolation() -> None:
     """Repeated suffix training must not modify the caller's index payload."""
     model = MutableIndices()
     inputs = torch.tensor([[0, 1], [2, 3]])
-    runtime = prepare(
-        model, inputs, SplitRequest(after("clone"), features=SplitFeatures(training=True))
+    runtime = prepare_fixture(
+        model, inputs, request_fixture("through:" + "clone", features=SplitFeatures(training=True))
     )
     boundary = runtime.run_training_prefix(inputs)
     before = {key: value.clone() for key, value in boundary.tensors.items()}
@@ -106,10 +113,10 @@ def test_training_costs_do_not_treat_capture_grad_flags_as_a_loss_contract(
 ) -> None:
     """Floating and unknown boundary types retain unknown loss-dependent gradient costs."""
 
-    runtime = prepare(
+    runtime = prepare_fixture(
         nn.Sequential(nn.ReLU(), nn.Sigmoid()),
         torch.randn(2, 4),
-        SplitRequest(after("relu"), features=SplitFeatures(training=True)),
+        request_fixture("through:" + "relu", features=SplitFeatures(training=True)),
     )
     profile = replace(
         runtime.graph_profile(),
@@ -141,12 +148,12 @@ def test_empty_frontier_has_zero_payload_even_for_training() -> None:
 
             return torch.ones(2, 4)
 
-    runtime = prepare(
+    runtime = prepare_fixture(
         Constant(),
         torch.randn(2, 4),
-        SplitRequest(after("ones"), features=SplitFeatures(training=True)),
+        request_fixture("through:" + "ones", features=SplitFeatures(training=True)),
     )
-    analysis = runtime.analyze_partition(GraphPartition(frozenset()))
+    analysis = analyze_fixture(runtime, GraphPartition(frozenset()))
     layout = build_boundary_layout(runtime.graph_profile(), analysis.plan, training=True)
     assert layout.tensors == ()
     assert analysis.metrics.unique_boundary_tensors == 0
@@ -156,8 +163,10 @@ def test_empty_frontier_has_zero_payload_even_for_training() -> None:
 
 def test_boundary_same_device_move_and_noncontiguous_clone() -> None:
     """Same-device movement avoids allocation; explicit clone isolates view storage."""
-    runtime = prepare(
-        nn.Sequential(nn.Identity(), nn.ReLU()), torch.randn(2, 4), SplitRequest(after("relu"))
+    runtime = prepare_fixture(
+        nn.Sequential(nn.Identity(), nn.ReLU()),
+        torch.randn(2, 4),
+        request_fixture("through:" + "relu"),
     )
     boundary = runtime.run_prefix(torch.randn(2, 8)[:, ::2])
     moved = boundary.to("cpu")

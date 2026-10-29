@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from functools import cached_property
@@ -60,6 +61,10 @@ class SplitTraceNode:
     op: Any
     buffer_refs: tuple[Any, ...] = ()
     output_container_paths: tuple[tuple[Any, ...], ...] = ()
+    cost_name: str | None = None
+    cost_param_shapes: tuple[tuple[int, ...], ...] = ()
+    captured_forward_flops: int | None = None
+    captured_backward_flops: int | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +94,35 @@ class SplitTraceGraph:
     graph_shape_hash: str | None
     traced_batch_size: int | None
     shape_program: Any | None = None
+
+    @cached_property
+    def _segment_blueprints(self) -> OrderedDict[tuple[Any, ...], Any]:
+        """Bound graph-local immutable scheduling metadata; never store client state."""
+        return OrderedDict()
+
+    @cached_property
+    def _ancestor_cache(self) -> OrderedDict[str, frozenset[str]]:
+        """Bound reachability metadata instead of retaining an all-pairs closure."""
+        return OrderedDict()
+
+    def ancestors(self, node_id: str) -> frozenset[str]:
+        """Return dependency ancestry for one value with a bounded graph-local cache."""
+        cache = self._ancestor_cache
+        if node_id not in cache:
+            seen: set[str] = set()
+            pending = list(self.node_by_id[node_id].parents)
+            while pending:
+                parent_id = self.node_id_by_alias.get(parent := pending.pop(), parent)
+                if parent_id not in seen:
+                    seen.add(parent_id)
+                    parent_node = self.node_by_id.get(parent_id)
+                    if parent_node is not None:
+                        pending.extend(parent_node.parents)
+            cache[node_id] = frozenset(seen)
+            if len(cache) > 64:
+                cache.popitem(last=False)
+        cache.move_to_end(node_id)
+        return cache[node_id]
 
     @cached_property
     def node_by_id(self) -> dict[str, SplitTraceNode]:
@@ -844,6 +878,14 @@ def _node_from_op(
         param_refs=param_refs,
         replay_source_policy=replay_source_policy,
         op=op,
+        cost_name=getattr(op, "func_name", None),
+        cost_param_shapes=tuple(tuple(shape) for shape in getattr(op, "param_shapes", ()) or ()),
+        captured_forward_flops=None
+        if (forward := getattr(op, "flops_forward", None)) is None
+        else int(forward),
+        captured_backward_flops=None
+        if (backward := getattr(op, "flops_backward", None)) is None
+        else int(backward),
     )
 
 

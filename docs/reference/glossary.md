@@ -45,21 +45,25 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
 
 ## Split execution
 
-**SplitRequest / SplitPoint**
-: A typed request for preparing a split execution. `SplitPoint` identifies a boundary before or
-  after a named site, or by percentage; `SplitRequest` combines it with backend, validation,
-  feature, and placement choices.
+**SplitGraph / prepare_graph / PartitionAnalysis**
+: `tl.split.prepare_graph(model, inputs, features=...)` captures and normalizes a graph
+  before a partition is selected. `graph.analyze(partition)` returns a `PartitionAnalysis`
+  without building segments; `graph.materialize(analysis)` binds an executable runtime.
+  The context and runtime share the same IR, ShapeProgram and bounded metadata caches.
 
-**GraphPartition**
-: An immutable set of canonical compute-node IDs assigned to the prefix. The planner derives
-  the suffix and unique boundary frontier, checks dependency closure and native-call atomicity,
-  and refuses unproven state/effect ordering. `runtime.analyze_partition(partition)` returns
-  reusable analysis; `runtime.partition(partition)` materializes it. See
-  [Native split runtime](split_native_runtime.md) for safety limits and API contracts.
+**SplitRequest / GraphPartition**
+: `GraphPartition(prefix_node_ids=frozenset(...))` is the sole split description. IDs are
+  canonical compute-value IDs from `graph.trace_graph.compute_nodes`. The planner checks
+  dependency closure, native-call atomicity, source/output ownership, effects and state.
+  `SplitRequest(partition, ...)` adds backend, features, validation and placement policies
+  when IDs are already known. `runtime.repartition(partition)` reuses the capture and
+  inherits current effective state. `partition_candidates()` offers topological prefixes;
+  it does not restrict manually supplied noncontiguous partitions. See
+  [Native split runtime](split_native_runtime.md).
 
 **GraphProfile / BoundaryLayout**
 : Immutable static metadata from the captured graph and ShapeProgram. `graph_profile()` exposes
-  dependencies and known tensor/parameter costs, while `boundary_layout()` describes unique
+  dependencies, `forward_flops`, heuristic `backward_flops`, and tensor/parameter costs, while `boundary_layout()` describes unique
   crossing values. Unknown costs remain `None`; logical tensor bytes are not peak device memory.
 
 **ParameterOwnership / StateMigrationPlan**
@@ -93,10 +97,8 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
   segments and explain their capabilities; the same entry point is available as
   `tl.split.prepare(...)`. `runtime.retains_trace` discloses diagnostic retention;
   `runtime.trace` refuses with `SplitUnsupportedError` when compact preparation discarded
-  the capture. `trace_graph`, `.at()`, and `.with_placement()` remain available.
-  `split_points(diagnose=True)` performs planning, lowering, and capability analysis
-  without building executable segments; `analyze(point)` returns a `SplitPointAnalysis`
-  that `materialize(analysis)` turns into a full runtime.
+  the capture. `trace_graph`, `repartition(partition)`, and `with_placement()` remain available.
+  Analysis and materialization use the same `GraphPartition` planner as first preparation.
   `runtime.train_suffix(..., microbatch_size=N)` adds Torch suffix microbatch training for
   uneven logical batches. It zeroes a caller-owned optimizer once, accumulates each suffix
   graph's gradients, and steps once. Mean-reduced losses use chunk-size weighting (`b_i / B`),
@@ -114,10 +116,6 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
 **SplitVerificationStatus**
 : The declared verification level of a lowered split component: exact, region-verified,
   unverified, unsupported, or environment-unavailable.
-
-**percent**
-: `tl.percent(value)` creates a percentage-based `SplitPoint`; the value must be strictly
-  between 0 and 100.
 
 ## Graph records
 

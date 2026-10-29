@@ -8,8 +8,13 @@ from unittest.mock import patch
 import pytest
 import torch
 from torch import nn
+from v2_helpers import (
+    analyze_fixture,
+    prepare_fixture,
+    request_fixture,
+)
 
-from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, after, prepare
+from torchlens.split import GraphPartition, SplitFeatures
 
 
 class Branches(nn.Module):
@@ -36,8 +41,10 @@ def test_noncontiguous_partition_training_and_recut(optimizer_kind: str) -> None
     reference = Branches()
     model = deepcopy(reference)
     sample = torch.randn(2, 4)
-    runtime = prepare(
-        model, sample, SplitRequest(after("left_end"), features=SplitFeatures(training=True))
+    runtime = prepare_fixture(
+        model,
+        sample,
+        request_fixture("through:" + "left_end", features=SplitFeatures(training=True)),
     )
     partition = GraphPartition(
         frozenset(
@@ -50,12 +57,10 @@ def test_noncontiguous_partition_training_and_recut(optimizer_kind: str) -> None
     with patch.object(
         runtime.adapter, "build_segments", wraps=runtime.adapter.build_segments
     ) as build:
-        analysis = runtime.analyze_partition(partition)
+        analysis = analyze_fixture(runtime, partition)
         assert build.call_count == 0
         runtime = runtime.materialize(analysis)
         assert build.call_count == 1
-    assert runtime.plan.boundary_kind == "partition"
-    assert runtime.plan.target_node_id is None
 
     def optimizer(parameters: object) -> torch.optim.Optimizer:
         """Construct equivalent stateful optimizers on independent models."""
@@ -87,15 +92,15 @@ def test_noncontiguous_partition_training_and_recut(optimizer_kind: str) -> None
         actual_opt.step()
         for actual, expected in zip(model.parameters(), reference.parameters(), strict=True):
             torch.testing.assert_close(actual, expected)
-        runtime = runtime.partition(partition)
+        runtime = runtime.repartition(partition)
         torch.testing.assert_close(runtime.replay(split_x.detach()), reference(x.detach()))
 
 
 def test_partition_analysis_rejects_foreign_capture() -> None:
     """Equivalent graph shapes do not authorize cross-client state sharing."""
     x = torch.ones(2, 4)
-    first = prepare(Branches(), x, SplitRequest(after("left_end")))
-    second = prepare(Branches(), x, SplitRequest(after("left_end")))
-    analysis = first.analyze_partition(GraphPartition(frozenset()))
+    first = prepare_fixture(Branches(), x, request_fixture("through:" + "left_end"))
+    second = prepare_fixture(Branches(), x, request_fixture("through:" + "left_end"))
+    analysis = analyze_fixture(first, GraphPartition(frozenset()))
     with pytest.raises(ValueError, match="another captured graph"):
         second.materialize(analysis)

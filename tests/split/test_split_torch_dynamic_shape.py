@@ -5,9 +5,12 @@ from __future__ import annotations
 import pytest
 import torch
 from torch import nn
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    repartition_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split.errors import SplitBoundaryError
 
 
@@ -104,7 +107,7 @@ def test_batch_symbolic_replay_for_view_reshape_flatten() -> None:
     torch.manual_seed(0)
     model = DynamicShapeModel().eval()
     example = torch.randn(2, 3, 4)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         example,
         split_request("50%"),
@@ -123,7 +126,7 @@ def test_dynamic_shape_witness_solves_attention_view_and_preserves_state() -> No
     model = AttentionLikeDynamicShapeModel().eval()
     example = torch.randn(2, 3, 8)
     rng_state = torch.random.get_rng_state().clone()
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         example,
         split_request("50%"),
@@ -148,7 +151,7 @@ def test_reshape_does_not_guess_from_trace_batch_divisibility() -> None:
     """A coincidental trace dimension stays constant after witness disambiguation."""
 
     model = CoincidentalBatchSizedReshape().eval()
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         torch.randn(2, 4),
         split_request("50%"),
@@ -181,7 +184,7 @@ def test_rank_change_and_reduction_use_witnesses_without_axis_guessing() -> None
     """Stack and reduction distinguish fixed trace coincidences from batch axes."""
 
     model = CoincidentalStackAndReduction().eval()
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         torch.randn(2, 4),
         split_request("50%"),
@@ -208,15 +211,15 @@ def test_scalar_shape_refs_are_frontier_dependencies_at_every_boundary() -> None
 
     model = ScalarShapeDependencyModel().eval()
     trace_input = torch.randn(2, 4)
-    seed_runtime = tl.split.prepare(
+    seed_runtime = prepare_fixture(
         model,
         trace_input,
         split_request("50%"),
     )
 
     for node in seed_runtime.trace_graph.compute_nodes:
-        for point in (tl.split.before(node.canonical_id), tl.split.after(node.canonical_id)):
-            runtime = seed_runtime.at(point)
+        for point in ("until:" + str(node.canonical_id), "through:" + str(node.canonical_id)):
+            runtime = repartition_fixture(seed_runtime, point)
             for batch in (1, 3):
                 value = torch.randn(batch, 4)
                 torch.testing.assert_close(runtime.replay(value), model(value))
@@ -226,7 +229,7 @@ def test_concat_and_slice_compile_additive_and_ceildiv_batch_expressions() -> No
     """Semantic rules represent B+C and ceildiv(B,k) without proportional guessing."""
 
     model = AffineConcatAndSliceModel().eval()
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         torch.randn(2, 4),
         split_request("50%"),
@@ -247,13 +250,15 @@ def test_unresolved_shape_allows_captured_batch_and_refuses_changed_batch(segmen
     """A failed shape probe restricts changed batches across all executing segments."""
 
     model = InteriorBatchBranchModel().eval()
-    seed_runtime = tl.split.prepare(model, torch.randn(2, 4), split_request("50%"))
+    seed_runtime = prepare_fixture(model, torch.randn(2, 4), split_request("50%"))
     shape_program = seed_runtime.trace_graph.shape_program
     assert shape_program is not None
     assert shape_program.unresolved
     unresolved_id = next(iter(shape_program.unresolved))
-    point = tl.split.after(unresolved_id) if segment == "prefix" else tl.split.before(unresolved_id)
-    runtime = seed_runtime.at(point)
+    point = (
+        "through:" + str(unresolved_id) if segment == "prefix" else "until:" + str(unresolved_id)
+    )
+    runtime = repartition_fixture(seed_runtime, point)
 
     assert runtime.capability_report.preflight_ok
     assert runtime.capability_report.replay.supported
@@ -276,7 +281,7 @@ def test_capture_transaction_restores_mutable_and_new_plain_attributes() -> None
     """Preparing a runtime does not retain ordinary model-state mutations."""
 
     model = MutableCaptureStateModel().eval()
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         torch.randn(2, 4),
         split_request("50%"),

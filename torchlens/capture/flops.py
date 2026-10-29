@@ -1575,6 +1575,7 @@ BACKWARD_MULTIPLIERS: dict[str, float] = {
 # Default backward multiplier for ops not in the dict
 _DEFAULT_BACKWARD_MULTIPLIER = 1.0
 _CUSTOM_OP_RULES: dict[str, tuple[Callable[..., int | None], Callable[..., int | None] | None]] = {}
+_rule_revision: int = 0
 
 
 def register_op_rule(
@@ -1594,7 +1595,9 @@ def register_op_rule(
         Optional memory-cost callable retained for external callers.
     """
 
+    global _rule_revision
     _CUSTOM_OP_RULES[op_name] = (flops_fn, mem_fn)
+    _rule_revision += 1
 
 
 # ============================================================================

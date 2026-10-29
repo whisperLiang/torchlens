@@ -7,19 +7,24 @@ from unittest.mock import patch
 import pytest
 import torch
 from torch import nn
-from v2_helpers import split_request
+from v2_helpers import (
+    analyze_fixture,
+    candidate_report,
+    prepare_fixture,
+    repartition_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split import (
+    PartitionAnalysis,
     PlacementPlan,
-    SplitPointAnalysis,
+    context as runtime_module,
     pipeline as pipeline_module,
-    runtime as runtime_module,
 )
 from torchlens.split.state import SegmentState
 
 
-class PointModel(nn.Module):
+class PartitionModel(nn.Module):
     """Small model with several distinct compute boundaries."""
 
     def __init__(self) -> None:
@@ -40,7 +45,7 @@ def test_candidate_diagnosis_never_builds_segments() -> None:
     """Only the selected point is materialized after candidate analysis."""
 
     x = torch.ones(2, 4)
-    runtime = tl.split.prepare(PointModel().eval(), x, split_request("after:relu"))
+    runtime = prepare_fixture(PartitionModel().eval(), x, split_request("through:relu"))
     with (
         patch.object(
             runtime.adapter, "build_segments", wraps=runtime.adapter.build_segments
@@ -54,27 +59,27 @@ def test_candidate_diagnosis_never_builds_segments() -> None:
             side_effect=AssertionError("candidate analysis must reuse the capture"),
         ),
     ):
-        report = runtime.split_points(diagnose=True)
-        assert report.total == 2 * len(runtime.trace_graph.compute_nodes)
+        report = candidate_report(runtime, diagnose=True)
+        assert report.total == len(runtime.trace_graph.replay_calls) + 1
         assert build.call_count == execute.call_count == 0
-        selected = report.supported[0].point
-        runtime.at(selected)
+        selected = report.supported[0].partition
+        repartition_fixture(runtime, selected)
         assert build.call_count == execute.call_count == 1
 
 
 @pytest.mark.parametrize("frozen", [False, True])
-def test_point_analysis_does_not_bind_lazy_owned_state(
+def test_partition_analysis_does_not_bind_lazy_owned_state(
     frozen: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Diagnostic inspection leaves later first-use state binding live."""
 
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
-    model = PointModel().eval().requires_grad_(not frozen)
+    model = PartitionModel().eval().requires_grad_(not frozen)
     x = torch.ones(2, 4)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         x,
-        split_request("after:relu", placement=PlacementPlan.on("cpu"), live_param_sources=True),
+        split_request("through:relu", placement=PlacementPlan.on("cpu"), live_param_sources=True),
     )
     states = (
         runtime.segments.prefix._state,
@@ -87,8 +92,8 @@ def test_point_analysis_does_not_bind_lazy_owned_state(
         for state in states
         if state._replica_pool is not None
     }
-    runtime.split_points(diagnose=True)
-    runtime.analyze(tl.split.before("last"))
+    candidate_report(runtime, diagnose=True)
+    analyze_fixture(runtime, "until:" + "last")
     assert tuple(state._entries for state in states) == entries_before
     for state in states:
         if state._replica_pool is not None:
@@ -99,19 +104,19 @@ def test_point_analysis_does_not_bind_lazy_owned_state(
     torch.testing.assert_close(runtime.replay(x), model(x))
 
 
-def test_analysis_and_at_materialize_equivalent_runtimes() -> None:
+def test_explicit_analysis_and_repartition_materialize_equivalent_runtimes() -> None:
     """Explicit analysis and ``at`` share the same plan and replay contract."""
 
-    model = PointModel().eval()
+    model = PartitionModel().eval()
     x = torch.ones(2, 4)
-    seed = tl.split.prepare(model, x, split_request("after:relu", trainable=True))
-    point = tl.split.before("last")
-    analysis = seed.analyze(point)
-    assert isinstance(analysis, SplitPointAnalysis)
+    seed = prepare_fixture(model, x, split_request("through:relu", trainable=True))
+    point = "until:" + "last"
+    analysis = analyze_fixture(seed, point)
+    assert isinstance(analysis, PartitionAnalysis)
     assert analysis.source_graph is seed.trace_graph
     assert analysis.graph_ir.values is seed.graph_ir.values
     explicit = seed.materialize(analysis)
-    implicit = seed.at(point)
+    implicit = repartition_fixture(seed, point)
     assert explicit.split_id == implicit.split_id
     assert explicit.boundary_schema == implicit.boundary_schema
     assert explicit.capability_report == implicit.capability_report
@@ -129,7 +134,7 @@ def test_analysis_cannot_be_materialized_on_another_capture() -> None:
     """A same-shaped foreign graph cannot supply a point analysis."""
 
     x = torch.ones(2, 4)
-    first = tl.split.prepare(PointModel().eval(), x, split_request("after:relu"))
-    second = tl.split.prepare(PointModel().eval(), x, split_request("after:relu"))
+    first = prepare_fixture(PartitionModel().eval(), x, split_request("through:relu"))
+    second = prepare_fixture(PartitionModel().eval(), x, split_request("through:relu"))
     with pytest.raises(ValueError, match="another captured graph"):
-        second.materialize(first.analyze(tl.split.before("last")))
+        second.materialize(analyze_fixture(first, "until:" + "last"))

@@ -8,8 +8,13 @@ from typing import Any
 import pytest
 import torch
 from torch import nn
+from v2_helpers import (
+    capture_fixture,
+    prepare_fixture,
+    request_fixture,
+)
 
-from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, after, prepare
+from torchlens.split import GraphPartition, SplitFeatures
 from torchlens.split.errors import SplitUnsupportedError
 from torchlens.split.planner import _validate_partition_effects
 
@@ -39,11 +44,11 @@ def test_ordered_fresh_writes_match_gradients_and_adam(activation: str) -> None:
     torch.manual_seed(77)
     reference = ResidualWrites(activation)
     model = deepcopy(reference)
-    runtime = prepare(
+    runtime = prepare_fixture(
         model,
         torch.randn(2, 4),
-        SplitRequest(
-            after("activation"), features=SplitFeatures(training=True, retain_trace=False)
+        request_fixture(
+            "through:" + "activation", features=SplitFeatures(training=True, retain_trace=False)
         ),
     )
     selected = frozenset(
@@ -52,7 +57,7 @@ def test_ordered_fresh_writes_match_gradients_and_adam(activation: str) -> None:
         if n.module_path in {"first", "activation"}
     )
     partition = GraphPartition(selected)
-    runtime = runtime.partition(partition)
+    runtime = runtime.repartition(partition)
     assert len(runtime.plan.ordered_mutation_node_ids) == 3
     assert model.activation.inplace and model.final.inplace
     actual_optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
@@ -81,22 +86,26 @@ def test_ordered_fresh_writes_match_gradients_and_adam(activation: str) -> None:
             model.parameters(), reference.parameters(), strict=True
         ):
             torch.testing.assert_close(actual, expected_parameter)
-        runtime = runtime.partition(partition)
+        runtime = runtime.repartition(partition)
 
 
 def test_boundary_between_fresh_producer_and_write_refuses() -> None:
     """A fresh allocation in another segment becomes a boundary root, not local storage."""
-    runtime = prepare(ResidualWrites("relu"), torch.ones(2, 4), SplitRequest(after("activation")))
+    runtime = prepare_fixture(
+        ResidualWrites("relu"),
+        torch.ones(2, 4),
+        request_fixture("through:" + "activation", features=SplitFeatures(training=True)),
+    )
     selected = frozenset(
         n.canonical_id for n in runtime.trace_graph.compute_nodes if n.module_path == "first"
     )
     with pytest.raises(SplitUnsupportedError) as caught:
-        runtime.partition(GraphPartition(selected))
+        runtime.repartition(GraphPartition(selected))
     assert caught.value.context.reason == "partition_effect_order_unproven"
 
 
-def test_write_through_view_refuses_even_with_local_allocation() -> None:
-    """Alias-producing view operations cannot serve as certified write producers."""
+def test_ordered_view_write_preserves_fresh_storage() -> None:
+    """An ordered view write retains the proven fresh allocation and native alias behavior."""
 
     class ViewWrite(nn.Module):
         """Write through a view of an allocated tensor."""
@@ -106,11 +115,12 @@ def test_write_through_view_refuses_even_with_local_allocation() -> None:
             fresh = x + 1
             return fresh.view_as(x).relu_()
 
-    runtime = prepare(ViewWrite(), torch.ones(2, 4), SplitRequest(after("relu")))
-    with pytest.raises(SplitUnsupportedError):
-        runtime.partition(
-            GraphPartition(frozenset(n.canonical_id for n in runtime.trace_graph.compute_nodes))
-        )
+    runtime = prepare_fixture(ViewWrite(), torch.ones(2, 4), request_fixture("through:" + "relu"))
+    cut = runtime.repartition(
+        GraphPartition(frozenset(n.canonical_id for n in runtime.trace_graph.compute_nodes))
+    )
+    x = torch.randn(2, 4)
+    torch.testing.assert_close(cut.replay(x), ViewWrite()(x))
 
 
 @pytest.mark.parametrize("local_normalization", [False, True])
@@ -132,11 +142,24 @@ def test_permuted_write_requires_fresh_local_storage(local_normalization: bool) 
 
     model = PermutedWrite()
     reference = deepcopy(model)
-    runtime = prepare(
+    if not local_normalization:
+        graph = capture_fixture(
+            model,
+            torch.randn(2, 3, 4),
+            request_fixture(
+                "through:activation", features=SplitFeatures(training=True, retain_trace=False)
+            ),
+        )
+        with pytest.raises(SplitUnsupportedError):
+            graph.analyze(
+                GraphPartition(frozenset(n.canonical_id for n in graph.trace_graph.compute_nodes))
+            )
+        return
+    runtime = prepare_fixture(
         model,
         torch.randn(2, 3, 4),
-        SplitRequest(
-            after("activation"), features=SplitFeatures(training=True, retain_trace=False)
+        request_fixture(
+            "through:" + "activation", features=SplitFeatures(training=True, retain_trace=False)
         ),
     )
     partition = GraphPartition(
@@ -148,9 +171,9 @@ def test_permuted_write_requires_fresh_local_storage(local_normalization: bool) 
     )
     if not local_normalization:
         with pytest.raises(SplitUnsupportedError):
-            runtime.partition(partition)
+            runtime.repartition(partition)
         return
-    cut = runtime.partition(partition)
+    cut = runtime.repartition(partition)
     x = torch.randn(2, 3, 4, requires_grad=True)
     expected_x = x.detach().clone().requires_grad_(True)
     target = torch.randn(2, 2)
@@ -165,8 +188,8 @@ def test_permuted_write_requires_fresh_local_storage(local_normalization: bool) 
         torch.testing.assert_close(actual.grad, expected.grad)
 
 
-def test_partition_cannot_reorder_independent_computation_across_write() -> None:
-    """Data closure alone does not allow an independent node to cross a mutation barrier."""
+def test_partition_reorders_only_data_independent_local_writes() -> None:
+    """Fresh storage and independent reads license this branch reorder."""
 
     class Interleaved(nn.Module):
         """Keep an independent branch between allocation and mutation."""
@@ -177,11 +200,12 @@ def test_partition_cannot_reorder_independent_computation_across_write() -> None
             right = x * 2
             return left.relu_() + right
 
-    runtime = prepare(Interleaved(), torch.ones(2, 4), SplitRequest(after("relu")))
+    runtime = prepare_fixture(Interleaved(), torch.ones(2, 4), request_fixture("through:" + "relu"))
     nodes = runtime.trace_graph.compute_nodes
     selected = frozenset(n.canonical_id for n in nodes if n.op_type == "relu" or n is nodes[0])
-    with pytest.raises(SplitUnsupportedError):
-        runtime.partition(GraphPartition(selected))
+    cut = runtime.repartition(GraphPartition(selected))
+    x = torch.randn(2, 4)
+    torch.testing.assert_close(cut.replay(x), Interleaved()(x))
 
 
 @pytest.mark.parametrize(
@@ -190,16 +214,16 @@ def test_partition_cannot_reorder_independent_computation_across_write() -> None
         (False, (), True),
         (False, (1,), True),
         (False, (0,), False),
-        (False, (0, 2), False),
+        (False, (0, 2), True),
         (False, (0, 1, 2), True),
-        (True, (2,), False),
+        (True, (2,), True),
         (True, (0, 1), True),
     ],
 )
-def test_write_barrier_allows_only_order_preserving_branch_moves(
+def test_write_barrier_distinguishes_storage_dependencies(
     independent_after_write: bool, selected_indexes: tuple[int, ...], supported: bool
 ) -> None:
-    """An independent branch may move before a suffix write, never after a prefix write."""
+    """Independent storage may move; floating autograd boundary writes remain refused."""
 
     class Interleaved(nn.Module):
         """Place an independent read between fresh allocation and its write."""
@@ -214,17 +238,21 @@ def test_write_barrier_allows_only_order_preserving_branch_moves(
             return left.relu_() + right
 
     model = Interleaved()
-    runtime = prepare(model, torch.ones(2, 4), SplitRequest(after("relu")))
+    runtime = prepare_fixture(
+        model,
+        torch.ones(2, 4),
+        request_fixture("through:" + "relu", features=SplitFeatures(training=True)),
+    )
     nodes = runtime.trace_graph.compute_nodes
     assert len(nodes) == 4
     partition = GraphPartition(frozenset(nodes[index].canonical_id for index in selected_indexes))
     if not supported:
         with pytest.raises(SplitUnsupportedError) as caught:
-            runtime.partition(partition)
+            runtime.repartition(partition)
         assert caught.value.context.reason == "partition_effect_order_unproven"
         return
 
-    cut = runtime.partition(partition)
+    cut = runtime.repartition(partition)
     write_index = 1 if independent_after_write else 2
     assert cut.plan.ordered_mutation_node_ids == frozenset({nodes[write_index].canonical_id})
     x = torch.randn(2, 4)
@@ -237,13 +265,13 @@ def test_eval_batchnorm_fresh_output_can_be_mutated() -> None:
         nn.Conv2d(3, 4, 1), nn.BatchNorm2d(4), nn.ReLU(inplace=True), nn.Conv2d(4, 2, 1)
     ).eval()
     x = torch.randn(2, 3, 4, 4)
-    runtime = prepare(model, x, SplitRequest(after("2")))
+    runtime = prepare_fixture(model, x, request_fixture("through:" + "2"))
     selected = frozenset(
         n.canonical_id
         for n in runtime.trace_graph.compute_nodes
         if n.canonical_id in runtime.plan.prefix_node_ids
     )
-    cut = runtime.partition(GraphPartition(selected))
+    cut = runtime.repartition(GraphPartition(selected))
     torch.testing.assert_close(cut.replay(x), model(x))
     with pytest.raises(SplitUnsupportedError):
         _validate_partition_effects(cut.trace_graph, cut.request)
@@ -266,8 +294,8 @@ def test_certified_mutations_refuse_dispatch_modes_and_subclasses() -> None:
 
     model = ResidualWrites("relu")
     x = torch.ones(2, 4)
-    runtime = prepare(model, x, SplitRequest(after("activation")))
-    runtime = runtime.partition(GraphPartition(frozenset()))
+    runtime = prepare_fixture(model, x, request_fixture("through:" + "activation"))
+    runtime = runtime.repartition(GraphPartition(frozenset()))
     with Passthrough(), pytest.raises(SplitUnsupportedError) as caught:
         runtime.replay(x)
     assert caught.value.context.reason == "partition_mutation_dispatch_unsupported"

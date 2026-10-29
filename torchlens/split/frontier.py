@@ -18,10 +18,6 @@ def boundary_key_for_node(node_id: str, container_path: tuple[Any, ...] = ()) ->
 
 def classify_boundary_role(
     *,
-    node_id: str,
-    target_node_id: str | None,
-    boundary_kind: str,
-    direct_target_parent_ids: set[str],
     is_source: bool,
     dtype: str | None,
     shape: tuple[int, ...] | None,
@@ -33,20 +29,14 @@ def classify_boundary_role(
     role: BoundaryRole
     if is_source:
         role = "passthrough"
-    elif (node_id == target_node_id and boundary_kind == "after") or (
-        boundary_kind == "before" and node_id in direct_target_parent_ids
-    ):
-        role = "primary"
     elif "int" in dtype_text or "bool" in dtype_text:
         role = "index"
     elif shape is not None and len(shape) <= 1 and ("int" in dtype_text or dtype_text == ""):
         role = "shape_value"
     elif shape is not None and len(shape) >= 4 and len(spatial_shapes) > 1:
         role = "multi_scale_feature"
-    elif boundary_kind == "partition":
-        role = "activation"
     else:
-        role = "skip"
+        role = "activation"
     return role
 
 

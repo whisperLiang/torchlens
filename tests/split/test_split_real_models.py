@@ -12,9 +12,10 @@ from real_model_helpers import (
     _skip_if_module_missing,
     _skip_unless_enabled,
 )
-from v2_helpers import split_request
-
-import torchlens as tl
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
 pytestmark = [pytest.mark.slow, pytest.mark.real_model]
 
@@ -39,7 +40,7 @@ def _all_compute_split_boundaries(runtime: object) -> list[str]:
     return [
         f"{kind}:{node.canonical_id}"
         for node in runtime.trace_graph.compute_nodes
-        for kind in ("before", "after")
+        for kind in ("until", "through")
     ]
 
 
@@ -61,8 +62,8 @@ def test_resnet18_representative_splits_skip_cleanly_when_disabled() -> None:
     model = torchvision.models.resnet18(weights=None).eval()
     x = torch.randn(1, 3, 64, 64)
 
-    for spec in (split_request("25%"), split_request("50%"), split_request("before:fc")):
-        runtime = tl.split.prepare(model, x, spec)
+    for spec in (split_request("25%"), split_request("50%"), split_request("until:fc")):
+        runtime = prepare_fixture(model, x, spec)
         boundary = runtime.run_prefix(x)
         runtime.validate_boundary(boundary)
         assert torch.allclose(runtime.run_suffix(boundary), model(x), atol=1e-4, rtol=1e-3)
@@ -84,7 +85,7 @@ def test_tiny_transformer_config_split_skip_cleanly_when_disabled() -> None:
     model = transformers.DistilBertModel(config).eval()
     x = torch.randint(0, 128, (2, 8))
 
-    runtime = tl.split.prepare(model, x, split_request("50%"))
+    runtime = prepare_fixture(model, x, split_request("50%"))
     boundary = runtime.run_prefix(x)
     runtime.validate_boundary(boundary)
     split_output = runtime.run_suffix(boundary).last_hidden_state
@@ -112,7 +113,7 @@ def test_torch_transformer_cross_batch_and_device() -> None:
         model = transformers.DistilBertModel(config).to(device).eval()
         x = torch.randint(0, 128, (2, 12), device=device)
         for boundary in ("25%", "60%", "85%"):
-            runtime = tl.split.prepare(
+            runtime = prepare_fixture(
                 model,
                 x,
                 split_request(boundary),
@@ -169,7 +170,7 @@ def test_torchvision_extra_real_models_cross_batch_and_device() -> None:
             model = factory().to(device).eval()
             x = torch.ones(shape, device=device)
             for boundary in boundaries:
-                runtime = tl.split.prepare(
+                runtime = prepare_fixture(
                     model,
                     x,
                     split_request(boundary),
@@ -183,9 +184,12 @@ def test_torchvision_extra_real_models_cross_batch_and_device() -> None:
                     assert torch.allclose(split_output, full_output, atol=atol, rtol=1e-3)
 
 
-def test_yolo26_detection_split_replay_cross_batch_and_device() -> None:
+@pytest.mark.parametrize("cross_device", [False, True])
+def test_yolo26_detection_split_replay_cross_batch_and_device(cross_device: bool) -> None:
     """YOLO26 official weights cover full detection and backbone split replay."""
 
+    if cross_device and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable; CPU detection replay is covered separately.")
     _skip_unless_enabled()
     _skip_if_module_missing("ultralytics")
     _run_backend_subprocess(
@@ -198,6 +202,7 @@ def test_yolo26_detection_split_replay_cross_batch_and_device() -> None:
         from torch import nn
 
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
         from torchlens.utils._torch_compat import get_dynamo_optimized_module_type
 
         # Initialize Dynamo/Triton before Ultralytics can import TensorFlow.
@@ -239,7 +244,7 @@ def test_yolo26_detection_split_replay_cross_batch_and_device() -> None:
         # boundary can expose Ultralytics' auxiliary ``full`` shape seed whose
         # scalar provenance is not present in TorchLens' portable graph yet.
         for boundary in ("75%",):
-            runtime = tl.split.prepare(
+            runtime = prepare_fixture(
                 detector,
                 full_input,
                 split_request(boundary, backend="torch"),
@@ -253,7 +258,7 @@ def test_yolo26_detection_split_replay_cross_batch_and_device() -> None:
         # shape policy with the backbone's batch-polymorphic contract.
         backbone = nn.Sequential(*list(detector.model[:11])).eval()
         trace_input = torch.zeros(2, 3, 160, 160)
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             backbone,
             trace_input,
             split_request(
@@ -267,8 +272,8 @@ def test_yolo26_detection_split_replay_cross_batch_and_device() -> None:
             with torch.no_grad():
                 assert_same(runtime.replay(replay_input), backbone(replay_input))
 
-        if not torch.cuda.is_available():
-            raise SystemExit(75)
+        if os.environ["TORCHLENS_REAL_MODEL_CROSS_DEVICE"] != "1":
+            raise SystemExit(0)
         for batch in (1, 3):
             backbone.cpu()
             cpu_input = torch.zeros(batch, 3, 160, 160)
@@ -286,6 +291,7 @@ def test_yolo26_detection_split_replay_cross_batch_and_device() -> None:
         os._exit(0)
         """,
         timeout=300,
+        env_overrides={"TORCHLENS_REAL_MODEL_CROSS_DEVICE": "1" if cross_device else "0"},
     )
 
 
@@ -303,6 +309,7 @@ def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
         import torch
 
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
         from torchlens.utils._torch_compat import get_dynamo_optimized_module_type
 
         torch.set_num_threads(1)
@@ -352,7 +359,7 @@ def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
         cpu_model = YOLO("yolov8n.yaml").model.eval()
         gpu_model = copy.deepcopy(cpu_model).cuda().eval() if torch.cuda.is_available() else None
         request = split_request("50%")
-        cpu_seed = tl.split.prepare(
+        cpu_seed = prepare_fixture(
             cpu_model,
             torch.zeros(2, 3, 160, 160),
             request,
@@ -375,7 +382,7 @@ def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
 
         gpu_seed = None
         if gpu_model is not None:
-            gpu_seed = tl.split.prepare(
+            gpu_seed = prepare_fixture(
                 gpu_model,
                 torch.zeros(2, 3, 160, 160, device="cuda"),
                 request,
@@ -387,7 +394,7 @@ def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
         all_points = [
             point
             for node in cpu_seed.trace_graph.compute_nodes
-            for point in (tl.split.before(node.canonical_id), tl.split.after(node.canonical_id))
+            for point in ("until:" + str(node.canonical_id), "through:" + str(node.canonical_id))
         ]
         assert len(all_points) == 2 * expected_compute_nodes
         partition_count = int(os.environ.get("TORCHLENS_YOLOV8_PARTITIONS", "1"))
@@ -417,8 +424,8 @@ def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
 
             counts = {"cpu": 0, "cuda": 0, "cpu_cuda": 0, "cuda_cpu": 0}
             for point in points:
-                cpu_runtime = cpu_seed.at(point)
-                gpu_runtime = None if gpu_seed is None else gpu_seed.at(point)
+                cpu_runtime = repartition_fixture(cpu_seed, point)
+                gpu_runtime = None if gpu_seed is None else repartition_fixture(gpu_seed, point)
                 for batch in (1, 2, 3):
                     assert_same(cpu_runtime.replay(cpu_inputs[batch]), cpu_expected[batch])
                     counts["cpu"] += 1
@@ -475,6 +482,7 @@ def test_rfdetr_detection_split_replay_fixed_batch() -> None:
         from torch import nn
 
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
         from torchlens.utils._torch_compat import get_dynamo_optimized_module_type
 
         torch.set_num_threads(1)
@@ -522,14 +530,14 @@ def test_rfdetr_detection_split_replay_fixed_batch() -> None:
             return []
 
         with torch.no_grad():
-            seed = tl.split.prepare(
+            seed = prepare_fixture(
                 model,
                 inputs,
                 split_request("25%", backend="torch"),
             )
             expected = model(inputs)
             for percent in (25, 50, 75):
-                runtime = seed.at(tl.split.percent(percent))
+                runtime = repartition_fixture(seed, "fraction:" + str(percent))
                 actual = runtime.replay(inputs)
                 actual_leaves = tensor_leaves(actual)
                 expected_leaves = tensor_leaves(expected)
@@ -562,6 +570,7 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
         from torch import nn
 
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
         from torchlens.utils._torch_compat import get_dynamo_optimized_module_type
 
         torch.set_num_threads(1)
@@ -640,7 +649,7 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
         # This matrix tests inference. Do not retain backward graphs for the
         # B=1 capture and B=2 probe alongside both CPU and GPU runtimes.
         with torch.no_grad():
-            cpu_seed = tl.split.prepare(cpu_model, cpu_example, request)
+            cpu_seed = prepare_fixture(cpu_model, cpu_example, request)
         # Keep the established Torch 2.8 inventory and explicitly admit the
         # measured Torch 2.10-2.11 / RF-DETR 1.8.3 inventory. Torch 2.11 has
         # the same 860 nodes in the untouched baseline and refactored runtime.
@@ -669,7 +678,7 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
         gpu_seed = None
         if gpu_model is not None:
             with torch.no_grad():
-                gpu_seed = tl.split.prepare(
+                gpu_seed = prepare_fixture(
                     gpu_model,
                     torch.zeros(2, 3, 384, 384, device="cuda"),
                     request,
@@ -681,7 +690,7 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
         all_points = [
             point
             for node in cpu_seed.trace_graph.compute_nodes
-            for point in (tl.split.before(node.canonical_id), tl.split.after(node.canonical_id))
+            for point in ("until:" + str(node.canonical_id), "through:" + str(node.canonical_id))
         ]
         assert len(all_points) == 2 * expected_compute_nodes
         partition_count = int(os.environ.get("TORCHLENS_RFDETR_PARTITIONS", "1"))
@@ -711,8 +720,8 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
 
             counts = {"cpu": 0, "cuda": 0, "cpu_cuda": 0, "cuda_cpu": 0}
             for point in points:
-                cpu_runtime = cpu_seed.at(point)
-                gpu_runtime = None if gpu_seed is None else gpu_seed.at(point)
+                cpu_runtime = repartition_fixture(cpu_seed, point)
+                gpu_runtime = None if gpu_seed is None else repartition_fixture(gpu_seed, point)
                 for batch in (1, 2, 3):
                     cpu_actual = cpu_runtime.replay(cpu_inputs[batch])
                     assert_same(cpu_actual, cpu_expected[batch])
@@ -783,14 +792,14 @@ def test_torchvision_ops_mlp_all_split_nodes_cross_batch_and_device() -> None:
         ).to(device)
         model.eval()
         x = torch.ones((2, 6), device=device)
-        seed_runtime = tl.split.prepare(
+        seed_runtime = prepare_fixture(
             model,
             x,
             split_request("50%"),
         )
 
         for boundary in _all_compute_split_boundaries(seed_runtime):
-            runtime = tl.split.prepare(
+            runtime = prepare_fixture(
                 model,
                 x,
                 split_request(boundary),

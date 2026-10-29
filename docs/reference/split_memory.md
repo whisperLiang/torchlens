@@ -12,12 +12,14 @@ Torch training can explicitly discard diagnostic capture data:
 import torch
 from torch import nn
 import torchlens as tl
-from torchlens.split import SplitFeatures, SplitRequest, after
+from torchlens.split import GraphPartition, SplitFeatures, prepare_graph
 
 model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 3))
 x = torch.randn(2, 4)
 features = SplitFeatures(training=True, retain_trace=False)
-runtime = tl.split.prepare(model, x, SplitRequest(after("1"), features=features))
+graph = prepare_graph(model, x, features=features)
+partition = GraphPartition(frozenset(n.canonical_id for n in graph.trace_graph.compute_nodes[:2]))
+runtime = graph.materialize(graph.analyze(partition))
 assert not runtime.retains_trace
 torch.testing.assert_close(runtime.replay(x), model(x))
 ```
@@ -62,15 +64,14 @@ current step's autograd graph, independently of diagnostic retention.
 import torch
 from torch import nn
 import torchlens as tl
-from torchlens.split import SplitFeatures, SplitRequest, after
+from torchlens.split import GraphPartition, SplitFeatures, prepare_graph
 
 model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 3))
 x = torch.randn(7, 4)
 targets = torch.randn(7, 3)
-runtime = tl.split.prepare(
-    model, x,
-    SplitRequest(point=after("1"), features=SplitFeatures(training=True)),
-)
+graph = prepare_graph(model, x, features=SplitFeatures(training=True))
+partition = GraphPartition(frozenset(n.canonical_id for n in graph.trace_graph.compute_nodes[:2]))
+runtime = graph.materialize(graph.analyze(partition))
 prefix_optimizer = torch.optim.SGD(model[0].parameters(), lr=0.01)
 suffix_optimizer = torch.optim.SGD(model[2].parameters(), lr=0.01)
 
@@ -97,15 +98,11 @@ guarantee that model parameter values are identical to those present when the bo
 was produced. A cached or caller-held boundary may be passed to `run_suffix()` after
 suffix parameters change, provided its structural ABI is still compatible.
 
-`runtime.split_points(diagnose=True)` plans, lowers, and checks capabilities for each
-candidate without constructing backend executable segments. Use `runtime.analyze(point)`
-to inspect one candidate's `SplitPointAnalysis`, then `runtime.materialize(analysis)`
-to build its executable runtime. `runtime.at(point)` performs both steps and remains
-the direct way to build a runtime at another cut from the same capture.
-Analysis also checks whether current segment state can migrate to the selected cut:
-divergent tied replicas or inference/training prefix values are reported as unsupported.
-Diagnostic inspection preserves lazy state bindings and shared replica caches;
-materialization checks the current values again if state changed after analysis.
+`graph.partition_candidates()` returns native-call-atomic topological prefixes.
+Use `graph.analyze(partition)` to inspect a `PartitionAnalysis`, then
+`graph.materialize(analysis)` to build segments. `runtime.repartition(partition)`
+combines these stages while inheriting current effective state. Arbitrary legal
+noncontiguous GraphPartition sets use the same planner.
 
 Both `train_suffix` and `train_suffix_result` accept keyword-only options:
 
@@ -187,8 +184,7 @@ appear together in `aliases` and count as one state source. Anonymous state uses
 a canonical replay occurrence ID. These IDs are graph-scoped and do not contain
 Python object addresses. Unused model state is absent.
 
-`runtime.plan_state_migration(new_partition)` accepts a `GraphPartition` or a
-legacy `SplitPoint`. It describes old and new owners, device movement, and
+`runtime.plan_state_migration(new_partition)` accepts a `GraphPartition`. It describes old and new owners, device movement, and
 optimizer actions without constructing executable segments or committing lazy
 state bindings. `supported` is false when independent optimizer histories would
 have to be merged (`shared_optimizer_state_ambiguous`) or tied trainable state
@@ -213,16 +209,15 @@ mapping includes both live referenced parameters and owned device replicas:
 import torch
 from torch import nn
 import torchlens as tl
-from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, after
+from torchlens.split import GraphPartition, SplitFeatures, prepare_graph
 
 model = nn.Sequential(
     nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 3),
 )
 x = torch.randn(2, 4)
-runtime = tl.split.prepare(
-    model, x,
-    SplitRequest(after("1"), features=SplitFeatures(training=True, retain_trace=False)),
-)
+graph = prepare_graph(model, x, features=SplitFeatures(training=True, retain_trace=False))
+partition = GraphPartition(frozenset(n.canonical_id for n in graph.trace_graph.compute_nodes[:2]))
+runtime = graph.materialize(graph.analyze(partition))
 # This sequential graph's first three compute nodes are dependency-closed.
 # Moving the second linear call into the prefix changes its parameter ownership.
 new_partition = GraphPartition(frozenset(
@@ -239,7 +234,7 @@ optimizer = torch.optim.Adam(parameters, lr=1e-3)
 migration = runtime.plan_state_migration(new_partition)
 if not migration.supported:
     raise RuntimeError(migration.unsupported_reasons)
-new_runtime = runtime.partition(new_partition)
+new_runtime = runtime.repartition(new_partition)
 new_bindings = new_runtime.parameter_bindings()
 torch.testing.assert_close(new_runtime.replay(x), model(x))
 # Both segments use the same CPU, so this optimizer still owns every live parameter.

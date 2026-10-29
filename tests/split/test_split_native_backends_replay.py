@@ -6,9 +6,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
 
 
@@ -30,10 +32,10 @@ def test_jax_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
         return hidden * 2.0 + 1.0
 
     x = jnp.array([[-1.0, 2.0, 3.0], [4.0, -5.0, 6.0]])
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         x,
-        split_request("after:max", backend="jax"),
+        split_request("through:max", backend="jax"),
     )
 
     replay_x = jnp.ones((3, 3))
@@ -57,10 +59,10 @@ def test_tinygrad_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
         return hidden * 2.0 + 1.0
 
     x = tinygrad.Tensor([[-1.0, 2.0, 3.0], [4.0, -5.0, 6.0]]).realize()
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         x,
-        split_request("after:where", backend="tinygrad"),
+        split_request("through:where", backend="tinygrad"),
     )
 
     replay_x = tinygrad.Tensor([[-1.0, 2.0, 3.0], [4.0, -5.0, 6.0], [7.0, -8.0, 9.0]]).realize()
@@ -101,7 +103,7 @@ def test_tinygrad_split_does_not_bind_derived_weight_to_its_buffers() -> None:
 
     model = Model()
     x = Tensor([3.0, 4.0], device="CPU").realize()
-    runtime = tl.split.prepare(model, x, split_request("50%", backend="tinygrad"))
+    runtime = prepare_fixture(model, x, split_request("50%", backend="tinygrad"))
     assert runtime.replay(x).tolist() == model(x).tolist() == [14.0, 26.0]
 
 
@@ -115,7 +117,7 @@ def test_tf_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
         return hidden * 2.0 + 1.0
 
     x = tf.constant([[-1.0, 2.0, 3.0], [4.0, -5.0, 6.0]], dtype=tf.float32)
-    runtime = tl.split.prepare(model, x, split_request("after:relu", backend="tf"))
+    runtime = prepare_fixture(model, x, split_request("through:relu", backend="tf"))
 
     boundary = runtime.run_prefix(x)
     runtime.validate_boundary(boundary)
@@ -159,7 +161,7 @@ def test_jax_split_replay_preserves_integer_dict_and_list_containers() -> None:
         return {0: result, 1: [result + 1.0, (result + 2.0, {3: result + 3.0})]}
 
     x = jnp.ones((2, 3))
-    runtime = tl.split.prepare(model, x, split_request("after:max", backend="jax"))
+    runtime = prepare_fixture(model, x, split_request("through:max", backend="jax"))
     assert runtime.batch_validation["status"] == "passed"
     for batch in (1, 2, 4):
         replay_x = jnp.arange(batch * 3, dtype=jnp.float32).reshape(batch, 3) - 2.0
@@ -191,7 +193,7 @@ def test_tf_split_replay_preserves_integer_dict_and_list_containers() -> None:
         return {0: result, 1: [result + 1.0]}
 
     x = tf.ones((2, 3), dtype=tf.float32)
-    runtime = tl.split.prepare(model, x, split_request("after:relu", backend="tf"))
+    runtime = prepare_fixture(model, x, split_request("through:relu", backend="tf"))
     output = runtime.replay(x)
     assert isinstance(output, dict)
     assert isinstance(output[1], list)
@@ -211,10 +213,10 @@ def test_jax_batch_symbolic_replay_for_reshape() -> None:
         return jnp.maximum(flat, 0) * 2.0
 
     x = jnp.ones((2, 3, 2))
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         x,
-        split_request("after:reshape", backend="jax"),
+        split_request("through:reshape", backend="jax"),
     )
 
     for batch in (1, 2, 4):
@@ -232,10 +234,10 @@ def test_jax_batch_symbolic_replay_for_broadcast_bias() -> None:
         return hidden * 2.0
 
     x = jnp.ones((2, 4))
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         x,
-        split_request("after:broadcast_in_dim_2_3_raw", backend="jax"),
+        split_request("through:broadcast_in_dim_2_3_raw", backend="jax"),
     )
 
     for batch in (1, 2, 4):
@@ -253,10 +255,10 @@ def test_jax_batch_symbolic_preserves_fixed_dim_matching_trace_batch() -> None:
         return jnp.maximum(flat, 0)
 
     x = jnp.ones((2, 1, 2))
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         x,
-        split_request("after:reshape", backend="jax"),
+        split_request("through:reshape", backend="jax"),
     )
 
     for batch in (1, 2, 4):
@@ -274,10 +276,10 @@ def test_tf_batch_symbolic_replay_for_reshape() -> None:
         return tf.nn.relu(flat) * 2.0
 
     x = tf.ones((2, 3, 2), dtype=tf.float32)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         x,
-        split_request("after:reshape", backend="tf"),
+        split_request("through:reshape", backend="tf"),
     )
 
     for batch in (1, 2, 4):
@@ -296,10 +298,10 @@ def test_tf_batch_symbolic_preserves_fixed_dim_matching_trace_batch() -> None:
         return tf.nn.relu(flat)
 
     x = tf.ones((2, 1, 2), dtype=tf.float32)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         x,
-        split_request("after:reshape", backend="tf"),
+        split_request("through:reshape", backend="tf"),
     )
 
     for batch in (1, 2, 4):
@@ -318,10 +320,10 @@ def test_tinygrad_batch_symbolic_replay_for_reshape() -> None:
         return flat.relu() * 2.0
 
     x = tinygrad.Tensor.ones(2, 3, 2).realize()
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         x,
-        split_request("after:reshape_3", backend="tinygrad"),
+        split_request("through:reshape_3", backend="tinygrad"),
     )
 
     # B=1 may retain a singleton UOp that B=2 optimizes away. The native
@@ -345,10 +347,10 @@ def test_tinygrad_unaligned_shape_probe_still_requires_numeric_equivalence() -> 
         flat = x.reshape(x.shape[0], -1)
         return flat.relu() * (3.0 if x.shape[0] >= 2 else 2.0)
 
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         tinygrad.Tensor.ones(2, 3, 2).realize(),
-        split_request("after:reshape_3", backend="tinygrad"),
+        split_request("through:reshape_3", backend="tinygrad"),
     )
     assert runtime.batch_validation["status"] == "failed"
     assert "numeric mismatch" in runtime.batch_validation["reason"]
@@ -368,10 +370,10 @@ def test_tinygrad_batch_symbolic_accepts_untested_batch() -> None:
         return flat.relu() * 2.0
 
     x = tinygrad.Tensor.ones(2, 3, 2).realize()
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         x,
-        split_request("after:reshape_3", backend="tinygrad"),
+        split_request("through:reshape_3", backend="tinygrad"),
     )
 
     replay_x = tinygrad.Tensor.ones(5, 3, 2).realize()
@@ -392,10 +394,10 @@ def test_tinygrad_batch_symbolic_rejects_non_batch_dim_change() -> None:
         return flat.relu() * 2.0
 
     x = tinygrad.Tensor.ones(2, 3, 2).realize()
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         x,
-        split_request("after:reshape_3", backend="tinygrad"),
+        split_request("through:reshape_3", backend="tinygrad"),
     )
 
     with pytest.raises((SplitUnsupportedError, ValueError, RuntimeError)):

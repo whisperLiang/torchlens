@@ -6,11 +6,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from v2_helpers import split_request
+from v2_helpers import (
+    candidate_report,
+    prepare_fixture,
+    repartition_fixture,
+    split_request,
+)
 
 mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 
-import torchlens as tl  # noqa: E402
 from torchlens.split.errors import SplitBoundaryError  # noqa: E402
 
 pytestmark = pytest.mark.backend_mlx
@@ -33,13 +37,15 @@ def _split_merge(x: Any) -> Any:
 def test_mlx_replays_every_supported_cut_at_changed_batches() -> None:
     """One MLX capture supports cuts before and after each multi-output call."""
 
-    seed = tl.split.prepare(_split_merge, _input(2), split_request("after:maximum", backend="mlx"))
+    seed = prepare_fixture(_split_merge, _input(2), split_request("through:maximum", backend="mlx"))
     graph = seed.trace_graph
     assert graph.shape_program.batch_probe.status == "passed"
-    report = seed.split_points()
+    report = candidate_report(
+        seed,
+    )
     assert report.supported
     for candidate in report.supported:
-        runtime = seed.at(candidate.point)
+        runtime = repartition_fixture(seed, candidate.partition)
         assert runtime.trace_graph is graph
         for batch in (1, 3, 7):
             x = _input(batch)
@@ -57,7 +63,7 @@ def test_mlx_reshape_rewrites_only_the_shape_operand() -> None:
         reshaped = mx.reshape(hidden, shape=(hidden.shape[0], -1))
         return mx.multiply(reshaped, 2)
 
-    runtime = tl.split.prepare(model, _input(2), split_request("after:maximum", backend="mlx"))
+    runtime = prepare_fixture(model, _input(2), split_request("through:maximum", backend="mlx"))
     x = _input(7)
     replayed, expected = runtime.replay(x), model(x)
     mx.eval(replayed, expected)
@@ -74,11 +80,11 @@ def test_mlx_binds_nested_inputs_and_keyword_arrays() -> None:
 
     x = _input(2)
     request = split_request(
-        "after:maximum",
+        "through:maximum",
         backend="mlx",
         batch_axes={"/args/0/a": 0, "/args/0/z": 0, "/kwargs/extra/offset": 0},
     )
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         {"z": x, "a": mx.multiply(x, 3)},
         request,
@@ -100,8 +106,8 @@ def test_mlx_shared_input_identities_must_be_preserved() -> None:
         return mx.subtract(mx.maximum(x, 0), y)
 
     example = _input(2)
-    runtime = tl.split.prepare(
-        model, (example, example), split_request("after:maximum", backend="mlx")
+    runtime = prepare_fixture(
+        model, (example, example), split_request("through:maximum", backend="mlx")
     )
     x = _input(3)
     replayed, expected = runtime.replay(x, x), model(x, x)
@@ -132,7 +138,7 @@ def test_mlx_replays_native_module_calls_with_captured_parameters() -> None:
             return self.output(mx.maximum(self.hidden(x), 0))
 
     model = Model()
-    runtime = tl.split.prepare(model, _input(2), split_request("after:maximum", backend="mlx"))
+    runtime = prepare_fixture(model, _input(2), split_request("through:maximum", backend="mlx"))
     for batch in (1, 3):
         x = _input(batch)
         replayed, expected = runtime.replay(x), model(x)
@@ -144,10 +150,10 @@ def test_mlx_replays_native_module_calls_with_captured_parameters() -> None:
 def test_mlx_boundary_cache_round_trips_split_outputs(tmp_path: Path) -> None:
     """Native MLX boundary values survive signed cache save/load and suffix replay."""
 
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         _split_merge,
         _input(2),
-        split_request("after:split_1_3", backend="mlx", boundary_cache=True),
+        split_request("through:split_1_3", backend="mlx", boundary_cache=True),
     )
     x = _input(3)
     boundary = runtime.run_prefix(x)
@@ -170,7 +176,7 @@ def test_mlx_reconstructs_one_final_leaf_from_a_multi_output_call() -> None:
         left, right = mx.split(hidden, 2, axis=-1)
         return {"right": right, "sum": mx.add(left, right), "meta": ("mlx", 2, None, [])}
 
-    runtime = tl.split.prepare(model, _input(2), split_request("after:maximum", backend="mlx"))
+    runtime = prepare_fixture(model, _input(2), split_request("through:maximum", backend="mlx"))
     x = _input(3)
     replayed, expected = runtime.replay(x), model(x)
     assert tuple(replayed) == tuple(expected) == ("right", "sum", "meta")

@@ -13,9 +13,12 @@ from importlib.util import find_spec
 import pytest
 import torch
 from torch import nn
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    repartition_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split import PlacementPlan
 
 pytestmark = [pytest.mark.slow, pytest.mark.real_model]
@@ -66,7 +69,7 @@ def test_image_classification_resnet18_replay_and_train() -> None:
     # canonical B=1 capture is legal for this architecture.
     model = torchvision.models.resnet18(weights=None, num_classes=10).eval()
     example = torch.randn(2, 3, 64, 64)
-    runtime = tl.split.prepare(model, example, split_request("50%", trainable=True))
+    runtime = prepare_fixture(model, example, split_request("50%", trainable=True))
 
     assert runtime.traced_batch_size == 1
     capture_id = id(runtime.trace)
@@ -107,7 +110,7 @@ def test_text_classification_distilbert_replay_and_train() -> None:
     model = transformers.DistilBertForSequenceClassification(config).eval()
     input_ids = torch.randint(0, 128, (2, 8))
     attention_mask = torch.ones(2, 8, dtype=torch.long)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         input_ids,
         split_request("50%", trainable=True),
@@ -165,12 +168,16 @@ def test_object_detection_rfdetr_representative_splits() -> None:
     model = RFDETRTensorModel(detector.model.model).eval()
     example = torch.randn(1, 3, 384, 384)
     with torch.no_grad():
-        seed = tl.split.prepare(model, example, split_request("25%"))
+        seed = prepare_fixture(model, example, split_request("25%"))
     assert seed.traced_batch_size == 1
     capture_id = id(seed.trace_graph)
     graph_id = seed.graph_identity
     for point in ("25%", "50%", "75%"):
-        runtime = seed if point == "25%" else seed.at(tl.split.percent(float(point.rstrip("%"))))
+        runtime = (
+            seed
+            if point == "25%"
+            else repartition_fixture(seed, "fraction:" + str(float(point.rstrip("%"))))
+        )
         x = torch.randn(1, 3, 384, 384)
         with torch.no_grad():
             _nested_allclose(runtime.replay(x), model(x), atol=2e-3)
@@ -195,7 +202,7 @@ def test_semantic_segmentation_deeplabv3_replay_and_train() -> None:
         aux_loss=False,
     ).eval()
     example = torch.randn(2, 3, 64, 64)
-    runtime = tl.split.prepare(model, example, split_request("50%", trainable=True))
+    runtime = prepare_fixture(model, example, split_request("50%", trainable=True))
     assert runtime.traced_batch_size == 1
     capture_id = id(runtime.trace)
     for batch in (1, 2):
@@ -227,7 +234,7 @@ def test_resnet18_cpu_prefix_cuda_suffix_when_available() -> None:
     torch.manual_seed(0)
     model = torchvision.models.resnet18(weights=None, num_classes=10).eval()
     example = torch.randn(1, 3, 64, 64)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         example,
         split_request("50%", placement=PlacementPlan.across("cpu", "cuda:0")),

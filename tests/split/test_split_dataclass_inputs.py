@@ -8,9 +8,11 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split.adapters.torch import TorchSplitAdapter
 from torchlens.split.batching import rebatch_inputs
 from torchlens.split.pipeline import _snapshot_probe_output
@@ -79,7 +81,7 @@ def test_equinox_custom_init_parameter_input_replays_larger_batch() -> None:
     with jax.default_device(jax.devices("cpu")[0]):
         params = Weights(3)
         original = params.weight
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             model, (params, jnp.ones((2, 3))), split_request("50%", backend="jax")
         )
         assert runtime.batch_validation["status"] == "passed", runtime.batch_validation

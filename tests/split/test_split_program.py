@@ -6,17 +6,20 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from v2_helpers import split_request
+from v2_helpers import (
+    plan_fixture,
+    split_request,
+)
 
 from torchlens.split.adapters.torch import TorchSplitAdapter
 from torchlens.split.errors import SplitUnsupportedError
 from torchlens.split.graph import SplitTraceGraph, SplitTraceNode
-from torchlens.split.planner import plan_split
 from torchlens.split.program import (
     build_capability_report,
     ensure_capability_report_supported,
     lower_replay_program,
 )
+from torchlens.utils.display import identity
 
 
 def _node(
@@ -69,7 +72,7 @@ def test_replay_program_preflight_rejects_targetless_suffix_compute() -> None:
         backend="torch",
         nodes=(
             _node("input", is_input=True, raw_index=0),
-            _node("h", parents=("input",), target=lambda value: value, raw_index=1),
+            _node("h", parents=("input",), target=identity, raw_index=1),
             _node("unsupported", parents=("h",), raw_index=2),
             _node("output", parents=("unsupported",), is_output=True, raw_index=3),
         ),
@@ -78,8 +81,8 @@ def test_replay_program_preflight_rejects_targetless_suffix_compute() -> None:
         graph_shape_hash="abc",
         traced_batch_size=2,
     )
-    spec = split_request("after:h")
-    plan = plan_split(graph, spec)
+    spec = split_request("through:h")
+    plan = plan_fixture(graph, spec)
     prefix_program = lower_replay_program(graph, plan, spec, segment="prefix")
     suffix_program = lower_replay_program(graph, plan, spec, segment="suffix")
 

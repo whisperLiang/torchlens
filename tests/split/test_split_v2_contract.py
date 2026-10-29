@@ -5,14 +5,15 @@ from __future__ import annotations
 import pytest
 import torch
 from torch import nn
+from v2_helpers import (
+    prepare_fixture,
+    request_fixture,
+)
 
-import torchlens as tl
 from torchlens.split import (
     SplitFeatures,
     SplitModelProfile,
-    SplitRequest,
     SplitVerificationStatus,
-    after,
     checkpoint_cache_path,
     register_model_profile,
 )
@@ -45,16 +46,16 @@ def test_v2_prepare_normalizes_graph_and_exposes_boundary_abi() -> None:
 
     model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
     inputs = torch.randn(2, 4)
-    request = SplitRequest(
-        point=after("relu"),
+    request = request_fixture(
+        selection="through:" + "relu",
         backend="torch",
         features=SplitFeatures(boundary_cache=True),
         validation="strict",
     )
 
-    runtime = tl.split.prepare(model, inputs, request)
+    runtime = prepare_fixture(model, inputs, request)
 
-    assert runtime.request is request
+    assert runtime.request.features == request.features
     assert runtime.graph_ir is not None
     assert runtime.graph_ir.backend == "torch"
     assert runtime.graph_ir.ops

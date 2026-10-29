@@ -8,9 +8,11 @@ from typing import Any
 
 import pytest
 import torch
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split.adapters.torch import GeneratedSuffix
 from torchlens.split.errors import SplitUnsupportedError
 
@@ -24,7 +26,7 @@ def test_missing_output_parent_never_uses_historical_activation(
     model = torch.nn.Sequential(torch.nn.ReLU(), torch.nn.Sigmoid())
     x = torch.randn(2, 4)
     with torch.no_grad():
-        runtime = tl.split.prepare(model, x, split_request("50%", retain_trace=retain_trace))
+        runtime = prepare_fixture(model, x, split_request("50%", retain_trace=retain_trace))
         suffix = runtime.segments.suffix
         execute = suffix._execute_nodes
         outputs = [
@@ -57,7 +59,7 @@ def test_missing_output_records_never_guess_last_intermediate(has_intermediate: 
     """Neither a nonempty overlay nor an empty one defines the final-output contract."""
 
     with torch.no_grad():
-        runtime = tl.split.prepare(torch.nn.ReLU(), torch.ones(2, 4), split_request("50%"))
+        runtime = prepare_fixture(torch.nn.ReLU(), torch.ones(2, 4), split_request("50%"))
     graph = replace(runtime.trace_graph, output_node_ids=())
     suffix = GeneratedSuffix(
         graph=graph,
@@ -76,7 +78,7 @@ def test_declared_constant_output_keeps_its_explicit_source_value() -> None:
     """A genuine parent-less output is required state, not a historical fallback."""
 
     with torch.no_grad():
-        runtime = tl.split.prepare(torch.nn.ReLU(), torch.ones(2, 4), split_request("50%"))
+        runtime = prepare_fixture(torch.nn.ReLU(), torch.ones(2, 4), split_request("50%"))
     node = runtime.trace_graph.node_by_id[runtime.trace_graph.output_node_ids[0]]
     constant = torch.tensor([7.0])
     declared = replace(node, parents=(), op=SimpleNamespace(out=constant))

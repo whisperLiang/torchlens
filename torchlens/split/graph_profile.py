@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from math import prod
 from typing import Any, TypeVar
 
+from ..capture import flops as capture_flops
 from ..intervention.types import CapturedArgTemplate, LiteralTensor, LiteralValue
 from .errors import SplitUnsupportedError
 from .graph import ReplayValueRef, SplitTraceGraph, SplitTraceNode
@@ -46,7 +47,10 @@ class NodeCostFeatures:
     op_type: str
     input_node_ids: tuple[str, ...]
     output_node_ids: tuple[str, ...]
-    flops: float | None
+    forward_flops: int | None
+    backward_flops: int | None
+    captured_forward_flops: int | None
+    captured_backward_flops: int | None
     parameter_ids: tuple[str, ...]
     parameter_bytes: int | None
     activation_bytes: int | None
@@ -80,6 +84,17 @@ class GraphProfile:
     tensors: tuple[TensorCostFeatures, ...]
     parameters: tuple[ParameterCostFeatures, ...]
     unknown_cost_diagnostics: tuple[str, ...]
+    backward_flops_estimated: bool = True
+
+    @property
+    def forward_flops(self) -> int | None:
+        """Return a total only when every native call has a known cost."""
+        return _sum_known(node.forward_flops for node in self.nodes)
+
+    @property
+    def backward_flops(self) -> int | None:
+        """Return the capture engine's heuristic estimate, never measured time."""
+        return _sum_known(node.backward_flops for node in self.nodes)
 
 
 @dataclass(frozen=True)
@@ -95,10 +110,13 @@ class PartitionMetrics:
     parameter_bytes: int | None
     prefix_parameter_bytes: int | None
     suffix_parameter_bytes: int | None
-    flops: float | None
-    prefix_flops: float | None
-    suffix_flops: float | None
-    known_flops: float
+    forward_flops: int | None
+    prefix_forward_flops: int | None
+    suffix_forward_flops: int | None
+    known_forward_flops: int
+    backward_flops: int | None
+    prefix_backward_flops: int | None
+    suffix_backward_flops: int | None
     unknown_cost_diagnostics: tuple[str, ...]
 
 
@@ -209,42 +227,82 @@ def _parameters(graph: SplitTraceGraph, model: Any) -> tuple[ParameterCostFeatur
     return tuple(result)
 
 
-def _flops(node: SplitTraceNode, shapes: dict[str, tuple[int, ...] | None]) -> float | None:
-    """Derive dense linear/matmul FLOPs; leave all other operation costs unknown."""
+@dataclass(frozen=True)
+class _TensorMetadata:
+    """Tensor-shaped argument with no allocation, value access or autograd state."""
 
+    shape: tuple[int, ...]
+    dtype: str | None = None
+
+
+def _cost_argument(
+    component: Any, shapes: dict[str, tuple[int, ...] | None], graph: SplitTraceGraph
+) -> Any:
+    """Decode replay templates once into pure shape/scalar/container metadata."""
+    if isinstance(component, ReplayValueRef):
+        shape = shapes.get(component.value_id)
+        if shape is None:
+            raise ValueError("argument shape unavailable")
+        return _TensorMetadata(shape, graph.node_by_id[component.value_id].dtype)
+    if isinstance(component, LiteralTensor):
+        shape = _shape(component.value)
+        if shape is None:
+            raise ValueError("literal shape unavailable")
+        return _TensorMetadata(shape, str(getattr(component.value, "dtype", "")) or None)
+    if isinstance(component, LiteralValue):
+        return component.value
+    if isinstance(component, tuple):
+        if component and all(
+            isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+            for item in component
+        ):
+            return {key: _cost_argument(value, shapes, graph) for key, value in component}
+        return tuple(_cost_argument(value, shapes, graph) for value in component)
+    if isinstance(component, list):
+        return [_cost_argument(value, shapes, graph) for value in component]
+    if isinstance(component, dict):
+        return {key: _cost_argument(value, shapes, graph) for key, value in component.items()}
+    if component is None or isinstance(component, (int, float, bool, str)):
+        return component
+    raise ValueError("argument metadata unavailable")
+
+
+def _call_cost(
+    node: SplitTraceNode,
+    shapes: dict[str, tuple[int, ...] | None],
+    graph: SplitTraceGraph,
+    batch: int | None,
+) -> tuple[int | None, int | None]:
+    """Call the capture FLOPs authority with shape-only replay arguments."""
     shape = shapes.get(node.canonical_id)
+    if shape is None:
+        return None, None
+    name = node.cost_name or str(getattr(node.target, "__name__", node.op_type))
     template = node.args_template
-    if shape is None or not isinstance(template, CapturedArgTemplate):
-        return None
-    name = str(getattr(node.target, "__name__", node.op_type))
-    if name not in {"linear", "matmul", "mm", "bmm", "__matmul__"}:
-        return None
-    args = template.args
-    if len(args) < 2:
-        return None
-    left, right = args[:2]
-    left_shape = shapes.get(left.value_id) if isinstance(left, ReplayValueRef) else None
-    right_shape = (
-        _shape(right.value)
-        if isinstance(right, LiteralTensor)
-        else shapes.get(right.value_id)
-        if isinstance(right, ReplayValueRef)
-        else None
-    )
-    if left_shape is None or right_shape is None or len(left_shape) < 2 or len(right_shape) < 2:
-        return None
-    inner = left_shape[-1]
-    if inner != (right_shape[-1] if name == "linear" else right_shape[-2]):
-        return None
-    cost = 2 * prod(shape) * inner
-    if name == "linear":
-        kwargs = dict(template.kwargs)
-        bias = args[2] if len(args) > 2 else kwargs.get("bias")
-        if isinstance(bias, LiteralValue):
-            bias = bias.value
-        if bias is not None:
-            cost += prod(shape)
-    return float(cost)
+    if not isinstance(template, CapturedArgTemplate):
+        return None, None
+    try:
+        args = tuple(_cost_argument(item, shapes, graph) for item in template.args)
+        kwargs = {key: _cost_argument(item, shapes, graph) for key, item in template.kwargs}
+        if isinstance(node.kwargs_template, dict):
+            kwargs.update(
+                {
+                    key: _cost_argument(item, shapes, graph)
+                    for key, item in node.kwargs_template.items()
+                }
+            )
+        program = graph.shape_program
+        if program is not None and batch is not None and program.has_batch_axes:
+            binding = program.binding_from_batch(batch)
+            args = program.rewrite(node.canonical_id, args, binding)
+            kwargs = program.rewrite(node.canonical_id, kwargs, binding)
+        forward = capture_flops.compute_forward_flops(
+            name, shape, node.cost_param_shapes, args, kwargs
+        )
+        return forward, capture_flops.compute_backward_flops(name, forward)
+    except (ValueError, TypeError, AttributeError, IndexError, KeyError):
+        # Custom rules requiring payloads cannot be evaluated by a shape-only profile.
+        return None, None
 
 
 def _profile_shapes(
@@ -326,10 +384,22 @@ def build_graph_profile(
     nodes = []
     for node in graph.compute_nodes:
         call = graph.replay_call_by_output_id[node.canonical_id]
-        cost = _flops(node, shapes) if node.canonical_id == call.output_node_ids[0] else 0.0
+        forward, backward = (
+            _call_cost(node, shapes, graph, batch)
+            if node.canonical_id == call.output_node_ids[0]
+            else (0, 0)
+        )
         used = parameters_by_consumer.get(node.canonical_id, [])
-        if cost is None:
+        if forward is None:
             unknown.append(f"flops:{node.canonical_id}")
+        if (
+            batch == graph.traced_batch_size
+            and node.canonical_id == call.output_node_ids[0]
+            and node.cost_name not in capture_flops._CUSTOM_OP_RULES
+            and node.captured_forward_flops is not None
+            and forward != node.captured_forward_flops
+        ):
+            unknown.append(f"flops_capture_mismatch:{node.canonical_id}")
         nodes.append(
             NodeCostFeatures(
                 node_id=node.canonical_id,
@@ -339,7 +409,10 @@ def build_graph_profile(
                     graph.node_id_by_alias.get(parent, parent) for parent in node.parents
                 ),
                 output_node_ids=call.output_node_ids,
-                flops=cost,
+                forward_flops=forward,
+                backward_flops=backward,
+                captured_forward_flops=node.captured_forward_flops,
+                captured_backward_flops=node.captured_backward_flops,
                 parameter_ids=tuple(param.state_id for param in used),
                 parameter_bytes=_sum_known(param.bytes for param in used),
                 activation_bytes=tensor_by_id[node.canonical_id].bytes,
@@ -406,9 +479,14 @@ def partition_metrics(
         suffix_parameter_bytes=_sum_known(
             p.bytes for p in params if set(p.consumer_ids) & plan.suffix_node_ids
         ),
-        flops=_sum_known(n.flops for n in profile.nodes),
-        prefix_flops=_sum_known(n.flops for n in prefix),
-        suffix_flops=_sum_known(n.flops for n in suffix),
-        known_flops=sum(n.flops for n in profile.nodes if n.flops is not None),
+        forward_flops=_sum_known(n.forward_flops for n in profile.nodes),
+        prefix_forward_flops=_sum_known(n.forward_flops for n in prefix),
+        suffix_forward_flops=_sum_known(n.forward_flops for n in suffix),
+        known_forward_flops=sum(
+            n.forward_flops for n in profile.nodes if n.forward_flops is not None
+        ),
+        backward_flops=_sum_known(n.backward_flops for n in profile.nodes),
+        prefix_backward_flops=_sum_known(n.backward_flops for n in prefix),
+        suffix_backward_flops=_sum_known(n.backward_flops for n in suffix),
         unknown_cost_diagnostics=tuple(diagnostics),
     )

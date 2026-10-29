@@ -176,7 +176,7 @@ values are released after their last use; boundaries carry all crossing dependen
 `SplitUnsupportedError` (context reason `diagnostic_trace_not_retained`); historical
 activation inspection is unavailable, not silently served from stale values. Request
 `SplitFeatures(retain_trace=True)` to retain the complete diagnostic Trace. Recutting with
-`.at()`, moving segment state with `.with_placement()`, and inspecting `trace_graph` do
+`.repartition(partition)`, moving segment state with `.with_placement()`, and inspecting `trace_graph` do
 not require diagnostic retention. Training and other backends retain full captures when
 `retain_trace=None`; explicit `False` is supported only for Torch inference and otherwise
 refuses. Compact retention does not change the caller's grad mode: use `torch.no_grad()`

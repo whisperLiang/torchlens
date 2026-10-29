@@ -18,7 +18,7 @@ def _spec(label: str = "relu_1_1") -> dict[str, BoundarySchema]:
         "h": BoundarySchema(
             value_id="h",
             container_path=(),
-            role="primary",
+            role="activation",
             alias_group=None,
             source_kind="boundary",
             label=label,

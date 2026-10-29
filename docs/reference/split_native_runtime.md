@@ -1,18 +1,38 @@
 # Native split runtime
 
-Point splits (`before`, `after`, `percent`) retain their ordered-cut semantics.
-`GraphPartition(prefix_node_ids=frozenset(...))` selects a dependency-closed set
-of canonical compute-node IDs from `runtime.trace_graph.compute_nodes`. Display
-labels are not partition IDs. A partition has its own stable semantic identity;
-it does not invent a target node. Inputs execute in the prefix and final output
-reconstruction executes in the suffix, including empty/all-compute partitions.
+`GraphPartition(prefix_node_ids=frozenset(...))` is the sole split description.
+Canonical compute-node IDs come from `graph.trace_graph.compute_nodes`; display
+labels and module names are not partition IDs. Capture first, choose a set, analyze
+it, then materialize it. There is one planner and one backend replay engine.
 
-Use `runtime.analyze_partition(partition)` to validate and lower without building
-segments, then `runtime.materialize(analysis)`. `runtime.partition(partition)`
-combines those calls. All reuse the normalized capture and ShapeProgram, and
-rebind current effective segment state. An analysis cannot be materialized on
-an unrelated captured graph. The historical `SplitPointAnalysis` type describes
-both forms of analysis.
+```python
+import torch
+from torch import nn
+from torchlens.split import GraphPartition, SplitFeatures, prepare_graph
+
+model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 3))
+x = torch.randn(2, 4)
+graph = prepare_graph(model, x, features=SplitFeatures(training=True, retain_trace=False))
+partition = GraphPartition(frozenset(
+    node.canonical_id for node in graph.trace_graph.compute_nodes[:2]
+))
+analysis = graph.analyze(partition)  # no executable segments or state replicas
+runtime = graph.materialize(analysis)
+torch.testing.assert_close(runtime.replay(x), model(x))
+new_partition = GraphPartition(frozenset(
+    node.canonical_id for node in graph.trace_graph.compute_nodes[:1]
+))
+migration = runtime.plan_state_migration(new_partition)
+new_runtime = runtime.repartition(new_partition)
+torch.testing.assert_close(new_runtime.replay(x), model(x))
+```
+
+`prepare(model, inputs, SplitRequest(partition, ...))` combines these same stages
+when canonical IDs are already known. `partition_candidates()` returns a bounded
+linear sequence of native-call-atomic topological prefixes, including empty/all
+compute selections. It neither enumerates nor limits all legal DAG partitions.
+An analysis belongs to exactly one captured graph; another capture refuses it.
+Inputs belong to the prefix and output reconstruction belongs to the suffix.
 
 Every dependency into the prefix must originate in the prefix. Every output of
 a native multi-output call must have the same owner. The frontier contains each
@@ -59,169 +79,107 @@ profile batch to evaluate a different static workload.
 
 ## Reusing analysis
 
-Point and partition analysis share a 32-entry LRU plan cache within one capture
+Partition analyses share a 32-entry LRU plan cache within one capture
 lineage. The key includes graph and shape identity, partition, backend, features,
 validation and placement. Recut children share this metadata cache; independent
 captures do not. Cached programs contain no current boundary, optimizer state,
 or effective parameter replicas. Every hit checks current state compatibility,
-and materialization again inherits the current effective values.
+and materialization inherits current effective values. A combined `repartition()`
+reuses its own state inspection once; it never retains state snapshots in the cache.
 
-Graph costs have a separate eight-batch bound. `clear_analysis_cache()` clears
+Torch segment schedules have a separate 64-entry graph-local LRU. Its immutable
+blueprints contain only call order, last-use release schedules and state argument
+locations. Every materialization creates new SegmentState bindings, execution
+scratch and replica pools. It recomputes frozen-state sharing eligibility from
+current handles. Blueprints never contain boundary tensors, gradients, optimizer
+state or private mutable replicas. Same-device recuts preserve effective tensor
+identity; necessary device copies use the existing SegmentState migration path.
+
+Graph costs have a separate eight-entry batch/rule-revision bound. `clear_analysis_cache()` clears
 both caches for the lineage; `analysis_cache_info()` exposes hit/miss counts,
 current size and capacity. Caller mutations to returned boundary dictionaries or
 capability reports do not poison later cache hits. Replacing the normalized
 graph detaches that runtime's caches from its siblings, so costs from the replacement
 cannot contaminate the original capture. Parameter values are never hashed on replay.
 
-### Planning benchmark
+### Repartition measurements
 
-`python benchmarks/split_planner.py --writes 250 --repeats 25 --warmup 3`
-measures uncached planning for a synthetic 500-node chain with 250 native writes.
-Use the same script with `--source-root` pointing at each checkout. It reports
-the cold call separately, median, nearest-rank P95 and every measured sample.
+Run `python benchmarks/split_repartition.py --repeats 25 --output result.json`.
+Uninstrumented samples report median, nearest-rank P95 and every sample for cold
+and warm analysis/materialization, same-partition and rotating recuts, and recuts
+after training. A separate instrumented pass breaks down validation, frontier,
+lowering, capabilities, materialization, binding, inheritance and device transfer.
+A separate memory pass reports Python metadata peak/retained bytes; these are not
+tensor allocator totals. CUDA measurements require a CUDA-enabled installation.
 
-On an ARM64 NVIDIA Orin host with Python 3.10.12 and Torch 2.11.0, comparing
-`24e82949f` with this refactor gave:
+`python benchmarks/split_runtime_overhead.py --repeats 20` measures execution and
+candidate-analysis overhead. `benchmarks/split_training_compact.py` measures
+retention modes in separate processes. `benchmarks/split_planner.py` isolates
+uncached synthetic planning. See [the acceptance report](split_runtime_acceptance.md)
+for exact versions, configurations, measurements and unexecuted coverage.
 
-| Uncached planning | Before (ms) | After (ms) |
-| --- | ---: | ---: |
-| Median | 30.327 | 7.429 |
-| P95 | 30.414 | 7.536 |
+## FLOPs authority
 
-Boundary schemas and canonical bindings are built together. Write-order checks
-precompute the leading prefix and trailing suffix runs once, replacing one
-whole-graph scan per write. The write-order portion is O(V + W), previously
-O(V × W), for V compute nodes and W writes. This workload measures planning;
-it performs no tensor execution and establishes no replay or training speedup.
+GraphProfile calls `torchlens.capture.flops.compute_forward_flops()` and
+`compute_backward_flops()` directly. ReplayValueRef arguments resolve to pure
+shape/dtype metadata; LiteralTensor arguments contribute shape only, and literal
+scalars/containers retain their call positions. ShapeProgram evaluates the requested
+batch and rewrites scalar shape recipes. No tensors are allocated, captured,
+replayed or read for their values. Required unavailable metadata stays unknown.
+There is no second formula table or registration API.
 
-## Capability evidence and execution profiling
+`NodeCostFeatures.forward_flops` and `backward_flops` distinguish forward work from
+the capture module's heuristic backward multiplier (`backward_flops_estimated=True`).
+Numeric capture-time costs are retained as `captured_forward_flops` and
+`captured_backward_flops`, including compact graphs. A multi-output native call is
+charged once, on its first row. Zero-FLOPs memory operations still expose tensor
+bytes. `register_op_rule()` changes invalidate cached profiles/analysis metrics via
+the capture engine's rule revision. Rules requiring tensor payloads remain unknown.
 
-`capability_report.feature_evidence` separates backend support, model preflight,
-device availability and numerical evidence. Each level is nullable: `None`
-means unexamined or unknown. Device availability does not establish free memory
-or kernel support. Numerical evidence for `dynamic_batch` refers only to the
-recorded unplaced B=2 forward probe; it does not validate this partition,
-another batch, gradients or heterogeneous execution.
+## Effect safety
 
-`runtime.profile_split(inputs, warmup=3, repeats=10)` measures prefix/suffix
-forward phases. Pass `targets=` and optionally `loss_fn=` to a training runtime
-to execute and separately time real suffix/prefix backward phases. Each result
-contains measured samples, median and nearest-rank P95 in milliseconds.
+Known native local writes can be certified through their fresh allocation and
+storage-preserving views. Independent branches may cross a local write only if
+neither allocation nor its dependent aliases cross the other branch. Out= anchor
+initialization retains its non-resizing shape proof and strict ordering barrier.
+Training BatchNorm is allowed when its state mutations remain in original effect
+order; unknown or reordered state writes refuse. Positional functional inplace
+arguments, custom targets and dispatch overrides are included in this analysis.
 
-Profiling uses the existing segment builder with isolated copies of current
-effective state and inputs; it restores RNG and never performs optimizer steps.
-Custom loss functions must be pure with respect to external state: their Python
-closures are caller-owned. Gradient accumulation is limited to the isolated
-trial leaves even when an objective references an external parameter.
-Materialization timing includes isolation copies. CUDA phases synchronize the
-devices in use. Effects whose alias semantics cannot be isolated refuse before
-measurement. Process-wide allocator peak counters are left unchanged, so this
-API reports peak allocated memory as unknown; use the isolated-process memory
-benchmarks for allocated/reserved peaks. Cold model download is outside profiling.
+A sequential same-device inference cut can preserve native aliases through detached
+boundary leaves. That does not license mutating floating autograd leaves:
+`run_training_prefix()` refuses such inference-only plans with
+`partition_training_boundary_write`. Training preparation refuses unproven writes
+at analysis time. Cross-device shared trainable parameters still require a gradient
+merge contract and refuse when the runtime cannot consolidate them.
 
-## Boundary layout and payload ownership
+## Real-model validation
 
-`runtime.boundary_layout(batch_size=8, training=True)` returns immutable rows
-joining the boundary ABI dictionary key to its canonical graph value ID. Each
-row includes shape, dtype, logical bytes, capture `requires_grad`, container
-path and alias group. `alias_group=None` means aliasing is unknown; it does not
-promise independent storage. Unique values are counted once across consumers.
-The layout evaluates the existing shape program and never executes the model.
+Run each command in a fresh process:
 
-Forward byte totals exclude transport framing and serialization overhead.
-Backward bytes remain unknown for potentially differentiable values because a
-future loss may ignore any boundary leaf. Integer/boolean payloads require no
-gradient: both layout and partition metrics report zero backward bytes for an
-empty frontier or one containing only recognized integer/boolean dtypes.
-Floating, complex and unknown dtypes keep the backward byte total unknown.
-The Torch training engine creates floating/complex suffix roots even
-when capture inputs did not require gradients, so `requires_grad=False` alone
-is not evidence of zero backward payload. Captured frozen buffer/parameter state
-keeps its non-differentiable contract when suffix roots are created, including
-BatchNorm running statistics in full-batch and microbatch training.
+```bash
+python benchmarks/split_graph_partition.py --model resnet18 --training --output resnet18.json
+python benchmarks/split_graph_partition.py --model transformer --training --output distilbert.json
+python benchmarks/split_graph_partition.py --model yolov8 --training --output yolov8n.json
+python benchmarks/split_graph_partition.py --model rfdetr --training --weights /trusted/checkpoint.pth --output rfdetr.json
+```
 
-`ReplayBoundary.to()` follows the backend's movement semantics; a same-device
-Torch move does not copy tensor storage. `detach()` shares storage while cutting
-the autograd connection; `clone()` explicitly isolates storage. Training keeps
-the necessary clones, including integer/index payloads that a suffix can mutate.
-Microbatch training also isolates every chunk. No asynchronous transport or
-network protocol is introduced. The authenticated local pickle cache must not
-be used as an untrusted network deserialization endpoint.
+Sequential and truly noncontiguous DAG results are independent; no fallback turns
+a sequential pass into a DAG pass. Candidate generation checks the unchanged
+captured order, native-call closure, dependency closure and a real compute frontier.
+The script records every refusal and requires three different partitions for its
+A/B/C/A recut experiment. Every B=1/2/4/8 executes explicitly.
 
-## Partition safety limits
+The native reference is a separate model/optimizer. The script compares finite
+outputs, loss, input/parameter/connected-boundary gradients, buffers, parameter
+updates and momentum/Adam state. Native observation hooks align exact call targets
+and unambiguous functional facades; missing gradient coverage fails. Eval mode
+permits gradients while controlling dropout/running-state changes. Tied state,
+train-mode BatchNorm, microbatches, cache isolation and device migration have
+additional tests under `tests/split/`. The split model is captured once plus its
+independent B=2 shape witness; replay/recuts add zero captures.
 
-Training executes the native backend's backward kernels and inherits their
-numerical reproducibility limits. A supported plan is not a numerical validation
-certificate for a particular loss, dtype and device. Split execution does not
-replace native backward kernels or change their determinism settings.
-
-The reusable model check in
-[`split_graph_partition.py`](../../benchmarks/split_graph_partition.py) uses
-`atol=1e-4, rtol=1e-3`. Only RF-DETR 1.8.3 CUDA float32 **parameter gradients**
-use `atol=5e-4`, calibrated against repeated native backward variation for the
-benchmark's loss. Forward, input gradients and SGD updates retain the stricter
-threshold. Every comparison rejects NaN/Inf, including matching infinities.
-This acceptance policy is specific to the benchmark loss; it does not establish
-a tolerance for arbitrary rescaled losses or change runtime arithmetic.
-
-The DAG planner accepts a bounded set of native ReLU, SiLU and residual-add
-in-place writes when their target is a fresh allocation in the same segment.
-Supported fresh producers include native convolutions, linear/add/LayerNorm calls
-and read-only BatchNorm; native permutations of those local allocations retain
-their proven storage origin. Every write must preserve capture order relative to all
-computation across the cut; this prevents an independent alias consumer from
-moving across a write. A native `arange(out=new_full(...))` initialization is
-also supported when the direct destination and write remain in the same segment,
-their captured and symbolic extents/dtypes agree, and both are non-differentiable.
-This preserves the initialization used by recent YOLO anchor builders.
-Other unproven views, transported values, resizing or generic `out=` writes,
-training BatchNorm running-stat writes and unknown custom callables refuse with
-structured reasons. The exact internal TorchLens identity placeholder is supported.
-
-Plans using this allocation proof require ordinary Tensor/Parameter operands and
-no custom dispatch modes at execution. The runtime checks every native call,
-including fresh producers, and refuses overrides with
-`partition_mutation_dispatch_unsupported`. Model in-place flags are preserved.
-Point-based splits retain their existing replay contract. Profiling currently
-refuses all writes because its independent state clones do not certify arbitrary
-alias relationships.
-
-Stable `SplitUnsupportedError.context.reason` values include:
-
-| Reason | Meaning |
-| --- | --- |
-| `partition_node_invalid` | A selection is not a canonical compute-node ID |
-| `partition_call_split` | Outputs of one native invocation were separated |
-| `partition_reverse_dependency` | Suffix computation feeds the requested prefix |
-| `partition_dependency_unresolved` | A recorded data dependency cannot be resolved |
-| `partition_mutable_state_unsupported` | A buffer observation cannot be assigned safely |
-| `partition_effect_order_unproven` | Mutation or alias ordering lacks effect evidence |
-| `partition_mutation_dispatch_unsupported` | Runtime tensor overrides invalidate a fresh-allocation proof |
-| `partition_custom_effects_unproven` | Custom callable side effects are not certified |
-| `partition_shared_trainable_cross_device` | Tied parameter replicas lack gradient consolidation |
-
-Same-device tied parameters are supported. Heterogeneous training with a shared
-parameter on both sides refuses until a gradient consolidation contract exists.
-State migration and optimizer reassociation remain caller-visible; TorchLens
-does not merge optimizer states or perform an implicit step.
-
-In training and live-state runtimes, captured plain Tensor attributes (for example
-a detection head's unregistered `stride`) participate in the same live-state
-contract as registered buffers.
-Compact handles retain their qualified names and follow attribute replacement;
-missing live values refuse instead of using stale capture data. Ownership reports
-classify these sources as buffers, including their stable names.
-
-Batch-dependent `repeat`/`tile` counts on fixed state are lowered as repeat
-factors, separately from output extents. Fixed repeat counts on dynamic inputs
-remain fixed. These recipes retain the shape program's sampled-witness disclosure
-and do not certify unseen Python control flow.
-
-## Runnable example
-
-Run `python examples/split_native_partition.py` from an installed checkout. The
-example constructs an interleaved two-branch network, selects dependency-ready
-native calls from `graph_profile()`, analyzes and materializes a noncontiguous
-prefix, inspects layout and migration metadata, and compares two Adam steps
-against a full-model reference while recutting between steps. It requires no
-downloads or GPU and contains no placement solver or network transport.
+The benchmark reports cross-device tests as not run; the explicit placement matrix
+lives in `tests/split/test_split_partition_cross_device.py` and state migration tests.
+RF-DETR is skipped without both the package and a trusted local checkpoint. A failed,
+skipped or unsupported row is never reported as a numerical pass.

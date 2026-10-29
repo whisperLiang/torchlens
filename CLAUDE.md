@@ -846,11 +846,12 @@ print(tl.compat.report(model, x).to_markdown())
   batch-VARYING run whose shape relations were not proven refuses typed at bind time
   (`ShapeProgram.require_batch_resolvable`, naming the nodes and reasons) while
   replaying AT the captured batch stays allowed. Fine-grained cuts:
-  `SplitRuntime.split_points()` enumerates every semantically valid `before:`/`after:`
-  compute boundary as `SplitCandidate` rows with boundary value IDs, boundary schema,
-  and a deterministic `unsupported_reasons` — nothing is silently skipped;
-  `SplitRuntime.at(point)` re-plans a new boundary on the SAME capture. Heterogeneous
-  placement is first-class: `PlacementPlan.across(prefix, suffix)` on the request (or
+  `tl.split.prepare_graph()` captures before choosing canonical IDs.
+  `GraphPartition` is the sole split description. `.analyze(partition)` returns
+  `PartitionAnalysis`; `.materialize(analysis)` builds segments, and
+  `.repartition(partition)` reuses the SAME capture and current effective state.
+  `.partition_candidates()` offers atomic topological prefixes without restricting
+  manual noncontiguous DAG selections. Heterogeneous placement is first-class: `PlacementPlan.across(prefix, suffix)` on the request (or
   `SplitRuntime.with_placement()`), with `SegmentState` owning device-local replicas
   (`referenced` vs `owned`, one replica per source identity so tied/shared params keep
   one identity) exposed via `prefix_parameters()` / `suffix_parameters()`; boundary

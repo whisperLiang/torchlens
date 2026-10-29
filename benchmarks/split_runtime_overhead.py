@@ -83,7 +83,7 @@ class _WidthModel(nn.Module):
 
 
 class _DeepModel(nn.Module):
-    """A small model with 32 before/after candidate points."""
+    """A small model with 32 topological partition candidates."""
 
     def __init__(self) -> None:
         """Build repeated affine and activation operations."""
@@ -113,7 +113,7 @@ def main() -> None:
     sys.path.insert(0, str(args.source_root.resolve()))
 
     import torchlens as tl
-    from torchlens.split import SplitFeatures, SplitRequest, after
+    from torchlens.split import SplitFeatures, prepare_graph
 
     torch.set_num_threads(1)
     torch.manual_seed(args.seed)
@@ -122,11 +122,9 @@ def main() -> None:
     for width in (16, 1024):
         model = _WidthModel(width).eval()
         x = torch.randn(1, width)
-        runtime = tl.split.prepare(
-            model,
-            x,
-            SplitRequest(point=after("relu"), features=SplitFeatures(retain_trace=False)),
-        )
+        graph = prepare_graph(model, x, features=SplitFeatures(retain_trace=False))
+        partition = graph.partition_candidates()[2]
+        runtime = graph.materialize(graph.analyze(partition))
         boundary = runtime.run_prefix(x)
         runtime.run_suffix(boundary)
         with torch.no_grad():
@@ -146,26 +144,23 @@ def main() -> None:
 
     model = _DeepModel().eval()
     x = torch.randn(1, 8)
-    runtime = tl.split.prepare(
-        model,
-        x,
-        SplitRequest(point=after("layers.3"), features=SplitFeatures(retain_trace=False)),
-    )
+    graph = prepare_graph(model, x, features=SplitFeatures(retain_trace=False))
+    runtime = graph.materialize(graph.analyze(graph.partition_candidates()[8]))
     with patch.object(
         runtime.adapter, "build_segments", wraps=runtime.adapter.build_segments
     ) as build:
-        candidate_ms = measure(lambda: runtime.split_points(diagnose=True))
+        candidate_ms = measure(lambda: [runtime.analyze(p) for p in runtime.partition_candidates()])
         builds_during_candidates = build.call_count
-    report = runtime.split_points(diagnose=True)
-    selected = report.supported[0].point
+    report = [runtime.analyze(p) for p in runtime.partition_candidates()]
+    selected = report[0].request.partition
     analysis_ms = measure(lambda: runtime.analyze(selected))
     analysis = runtime.analyze(selected)
     materialize_ms = measure(lambda: runtime.materialize(analysis))
     with patch.object(
         runtime.adapter, "build_segments", wraps=runtime.adapter.build_segments
     ) as build:
-        selected_at_ms = measure(lambda: runtime.at(selected))
-        builds_during_at = build.call_count
+        selected_repartition_ms = measure(lambda: runtime.repartition(selected))
+        builds_during_repartition = build.call_count
     cold_analysis = measure(lambda: runtime.analyze(selected), before=runtime.clear_analysis_cache)
     runtime.analyze(selected)
     cached_analysis = measure(lambda: runtime.analyze(selected))
@@ -175,13 +170,13 @@ def main() -> None:
             "analysis_cache_miss": cold_analysis,
             "analysis_cache_hit": cached_analysis,
             "candidate": candidate_ms,
-            "candidate_count": report.total,
-            "supported_count": len(report.supported),
+            "candidate_count": len(report),
+            "supported_count": sum(not a.capability_report.unsupported_reasons for a in report),
             "builds_during_candidates": builds_during_candidates,
             "selected_analyze": analysis_ms,
             "selected_materialize": materialize_ms,
-            "selected_at": selected_at_ms,
-            "builds_during_at": builds_during_at,
+            "selected_repartition": selected_repartition_ms,
+            "builds_during_repartition": builds_during_repartition,
         }
     )
     print(

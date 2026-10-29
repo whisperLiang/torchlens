@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import pytest
 import torch
-from v2_helpers import split_request
-
-import torchlens as tl
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
 pytestmark = pytest.mark.smoke
 
@@ -84,7 +85,7 @@ class _PooledClassifier(torch.nn.Module):
         return self.head(value)
 
 
-@pytest.mark.parametrize("boundary", ["before:flatten", "after:flatten"])
+@pytest.mark.parametrize("boundary", ["until:flatten", "through:flatten"])
 @pytest.mark.parametrize(
     ("spelling", "start_dim", "end_dim"),
     [
@@ -111,7 +112,7 @@ def test_pooled_classifier_flatten_axes_survive_batch_changes(
     """
 
     model = _PooledClassifier(spelling, start_dim, end_dim).eval()
-    runtime = tl.split.prepare(model, torch.randn(2, 4, 5, 5), split_request(boundary))
+    runtime = prepare_fixture(model, torch.randn(2, 4, 5, 5), split_request(boundary))
     assert runtime.traced_batch_size == 1
     assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
     assert runtime.batch_validation["probe_batch_size"] == 2

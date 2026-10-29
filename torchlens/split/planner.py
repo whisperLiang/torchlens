@@ -1,15 +1,14 @@
-"""Split target resolution and live-frontier planning."""
+"""Canonical DAG partition validation and live-frontier planning."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from hashlib import sha256
-from math import floor
 from types import BuiltinFunctionType
-from typing import Any, Literal
+from typing import Any
 
 from ..backends.registry import TORCH_BACKEND_NAME
-from ..intervention.types import CapturedArgTemplate, LiteralValue
+from ..intervention.types import CapturedArgTemplate, LiteralTensor, LiteralValue
 from .errors import SplitErrorContext, SplitRequestError, SplitUnsupportedError
 from .frontier import (
     boundary_key_for_node,
@@ -24,128 +23,19 @@ from .graph import (
 )
 from .ir import BoundarySchema, GraphPartition, SplitRequest
 
-BoundaryKind = Literal["after", "before", "partition"]
-
 
 @dataclass(frozen=True)
 class SplitPlan:
     """Resolved split plan."""
 
     split_id: str
-    boundary_kind: BoundaryKind
-    target_node_id: str | None
     prefix_node_ids: frozenset[str]
     suffix_node_ids: frozenset[str]
     boundary_node_ids: tuple[str, ...]
     boundary_spec: dict[str, BoundarySchema]
     boundary_bindings: dict[str, str]
     ordered_mutation_node_ids: frozenset[str] = frozenset()
-
-
-def _resolve_percent_target(graph: SplitTraceGraph, percent: float) -> SplitTraceNode:
-    """Resolve a percent target among eligible compute nodes."""
-
-    eligible = graph.compute_nodes
-    if not eligible:
-        raise SplitRequestError(
-            "Cannot resolve percent split: graph has no eligible compute nodes."
-        )
-    index = floor((percent / 100.0) * (len(eligible) - 1))
-    return eligible[index]
-
-
-def _unique_match(candidates: list[SplitTraceNode], target: str) -> SplitTraceNode:
-    """Return a unique target match or raise."""
-
-    if not candidates:
-        raise SplitRequestError(f"No split target matched {target!r}.")
-    deduped = {candidate.canonical_id: candidate for candidate in candidates}
-    if len(deduped) > 1:
-        labels = ", ".join(sorted(node.label for node in deduped.values()))
-        raise SplitRequestError(f"Split target {target!r} is ambiguous: {labels}.")
-    return next(iter(deduped.values()))
-
-
-def _targetable_candidates(candidates: list[SplitTraceNode]) -> list[SplitTraceNode]:
-    """Return candidates that are valid split targets."""
-
-    return [
-        node
-        for node in candidates
-        if not (node.is_input or node.is_output or node.is_buffer or node.is_buffer_only_source)
-    ]
-
-
-def _resolve_named_target(graph: SplitTraceGraph, target: str) -> SplitTraceNode:
-    """Resolve a target by exact label/raw/canonical/module, then substring."""
-
-    for field_name in ("label", "raw_label", "canonical_id", "module_path"):
-        exact = [
-            node
-            for node in graph.nodes
-            if getattr(node, field_name, None) is not None
-            and str(getattr(node, field_name)) == target
-        ]
-        if exact:
-            targetable = _targetable_candidates(exact)
-            return _unique_match(targetable or exact, target)
-    substring = [
-        node
-        for node in graph.nodes
-        if any(
-            value is not None and target in str(value)
-            for value in (node.label, node.raw_label, node.canonical_id, node.module_path)
-        )
-    ]
-    targetable = _targetable_candidates(substring)
-    return _unique_match(targetable or substring, target)
-
-
-def _reject_invalid_target(node: SplitTraceNode) -> None:
-    """Reject source/sink split targets."""
-
-    if node.is_input:
-        raise SplitRequestError(f"Split target {node.label!r} is an input node.")
-    if node.is_output:
-        raise SplitRequestError(f"Split target {node.label!r} is an output node.")
-    if node.is_buffer:
-        raise SplitRequestError(f"Split target {node.label!r} is a buffer node.")
-    if node.is_buffer_only_source:
-        raise SplitRequestError(f"Split target {node.label!r} is a buffer-only source node.")
-
-
-def _call_group_ids(graph: SplitTraceGraph, node: SplitTraceNode) -> set[str]:
-    """Return all nodes in the same function-call group as ``node``."""
-
-    call = graph.replay_call_by_output_id.get(node.canonical_id)
-    return {node.canonical_id} if call is None else set(call.output_node_ids)
-
-
-def _prefix_suffix_sets(
-    graph: SplitTraceGraph,
-    target: SplitTraceNode,
-    *,
-    boundary_kind: BoundaryKind,
-) -> tuple[frozenset[str], frozenset[str]]:
-    """Compute prefix and suffix node ID sets."""
-
-    order = graph.order_by_id
-    target_order = order[target.canonical_id]
-    group_ids = _call_group_ids(graph, target)
-    if boundary_kind == "after":
-        prefix = {
-            node.canonical_id
-            for node in graph.nodes
-            if order[node.canonical_id] <= target_order or node.canonical_id in group_ids
-        }
-    else:
-        prefix = {
-            node.canonical_id
-            for node in graph.nodes
-            if order[node.canonical_id] < target_order and node.canonical_id not in group_ids
-        }
-    suffix = {node.canonical_id for node in graph.nodes} - prefix
-    return frozenset(prefix), frozenset(suffix)
+    training_boundary_writes: tuple[str, ...] = ()
 
 
 def _frontier_node_ids(
@@ -191,18 +81,11 @@ def _boundary_metadata(
     graph: SplitTraceGraph,
     *,
     spec: SplitRequest,
-    target: SplitTraceNode | None,
-    boundary_kind: BoundaryKind,
     boundary_node_ids: tuple[str, ...],
 ) -> tuple[dict[str, BoundarySchema], dict[str, str]]:
     """Build boundary schemas and canonical bindings from the same unique keys."""
 
     node_by_id = graph.node_by_id
-    direct_parent_ids = {
-        parent_node.canonical_id
-        for parent in (() if target is None else target.parents)
-        if (parent_node := graph.node_for_label(parent)) is not None
-    }
     spatial_shapes: set[tuple[int, ...]] = set()
     for node_id in boundary_node_ids:
         output_shape = node_by_id[node_id].output_shape
@@ -217,10 +100,6 @@ def _boundary_metadata(
             raise SplitRequestError("Split boundary contains duplicate canonical value bindings.")
         bindings[key] = node_id
         role = classify_boundary_role(
-            node_id=node.canonical_id,
-            target_node_id=None if target is None else target.canonical_id,
-            boundary_kind=boundary_kind,
-            direct_target_parent_ids=direct_parent_ids,
             is_source=node.is_input or node.is_buffer,
             dtype=node.dtype,
             shape=node.output_shape,
@@ -257,7 +136,7 @@ def _validate_replay_dependencies(graph: SplitTraceGraph) -> None:
             )
 
 
-def _split_id(graph: SplitTraceGraph, spec: SplitRequest, target: SplitTraceNode | None) -> str:
+def _split_id(graph: SplitTraceGraph, spec: SplitRequest) -> str:
     """Compute a stable split identifier."""
 
     payload = repr(
@@ -268,7 +147,6 @@ def _split_id(graph: SplitTraceGraph, spec: SplitRequest, target: SplitTraceNode
             spec.batch_symbol,
             spec.validation,
             spec.features.training,
-            None if target is None else target.canonical_id,
         )
     ).encode("utf-8")
     return sha256(payload).hexdigest()[:16]
@@ -307,9 +185,9 @@ def _partition_sets(
     and device support, and for restoring per-call RNG/autocast context.
     """
 
-    if not isinstance(spec.point, GraphPartition):
+    if not isinstance(spec.partition, GraphPartition):
         raise TypeError("Partition planning requires a GraphPartition")
-    selected = spec.point.prefix_node_ids
+    selected = spec.partition.prefix_node_ids
     compute_ids = {node.canonical_id for node in graph.compute_nodes}
     unknown = selected - compute_ids
     if unknown:
@@ -449,6 +327,8 @@ class _MutationProof:
     targets: _MutationTargets
     ordered: frozenset[str]
     certified: set[str] = field(default_factory=set)
+    training: bool = False
+    heterogeneous: bool = False
 
 
 def _torch_mutation_targets() -> _MutationTargets:
@@ -482,6 +362,7 @@ def _torch_mutation_targets() -> _MutationTargets:
             torch.Tensor.__iadd__,
             torch.nn.functional.relu,
             torch.nn.functional.silu,
+            torch.embedding_renorm_,
             *native_silu_writes,
         )
     )
@@ -496,10 +377,30 @@ def _torch_mutation_targets() -> _MutationTargets:
             torch.Tensor.__add__,
             torch.layer_norm,
             torch.nn.functional.layer_norm,
+            torch.clone,
+            torch.Tensor.clone,
         )
     )
     batchnorm = targets((torch.batch_norm, torch.nn.functional.batch_norm))
-    permutations = targets((torch.permute, torch.Tensor.permute))
+    permutations = targets(
+        (
+            torch.permute,
+            torch.Tensor.permute,
+            torch.Tensor.view,
+            torch.Tensor.view_as,
+            torch.reshape,
+            torch.Tensor.reshape,
+            torch.transpose,
+            torch.Tensor.transpose,
+            torch.flatten,
+            torch.Tensor.flatten,
+            torch.chunk,
+            torch.Tensor.chunk,
+            torch.split,
+            torch.Tensor.split,
+            torch.Tensor.detach,
+        )
+    )
     out_writes = targets((torch.arange,))
     out_allocations = targets((torch.Tensor.new_full,))
     return _MutationTargets(writes, fresh, batchnorm, permutations, out_writes, out_allocations)
@@ -527,27 +428,139 @@ def _certify_local_write(
     argument = kwargs["out"] if has_out else args[0] if args else kwargs.get("input")
     if node.target not in allowed_targets:
         return False
+    if isinstance(argument, LiteralTensor):
+        return (
+            getattr(node.target, "__name__", "") == "embedding_renorm_"
+            and getattr(argument.value, "requires_grad", True) is False
+            and node.canonical_id in proof.ordered
+        )
     if not isinstance(argument, ReplayValueRef):
         return False
     producer = graph.node_by_id.get(argument.value_id)
-    if producer is None or any((producer.is_input, producer.is_buffer, producer.is_param_source)):
+    if producer is None:
         return False
+    if producer.is_input or producer.is_buffer or producer.is_buffer_only_source:
+        # Native source writes are safe only in the unchanged execution order.
+        # An input must stay on its owning side; non-differentiable buffer writes
+        # may consume the source across a sequential frontier.
+        return (
+            not has_out
+            and node.canonical_id in proof.ordered
+            and (
+                (
+                    producer.is_input
+                    and not proof.training
+                    and (node.canonical_id in prefix or not proof.heterogeneous)
+                )
+                or (
+                    producer.is_buffer
+                    and producer.requires_grad is not True
+                    and (node.canonical_id in prefix or not proof.heterogeneous)
+                )
+            )
+        )
+    if producer.is_param_source:
+        return (
+            getattr(node.target, "__name__", "") == "embedding_renorm_"
+            and producer.requires_grad is False
+            and node.canonical_id in proof.ordered
+        )
+    if (
+        getattr(node.target, "__name__", "") == "embedding_renorm_"
+        and node.canonical_id in proof.ordered
+        and producer.target in targets.permutations
+        and getattr(producer.target, "__name__", "") == "detach"
+    ):
+        detached_args, _ = _partition_call_arguments(producer)
+        return bool(
+            detached_args
+            and isinstance(detached_args[0], LiteralTensor)
+            and getattr(detached_args[0].value, "requires_grad", True) is False
+        )
     in_prefix = node.canonical_id in prefix
     if (producer.canonical_id in prefix) != in_prefix:
-        return False
+        # Training boundaries isolate integral leaves before suffix execution.
+        # Such leaves have no autograd history to sever with a sequential write.
+        return (
+            not has_out
+            and node.canonical_id in proof.ordered
+            and producer.dtype is not None
+            and (
+                (not proof.training and not proof.heterogeneous)
+                or any(kind in producer.dtype for kind in ("int", "bool"))
+            )
+        )
     if has_out and not _out_initialization_matches(graph, node, producer, targets.out_allocations):
         return False
     origin = _local_storage_origin(graph, producer, proof, in_prefix)
+    if (
+        not proof.training
+        and not proof.heterogeneous
+        and not has_out
+        and node.canonical_id in proof.ordered
+    ):
+        # A sequential, same-device inference frontier preserves tensor aliases:
+        # detach does not copy storage, and no autograd leaf is mutated.
+        return True
     return (
         origin is not None
-        and node.canonical_id in proof.ordered
+        and (
+            node.canonical_id in proof.ordered
+            or (not has_out and _independent_crossings(graph, node, origin, proof))
+        )
         and (
             has_out
             or origin.canonical_id in proof.certified
             or origin.target in targets.fresh
-            or _is_readonly_batchnorm(origin, targets.batchnorm)
+            or origin.target in targets.batchnorm
+            or (origin.is_input and not proof.training)
         )
     )
+
+
+def _independent_crossings(
+    graph: SplitTraceGraph, node: SplitTraceNode, origin: SplitTraceNode, proof: _MutationProof
+) -> bool:
+    """Allow fresh storage writes to cross only data-independent native operations.
+
+    Unknown alias roots, source writes, out= initialization and mutable state
+    keep their original ordering barrier. A crossed local write must have its own
+    proven fresh allocation, independent of this allocation in both directions.
+    """
+    if origin.target not in proof.targets.fresh | proof.targets.batchnorm:
+        return False
+    order = graph.order_by_id
+    index = order[node.canonical_id]
+    in_prefix = node.canonical_id in proof.prefix
+    origin_ancestors = graph.ancestors(origin.canonical_id)
+    for crossed in graph.compute_nodes:
+        if (crossed.canonical_id in proof.prefix) == in_prefix:
+            continue
+        if (order[crossed.canonical_id] < index) != in_prefix:
+            continue
+        if origin.canonical_id in graph.ancestors(crossed.canonical_id):
+            return False
+        args, kwargs = _partition_call_arguments(crossed)
+        if not _node_mutates(crossed, args, kwargs):
+            continue
+        argument = args[0] if args else kwargs.get("input")
+        if crossed.target not in proof.targets.writes or kwargs.get("out") is not None:
+            return False
+        if not isinstance(argument, ReplayValueRef):
+            return False
+        producer = graph.node_by_id.get(argument.value_id)
+        if producer is None or (producer.canonical_id in proof.prefix) == in_prefix:
+            return False
+        other = _local_storage_origin(graph, producer, proof, not in_prefix)
+        if other is None or other.target not in proof.targets.fresh | proof.targets.batchnorm:
+            return False
+        if (
+            other.canonical_id == origin.canonical_id
+            or other.canonical_id in origin_ancestors
+            or origin.canonical_id in graph.ancestors(other.canonical_id)
+        ):
+            return False
+    return True
 
 
 def _out_initialization_matches(
@@ -622,18 +635,6 @@ def _ordered_partition_nodes(graph: SplitTraceGraph, prefix: frozenset[str]) -> 
     return frozenset(ordered)
 
 
-def _is_readonly_batchnorm(producer: SplitTraceNode, batchnorm: frozenset[Any]) -> bool:
-    """Recognize the affirmative disabled training flag of a native BatchNorm."""
-
-    if producer.target in batchnorm and isinstance(producer.args_template, CapturedArgTemplate):
-        template = producer.args_template
-        training = dict(template.kwargs).get(
-            "training", template.args[5] if len(template.args) > 5 else None
-        )
-        return isinstance(training, LiteralValue) and training.value is False
-    return False
-
-
 def _validate_partition_effects(
     graph: SplitTraceGraph,
     spec: SplitRequest,
@@ -660,11 +661,16 @@ def _validate_partition_effects(
                 _torch_mutation_targets(),
                 _ordered_partition_nodes(graph, prefix_node_ids),
                 certified,
+                spec.trainable,
+                spec.placement.is_heterogeneous,
             )
     for node in graph.compute_nodes:
         args, kwargs = _partition_call_arguments(node)
         if _node_mutates(node, args, kwargs):
-            if proof is not None and _certify_local_write(graph, node, args, kwargs, proof):
+            if proof is not None and (
+                _certify_local_write(graph, node, args, kwargs, proof)
+                or (node.target in proof.targets.batchnorm and node.canonical_id in proof.ordered)
+            ):
                 certified.add(node.canonical_id)
             else:
                 raise _partition_refusal(
@@ -673,7 +679,7 @@ def _validate_partition_effects(
                     "partition_effect_order_unproven",
                     f"Partition cannot certify mutation/alias ordering for {node.canonical_id!r}; "
                     "keep a supported write with its fresh producer and preserve effect order, "
-                    "or use an out-of-place graph or point split.",
+                    "or use an out-of-place graph.",
                     node,
                 )
         if (
@@ -726,6 +732,12 @@ def _node_mutates(node: SplitTraceNode, args: tuple[Any, ...], kwargs: dict[str,
     """Recognize write markers and conservatively classify BatchNorm training."""
 
     names = (node.op_type.lower(), str(getattr(node.target, "__name__", "")).lower())
+    if any(name in {"dropout", "dropout_"} for name in names):
+        training = kwargs.get("training", kwargs.get("train", args[2] if len(args) > 2 else None))
+        if training is False:
+            # Affirmatively disabled native dropout is an identity even when
+            # the module requested its inplace spelling.
+            return False
     mutates = (
         bool(getattr(node.op, "is_inplace", False))
         or any(name.endswith("_") and not name.endswith("__") for name in names)
@@ -739,60 +751,41 @@ def _node_mutates(node: SplitTraceNode, args: tuple[Any, ...], kwargs: dict[str,
     return mutates
 
 
-def plan_split(graph: SplitTraceGraph, spec: SplitRequest) -> SplitPlan:
-    """Resolve a :class:`SplitRequest` into executable split plan."""
+def plan_partition(graph: SplitTraceGraph, spec: SplitRequest) -> SplitPlan:
+    """Validate a canonical partition and derive its unique live frontier."""
 
     _validate_replay_dependencies(graph)
-    target: SplitTraceNode | None
-    boundary_kind: BoundaryKind
-    ordered_mutations: frozenset[str] = frozenset()
-    if isinstance(spec.point, GraphPartition):
-        boundary_kind = "partition"
-        target = None
-        prefix_node_ids, suffix_node_ids = _partition_sets(graph, spec)
-        ordered_mutations = _validate_partition_effects(
-            graph, spec, prefix_node_ids=prefix_node_ids
-        )
-    else:
-        if spec.point.kind == "percent":
-            boundary_kind = "after"
-            target = _resolve_percent_target(graph, float(spec.point.target))
-        else:
-            boundary_kind = spec.point.kind
-            target = _resolve_named_target(graph, str(spec.point.target))
-        _reject_invalid_target(target)
-        prefix_node_ids, suffix_node_ids = _prefix_suffix_sets(
-            graph, target, boundary_kind=boundary_kind
-        )
-    for call in graph.replay_calls:
-        placements = {node_id in prefix_node_ids for node_id in call.output_node_ids}
-        if len(placements) != 1:
-            raise SplitRequestError(
-                f"Replay call {call.call_id!r} has outputs in different segments."
-            )
+    prefix_node_ids, suffix_node_ids = _partition_sets(graph, spec)
+    ordered_mutations = _validate_partition_effects(graph, spec, prefix_node_ids=prefix_node_ids)
     boundary_node_ids = _frontier_node_ids(
-        graph,
-        prefix_node_ids=prefix_node_ids,
-        suffix_node_ids=suffix_node_ids,
+        graph, prefix_node_ids=prefix_node_ids, suffix_node_ids=suffix_node_ids
     )
     boundary_spec, boundary_bindings = _boundary_metadata(
-        graph,
-        spec=spec,
-        target=target,
-        boundary_kind=boundary_kind,
-        boundary_node_ids=boundary_node_ids,
+        graph, spec=spec, boundary_node_ids=boundary_node_ids
+    )
+    training_boundary_writes = tuple(
+        node.canonical_id
+        for node in graph.compute_nodes
+        if node.canonical_id in ordered_mutations
+        and node.canonical_id in suffix_node_ids
+        and getattr(node.target, "__name__", "") != "batch_norm"
+        and isinstance((arguments := _partition_call_arguments(node)[0]), tuple)
+        and arguments
+        and isinstance(arguments[0], ReplayValueRef)
+        and arguments[0].value_id in prefix_node_ids
+        and (dtype := graph.node_by_id[arguments[0].value_id].dtype) is not None
+        and ("float" in dtype or "complex" in dtype)
     )
     return SplitPlan(
-        split_id=_split_id(graph, spec, target),
-        boundary_kind=boundary_kind,
-        target_node_id=None if target is None else target.canonical_id,
+        split_id=_split_id(graph, spec),
         prefix_node_ids=prefix_node_ids,
         suffix_node_ids=suffix_node_ids,
         boundary_node_ids=boundary_node_ids,
         boundary_spec=boundary_spec,
         boundary_bindings=boundary_bindings,
         ordered_mutation_node_ids=ordered_mutations,
+        training_boundary_writes=training_boundary_writes,
     )
 
 
-__all__ = ["BoundaryKind", "SplitPlan", "plan_split"]
+__all__ = ["SplitPlan", "plan_partition"]

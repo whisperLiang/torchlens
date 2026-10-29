@@ -6,9 +6,13 @@ import json
 from dataclasses import replace
 
 import torch
+from v2_helpers import (
+    analyze_fixture,
+    prepare_fixture,
+    request_fixture,
+)
 
-import torchlens as tl
-from torchlens.split import GraphPartition, PlacementPlan, SplitFeatures, SplitRequest, after
+from torchlens.split import GraphPartition, PlacementPlan, SplitFeatures
 from torchlens.split.program import _feature_evidence
 
 
@@ -16,10 +20,12 @@ def test_preflight_never_claims_unmeasured_training_or_placement_numerics() -> N
     """An implemented feature is distinct from model, device, and numerical support."""
 
     model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Tanh(), torch.nn.Linear(4, 2))
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         torch.randn(3, 4),
-        SplitRequest(after("1"), features=SplitFeatures(training=True, retain_trace=False)),
+        request_fixture(
+            "through:" + "1", features=SplitFeatures(training=True, retain_trace=False)
+        ),
     )
     evidence = runtime.capability_report.feature_evidence
     assert evidence is not None
@@ -41,7 +47,7 @@ def test_preflight_never_claims_unmeasured_training_or_placement_numerics() -> N
     assert evidence["split_training"].numerically_verified is None
     assert evidence["cross_device"].model_supported is None
     assert evidence["cross_device"].device_supported is None
-    assert evidence["arbitrary_dag_partition"].model_supported is None
+    assert evidence["arbitrary_dag_partition"].model_supported is True
     assert evidence["state_migration"].model_supported is None
     assert evidence["microbatch"].model_supported is None
     dynamic = evidence["dynamic_batch"]
@@ -51,7 +57,7 @@ def test_preflight_never_claims_unmeasured_training_or_placement_numerics() -> N
     # Inspecting a new partition establishes only its static analysis, not a
     # new numerical trial or a claim about all possible graph partitions.
     partition = GraphPartition(frozenset())
-    changed = runtime.analyze_partition(partition).capability_report.feature_evidence
+    changed = analyze_fixture(runtime, partition).capability_report.feature_evidence
     assert changed is not None
     assert changed["arbitrary_dag_partition"].model_supported is True
     assert changed["arbitrary_dag_partition"].numerically_verified is None
@@ -62,10 +68,10 @@ def test_preflight_never_claims_unmeasured_training_or_placement_numerics() -> N
 def test_no_batch_axes_means_unknown_numerical_evidence() -> None:
     """A missing probe must not turn into a successful numerical assertion."""
 
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Tanh()),
         torch.randn(3, 4),
-        SplitRequest(after("0"), features=SplitFeatures(batch_axes={})),
+        request_fixture("through:" + "0", features=SplitFeatures(batch_axes={})),
     )
     evidence = runtime.capability_report.feature_evidence
     assert evidence is not None
@@ -77,10 +83,10 @@ def test_no_batch_axes_means_unknown_numerical_evidence() -> None:
 def test_explicit_device_availability_does_not_claim_execution_success() -> None:
     """Device discovery examines availability without constructing device replicas."""
 
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Tanh()),
         torch.randn(3, 4),
-        SplitRequest(after("0")),
+        request_fixture("through:" + "0"),
     )
     request = replace(runtime.request, placement=PlacementPlan.on("cpu"))
     evidence = _feature_evidence(runtime.adapter, runtime.trace_graph, request, True)
@@ -108,7 +114,7 @@ def test_failed_topology_probe_does_not_claim_numerical_comparison() -> None:
             hidden = torch.relu(x)
             return torch.sin(hidden) if x.shape[0] == 1 else torch.cos(hidden)
 
-    runtime = tl.split.prepare(Branch(), torch.randn(3, 4), SplitRequest(tl.split.percent(50)))
+    runtime = prepare_fixture(Branch(), torch.randn(3, 4), request_fixture("fraction:" + str(50)))
     assert runtime.batch_validation["status"] == "failed"
     assert runtime.batch_validation["reason"].startswith("compare topology:")
     evidence = runtime.capability_report.feature_evidence

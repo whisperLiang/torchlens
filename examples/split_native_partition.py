@@ -11,8 +11,7 @@ from copy import deepcopy
 import torch
 from torch import nn
 
-import torchlens as tl
-from torchlens.split import GraphPartition, GraphProfile, SplitFeatures, SplitRequest, after
+from torchlens.split import GraphPartition, GraphProfile, SplitFeatures, prepare_graph
 
 
 class BranchModel(nn.Module):
@@ -76,16 +75,12 @@ def main() -> None:
     reference = deepcopy(model)
     inputs = torch.randn(4, 4)
     targets = torch.randn(4, 2)
-    runtime = tl.split.prepare(
-        model,
-        inputs,
-        SplitRequest(after("left_relu"), features=SplitFeatures(training=True, retain_trace=False)),
-    )
-    profile = runtime.graph_profile(batch_size=4)
+    graph = prepare_graph(model, inputs, features=SplitFeatures(training=True, retain_trace=False))
+    profile = graph.graph_profile(batch_size=4)
     partition = choose_small_ready_calls(profile)
-    analysis = runtime.analyze_partition(partition)
+    analysis = graph.analyze(partition)
+    runtime = graph.materialize(analysis)
     migration = runtime.plan_state_migration(partition)
-    runtime = runtime.materialize(analysis)
     print("Selected prefix nodes:", sorted(partition.prefix_node_ids))
     print("Preflight:", analysis.capability_report.preflight_ok)
     print("Static costs:", analysis.metrics)
@@ -113,7 +108,7 @@ def main() -> None:
         reference_optimizer.step()
         for actual, expected in zip(model.parameters(), reference.parameters(), strict=True):
             torch.testing.assert_close(actual, expected)
-        runtime = runtime.partition(partition)
+        runtime = runtime.repartition(partition)
     print("Forward, parameter gradients and two Adam updates agree; recuts reused the capture.")
 
 

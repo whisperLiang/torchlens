@@ -7,9 +7,14 @@ from pathlib import Path
 import pytest
 import torch
 from torch import nn
-from v2_helpers import split_request
+from v2_helpers import (
+    analyze_fixture,
+    candidate_report,
+    prepare_fixture,
+    repartition_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split import PlacementPlan
 from torchlens.split.boundary import ReplayBoundary
 from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
@@ -49,10 +54,10 @@ def test_trained_state_survives_replacement_and_recut(
     model = StateMigrationMlp()
     original = {key: value.clone() for key, value in model.state_dict().items()}
     inputs = torch.ones(3, 4)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         inputs,
-        split_request("after:relu", trainable=True, placement=PlacementPlan.on(device)),
+        split_request("through:relu", trainable=True, placement=PlacementPlan.on(device)),
     )
     prefix = runtime.prefix_parameters()
     suffix = runtime.suffix_parameters()
@@ -77,8 +82,8 @@ def test_trained_state_survives_replacement_and_recut(
         assert len(moved.prefix_parameters()) == 2
         torch.testing.assert_close(moved.replay(inputs), expected)
 
-    for point in (tl.split.before("fc1"), tl.split.after("fc2")):
-        recut = runtime.at(point)
+    for point in ("until:" + "fc1", "through:" + "fc2"):
+        recut = repartition_fixture(runtime, point)
         torch.testing.assert_close(recut.replay(inputs).cpu(), expected)
         assert len(recut.prefix_parameters()) + len(recut.suffix_parameters()) == 4
     for key, value in model.state_dict().items():
@@ -94,10 +99,10 @@ def test_owned_suffix_updates_allow_direct_and_cached_boundaries(
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
     model = StateMigrationMlp()
     inputs = torch.ones(3, 4)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         inputs,
-        split_request("after:relu", trainable=True, placement=PlacementPlan.on("cpu")),
+        split_request("through:relu", trainable=True, placement=PlacementPlan.on("cpu")),
     )
     boundary = (
         runtime.run_training_prefix(inputs) if training_boundary else runtime.run_prefix(inputs)
@@ -127,10 +132,10 @@ def test_cached_training_boundary_keeps_backward_metadata_without_state_identity
     """Cached training boundaries retain their graph ABI after dropping backward state."""
 
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         StateMigrationMlp(),
         torch.ones(3, 4),
-        split_request("after:relu", placement=PlacementPlan.on("cpu")),
+        split_request("through:relu", placement=PlacementPlan.on("cpu")),
     )
     inputs = torch.ones(3, 4)
     inference = runtime.run_prefix(inputs)
@@ -158,10 +163,10 @@ def test_recut_refuses_merging_distinct_inference_and_training_prefix_state(
 
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
     inputs = torch.ones(3, 4)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         StateMigrationMlp(),
         inputs,
-        split_request("after:relu", placement=PlacementPlan.on("cpu")),
+        split_request("through:relu", placement=PlacementPlan.on("cpu")),
     )
     parameters = runtime.prefix_parameters()
     if divergent:
@@ -172,7 +177,10 @@ def test_recut_refuses_merging_distinct_inference_and_training_prefix_state(
     expected_training = runtime.run_suffix(runtime.run_training_prefix(inputs)).detach()
     assert torch.equal(expected_inference, expected_training) is not divergent
 
-    for rebuilt in (runtime.at(runtime.request.point), runtime.with_placement(runtime.placement)):
+    for rebuilt in (
+        repartition_fixture(runtime, runtime.request.partition),
+        runtime.with_placement(runtime.placement),
+    ):
         torch.testing.assert_close(rebuilt.replay(inputs), expected_inference)
         torch.testing.assert_close(
             rebuilt.run_suffix(rebuilt.run_training_prefix(inputs)), expected_training
@@ -180,9 +188,9 @@ def test_recut_refuses_merging_distinct_inference_and_training_prefix_state(
 
     if divergent:
         with pytest.raises(SplitUnsupportedError, match="divergent inference and training"):
-            runtime.at(tl.split.before("fc1"))
+            repartition_fixture(runtime, "until:" + "fc1")
     else:
-        recut = runtime.at(tl.split.before("fc1"))
+        recut = repartition_fixture(runtime, "until:" + "fc1")
         torch.testing.assert_close(recut.replay(inputs), expected_inference)
         torch.testing.assert_close(
             recut.run_suffix(recut.run_training_prefix(inputs)), expected_training
@@ -206,10 +214,10 @@ def test_recut_moves_updated_suffix_into_both_prefix_paths(
     model = StateMigrationMlp()
     original = {key: value.clone() for key, value in model.state_dict().items()}
     inputs = torch.ones(3, 4)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         inputs,
-        split_request("after:relu", placement=PlacementPlan.on("cpu")),
+        split_request("through:relu", placement=PlacementPlan.on("cpu")),
     )
     runtime.run_prefix(inputs)
     parameters = runtime.suffix_parameters()
@@ -221,7 +229,7 @@ def test_recut_moves_updated_suffix_into_both_prefix_paths(
     expected = runtime.replay(inputs).detach()
     assert not torch.equal(expected, model(inputs))
 
-    recut = runtime.at(tl.split.after("fc2"))
+    recut = repartition_fixture(runtime, "through:" + "fc2")
     torch.testing.assert_close(recut.replay(inputs), expected)
     torch.testing.assert_close(recut.run_suffix(recut.run_training_prefix(inputs)), expected)
     assert {id(value) for value in parameters} <= {id(value) for value in recut.prefix_parameters()}
@@ -254,36 +262,36 @@ def test_recut_preserves_tied_identity_or_refuses_divergent_replicas(
 
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
     inputs = torch.ones(3, 4)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         TiedModel(),
         inputs,
-        split_request("after:relu", trainable=True, placement=PlacementPlan.on("cpu")),
+        split_request("through:relu", trainable=True, placement=PlacementPlan.on("cpu")),
     )
-    analysis = runtime.analyze(tl.split.after("tail"))
-    target_node_id = analysis.plan.target_node_id
+    analysis = analyze_fixture(runtime, "through:" + "tail")
+    target_partition = analysis.request.partition
     if divergent:
         with torch.no_grad():
             runtime.prefix_parameters()[0].add_(1)
     candidate = next(
         candidate
-        for candidate in runtime.split_points(diagnose=True).candidates
-        if candidate.kind == "after" and candidate.node_id == target_node_id
+        for candidate in candidate_report(runtime, diagnose=True).candidates
+        if candidate.partition == target_partition
     )
     assert candidate.replay_supported is not divergent
     if divergent:
         assert "divergent replicas" in candidate.unsupported_reason
         with pytest.raises(SplitUnsupportedError, match="divergent replicas"):
-            runtime.analyze(tl.split.after("tail"))
+            analyze_fixture(runtime, "through:" + "tail")
     expected = runtime.replay(inputs)
-    same_cut = runtime.at(runtime.request.point)
+    same_cut = repartition_fixture(runtime, runtime.request.partition)
     torch.testing.assert_close(same_cut.replay(inputs), expected)
     if divergent:
         with pytest.raises(SplitUnsupportedError, match="divergent replicas"):
-            runtime.at(tl.split.after("tail"))
+            repartition_fixture(runtime, "through:" + "tail")
         with pytest.raises(SplitUnsupportedError, match="divergent replicas"):
             runtime.materialize(analysis)
     else:
-        recut = runtime.at(tl.split.after("tail"))
+        recut = repartition_fixture(runtime, "through:" + "tail")
         assert len(recut.prefix_parameters()) == 1
         torch.testing.assert_close(recut.replay(inputs), expected)
 
@@ -291,8 +299,8 @@ def test_recut_preserves_tied_identity_or_refuses_divergent_replicas(
 def test_replay_boundary_still_refuses_structural_mismatches() -> None:
     """Removing value checks leaves split, graph, dtype, and shape checks intact."""
 
-    runtime = tl.split.prepare(
-        StateMigrationMlp().eval(), torch.ones(3, 4), split_request("after:relu")
+    runtime = prepare_fixture(
+        StateMigrationMlp().eval(), torch.ones(3, 4), split_request("through:relu")
     )
     boundary = runtime.run_prefix(torch.ones(3, 4))
     for field, replacement in (("split_id", "other"), ("graph_shape_hash", "other")):
@@ -321,7 +329,7 @@ def test_explicit_replay_does_not_read_model_state(monkeypatch: pytest.MonkeyPat
 
     model = StateMigrationMlp().eval()
     inputs = torch.ones(3, 4)
-    runtime = tl.split.prepare(model, inputs, split_request("after:relu"))
+    runtime = prepare_fixture(model, inputs, split_request("through:relu"))
 
     def unexpected_state_read(*args: object, **kwargs: object) -> None:
         raise AssertionError("split replay must not scan model state")

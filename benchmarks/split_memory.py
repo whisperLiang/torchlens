@@ -206,11 +206,9 @@ def main() -> None:
             if args.retain_trace
             else tl.split.SplitFeatures()
         )
-        runtime = tl.split.prepare(
-            model,
-            inputs,
-            tl.split.SplitRequest(point=tl.split.percent(50), backend="torch", features=features),
-        )
+        graph = tl.split.prepare_graph(model, inputs, backend="torch", features=features)
+        partition = graph.partition_candidates()[len(graph.partition_candidates()) // 2]
+        runtime = graph.materialize(graph.analyze(partition))
     gc.collect()
     retained_trace = runtime.retains_trace
     snapshot(
@@ -228,13 +226,10 @@ def main() -> None:
     replay_input = torch.zeros(3, 3, 384, 384, device=args.device)
     with torch.inference_mode():
         expected = model(replay_input)
-        points = (
-            tl.split.before(runtime.trace_graph.compute_nodes[0].canonical_id),
-            tl.split.percent(50),
-            tl.split.after(runtime.trace_graph.compute_nodes[-1].canonical_id),
-        )
-        for point in points:
-            replay = runtime.at(point)
+        candidates = runtime.partition_candidates()
+        partitions = (candidates[0], candidates[len(candidates) // 2], candidates[-1])
+        for partition in partitions:
+            replay = runtime.repartition(partition)
             if cuda:
                 torch.cuda.empty_cache()
                 torch.cuda.reset_peak_memory_stats()
@@ -245,7 +240,9 @@ def main() -> None:
             ):
                 torch.testing.assert_close(left, right, atol=1e-4, rtol=1e-3)
             snapshot(
-                "replay", point=point.as_boundary(), elapsed_seconds=time.perf_counter() - started
+                "replay",
+                point=partition.as_boundary(),
+                elapsed_seconds=time.perf_counter() - started,
             )
             del actual, replay
         if args.latency_runs:

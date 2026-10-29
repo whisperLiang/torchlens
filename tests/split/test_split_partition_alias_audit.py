@@ -7,8 +7,12 @@ from copy import deepcopy
 import pytest
 import torch
 from torch import nn
+from v2_helpers import (
+    prepare_fixture,
+    request_fixture,
+)
 
-from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, after, prepare
+from torchlens.split import GraphPartition, SplitFeatures
 from torchlens.split.errors import SplitUnsupportedError
 
 
@@ -36,11 +40,11 @@ def test_read_alias_created_before_write_keeps_forward_and_backward_truth(
 
     model = AliasRead()
     reference = deepcopy(model)
-    runtime = prepare(
+    runtime = prepare_fixture(
         model,
         torch.randn(2, 4, 4),
-        SplitRequest(
-            after("activation"),
+        request_fixture(
+            "through:" + "activation",
             features=SplitFeatures(training=True, retain_trace=retain_trace),
         ),
     )
@@ -49,7 +53,7 @@ def test_read_alias_created_before_write_keeps_forward_and_backward_truth(
         for node in runtime.trace_graph.compute_nodes
         if node.canonical_id in runtime.plan.prefix_node_ids
     )
-    runtime = runtime.partition(GraphPartition(selected))
+    runtime = runtime.repartition(GraphPartition(selected))
     assert runtime.plan.ordered_mutation_node_ids
     x = torch.randn(2, 4, 4, requires_grad=True)
     expected_x = x.detach().clone().requires_grad_(True)
@@ -78,14 +82,17 @@ def test_positional_functional_inplace_argument_is_not_missed(fresh: bool) -> No
             return nn.functional.relu(value, True) * 2
 
     model = PositionalWrite()
-    runtime = prepare(model, torch.randn(2, 4), SplitRequest(after("relu")))
+    runtime = prepare_fixture(model, torch.randn(2, 4), request_fixture("through:" + "relu"))
     partition = GraphPartition(frozenset())
     if fresh:
-        cut = runtime.partition(partition)
+        cut = runtime.repartition(partition)
         assert cut.plan.ordered_mutation_node_ids
         x = torch.randn(2, 4)
         torch.testing.assert_close(cut.replay(x), model(x))
     else:
+        cut = runtime.repartition(partition)
+        x = torch.randn(2, 4)
+        torch.testing.assert_close(cut.replay(x.clone()), model(x.clone()))
         with pytest.raises(SplitUnsupportedError) as caught:
-            runtime.partition(partition)
-        assert caught.value.context.reason == "partition_effect_order_unproven"
+            cut.run_training_prefix(x)
+        assert caught.value.context.reason == "partition_training_boundary_write"

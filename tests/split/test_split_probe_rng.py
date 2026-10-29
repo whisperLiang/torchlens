@@ -8,9 +8,11 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split import pipeline
 
 
@@ -62,8 +64,8 @@ def test_probe_matches_native_random_draws_without_mutating_capture(
         return result
 
     monkeypatch.setattr(pipeline, "capture_model", capture)
-    runtime = tl.split.prepare(
-        StochasticProbeModel(kind), torch.ones(8, 16), split_request("after:relu")
+    runtime = prepare_fixture(
+        StochasticProbeModel(kind), torch.ones(8, 16), split_request("through:relu")
     )
     assert runtime.batch_validation["status"] == "passed", runtime.batch_validation["reason"]
     assert [batch for batch, _seed in captures] == [1, 2]
@@ -88,7 +90,7 @@ def test_stochastic_probe_preserves_user_rng_states() -> None:
     numpy_state = np.random.get_state()
     torch_state = torch.random.get_rng_state().clone()
     cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else []
-    runtime = tl.split.prepare(model, x, split_request("after:relu"))
+    runtime = prepare_fixture(model, x, split_request("through:relu"))
     assert runtime.batch_validation["status"] == "passed", runtime.batch_validation["reason"]
     assert random.getstate() == python_state
     actual_numpy = np.random.get_state()
@@ -111,6 +113,6 @@ def test_stochastic_probe_does_not_mask_real_scalar_branch() -> None:
             x = torch.relu(x)
             return (x + torch.rand_like(x)) * (3 if x.shape[0] >= 2 else 2)
 
-    runtime = tl.split.prepare(Model(), torch.ones(8, 16), split_request("after:relu"))
+    runtime = prepare_fixture(Model(), torch.ones(8, 16), split_request("through:relu"))
     assert runtime.batch_validation["status"] == "failed"
     assert "numeric mismatch" in runtime.batch_validation["reason"]

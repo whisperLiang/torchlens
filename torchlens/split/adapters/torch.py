@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import nullcontext
-from dataclasses import replace
-from types import BuiltinFunctionType, MethodDescriptorType, WrapperDescriptorType
+from dataclasses import dataclass, replace
+from types import BuiltinFunctionType, MappingProxyType, MethodDescriptorType, WrapperDescriptorType
 from typing import Any
 
 from ... import _state
@@ -409,6 +410,29 @@ class _LiveParamCursor:
         return value
 
 
+@dataclass(frozen=True)
+class _SegmentBlueprint:
+    """Scheduling and argument locations only; mutable execution state stays in segments."""
+
+    release_after: Mapping[str, tuple[str, ...]]
+    execution_steps: tuple[
+        tuple[SplitTraceNode, tuple[SplitTraceNode, ...] | None, SplitTraceNode | None], ...
+    ]
+    state_nodes: tuple[tuple[SplitTraceNode, tuple[LiteralTensor, ...]], ...]
+
+
+def _state_literals(component: Any) -> tuple[LiteralTensor, ...]:
+    """Flatten tensor argument locations in the executor's argument traversal order."""
+    if isinstance(component, LiteralTensor):
+        return (component,)
+    if isinstance(component, tuple):
+        values = (
+            (item for _key, item in component) if _is_template_dict(component) else iter(component)
+        )
+        return tuple(literal for item in values for literal in _state_literals(item))
+    return ()
+
+
 class _GeneratedSegmentBase:
     """Shared generated-eager replay helpers."""
 
@@ -424,6 +448,7 @@ class _GeneratedSegmentBase:
         use_live_param_sources: bool,
         placement: DevicePlacement | None = None,
         state: SegmentState | None = None,
+        shareable_param_ids: frozenset[int] | None = None,
     ) -> None:
         """Create a generated replay segment."""
 
@@ -435,7 +460,9 @@ class _GeneratedSegmentBase:
         self._node_by_id = graph.node_by_id
         self._label_to_id = graph.node_id_by_alias
         self._shape_binding: ShapeBinding | None = None
-        self._shareable_param_ids = _shareable_param_sources(graph)
+        self._shareable_param_ids = (
+            _shareable_param_sources(graph) if shareable_param_ids is None else shareable_param_ids
+        )
         retained_ids = set(plan.boundary_node_ids)
         if self.segment == "suffix":
             retained_ids = set(graph.output_node_ids)
@@ -444,8 +471,39 @@ class _GeneratedSegmentBase:
                     graph.node_id_by_alias.get(parent, parent)
                     for parent in graph.node_by_id[node_id].parents
                 )
-        self._release_after = release_schedule(graph, node_ids, frozenset(retained_ids))
-        self._execution_steps = self._prepare_execution_steps()
+        key = ("torch", self.segment, node_ids, frozenset(retained_ids))
+        cache = graph._segment_blueprints
+        blueprint = cache.get(key)
+        if blueprint is None:
+            blueprint = _SegmentBlueprint(
+                MappingProxyType(release_schedule(graph, node_ids, frozenset(retained_ids))),
+                self._prepare_execution_steps(),
+                tuple(
+                    (
+                        node,
+                        tuple(
+                            literal
+                            for component in (
+                                *getattr(node.args_template, "args", ()),
+                                *(
+                                    item
+                                    for _name, item in getattr(node.args_template, "kwargs", ())
+                                ),
+                            )
+                            for literal in _state_literals(component)
+                        ),
+                    )
+                    for node in graph.nodes
+                    if node.canonical_id in node_ids and not node.is_input and not node.is_output
+                ),
+            )
+            cache[key] = blueprint
+            if len(cache) > 64:
+                cache.popitem(last=False)
+        cache.move_to_end(key)
+        self._release_after = blueprint.release_after
+        self._execution_steps = blueprint.execution_steps
+        self._state_nodes = blueprint.state_nodes
         shape_program = graph.shape_program
         self._shape_rewrite_node_ids = (
             frozenset(shape_program.recipes) if shape_program is not None else frozenset()
@@ -648,9 +706,7 @@ class _GeneratedSegmentBase:
         """
 
         values: dict[str, Any] = {}
-        for node in self.graph.nodes:
-            if node.canonical_id not in self.node_ids or node.is_input or node.is_output:
-                continue
+        for node, literals in self._state_nodes:
             if node.is_buffer or (node.target is None and self._is_replay_source_node(node)):
                 values[f"{node.canonical_id}:source"] = self._source_value(node)
                 continue
@@ -658,35 +714,11 @@ class _GeneratedSegmentBase:
             if template is None:
                 continue
             param_cursor = _LiveParamCursor(self._param_handles_for_node(node))
-            occurrence = 0
-
-            def bind_component(
-                component: Any,
-                *,
-                cursor: _LiveParamCursor = param_cursor,
-                node_id: str = node.canonical_id,
-            ) -> None:
-                """Walk captured argument leaves in replay's resolution order."""
-
-                nonlocal occurrence
-                if isinstance(component, LiteralTensor):
-                    value = cursor.maybe_replace(component.value)
-                    if value is component.value:
-                        value = self._state.resolve(value)
-                    values[f"{node_id}:literal:{occurrence}"] = value
-                    occurrence += 1
-                elif isinstance(component, tuple):
-                    if _is_template_dict(component):
-                        for _key, item in component:
-                            bind_component(item)
-                    else:
-                        for item in component:
-                            bind_component(item)
-
-            for component in template.args:
-                bind_component(component)
-            for _key, component in template.kwargs:
-                bind_component(component)
+            for occurrence, component in enumerate(literals):
+                value = param_cursor.maybe_replace(component.value)
+                if value is component.value:
+                    value = self._state.resolve(value)
+                values[f"{node.canonical_id}:literal:{occurrence}"] = value
         return values
 
     def _context(self, node: SplitTraceNode, reason: str) -> SplitErrorContext:
@@ -1363,6 +1395,7 @@ class TorchSplitAdapter(SplitPolicyMixin):
             spec.trainable if spec.use_live_param_sources is None else spec.use_live_param_sources
         )
         replica_pool = _StateReplicaPool()
+        shareable = _shareable_param_sources(graph)
         prefix_state = SegmentState(
             adapter=self, placement=spec.placement.prefix, replica_pool=replica_pool
         )
@@ -1373,6 +1406,7 @@ class TorchSplitAdapter(SplitPolicyMixin):
             node_ids=plan.prefix_node_ids,
             use_live_param_sources=use_live,
             state=prefix_state,
+            shareable_param_ids=shareable,
         )
         training_spec = replace(
             spec,
@@ -1386,6 +1420,7 @@ class TorchSplitAdapter(SplitPolicyMixin):
             spec=training_spec,
             node_ids=plan.prefix_node_ids,
             use_live_param_sources=True,
+            shareable_param_ids=shareable,
             state=(
                 prefix._state
                 if use_live
@@ -1400,6 +1435,7 @@ class TorchSplitAdapter(SplitPolicyMixin):
             spec=spec,
             node_ids=plan.suffix_node_ids,
             use_live_param_sources=use_live,
+            shareable_param_ids=shareable,
             state=SegmentState(
                 adapter=self, placement=spec.placement.suffix, replica_pool=replica_pool
             ),

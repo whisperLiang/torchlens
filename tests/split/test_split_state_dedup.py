@@ -8,9 +8,11 @@ import weakref
 import pytest
 import torch
 from torch import nn
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split import PlacementPlan
 from torchlens.split.adapters.torch import TorchSplitAdapter
 from torchlens.split.placement import DevicePlacement
@@ -48,10 +50,10 @@ def test_tied_replicas_share_only_frozen_state(
         monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
     model = TiedStateModel(frozen=frozen)
     inputs = torch.randn(3, 4)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         inputs,
-        split_request("after:cut", trainable=True, placement=PlacementPlan.on(device)),
+        split_request("through:cut", trainable=True, placement=PlacementPlan.on(device)),
     )
     prefix = runtime.segments.prefix._state
     suffix = runtime.segments.suffix._state
@@ -102,10 +104,10 @@ def test_captured_and_live_prefix_state_stay_separate(monkeypatch: pytest.Monkey
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
     model = TiedStateModel(frozen=False)
     inputs = torch.ones(3, 4)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         inputs,
-        split_request("after:cut", placement=PlacementPlan.on("cpu")),
+        split_request("through:cut", placement=PlacementPlan.on("cpu")),
     )
     inference = runtime.run_prefix(inputs)
     inference_values = {key: value.clone() for key, value in inference.tensors.items()}
@@ -158,10 +160,10 @@ def test_same_source_on_distinct_devices_has_distinct_replicas() -> None:
 
     model = TiedStateModel(frozen=True)
     inputs = torch.randn(3, 4)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         inputs,
-        split_request("after:cut", trainable=True, placement=PlacementPlan.across("cuda", "cpu")),
+        split_request("through:cut", trainable=True, placement=PlacementPlan.across("cuda", "cpu")),
     )
     actual = runtime.replay(inputs)
     prefix_weight = runtime.segments.prefix._state.resolve(model.shared.weight, shareable=True)
@@ -188,10 +190,10 @@ def test_runtime_replica_pool_does_not_outlive_runtime(monkeypatch: pytest.Monke
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
     model = TiedStateModel(frozen=True)
     inputs = torch.ones(3, 4)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         inputs,
-        split_request("after:cut", trainable=True, placement=PlacementPlan.on("cpu")),
+        split_request("through:cut", trainable=True, placement=PlacementPlan.on("cpu")),
     )
     runtime.replay(inputs)
     runtime_ref = weakref.ref(runtime)

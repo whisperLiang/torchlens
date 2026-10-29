@@ -7,9 +7,14 @@ from typing import Any
 
 import pytest
 import torch
+from v2_helpers import (
+    fixture_partition,
+    prepare_fixture,
+    repartition_fixture,
+    request_fixture,
+)
 
-import torchlens as tl
-from torchlens.split import GraphPartition, PlacementPlan, SplitFeatures, SplitRequest, after
+from torchlens.split import GraphPartition, PlacementPlan, SplitFeatures
 from torchlens.split.ownership import parameter_bindings, parameter_ownership, plan_state_migration
 from torchlens.split.state import SegmentState
 
@@ -36,11 +41,11 @@ class SharedState(torch.nn.Module):
 def _runtime(model: torch.nn.Module, *, retain_trace: bool = False) -> Any:
     """Prepare live Torch state with either supported retention mode."""
 
-    return tl.split.prepare(
+    return prepare_fixture(
         model,
         torch.randn(2, 4),
-        SplitRequest(
-            after("middle"),
+        request_fixture(
+            "through:" + "middle",
             features=SplitFeatures(training=True, retain_trace=retain_trace),
         ),
     )
@@ -124,7 +129,10 @@ def test_migration_refuses_ambiguous_shared_optimizer_histories(
     bindings = parameter_bindings(runtime)["parameter:left.weight"]
     assert bindings["prefix"] is not bindings["suffix"]
     migration = plan_state_migration(
-        runtime, after(runtime.trace_graph.compute_nodes[-1].canonical_id)
+        runtime,
+        fixture_partition(
+            runtime, "through:" + str(runtime.trace_graph.compute_nodes[-1].canonical_id)
+        ),
     )
     assert not migration.supported
     assert "shared_optimizer_state_ambiguous" in migration.unsupported_reasons
@@ -183,7 +191,7 @@ def test_optimizer_bindings_remain_valid_after_repartition(kind: str) -> None:
         )
         partition = GraphPartition(chosen)
         assert plan_state_migration(runtime, partition).supported
-        runtime = runtime.partition(partition)
+        runtime = runtime.repartition(partition)
         updated = parameter_bindings(runtime)
         for state_id, owners in updated.items():
             assert all(
@@ -216,7 +224,7 @@ def test_migration_reports_parameter_and_buffer_device_moves() -> None:
     runtime = _runtime(model).with_placement(PlacementPlan.across("cpu", "cuda:0"))
     old_bindings = runtime.parameter_bindings()
     migration = runtime.plan_state_migration(
-        after(runtime.trace_graph.compute_nodes[-1].canonical_id)
+        "through:" + str(runtime.trace_graph.compute_nodes[-1].canonical_id)
     )
     assert migration.supported
     rows = {row.state_id: row for row in migration.entries}
@@ -229,7 +237,12 @@ def test_migration_reports_parameter_and_buffer_device_moves() -> None:
     assert moved_buffer.source_devices == (("suffix", "cuda:0"),)
     assert moved_buffer.destination_devices == (("prefix", "cpu"),)
     assert moved_buffer.optimizer_action == "none"
-    recut = runtime.at(after(runtime.trace_graph.compute_nodes[-1].canonical_id))
+    recut = repartition_fixture(
+        runtime,
+        fixture_partition(
+            runtime, "through:" + str(runtime.trace_graph.compute_nodes[-1].canonical_id)
+        ),
+    )
     new_bindings = recut.parameter_bindings()
     torch.testing.assert_close(
         new_bindings["parameter:right.weight"]["prefix"],

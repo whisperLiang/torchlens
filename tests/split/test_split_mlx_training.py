@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from v2_helpers import split_request
+from v2_helpers import (
+    candidate_report,
+    prepare_fixture,
+    repartition_fixture,
+    split_request,
+)
 
 mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 nn = pytest.importorskip("mlx.nn", exc_type=ImportError)
@@ -68,8 +73,8 @@ def test_mlx_optimizer_steps_match_unsplit_and_preserve_source(optimizer_cls: An
     model, reference = _Mlp(), _Mlp()
     x, targets = _input(), mx.array([[0.2, -0.5], [1, 0.3], [-0.7, 0.4]])
     source = dict(tree_flatten(model.parameters()))
-    runtime = tl.split.prepare(
-        model, _input(2), split_request("after:maximum", backend="mlx", trainable=True)
+    runtime = prepare_fixture(
+        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
     )
     prefix_optimizer = optimizer_cls(learning_rate=0.01)
     suffix_optimizer = optimizer_cls(learning_rate=0.01)
@@ -98,7 +103,7 @@ def test_mlx_optimizer_steps_match_unsplit_and_preserve_source(optimizer_cls: An
         assert value is source[name]
     assert runtime.prefix_parameters() and runtime.suffix_parameters()
     migrated = runtime.with_placement(tl.split.PlacementPlan.on("cpu"))
-    recut = migrated.at(tl.split.before("maximum"))
+    recut = repartition_fixture(migrated, "until:" + "maximum")
     _assert_close(migrated.replay(x), reference(x))
     _assert_close(recut.replay(x), reference(x))
 
@@ -112,11 +117,13 @@ def test_mlx_gradients_match_at_every_cut_and_changed_batch() -> None:
         left, right = mx.split(mx.maximum(x, 0), 2, axis=-1)
         return mx.add(mx.multiply(left, 2), right)
 
-    seed = tl.split.prepare(
-        model, _input(2), split_request("after:maximum", backend="mlx", trainable=True)
+    seed = prepare_fixture(
+        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
     )
-    for candidate in seed.split_points().supported:
-        runtime = seed.at(candidate.point)
+    for candidate in candidate_report(
+        seed,
+    ).supported:
+        runtime = repartition_fixture(seed, candidate.partition)
         x = _input(5)
         targets = mx.ones((5, 2))
         expected = mx.grad(lambda a, targets=targets: _loss(model(a), targets))(x)
@@ -139,11 +146,11 @@ def test_mlx_nested_and_keyword_input_gradients() -> None:
 
     x = _input(2)
     pair, offset = {"b": mx.add(x, 2), "a": x}, mx.ones_like(x)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         pair,
         split_request(
-            "after:maximum",
+            "through:maximum",
             backend="mlx",
             trainable=True,
             batch_axes={"/args/0/a": 0, "/args/0/b": 0, "/kwargs/offset": 0},
@@ -171,11 +178,11 @@ def test_mlx_shared_input_gradient_survives_explicit_placement() -> None:
         return mx.multiply(mx.maximum(x, 0), y)
 
     x = _input(2)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         (x, x),
         split_request(
-            "after:maximum",
+            "through:maximum",
             backend="mlx",
             trainable=True,
             placement=tl.split.PlacementPlan.on("cpu"),
@@ -212,8 +219,8 @@ def test_mlx_native_conv_and_layernorm_parameter_gradients() -> None:
 
     model = Model()
     x = mx.arange(64, dtype=mx.float32).reshape(2, 4, 4, 2) / 50
-    runtime = tl.split.prepare(
-        model, x, split_request("after:maximum", backend="mlx", trainable=True)
+    runtime = prepare_fixture(
+        model, x, split_request("through:maximum", backend="mlx", trainable=True)
     )
     targets = mx.ones((2, 3))
     _value, expected = nn.value_and_grad(model, lambda: _loss(model(x), targets))()
@@ -229,8 +236,8 @@ def test_mlx_native_conv_and_layernorm_parameter_gradients() -> None:
 def test_mlx_training_rejects_detached_stale_and_invalid_gradients() -> None:
     """Prefix recomputation refuses boundaries that cannot attest the original forward."""
 
-    runtime = tl.split.prepare(
-        _Mlp(), _input(2), split_request("after:maximum", backend="mlx", trainable=True)
+    runtime = prepare_fixture(
+        _Mlp(), _input(2), split_request("through:maximum", backend="mlx", trainable=True)
     )
     x, targets = _input(2), mx.ones((2, 2))
     detached = runtime.run_prefix(x)
@@ -254,8 +261,8 @@ def test_mlx_default_classification_loss_and_frozen_parameters() -> None:
 
     model = _Mlp()
     model.hidden.freeze(keys="weight")
-    runtime = tl.split.prepare(
-        model, _input(2), split_request("after:maximum", backend="mlx", trainable=True)
+    runtime = prepare_fixture(
+        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
     )
     x, targets = _input(3), mx.array([0, 1, 0])
     boundary = runtime.run_training_prefix(x)
@@ -274,8 +281,8 @@ def test_mlx_custom_nested_loss_and_non_scalar_refusal() -> None:
         y = mx.maximum(x, 0)
         return {"pair": mx.split(y, 2, axis=-1), "literal": "kept"}
 
-    runtime = tl.split.prepare(
-        model, _input(2), split_request("after:maximum", backend="mlx", trainable=True)
+    runtime = prepare_fixture(
+        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
     )
     boundary = runtime.run_training_prefix(_input(2))
     result = runtime.train_suffix_result(
@@ -300,8 +307,8 @@ def test_mlx_training_boundary_snapshots_input_values() -> None:
     x = _input(2)
     original = x.astype(x.dtype)
     mx.eval(original)
-    runtime = tl.split.prepare(
-        model, x, split_request("after:multiply", backend="mlx", trainable=True)
+    runtime = prepare_fixture(
+        model, x, split_request("through:multiply", backend="mlx", trainable=True)
     )
     targets = mx.zeros_like(x)
     boundary = runtime.run_training_prefix(x)
@@ -317,10 +324,10 @@ def test_mlx_cached_training_boundary_is_suffix_only(tmp_path: Path) -> None:
 
     from torchlens.split.cache import load_boundary, save_boundary
 
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         _Mlp(),
         _input(2),
-        split_request("after:maximum", backend="mlx", trainable=True, boundary_cache=True),
+        split_request("through:maximum", backend="mlx", trainable=True, boundary_cache=True),
     )
     boundary = runtime.run_training_prefix(_input(2))
     path = tmp_path / "training.boundary"
@@ -338,8 +345,8 @@ def test_mlx_cached_training_boundary_is_suffix_only(tmp_path: Path) -> None:
 def test_mlx_prefix_rejects_inplace_parameter_mutation() -> None:
     """External writes through exposed parameter arrays invalidate the training boundary."""
 
-    runtime = tl.split.prepare(
-        _Mlp(), _input(2), split_request("after:maximum", backend="mlx", trainable=True)
+    runtime = prepare_fixture(
+        _Mlp(), _input(2), split_request("through:maximum", backend="mlx", trainable=True)
     )
     boundary = runtime.run_training_prefix(_input(2))
     suffix = runtime.train_suffix_result(boundary, mx.ones((2, 2)))
@@ -372,8 +379,8 @@ def test_mlx_native_attention_parameter_and_input_gradients() -> None:
     model = Model()
     x = mx.arange(24, dtype=mx.float32).reshape(2, 3, 4) / 10 - 1
     targets = mx.ones((2, 4))
-    runtime = tl.split.prepare(
-        model, x, split_request("after:maximum", backend="mlx", trainable=True)
+    runtime = prepare_fixture(
+        model, x, split_request("through:maximum", backend="mlx", trainable=True)
     )
     expected_input = mx.grad(lambda a: _loss(model(a), targets))(x)
     _value, expected_params = nn.value_and_grad(model, lambda: _loss(model(x), targets))()
@@ -408,8 +415,8 @@ def test_mlx_integer_embedding_inputs_are_not_gradient_roots() -> None:
     model = Model()
     tokens = mx.array([[1, 2, 3], [4, 1, 6]], dtype=mx.int32)
     targets = mx.ones((2, 2))
-    runtime = tl.split.prepare(
-        model, tokens, split_request("after:maximum", backend="mlx", trainable=True)
+    runtime = prepare_fixture(
+        model, tokens, split_request("through:maximum", backend="mlx", trainable=True)
     )
     _value, expected = nn.value_and_grad(model, lambda: _loss(model(tokens), targets))()
     boundary = runtime.run_training_prefix(tokens)

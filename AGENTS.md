@@ -574,12 +574,12 @@ pytest tests/ -m "not rare and not slow" -x --tb=short
   empirical shape witnesses, never universal proof. An inexecutable probe yields no evidence.
   A batch-VARYING run
   over unproven relations refuses typed (`ShapeProgram.require_batch_resolvable`); replaying at
-  the captured batch stays allowed. `SplitRuntime.split_points()` enumerates every valid
-  `before:`/`after:` cut as `SplitCandidate` rows carrying boundary IDs/schema and a
-  deterministic `unsupported_reasons` (never silently skipped); diagnosis analyzes points
-  without building segments. `.analyze(point)` returns `SplitPointAnalysis`,
-  `.materialize(analysis)` builds the selected point, and `.at(point)` combines both on the
-  same capture. `PlacementPlan.across(prefix, suffix)` / `SplitRuntime.with_placement()` bind
+  the captured batch stays allowed. `tl.split.prepare_graph()` captures before selection;
+  `GraphPartition` is the sole canonical compute-node set. `.analyze(partition)` returns
+  `PartitionAnalysis` without segments; `.materialize(analysis)` creates a runtime;
+  `.repartition(partition)` inherits current state on the same graph. Optional
+  `.partition_candidates()` returns atomic topological prefixes, never all DAG cuts.
+  `PlacementPlan.across(prefix, suffix)` / `SplitRuntime.with_placement()` bind
   segment state per device through `SegmentState` (`referenced` vs `owned`, one replica per
   source identity so tied params keep one identity; `prefix_parameters()` /
   `suffix_parameters()`), with runtime boundary and boundary-gradient transport. Segment-state

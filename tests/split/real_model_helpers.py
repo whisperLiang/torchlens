@@ -89,7 +89,8 @@ def _run_backend_subprocess(
         [
             sys.executable,
             "-c",
-            "from v2_helpers import split_request\n" + textwrap.dedent(code),
+            "from v2_helpers import analyze_fixture, candidate_report, fixture_partition, plan_fixture, prepare_fixture, repartition_fixture, request_fixture, split_request\n"
+            + textwrap.dedent(code),
         ],
         cwd=Path(__file__).resolve().parents[2],
         env=env,

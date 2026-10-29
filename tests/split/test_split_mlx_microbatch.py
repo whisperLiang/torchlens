@@ -6,7 +6,10 @@ from copy import deepcopy
 from typing import Any
 
 import pytest
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
 mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 nn = pytest.importorskip("mlx.nn", exc_type=ImportError)
@@ -52,11 +55,11 @@ def test_mlx_microbatches_match_logical_gradients(reduction: str, size: int) -> 
     reference = deepcopy(model)
     x = mx.arange(20, dtype=mx.float32).reshape(5, 4) / 7 - 0.8
     targets = {"answer": mx.cos(x)}
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         x,
         split_request(
-            "after:transpose_1",
+            "through:transpose_1",
             backend="mlx",
             trainable=True,
             placement=tl.split.PlacementPlan.on(mx.new_stream(mx.cpu)),
@@ -104,8 +107,8 @@ def test_mlx_cached_microbatch_updates_suffix_once() -> None:
 
     model = _Model()
     x = mx.arange(20, dtype=mx.float32).reshape(5, 4) / 10
-    runtime = tl.split.prepare(
-        model, x, split_request("after:maximum", backend="mlx", trainable=True)
+    runtime = prepare_fixture(
+        model, x, split_request("through:maximum", backend="mlx", trainable=True)
     )
     optimizer = optim.SGD(0.01)
     seen: list[tuple[int, int, int]] = []
@@ -149,8 +152,8 @@ def test_mlx_stateful_microbatches_match_native_sequential_chunks() -> None:
     reference = deepcopy(model)
     x = mx.sin(mx.arange(20, dtype=mx.float32).reshape(5, 4) / 3)
     targets = mx.cos(x)
-    runtime = tl.split.prepare(
-        model, x, split_request("after:maximum", backend="mlx", trainable=True)
+    runtime = prepare_fixture(
+        model, x, split_request("through:maximum", backend="mlx", trainable=True)
     )
 
     def native_loss(values: Any) -> Any:

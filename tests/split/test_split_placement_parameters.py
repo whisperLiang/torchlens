@@ -7,9 +7,11 @@ import copy
 import pytest
 import torch
 from torch import nn
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split import PlacementPlan
 from torchlens.split.state import SegmentState
 
@@ -48,10 +50,12 @@ def test_placed_prefix_optimizer_uses_training_state(
     x = torch.randn(3, 4)
     y = torch.randn(3, 3)
     original_prefix = [value.detach().clone() for value in model.fc1.parameters()]
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         x,
-        split_request("after:relu", trainable=True, placement=PlacementPlan.across(device, "cpu")),
+        split_request(
+            "through:relu", trainable=True, placement=PlacementPlan.across(device, "cpu")
+        ),
     )
     if warm_inference:
         runtime.run_prefix(x)
@@ -96,10 +100,10 @@ def test_training_prefix_parameters_with_captured_inference_sources() -> None:
         pytest.skip("CUDA is required for heterogeneous state replicas.")
     model = PlacedMlp()
     x = torch.randn(3, 4)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         x,
-        split_request("after:relu", placement=PlacementPlan.across("cuda:0", "cpu")),
+        split_request("through:relu", placement=PlacementPlan.across("cuda:0", "cpu")),
     )
     runtime.run_prefix(x)
     parameters = runtime.prefix_parameters()

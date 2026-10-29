@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from .api import prepare
+from .api import prepare, prepare_graph
 from .boundary import ReplayBoundary
 from .boundary_layout import BoundaryLayout, BoundaryTensorLayout
-from .candidates import SplitCandidate, SplitCandidateReport, SplitPointAnalysis
+from .candidates import PartitionAnalysis
+from .context import SplitGraph
 from .graph_profile import (
     GraphProfile,
     NodeCostFeatures,
@@ -25,14 +26,10 @@ from .ir import (
     SplitFeatures,
     SplitGraphIR,
     SplitModelProfile,
-    SplitPoint,
     SplitRequest,
     SplitVerificationStatus,
     StateIR,
     ValueIR,
-    after,
-    before,
-    percent,
 )
 from .ownership import ParameterOwnership, StateMigration, StateMigrationPlan
 from .pipeline import (
@@ -94,22 +91,16 @@ __all__ = [
     "ShapeProgram",
     "ShapeRecipe",
     "TensorShapeIR",
-    "SplitCandidate",
-    "SplitCandidateReport",
-    "SplitPointAnalysis",
     "SplitCapabilityReport",
     "SplitFeatures",
     "SplitGraphIR",
     "SplitModelProfile",
-    "SplitPoint",
     "SplitRequest",
     "SplitRuntime",
     "SplitVerificationStatus",
     "StateIR",
     "ValueIR",
-    "after",
     "analyze_split_capabilities",
-    "before",
     "capture_canonical_model",
     "capture_model",
     "checkpoint_cache_path",
@@ -119,8 +110,10 @@ __all__ = [
     "execute_split_runtime",
     "lower_split_program",
     "normalize_to_split_ir",
-    "percent",
     "prepare",
+    "prepare_graph",
+    "SplitGraph",
+    "PartitionAnalysis",
     "profile_cache_dir",
     "register_model_profile",
     "resolve_model_profile",

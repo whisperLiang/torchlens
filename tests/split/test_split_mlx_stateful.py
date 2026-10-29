@@ -6,7 +6,12 @@ from copy import deepcopy
 from typing import Any
 
 import pytest
-from v2_helpers import split_request
+from v2_helpers import (
+    candidate_report,
+    prepare_fixture,
+    repartition_fixture,
+    split_request,
+)
 
 mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 nn = pytest.importorskip("mlx.nn", exc_type=ImportError)
@@ -116,8 +121,8 @@ def test_mlx_tied_parameter_steps_match_native(optimizer_cls: Any, shared_optimi
     model = _TiedModel()
     reference = deepcopy(model)
     source = dict(tree_flatten(model.parameters()))
-    runtime = tl.split.prepare(
-        model, _input(2), split_request("after:maximum", backend="mlx", trainable=True)
+    runtime = prepare_fixture(
+        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
     )
     kwargs = {"momentum": 0.8} if optimizer_cls is optim.SGD else {}
     prefix_opt = optimizer_cls(learning_rate=0.01, **kwargs)
@@ -145,12 +150,17 @@ def test_mlx_tied_parameter_steps_match_native(optimizer_cls: Any, shared_optimi
     assert int(prefix_opt.step.item()) == int(suffix_opt.step.item()) == 3
     assert all(value is source[name] for name, value in tree_flatten(model.parameters()))
     migrated = runtime.with_placement(tl.split.PlacementPlan.on(mx.new_stream(mx.cpu)))
-    recut = migrated.at(tl.split.before("maximum"))
+    recut = repartition_fixture(migrated, "until:" + "maximum")
     _close(recut.replay(_input()), reference(_input()))
-    assert all(candidate.training_supported for candidate in runtime.split_points().supported)
+    assert all(
+        candidate.training_supported
+        for candidate in candidate_report(
+            runtime,
+        ).supported
+    )
 
 
-@pytest.mark.parametrize("boundary_point", ["before:maximum", "after:maximum"])
+@pytest.mark.parametrize("boundary_point", ["until:maximum", "through:maximum"])
 def test_mlx_batchnorm_dropout_and_ties_match_native(boundary_point: str) -> None:
     """Running statistics advance once per native call and VJPs reuse the original masks."""
 
@@ -160,7 +170,7 @@ def test_mlx_batchnorm_dropout_and_ties_match_native(boundary_point: str) -> Non
     source = dict(tree_flatten(model.parameters()))
     initial_rng = tuple(value.astype(value.dtype) for value in mx.random.state)
     mx.eval(initial_rng)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model, _input(2), split_request(boundary_point, backend="mlx", trainable=True)
     ).with_placement(
         tl.split.PlacementPlan(
@@ -197,7 +207,7 @@ def test_mlx_batchnorm_dropout_and_ties_match_native(boundary_point: str) -> Non
     _close(model.norm.running_mean, mx.zeros((4,)))
     _close(model.norm.running_var, mx.ones((4,)))
     migrated = runtime.with_placement(tl.split.PlacementPlan.on(mx.new_stream(mx.cpu)))
-    recut = migrated.at(tl.split.before("maximum"))
+    recut = repartition_fixture(migrated, "until:" + "maximum")
     for name, value in tree_flatten(reference.parameters()):
         _close(_runtime_values(recut)[name], value)
 
@@ -211,8 +221,8 @@ def test_mlx_explicit_random_producers_replay_fresh_then_reuse_vjp_keys() -> Non
         noisy = mx.multiply(x, mx.random.uniform(shape=x.shape))
         return mx.multiply(mx.maximum(noisy, 0), mx.random.normal(shape=x.shape))
 
-    runtime = tl.split.prepare(
-        model, _input(2), split_request("after:maximum", backend="mlx", trainable=True)
+    runtime = prepare_fixture(
+        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
     )
     assert runtime.batch_validation["status"] == "passed"
     x, targets = _input(), mx.ones((5, 4))
@@ -236,13 +246,15 @@ def test_mlx_stateful_gradients_at_every_valid_cut() -> None:
 
     mx.random.seed(52)
     model = _StatefulModel()
-    runtime = tl.split.prepare(
-        model, _input(2), split_request("after:maximum", backend="mlx", trainable=True)
+    runtime = prepare_fixture(
+        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
     )
     targets = mx.cos(_input())
-    for candidate in runtime.split_points().supported:
+    for candidate in candidate_report(
+        runtime,
+    ).supported:
         reference = deepcopy(model)
-        split = runtime.at(candidate.point)
+        split = repartition_fixture(runtime, candidate.partition)
         mx.random.seed(82)
         expected_value, gradients = _native_gradients(reference, _input(), targets)
         mx.random.seed(82)
@@ -279,8 +291,8 @@ def test_mlx_tied_aliases_in_distinct_modules_and_suffix_optimizer_owner() -> No
     mx.random.seed(25)
     model = Model()
     source = model.left.weight
-    runtime = tl.split.prepare(
-        model, _input(2), split_request("after:maximum", backend="mlx", trainable=True)
+    runtime = prepare_fixture(
+        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
     )
     targets = mx.cos(_input())
 
@@ -352,8 +364,8 @@ def test_mlx_batchnorm_minimum_batch_uses_independent_probe() -> None:
 
     mx.random.seed(22)
     model = Model()
-    runtime = tl.split.prepare(
-        model, _input(2), split_request("after:maximum", backend="mlx", trainable=True)
+    runtime = prepare_fixture(
+        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
     )
     assert runtime.traced_batch_size == 2
     assert runtime.batch_validation["probe_batch_size"] == 3
@@ -376,11 +388,11 @@ def test_mlx_stateful_tied_updates_across_native_devices(
     mx.random.seed(43)
     model = _StatefulModel()
     reference = deepcopy(model)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         _input(2),
         split_request(
-            "after:maximum",
+            "through:maximum",
             backend="mlx",
             trainable=True,
             placement=tl.split.PlacementPlan.across(prefix_device, suffix_device),

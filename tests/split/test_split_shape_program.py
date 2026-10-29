@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import pytest
 import torch
+from v2_helpers import (
+    FixtureRequest,
+    prepare_fixture,
+    request_fixture,
+)
 
-import torchlens as tl
-from torchlens.split import SplitFeatures, SplitRequest, percent
+from torchlens.split import SplitFeatures
 from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
 
 
-def _request(*, batch_axes: dict[str, int] | None) -> SplitRequest:
+def _request(*, batch_axes: dict[str, int] | None) -> FixtureRequest:
     """Return a strict dynamic-batch request for shape-program tests."""
 
-    return SplitRequest(
-        point=percent(50),
+    return request_fixture(
+        selection="fraction:" + str(50),
         backend="torch",
         features=SplitFeatures(batch_axes=batch_axes),
     )
@@ -31,7 +35,7 @@ def test_explicit_multi_input_batch_axes_propagate_through_permute() -> None:
     model = Model().eval()
     left = torch.ones(2, 3, 4)
     right = torch.ones(3, 2, 4)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         (left, right),
         _request(batch_axes={"/args/0": 0, "/args/1": 1}),
@@ -56,7 +60,7 @@ def test_kwargs_batch_axis_uses_json_pointer_and_runtime_override() -> None:
     model = Model().eval()
     values = torch.ones(2, 3, 4)
     mask = torch.ones(2, 3, 4)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         values,
         _request(batch_axes={"/args/0": 0, "/kwargs/mask": 0}),
@@ -82,7 +86,7 @@ def test_explicit_mode_rejects_unique_undeclared_batch_dimension() -> None:
 
     model = Model().eval()
     with pytest.raises(SplitUnsupportedError, match="undeclared tensor paths"):
-        tl.split.prepare(
+        prepare_fixture(
             model,
             (torch.ones(2, 3), torch.ones(2, 3)),
             _request(batch_axes={"/args/0": 0}),
@@ -97,7 +101,7 @@ def test_explicit_mode_rejects_ambiguous_undeclared_batch_input() -> None:
             return values + mask[:, 0]
 
     with pytest.raises(SplitUnsupportedError, match="undeclared tensor paths"):
-        tl.split.prepare(
+        prepare_fixture(
             Model().eval(),
             (torch.ones(2, 3), torch.ones(2, 2, 3)),
             _request(batch_axes={"/args/0": 0}),
@@ -113,7 +117,7 @@ def test_validate_equivalence_uses_prepared_and_override_kwargs() -> None:
 
     model = Model().eval()
     values = torch.ones(2, 3)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         values,
         _request(batch_axes={"/args/0": 0, "/kwargs/scale": 0}),
@@ -137,7 +141,7 @@ def test_reshape_retains_batch_product_expression() -> None:
 
     model = Model().eval()
     example = torch.ones(2, 3, 4)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         example,
         _request(batch_axes={"/args/0": 0}),
@@ -156,13 +160,13 @@ def test_explicit_batch_axes_reject_unknown_and_non_batch_changes() -> None:
     model = torch.nn.Sequential(torch.nn.Flatten(start_dim=1), torch.nn.Linear(12, 2)).eval()
     example = torch.ones(2, 3, 4)
     with pytest.raises(SplitUnsupportedError, match="Unknown batch input paths"):
-        tl.split.prepare(
+        prepare_fixture(
             model,
             example,
             _request(batch_axes={"/args/9": 0}),
         )
 
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         example,
         _request(batch_axes={"/args/0": 0}),
@@ -179,7 +183,7 @@ def test_auto_inference_rejects_nested_ambiguous_inputs() -> None:
             return values["x"] * 2.0
 
     with pytest.raises(SplitUnsupportedError, match="could not be inferred conservatively"):
-        tl.split.prepare(
+        prepare_fixture(
             Model().eval(),
             {"x": torch.ones(2, 3)},
             _request(batch_axes=None),
@@ -195,7 +199,7 @@ def test_nested_dict_inputs_rebatch_via_explicit_axes() -> None:
 
     model = Model().eval()
     example = {"x": torch.ones(2, 3), "y": torch.ones(2, 3)}
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         example,
         _request(batch_axes={"/args/0/x": 0, "/args/0/y": 0}),

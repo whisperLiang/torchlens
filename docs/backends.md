@@ -272,11 +272,11 @@ MLX also supports generated-eager split replay, functional split training, nativ
 placement, and trusted local boundary caches:
 
 ```python
-request = tl.split.SplitRequest(
-    point=tl.split.after("maximum"),
-    backend="mlx",
-)
-runtime = tl.split.prepare(model, x, request)
+graph = tl.split.prepare_graph(model, x, backend="mlx")
+partition = tl.split.GraphPartition(frozenset(
+    node.canonical_id for node in graph.trace_graph.compute_nodes[:1]
+))
+runtime = graph.materialize(graph.analyze(partition))
 boundary = runtime.run_prefix(x)
 replayed = runtime.run_suffix(boundary)
 ```
@@ -295,13 +295,14 @@ updating. The source model is not updated. One native optimizer can serve both s
 import mlx.core as mx
 import mlx.optimizers as optim
 
-request = tl.split.SplitRequest(
-    point=tl.split.after("maximum"),
-    backend="mlx",
-    features=tl.split.SplitFeatures(training=True),
+graph = tl.split.prepare_graph(
+    model, x, backend="mlx", features=tl.split.SplitFeatures(training=True),
     placement=tl.split.PlacementPlan.on(mx.cpu),
 )
-runtime = tl.split.prepare(model, x, request)
+partition = tl.split.GraphPartition(frozenset(
+    node.canonical_id for node in graph.trace_graph.compute_nodes[:1]
+))
+runtime = graph.materialize(graph.analyze(partition))
 optimizer = optim.Adam(learning_rate=0.01)
 boundary = runtime.run_training_prefix(x)
 suffix = runtime.train_suffix_result(boundary, targets, optimizer=optimizer)

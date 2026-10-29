@@ -8,7 +8,7 @@ from types import MappingProxyType
 from typing import Any, Literal
 
 from .errors import SplitErrorContext, SplitUnsupportedError
-from .ir import GraphPartition, SplitPoint
+from .ir import GraphPartition
 from .state import SegmentState
 
 StateKind = Literal["parameter", "buffer", "literal"]
@@ -257,9 +257,7 @@ def parameter_bindings(runtime: Any) -> Mapping[str, Mapping[str, Any]]:
     )
 
 
-def plan_state_migration(
-    runtime: Any, partition: GraphPartition | SplitPoint
-) -> StateMigrationPlan:
+def plan_state_migration(runtime: Any, partition: GraphPartition) -> StateMigrationPlan:
     """Describe state movement and optimizer reassociation without constructing segments.
 
     Parameters
@@ -279,11 +277,7 @@ def plan_state_migration(
     """
 
     _require_torch(runtime)
-    analysis = (
-        runtime.analyze_partition(partition)
-        if isinstance(partition, GraphPartition)
-        else runtime.analyze(partition)
-    )
+    analysis = runtime.analyze(partition)
     with runtime._temporary_segment_state_snapshots() as snapshots:
         rows, bindings = _inventory(runtime, snapshots)
         migrations = []

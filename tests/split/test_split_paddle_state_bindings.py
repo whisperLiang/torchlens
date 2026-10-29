@@ -54,9 +54,9 @@ def test_parameter_binding_matches_native_training_across_batches(call_style: st
             paddle.seed(123)
             model = Model()
             reference = copy.deepcopy(model)
-            runtime = tl.split.prepare(
+            runtime = prepare_fixture(
                 model, paddle.ones([2, 4]),
-                split_request('after:relu', backend='paddle', trainable=True),
+                split_request('through:relu', backend='paddle', trainable=True),
             )
             assert runtime.trace_graph.shape_program.batch_probe.status == 'passed'
             for segment, expected in (
@@ -127,13 +127,13 @@ def test_repeated_and_reversed_operands_keep_exact_live_state() -> None:
             paddle.set_device(device)
             paddle.seed(12)
             model = Model()
-            runtime = tl.split.prepare(
-                model, paddle.ones([2, 4]), split_request('after:relu', backend='paddle'),
+            runtime = prepare_fixture(
+                model, paddle.ones([2, 4]), split_request('through:relu', backend='paddle'),
             )
             assert runtime.trace_graph.shape_program.batch_probe.status == 'passed'
             for shift in (0.0, 0.2):
                 model.set_state_dict({name: value + shift for name, value in model.state_dict().items()})
-                for updated in (runtime, runtime.at(tl.split.before('relu'))):
+                for updated in (runtime, repartition_fixture(runtime, "until:" + str('relu'))):
                     for batch in (1, 2, 4):
                         x = paddle.arange(batch * 4, dtype='float32').reshape([batch, 4]) / 7
                         assert_close(updated.replay(x), model(x))
@@ -154,8 +154,8 @@ def test_missing_state_provenance_refuses_instead_of_guessing_parameter() -> Non
         model = paddle.nn.Sequential(
             paddle.nn.Linear(4, 4), paddle.nn.ReLU(), paddle.nn.Linear(4, 4)
         )
-        runtime = tl.split.prepare(
-            model, paddle.ones([2, 4]), split_request('before:relu', backend='paddle'),
+        runtime = prepare_fixture(
+            model, paddle.ones([2, 4]), split_request('until:relu', backend='paddle'),
         )
         node = next(node for node in runtime.trace_graph.nodes if node.op_type == 'functional.linear')
         marker = node.kwargs_template['weight']
@@ -189,8 +189,8 @@ def test_unwrapped_intermediate_never_becomes_a_historical_state_literal() -> No
             hidden = paddle.add(x, paddle.ones_like(x))
             return paddle.nn.functional.relu(hidden) * 2
 
-        runtime = tl.split.prepare(
-            model, paddle.ones([2, 4]), split_request('after:relu', backend='paddle'),
+        runtime = prepare_fixture(
+            model, paddle.ones([2, 4]), split_request('through:relu', backend='paddle'),
         )
         try:
             runtime.replay(paddle.ones([1, 4]) * 5)

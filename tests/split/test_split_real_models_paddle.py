@@ -21,6 +21,7 @@ def test_paddle_layer_model_split_replay_batch_symbolic_and_train() -> None:
         """
         import paddle
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         class PaddleMLP(paddle.nn.Layer):
             def __init__(self):
@@ -37,7 +38,7 @@ def test_paddle_layer_model_split_replay_batch_symbolic_and_train() -> None:
         model = PaddleMLP()
         model.eval()
         x = paddle.ones([2, 2, 3], dtype="float32")
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             model,
             x,
             split_request("25%", backend="paddle"),
@@ -48,7 +49,7 @@ def test_paddle_layer_model_split_replay_batch_symbolic_and_train() -> None:
             assert float(diff.item()) < 1e-5
 
         model.train()
-        train_runtime = tl.split.prepare(
+        train_runtime = prepare_fixture(
             model,
             x,
             split_request("25%", backend="paddle", trainable=True),
@@ -74,6 +75,7 @@ def test_paddle_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
         """
         import paddle
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         if paddle.device.cuda.device_count() == 0:
             print("No Paddle GPU available for CPU-prefix/GPU-suffix split training.")
@@ -96,7 +98,7 @@ def test_paddle_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
         paddle.set_device("cpu")
         model = PaddleTrainMlp()
         trace_x = paddle.randn([2, 4], dtype="float32")
-        seed_runtime = tl.split.prepare(
+        seed_runtime = prepare_fixture(
             model,
             trace_x,
             split_request("50%", backend="paddle", trainable=True),
@@ -106,11 +108,11 @@ def test_paddle_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
             for node in seed_runtime.trace_graph.compute_nodes
             if "relu" in node.op_type
         )
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             model,
             trace_x,
             split_request(
-                f"after:{relu_id}",
+                f"through:{relu_id}",
                 backend="paddle",
                 trainable=True,
             ),
@@ -157,6 +159,7 @@ def test_paddle_mlp_all_split_nodes_cross_batch_and_device() -> None:
         """
         import paddle
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         class PaddleMLP(paddle.nn.Layer):
             def __init__(self):
@@ -180,7 +183,7 @@ def test_paddle_mlp_all_split_nodes_cross_batch_and_device() -> None:
         model = PaddleMLP()
         model.eval()
         x = paddle.ones([2, 6], dtype="float32")
-        seed_runtime = tl.split.prepare(
+        seed_runtime = prepare_fixture(
             model,
             x,
             split_request("50%", backend="paddle"),
@@ -188,12 +191,12 @@ def test_paddle_mlp_all_split_nodes_cross_batch_and_device() -> None:
         boundaries = [
             f"{kind}:{node.canonical_id}"
             for node in seed_runtime.trace_graph.compute_nodes
-            for kind in ("before", "after")
+            for kind in ("until", "through")
         ]
         for boundary in boundaries:
             paddle.set_device("cpu")
             model.to("cpu")
-            runtime = tl.split.prepare(
+            runtime = prepare_fixture(
                 model,
                 x,
                 split_request(boundary, backend="paddle"),
@@ -232,6 +235,7 @@ def test_paddle_transformer_block_split_replay_batch_symbolic_and_device() -> No
         import paddle
         import paddle.nn.functional as F
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         class PaddleTransformerBlock(paddle.nn.Layer):
             def __init__(self):
@@ -263,7 +267,7 @@ def test_paddle_transformer_block_split_replay_batch_symbolic_and_device() -> No
             model.eval()
             x = paddle.ones([2, 4, 8], dtype="float32")
             for boundary in ("25%", "50%", "75%"):
-                runtime = tl.split.prepare(
+                runtime = prepare_fixture(
                     model,
                     x,
                     split_request(boundary, backend="paddle"),
@@ -286,6 +290,7 @@ def test_paddle_official_vision_models_split_replay_batch_symbolic() -> None:
         """
         import paddle
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         def assert_close(left, right, *, atol=1e-5, rtol=1e-4):
             assert bool(paddle.allclose(left, right, atol=atol, rtol=rtol).item())
@@ -297,7 +302,7 @@ def test_paddle_official_vision_models_split_replay_batch_symbolic() -> None:
             model.eval()
             x = paddle.ones(shape, dtype="float32")
             for boundary in ("25%", "50%", "75%"):
-                runtime = tl.split.prepare(
+                runtime = prepare_fixture(
                     model,
                     x,
                     split_request(boundary, backend="paddle"),
@@ -340,7 +345,7 @@ def test_paddle_complete_multiscale_detector_all_nodes_cross_batch() -> None:
         import paddle
         import paddle.nn.functional as F
         import torchlens as tl
-        from torchlens.split import after, before
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         class CompletePaddleDetector(paddle.nn.Layer):
             def __init__(self):
@@ -381,7 +386,7 @@ def test_paddle_complete_multiscale_detector_all_nodes_cross_batch() -> None:
         model = CompletePaddleDetector()
         model.eval()
         trace_x = paddle.ones([1, 3, 32, 32], dtype="float32")
-        seed_runtime = tl.split.prepare(
+        seed_runtime = prepare_fixture(
             model,
             trace_x,
             split_request("50%", backend="paddle"),
@@ -389,19 +394,19 @@ def test_paddle_complete_multiscale_detector_all_nodes_cross_batch() -> None:
         boundaries = [
             (kind, node.canonical_id)
             for node in seed_runtime.trace_graph.compute_nodes
-            for kind in ("before", "after")
+            for kind in ("until", "through")
         ]
         assert boundaries
         for kind, node_id in boundaries:
-            point = after(node_id) if kind == "after" else before(node_id)
-            runtime = seed_runtime.at(point)
+            point = "through:" + str(node_id) if kind == "after" else "until:" + str(node_id)
+            runtime = repartition_fixture(seed_runtime, point)
             actual = runtime.replay(trace_x)
             expected = model(trace_x)
             for actual_leaf, expected_leaf in zip(actual, expected, strict=True):
                 assert float(paddle.max(paddle.abs(actual_leaf - expected_leaf)).item()) < 1e-4
 
         for batch in (2, 3):
-            runtime = seed_runtime.at(split_request("50%", backend="paddle").point)
+            runtime = repartition_fixture(seed_runtime, split_request("50%", backend="paddle").partition)
             replay_x = paddle.ones([batch, 3, 32, 32], dtype="float32")
             actual = runtime.replay(replay_x)
             expected = model(replay_x)
@@ -422,6 +427,7 @@ def test_paddle_official_resnet_cross_batch_and_device() -> None:
         """
         import paddle
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         if paddle.device.cuda.device_count() == 0:
             print("No Paddle GPU available for official ResNet cross-device replay.")
@@ -440,7 +446,7 @@ def test_paddle_official_resnet_cross_batch_and_device() -> None:
             # budget here. FP64 isolates boundary transport and replay fidelity.
             model.to(dtype="float64")
             trace_x = paddle.ones([2, 3, 32, 32], dtype="float64")
-            runtime = tl.split.prepare(
+            runtime = prepare_fixture(
                 model,
                 trace_x,
                 split_request(boundary, backend="paddle"),
@@ -480,6 +486,7 @@ def test_paddle_official_lenet_all_split_nodes_cross_batch_and_device() -> None:
         """
         import paddle
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         def assert_place(tensor, token):
             assert token in str(tensor.place).lower(), tensor.place
@@ -493,7 +500,7 @@ def test_paddle_official_lenet_all_split_nodes_cross_batch_and_device() -> None:
         model = paddle.vision.models.LeNet(num_classes=10)
         model.eval()
         x = paddle.ones([2, 1, 28, 28], dtype="float32")
-        seed_runtime = tl.split.prepare(
+        seed_runtime = prepare_fixture(
             model,
             x,
             split_request("50%", backend="paddle"),
@@ -502,12 +509,12 @@ def test_paddle_official_lenet_all_split_nodes_cross_batch_and_device() -> None:
             f"{kind}:{node.canonical_id}"
             for node in seed_runtime.trace_graph.compute_nodes
             if node.parents
-            for kind in ("before", "after")
+            for kind in ("until", "through")
         ]
         for boundary in boundaries:
             paddle.set_device("cpu")
             model.to("cpu")
-            runtime = tl.split.prepare(
+            runtime = prepare_fixture(
                 model,
                 x,
                 split_request(boundary, backend="paddle"),

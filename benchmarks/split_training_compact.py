@@ -72,7 +72,7 @@ def main() -> None:
     from torch import nn
 
     import torchlens as tl
-    from torchlens.split import api
+    from torchlens.split import api, context
     from torchlens.split.errors import SplitUnsupportedError
 
     torch.set_num_threads(1)
@@ -120,11 +120,8 @@ def main() -> None:
     model = Model().to(args.device).train(training)
     inputs = torch.randn(args.batch_size, args.width, device=args.device, requires_grad=training)
     targets = torch.randn_like(inputs)
-    request = tl.split.SplitRequest(
-        point=tl.split.after(f"layers.{max(args.depth // 2 - 1, 0)}"),
-        features=tl.split.SplitFeatures(
-            training=training, retain_trace=args.mode == "diagnostic-training"
-        ),
+    features = tl.split.SplitFeatures(
+        training=training, retain_trace=args.mode == "diagnostic-training"
     )
     report: dict[str, Any] = {
         "mode": args.mode,
@@ -169,10 +166,14 @@ def main() -> None:
                 api, "normalize_to_split_ir", instrument("normalize", api.normalize_to_split_ir)
             ),
             patch.object(
-                api, "execute_split_runtime", instrument("materialize", api.execute_split_runtime)
+                context,
+                "execute_split_runtime",
+                instrument("materialize", context.execute_split_runtime),
             ),
         ):
-            runtime = tl.split.prepare(model, inputs, request)
+            graph = tl.split.prepare_graph(model, inputs, features=features)
+            partition = graph.partition_candidates()[len(graph.partition_candidates()) // 2]
+            runtime = graph.materialize(graph.analyze(partition))
     except SplitUnsupportedError as error:
         report.update(status="unsupported", error=str(error))
         print(json.dumps(report))
@@ -246,10 +247,12 @@ def main() -> None:
     recut_snapshots = []
     nodes = runtime.trace_graph.compute_nodes
     for index in range(args.recuts):
-        point = tl.split.after(nodes[index % len(nodes)].canonical_id)
+        partition = tl.split.GraphPartition(
+            frozenset(node.canonical_id for node in nodes[: index % len(nodes) + 1])
+        )
         sync()
         started = time.perf_counter()
-        recut = runtime.at(point)
+        recut = runtime.repartition(partition)
         sync()
         recut_samples.append((time.perf_counter() - started) * 1000)
         recut_refs.append(weakref.ref(recut))

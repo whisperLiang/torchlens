@@ -6,7 +6,10 @@ from typing import Any
 
 import numpy as np
 import pytest
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
 import torchlens as tl
 from torchlens.backends.tinygrad import TinygradBackend
@@ -52,7 +55,7 @@ def test_tinygrad_function_replay_uses_changed_inputs(point: str) -> None:
 
     Tensor = pytest.importorskip("tinygrad").Tensor
     model = _nested_function_model()
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         Tensor.ones(2, 3, device="CPU", dtype="float32").realize(),
         split_request(point, backend="tinygrad", batch_axes={}),

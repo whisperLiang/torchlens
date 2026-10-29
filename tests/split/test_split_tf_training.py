@@ -5,9 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split.errors import SplitUnsupportedError
 
 
@@ -54,10 +56,10 @@ def test_tf_module_split_training_optimizer_step_matches_full_step() -> None:
         split_model = clone_from(base)
         x = tf.reshape(tf.linspace(-1.0, 1.0, 8), (2, 4))
         y = tf.reshape(tf.linspace(0.25, -0.25, 6), (2, 3))
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             split_model,
             x,
-            split_request("after:relu", backend="tf", trainable=True),
+            split_request("through:relu", backend="tf", trainable=True),
         )
         full_opt = tf.keras.optimizers.SGD(learning_rate=0.05)
         suffix_opt = tf.keras.optimizers.SGD(learning_rate=0.05)
@@ -93,7 +95,7 @@ def test_tf_training_boundary_cache_strips_gradient_tape(tmp_path) -> None:
 
     x = tf.ones((2, 2), dtype=tf.float32)
     target = tf.zeros_like(x)
-    runtime = tl.split.prepare(model, x, split_request("after:relu", backend="tf", trainable=True))
+    runtime = prepare_fixture(model, x, split_request("through:relu", backend="tf", trainable=True))
     boundary = runtime.run_training_prefix(x)
 
     runtime.save_boundary(boundary, tmp_path / "boundary")

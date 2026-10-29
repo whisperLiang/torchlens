@@ -7,9 +7,12 @@ from typing import Any
 
 import pytest
 import torch
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    repartition_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split import pipeline
 from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
 
@@ -34,14 +37,14 @@ def test_replay_releases_dead_tensor_objects_within_segment(
     x = torch.randn(2, 8)
     model = Chain()
     with torch.no_grad():
-        seed = tl.split.prepare(model, x, split_request("50%", retain_trace=True))
+        seed = prepare_fixture(model, x, split_request("50%", retain_trace=True))
     nodes = seed.trace_graph.compute_nodes
     point = (
-        tl.split.after(nodes[-1].canonical_id)
+        "through:" + str(nodes[-1].canonical_id)
         if segment_name == "prefix"
-        else tl.split.before(nodes[0].canonical_id)
+        else "until:" + str(nodes[0].canonical_id)
     )
-    runtime = seed.at(point)
+    runtime = repartition_fixture(seed, point)
     segment = getattr(runtime.segments, segment_name)
     execute = segment._execute_func
     references: list[weakref.ReferenceType[torch.Tensor]] = []
@@ -88,11 +91,11 @@ def test_every_cut_keeps_multioutput_aliases_and_early_output() -> None:
     model = AliasedBranches()
     x = torch.randn(2, 8)
     with torch.no_grad():
-        seed = tl.split.prepare(model, x, split_request("50%"))
+        seed = prepare_fixture(model, x, split_request("50%"))
         expected = model(x)
         for node in seed.trace_graph.compute_nodes:
-            for point in (tl.split.before(node.canonical_id), tl.split.after(node.canonical_id)):
-                runtime = seed.at(point)
+            for point in ("until:" + str(node.canonical_id), "through:" + str(node.canonical_id)):
+                runtime = repartition_fixture(seed, point)
                 actual = runtime.replay(x)
                 assert actual.keys() == expected.keys()
                 for name in expected:
@@ -107,7 +110,7 @@ def test_graph_connected_replay_still_computes_input_gradients() -> None:
     x = torch.randn(2, 8, requires_grad=True)
     expected = model(x)
     expected_grad = torch.autograd.grad(expected.sum(), x)[0]
-    runtime = tl.split.prepare(model, x, split_request("50%", trainable=True))
+    runtime = prepare_fixture(model, x, split_request("50%", trainable=True))
     boundary = runtime.run_training_prefix(x)
     actual = runtime.run_suffix(boundary)
     actual_grad = torch.autograd.grad(actual.sum(), x)[0]
@@ -122,9 +125,9 @@ def test_cuda_replay_peak_tracks_frontier_not_chain_length() -> None:
 
     x = torch.ones(2, 32768, device="cuda")
     with torch.no_grad():
-        seed = tl.split.prepare(Chain(), x, split_request("50%", batch_axes={}))
+        seed = prepare_fixture(Chain(), x, split_request("50%", batch_axes={}))
         first = seed.trace_graph.compute_nodes[0]
-        runtime = seed.at(tl.split.before(first.canonical_id))
+        runtime = repartition_fixture(seed, "until:" + str(first.canonical_id))
         torch.cuda.synchronize()
         baseline = torch.cuda.memory_allocated()
         torch.cuda.reset_peak_memory_stats()
@@ -169,7 +172,7 @@ def test_probe_releases_witness_capture_before_generated_replay(
     monkeypatch.setattr(pipeline, "capture_model", observe_capture)
     monkeypatch.setattr(pipeline, "execute_split_runtime", observe_segments)
     with torch.no_grad():
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             Chain(), torch.ones(4, 8), split_request("50%", retain_trace=True)
         )
     assert checked
@@ -203,7 +206,7 @@ def test_shape_witness_omits_values_without_changing_retained_trace(
 
     monkeypatch.setattr(pipeline, "capture_model", observe)
     with torch.no_grad():
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             Chain(), torch.ones(4, 8), split_request("50%", retain_trace=True)
         )
     assert len(observations) == 2
@@ -243,7 +246,7 @@ def test_failed_shape_witness_never_recaptures_with_full_values(
     inputs = torch.ones(4, 8)
     rng = torch.random.get_rng_state().clone()
     with torch.no_grad():
-        runtime = tl.split.prepare(MutatingModel(), inputs, split_request("50%"))
+        runtime = prepare_fixture(MutatingModel(), inputs, split_request("50%"))
     assert attempts == [True, False]
     assert runtime.batch_validation["status"] == "failed", runtime.batch_validation
     assert "scalar parent requires saved arguments" in runtime.batch_validation["reason"]

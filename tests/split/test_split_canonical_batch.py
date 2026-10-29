@@ -13,9 +13,11 @@ from typing import Any
 
 import numpy as np
 import pytest
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split import pipeline
 from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
 
@@ -35,7 +37,7 @@ def _check_native_backend(backend: str) -> None:
 
             return native.maximum(x, 0)
 
-        boundary = "after:max"
+        boundary = "through:max"
     elif backend == "tf":
         native = pytest.importorskip("tensorflow")
         from torchlens.split.adapters.tf import TfSplitAdapter
@@ -43,7 +45,7 @@ def _check_native_backend(backend: str) -> None:
         adapter = TfSplitAdapter()
         make = native.constant
         relu = native.nn.relu
-        boundary = "after:relu"
+        boundary = "through:relu"
     elif backend == "paddle":
         native = pytest.importorskip("paddle")
         from torchlens.split.adapters.paddle import PaddleSplitAdapter
@@ -57,7 +59,7 @@ def _check_native_backend(backend: str) -> None:
 
             return native.nn.functional.relu(x)
 
-        boundary = "after:relu"
+        boundary = "through:relu"
     else:
         native = pytest.importorskip("tinygrad")
         from torchlens.split.adapters.tinygrad import TinygradSplitAdapter
@@ -74,7 +76,7 @@ def _check_native_backend(backend: str) -> None:
 
             return x.relu()
 
-        boundary = "after:where"
+        boundary = "through:where"
 
     for dtype in (np.float32, np.int32, np.bool_):
         values = np.arange(12).reshape(3, 4).astype(dtype)
@@ -99,7 +101,7 @@ def _check_native_backend(backend: str) -> None:
 
     for axes, shape in ((None, (4,)), ({}, (4,)), ({}, (7, 4))):
         static_input = make(np.ones(shape, dtype=np.float32))
-        static = tl.split.prepare(
+        static = prepare_fixture(
             model,
             static_input,
             split_request(boundary, backend=backend, batch_axes=axes),
@@ -116,7 +118,7 @@ def _check_native_backend(backend: str) -> None:
             static.run_prefix(make(np.ones((shape[0] + 1, *shape[1:]), dtype=np.float32)))
 
     runtimes = [
-        tl.split.prepare(
+        prepare_fixture(
             model,
             make(np.ones((batch, 4), dtype=np.float32)),
             split_request(boundary, backend=backend),
@@ -138,7 +140,7 @@ def _check_native_backend(backend: str) -> None:
 
         return relu(x) * (3.0 if x.shape[0] >= 2 else 2.0)
 
-    restricted = tl.split.prepare(
+    restricted = prepare_fixture(
         branch_model,
         make(np.ones((8, 4), dtype=np.float32)),
         split_request(boundary, backend=backend),
@@ -215,7 +217,7 @@ def test_rebatch_failure_does_not_capture_original_batch(monkeypatch: pytest.Mon
     monkeypatch.setattr(pipeline, "capture_model", capture)
     with pytest.raises(SplitUnsupportedError, match="Cannot construct canonical batch B=1"):
         pipeline.capture_canonical_model(
-            object(), (torch.ones(32, 4),), split_request("after:relu"), adapter=adapter
+            object(), (torch.ones(32, 4),), split_request("through:relu"), adapter=adapter
         )
     assert captures == []
 
@@ -273,7 +275,7 @@ def test_canonical_capture_only_retries_at_two(
         return result
 
     monkeypatch.setattr(pipeline, "capture_model", capture)
-    args = (object(), (torch.ones(32, 4),), split_request("after:relu"))
+    args = (object(), (torch.ones(32, 4),), split_request("through:relu"))
     if accept_two:
         actual, inputs, _kwargs, batch_spec = pipeline.capture_canonical_model(
             *args, adapter=TorchSplitAdapter()

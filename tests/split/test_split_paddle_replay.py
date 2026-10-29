@@ -25,10 +25,10 @@ def test_paddle_split_replay_equivalence() -> None:
             return hidden * 2.0 + 1.0
 
         x = paddle.randn([2, 3], dtype="float32")
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             model,
             x,
-            split_request("after:relu", backend="paddle"),
+            split_request("through:relu", backend="paddle"),
         )
 
         boundary = runtime.run_prefix(x)
@@ -58,10 +58,10 @@ def test_paddle_boundary_cache_roundtrip() -> None:
             return hidden * 2.0 + 1.0
 
         x = paddle.randn([2, 3], dtype="float32")
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             model,
             x,
-            split_request("after:relu", backend="paddle"),
+            split_request("through:relu", backend="paddle"),
         )
         boundary = runtime.run_prefix(x)
 
@@ -93,10 +93,10 @@ def test_paddle_batch_symbolic_replay_for_reshape() -> None:
             return paddle.nn.functional.relu(flat) * 2.0
 
         x = paddle.randn([2, 3, 2], dtype="float32")
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             model,
             x,
-            split_request("after:reshape", backend="paddle"),
+            split_request("through:reshape", backend="paddle"),
         )
 
         for batch in (1, 2, 4):
@@ -122,10 +122,10 @@ def test_paddle_batch_symbolic_preserves_fixed_dim_matching_trace_batch() -> Non
             return paddle.nn.functional.relu(flat)
 
         x = paddle.randn([2, 1, 2], dtype="float32")
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             model,
             x,
-            split_request("after:reshape", backend="paddle"),
+            split_request("through:reshape", backend="paddle"),
         )
 
         for batch in (1, 2, 4):
@@ -163,10 +163,10 @@ def test_paddle_layer_split_training_optimizer_step_matches_full_step() -> None:
         split_model = copy.deepcopy(model)
         x = paddle.randn([2, 4], dtype="float32")
         y = paddle.randn([2, 3], dtype="float32")
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             split_model,
             x,
-            split_request("after:relu", backend="paddle", trainable=True),
+            split_request("through:relu", backend="paddle", trainable=True),
         )
         suffix_opt = paddle.optimizer.SGD(
             learning_rate=0.05,

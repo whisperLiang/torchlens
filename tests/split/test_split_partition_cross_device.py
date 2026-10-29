@@ -7,15 +7,16 @@ from copy import deepcopy
 import pytest
 import torch
 from torch import nn
+from v2_helpers import (
+    prepare_fixture,
+    request_fixture,
+)
 
 from torchlens.split import (
     GraphPartition,
     PlacementPlan,
     SplitFeatures,
-    SplitRequest,
     SplitRuntime,
-    after,
-    prepare,
 )
 
 
@@ -76,16 +77,16 @@ def test_noncontiguous_cross_device_training_and_external_optimizer_migration(
     # choices; no global TF32 setting or numerical tolerance is changed.
     model = InterleavedBranches().double()
     reference = deepcopy(model)
-    runtime = prepare(
+    runtime = prepare_fixture(
         model,
         torch.randn(1, 4, dtype=torch.float64),
-        SplitRequest(
-            after("left_end"),
+        request_fixture(
+            "through:" + "left_end",
             features=SplitFeatures(training=True, retain_trace=retain_trace),
         ),
     )
     partitions = (_branch_partition(runtime, "left"), _branch_partition(runtime, "right"))
-    runtime = runtime.partition(partitions[0]).with_placement(
+    runtime = runtime.repartition(partitions[0]).with_placement(
         PlacementPlan.across(prefix_device, suffix_device)
     )
     graph = runtime.trace_graph
@@ -142,7 +143,7 @@ def test_noncontiguous_cross_device_training_and_external_optimizer_migration(
             for field in ("weight", "bias"):
                 assert moved[f"parameter:{branch}.{field}"].optimizer_action == expected_action
         previous, previous_optimizer = effective, optimizer
-        runtime = runtime.partition(selected)
+        runtime = runtime.repartition(selected)
         assert runtime.trace_graph is graph
         effective = _effective_parameters(runtime)
         optimizer = torch.optim.SGD(effective.values(), lr=0.01, momentum=0.9)

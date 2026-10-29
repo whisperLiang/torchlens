@@ -6,17 +6,24 @@ from unittest.mock import patch
 
 import torch
 from torch import nn
+from v2_helpers import (
+    analyze_fixture,
+    prepare_fixture,
+    request_fixture,
+)
 
-from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, after, prepare
+from torchlens.split import GraphPartition, SplitFeatures
 
 
 def test_profile_and_partition_metrics_need_no_execution() -> None:
     """Expose batch-scaled frontier costs without replaying or materializing."""
     model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
-    runtime = prepare(
+    runtime = prepare_fixture(
         model,
         torch.ones(2, 4),
-        SplitRequest(after("1"), features=SplitFeatures(training=True, retain_trace=False)),
+        request_fixture(
+            "through:" + "1", features=SplitFeatures(training=True, retain_trace=False)
+        ),
     )
     with (
         patch.object(model, "forward", side_effect=AssertionError("no recapture")),
@@ -38,7 +45,7 @@ def test_profile_and_partition_metrics_need_no_execution() -> None:
             for node in runtime.trace_graph.compute_nodes
             if node.module_path in {"0", "1"}
         )
-        analysis = runtime.analyze_partition(GraphPartition(selected))
+        analysis = analyze_fixture(runtime, GraphPartition(selected))
         assert analysis.metrics is not None
         assert analysis.metrics.unique_boundary_tensors == 1
         assert analysis.metrics.forward_boundary_bytes == runtime.traced_batch_size * 8 * 4
@@ -54,7 +61,7 @@ def test_unproven_batch_costs_are_unknown() -> None:
             """Return distinct compute graphs for the two witness batches."""
             return torch.sigmoid(torch.relu(x)) if x.shape[0] > 1 else torch.relu(x)
 
-    runtime = prepare(BatchBranch(), torch.ones(2, 4), SplitRequest(after("relu")))
+    runtime = prepare_fixture(BatchBranch(), torch.ones(2, 4), request_fixture("through:" + "relu"))
     assert runtime.batch_validation["status"] == "failed"
     profile = runtime.graph_profile(batch_size=8)
     assert "batch_shape:extrapolation_unproven" in profile.unknown_cost_diagnostics

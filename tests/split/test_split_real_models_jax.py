@@ -24,6 +24,7 @@ def test_jax_stax_cnn_split_replay_batch_symbolic_and_train() -> None:
         from jax.example_libraries import stax
 
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         init_fun, apply_fun = stax.serial(
             stax.Conv(4, (3, 3), padding="SAME"),
@@ -38,7 +39,7 @@ def test_jax_stax_cnn_split_replay_batch_symbolic_and_train() -> None:
             return apply_fun(params, x)
 
         x = jnp.ones((2, 32, 32, 3), dtype=jnp.float32)
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             model,
             (params, x),
             split_request("25%", backend="jax"),
@@ -47,7 +48,7 @@ def test_jax_stax_cnn_split_replay_batch_symbolic_and_train() -> None:
             replay_x = jnp.ones((batch, 32, 32, 3), dtype=jnp.float32)
             assert bool(jnp.allclose(runtime.replay(params, replay_x), model(params, replay_x)))
 
-        train_runtime = tl.split.prepare(
+        train_runtime = prepare_fixture(
             model,
             (params, x),
             split_request("25%", backend="jax", trainable=True),
@@ -82,6 +83,7 @@ def test_jax_flax_haiku_equinox_all_split_nodes_cross_batch_and_device() -> None
         import jax.numpy as jnp
 
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         def platform_devices(platform):
             try:
@@ -101,20 +103,20 @@ def test_jax_flax_haiku_equinox_all_split_nodes_cross_batch_and_device() -> None
             return [
                 f"{kind}:{node.canonical_id}"
                 for node in runtime.trace_graph.compute_nodes
-                for kind in ("before", "after")
+                for kind in ("until", "through")
             ]
 
         def assert_all_split_nodes(name, model, args_factory):
             with jax.default_device(cpu):
                 traced_args = args_factory(2, cpu)
-                seed_runtime = tl.split.prepare(
+                seed_runtime = prepare_fixture(
                     model,
                     traced_args,
                     split_request("50%", backend="jax"),
                 )
             for boundary in all_boundaries(seed_runtime):
                 with jax.default_device(cpu):
-                    runtime = tl.split.prepare(
+                    runtime = prepare_fixture(
                         model,
                         traced_args,
                         split_request(boundary, backend="jax"),
@@ -239,6 +241,7 @@ def test_jax_flax_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
         import jax
         import jax.numpy as jnp
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         try:
             cpu = jax.devices("cpu")[0]
@@ -274,7 +277,7 @@ def test_jax_flax_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
             return all(bool(check) for check in checks)
 
         trace_x = jax.device_put(jnp.ones((2, 4), dtype=jnp.float32), cpu)
-        seed_runtime = tl.split.prepare(
+        seed_runtime = prepare_fixture(
             model,
             (params_cpu, trace_x),
             split_request("50%", backend="jax", trainable=True),
@@ -284,11 +287,11 @@ def test_jax_flax_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
             for node in seed_runtime.trace_graph.compute_nodes
             if node.op_type in {"max", "jax_region"}
         )
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             model,
             (params_cpu, trace_x),
             split_request(
-                f"after:{activation_id}",
+                f"through:{activation_id}",
                 backend="jax",
                 trainable=True,
             ),
@@ -342,6 +345,7 @@ def test_jax_reference_resnet_transformer_and_vit_split_replay_batch_symbolic() 
         from jax.example_libraries import stax
 
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         residual_init, residual_apply = stax.serial(
             stax.FanOut(2),
@@ -444,7 +448,7 @@ def test_jax_reference_resnet_transformer_and_vit_split_replay_batch_symbolic() 
         for model, params, input_factory in model_cases:
             x = input_factory(2)
             for boundary in ("25%", "50%", "75%"):
-                runtime = tl.split.prepare(
+                runtime = prepare_fixture(
                     model,
                     (params, x),
                     split_request(boundary, backend="jax"),
@@ -474,7 +478,7 @@ def test_jax_complete_multiscale_detector_all_nodes_cross_batch() -> None:
         import jax
         import jax.numpy as jnp
         import torchlens as tl
-        from torchlens.split import after, before
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         class CompleteJaxDetector(nn.Module):
             @nn.compact
@@ -521,7 +525,7 @@ def test_jax_complete_multiscale_detector_all_nodes_cross_batch() -> None:
                     diff = float(jnp.max(jnp.abs(actual[key] - expected[key])))
                     raise AssertionError(f"JAX detector mismatch {key=} {diff=}")
 
-        seed_runtime = tl.split.prepare(
+        seed_runtime = prepare_fixture(
             model,
             (params, trace_x),
             split_request("50%", backend="jax"),
@@ -529,12 +533,12 @@ def test_jax_complete_multiscale_detector_all_nodes_cross_batch() -> None:
         boundaries = [
             (kind, node.canonical_id)
             for node in seed_runtime.trace_graph.compute_nodes
-            for kind in ("before", "after")
+            for kind in ("until", "through")
         ]
         assert boundaries
         for kind, node_id in boundaries:
-            point = after(node_id) if kind == "after" else before(node_id)
-            runtime = seed_runtime.at(point)
+            point = "through:" + str(node_id) if kind == "after" else "until:" + str(node_id)
+            runtime = repartition_fixture(seed_runtime, point)
             try:
                 assert_same(runtime.replay(params, trace_x), model(params, trace_x))
             except AssertionError as exc:
@@ -545,8 +549,8 @@ def test_jax_complete_multiscale_detector_all_nodes_cross_batch() -> None:
 
         for batch in (2, 3):
             replay_x = jnp.ones((batch, 32, 32, 3), dtype=jnp.float32)
-            runtime = seed_runtime.at(
-                split_request("50%", backend="jax").point
+            runtime = repartition_fixture(seed_runtime,
+                split_request("50%", backend="jax").partition
             )
             assert_same(runtime.replay(params, replay_x), model(params, replay_x))
         """,
@@ -566,6 +570,7 @@ def test_jax_stax_mlp_all_split_nodes_cross_batch_and_device() -> None:
         from jax.example_libraries import stax
 
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         def platform_devices(platform):
             try:
@@ -592,14 +597,14 @@ def test_jax_stax_mlp_all_split_nodes_cross_batch_and_device() -> None:
         gpu = gpu_devices[0]
         params_cpu = jax.tree_util.tree_map(lambda value: jax.device_put(value, cpu), base_params)
         x_cpu = jax.device_put(jnp.ones((2, 6), dtype=jnp.float32), cpu)
-        seed_runtime = tl.split.prepare(
+        seed_runtime = prepare_fixture(
             model,
             (params_cpu, x_cpu),
             split_request("50%", backend="jax"),
         )
         boundaries = ("25%", "50%", "75%")
         for boundary in boundaries:
-            runtime = tl.split.prepare(
+            runtime = prepare_fixture(
                 model,
                 (params_cpu, x_cpu),
                 split_request(boundary, backend="jax"),

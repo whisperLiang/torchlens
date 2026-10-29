@@ -65,12 +65,14 @@ def test_fresh_split_captures_held_activation_once_per_batch(
 
         get_dynamo_optimized_module_type(force_probe=True)
         import torchlens as tl
+        sys.path.insert(0, str(__import__("pathlib").Path.cwd() / "tests" / "split"))
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
         example = torch.randn(2, 4, 3, 4)
 
         for index in range(2):
-            runtime = tl.split.prepare(
-                model, example, tl.split.SplitRequest(
-                    point=tl.split.percent(50),
+            runtime = prepare_fixture(
+                model, example, request_fixture(
+                    selection="fraction:" + str(50),
                     features=tl.split.SplitFeatures(retain_trace=True),
                 )
             )

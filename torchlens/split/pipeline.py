@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import types
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
@@ -35,7 +36,7 @@ from .errors import SplitUnsupportedError
 from .graph import SplitTraceGraph, project_symbolic_shapes, split_graph_from_trace
 from .ir import SplitGraphIR, SplitModelProfile, SplitRequest
 from .placement import PlacementPlan
-from .planner import SplitPlan, plan_split
+from .planner import SplitPlan, plan_partition
 from .program import (
     ReplayProgram,
     ReplaySegment,
@@ -295,7 +296,7 @@ def _execute_batch_probe(
         placement=PlacementPlan(),
         features=replace(request.features, training=False, live_param_sources=False),
     )
-    probe_plan = plan_split(graph, probe_request)
+    probe_plan = plan_partition(graph, probe_request)
     segments = execute_split_runtime(adapter, graph, probe_plan, probe_request)
     scope = getattr(adapter, "batch_probe_scope", None)
     with scope(segments) if callable(scope) else nullcontext():
@@ -559,6 +560,12 @@ def _torch_capture_state(model: Any) -> Iterator[None]:
         )
         for module in (model.modules() if hasattr(model, "modules") else ())
     )
+    hook_registries = tuple(
+        (module, name, registry, tuple(registry.items()))
+        for module, _parameters, _buffers, _children in registered_state
+        for name, registry in vars(module).items()
+        if isinstance(registry, OrderedDict) and (name.endswith("_hooks") or "_hooks_" in name)
+    )
     plain_attrs = _ModuleTreePlainAttrSnapshot(
         model,
         ignored_names=frozenset({"_tl", "forward"}),
@@ -589,6 +596,13 @@ def _torch_capture_state(model: Any) -> Iterator[None]:
                 module._modules.clear()
                 module._modules.update(children)
 
+        def restore_hook_registries() -> None:
+            """Preserve native weak-referenceable registries and existing user handles."""
+            for module, name, registry, entries in hook_registries:
+                registry.clear()
+                registry.update(entries)
+                vars(module)[name] = registry
+
         def restore_state_dict() -> None:
             """Restore captured tensor values after the module tree is restored."""
 
@@ -605,6 +619,7 @@ def _torch_capture_state(model: Any) -> Iterator[None]:
         attempt_restore(restore_state_dict)
         attempt_restore(restore_training_modes)
         attempt_restore(plain_attrs.restore_changed_attrs)
+        attempt_restore(restore_hook_registries)
         attempt_restore(lambda: set_rng_from_saved_states(rng_state))
         if active_error is None and cleanup_errors:
             raise cleanup_errors[0]
@@ -784,10 +799,9 @@ def normalize_to_split_ir(
             traced_batch_size=shape_program.traced_batch_size,
         )
         graph = project_symbolic_shapes(graph, shape_program)
-    resolved_plan = plan if plan is not None else plan_split(graph, spec)
     return graph, SplitGraphIR.from_trace_graph(
         graph,
-        plan=resolved_plan,
+        plan=plan,
         profile_hash=None if model_profile is None else model_profile.profile_hash,
     )
 

@@ -8,9 +8,14 @@ from typing import Any
 
 import pytest
 import torch
+from v2_helpers import (
+    FixtureRequest,
+    prepare_fixture,
+    repartition_fixture,
+    request_fixture,
+)
 
-import torchlens as tl
-from torchlens.split import PlacementPlan, SplitFeatures, SplitRequest, pipeline
+from torchlens.split import PlacementPlan, SplitFeatures, pipeline
 from torchlens.split.errors import SplitUnsupportedError
 
 
@@ -20,11 +25,11 @@ def _request(
     training: bool = False,
     live_param_sources: bool | None = None,
     batch_axes: dict[str, int] | None = None,
-) -> SplitRequest:
+) -> FixtureRequest:
     """Build a typed request without opting existing fixtures into retention."""
 
-    return SplitRequest(
-        point=tl.split.percent(50),
+    return request_fixture(
+        selection="fraction:" + str(50),
         features=SplitFeatures(
             retain_trace=retain_trace,
             training=training,
@@ -52,7 +57,7 @@ def test_inference_defaults_to_compact_recuttable_runtime(retain_trace: bool | N
     model = AllocationChain()
     x = torch.randn(3, 4)
     with torch.no_grad():
-        runtime = tl.split.prepare(model, x, _request(retain_trace=retain_trace))
+        runtime = prepare_fixture(model, x, _request(retain_trace=retain_trace))
         assert not runtime.retains_trace
         assert runtime._trace is None
         with pytest.raises(SplitUnsupportedError, match="retain_trace=True"):
@@ -61,8 +66,12 @@ def test_inference_defaults_to_compact_recuttable_runtime(retain_trace: bool | N
         expected = model(x)
         for changed in (
             runtime,
-            runtime.at(tl.split.before(runtime.trace_graph.compute_nodes[0].canonical_id)),
-            runtime.at(tl.split.after(runtime.trace_graph.compute_nodes[-1].canonical_id)),
+            repartition_fixture(
+                runtime, "until:" + str(runtime.trace_graph.compute_nodes[0].canonical_id)
+            ),
+            repartition_fixture(
+                runtime, "through:" + str(runtime.trace_graph.compute_nodes[-1].canonical_id)
+            ),
             runtime.with_placement(PlacementPlan.on("cpu")),
         ):
             assert not changed.retains_trace
@@ -96,7 +105,7 @@ def test_compact_runtime_releases_original_trace_and_intermediate_snapshots(
     model = AllocationChain()
     x = torch.randn(3, 4)
     with torch.no_grad():
-        runtime = tl.split.prepare(model, x, _request(batch_axes={}))
+        runtime = prepare_fixture(model, x, _request(batch_axes={}))
     gc.collect()
     assert traces and all(reference() is None for reference in traces)
     assert all(reference() is None for reference in payloads)
@@ -111,11 +120,13 @@ def test_diagnostic_retention_preserves_trace_values_and_recut_identity() -> Non
     model = AllocationChain()
     x = torch.randn(3, 4)
     with torch.no_grad():
-        runtime = tl.split.prepare(model, x, _request(retain_trace=True))
+        runtime = prepare_fixture(model, x, _request(retain_trace=True))
         assert runtime.retains_trace
         assert runtime.trace is runtime._trace
         assert all(op.out is not None for op in runtime.trace)
-        recut = runtime.at(tl.split.before(runtime.trace_graph.compute_nodes[0].canonical_id))
+        recut = repartition_fixture(
+            runtime, "until:" + str(runtime.trace_graph.compute_nodes[0].canonical_id)
+        )
         assert recut.trace is runtime.trace
         torch.testing.assert_close(recut.replay(x), model(x))
     runtime.trace.cleanup()
@@ -129,7 +140,7 @@ def test_compact_replay_and_recut_restore_captured_cpu_autocast() -> None:
     with torch.no_grad():
         with torch.autocast("cpu", dtype=torch.bfloat16):
             expected = model(x)
-            runtime = tl.split.prepare(model, x, _request(batch_axes={}))
+            runtime = prepare_fixture(model, x, _request(batch_axes={}))
         assert expected.dtype == torch.bfloat16
         assert not torch.is_autocast_enabled("cpu")
         assert not runtime.retains_trace
@@ -140,8 +151,8 @@ def test_compact_replay_and_recut_restore_captured_cpu_autocast() -> None:
         first, last = runtime.trace_graph.compute_nodes[0], runtime.trace_graph.compute_nodes[-1]
         for changed in (
             runtime,
-            runtime.at(tl.split.before(first.canonical_id)),
-            runtime.at(tl.split.after(last.canonical_id)),
+            repartition_fixture(runtime, "until:" + str(first.canonical_id)),
+            repartition_fixture(runtime, "through:" + str(last.canonical_id)),
         ):
             actual = changed.replay(x)
             assert actual.dtype == torch.bfloat16
@@ -160,7 +171,7 @@ def test_compact_preparation_releases_cuda_activation_archive() -> None:
         for retain_trace in (True, False):
             gc.collect()
             baseline = torch.cuda.memory_allocated()
-            runtime = tl.split.prepare(model, x, _request(retain_trace=retain_trace, batch_axes={}))
+            runtime = prepare_fixture(model, x, _request(retain_trace=retain_trace, batch_axes={}))
             gc.collect()
             torch.cuda.synchronize()
             retained[retain_trace] = torch.cuda.memory_allocated() - baseline
@@ -210,25 +221,25 @@ def test_compact_replay_keeps_required_state_constants_and_nested_outputs(batch:
     model = ConstantSources().eval()
     x = torch.randn(3, 4)
     with torch.no_grad():
-        runtime = tl.split.prepare(model, x, _request())
-        diagnostic = tl.split.prepare(model, x, _request(retain_trace=True))
+        runtime = prepare_fixture(model, x, _request())
+        diagnostic = prepare_fixture(model, x, _request(retain_trace=True))
         actual_input = x[:batch]
         expected = model(actual_input)
         assert_output(runtime.replay(actual_input), expected)
         checked = 0
         for node in runtime.trace_graph.compute_nodes:
-            for point in (tl.split.before(node.canonical_id), tl.split.after(node.canonical_id)):
+            for point in ("until:" + str(node.canonical_id), "through:" + str(node.canonical_id)):
                 try:
-                    reference = diagnostic.at(point)
+                    reference = repartition_fixture(diagnostic, point)
                 except SplitUnsupportedError as exc:
                     # Plain tensor sources can have no live buffer handle.
                     # The established recut guard then rejects merging the
                     # inference and training-prefix states in either mode.
                     with pytest.raises(SplitUnsupportedError) as compact_error:
-                        runtime.at(point)
+                        repartition_fixture(runtime, point)
                     assert compact_error.value.context == exc.context
                     continue
-                actual = runtime.at(point).replay(actual_input)
+                actual = repartition_fixture(runtime, point).replay(actual_input)
                 assert_output(actual, expected)
                 assert_output(actual, reference.replay(actual_input))
                 checked += 1
@@ -256,11 +267,11 @@ def test_compact_every_cut_preserves_residuals_views_and_inplace_updates() -> No
     model = AliasedResidual()
     x = torch.randn(3, 8)
     with torch.no_grad():
-        runtime = tl.split.prepare(model, x, _request())
+        runtime = prepare_fixture(model, x, _request())
         expected = model(x)
         for node in runtime.trace_graph.compute_nodes:
-            for point in (tl.split.before(node.canonical_id), tl.split.after(node.canonical_id)):
-                torch.testing.assert_close(runtime.at(point).replay(x), expected)
+            for point in ("until:" + str(node.canonical_id), "through:" + str(node.canonical_id)):
+                torch.testing.assert_close(repartition_fixture(runtime, point).replay(x), expected)
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda:0"])
@@ -272,7 +283,7 @@ def test_compact_placement_preserves_live_parameter_identity_and_model_device(de
     model = torch.nn.Sequential(torch.nn.Linear(4, 5), torch.nn.ReLU(), torch.nn.Linear(5, 3))
     x = torch.randn(3, 4)
     with torch.no_grad():
-        runtime = tl.split.prepare(model, x, _request(live_param_sources=True))
+        runtime = prepare_fixture(model, x, _request(live_param_sources=True))
         parameters = [
             reference.handle for node in runtime.trace_graph.nodes for reference in node.param_refs
         ]
@@ -294,7 +305,7 @@ def test_live_buffer_replacement_updates_replay_without_growing_state(retain_tra
     model = torch.nn.Sequential(torch.nn.BatchNorm1d(4), torch.nn.ReLU()).eval()
     inputs = torch.arange(12, dtype=torch.float32).reshape(3, 4)
     with torch.no_grad():
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             model, inputs, _request(retain_trace=retain_trace, live_param_sources=True)
         )
         runtime.replay(inputs)
@@ -326,7 +337,7 @@ def test_compact_buffer_lookup_keeps_last_value_without_retaining_owner() -> Non
     model = torch.nn.Sequential(torch.nn.BatchNorm1d(4), torch.nn.ReLU()).eval()
     inputs = torch.ones(3, 4)
     with torch.no_grad():
-        runtime = tl.split.prepare(model, inputs, _request(live_param_sources=True))
+        runtime = prepare_fixture(model, inputs, _request(live_param_sources=True))
         references = [buffer for node in runtime.trace_graph.nodes for buffer in node.buffer_refs]
         assert references
         owner = weakref.ref(model[0])
@@ -353,13 +364,15 @@ def test_owned_buffer_replacement_preserves_effective_state_and_recut(
     inputs = torch.arange(12, dtype=torch.float32).reshape(3, 4)
     request = _request(retain_trace=retain_trace, live_param_sources=True)
     with torch.no_grad():
-        runtime = tl.split.prepare(model, inputs, request).with_placement(PlacementPlan.on("cpu"))
+        runtime = prepare_fixture(model, inputs, request).with_placement(PlacementPlan.on("cpu"))
         expected = runtime.replay(inputs)
         model._apply(lambda value: value.clone())
         model[0].running_mean.fill_(20)
         assert not torch.equal(expected, model(inputs))
         torch.testing.assert_close(runtime.replay(inputs), expected)
-        recut = runtime.at(tl.split.before(runtime.trace_graph.compute_nodes[0].canonical_id))
+        recut = repartition_fixture(
+            runtime, "until:" + str(runtime.trace_graph.compute_nodes[0].canonical_id)
+        )
         torch.testing.assert_close(recut.replay(inputs), expected)
         if retain_trace:
             runtime.trace.cleanup()
@@ -376,7 +389,7 @@ def test_training_automatically_retains_trace_and_preserves_input_and_parameter_
     expected = model(x)
     targets = (x, *model.parameters())
     expected_gradients = torch.autograd.grad(expected.sum(), targets)
-    runtime = tl.split.prepare(model, x, _request(training=True, retain_trace=retain_trace))
+    runtime = prepare_fixture(model, x, _request(training=True, retain_trace=retain_trace))
     assert runtime.retains_trace
     assert runtime.trace is not None
     boundary = runtime.run_training_prefix(x)
@@ -392,7 +405,7 @@ def test_training_with_explicit_compact_retention_preserves_gradients() -> None:
 
     model = AllocationChain()
     inputs = torch.randn(3, 4, requires_grad=True)
-    runtime = tl.split.prepare(model, inputs, _request(training=True, retain_trace=False))
+    runtime = prepare_fixture(model, inputs, _request(training=True, retain_trace=False))
     assert not runtime.retains_trace
     for _ in range(2):
         expected = model(inputs)

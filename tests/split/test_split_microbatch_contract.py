@@ -13,7 +13,11 @@ from typing import Any
 import pytest
 import torch
 from torch import nn
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    repartition_fixture,
+    split_request,
+)
 
 import torchlens as tl
 from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
@@ -96,7 +100,7 @@ def _prepare(model: nn.Module | None = None) -> tuple[Any, torch.Tensor, torch.T
     torch.manual_seed(314)
     model = ContractMlp() if model is None else model
     x, targets = torch.randn(7, 4), torch.randn(7, 3)
-    return tl.split.prepare(model, x, split_request("after:relu", trainable=True)), x, targets
+    return prepare_fixture(model, x, split_request("through:relu", trainable=True)), x, targets
 
 
 def _assert_gradients(actual: dict[str, Any], expected: dict[str, Any]) -> None:
@@ -118,9 +122,9 @@ def test_nonleading_batch_and_shared_value_match_full_prefix_backward() -> None:
     shared = torch.randn(6, requires_grad=True)
     micro_shared = shared.detach().clone().requires_grad_(True)
     targets = torch.randn(7, 3)
-    request = split_request("after:sin", trainable=True, batch_axes={"/args/0": 0})
-    full = tl.split.prepare(model, (x, shared), request)
-    micro = tl.split.prepare(micro_model, (x, micro_shared), request)
+    request = split_request("through:sin", trainable=True, batch_axes={"/args/0": 0})
+    full = prepare_fixture(model, (x, shared), request)
+    micro = prepare_fixture(micro_model, (x, micro_shared), request)
     boundary = full.run_training_prefix(x, shared)
     micro_boundary = micro.run_training_prefix(x, micro_shared)
     assert sorted(tuple(value.shape) for value in boundary.tensors.values()) == [(6,), (6, 7)]
@@ -139,7 +143,7 @@ def test_residual_and_integer_frontier_matches_full_and_stays_reusable() -> None
     """Slice every batched crossing, exclude integer gradients, and preserve input."""
 
     runtime, x, targets = _prepare(ResidualAndIndexModel())
-    runtime = runtime.at(tl.split.after("argmax"))
+    runtime = repartition_fixture(runtime, "through:" + "argmax")
     boundary = runtime.run_prefix(x)
     snapshots = {key: value.clone() for key, value in boundary.tensors.items()}
     integer_keys = {key for key, value in boundary.tensors.items() if not value.is_floating_point()}
@@ -160,7 +164,7 @@ def test_integer_chunk_mutation_does_not_write_caller_boundary(
     """Nondifferentiable inputs need storage isolation just like autograd roots."""
 
     runtime, x, targets = _prepare(ResidualAndIndexModel())
-    runtime = runtime.at(tl.split.after("argmax"))
+    runtime = repartition_fixture(runtime, "through:" + "argmax")
     boundary = runtime.run_prefix(x)
     snapshots = {key: value.clone() for key, value in boundary.tensors.items()}
     execute = runtime.segments.suffix._execute_nodes
@@ -239,7 +243,7 @@ def test_sum_reduction_matches_full_batch_and_optimizer_is_lazy() -> None:
     full, x, targets = _prepare()
     micro_model = ContractMlp()
     micro_model.load_state_dict(full.model.state_dict())
-    micro = tl.split.prepare(micro_model, x, split_request("after:relu", trainable=True))
+    micro = prepare_fixture(micro_model, x, split_request("through:relu", trainable=True))
     full_optimizer = CountingAdam(full.model.fc2.parameters())
     micro_optimizer = CountingAdam(micro.model.fc2.parameters())
     boundary = full.run_prefix(x)

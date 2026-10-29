@@ -5,14 +5,16 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split._tf_capture import batch_stable_keras_add
 
 
 @pytest.mark.tf_backend
-@pytest.mark.parametrize("point", ["before:add", "after:add"])
+@pytest.mark.parametrize("point", ["until:add", "through:add"])
 def test_singleton_spatial_residual_replays_and_restores_keras(point: str) -> None:
     """Retain batch-changing residual shape, values, and original Keras callable.
 
@@ -30,7 +32,7 @@ def test_singleton_spatial_residual_replays_and_restores_keras(point: str) -> No
     model = tf.keras.Model(inputs, tf.keras.layers.ReLU()(residual))
     original = keras_numpy.add
     with tf.device("/CPU:0"):
-        runtime = tl.split.prepare(model, tf.ones((2, 1, 1, 4)), split_request(point, backend="tf"))
+        runtime = prepare_fixture(model, tf.ones((2, 1, 1, 4)), split_request(point, backend="tf"))
         assert keras_numpy.add is original
         assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
         for batch in (1, 2, 3):
@@ -108,7 +110,7 @@ def test_keras_subclass_probe_preserves_generated_layer_names(
         model(sample)
         names = tuple(layer.name for layer in model.layers)
         weights = tuple(variable.numpy().copy() for variable in model.weights)
-        runtime = tl.split.prepare(model, sample, split_request("50%", backend="tf"))
+        runtime = prepare_fixture(model, sample, split_request("50%", backend="tf"))
         assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
         assert tuple(layer.name for layer in model.layers) == names
         for variable, expected in zip(model.weights, weights, strict=True):

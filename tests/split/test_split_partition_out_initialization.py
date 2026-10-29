@@ -8,10 +8,15 @@ from dataclasses import replace
 import pytest
 import torch
 from torch import nn
+from v2_helpers import (
+    capture_fixture,
+    plan_fixture,
+    prepare_fixture,
+    request_fixture,
+)
 
-from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, after, percent, prepare
+from torchlens.split import GraphPartition, SplitFeatures
 from torchlens.split.errors import SplitUnsupportedError
-from torchlens.split.planner import plan_split
 from torchlens.split.shape_program import DimExpr
 
 
@@ -46,11 +51,11 @@ def test_anchor_initialization_preserves_training_and_recuts(
     torch.manual_seed(428)
     model = AnchorInitialization().to(device)
     reference = deepcopy(model)
-    runtime = prepare(
+    runtime = prepare_fixture(
         model,
         torch.randn(1, 4, device=device),
-        SplitRequest(
-            after("cut"), features=SplitFeatures(training=True, retain_trace=retain_trace)
+        request_fixture(
+            "through:" + "cut", features=SplitFeatures(training=True, retain_trace=retain_trace)
         ),
     )
     graph = runtime.trace_graph
@@ -62,7 +67,7 @@ def test_anchor_initialization_preserves_training_and_recuts(
         )
     )
     entire = GraphPartition(frozenset(node.canonical_id for node in graph.compute_nodes))
-    runtime = runtime.partition(initial)
+    runtime = runtime.repartition(initial)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
     expected_optimizer = torch.optim.SGD(reference.parameters(), lr=0.01, momentum=0.9)
     for index, batch in enumerate((1, 2, 4, 8)):
@@ -88,7 +93,7 @@ def test_anchor_initialization_preserves_training_and_recuts(
         for actual, expected in zip(model.parameters(), reference.parameters(), strict=True):
             torch.testing.assert_close(actual, expected)
             torch.testing.assert_close(optimizer.state[actual], expected_optimizer.state[expected])
-        runtime = runtime.partition(entire if index % 2 == 0 else initial)
+        runtime = runtime.repartition(entire if index % 2 == 0 else initial)
         assert runtime.trace_graph is graph
 
 
@@ -112,26 +117,28 @@ def test_uncertified_out_writes_stay_refused(destination: str) -> None:
                 return torch.add(x, 1, out=out)
             return torch.arange(4, out=out)
 
-    runtime = prepare(UnprovenOut(), torch.ones(4), SplitRequest(percent(50)))
+    runtime = capture_fixture(UnprovenOut(), torch.ones(4), request_fixture("fraction:" + str(50)))
     partition = GraphPartition(
         frozenset(node.canonical_id for node in runtime.trace_graph.compute_nodes)
     )
     with pytest.raises(SplitUnsupportedError) as caught:
-        runtime.partition(partition)
+        runtime.analyze(partition)
     assert caught.value.context.reason == "partition_effect_order_unproven"
 
 
 def test_anchor_destination_cannot_cross_the_boundary() -> None:
     """The allocation and write must remain in the same segment."""
 
-    runtime = prepare(AnchorInitialization(), torch.randn(2, 4), SplitRequest(after("cut")))
+    runtime = prepare_fixture(
+        AnchorInitialization(), torch.randn(2, 4), request_fixture("through:" + "cut")
+    )
     selected: set[str] = set()
     for node in runtime.trace_graph.compute_nodes:
         selected.add(node.canonical_id)
         if node.op_type == "newfull":
             break
     with pytest.raises(SplitUnsupportedError) as caught:
-        runtime.partition(GraphPartition(frozenset(selected)))
+        runtime.repartition(GraphPartition(frozenset(selected)))
     assert caught.value.context.reason == "partition_effect_order_unproven"
 
 
@@ -147,21 +154,25 @@ def test_anchor_initialization_keeps_the_complete_effect_order_barrier() -> None
             anchors = torch.arange(4, out=destination)
             return independent + anchors
 
-    runtime = prepare(Interleaved(), torch.randn(2, 4), SplitRequest(percent(50)))
+    runtime = capture_fixture(
+        Interleaved(), torch.randn(2, 4), request_fixture("fraction:" + str(50))
+    )
     selected = frozenset(
         node.canonical_id
         for node in runtime.trace_graph.compute_nodes
         if node.op_type in {"newfull", "arange"}
     )
     with pytest.raises(SplitUnsupportedError) as caught:
-        runtime.partition(GraphPartition(selected))
+        runtime.analyze(GraphPartition(selected))
     assert caught.value.context.reason == "partition_effect_order_unproven"
 
 
 def test_anchor_requires_matching_symbolic_destination_extents() -> None:
     """Matching B=1 metadata alone cannot certify a dynamically resizing destination."""
 
-    runtime = prepare(AnchorInitialization(), torch.randn(1, 4), SplitRequest(after("cut")))
+    runtime = prepare_fixture(
+        AnchorInitialization(), torch.randn(1, 4), request_fixture("through:" + "cut")
+    )
     graph = runtime.trace_graph
     allocation = next(node for node in graph.compute_nodes if node.op_type == "newfull")
     program = graph.shape_program
@@ -171,7 +182,7 @@ def test_anchor_requires_matching_symbolic_destination_extents() -> None:
         dims=(DimExpr("mul", args=(DimExpr.const(4), DimExpr.symbol(program.batch_symbol))),),
     )
     changed = replace(graph, shape_program=replace(program, value_shapes=shapes))
-    request = replace(runtime.request, point=GraphPartition(frozenset()))
+    request = replace(runtime.request, partition=GraphPartition(frozenset()))
     with pytest.raises(SplitUnsupportedError) as caught:
-        plan_split(changed, request)
+        plan_fixture(changed, request)
     assert caught.value.context.reason == "partition_effect_order_unproven"

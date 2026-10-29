@@ -228,8 +228,6 @@ class StateIR:
 BoundaryRole = Literal[
     "input",
     "output",
-    "primary",
-    "skip",
     "passthrough",
     "multi_scale_feature",
     "index",
@@ -598,58 +596,10 @@ class GraphPartition:
 
 
 @dataclass(frozen=True)
-class SplitPoint:
-    """Typed split point replacing stringly-typed boundary specifications."""
-
-    kind: Literal["after", "before", "percent"]
-    target: str | float
-
-    def __post_init__(self) -> None:
-        """Validate the typed point before it reaches the planner."""
-
-        if self.kind not in {"after", "before", "percent"}:
-            raise ValueError("SplitPoint.kind must be 'after', 'before', or 'percent'")
-        if self.kind == "percent":
-            try:
-                value = float(self.target)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("percent split target must be numeric") from exc
-            if not 0 < value < 100:
-                raise ValueError("percent split target must be strictly between 0 and 100")
-        elif not isinstance(self.target, str) or not self.target.strip():
-            raise ValueError("named split point target must be a non-empty string")
-
-    def as_boundary(self) -> str:
-        """Return the internal planner spelling for this point."""
-
-        if self.kind == "percent":
-            return f"percent:{self.target}"
-        return f"{self.kind}:{self.target}"
-
-
-def after(target: str) -> SplitPoint:
-    """Create an ``after`` split point."""
-
-    return SplitPoint("after", target)
-
-
-def before(target: str) -> SplitPoint:
-    """Create a ``before`` split point."""
-
-    return SplitPoint("before", target)
-
-
-def percent(value: float) -> SplitPoint:
-    """Create a percentage split point."""
-
-    return SplitPoint("percent", value)
-
-
-@dataclass(frozen=True)
 class SplitRequest:
     """Public v2 request for preparing a split runtime."""
 
-    point: SplitPoint | GraphPartition
+    partition: GraphPartition
     backend: str | None = None
     model_profile: str | SplitModelProfile | None = None
     features: SplitFeatures = field(default_factory=SplitFeatures)
@@ -661,6 +611,8 @@ class SplitRequest:
     def __post_init__(self) -> None:
         """Validate request-level policy."""
 
+        if not isinstance(self.partition, GraphPartition):
+            raise TypeError("partition must be a GraphPartition")
         if self.validation not in {"strict", "permissive"}:
             raise ValueError("validation must be 'strict' or 'permissive'")
         if self.device_policy != "runtime":
@@ -672,9 +624,9 @@ class SplitRequest:
 
     @property
     def boundary(self) -> str:
-        """Return the planner spelling of the typed split point."""
+        """Return the planner spelling of the canonical partition."""
 
-        return self.point.as_boundary()
+        return self.partition.as_boundary()
 
     @property
     def trainable(self) -> bool:
@@ -864,12 +816,8 @@ __all__ = [
     "SplitFeatures",
     "SplitGraphIR",
     "SplitModelProfile",
-    "SplitPoint",
     "SplitRequest",
     "SplitVerificationStatus",
     "StateIR",
     "ValueIR",
-    "after",
-    "before",
-    "percent",
 ]

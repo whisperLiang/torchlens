@@ -2,24 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from ..backends import resolve_backend_spec
 from ..backends.registry import TORCH_BACKEND_NAME
 from .adapters import resolve_split_adapter
+from .context import SplitGraph
 from .errors import SplitErrorContext, SplitUnsupportedError
-from .ir import SplitRequest
+from .ir import GraphPartition, SplitFeatures, SplitModelProfile, SplitRequest
 from .pipeline import (
-    analyze_split_capabilities,
     capture_canonical_model,
-    execute_split_runtime,
-    lower_split_program,
     normalize_to_split_ir,
 )
-from .placement import require_placement_support
-from .planner import plan_split
+from .placement import PlacementPlan, require_placement_support
 from .profiles import resolve_model_profile
-from .program import ensure_capability_report_supported
 from .runtime import SplitRuntime
 
 
@@ -31,14 +27,14 @@ def _normalize_inputs(inputs: Any) -> tuple[Any, ...]:
     return (inputs,)
 
 
-def prepare(
+def _prepare_graph(
     model: Any,
     inputs: Any,
     request: SplitRequest,
     *,
     input_kwargs: dict[str, Any] | None = None,
-) -> SplitRuntime:
-    """Prepare a backend-neutral split runtime from a v2 request.
+) -> SplitGraph:
+    """Capture a backend-neutral graph and shape program from typed policies.
 
     Parameters
     ----------
@@ -47,7 +43,7 @@ def prepare(
     inputs:
         Example positional inputs.
     request:
-        Typed split point, backend, profile, and feature request. Torch inference
+        Canonical partition, backend, profile, and feature request. Torch inference
         defaults to a compact runtime without a diagnostic Trace. Request
         ``features=SplitFeatures(retain_trace=True)`` to retain saved activations.
         Training and other backends retain their complete captures by default.
@@ -58,8 +54,8 @@ def prepare(
 
     Returns
     -------
-    SplitRuntime
-        Prepared split runtime.
+    SplitGraph
+        Captured graph context without executable segments.
     """
 
     profile = resolve_model_profile(request.model_profile)
@@ -132,34 +128,12 @@ def prepare(
             # Also release the owned diagnostic capture if normalization fails.
             # Successful normalization already releases it before the B=2 probe.
             capture.cleanup()
-    plan = plan_split(graph, request)
-    prefix_program = lower_split_program(graph, plan, request, segment="prefix", adapter=adapter)
-    suffix_program = lower_split_program(graph, plan, request, segment="suffix", adapter=adapter)
-    capability_report = analyze_split_capabilities(
-        adapter,
-        graph,
-        plan,
-        request,
-        prefix_program=prefix_program,
-        suffix_program=suffix_program,
-        graph_ir=graph_ir,
-        model_profile=profile,
-        features=request.features.as_dict(),
-    )
-    if request.validation == "strict":
-        ensure_capability_report_supported(capability_report, request)
-    segments = execute_split_runtime(adapter, graph, plan, request)
-    return SplitRuntime(
+    return SplitGraph(
         model=model,
         trace=None if compact else capture,
         trace_graph=graph,
         request=request,
-        plan=plan,
         adapter=adapter,
-        segments=segments,
-        capability_report=capability_report,
-        prefix_program=prefix_program,
-        suffix_program=suffix_program,
         graph_ir=graph_ir,
         model_profile=profile,
         prepared_input_kwargs=input_kwargs,
@@ -167,4 +141,72 @@ def prepare(
     )
 
 
-__all__ = ["prepare"]
+def prepare_graph(
+    model: Any,
+    inputs: Any,
+    *,
+    backend: str | None = None,
+    features: SplitFeatures = SplitFeatures(),
+    model_profile: str | SplitModelProfile | None = None,
+    placement: PlacementPlan = PlacementPlan(),
+    validation: Literal["strict", "permissive"] = "strict",
+    input_kwargs: dict[str, Any] | None = None,
+) -> SplitGraph:
+    """Capture once before choosing a canonical GraphPartition.
+
+    Parameters
+    ----------
+    model:
+        Backend model or callable.
+    inputs:
+        Example positional inputs; batch axes follow ``features.batch_axes``.
+    backend, features, model_profile, placement, validation:
+        Capture, shape, backend and execution policies.
+    input_kwargs:
+        Example keyword arguments.
+
+    Returns
+    -------
+    SplitGraph
+        Shared graph and shape metadata with analysis and materialization doors.
+        No persistent executable segments or private parameter replicas are created.
+    """
+    return _prepare_graph(
+        model,
+        inputs,
+        SplitRequest(
+            GraphPartition(frozenset()),
+            backend=backend,
+            features=features,
+            model_profile=model_profile,
+            placement=placement,
+            validation=validation,
+        ),
+        input_kwargs=input_kwargs,
+    )
+
+
+def prepare(
+    model: Any, inputs: Any, request: SplitRequest, *, input_kwargs: dict[str, Any] | None = None
+) -> SplitRuntime:
+    """Capture and materialize when canonical partition IDs are already known.
+
+    Parameters
+    ----------
+    model, inputs:
+        Backend model and example positional inputs.
+    request:
+        Canonical GraphPartition and capture/execution policies.
+    input_kwargs:
+        Optional example keyword inputs.
+
+    Returns
+    -------
+    SplitRuntime
+        Runtime produced by the same two-stage graph workflow.
+    """
+    graph = _prepare_graph(model, inputs, request, input_kwargs=input_kwargs)
+    return graph.materialize(graph.analyze(request.partition))
+
+
+__all__ = ["prepare", "prepare_graph"]

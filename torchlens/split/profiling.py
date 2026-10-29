@@ -11,7 +11,7 @@ from time import perf_counter
 from typing import Any
 
 from ..backends.registry import TORCH_BACKEND_NAME
-from .candidates import SplitPointAnalysis
+from .candidates import PartitionAnalysis
 from .errors import SplitErrorContext, SplitUnsupportedError
 from .planner import _validate_partition_effects
 
@@ -156,7 +156,7 @@ def _materialize_trial(runtime: Any, session: _ProfileSession) -> tuple[Any, flo
     with runtime._temporary_segment_state_snapshots():
         start = perf_counter()
         trial = runtime.materialize(
-            SplitPointAnalysis(
+            PartitionAnalysis(
                 runtime.trace_graph,
                 runtime.request,
                 runtime.plan,

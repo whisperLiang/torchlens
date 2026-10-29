@@ -7,9 +7,11 @@ from typing import Any
 
 import pytest
 import torch
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split import PlacementPlan
 from torchlens.split.adapters.torch import (
     _GeneratedSegmentBase,
@@ -115,10 +117,10 @@ def test_cpu_captured_factory_runs_on_cuda_suffix(kind: str, explicit_device: bo
     model = Model().eval()
     x = torch.randn(3, 4)
     expected = model(x)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         x,
-        split_request("after:relu", placement=PlacementPlan.across("cpu", "cuda:0")),
+        split_request("through:relu", placement=PlacementPlan.across("cpu", "cuda:0")),
     )
     assert runtime.batch_validation["status"] == "passed"
     output = runtime.replay(x)

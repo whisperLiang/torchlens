@@ -7,9 +7,10 @@ import copy
 import pytest
 import torch
 from torch import nn
-from v2_helpers import split_request
-
-import torchlens as tl
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
 
 class TinyMicrobatchMlp(nn.Module):
@@ -52,8 +53,8 @@ def test_uneven_microbatches_match_full_suffix_and_prefix_update() -> None:
     micro_model = copy.deepcopy(full_model)
     x = torch.randn(7, 4)
     targets = torch.randn(7, 3)
-    full_runtime = tl.split.prepare(full_model, x, split_request("after:relu", trainable=True))
-    micro_runtime = tl.split.prepare(micro_model, x, split_request("after:relu", trainable=True))
+    full_runtime = prepare_fixture(full_model, x, split_request("through:relu", trainable=True))
+    micro_runtime = prepare_fixture(micro_model, x, split_request("through:relu", trainable=True))
     full_suffix = CountingSgd(full_model.fc2.parameters(), lr=0.03)
     full_prefix = CountingSgd(full_model.fc1.parameters(), lr=0.03)
     micro_suffix = CountingSgd(micro_model.fc2.parameters(), lr=0.03)
@@ -87,7 +88,7 @@ def test_microbatch_target_callback_and_nested_targets() -> None:
     model = TinyMicrobatchMlp()
     x = torch.randn(7, 4)
     target = {"value": torch.randn(7, 3), "constant": torch.tensor(2.0)}
-    runtime = tl.split.prepare(model, x, split_request("after:relu", trainable=True))
+    runtime = prepare_fixture(model, x, split_request("through:relu", trainable=True))
     boundary = runtime.run_training_prefix(x)
     seen: list[tuple[int, int, int]] = []
 
@@ -114,8 +115,8 @@ def test_run_prefix_has_no_autograd_graph_but_training_prefix_does() -> None:
     """Frozen prefix execution owns no autograd graph; training remains connected."""
 
     model = TinyMicrobatchMlp()
-    runtime = tl.split.prepare(
-        model, torch.randn(2, 4), split_request("after:relu", trainable=True)
+    runtime = prepare_fixture(
+        model, torch.randn(2, 4), split_request("through:relu", trainable=True)
     )
     detached = runtime.run_prefix(torch.randn(7, 4))
     assert all(
@@ -141,7 +142,7 @@ def test_microbatch_refuses_invalid_size_and_non_torch_backend() -> None:
 
     model = TinyMicrobatchMlp()
     x = torch.randn(7, 4)
-    runtime = tl.split.prepare(model, x, split_request("after:relu", trainable=True))
+    runtime = prepare_fixture(model, x, split_request("through:relu", trainable=True))
     boundary = runtime.run_prefix(x)
     with pytest.raises(ValueError, match="positive"):
         runtime.train_suffix(boundary, torch.randn(7, 3), microbatch_size=0)

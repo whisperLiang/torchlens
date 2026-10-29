@@ -3,7 +3,7 @@
 Example: ``python benchmarks/split_planner.py --writes 250 --repeats 25``.
 Run this same script with ``--source-root`` pointing at each compared checkout.
 The workload is a normalized chain of add/ReLU-write pairs with a midpoint cut.
-It measures uncached ``plan_split`` only: no capture, lowering, segment creation,
+It measures uncached ``plan_partition`` only: no capture, lowering, segment creation,
 replay, training or CUDA work. It is not a model-execution speedup measurement.
 """
 
@@ -111,7 +111,7 @@ def main() -> None:
 
     import torchlens as tl
     from torchlens.split import GraphPartition, SplitRequest
-    from torchlens.split.planner import plan_split
+    from torchlens.split.planner import plan_partition
 
     graph = _graph(args.writes)
     prefix_count = 2 * (args.writes // 2)
@@ -121,7 +121,7 @@ def main() -> None:
     samples = []
     for _ in range(1 + args.warmup + args.repeats):
         start = time.perf_counter()
-        plan = plan_split(graph, request)
+        plan = plan_partition(graph, request)
         samples.append((time.perf_counter() - start) * 1000)
         assert len(plan.ordered_mutation_node_ids) == args.writes
         assert len(plan.boundary_node_ids) == 1
@@ -129,7 +129,7 @@ def main() -> None:
     print(
         json.dumps(
             {
-                "scope": "synthetic uncached plan_split; no tensor execution",
+                "scope": "synthetic uncached plan_partition; no tensor execution",
                 "source_root": str(args.source_root.resolve()),
                 "torchlens_module": tl.__file__,
                 "python": platform.python_version(),

@@ -6,9 +6,11 @@ from pathlib import Path
 
 import pytest
 import torch
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split.graph import _portable_dim
 from torchlens.split.shape_program import DimExpr
 
@@ -23,7 +25,7 @@ def test_empty_boundary_roundtrip(batch: int, tmp_path: Path) -> None:
 
             return torch.relu(x[:, :0])
 
-    runtime = tl.split.prepare(Model(), torch.ones(4, 4), split_request("after:relu"))
+    runtime = prepare_fixture(Model(), torch.ones(4, 4), split_request("through:relu"))
     assert runtime.batch_validation["status"] == "passed"
     boundary = runtime.run_prefix(torch.ones(batch, 4))
     for schema in boundary.spec.values():

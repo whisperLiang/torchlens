@@ -6,9 +6,10 @@ import copy
 
 import torch
 from torch import nn
-from v2_helpers import split_request
-
-import torchlens as tl
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
 
 class TrainMlp(nn.Module):
@@ -58,7 +59,7 @@ def test_suffix_only_training_parity() -> None:
     for param in split_model.fc1.parameters():
         param.requires_grad_(False)
 
-    runtime = tl.split.prepare(split_model, x, split_request("after:relu", trainable=True))
+    runtime = prepare_fixture(split_model, x, split_request("through:relu", trainable=True))
     boundary = runtime.run_prefix(x)
     opt = torch.optim.SGD(split_model.fc2.parameters(), lr=0.05)
     full_opt = torch.optim.SGD(model.fc2.parameters(), lr=0.05)
@@ -83,7 +84,7 @@ def test_full_split_training_gradient_handoff() -> None:
     split_model = copy.deepcopy(model)
     x = torch.randn(4, 4)
     y = torch.randn(4, 3)
-    runtime = tl.split.prepare(split_model, x, split_request("after:relu", trainable=True))
+    runtime = prepare_fixture(split_model, x, split_request("through:relu", trainable=True))
     boundary = runtime.run_training_prefix(x)
     suffix_opt = torch.optim.SGD(split_model.fc2.parameters(), lr=0.05)
     prefix_opt = torch.optim.SGD(split_model.fc1.parameters(), lr=0.05)
@@ -107,7 +108,7 @@ def test_training_accepts_boundary_after_suffix_parameter_update() -> None:
     model = TrainMlp()
     x = torch.randn(4, 4)
     y = torch.randn(4, 3)
-    runtime = tl.split.prepare(model, x, split_request("after:relu", trainable=True))
+    runtime = prepare_fixture(model, x, split_request("through:relu", trainable=True))
     boundary = runtime.run_prefix(x)
     with torch.no_grad():
         for parameter in runtime.suffix_parameters():
@@ -122,7 +123,7 @@ def test_nondifferentiable_boundary_is_skipped() -> None:
     model = NonDiffPassModel()
     x = torch.randn(4, 4)
     y = torch.randn(4, 3)
-    runtime = tl.split.prepare(model, x, split_request("before:float", trainable=True))
+    runtime = prepare_fixture(model, x, split_request("until:float", trainable=True))
     boundary = runtime.run_training_prefix(x)
     int_keys = [
         key

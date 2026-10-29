@@ -11,9 +11,14 @@ from typing import Any
 
 import pytest
 import torch
+from v2_helpers import (
+    FixtureRequest,
+    prepare_fixture,
+    repartition_fixture,
+    request_fixture,
+)
 
-import torchlens as tl
-from torchlens.split import PlacementPlan, SplitFeatures, SplitRequest, after, pipeline
+from torchlens.split import PlacementPlan, SplitFeatures, pipeline
 from torchlens.split._torch_compact import compact_torch_graph
 from torchlens.split.errors import SplitUnsupportedError
 from torchlens.split.graph import split_graph_from_trace
@@ -42,10 +47,12 @@ def _loss(output: dict[str, Any], targets: torch.Tensor) -> torch.Tensor:
     return (output["prediction"] - targets).square().mean() + output["aux"][0].square().mean()
 
 
-def _request() -> SplitRequest:
+def _request() -> FixtureRequest:
     """Opt into training compaction without changing default training policy."""
 
-    return SplitRequest(after("middle"), features=SplitFeatures(training=True, retain_trace=False))
+    return request_fixture(
+        "through:" + "middle", features=SplitFeatures(training=True, retain_trace=False)
+    )
 
 
 @pytest.mark.parametrize("optimizer_kind", ["sgd", "momentum", "adam"])
@@ -57,7 +64,7 @@ def test_compact_tied_training_recut_preserves_gradients_and_optimizer_state(
     torch.manual_seed(71)
     reference = TiedBranches()
     model = copy.deepcopy(reference)
-    runtime = tl.split.prepare(model, torch.randn(2, 4), _request())
+    runtime = prepare_fixture(model, torch.randn(2, 4), _request())
     assert not runtime.retains_trace
     assert runtime.batch_validation["status"] == "passed"
 
@@ -97,8 +104,8 @@ def test_compact_tied_training_recut_preserves_gradients_and_optimizer_state(
                 actual_optimizer.state[actual], expected_optimizer.state[expected_param]
             )
         compute = runtime.trace_graph.compute_nodes
-        point = tl.split.before(compute[0].canonical_id) if step % 2 else after("middle")
-        runtime = runtime.at(point)
+        point = "until:" + str(compute[0].canonical_id) if step % 2 else "through:" + "middle"
+        runtime = repartition_fixture(runtime, point)
         assert tuple(id(value) for value in model.parameters()) == parameter_ids
         assert not runtime.retains_trace
 
@@ -129,7 +136,7 @@ def test_compact_training_collects_capture_and_preserves_existing_gradients(
     for parameter in model.parameters():
         parameter.grad = torch.ones_like(parameter)
     gradients = tuple(parameter.grad for parameter in model.parameters())
-    runtime = tl.split.prepare(model, torch.randn(2, 4, requires_grad=True), _request())
+    runtime = prepare_fixture(model, torch.randn(2, 4, requires_grad=True), _request())
     gc.collect()
     assert traces and all(reference() is None for reference in traces)
     assert payloads and all(reference() is None for reference in payloads)
@@ -167,10 +174,10 @@ def test_compact_training_updates_live_batchnorm_buffers() -> None:
     )
     model = copy.deepcopy(reference)
     inputs = torch.randn(3, 4)
-    request = SplitRequest(
-        after("0"), features=SplitFeatures(training=True, retain_trace=False, batch_axes={})
+    request = request_fixture(
+        "through:" + "0", features=SplitFeatures(training=True, retain_trace=False, batch_axes={})
     )
-    runtime = tl.split.prepare(model, inputs, request)
+    runtime = prepare_fixture(model, inputs, request)
     torch.testing.assert_close(model.state_dict(), reference.state_dict())
     for _ in range(3):
         model.zero_grad(set_to_none=True)
@@ -204,12 +211,12 @@ def test_compact_training_preserves_rng_and_matches_diagnostic_dropout(
     model = torch.nn.Sequential(torch.nn.Linear(4, 8), torch.nn.Dropout(0.3), torch.nn.Linear(8, 2))
     diagnostic_model = copy.deepcopy(model)
     inputs = torch.randn(3, 4)
-    request = SplitRequest(
-        after("0"), features=SplitFeatures(training=True, retain_trace=False, batch_axes={})
+    request = request_fixture(
+        "through:" + "0", features=SplitFeatures(training=True, retain_trace=False, batch_axes={})
     )
     rng = torch.random.get_rng_state().clone()
-    runtime = tl.split.prepare(model, inputs, request)
-    diagnostic = tl.split.prepare(
+    runtime = prepare_fixture(model, inputs, request)
+    diagnostic = prepare_fixture(
         diagnostic_model,
         inputs,
         replace(request, features=replace(request.features, retain_trace=True)),
@@ -234,11 +241,11 @@ def test_compact_training_replays_cpu_autocast_gradients() -> None:
 
     model = torch.nn.Sequential(torch.nn.Linear(4, 8), torch.nn.GELU(), torch.nn.Linear(8, 2))
     inputs = torch.randn(3, 4, requires_grad=True)
-    request = SplitRequest(
-        after("1"), features=SplitFeatures(training=True, retain_trace=False, batch_axes={})
+    request = request_fixture(
+        "through:" + "1", features=SplitFeatures(training=True, retain_trace=False, batch_axes={})
     )
     with torch.autocast("cpu", dtype=torch.bfloat16):
-        runtime = tl.split.prepare(model, inputs, request)
+        runtime = prepare_fixture(model, inputs, request)
         expected = model(inputs)
     actual = runtime.run_suffix(runtime.run_training_prefix(inputs))
     assert actual.dtype == torch.bfloat16
@@ -257,12 +264,12 @@ def test_compact_training_cpu_cuda_gradient_handoff_and_update() -> None:
     model = torch.nn.Sequential(torch.nn.Linear(4, 8), torch.nn.Tanh(), torch.nn.Linear(8, 2))
     reference = copy.deepcopy(model)
     original = {name: value.detach().clone() for name, value in model.state_dict().items()}
-    request = SplitRequest(
-        after("1"),
+    request = request_fixture(
+        "through:" + "1",
         features=SplitFeatures(training=True, retain_trace=False),
         placement=PlacementPlan.across("cpu", "cuda:0"),
     )
-    runtime = tl.split.prepare(model, torch.randn(3, 4), request)
+    runtime = prepare_fixture(model, torch.randn(3, 4), request)
     runtime.prefix_parameters()
     runtime.suffix_parameters()
     # Bindings expose parameter collections without promising model traversal

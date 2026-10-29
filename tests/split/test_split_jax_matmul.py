@@ -8,9 +8,11 @@ from typing import Any
 
 import numpy as np
 import pytest
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split._jax_capture import batch_stable_matmul
 
 pytestmark = pytest.mark.backend_jax
@@ -60,7 +62,7 @@ def test_jax_attention_replays_singleton_and_larger_batches(point: str) -> None:
         return jnp.matmul(jax.nn.softmax(scores, axis=-1), x) + x
 
     with jax.default_device(jax.devices("cpu")[0]):
-        runtime = tl.split.prepare(model, jnp.ones((2, 3, 4)), split_request(point, backend="jax"))
+        runtime = prepare_fixture(model, jnp.ones((2, 3, 4)), split_request(point, backend="jax"))
         assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
         for batch in (1, 2, 3):
             x = jnp.arange(batch * 12, dtype=jnp.float32).reshape(batch, 3, 4) / 20

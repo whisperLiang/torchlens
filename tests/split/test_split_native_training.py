@@ -12,9 +12,11 @@ from typing import Any
 
 import pytest
 from _paddle_subprocess import run_paddle_subprocess
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split.errors import SplitUnsupportedError
 
 
@@ -28,7 +30,10 @@ def _run_tinygrad_subprocess(code: str) -> None:
     env["DEBUG"] = "0"
     helper_path = str(Path(__file__).resolve().parent)
     env["PYTHONPATH"] = helper_path + os.pathsep + env.get("PYTHONPATH", "")
-    source = "from v2_helpers import split_request\n" + textwrap.dedent(code)
+    source = (
+        "from v2_helpers import analyze_fixture, candidate_report, fixture_partition, plan_fixture, prepare_fixture, repartition_fixture, request_fixture, split_request\n"
+        + textwrap.dedent(code)
+    )
     result = subprocess.run(
         [sys.executable, "-c", source],
         cwd=Path(__file__).resolve().parents[2],
@@ -65,7 +70,7 @@ def test_jax_suffix_and_prefix_gradient_handoff() -> None:
 
     x = jnp.array([[-1.0, 2.0], [3.0, -4.0]])
     targets = jnp.ones_like(x)
-    runtime = tl.split.prepare(model, x, split_request("after:max", backend="jax", trainable=True))
+    runtime = prepare_fixture(model, x, split_request("through:max", backend="jax", trainable=True))
     boundary = runtime.run_training_prefix(x)
 
     loss, grads = runtime.train_suffix(boundary, targets)
@@ -98,7 +103,7 @@ def test_tf_suffix_boundary_gradients() -> None:
 
     x = tf.constant([[-1.0, 2.0], [3.0, -4.0]], dtype=tf.float32)
     targets = tf.ones_like(x)
-    runtime = tl.split.prepare(model, x, split_request("after:relu", backend="tf", trainable=True))
+    runtime = prepare_fixture(model, x, split_request("through:relu", backend="tf", trainable=True))
     boundary = runtime.run_training_prefix(x)
 
     loss, grads = runtime.train_suffix(boundary, targets)
@@ -128,6 +133,7 @@ def test_paddle_suffix_boundary_gradients() -> None:
         """
         import paddle
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         def model(x):
             hidden = paddle.nn.functional.relu(x)
@@ -135,10 +141,10 @@ def test_paddle_suffix_boundary_gradients() -> None:
 
         x = paddle.to_tensor([[-1.0, 2.0], [3.0, -4.0]], dtype="float32")
         targets = paddle.ones_like(x)
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             model,
             x,
-            split_request("after:relu", backend="paddle", trainable=True),
+            split_request("through:relu", backend="paddle", trainable=True),
         )
         boundary = runtime.run_training_prefix(x)
 
@@ -166,6 +172,7 @@ def test_tinygrad_live_tied_buffer_survives_parameter_update() -> None:
         import pytest
         from tinygrad import Tensor
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         class Shared:
             def __init__(self):
@@ -180,10 +187,10 @@ def test_tinygrad_live_tied_buffer_survives_parameter_update() -> None:
 
         model = Shared()
         x = Tensor([[-1.0, 2.0], [3.0, -4.0]]).realize()
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             model,
             x,
-            split_request("after:where", backend="tinygrad", trainable=True, batch_axes={}),
+            split_request("through:where", backend="tinygrad", trainable=True, batch_axes={}),
         )
         buffers = [
             node for node in runtime.trace_graph.nodes
@@ -218,6 +225,7 @@ def test_tinygrad_suffix_boundary_gradients() -> None:
         from tinygrad import Tensor
 
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         def flatten_numbers(value):
             if isinstance(value, list):
@@ -230,10 +238,10 @@ def test_tinygrad_suffix_boundary_gradients() -> None:
 
         x = Tensor([[-1.0, 2.0], [3.0, -4.0]]).realize()
         targets = Tensor.ones(2, 2).realize()
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             model,
             x,
-            split_request("after:where", backend="tinygrad", trainable=True),
+            split_request("through:where", backend="tinygrad", trainable=True),
         )
         boundary = runtime.run_training_prefix(x)
 
@@ -262,6 +270,7 @@ def test_tinygrad_suffix_and_prefix_gradient_handoff() -> None:
         from tinygrad import Tensor
 
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         def flatten_numbers(value):
             if isinstance(value, list):
@@ -275,10 +284,10 @@ def test_tinygrad_suffix_and_prefix_gradient_handoff() -> None:
         x = Tensor([[-1.0, 2.0], [3.0, -4.0]]).realize()
         x.requires_grad = True
         targets = Tensor.ones(2, 2).realize()
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             model,
             x,
-            split_request("after:where", backend="tinygrad", trainable=True),
+            split_request("through:where", backend="tinygrad", trainable=True),
         )
         boundary = runtime.run_training_prefix(x)
         _loss, grads = runtime.train_suffix(boundary, targets)
@@ -307,6 +316,7 @@ def test_tinygrad_suffix_optimizer_step_matches_full_step() -> None:
         from tinygrad.nn import optim
 
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
 
         weight = Tensor([2.0]).realize()
         weight.requires_grad = True
@@ -316,10 +326,10 @@ def test_tinygrad_suffix_optimizer_step_matches_full_step() -> None:
 
         x = Tensor([[-1.0, 2.0], [3.0, -4.0]]).realize()
         targets = Tensor.ones(2, 2).realize()
-        runtime = tl.split.prepare(
+        runtime = prepare_fixture(
             split_model,
             x,
-            split_request("after:where", backend="tinygrad", trainable=True),
+            split_request("through:where", backend="tinygrad", trainable=True),
         )
         optimizer = optim.SGD([weight], lr=0.1)
         boundary = runtime.run_training_prefix(x)
@@ -356,7 +366,7 @@ def test_tf_detached_boundary_rejects_prefix_backward() -> None:
         return tf.nn.relu(x) * 2.0
 
     x = tf.ones((2, 2), dtype=tf.float32)
-    runtime = tl.split.prepare(model, x, split_request("after:relu", backend="tf", trainable=True))
+    runtime = prepare_fixture(model, x, split_request("through:relu", backend="tf", trainable=True))
     boundary = runtime.run_prefix(x)
     _loss, grads = runtime.train_suffix(boundary, tf.ones_like(x))
 
@@ -374,13 +384,14 @@ def test_tinygrad_detached_boundary_rejects_prefix_backward() -> None:
         from tinygrad import Tensor
 
         import torchlens as tl
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
         from torchlens.split.errors import SplitUnsupportedError
 
         def model(x):
             return x.relu() * 2.0
 
         x = Tensor.ones(2, 2).realize()
-        runtime = tl.split.prepare(model, x, split_request("after:where", backend="tinygrad"))
+        runtime = prepare_fixture(model, x, split_request("through:where", backend="tinygrad"))
         boundary = runtime.run_prefix(x)
         _loss, grads = runtime.train_suffix(boundary, Tensor.ones(2, 2).realize())
 

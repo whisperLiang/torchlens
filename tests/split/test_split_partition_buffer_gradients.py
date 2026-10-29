@@ -7,8 +7,12 @@ from copy import deepcopy
 import pytest
 import torch
 from torch import nn
+from v2_helpers import (
+    prepare_fixture,
+    request_fixture,
+)
 
-from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, after, prepare
+from torchlens.split import GraphPartition, SplitFeatures
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
@@ -34,10 +38,12 @@ def test_eval_batchnorm_state_stays_frozen_across_partition_and_recut(
         .eval()
     )
     reference = deepcopy(model)
-    runtime = prepare(
+    runtime = prepare_fixture(
         model,
         torch.randn(4, 4, device=device),
-        SplitRequest(after("2"), features=SplitFeatures(training=True, retain_trace=retain_trace)),
+        request_fixture(
+            "through:" + "2", features=SplitFeatures(training=True, retain_trace=retain_trace)
+        ),
     )
     selected = frozenset(
         node.canonical_id
@@ -45,7 +51,7 @@ def test_eval_batchnorm_state_stays_frozen_across_partition_and_recut(
         if node.canonical_id in runtime.plan.prefix_node_ids
     )
     partition = GraphPartition(selected)
-    runtime = runtime.partition(partition)
+    runtime = runtime.repartition(partition)
     buffer_keys = {
         key
         for key, node_id in runtime.plan.boundary_bindings.items()
@@ -76,4 +82,4 @@ def test_eval_batchnorm_state_stays_frozen_across_partition_and_recut(
             torch.testing.assert_close(actual, expected)
         for actual, expected in zip(model.buffers(), reference.buffers(), strict=True):
             torch.testing.assert_close(actual, expected)
-        runtime = runtime.partition(partition)
+        runtime = runtime.repartition(partition)

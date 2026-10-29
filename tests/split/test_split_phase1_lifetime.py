@@ -10,9 +10,12 @@ from typing import Any
 import pytest
 import torch
 from torch import nn
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    repartition_fixture,
+    split_request,
+)
 
-import torchlens as tl
 from torchlens.split import PlacementPlan
 from torchlens.split.boundary import ReplayBoundary
 from torchlens.split.state import SegmentState
@@ -61,7 +64,7 @@ def test_prefix_grad_policy_controls_execution_and_saved_tensors(
 
     model = LifetimeMlp()
     inputs = torch.randn(3, 4, requires_grad=True)
-    runtime = tl.split.prepare(model, inputs, split_request("after:cut", trainable=True))
+    runtime = prepare_fixture(model, inputs, split_request("through:cut", trainable=True))
     segment = runtime.segments.training_prefix if training else runtime.segments.prefix
     execute = segment._execute_func
     grad_modes: list[bool] = []
@@ -106,7 +109,7 @@ def test_public_suffix_preserves_reusable_boundary() -> None:
 
     model = LifetimeMlp()
     inputs = torch.randn(3, 4)
-    runtime = tl.split.prepare(model, inputs, split_request("after:cut", trainable=True))
+    runtime = prepare_fixture(model, inputs, split_request("through:cut", trainable=True))
     boundary = runtime.run_prefix(inputs)
     tensors = dict(boundary.tensors)
     snapshots = {key: value.clone() for key, value in tensors.items()}
@@ -129,7 +132,7 @@ def test_internal_replay_releases_source_boundary_before_transported_suffix(
 
     model = LifetimeMlp()
     inputs = torch.randn(3, 4)
-    runtime = tl.split.prepare(model, inputs, split_request("after:cut", trainable=True))
+    runtime = prepare_fixture(model, inputs, split_request("through:cut", trainable=True))
     run_prefix = runtime._run_prefix
     suffix = runtime.segments.suffix
     source_refs: list[weakref.ReferenceType[Any]] = []
@@ -187,7 +190,7 @@ def test_microbatch_releases_graph_roots_and_saved_payloads_before_next_forward(
 
     model = LifetimeMlp()
     inputs = torch.randn(7, 4)
-    runtime = tl.split.prepare(model, inputs, split_request("after:cut", trainable=True))
+    runtime = prepare_fixture(model, inputs, split_request("through:cut", trainable=True))
     boundary = runtime.run_training_prefix(inputs)
     suffix = runtime.segments.suffix
     tensor_refs: list[weakref.ReferenceType[Any]] = []
@@ -260,8 +263,10 @@ def test_multioutput_and_residual_values_die_after_their_final_consumer(
 
     model = MultioutputBranches()
     inputs = torch.randn(3, 8)
-    seed = tl.split.prepare(model, inputs, split_request("50%"))
-    runtime = seed.at(tl.split.before(seed.trace_graph.compute_nodes[0].canonical_id))
+    seed = prepare_fixture(model, inputs, split_request("50%"))
+    runtime = repartition_fixture(
+        seed, "until:" + str(seed.trace_graph.compute_nodes[0].canonical_id)
+    )
     segment = runtime.segments.suffix
     execute = segment._execute_func
     views: list[weakref.ReferenceType[torch.Tensor]] = []
@@ -320,10 +325,10 @@ def test_frozen_embedding_with_forward_mutation_keeps_independent_segment_state(
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
     model = FrozenEmbedding()
     inputs = torch.tensor([[0, 1], [1, 2], [2, 3]])
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         inputs,
-        split_request("after:cut", trainable=True, placement=PlacementPlan.on("cpu")),
+        split_request("through:cut", trainable=True, placement=PlacementPlan.on("cpu")),
     )
     # Let the production adapter decide eligibility before observing cached state.
     runtime.segments.prefix.bound_state_values()

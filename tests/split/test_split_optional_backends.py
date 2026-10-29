@@ -6,7 +6,10 @@ from typing import Any
 
 import pytest
 from _paddle_subprocess import run_paddle_subprocess
-from v2_helpers import split_request
+from v2_helpers import (
+    prepare_fixture,
+    split_request,
+)
 
 from torchlens.split.adapters import resolve_split_adapter
 
@@ -23,7 +26,6 @@ def test_jax_optional_adapter_gate() -> None:
     """Installed JAX supports native-IR split replay."""
 
     jnp = pytest.importorskip("jax.numpy")
-    import torchlens as tl
 
     def model(x: object) -> object:
         return jnp.maximum(x, 0) * 2.0 + 1.0
@@ -32,13 +34,13 @@ def test_jax_optional_adapter_gate() -> None:
     adapter = resolve_split_adapter("jax")
 
     assert adapter.supports_replay is True
-    runtime = tl.split.prepare(model, x, split_request("after:max", backend="jax"))
+    runtime = prepare_fixture(model, x, split_request("through:max", backend="jax"))
     replayed = runtime.replay(x)
     assert bool(jnp.allclose(replayed, model(x)))
-    trainable = tl.split.prepare(
+    trainable = prepare_fixture(
         model,
         x,
-        split_request("after:max", backend="jax", trainable=True),
+        split_request("through:max", backend="jax", trainable=True),
     )
     assert trainable.segments.training_prefix is not None
 
@@ -47,7 +49,6 @@ def test_tinygrad_optional_adapter_gate() -> None:
     """Installed tinygrad supports UOp split replay and split training construction."""
 
     tinygrad = pytest.importorskip("tinygrad")
-    import torchlens as tl
 
     def model(x: object) -> object:
         return x.relu() * 2.0 + 1.0
@@ -56,15 +57,15 @@ def test_tinygrad_optional_adapter_gate() -> None:
     adapter = resolve_split_adapter("tinygrad")
 
     assert adapter.supports_replay is True
-    runtime = tl.split.prepare(model, x, split_request("after:where", backend="tinygrad"))
+    runtime = prepare_fixture(model, x, split_request("through:where", backend="tinygrad"))
     replayed = runtime.replay(x)
     assert _flatten_numbers(replayed.tolist()) == pytest.approx(
         _flatten_numbers(model(x).realize().tolist())
     )
-    trainable = tl.split.prepare(
+    trainable = prepare_fixture(
         model,
         x,
-        split_request("after:where", backend="tinygrad", trainable=True),
+        split_request("through:where", backend="tinygrad", trainable=True),
     )
     assert trainable.segments.training_prefix is not None
 
@@ -73,7 +74,6 @@ def test_mlx_optional_adapter_gate() -> None:
     """Installed MLX supports generated eager replay and boundary caching."""
 
     mx = pytest.importorskip("mlx.core")
-    import torchlens as tl
 
     def model(x: object) -> object:
         hidden = mx.maximum(x, 0)
@@ -85,7 +85,7 @@ def test_mlx_optional_adapter_gate() -> None:
 
     assert adapter.supports_replay is True
     assert adapter.supports_boundary_cache is True
-    runtime = tl.split.prepare(model, x, split_request("after:maximum", backend="mlx"))
+    runtime = prepare_fixture(model, x, split_request("through:maximum", backend="mlx"))
     replayed = runtime.replay(x)
     mx.eval(replayed)
     expected = model(x)
@@ -95,8 +95,8 @@ def test_mlx_optional_adapter_gate() -> None:
     assert adapter.supports_state_placement is True
     boundary = runtime.run_prefix(x).to("cpu")
     assert bool(mx.allclose(runtime.run_suffix(boundary), expected))
-    training = tl.split.prepare(
-        model, x, split_request("after:maximum", backend="mlx", trainable=True)
+    training = prepare_fixture(
+        model, x, split_request("through:maximum", backend="mlx", trainable=True)
     )
     assert training.run_training_prefix(x).metadata["supports_prefix_backward"]
 
@@ -105,13 +105,12 @@ def test_mlx_split_reconstructs_direct_multi_output() -> None:
     """MLX replay preserves a list returned directly by a split call."""
 
     mx = pytest.importorskip("mlx.core")
-    import torchlens as tl
 
     def model(x: object) -> object:
         return list(mx.split(mx.maximum(x, 0), 2, axis=-1))
 
     x = mx.arange(8, dtype=mx.float32).reshape((2, 4)) - 3
-    runtime = tl.split.prepare(model, x, split_request("after:maximum", backend="mlx"))
+    runtime = prepare_fixture(model, x, split_request("through:maximum", backend="mlx"))
     replayed = runtime.replay(x)
     expected = model(x)
     mx.eval(*replayed, *expected)
@@ -126,7 +125,6 @@ def test_mlx_split_reconstructs_nested_output_and_keeps_scalar_literals() -> Non
     """MLX replay keeps final output paths distinct from call output paths."""
 
     mx = pytest.importorskip("mlx.core")
-    import torchlens as tl
 
     def model(x: object) -> object:
         hidden = mx.maximum(x, 0)
@@ -134,7 +132,7 @@ def test_mlx_split_reconstructs_nested_output_and_keeps_scalar_literals() -> Non
         return {"left": left, "right": [right, mx.add(mx.multiply(left, 2), right)]}
 
     x = mx.arange(8, dtype=mx.float32).reshape((2, 4)) - 3
-    runtime = tl.split.prepare(model, x, split_request("after:maximum", backend="mlx"))
+    runtime = prepare_fixture(model, x, split_request("through:maximum", backend="mlx"))
     replayed = runtime.replay(x)
     expected = model(x)
     assert isinstance(replayed, dict)
@@ -166,13 +164,13 @@ def test_paddle_optional_adapter_gate() -> None:
         adapter = resolve_split_adapter("paddle")
 
         assert adapter.supports_replay is True
-        runtime = tl.split.prepare(model, x, split_request("after:relu", backend="paddle"))
+        runtime = prepare_fixture(model, x, split_request("through:relu", backend="paddle"))
         replayed = runtime.replay(x)
         assert bool(paddle.allclose(replayed, model(x)).item())
-        trainable = tl.split.prepare(
+        trainable = prepare_fixture(
             model,
             x,
-            split_request("after:relu", backend="paddle", trainable=True),
+            split_request("through:relu", backend="paddle", trainable=True),
         )
         assert trainable.segments.training_prefix is not None
         """
@@ -197,7 +195,6 @@ def test_tf_optional_adapter_gate() -> None:
     """Installed TensorFlow supports raw-op split replay."""
 
     tf = pytest.importorskip("tensorflow")
-    import torchlens as tl
 
     def model(x: object) -> object:
         return tf.nn.relu(x) * 2.0 + 1.0
@@ -206,12 +203,12 @@ def test_tf_optional_adapter_gate() -> None:
     adapter = resolve_split_adapter("tf")
 
     assert adapter.supports_replay is True
-    runtime = tl.split.prepare(model, x, split_request("after:relu", backend="tf"))
+    runtime = prepare_fixture(model, x, split_request("through:relu", backend="tf"))
     replayed = runtime.replay(x)
     assert bool(tf.reduce_all(tf.abs(replayed - model(x)) < 1e-5).numpy())
-    trainable = tl.split.prepare(
+    trainable = prepare_fixture(
         model,
         x,
-        split_request("after:relu", backend="tf", trainable=True),
+        split_request("through:relu", backend="tf", trainable=True),
     )
     assert trainable.segments.training_prefix is not None

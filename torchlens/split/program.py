@@ -9,7 +9,6 @@ from ..backends.registry import TORCH_BACKEND_NAME
 from .errors import SplitErrorContext, SplitUnsupportedError
 from .graph import SplitTraceGraph, SplitTraceNode
 from .ir import (
-    GraphPartition,
     SplitGraphIR,
     SplitModelProfile,
     SplitRequest,
@@ -500,10 +499,10 @@ def _feature_evidence(
     return {
         "arbitrary_dag_partition": CapabilityEvidence(
             backend_supported=True if torch_backend else None,
-            model_supported=preflight_ok if isinstance(spec.point, GraphPartition) else None,
+            model_supported=preflight_ok,
             device_supported=devices,
-            evidence_scope=static_scope if isinstance(spec.point, GraphPartition) else (),
-            reasons=() if isinstance(spec.point, GraphPartition) else ("partition_not_analyzed",),
+            evidence_scope=static_scope,
+            reasons=(),
         ),
         "split_inference": CapabilityEvidence(
             replay, preflight_ok, devices, evidence_scope=static_scope

@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from v2_helpers import split_request
+from v2_helpers import (
+    candidate_report,
+    prepare_fixture,
+    repartition_fixture,
+    split_request,
+)
 
 mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 nn = pytest.importorskip("mlx.nn", exc_type=ImportError)
@@ -50,14 +55,18 @@ def test_mlx_repeated_outputs_replay_and_cache_at_every_cut(container: str, tmp_
             return (total, total, "mlx")
         return {"pair": [right, total, right], "early": (hidden, hidden), "input": [x, x]}
 
-    seed = tl.split.prepare(
+    seed = prepare_fixture(
         model,
         _input(2),
-        split_request("before:split_1_3", backend="mlx", boundary_cache=True),
+        split_request("until:split_1_3", backend="mlx", boundary_cache=True),
     )
     assert seed.batch_validation["status"] == "passed"
-    for index, candidate in enumerate(seed.split_points().supported):
-        runtime = seed.at(candidate.point)
+    for index, candidate in enumerate(
+        candidate_report(
+            seed,
+        ).supported
+    ):
+        runtime = repartition_fixture(seed, candidate.partition)
         for batch in (1, 2, 5):
             x = _input(batch)
             expected = iter_arrays_with_paths(model(x), runtime.adapter.is_tensor)
@@ -90,8 +99,8 @@ def test_mlx_repeated_output_gradients_accumulate() -> None:
 
         return mx.mean(mx.square(output["a"])) + 3 * mx.mean(output["nested"][0])
 
-    runtime = tl.split.prepare(
-        model, _input(2), split_request("after:maximum", backend="mlx", trainable=True)
+    runtime = prepare_fixture(
+        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
     )
     x = _input(5)
     boundary = runtime.run_training_prefix(x)
@@ -176,11 +185,11 @@ def test_mlx_multi_optimizer_matches_nested_tied_native_training(
     original = dict(tree_flatten(model.parameters()))
     snapshots = {name: value.astype(value.dtype) for name, value in original.items()}
     mx.eval(snapshots)
-    runtime = tl.split.prepare(
+    runtime = prepare_fixture(
         model,
         _input(2),
         split_request(
-            "after:maximum",
+            "through:maximum",
             backend="mlx",
             trainable=True,
             placement=tl.split.PlacementPlan.across(*placement) if placement else None,
@@ -221,8 +230,8 @@ def test_mlx_multi_optimizer_matches_nested_tied_native_training(
 def test_mlx_multi_optimizer_detached_suffix_matches_native_updates() -> None:
     """Suffix-only steps restore nested list paths before native optimizer filtering."""
 
-    runtime = tl.split.prepare(
-        _GroupedModel(), _input(2), split_request("after:maximum", backend="mlx", trainable=True)
+    runtime = prepare_fixture(
+        _GroupedModel(), _input(2), split_request("through:maximum", backend="mlx", trainable=True)
     )
     optimizer, reference_optimizer = _optimizer(), _optimizer()
     reference_parameters = dict(runtime.segments.suffix._binding.parameters())

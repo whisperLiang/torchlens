@@ -22,7 +22,7 @@ def _schema() -> BoundarySchema:
     return BoundarySchema(
         value_id="h",
         container_path=("features", 0),
-        role="primary",
+        role="activation",
         shape=SymbolicShape(("B", 3)),
         dtype="torch.float32",
         output_index=0,
@@ -33,10 +33,10 @@ def _schema() -> BoundarySchema:
     ("changes", "message"),
     [
         (
-            {"value_id": "other", "role": "skip", "output_index": 1, "container_path": ()},
+            {"value_id": "other", "role": "passthrough", "output_index": 1, "container_path": ()},
             "canonical ID",
         ),
-        ({"role": "skip", "output_index": 1, "container_path": ()}, "role"),
+        ({"role": "passthrough", "output_index": 1, "container_path": ()}, "role"),
         ({"output_index": 1, "container_path": ()}, "output index"),
         ({"container_path": ()}, "container path"),
     ],

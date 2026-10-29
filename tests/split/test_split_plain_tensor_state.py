@@ -7,8 +7,12 @@ from copy import deepcopy
 import pytest
 import torch
 from torch import nn
+from v2_helpers import (
+    prepare_fixture,
+    request_fixture,
+)
 
-from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, after, prepare
+from torchlens.split import GraphPartition, SplitFeatures
 from torchlens.split.errors import SplitUnsupportedError
 
 
@@ -37,11 +41,11 @@ def test_plain_tensor_state_training_replacement_and_recut(retain_trace: bool) -
     torch.manual_seed(717)
     model = PlainTensorState()
     reference = deepcopy(model)
-    runtime = prepare(
+    runtime = prepare_fixture(
         model,
         torch.randn(2, 4),
-        SplitRequest(
-            after("cut"), features=SplitFeatures(training=True, retain_trace=retain_trace)
+        request_fixture(
+            "through:" + "cut", features=SplitFeatures(training=True, retain_trace=retain_trace)
         ),
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=0.002)
@@ -77,7 +81,7 @@ def test_plain_tensor_state_training_replacement_and_recut(retain_trace: bool) -
             if step == 0
             else frozenset()
         )
-        runtime = runtime.partition(GraphPartition(selected))
+        runtime = runtime.repartition(GraphPartition(selected))
 
 
 @pytest.mark.parametrize("retain_trace", [False, True])
@@ -85,11 +89,11 @@ def test_removed_plain_tensor_state_refuses_typed(retain_trace: bool) -> None:
     """Missing live state must never fall back to a stale captured value."""
 
     model = PlainTensorState()
-    runtime = prepare(
+    runtime = prepare_fixture(
         model,
         torch.randn(2, 4),
-        SplitRequest(
-            after("cut"), features=SplitFeatures(training=True, retain_trace=retain_trace)
+        request_fixture(
+            "through:" + "cut", features=SplitFeatures(training=True, retain_trace=retain_trace)
         ),
     )
     del model.stride

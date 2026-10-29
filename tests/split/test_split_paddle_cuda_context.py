@@ -24,8 +24,8 @@ def test_cpu_split_never_loads_the_cuda_driver() -> None:
         x, y = paddle.ones([2, 3]), paddle.ones([2, 2])
         optimizer = paddle.optimizer.SGD(0.02, parameters=model.parameters())
         with patch('torchlens.backends.paddle._cuda._cuda_driver', side_effect=AssertionError):
-            runtime = tl.split.prepare(
-                model, x, split_request('after:relu', backend='paddle', trainable=True)
+            runtime = prepare_fixture(
+                model, x, split_request('through:relu', backend='paddle', trainable=True)
             )
             assert runtime.validate_equivalence(model, (x,))
             boundary = runtime.run_training_prefix(x)
@@ -74,8 +74,8 @@ def test_rocm_gpu_scope_never_loads_the_nvidia_driver(cuda_build: bool) -> None:
                     raise RuntimeError('scope failure')
             rocm_tensor.data_ptr.assert_not_called()
 
-            runtime = tl.split.prepare(
-                model, x, split_request('after:relu', backend='paddle', trainable=True)
+            runtime = prepare_fixture(
+                model, x, split_request('through:relu', backend='paddle', trainable=True)
             )
             assert runtime.validate_equivalence(model, (x,))
             boundary = runtime.run_training_prefix(x)
@@ -149,8 +149,8 @@ def test_gpu_split_restores_foreign_context_and_matches_native_training() -> Non
 
         try:
             # A private context on the same GPU reproduces tinygrad's driver behavior.
-            runtime = tl.split.prepare(
-                model, x, split_request('after:relu', backend='paddle', trainable=True)
+            runtime = prepare_fixture(
+                model, x, split_request('through:relu', backend='paddle', trainable=True)
             )
             assert_restored()
             assert runtime.trace_graph.shape_program.batch_probe.status == 'passed', (
