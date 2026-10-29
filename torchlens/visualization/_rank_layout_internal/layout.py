@@ -764,7 +764,8 @@ def render_rank_layout(
     # DOT is also a public output format. Keep its temporary input separate:
     # Windows forbids writing over neato's open input, and cleanup must never
     # remove the user's rendered artifact.
-    source_path = f"{vis_outpath}.source.dot"
+    source_suffix = ".source.dot" if vis_fileformat == "dot" else ".dot"
+    source_path = f"{vis_outpath}{source_suffix}"
     with open(source_path, "w", encoding="utf-8") as f:
         f.write(dot_source)
 
