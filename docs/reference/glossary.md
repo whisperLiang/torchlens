@@ -50,12 +50,31 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
   after a named site, or by percentage; `SplitRequest` combines it with backend, validation,
   feature, and placement choices.
 
+**GraphPartition**
+: An immutable set of canonical compute-node IDs assigned to the prefix. The planner derives
+  the suffix and unique boundary frontier, checks dependency closure and native-call atomicity,
+  and refuses unproven state/effect ordering. `runtime.analyze_partition(partition)` returns
+  reusable analysis; `runtime.partition(partition)` materializes it. See
+  [Native split runtime](split_native_runtime.md) for safety limits and API contracts.
+
+**GraphProfile / BoundaryLayout**
+: Immutable static metadata from the captured graph and ShapeProgram. `graph_profile()` exposes
+  dependencies and known tensor/parameter costs, while `boundary_layout()` describes unique
+  crossing values. Unknown costs remain `None`; logical tensor bytes are not peak device memory.
+
+**ParameterOwnership / StateMigrationPlan**
+: Stable named state identities, segment owners and recut changes, exposed by
+  `parameter_ownership()` and `plan_state_migration()`. `parameter_bindings()` maps those identities
+  to effective tensors for caller-owned optimizers. Migration planning does not move state or
+  step/reset an optimizer.
+
 **SplitFeatures**
 : The requested replay, training, boundary-cache, batch-axis, cross-device, and live-parameter
   capabilities, plus diagnostic retention through `retain_trace`. A declared batch axis
   identifies semantics, not a list of allowed batch sizes. `retain_trace=None` defaults to
   compact Torch inference; `True` retains the complete diagnostic capture. Training and
-  non-Torch backends retain complete captures by default.
+  non-Torch backends retain complete captures by default. Explicit `retain_trace=False` also
+  enables compact Torch training, retaining live execution state while releasing diagnostic data.
 
 **SplitModelProfile**
 : Pinned metadata for a real-model loader, checkpoint, and expected capabilities.

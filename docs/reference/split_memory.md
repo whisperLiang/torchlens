@@ -4,6 +4,58 @@ These split APIs are documented-unstable. A prepared runtime keeps its canonical
 batch-polymorphic graph and can replay or train different logical batch sizes without
 retracing. Torch suffix microbatching is an execution option on that same runtime.
 
+## Compact training retention
+
+Torch training can explicitly discard diagnostic capture data:
+
+```python
+import torch
+from torch import nn
+import torchlens as tl
+from torchlens.split import SplitFeatures, SplitRequest, after
+
+model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 3))
+x = torch.randn(2, 4)
+features = SplitFeatures(training=True, retain_trace=False)
+runtime = tl.split.prepare(model, x, SplitRequest(after("1"), features=features))
+assert not runtime.retains_trace
+torch.testing.assert_close(runtime.replay(x), model(x))
+```
+
+The existing generated prefix, suffix, and training engine execute this mode.
+`retain_trace=None` continues to retain the training Trace for compatibility;
+`retain_trace=True` always keeps the diagnostic Trace. Other backends currently
+refuse explicit compact retention with `compact_capture_unsupported`.
+
+Normalization first repairs data dependencies and argument templates. Compaction
+then copies only replay metadata and resolves live parameter and buffer handles
+before cleaning up the owned capture. Shape compilation and the independent batch
+probe run against the compact graph. The resulting graph retains callable targets,
+argument bindings, RNG and autocast context, shape metadata, multioutput grouping,
+in-place evidence, and necessary source constants. It drops ordinary activation
+snapshots, full Op/Param/Module records, and their Trace references. Required source
+constants and captured literal state can still consume memory; compact does not
+mean that all tensor storage disappears.
+
+Each training forward builds a new autograd graph using current live state. Cleanup
+does not detach parameters, clear the caller's gradients, or change the model's
+weights. Recutting uses the existing `SegmentState` inheritance path and retains
+effective state, including updates to owned device replicas. Optimizers remain
+caller-owned. A tied parameter used on both sides must accumulate both segments'
+gradients before a shared optimizer step; pass no optimizer to `train_suffix` and
+`backward_prefix`, then step the shared optimizer once.
+
+If a retained source tensor has a capture-time `grad_fn` but no executing producer,
+compact training refuses with `compact_training_autograd_source`. Silently detaching
+such a source would lose gradients, while reusing its history would break later
+backward calls. Recompute that source inside the captured model. Diagnostic mode
+does not establish repeated-backward safety for an external non-leaf source.
+
+`runtime.retains_trace` reports the retention policy; accessing `runtime.trace` in
+compact mode refuses explicitly. Keep each boundary only as long as its gradient
+handoff requires: a boundary from `run_training_prefix` intentionally retains the
+current step's autograd graph, independently of diagnostic retention.
+
 ## Training one logical batch
 
 ```python
@@ -125,6 +177,85 @@ Caller-owned source boundaries remain alive while the caller retains them. Graph
 prefix activations and the final logical boundary gradient still consume full-batch memory.
 
 ## State sharing
+
+`runtime.parameter_ownership()` returns immutable, tensor-free rows for state
+used by the captured execution. Each row identifies a parameter, buffer, or
+anonymous literal; its canonical consumer nodes; current owners and devices;
+shape and dtype; and whether it is trainable. Named IDs use qualified model
+names, such as `parameter:encoder.weight` or `buffer:running_mean`. Tied names
+appear together in `aliases` and count as one state source. Anonymous state uses
+a canonical replay occurrence ID. These IDs are graph-scoped and do not contain
+Python object addresses. Unused model state is absent.
+
+`runtime.plan_state_migration(new_partition)` accepts a `GraphPartition` or a
+legacy `SplitPoint`. It describes old and new owners, device movement, and
+optimizer actions without constructing executable segments or committing lazy
+state bindings. `supported` is false when independent optimizer histories would
+have to be merged (`shared_optimizer_state_ambiguous`) or tied trainable state
+would span devices (`shared_trainable_cross_device`). Incompatible effective
+model replicas can also raise the existing structured state-migration refusal.
+Equality of parameter values does not establish equality of Adam or momentum
+history.
+
+For a supported migration, `optimizer_action` is `keep`, `reassociate`, or
+`copy_and_reassociate`; nontrainable state uses `none`. TorchLens inherits model
+values through `SegmentState`. The caller must preserve optimizer state,
+hyperparameters, parameter groups, and accumulated step counts. TorchLens does
+not initialize a new optimizer, clear its history, or execute a step as part of
+planning or materialization.
+
+Use `runtime.parameter_bindings()` to associate those stable IDs with current
+effective tensors. Unlike metadata inspection, this call settles lazy bindings
+so the returned objects are the ones execution will use. Its nested read-only
+mapping includes both live referenced parameters and owned device replicas:
+
+```python
+import torch
+from torch import nn
+import torchlens as tl
+from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, after
+
+model = nn.Sequential(
+    nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 3),
+)
+x = torch.randn(2, 4)
+runtime = tl.split.prepare(
+    model, x,
+    SplitRequest(after("1"), features=SplitFeatures(training=True, retain_trace=False)),
+)
+# This sequential graph's first three compute nodes are dependency-closed.
+# Moving the second linear call into the prefix changes its parameter ownership.
+new_partition = GraphPartition(frozenset(
+    node.canonical_id for node in runtime.trace_graph.compute_nodes[:3]
+))
+bindings = runtime.parameter_bindings()
+parameters = list({
+    id(value): value
+    for owners in bindings.values()
+    for value in owners.values()
+}.values())
+optimizer = torch.optim.Adam(parameters, lr=1e-3)
+
+migration = runtime.plan_state_migration(new_partition)
+if not migration.supported:
+    raise RuntimeError(migration.unsupported_reasons)
+new_runtime = runtime.partition(new_partition)
+new_bindings = new_runtime.parameter_bindings()
+torch.testing.assert_close(new_runtime.replay(x), model(x))
+# Both segments use the same CPU, so this optimizer still owns every live parameter.
+assert {id(value) for owners in new_bindings.values() for value in owners.values()} == {
+    id(value) for value in parameters
+}
+# Match bindings and new_bindings by stable state ID. Preserve existing optimizer
+# objects for unchanged tensor identities; copy/reassociate externally owned
+# history when a migration row requires it. Do not silently reset that history.
+```
+
+Same-device recuts preserve effective parameter objects, allowing an optimizer
+over all parameters to continue directly. Optimizers split by segment still
+need their parameter groups reassociated when ownership changes. Plan descriptions
+observe current state; materialization rechecks effective values if training
+changed them after analysis.
 
 Each runtime's segment bundle owns a replica pool; there is no global tensor cache.
 Replicas are keyed by backend, effective source identity, and normalized destination

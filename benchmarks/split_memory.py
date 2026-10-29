@@ -190,7 +190,9 @@ def main() -> None:
             return self.core(NestedTensor(images, mask))
 
     snapshot("imported", torch_version=torch.__version__, source=str(tl.__file__))
-    detector = RFDETRNano()
+    # Resolve the already-checked file explicitly: older RF-DETR releases do
+    # not consult RF_HOME and would otherwise download into the working folder.
+    detector = RFDETRNano(pretrain_weights=str(weights_dir / "rf-detr-nano.pth"))
     model = TensorModel(detector.model.model).to(args.device).eval()
     inputs = torch.zeros(2, 3, 384, 384, device=args.device)
     gc.collect()
