@@ -36,6 +36,7 @@ exit op, and the box remainder accounting must treat op-segment members as
 rendered separately, exactly like standalone raw nodes.
 """
 
+import os
 import re
 import subprocess
 import sys
@@ -752,10 +753,10 @@ def test_collapse_determinism_across_hashseed():
             capture_output=True,
             text=True,
             env={
+                **os.environ,
                 "PYTHONHASHSEED": seed,
-                "PATH": "/usr/bin:/bin",
                 "CUDA_VISIBLE_DEVICES": "",
-                "PYTHONPATH": ":".join(sys.path),
+                "PYTHONPATH": os.pathsep.join(sys.path),
             },
             check=True,
         )
