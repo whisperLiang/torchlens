@@ -1,4 +1,10 @@
 # Byte-compiled / optimized / DLL files
+# Local benchmark runs; keep drivers and regression fixtures in source control.
+benchmarks/*_results*.json
+benchmarks/*_results*.md
+benchmarks/split_results_*/
+benchmarks/perf/*_baseline.md
+
 __pycache__/
 *.py[cod]
 *$py.class

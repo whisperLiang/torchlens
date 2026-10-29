@@ -1,7 +1,7 @@
 # TorchLens Benchmarks
 
-This directory contains standalone benchmark scripts and generated benchmark
-artifacts.
+This directory contains standalone benchmark scripts. Generate result artifacts
+locally when measuring a change; historical run outputs are not committed.
 
 ## Split memory
 
@@ -24,8 +24,7 @@ includes libraries and allocator caches, not just retained tensor storage.
 
 ## Performance benchmark suite
 
-`perf_suite.py` drives the 2026-05-14 performance benchmark matrix described in
-`.research/perf-benchmarks_PLAN.md`. It launches `perf_runner.py` in a fresh
+`perf_suite.py` drives the performance benchmark matrix. It launches `perf_runner.py` in a fresh
 subprocess for each operation/model/device/pass cell, writes
 `perf_results_2026-05-14.json`, and renders `perf_results_2026-05-14.md`.
 
@@ -47,8 +46,7 @@ Supporting files:
 ## Intervention overhead
 
 `intervention_overhead.py` is the earlier focused benchmark for TorchLens
-intervention primitives. Its committed output lives in
-`intervention_overhead_results.md`.
+intervention primitives. Running it writes `intervention_overhead_results.md` locally.
 
 ## Pre-hook provenance overhead
 

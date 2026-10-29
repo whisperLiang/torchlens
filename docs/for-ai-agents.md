@@ -78,9 +78,6 @@ JAX `array_payloads` saves round-trip typed PRNG keys and fully addressable sing
 arrays by value. `jax_named_sharding` metadata is a reconstructible JSON-primitive contract,
 but default load stays value-only; explicit re-sharding goes through `PayloadLoadHints` /
 `JaxPayloadLoadHint`, not `map_location`. Multi-host/unaddressable sharded arrays fail closed.
-The retained-memory baseline for Op `__slots__` lives at
-`benchmarks/perf/slots_baseline.md` and records roughly 10-15% lower trace-level retained memory
-on the measured fixtures.
 
 ## Public surface map
 

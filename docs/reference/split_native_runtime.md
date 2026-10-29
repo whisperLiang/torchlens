@@ -115,8 +115,8 @@ tensor allocator totals. CUDA measurements require a CUDA-enabled installation.
 `python benchmarks/split_runtime_overhead.py --repeats 20` measures execution and
 candidate-analysis overhead. `benchmarks/split_training_compact.py` measures
 retention modes in separate processes. `benchmarks/split_planner.py` isolates
-uncached synthetic planning. See [the acceptance report](split_runtime_acceptance.md)
-for exact versions, configurations, measurements and unexecuted coverage.
+uncached synthetic planning. Each benchmark records its configuration and measurements
+when run; generated result files are not part of the source tree.
 
 ## FLOPs authority
 
