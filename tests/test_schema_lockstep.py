@@ -682,11 +682,14 @@ class GeneratedDirectoryArtifact:
         names the differing files when stale.
     regenerate_command:
         Command a developer runs to refresh the directory.
+    reference_platform:
+        Native platform required for a byte comparison, when renderer-specific.
     """
 
     path: str
     check_command: tuple[str, ...]
     regenerate_command: str
+    reference_platform: str | None = None
 
 
 #: Generated directories too expensive for an in-process render (the collapse
@@ -697,6 +700,7 @@ GENERATED_DIRECTORY_ARTIFACTS: tuple[GeneratedDirectoryArtifact, ...] = (
         "docs/images/collapse",
         ("scripts/render_collapse_reference.py", "--check"),
         "python scripts/render_collapse_reference.py",
+        reference_platform="linux",
     ),
 )
 
@@ -858,6 +862,11 @@ def test_generated_directory_artifact_is_current(artifact: GeneratedDirectoryArt
     graphviz upgrade shows up here as a reviewed regen, never a silent drift.
     """
 
+    if artifact.reference_platform is not None and sys.platform != artifact.reference_platform:
+        pytest.skip(
+            "gallery byte oracle requires reviewed Linux Graphviz 2.43 and DejaVu fonts; "
+            "see tests/oracle_environments.md"
+        )
     result = subprocess.run(
         [sys.executable, *artifact.check_command],
         cwd=_REPO_ROOT,

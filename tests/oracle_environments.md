@@ -51,6 +51,9 @@ With that environment, all 14 SVGs reproduce the committed files byte-for-byte.
 The existing SVGs were not regenerated to accept the font-dependent geometry
 change. `tests/test_collapse_reference_fonts.py` checks environment restoration,
 and the schema-lockstep gallery gate reruns the generator's `--check` comparison.
+The gallery's Git attributes preserve LF bytes on Windows checkouts too. The
+native Windows renderer is outside this Linux byte oracle; run this gallery
+check in the reviewed Linux environment (including WSL) without refreshing SVGs.
 
 ## Verification
 

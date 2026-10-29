@@ -898,6 +898,14 @@ def _reset_rng_state() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _headless_render_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Render real artifacts without launching desktop viewers during tests."""
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("SSH_CONNECTION", "torchlens-tests")
+
+
+@pytest.fixture(autouse=True)
 def _split_backend_debug_environment(
     monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,

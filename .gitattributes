@@ -1,2 +1,4 @@
 *.ipynb filter=nbstripout
 *.ipynb diff=ipynb
+# The Linux gallery byte oracle compares the committed SVG bytes exactly.
+docs/images/collapse/*.svg text eol=lf

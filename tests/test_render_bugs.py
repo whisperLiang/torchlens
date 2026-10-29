@@ -1155,18 +1155,19 @@ def test_final_viewer_child_is_reaped_without_another_launch(
     on and released with NO later launch.
     """
 
-    import os
     import time
 
     from torchlens.visualization import _render_utils
 
-    stub_dir = tmp_path / "bin"
-    stub_dir.mkdir()
-    opener_name = "open" if sys.platform == "darwin" else "xdg-open"
-    stub = stub_dir / opener_name
-    stub.write_text("#!/bin/sh\nexit 0\n")
-    stub.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{stub_dir}{os.pathsep}{os.environ['PATH']}")
+    native_popen = subprocess.Popen
+
+    def spawn_stub_opener(cmd: list[str], **kwargs: Any) -> subprocess.Popen:
+        """Start a real short-lived child instead of the platform desktop viewer."""
+        assert cmd[0] == "xdg-open"
+        return native_popen([sys.executable, "-c", "pass"], **kwargs)
+
+    monkeypatch.setattr(_render_utils.sys, "platform", "linux")
+    monkeypatch.setattr(_render_utils.subprocess, "Popen", spawn_stub_opener)
     monkeypatch.setenv("DISPLAY", ":0")
     monkeypatch.delenv("SSH_CONNECTION", raising=False)
 

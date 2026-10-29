@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import example_models
 import graphviz
 import pytest
@@ -11,6 +13,12 @@ from torch import nn
 import torchlens as tl
 from torchlens.validation import check_metadata_invariants
 from torchlens.validation.invariants import MetadataInvariantError
+
+
+@pytest.fixture(autouse=True)
+def _isolated_render_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep default-named graph artifacts private to each test."""
+    monkeypatch.chdir(tmp_path)
 
 
 class WithOrphanIsland(nn.Module):
