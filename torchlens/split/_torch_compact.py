@@ -8,8 +8,42 @@ from weakref import ReferenceType, ref
 
 from ..backends.registry import TORCH_BACKEND_NAME
 from ..data_classes._runtime_handles import source_model_from_trace
+from ..intervention.types import LiteralTensor
 from ..ir.refs import TensorRef
+from .errors import SplitErrorContext, SplitUnsupportedError
 from .graph import SplitTraceGraph, SplitTraceNode
+
+
+def _buffer_owner(buffer: Any) -> tuple[Any | None, str]:
+    """Resolve a captured buffer's module without retaining its diagnostic Trace."""
+
+    model = source_model_from_trace(getattr(buffer, "source_trace", None))
+    address = getattr(buffer, "address", None)
+    if model is None or not isinstance(address, str):
+        return None, ""
+    module_path, _, name = address.rpartition(".")
+    try:
+        return (model.get_submodule(module_path) if module_path else model), name
+    except AttributeError:
+        return None, name
+
+
+def _owner_buffer_value(owner: Any, name: str) -> Any:
+    """Read registered or plain Tensor state without executing a user descriptor."""
+
+    if name in owner._buffers:
+        return owner._buffers[name]
+    return owner.__dict__.get(name)
+
+
+def live_buffer_value(buffer: Any) -> Any:
+    """Resolve both registered buffers and capture-tagged plain Tensor attributes."""
+
+    value = getattr(buffer, "handle", buffer)
+    if value is not None:
+        return value
+    owner, name = _buffer_owner(buffer)
+    return None if owner is None else _owner_buffer_value(owner, name)
 
 
 @dataclass(slots=True)
@@ -20,14 +54,15 @@ class _BufferHandle:
     source_id: int
     _owner_ref: ReferenceType[Any] | None = None
     _name: str = ""
+    address: str = ""
 
     @property
     def handle(self) -> Any:
-        """Resolve the current registered value after ``Module.to`` replaces it."""
+        """Resolve the current registered or plain Tensor state value."""
 
         owner = None if self._owner_ref is None else self._owner_ref()
         if owner is not None:
-            self._value = owner._buffers.get(self._name)
+            self._value = _owner_buffer_value(owner, self._name)
         return self._value
 
 
@@ -54,6 +89,7 @@ class _ReplayOpState:
     func_rng_states: dict[str, Any] | None
     func_autocast_state: dict[str, Any] | None
     multi_output_index: Any
+    is_inplace: bool = False
     out: Any = None
 
 
@@ -67,7 +103,57 @@ def _needs_source_payload(node: SplitTraceNode) -> bool:
     return node.is_buffer or (node.target is None and not node.parents)
 
 
-def compact_torch_graph(graph: SplitTraceGraph) -> SplitTraceGraph:
+def _validate_training_sources(graph: SplitTraceGraph) -> None:
+    """Refuse retained sources that would reuse a capture-time autograd graph.
+
+    Parameters
+    ----------
+    graph:
+        Normalized graph with source values and literal arguments still alive.
+
+    Notes
+    -----
+    Ordinary activations are reconstructed by replay and do not need this
+    check. A non-leaf tensor with no replay producer would instead carry a
+    one-shot autograd history across training steps. Detaching it would silently
+    lose gradients, so compact training refuses that unprovable lifetime.
+    """
+
+    def check(value: Any, node: SplitTraceNode) -> None:
+        """Reject a retained tensor with a capture-owned backward history."""
+
+        if getattr(value, "grad_fn", None) is not None:
+            raise SplitUnsupportedError(
+                "Compact training cannot retain a non-leaf source tensor's autograd "
+                "history. Recompute that source inside the captured model.",
+                context=SplitErrorContext(
+                    backend=graph.backend,
+                    split_point="",
+                    layer_label=node.label,
+                    op_type=node.op_type,
+                    reason="compact_training_autograd_source",
+                ),
+            )
+
+    def visit(component: Any, node: SplitTraceNode) -> None:
+        """Inspect the normalized template tree without changing any values."""
+
+        if isinstance(component, LiteralTensor):
+            check(component.value, node)
+        elif isinstance(component, tuple):
+            for item in component:
+                visit(item, node)
+
+    for node in graph.nodes:
+        if _needs_source_payload(node):
+            check(getattr(node.op, "out", None), node)
+        template = node.args_template
+        if template is not None:
+            visit(getattr(template, "args", ()), node)
+            visit(getattr(template, "kwargs", ()), node)
+
+
+def compact_torch_graph(graph: SplitTraceGraph, *, training: bool = False) -> SplitTraceGraph:
     """Retain only normalized Torch replay data, independent of the source Trace.
 
     Parameters
@@ -75,6 +161,10 @@ def compact_torch_graph(graph: SplitTraceGraph) -> SplitTraceGraph:
     graph:
         Torch graph after edge normalization and argument-template repair. The
         original capture must still be alive so live state handles can resolve.
+    training:
+        Check that retained sources do not carry one-shot captured autograd
+        histories. Training execution builds a fresh graph from live state on
+        every call; the source Trace's backward hooks are not required.
 
     Returns
     -------
@@ -95,6 +185,8 @@ def compact_torch_graph(graph: SplitTraceGraph) -> SplitTraceGraph:
 
     if graph.backend != TORCH_BACKEND_NAME:
         raise ValueError("compact_torch_graph requires a normalized Torch graph.")
+    if training:
+        _validate_training_sources(graph)
 
     modules: dict[int, _ModuleBuffers] = {}
     parameters: dict[int, _ParamHandle] = {}
@@ -105,16 +197,14 @@ def compact_torch_graph(graph: SplitTraceGraph) -> SplitTraceGraph:
 
         key = id(buffer)
         if key not in buffers:
-            value = getattr(buffer, "handle", buffer)
-            model = source_model_from_trace(getattr(buffer, "source_trace", None))
-            owner = None
-            name = ""
-            address = getattr(buffer, "address", None)
-            if model is not None and isinstance(address, str):
-                module_path, _, name = address.rpartition(".")
-                owner = model.get_submodule(module_path) if module_path else model
+            value = live_buffer_value(buffer)
+            owner, name = _buffer_owner(buffer)
             buffers[key] = _BufferHandle(
-                value, id(value), None if owner is None else ref(owner), name
+                value,
+                id(value),
+                None if owner is None else ref(owner),
+                name,
+                getattr(buffer, "address", ""),
             )
         return buffers[key]
 
@@ -156,6 +246,7 @@ def compact_torch_graph(graph: SplitTraceGraph) -> SplitTraceGraph:
             func_rng_states=rng,
             func_autocast_state=autocast,
             multi_output_index=getattr(node.op, "multi_output_index", None),
+            is_inplace=bool(getattr(node.op, "is_inplace", False)),
             out=getattr(node.op, "out", None) if _needs_source_payload(node) else None,
         )
         # TensorRef is metadata plus an optional strong activation reference.

@@ -636,11 +636,6 @@ class _GeneratedSegmentBase:
         self.bound_state_values()
         return self._state.trainable_values()
 
-    def state_report(self) -> dict[str, Any]:
-        """Return diagnostics for this segment's state binding."""
-
-        return self._state.as_dict()
-
     def bound_state_values(self) -> dict[str, Any]:
         """Bind and expose effective replay state without executing graph operations.
 
@@ -732,10 +727,12 @@ class _GeneratedSegmentBase:
         for param_ref in node.param_refs:
             module = _module_for_param_ref(param_ref)
             buffers = getattr(module, "buffers", None)
-            if buffers is None:
+            if not buffers:
                 continue
+            from .._torch_compact import live_buffer_value
+
             for buffer in buffers.values():
-                buffer_handle = getattr(buffer, "handle", None)
+                buffer_handle = live_buffer_value(buffer)
                 if buffer_handle is not None:
                     buffer_handle = self._state.resolve(
                         buffer_handle, source_id=getattr(buffer, "source_id", id(buffer))
@@ -920,6 +917,27 @@ class _GeneratedSegmentBase:
     ) -> Any:
         """Execute one captured operation function."""
 
+        if self.plan.ordered_mutation_node_ids:
+            # Planner allocation/write proofs apply only to ordinary native
+            # tensor semantics. Check every call, including fresh producers;
+            # otherwise a dispatch override could manufacture a hidden alias.
+            try:
+                plain = (
+                    _plain_torch_arguments(args, _torch())
+                    and _plain_torch_arguments(kwargs, _torch())
+                    and self._function_mode_stack_len() == 0
+                    and self._dispatch_mode_stack() == []
+                )
+            except Exception as error:
+                raise SplitUnsupportedError(
+                    "Cannot establish ordinary tensor semantics for ordered partition writes.",
+                    context=self._context(node, "partition_mutation_dispatch_unsupported"),
+                ) from error
+            if not plain:
+                raise SplitUnsupportedError(
+                    "Ordered partition writes require ordinary tensors without custom dispatch.",
+                    context=self._context(node, "partition_mutation_dispatch_unsupported"),
+                )
         if node.target is None:
             raise SplitUnsupportedError(
                 f"{node.label!r} has no callable target for split replay.",
@@ -1009,8 +1027,15 @@ class _GeneratedSegmentBase:
         """Return a replay value for an input/buffer/source node."""
 
         if self.use_live_param_sources and node.buffer_refs:
+            from .._torch_compact import live_buffer_value
+
             buffer = node.buffer_refs[0]
-            handle = getattr(buffer, "handle", buffer)
+            handle = live_buffer_value(buffer)
+            if handle is None:
+                raise SplitUnsupportedError(
+                    f"{node.label!r} live buffer value is unavailable.",
+                    context=self._context(node, "missing live buffer source"),
+                )
             return self._state.resolve(handle, source_id=getattr(buffer, "source_id", id(buffer)))
         value = getattr(node.op, "out", None)
         if value is None:

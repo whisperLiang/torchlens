@@ -6,11 +6,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-import torch
-from torch import nn
 from v2_helpers import split_request
 
-import torchlens as tl
 from torchlens.split.adapters.torch import TorchSplitAdapter
 from torchlens.split.errors import SplitUnsupportedError
 from torchlens.split.graph import SplitTraceGraph, SplitTraceNode
@@ -63,24 +60,6 @@ def _node(
         replay_source_policy="constant",
         op=SimpleNamespace(out=None),
     )
-
-
-def test_prepare_attaches_capability_report() -> None:
-    """Prepared runtimes expose the strict split capability report and programs."""
-
-    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 2)).eval()
-    x = torch.randn(2, 4)
-
-    runtime = tl.split.prepare(model, x, split_request("after:relu"))
-
-    assert runtime.capability_report is not None
-    assert runtime.capability_report.preflight_ok is True
-    assert runtime.capability_report.replay.supported is True
-    assert runtime.capability_report.boundary_cache.supported is True
-    assert runtime.prefix_program is not None
-    assert runtime.suffix_program is not None
-    assert runtime.prefix_program.segment == "prefix"
-    assert runtime.suffix_program.segment == "suffix"
 
 
 def test_replay_program_preflight_rejects_targetless_suffix_compute() -> None:

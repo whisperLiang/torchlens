@@ -4,12 +4,20 @@ from __future__ import annotations
 
 from .api import prepare
 from .boundary import ReplayBoundary
+from .boundary_layout import BoundaryLayout, BoundaryTensorLayout
 from .candidates import SplitCandidate, SplitCandidateReport, SplitPointAnalysis
+from .graph_profile import (
+    GraphProfile,
+    NodeCostFeatures,
+    ParameterCostFeatures,
+    PartitionMetrics,
+    TensorCostFeatures,
+)
 from .ir import (
     BackendHandle,
     BoundarySchema,
     DevicePlacement,
-    ModelProfile,
+    GraphPartition,
     OpIR,
     PlacementPlan,
     RegionIR,
@@ -26,6 +34,7 @@ from .ir import (
     before,
     percent,
 )
+from .ownership import ParameterOwnership, StateMigration, StateMigrationPlan
 from .pipeline import (
     analyze_split_capabilities,
     capture_canonical_model,
@@ -43,16 +52,36 @@ from .profiles import (
     register_model_profile,
     resolve_model_profile,
 )
-from .program import CapabilityStatus, ReplayOp, ReplayProgram, SplitCapabilityReport
+from .profiling import LatencyStats, SplitProfile
+from .program import (
+    CapabilityEvidence,
+    CapabilityStatus,
+    ReplayOp,
+    ReplayProgram,
+    SplitCapabilityReport,
+)
 from .runtime import SplitRuntime
 from .shape_program import DimExpr, ShapeBinding, ShapeProgram, ShapeRecipe, TensorShapeIR
 
 __all__ = [
     "BoundarySchema",
+    "BoundaryLayout",
+    "BoundaryTensorLayout",
+    "LatencyStats",
+    "SplitProfile",
     "BackendHandle",
     "CapabilityStatus",
+    "CapabilityEvidence",
     "DevicePlacement",
-    "ModelProfile",
+    "GraphPartition",
+    "GraphProfile",
+    "NodeCostFeatures",
+    "ParameterCostFeatures",
+    "ParameterOwnership",
+    "StateMigration",
+    "StateMigrationPlan",
+    "PartitionMetrics",
+    "TensorCostFeatures",
     "OpIR",
     "PlacementPlan",
     "ReplayOp",

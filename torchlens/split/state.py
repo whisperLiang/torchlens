@@ -291,11 +291,6 @@ class SegmentState:
             return replicate(value, target, trainable=trainable)
         return self.adapter.to_device(value, target)
 
-    def owned_entries(self) -> tuple[StateEntry, ...]:
-        """Return the device-local replicas this binding owns."""
-
-        return tuple(entry for entry in self._entries.values() if entry.ownership == "owned")
-
     def trainable_values(self) -> list[Any]:
         """Return owned replicas that carry gradients, in resolution order."""
 
@@ -305,20 +300,6 @@ class SegmentState:
             if entry.ownership == "owned" and entry.trainable
         ]
 
-    def as_dict(self) -> dict[str, Any]:
-        """Return JSON-like binding diagnostics."""
-
-        entries = list(self._entries.values())
-        return {
-            "placement": self.placement.as_dict(),
-            "entries": len(entries),
-            "owned": sum(1 for entry in entries if entry.ownership == "owned"),
-            "referenced": sum(1 for entry in entries if entry.ownership == "referenced"),
-            "trainable_owned": sum(
-                1 for entry in entries if entry.ownership == "owned" and entry.trainable
-            ),
-        }
-
 
 def _device_key(adapter: Any, device: Any) -> str:
     """Resolve backend device aliases before looking up a state replica."""
@@ -327,16 +308,6 @@ def _device_key(adapter: Any, device: Any) -> str:
     if callable(normalize):
         return str(normalize(device))
     return _normalize_device_text(str(device))
-
-
-def _devices_match(left: Any, right: Any) -> bool:
-    """Compare backend device descriptors by normalized text.
-
-    Kept as a small compatibility helper for adapters that do not expose a
-    device normalizer; ``SegmentState`` uses the adapter-aware variant above.
-    """
-
-    return _normalize_device_text(str(left)) == _normalize_device_text(str(right))
 
 
 def _normalize_device_text(text: str) -> str:

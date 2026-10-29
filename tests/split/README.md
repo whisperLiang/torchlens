@@ -1,5 +1,14 @@
 # Split runtime acceptance
 
+Run the repository quality gates with the versions declared in `[project.optional-dependencies.dev]`:
+in particular Ruff 0.15.4 and mypy 2.1.0. The full-suite oracle tests also require
+a committed environment fingerprint; see [oracle environments](../oracle_environments.md).
+Run with `TORCHLENS_ORACLE_ENFORCE=1` in a supported environment. When copying
+a Windows checkout to Linux, preserve Git's original LF
+bytes for generated artifacts; CRLF copies fail byte-identity checks even when
+the renderer output is unchanged. Never regenerate oracle expectations merely
+to make a new environment pass.
+
 The split suite includes optional native backends, pretrained model checks, and
 exhaustive boundary matrices. Missing GPU builds are environment failures in the
 cross-device real-model tests; a CPU-only JAX or Paddle installation does not cover
@@ -22,10 +31,11 @@ python -m pip install 'rfdetr==1.8.3' 'ultralytics==8.4.152' 'keras-cv==0.9.0'
 ```
 
 RF-DETR 1.8.3 follows the repository's declared `>=1.8,<1.9` dependency range.
-Its measured Torch 2.10 capture contains 860 compute nodes (1,720 before/after
-boundaries), which the inventory assertion explicitly admits for this version
-pair. The complete replay matrix below must still pass. Other version pairs
-retain their existing inventory expectations.
+Its measured Torch 2.10 and 2.11 captures contain 860 compute nodes (1,720 before/after
+boundaries), which the inventory assertion explicitly admits for these version
+pairs. Torch 2.11's inventory was independently reproduced on the untouched
+baseline and refactored runtime. The complete replay matrix below must still pass.
+Other version pairs retain their existing inventory expectations.
 
 Enable the complete suite, including all YOLOv8 and RF-DETR boundaries and allocated
 memory comparisons:
@@ -45,6 +55,10 @@ python -m pytest tests/split -q -rs --tb=short --randomly-seed=20260920
 The exhaustive tests can each take up to two hours. Their partition controls are
 for separately scheduled coverage; `PARTITIONS=1` runs every boundary in one test.
 The first pretrained run may download model weights.
+On slower devices, increase `PARTITIONS` and run every index to keep each shard
+within the unchanged timeout. Optional `TORCHLENS_RFDETR_PROGRESS=/path/prefix`
+appends a progress row after all checks for each GPU-enabled cut to
+`/path/prefix.<partition-index>.log`; the final count assertions remain mandatory.
 
 On a shared GPU with limited free memory, run these selections **sequentially**,
 in place of the final command above:

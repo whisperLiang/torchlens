@@ -80,7 +80,6 @@ def test_single_trace_replays_and_trains_across_runtime_batches() -> None:
         assert id(runtime.trace_graph) == graph_object_id
         assert id(runtime.plan) == plan_id
         assert runtime.graph_identity == graph_id
-        assert runtime.split_ir_identity == graph_id
         assert runtime.split_id == split_id
         assert runtime.trace_graph.shape_program.fingerprint == shape_fingerprint
         assert runtime.traced_batch_size in {1, 2}

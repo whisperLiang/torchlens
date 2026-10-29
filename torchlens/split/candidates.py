@@ -16,11 +16,12 @@ from .program import ReplayProgram, SplitCapabilityReport
 
 if TYPE_CHECKING:
     from .graph import SplitTraceGraph
+    from .graph_profile import PartitionMetrics
 
 
 @dataclass(frozen=True)
 class SplitPointAnalysis:
-    """Validated point-specific plan and programs, with no backend executables."""
+    """Validated point or DAG partition and programs, with no backend executables."""
 
     source_graph: SplitTraceGraph = field(repr=False, compare=False)
     request: SplitRequest
@@ -29,6 +30,7 @@ class SplitPointAnalysis:
     prefix_program: ReplayProgram
     suffix_program: ReplayProgram
     capability_report: SplitCapabilityReport
+    metrics: PartitionMetrics | None = None
 
 
 @dataclass(frozen=True)

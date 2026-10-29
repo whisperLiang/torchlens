@@ -5,9 +5,16 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
+from ..backends.registry import TORCH_BACKEND_NAME
 from .errors import SplitErrorContext, SplitUnsupportedError
 from .graph import SplitTraceGraph, SplitTraceNode
-from .ir import SplitGraphIR, SplitModelProfile, SplitRequest, SplitVerificationStatus
+from .ir import (
+    GraphPartition,
+    SplitGraphIR,
+    SplitModelProfile,
+    SplitRequest,
+    SplitVerificationStatus,
+)
 from .planner import SplitPlan
 from .shape import is_batch_shape_sensitive_op
 
@@ -29,6 +36,23 @@ class CapabilityStatus:
         result = asdict(self)
         result["status"] = self.status.value
         return result
+
+
+@dataclass(frozen=True)
+class CapabilityEvidence:
+    """Separate implementation, graph, device, and sampled numerical evidence.
+
+    ``None`` means unexamined or unknown, never success. Device evidence checks
+    requested device availability only, not free memory or kernel coverage.
+    Numerical evidence applies exclusively to the named ``evidence_scope``.
+    """
+
+    backend_supported: bool | None
+    model_supported: bool | None = None
+    device_supported: bool | None = None
+    numerically_verified: bool | None = None
+    evidence_scope: tuple[str, ...] = ()
+    reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -102,6 +126,7 @@ class SplitCapabilityReport:
     node_statuses: dict[str, SplitVerificationStatus] | None = None
     backend_capabilities: dict[str, bool] | None = None
     shape_diagnostics: dict[str, Any] | None = None
+    feature_evidence: dict[str, CapabilityEvidence] | None = None
 
     @property
     def preflight_ok(self) -> bool:
@@ -372,6 +397,7 @@ def build_capability_report(
             "boundary_cache": bool(getattr(adapter, "supports_boundary_cache", False)),
             "state_placement": bool(getattr(adapter, "supports_state_placement", False)),
         },
+        feature_evidence=_feature_evidence(adapter, graph, spec, preflight.supported),
         shape_diagnostics=(
             None
             if graph.shape_program is None
@@ -399,6 +425,140 @@ def build_capability_report(
             }
         ),
     )
+
+
+def _device_evidence(adapter: Any, spec: SplitRequest) -> bool | None:
+    """Inspect explicit Torch device availability without allocating replay state."""
+
+    if adapter.name != "torch" or not spec.placement.is_explicit:
+        return None
+    import torch
+
+    results: list[bool | None] = []
+    for placement in (spec.placement.prefix, spec.placement.suffix):
+        if not placement.is_explicit:
+            results.append(None)
+            continue
+        try:
+            device = torch.device(placement.device)
+        except (TypeError, ValueError, RuntimeError):
+            return False
+        if device.type == "cpu":
+            results.append(True)
+        elif device.type == "cuda":
+            results.append(
+                torch.cuda.is_available()
+                and (device.index is None or device.index < torch.cuda.device_count())
+            )
+        else:
+            results.append(None)
+    if False in results:
+        return False
+    return True if all(value is True for value in results) else None
+
+
+def _feature_evidence(
+    adapter: Any, graph: SplitTraceGraph, spec: SplitRequest, preflight_ok: bool
+) -> dict[str, CapabilityEvidence]:
+    """Describe feature evidence without treating static lowering as numerical validation."""
+
+    torch_backend = adapter.name == TORCH_BACKEND_NAME
+    replay = bool(getattr(adapter, "supports_replay", False))
+    training = bool(getattr(adapter, "supports_training", False))
+    cache = bool(getattr(adapter, "supports_boundary_cache", False))
+    placement = bool(getattr(adapter, "supports_state_placement", False))
+    devices = _device_evidence(adapter, spec)
+    static_scope = ("selected_partition_static_lowering",)
+    shape = graph.shape_program
+    probe = None if shape is None else shape.batch_probe
+    probe_passed = (
+        None if probe is None or probe.status == "unavailable" else probe.status == "passed"
+    )
+    numerical_probe = (
+        True
+        if probe_passed is True
+        else False
+        if probe is not None and str(probe.reason or "").startswith("compare outputs:")
+        else None
+    )
+    dynamic_model = (
+        False
+        if probe_passed is False
+        else True
+        if probe_passed and shape is not None and not shape.unresolved
+        else None
+    )
+    dynamic_scope = (
+        ()
+        if probe is None
+        else (
+            f"independent_batch_probe:B={probe.probe_batch_size}",
+            "unplaced_forward_replay_only",
+            "other_batches_are_extrapolated",
+        )
+    )
+    return {
+        "arbitrary_dag_partition": CapabilityEvidence(
+            backend_supported=True if torch_backend else None,
+            model_supported=preflight_ok if isinstance(spec.point, GraphPartition) else None,
+            device_supported=devices,
+            evidence_scope=static_scope if isinstance(spec.point, GraphPartition) else (),
+            reasons=() if isinstance(spec.point, GraphPartition) else ("partition_not_analyzed",),
+        ),
+        "split_inference": CapabilityEvidence(
+            replay, preflight_ok, devices, evidence_scope=static_scope
+        ),
+        "split_training": CapabilityEvidence(
+            training,
+            preflight_ok if spec.trainable else None,
+            devices,
+            evidence_scope=static_scope if spec.trainable else (),
+            reasons=() if spec.trainable else ("training_not_requested",),
+        ),
+        "compact_training": CapabilityEvidence(
+            torch_backend,
+            preflight_ok
+            if torch_backend and spec.trainable and spec.features.retain_trace is False
+            else None,
+            devices,
+            evidence_scope=("training_source_lifetime_check", "selected_partition_static_lowering")
+            if torch_backend and spec.trainable and spec.features.retain_trace is False
+            else (),
+        ),
+        "dynamic_batch": CapabilityEvidence(
+            True if torch_backend else None,
+            dynamic_model,
+            None,
+            numerical_probe,
+            evidence_scope=dynamic_scope,
+            reasons=() if probe is not None else ("batch_probe_unavailable",),
+        ),
+        "cross_device": CapabilityEvidence(
+            placement,
+            device_supported=devices,
+            evidence_scope=("requested_device_availability_only",),
+            reasons=("placement_numerics_not_verified",),
+        ),
+        "repartition": CapabilityEvidence(
+            replay,
+            evidence_scope=("same_capture_plan_reuse",),
+            reasons=("target_partition_and_current_state_require_analysis",),
+        ),
+        "state_migration": CapabilityEvidence(
+            torch_backend,
+            evidence_scope=("model_state_only_optimizer_owned_by_caller",),
+            reasons=("specific_migration_not_inspected",),
+        ),
+        "microbatch": CapabilityEvidence(
+            torch_backend or adapter.name == "mlx",
+            reasons=("chunk_shapes_and_loss_semantics_require_runtime_validation",),
+        ),
+        "boundary_cache": CapabilityEvidence(
+            cache,
+            preflight_ok if cache else False,
+            evidence_scope=("authenticated_local_cache_only",),
+        ),
+    }
 
 
 def _overall_verification(
@@ -463,6 +623,7 @@ def ensure_capability_report_supported(
 
 
 __all__ = [
+    "CapabilityEvidence",
     "CapabilityStatus",
     "ReplayOp",
     "ReplayProgram",

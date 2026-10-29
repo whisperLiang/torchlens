@@ -60,6 +60,13 @@ def test_v2_prepare_normalizes_graph_and_exposes_boundary_abi() -> None:
     assert runtime.graph_ir.ops
     assert runtime.boundary_schema
     assert runtime.capability_report is not None
+    assert runtime.capability_report.preflight_ok is True
+    assert runtime.capability_report.replay.supported is True
+    assert runtime.capability_report.boundary_cache.supported is True
+    assert runtime.prefix_program is not None
+    assert runtime.suffix_program is not None
+    assert runtime.prefix_program.segment == "prefix"
+    assert runtime.suffix_program.segment == "suffix"
     assert runtime.capability_report.verification == SplitVerificationStatus.EXACT
     report = runtime.explain_capabilities()
     assert report["backend_capabilities"]["replay"] is True

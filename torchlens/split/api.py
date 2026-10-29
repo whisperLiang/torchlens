@@ -51,6 +51,8 @@ def prepare(
         defaults to a compact runtime without a diagnostic Trace. Request
         ``features=SplitFeatures(retain_trace=True)`` to retain saved activations.
         Training and other backends retain their complete captures by default.
+        Torch training can opt into compact retention with ``retain_trace=False``;
+        live state and replay metadata remain available for fresh autograd graphs.
     input_kwargs:
         Optional keyword inputs for the native capture.
 
@@ -91,12 +93,14 @@ def prepare(
         )
     require_placement_support(adapter, request.placement, split_point=request.boundary)
 
-    compact = request.features.retain_trace is not True and not request.trainable
-    compact = compact and adapter.name == TORCH_BACKEND_NAME
+    compact = adapter.name == TORCH_BACKEND_NAME and (
+        request.features.retain_trace is False
+        or (request.features.retain_trace is None and not request.trainable)
+    )
     if request.features.retain_trace is False and not compact:
         raise SplitUnsupportedError(
-            "retain_trace=False is supported only for Torch inference; training and "
-            "other backends require their complete capture. Use retain_trace=True or None.",
+            "retain_trace=False is supported only for Torch; other backends require "
+            "their complete capture. Use retain_trace=True or None.",
             context=SplitErrorContext(
                 backend=str(backend_spec.name),
                 split_point=request.boundary,

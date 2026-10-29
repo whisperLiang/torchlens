@@ -12,10 +12,8 @@ from v2_helpers import split_request
 import torchlens as tl
 from torchlens.split import PlacementPlan
 from torchlens.split.boundary import ReplayBoundary
-from torchlens.split.cache import _cache_secret
 from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
 from torchlens.split.state import SegmentState
-from torchlens.user_funcs import _store_authenticated_capture_cache
 
 
 class StateMigrationMlp(nn.Module):
@@ -288,34 +286,6 @@ def test_recut_preserves_tied_identity_or_refuses_divergent_replicas(
         recut = runtime.at(tl.split.after("tail"))
         assert len(recut.prefix_parameters()) == 1
         torch.testing.assert_close(recut.replay(inputs), expected)
-
-
-def test_boundary_metadata_discards_legacy_state_fields(tmp_path: Path) -> None:
-    """Legacy cached metadata cannot impose value-state compatibility checks."""
-
-    model = StateMigrationMlp().eval()
-    inputs = torch.ones(3, 4)
-    runtime = tl.split.prepare(model, inputs, split_request("after:relu"))
-    boundary = runtime.run_prefix(inputs)
-    assert "state_fingerprint" not in boundary.metadata
-    assert "state_prefix_kind" not in boundary.metadata
-
-    old_metadata = dict(boundary.metadata)
-    old_metadata.update(state_fingerprint="obsolete", state_prefix_kind="inference")
-    legacy = ReplayBoundary(boundary.backend, boundary.tensors, boundary.spec, old_metadata)
-    assert "state_fingerprint" not in legacy.metadata
-    assert "state_prefix_kind" not in legacy.metadata
-    torch.testing.assert_close(runtime.run_suffix(legacy), runtime.run_suffix(boundary))
-
-    # Simulate an authenticated pickle produced by an older release, whose
-    # unpickler does not call the dataclass constructor.
-    object.__setattr__(legacy, "metadata", old_metadata)
-    cache_path = tmp_path / "old-boundary"
-    runtime.save_boundary(boundary, cache_path)
-    assert _store_authenticated_capture_cache(legacy, cache_path / "payload.pkl", _cache_secret())
-    cached = runtime.load_boundary(cache_path)
-    assert "state_fingerprint" not in cached.metadata
-    assert "state_prefix_kind" not in cached.metadata
 
 
 def test_replay_boundary_still_refuses_structural_mismatches() -> None:

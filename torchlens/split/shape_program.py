@@ -11,7 +11,7 @@ from numbers import Integral
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from ..backends.registry import TINYGRAD_BACKEND_NAME, TORCH_BACKEND_NAME
-from ..intervention.types import CapturedArgTemplate, LiteralValue
+from ..intervention.types import CapturedArgTemplate, LiteralTensor, LiteralValue
 from .batch_probe import BatchProbeResult
 from .errors import SplitBoundaryError, SplitErrorContext, SplitUnsupportedError
 from .graph import iter_replay_value_refs
@@ -48,7 +48,7 @@ ShapeSemantic = Literal[
     "factory",
 ]
 
-_SHAPE_RULE_VERSION = 3
+_SHAPE_RULE_VERSION = 4
 _WITNESS_DISAMBIGUATED_SEMANTICS = frozenset(
     {
         "reshape",
@@ -537,7 +537,13 @@ def compile_shape_program(
         for node_id, shape in value_shapes.items()
         if any(dim.contains(request.batch_symbol) for dim in shape.dims)
     )
-    recipes = _compile_recipes(graph, value_shapes, request.batch_symbol)
+    recipes = _compile_recipes(
+        graph,
+        value_shapes,
+        request.batch_symbol,
+        traced_batch_size=traced_batch_size,
+        shape_witnesses=shape_witnesses or {},
+    )
     unresolved = _unresolved_dynamic_nodes(
         graph,
         value_shapes,
@@ -803,7 +809,6 @@ def _apply_semantic_shape_expressions(
             if candidate is None:
                 candidate = _passthrough_shape_candidate(graph, node, resolved)
             if candidate is None or not _shape_candidate_matches_evidence(
-                node.canonical_id,
                 candidate,
                 node.output_shape,
                 batch_symbol=batch_symbol,
@@ -1055,19 +1060,10 @@ def _repeat_shape_candidate(
 ) -> TensorShapeIR | None:
     """Derive repeat/tile dimensions directly from captured repeat factors."""
 
-    args, _kwargs = _captured_call_parts(node)
-    if len(args) < 2:
-        return None
-    receiver_refs = _template_value_refs(args[0])
-    parent_shape = next(
-        (value_shapes[value_id] for value_id in receiver_refs if value_id in value_shapes),
-        None,
-    )
+    receiver_component, repeat_values = _repeat_call_parts(node)
+    parent_shape, _receiver_id = _repeat_receiver_shape(receiver_component, value_shapes)
     if parent_shape is None:
         return None
-    raw_repeats: Any = args[1:] if len(args) > 2 else _literal_component(args[1])
-    repeats = raw_repeats if isinstance(raw_repeats, (tuple, list)) else (raw_repeats,)
-    repeat_values = tuple(_literal_component(item) for item in repeats)
     if not repeat_values or not all(
         isinstance(item, Integral) and not isinstance(item, bool) for item in repeat_values
     ):
@@ -1081,6 +1077,37 @@ def _repeat_shape_candidate(
         node.canonical_id,
         tuple(_dim_mul(dim, factor) for dim, factor in zip(padded_dims, padded_factors)),
     )
+
+
+def _repeat_call_parts(node: SplitTraceNode) -> tuple[Any, tuple[Any, ...]]:
+    """Read positional or keyword repeat factors without treating them as extents."""
+
+    args, kwargs = _captured_call_parts(node)
+    receiver = args[0] if args else kwargs.get("input")
+    raw = (
+        args[1:]
+        if len(args) > 2
+        else args[1]
+        if len(args) == 2
+        else kwargs.get("repeats", kwargs.get("dims", ()))
+    )
+    raw = _literal_component(raw)
+    factors = raw if isinstance(raw, (tuple, list)) else (raw,)
+    return receiver, tuple(_literal_component(item) for item in factors)
+
+
+def _repeat_receiver_shape(
+    component: Any, value_shapes: Mapping[str, TensorShapeIR]
+) -> tuple[TensorShapeIR | None, str | None]:
+    """Resolve a repeat receiver from graph metadata or fixed parameter state."""
+
+    refs = _template_value_refs(component)
+    if len(refs) == 1:
+        return value_shapes.get(refs[0]), refs[0]
+    if isinstance(component, LiteralTensor) and component.param_barcode is not None:
+        shape = tuple(int(dim) for dim in component.value.shape)
+        return TensorShapeIR("", tuple(DimExpr.const(dim) for dim in shape)), None
+    return None, None
 
 
 def _permuted_shape_candidate(
@@ -1148,7 +1175,6 @@ def _symbols_in_expr(expression: DimExpr) -> set[str]:
 
 
 def _shape_candidate_matches_evidence(
-    node_id: str,
     candidate: TensorShapeIR,
     traced_shape: tuple[int, ...] | None,
     *,
@@ -1164,7 +1190,7 @@ def _shape_candidate_matches_evidence(
     if candidate.evaluate(trace_binding) != traced_shape:
         return False
     return all(
-        (witness_shape := shapes.get(node_id)) is not None
+        (witness_shape := shapes.get(candidate.value_id)) is not None
         and candidate.evaluate(ShapeBinding({batch_symbol: batch_size}, {})) == witness_shape
         for batch_size, shapes in shape_witnesses.items()
     )
@@ -1214,11 +1240,25 @@ def _compile_recipes(
     graph: SplitTraceGraph,
     value_shapes: Mapping[str, TensorShapeIR],
     batch_symbol: str,
+    *,
+    traced_batch_size: int,
+    shape_witnesses: Mapping[int, Mapping[str, tuple[int, ...] | None]],
 ) -> dict[str, tuple[ShapeRecipe, ...]]:
     """Lower symbolic output descriptors to exact per-node recipes."""
 
     recipes: dict[str, tuple[ShapeRecipe, ...]] = {}
     for node in graph.nodes:
+        if graph.backend == TORCH_BACKEND_NAME and shape_semantic_for_node(node) == "repeat":
+            repeat_recipe = _compile_repeat_recipe(
+                node,
+                value_shapes,
+                batch_symbol,
+                traced_batch_size=traced_batch_size,
+                shape_witnesses=shape_witnesses,
+            )
+            if repeat_recipe is not None:
+                recipes[node.canonical_id] = (repeat_recipe,)
+            continue
         if not _uses_shape_descriptor(node, graph.backend):
             continue
         shape = value_shapes.get(node.canonical_id)
@@ -1267,6 +1307,86 @@ def _compile_recipes(
         if node_recipes:
             recipes[node.canonical_id] = tuple(node_recipes)
     return recipes
+
+
+def _compile_repeat_recipe(
+    node: SplitTraceNode,
+    value_shapes: Mapping[str, TensorShapeIR],
+    batch_symbol: str,
+    *,
+    traced_batch_size: int,
+    shape_witnesses: Mapping[int, Mapping[str, tuple[int, ...] | None]],
+) -> ShapeRecipe | None:
+    """Lower witnessed repeat factors without confusing them with output extents.
+
+    A fixed receiver can be repeated by the runtime batch (learned query tokens
+    are one example). Only independently witnessed output dimensions authorize
+    changing such a factor. Repeating an already batched receiver by a constant
+    keeps that factor constant.
+    """
+
+    receiver_component, factors = _repeat_call_parts(node)
+    if not shape_witnesses:
+        return None
+    receiver, receiver_id = _repeat_receiver_shape(receiver_component, value_shapes)
+    output = value_shapes.get(node.canonical_id)
+    if receiver is None or output is None:
+        return None
+    if not factors or not all(
+        isinstance(item, Integral) and not isinstance(item, bool) and int(item) >= 0
+        for item in factors
+    ):
+        return None
+    captured = tuple(int(item) for item in factors)
+    rank = len(output.dims)
+    if len(captured) > rank or len(receiver.dims) > rank:
+        return None
+    padded_receiver = (DimExpr.const(1),) * (rank - len(receiver.dims)) + receiver.dims
+    padded_factors = (1,) * (rank - len(captured)) + captured
+    lowered: list[DimExpr] = []
+    changed = False
+    for axis, (parent_dim, output_dim, factor) in enumerate(
+        zip(padded_receiver, output.dims, padded_factors, strict=True)
+    ):
+        if _dim_mul(parent_dim, factor).simplify() == output_dim.simplify():
+            lowered.append(DimExpr.const(factor))
+            continue
+        # Quotients involving a dynamic receiver could require nonlinear batch
+        # reasoning. Leave those unsupported instead of guessing a repeat count.
+        if parent_dim.op != "const" or not isinstance(parent_dim.value, int):
+            return None
+        extent = parent_dim.value
+        if extent <= 0 or not output_dim.contains(batch_symbol):
+            return None
+        if axis < rank - len(captured):
+            return None  # tile's implicit leading factors are not captured arguments
+        for batch, shapes in shape_witnesses.items():
+            witnessed_output = shapes.get(node.canonical_id)
+            witnessed_receiver = shapes.get(receiver_id) if receiver_id is not None else None
+            if witnessed_output is None or (receiver_id is not None and witnessed_receiver is None):
+                return None
+            receiver_axis = axis - (rank - len(receiver.dims))
+            if (
+                receiver_axis >= 0
+                and witnessed_receiver is not None
+                and witnessed_receiver[receiver_axis] != extent
+            ):
+                return None
+            observed = witnessed_output[axis]
+            if observed % extent or output_dim.evaluate({batch_symbol: batch}) != observed:
+                return None
+        if output_dim.evaluate({batch_symbol: traced_batch_size}) != extent * factor:
+            return None
+        lowered.append(DimExpr("floordiv", args=(output_dim, parent_dim)).simplify())
+        changed = True
+    if not changed:
+        return None
+    return ShapeRecipe(
+        node_id=node.canonical_id,
+        recipe_id=f"repeat:{node.canonical_id}",
+        captured=captured,
+        dims=tuple(lowered[rank - len(captured) :]),
+    )
 
 
 def _parent_shape_relations(
@@ -1851,7 +1971,7 @@ def _shape_proof_sources(
         witness_axes = witness_diagnostics.get(node.canonical_id, {}).get("accepted_axes", ())
         if node.canonical_id in input_ids:
             source = "input_batch_axis"
-        elif semantic == "repeat":
+        elif semantic == "repeat" and _repeat_shape_candidate(node, value_shapes) == shape:
             source = "semantic:repeat"
         elif witness_axes:
             source = "sampled_shape_witness"

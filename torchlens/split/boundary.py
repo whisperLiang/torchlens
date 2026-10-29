@@ -30,20 +30,6 @@ class ReplayBoundary:
     spec: dict[str, BoundarySchema]
     metadata: dict[str, Any]
 
-    def __post_init__(self) -> None:
-        """Drop value-state fields from callers constructing old cached boundaries."""
-
-        if "state_fingerprint" in self.metadata or "state_prefix_kind" in self.metadata:
-            object.__setattr__(
-                self,
-                "metadata",
-                {
-                    key: value
-                    for key, value in self.metadata.items()
-                    if key not in {"state_fingerprint", "state_prefix_kind"}
-                },
-            )
-
     @staticmethod
     def _collate_metadata_abi(boundary: ReplayBoundary) -> tuple[Any, ...]:
         """Return metadata fields that identify a compatible boundary ABI."""

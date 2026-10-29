@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .._state import pause_logging
 from .adapters.base import SegmentBundle, SplitBackendAdapter
@@ -22,13 +24,26 @@ from .candidates import (
 )
 from .errors import SplitBoundaryError, SplitErrorContext, SplitUnsupportedError
 from .graph import SplitTraceGraph
-from .ir import BoundarySchema, SplitGraphIR, SplitModelProfile, SplitPoint, SplitRequest
+from .ir import (
+    BoundarySchema,
+    GraphPartition,
+    SplitGraphIR,
+    SplitModelProfile,
+    SplitPoint,
+    SplitRequest,
+)
 from .pipeline import analyze_split_capabilities, execute_split_runtime, lower_split_program
 from .placement import PlacementPlan, move_tree, require_placement_support
 from .planner import SplitPlan, plan_split
 from .program import ReplayProgram, SplitCapabilityReport, ensure_capability_report_supported
 from .state import SegmentState, StateEntry, _StateReplicaPool
 from .validation import nested_allclose
+
+if TYPE_CHECKING:
+    from .boundary_layout import BoundaryLayout
+    from .graph_profile import GraphProfile
+    from .ownership import ParameterOwnership, StateMigrationPlan
+    from .profiling import SplitProfile
 
 
 class SplitRuntime:
@@ -83,6 +98,10 @@ class SplitRuntime:
         self.model_profile = model_profile
         self.prepared_input_kwargs = dict(prepared_input_kwargs or {})
         self.batch_spec = batch_spec
+        self._analysis_cache: OrderedDict[tuple[Any, ...], SplitPointAnalysis] = OrderedDict()
+        self._profile_cache: OrderedDict[int | None, GraphProfile] = OrderedDict()
+        self._cache_graph = trace_graph
+        self._cache_counts = {"hits": 0, "misses": 0}
         initializer = getattr(adapter, "initialize_runtime_state", None)
         if callable(initializer):
             with pause_logging():
@@ -136,12 +155,6 @@ class SplitRuntime:
         return None if self.graph_ir is None else self.graph_ir.graph_hash
 
     @property
-    def split_ir_identity(self) -> str | None:
-        """Stable identity of the reused SplitIR graph."""
-
-        return self.graph_identity
-
-    @property
     def traced_batch_size(self) -> int | None:
         """Canonical capture batch used to produce this runtime's graph."""
 
@@ -184,6 +197,112 @@ class SplitRuntime:
             return {}
         return self.capability_report.as_dict()
 
+    def graph_profile(self, *, batch_size: int | None = None) -> GraphProfile:
+        """Describe static graph costs without executing the model.
+
+        Parameters
+        ----------
+        batch_size
+            Batch to evaluate using the retained ShapeProgram; defaults to the
+            capture batch. Unknown costs remain None, including unsupported FLOPs.
+
+        Returns
+        -------
+        GraphProfile
+            Immutable node, value and state metadata for placement algorithms.
+        """
+
+        from .graph_profile import build_graph_profile
+
+        if batch_size is not None and (type(batch_size) is not int or batch_size < 1):
+            raise ValueError("batch_size must be a positive integer")
+        self._check_cache_graph()
+        if batch_size not in self._profile_cache:
+            self._profile_cache[batch_size] = build_graph_profile(
+                self.trace_graph, model=self.model, batch_size=batch_size
+            )
+            if len(self._profile_cache) > 8:
+                self._profile_cache.popitem(last=False)
+        self._profile_cache.move_to_end(batch_size)
+        return self._profile_cache[batch_size]
+
+    def clear_analysis_cache(self) -> None:
+        """Invalidate this capture lineage's bounded plan and graph-cost caches."""
+
+        self._analysis_cache.clear()
+        self._profile_cache.clear()
+        self._cache_counts.update(hits=0, misses=0)
+
+    def parameter_ownership(self) -> tuple[ParameterOwnership, ...]:
+        """Describe stable parameter/buffer identities and current segment ownership."""
+
+        from .ownership import parameter_ownership
+
+        return parameter_ownership(self)
+
+    def boundary_layout(
+        self, *, batch_size: int | None = None, training: bool = False
+    ) -> BoundaryLayout:
+        """Describe unique boundary payloads from static shape and ABI metadata."""
+
+        from .boundary_layout import build_boundary_layout
+
+        return build_boundary_layout(
+            self.graph_profile(batch_size=batch_size), self.plan, training=training
+        )
+
+    def profile_split(
+        self,
+        inputs: Any,
+        *,
+        warmup: int = 3,
+        repeats: int = 10,
+        targets: Any = None,
+        loss_fn: Callable[[Any, Any], Any] | None = None,
+        input_kwargs: dict[str, Any] | None = None,
+    ) -> SplitProfile:
+        """Measure synchronized phases on isolated state; never step an optimizer."""
+
+        from .profiling import _ProfileOptions, profile_split
+
+        return profile_split(
+            self,
+            inputs,
+            _ProfileOptions(
+                warmup=warmup,
+                repeats=repeats,
+                targets=targets,
+                loss_fn=loss_fn,
+                input_kwargs=input_kwargs,
+            ),
+        )
+
+    def parameter_bindings(self) -> Mapping[str, Mapping[str, Any]]:
+        """Bind stable parameter IDs to effective tensors for caller-owned optimizers."""
+
+        from .ownership import parameter_bindings
+
+        return parameter_bindings(self)
+
+    def plan_state_migration(self, partition: GraphPartition | SplitPoint) -> StateMigrationPlan:
+        """Describe a recut and external optimizer reassociation without moving state."""
+
+        from .ownership import plan_state_migration
+
+        return plan_state_migration(self, partition)
+
+    def analysis_cache_info(self) -> dict[str, int]:
+        """Return capacity and hit/miss counts without exposing cached plans."""
+
+        return {**self._cache_counts, "size": len(self._analysis_cache), "capacity": 32}
+
+    def _check_cache_graph(self) -> None:
+        """Invalidate plans if the runtime graph identity was replaced."""
+
+        if self._cache_graph is not self.trace_graph:
+            self.clear_analysis_cache()
+            self._cache_graph = self.trace_graph
+
     def analyze(self, point: SplitPoint) -> SplitPointAnalysis:
         """Plan and validate another boundary without building executable segments.
 
@@ -209,13 +328,35 @@ class SplitRuntime:
 
     def _analyze_point(
         self,
-        point: SplitPoint,
+        point: SplitPoint | GraphPartition,
         *,
         state_snapshots: dict[str, dict[str, Any]],
     ) -> SplitPointAnalysis:
         """Analyze a point, optionally reusing one report's effective-state snapshot."""
 
+        from .graph_profile import partition_metrics
+
         request = replace(self.request, point=point)
+        self._check_cache_graph()
+        key = (
+            self.graph_identity,
+            request.boundary,
+            self.adapter.name,
+            getattr(self.trace_graph.shape_program, "fingerprint", None),
+            repr(request.features.as_dict()),
+            repr(request.placement.as_dict()),
+            request.validation,
+            request.batch_symbol,
+        )
+        cached = self._analysis_cache.get(key)
+        if cached is not None:
+            self._validate_recut_state_for_plan(
+                cached.plan, state_snapshots=state_snapshots, split_point=request.boundary
+            )
+            self._analysis_cache.move_to_end(key)
+            self._cache_counts["hits"] += 1
+            return _copy_analysis(cached)
+        self._cache_counts["misses"] += 1
         plan = plan_split(self.trace_graph, request)
         self._validate_recut_state_for_plan(
             plan,
@@ -260,7 +401,7 @@ class SplitRuntime:
         )
         if request.validation == "strict":
             ensure_capability_report_supported(capability_report, request)
-        return SplitPointAnalysis(
+        analysis = SplitPointAnalysis(
             source_graph=self.trace_graph,
             request=request,
             plan=plan,
@@ -268,7 +409,37 @@ class SplitRuntime:
             prefix_program=prefix_program,
             suffix_program=suffix_program,
             capability_report=capability_report,
+            metrics=partition_metrics(self.graph_profile(), plan, training=request.trainable),
         )
+        self._analysis_cache[key] = analysis
+        if len(self._analysis_cache) > 32:
+            self._analysis_cache.popitem(last=False)
+        return _copy_analysis(analysis)
+
+    def analyze_partition(self, partition: GraphPartition) -> SplitPointAnalysis:
+        """Validate a canonical node partition without capturing or building segments.
+
+        Parameters
+        ----------
+        partition
+            Compute nodes to execute in the prefix. Inputs stay on the prefix
+            and output reconstruction stays on the suffix.
+
+        Returns
+        -------
+        SplitPointAnalysis
+            Reusable plan, boundary schema, programs and capability evidence.
+        """
+
+        if not isinstance(partition, GraphPartition):
+            raise TypeError("partition must be a GraphPartition")
+        with self._temporary_segment_state_snapshots() as state_snapshots:
+            return self._analyze_point(partition, state_snapshots=state_snapshots)
+
+    def partition(self, partition: GraphPartition) -> SplitRuntime:
+        """Materialize a DAG partition using this capture and current effective state."""
+
+        return self.materialize(self.analyze_partition(partition))
 
     def materialize(self, analysis: SplitPointAnalysis) -> SplitRuntime:
         """Build executable segments for an analysis of this captured graph.
@@ -290,7 +461,7 @@ class SplitRuntime:
             self.adapter, self.trace_graph, analysis.plan, analysis.request
         )
         self._inherit_segment_state(segments, recut=True)
-        return SplitRuntime(
+        runtime = SplitRuntime(
             model=self.model,
             trace=self._trace,
             trace_graph=self.trace_graph,
@@ -306,6 +477,10 @@ class SplitRuntime:
             prepared_input_kwargs=self.prepared_input_kwargs,
             batch_spec=self.batch_spec,
         )
+        runtime._analysis_cache = self._analysis_cache
+        runtime._profile_cache = self._profile_cache
+        runtime._cache_counts = self._cache_counts
+        return runtime
 
     def at(self, point: SplitPoint) -> SplitRuntime:
         """Return an executable runtime at another boundary in the captured graph."""
@@ -322,6 +497,21 @@ class SplitRuntime:
 
         require_placement_support(self.adapter, plan, split_point=self.request.boundary)
         request = replace(self.request, placement=plan)
+        if isinstance(request.point, GraphPartition):
+            plan_split(self.trace_graph, request)
+        capability_report = self.capability_report
+        if self.prefix_program is not None and self.suffix_program is not None:
+            capability_report = analyze_split_capabilities(
+                self.adapter,
+                self.trace_graph,
+                self.plan,
+                request,
+                prefix_program=self.prefix_program,
+                suffix_program=self.suffix_program,
+                graph_ir=self.graph_ir,
+                model_profile=self.model_profile,
+                features=request.features.as_dict(),
+            )
         segments = execute_split_runtime(self.adapter, self.trace_graph, self.plan, request)
         self._inherit_segment_state(segments, recut=False)
         return SplitRuntime(
@@ -332,7 +522,7 @@ class SplitRuntime:
             plan=self.plan,
             adapter=self.adapter,
             segments=segments,
-            capability_report=self.capability_report,
+            capability_report=capability_report,
             prefix_program=self.prefix_program,
             suffix_program=self.suffix_program,
             graph_ir=self.graph_ir,
@@ -953,6 +1143,32 @@ class SplitRuntime:
 
 
 __all__ = ["SplitRuntime"]
+
+
+def _copy_analysis(analysis: SplitPointAnalysis) -> SplitPointAnalysis:
+    """Isolate mutable report/schema containers while sharing frozen replay programs."""
+
+    report = analysis.capability_report
+    return replace(
+        analysis,
+        plan=replace(
+            analysis.plan,
+            boundary_spec=dict(analysis.plan.boundary_spec),
+            boundary_bindings=dict(analysis.plan.boundary_bindings),
+        ),
+        capability_report=replace(
+            report,
+            features=None if report.features is None else deepcopy(report.features),
+            node_statuses=None if report.node_statuses is None else dict(report.node_statuses),
+            backend_capabilities=(
+                None if report.backend_capabilities is None else dict(report.backend_capabilities)
+            ),
+            shape_diagnostics=deepcopy(report.shape_diagnostics),
+            feature_evidence=(
+                None if report.feature_evidence is None else dict(report.feature_evidence)
+            ),
+        ),
+    )
 
 
 def _inherited_segment_entries(

@@ -7,7 +7,12 @@ from typing import Any
 
 from .boundary import ReplayBoundary
 from .errors import SplitBoundaryError, SplitErrorContext, SplitUnsupportedError
-from .training import TrainingStepResult, _default_loss, _is_diff_tensor
+from .training import (
+    TrainingStepResult,
+    _allows_boundary_gradient,
+    _default_loss,
+    _is_diff_tensor,
+)
 
 
 def _unsupported(runtime: Any, message: str, reason: str) -> SplitUnsupportedError:
@@ -92,7 +97,7 @@ def _run_chunk(
     for key, value in boundary.tensors.items():
         axis = axes[key]
         sliced = value if axis is None else value.narrow(axis, start, end - start)
-        if _is_diff_tensor(torch, sliced):
+        if _is_diff_tensor(torch, sliced) and _allows_boundary_gradient(runtime, key):
             # The transported logical boundary is already detached. A per-chunk
             # clone isolates public boundary storage from replay's in-place ops.
             sliced = sliced.detach().clone().requires_grad_(True)

@@ -642,7 +642,9 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
         with torch.no_grad():
             cpu_seed = tl.split.prepare(cpu_model, cpu_example, request)
         # Keep the established Torch 2.8 inventory and explicitly admit the
-        # measured Torch 2.10 / RF-DETR 1.8.3 inventory. The full numeric matrix
+        # measured Torch 2.10-2.11 / RF-DETR 1.8.3 inventory. Torch 2.11 has
+        # the same 860 nodes in the untouched baseline and refactored runtime.
+        # The full numeric matrix
         # below remains required; the historical Torch 2.13 count is not a
         # cross-version graph identity.
         torch_release = tuple(torch.__version__.split('.')[:2])
@@ -650,7 +652,7 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
         expected_compute_nodes = (
             860
             if torch_release == ("2", "8")
-            or (torch_release == ("2", "10") and rfdetr_version == "1.8.3")
+            or (torch_release in {("2", "10"), ("2", "11")} and rfdetr_version == "1.8.3")
             else 858
         )
         actual_compute_nodes = len(cpu_seed.trace_graph.compute_nodes)
@@ -684,6 +686,7 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
         assert len(all_points) == 2 * expected_compute_nodes
         partition_count = int(os.environ.get("TORCHLENS_RFDETR_PARTITIONS", "1"))
         partition_index = int(os.environ.get("TORCHLENS_RFDETR_PARTITION", "0"))
+        progress_prefix = os.environ.get("TORCHLENS_RFDETR_PROGRESS")
         assert partition_count >= 1
         assert 0 <= partition_index < partition_count
         points = all_points[partition_index::partition_count]
@@ -740,6 +743,10 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
                     assert_structure(cuda_to_cpu, cpu_expected[batch], "cpu")
                     counts["cuda_cpu"] += 1
                     del gpu_boundary, cuda_to_cpu
+
+                if progress_prefix:
+                    with open(f"{progress_prefix}.{partition_index}.log", "a") as progress:
+                        print(counts["cpu"] // 3, len(points), point, counts, file=progress)
 
         expected_counts = {
             "cpu": len(points) * 3,

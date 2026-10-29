@@ -387,14 +387,20 @@ def test_training_automatically_retains_trace_and_preserves_input_and_parameter_
     runtime.trace.cleanup()
 
 
-def test_training_with_explicit_compact_retention_refuses() -> None:
-    """An explicitly contradictory retention request must never silently discard gradients."""
+def test_training_with_explicit_compact_retention_preserves_gradients() -> None:
+    """Explicit compact training keeps input autograd while releasing its Trace."""
 
-    with pytest.raises(SplitUnsupportedError):
-        tl.split.prepare(
-            AllocationChain(),
-            torch.randn(3, 4),
-            _request(training=True, retain_trace=False),
+    model = AllocationChain()
+    inputs = torch.randn(3, 4, requires_grad=True)
+    runtime = tl.split.prepare(model, inputs, _request(training=True, retain_trace=False))
+    assert not runtime.retains_trace
+    for _ in range(2):
+        expected = model(inputs)
+        actual = runtime.run_suffix(runtime.run_training_prefix(inputs))
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual.sum(), inputs),
+            torch.autograd.grad(expected.sum(), inputs),
         )
 
 

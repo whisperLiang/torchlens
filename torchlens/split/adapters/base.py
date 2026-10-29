@@ -11,14 +11,11 @@ if TYPE_CHECKING:
     from ..ir import SplitRequest
     from ..planner import SplitPlan
     from ..program import ReplayProgram, ReplaySegment
-    from ..training import BoundaryGradients, TrainingStepResult
 
 
 def boundary_overlay(boundary: ReplayBoundary, plan: SplitPlan) -> dict[str, Any]:
     """Return replay values keyed only by canonical graph value IDs."""
 
-    if not plan.boundary_bindings:
-        return dict(boundary.tensors)
     missing = tuple(key for key in plan.boundary_bindings if key not in boundary.tensors)
     if missing:
         from ..errors import SplitBoundaryError
@@ -180,33 +177,6 @@ class ReplayExecutor(Protocol):
         ...
 
 
-class TrainingEngine(Protocol):
-    """Backend split-training engine."""
-
-    name: str
-
-    def train_suffix(
-        self,
-        runtime: Any,
-        boundary: ReplayBoundary,
-        targets: Any,
-        loss_fn: Any = None,
-        optimizer: Any = None,
-    ) -> TrainingStepResult:
-        """Differentiate or train a split suffix."""
-        ...
-
-    def backward_prefix(
-        self,
-        runtime: Any,
-        boundary: ReplayBoundary,
-        boundary_grads: BoundaryGradients,
-        optimizer: Any = None,
-    ) -> Any:
-        """Propagate suffix boundary gradients through a split prefix."""
-        ...
-
-
 class SplitBackendAdapter(TensorOps, ReplayExecutor, Protocol):
     """Protocol implemented by split replay backend adapters."""
 
@@ -236,6 +206,5 @@ __all__ = [
     "SplitPolicyMixin",
     "SplitBackendAdapter",
     "TensorOps",
-    "TrainingEngine",
     "boundary_overlay",
 ]

@@ -6233,6 +6233,14 @@
  },
  {
   "ambiguous": true,
+  "field": "parents",
+  "file": "torchlens/split/graph_profile.py",
+  "has_default": false,
+  "sites": 2,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": true,
   "field": "kind",
   "file": "torchlens/split/ir.py",
   "has_default": false,
@@ -6245,6 +6253,14 @@
   "file": "torchlens/split/ir.py",
   "has_default": false,
   "sites": 1,
+  "via_getattr": false
+ },
+ {
+  "ambiguous": true,
+  "field": "kind",
+  "file": "torchlens/split/ownership.py",
+  "has_default": false,
+  "sites": 2,
   "via_getattr": false
  },
  {
@@ -6268,7 +6284,7 @@
   "field": "parents",
   "file": "torchlens/split/planner.py",
   "has_default": false,
-  "sites": 3,
+  "sites": 6,
   "via_getattr": false
  },
  {

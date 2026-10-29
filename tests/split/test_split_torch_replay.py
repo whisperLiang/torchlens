@@ -426,6 +426,7 @@ def test_targetless_suffix_compute_node_raises() -> None:
         suffix_node_ids=frozenset({"unsupported", "output"}),
         boundary_node_ids=("h",),
         boundary_spec=boundary_spec,
+        boundary_bindings={"h": "h"},
     )
     suffix = GeneratedSuffix(
         graph=graph,

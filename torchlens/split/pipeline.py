@@ -19,6 +19,7 @@ from ..backends.registry import (
     TINYGRAD_BACKEND_NAME,
     TORCH_BACKEND_NAME,
 )
+from ..options import CaptureOptions
 from .adapters.base import SegmentBundle
 from .batch_probe import BatchProbeResult
 from .batching import (
@@ -482,29 +483,26 @@ def capture_model(
     backend_spec = resolve_backend_spec(spec.backend, model, inputs, input_kwargs)
     from ..user_funcs import trace
 
+    capture_kwargs: dict[str, Any] = {"layers_to_save": "all", "keep_orphans": True}
+    if output_observer is not None:
+        capture_kwargs["output_transform"] = output_observer
+    if random_seed is not None:
+        capture_kwargs["random_seed"] = random_seed
+    if str(backend_spec.name) == TORCH_BACKEND_NAME:
+        capture_kwargs.update(
+            layers_to_save="none" if shape_witness else "all",
+            intervention_ready=True,
+            capture_container_structure=True,
+            save_arg_values=not shape_witness,
+            save_rng_states=True,
+            detach_saved_activations=False,
+            backward_ready=spec.trainable and not shape_witness,
+        )
     common: dict[str, Any] = {
         "input_kwargs": input_kwargs,
-        "layers_to_save": "all",
-        "keep_orphans": True,
+        "capture": CaptureOptions(**capture_kwargs),
         "backend": str(backend_spec.name),
     }
-    if output_observer is not None:
-        common["output_transform"] = output_observer
-    if random_seed is not None:
-        common["random_seed"] = random_seed
-    if str(backend_spec.name) == TORCH_BACKEND_NAME:
-        if shape_witness:
-            common["layers_to_save"] = "none"
-        common.update(
-            {
-                "intervention_ready": True,
-                "capture_container_structure": True,
-                "save_arg_values": not shape_witness,
-                "save_rng_states": True,
-                "detach_saved_activations": False,
-                "backward_ready": spec.trainable and not shape_witness,
-            }
-        )
     if str(backend_spec.name) == TINYGRAD_BACKEND_NAME:
         from ._tinygrad_state import tinygrad_capture_state
 
@@ -737,7 +735,7 @@ def normalize_to_split_ir(
             raise SplitUnsupportedError("Only an owned Torch capture can be compacted.")
         from ._torch_compact import compact_torch_graph
 
-        graph = compact_torch_graph(graph)
+        graph = compact_torch_graph(graph, training=spec.trainable)
         # The normalized graph now owns only execution metadata and necessary
         # state/constants. Free diagnostic values before allocating the B=2 probe.
         capture.cleanup()

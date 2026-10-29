@@ -234,6 +234,7 @@ BoundaryRole = Literal[
     "multi_scale_feature",
     "index",
     "shape_value",
+    "activation",
 ]
 
 
@@ -527,7 +528,9 @@ class SplitFeatures:
     ``retain_trace`` controls diagnostic capture retention, not replay values.
     ``None`` uses a compact Torch inference runtime and retains complete traces
     for training and other backends. ``True`` retains the full diagnostic Trace.
-    Explicit ``False`` is supported only for Torch inference.
+    Explicit ``False`` supports Torch inference and training. Compact training
+    retains live state and replay recipes, but never an ordinary activation
+    archive or a reusable captured autograd graph.
     """
 
     replay: bool = True
@@ -563,6 +566,35 @@ class SplitFeatures:
             "live_param_sources": self.live_param_sources,
             "retain_trace": self.retain_trace,
         }
+
+
+@dataclass(frozen=True)
+class GraphPartition:
+    """An explicit set of canonical compute-node IDs assigned to the prefix.
+
+    Inputs are implicitly on the prefix and output reconstruction on the suffix.
+    The planner checks dependency closure and keeps every native call atomic.
+    IDs refer to ``SplitTraceNode.canonical_id``, including pass qualification;
+    display labels, module aliases and partial native calls are not accepted.
+    """
+
+    prefix_node_ids: frozenset[str]
+
+    def __post_init__(self) -> None:
+        """Freeze the selection and reject invalid ID representations."""
+
+        if isinstance(self.prefix_node_ids, (str, bytes)):
+            raise TypeError("prefix_node_ids must be a collection of canonical node IDs")
+        ids = frozenset(self.prefix_node_ids)
+        if any(not isinstance(node_id, str) or not node_id for node_id in ids):
+            raise TypeError("prefix_node_ids must contain non-empty canonical node ID strings")
+        object.__setattr__(self, "prefix_node_ids", ids)
+
+    def as_boundary(self) -> str:
+        """Return a stable identity independent of iteration order or a target node."""
+
+        digest = sha256(repr(tuple(sorted(self.prefix_node_ids))).encode("utf-8")).hexdigest()
+        return f"partition:{digest}"
 
 
 @dataclass(frozen=True)
@@ -617,7 +649,7 @@ def percent(value: float) -> SplitPoint:
 class SplitRequest:
     """Public v2 request for preparing a split runtime."""
 
-    point: SplitPoint
+    point: SplitPoint | GraphPartition
     backend: str | None = None
     model_profile: str | SplitModelProfile | None = None
     features: SplitFeatures = field(default_factory=SplitFeatures)
@@ -708,9 +740,6 @@ class SplitModelProfile:
             )
         )
         return sha256(payload.encode("utf-8")).hexdigest()
-
-
-ModelProfile = SplitModelProfile
 
 
 def _value_id(node: SplitTraceNode) -> str:
@@ -827,7 +856,7 @@ __all__ = [
     "BoundaryRole",
     "BoundarySchema",
     "DevicePlacement",
-    "ModelProfile",
+    "GraphPartition",
     "OpIR",
     "PlacementPlan",
     "RegionIR",

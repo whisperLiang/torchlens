@@ -937,6 +937,11 @@ DEVICE_GATED_SKIPIF_LEDGER: dict[str, str] = {
         "CPU weak-reference lifetime coverage cannot simulate device allocations. "
         "Not run on CPU-only CI; requires a CUDA-capable environment"
     ),
+    "split/test_split_compact_training.py::test_compact_training_cpu_cuda_gradient_handoff_and_update": (
+        "[2026-10-29] Compact training CPU-to-CUDA boundary gradients and optimizer "
+        "updates require a real CUDA device. Passed on Jetson Orin with Torch 2.11; "
+        "skipped in the local CPU environment and CPU-only CI"
+    ),
     "split/test_split_memory_cuda.py::<pytestmark>": (
         "[2026-09-20] Optional Phase 1 allocated-peak comparison needs CUDA and exclusive "
         "GPU use (TORCHLENS_CUDA_MEMORY_TESTS=1); CPU lifetime checks remain unconditional. "
@@ -951,6 +956,21 @@ DEVICE_GATED_SKIPIF_LEDGER: dict[str, str] = {
         "[2026-09-20] CPU-to-CUDA transport and backward handoff require an actual device; "
         "the same microbatch numerical contracts have unconditional CPU coverage. "
         "Executed on H100 PCIe; skipped on CPU-only CI"
+    ),
+    "split/test_split_ownership.py::test_migration_reports_parameter_and_buffer_device_moves": (
+        "[2026-10-29] Parameter and buffer ownership across CPU/CUDA placement needs "
+        "both device types. Passed on Jetson Orin with Torch 2.11; skipped in the "
+        "local CPU environment and CPU-only CI"
+    ),
+    "split/test_split_profiling.py::test_profile_cuda_phases": (
+        "[2026-10-29] Synchronized CUDA phase measurements need a CUDA execution "
+        "device. Passed on Jetson Orin with Torch 2.11; skipped in the local CPU "
+        "environment and CPU-only CI"
+    ),
+    "split/test_split_profiling.py::test_profile_parameter_free_cross_device_synchronizes": (
+        "[2026-10-29] Parameter-free CPU/CUDA profiling must synchronize the actual "
+        "execution device. Passed on Jetson Orin with Torch 2.11; skipped in the "
+        "local CPU environment and CPU-only CI"
     ),
     "split/test_split_state_dedup.py::test_same_source_on_distinct_devices_has_distinct_replicas": (
         "[2026-09-20] Distinct CPU/CUDA state ownership requires two real device types; "

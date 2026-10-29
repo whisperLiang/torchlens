@@ -77,6 +77,7 @@ def test_implicit_factory_placement_is_scoped() -> None:
 
     segment = object.__new__(_GeneratedSegmentBase)
     segment._state = SimpleNamespace(placement=DevicePlacement("cpu"))
+    segment.plan = SimpleNamespace(ordered_mutation_node_ids=frozenset())
     node = SimpleNamespace(target=torch.ones, op=SimpleNamespace())
     with torch.device("meta"):
         actual = segment._execute_func(node, (4,), {})

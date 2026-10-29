@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Protocol
 
 from ._mlx_training import MlxTrainingEngine
@@ -120,6 +120,23 @@ def _is_diff_tensor(torch: Any, value: Any) -> bool:
     return isinstance(value, torch.Tensor) and (value.is_floating_point() or value.is_complex())
 
 
+def _allows_boundary_gradient(runtime: Any, key: str) -> bool:
+    """Preserve explicit frozen state semantics when creating suffix roots.
+
+    Ordinary activations may need fresh roots even when capture inputs did not
+    require gradients. A captured frozen buffer/parameter source is different:
+    native kernels such as BatchNorm forbid gradients for running statistics.
+    """
+
+    node_id = runtime.plan.boundary_bindings[key]
+    node = runtime.trace_graph.node_by_id.get(node_id)
+    return not (
+        node is not None
+        and (node.is_buffer or node.is_param_source)
+        and node.requires_grad is False
+    )
+
+
 def _default_loss(torch: Any, output: Any, targets: Any) -> Any:
     """Compute the default split-training loss."""
 
@@ -214,26 +231,42 @@ def _extend_tf_resource_param_handles(
             handles.append(variable)
 
 
-def _train_suffix_torch(
+@dataclass(frozen=True)
+class _TorchSuffixOptions:
+    """Objective, optimizer and optional measurement isolation for one suffix step."""
+
+    loss_fn: Callable[[Any, Any], Any] | None = None
+    optimizer: Any | None = None
+    phase_timer: Callable[[str], Any] | None = None
+    parameter_inputs: tuple[Any, ...] | None = None
+
+
+def _execute_torch_suffix(
     runtime: Any,
     boundary: ReplayBoundary,
     targets: Any,
-    loss_fn: Callable[[Any, Any], Any] | None = None,
-    optimizer: Any | None = None,
+    options: _TorchSuffixOptions,
 ) -> tuple[Any, BoundaryGradients, bool]:
-    """Train a Torch suffix from a boundary and return boundary gradients."""
+    """Execute the shared Torch suffix step with optional isolated measurement."""
 
+    loss_fn, optimizer = options.loss_fn, options.optimizer
+    phase_timer, parameter_inputs = options.phase_timer, options.parameter_inputs
     torch = _require_torch(runtime)
     runtime.validate_boundary(boundary)
     root_tensors: dict[str, Any] = {}
     replay_tensors: dict[str, Any] = {}
     for key, value in boundary.tensors.items():
-        if _is_diff_tensor(torch, value):
+        if _is_diff_tensor(torch, value) and _allows_boundary_gradient(runtime, key):
             root = value.detach().clone().requires_grad_(True)
             root_tensors[key] = root
             replay_tensors[key] = root
         else:
-            replay_tensors[key] = value
+            # Integer/index roots can also be mutated by a suffix operation.
+            # Keep the caller's public boundary isolated, as microbatch replay
+            # already does for both differentiable and non-differentiable roots.
+            replay_tensors[key] = (
+                value.detach().clone() if isinstance(value, torch.Tensor) else value
+            )
     replay_boundary = ReplayBoundary(
         backend=boundary.backend,
         tensors=replay_tensors,
@@ -245,11 +278,18 @@ def _train_suffix_torch(
     # The caller boundary was strictly validated above.  ``replay_boundary``
     # only swaps differentiable roots, so re-running state and structural
     # validation here would add a full model fingerprint to every train step.
-    output = runtime._run_suffix_unchecked(replay_boundary)
+    with phase_timer("suffix_forward") if phase_timer is not None else nullcontext():
+        output = runtime._run_suffix_unchecked(replay_boundary)
     loss = (
         loss_fn(output, targets) if loss_fn is not None else _default_loss(torch, output, targets)
     )
-    loss.backward()
+    with phase_timer("suffix_backward") if phase_timer is not None else nullcontext():
+        if parameter_inputs is None:
+            loss.backward()
+        else:
+            # Profiling limits accumulation to isolated leaves even if a custom
+            # objective closes over an unrelated caller-owned parameter.
+            loss.backward(inputs=(*root_tensors.values(), *parameter_inputs))
     gradients: BoundaryGradients = {
         key: root.grad.detach().clone()
         for key, root in root_tensors.items()
@@ -630,12 +670,11 @@ class TorchTrainingEngine:
     ) -> TrainingStepResult:
         """Train a Torch suffix and return a structured result."""
 
-        loss, grads, optimizer_applied = _train_suffix_torch(
+        loss, grads, optimizer_applied = _execute_torch_suffix(
             runtime,
             boundary,
             targets,
-            loss_fn=loss_fn,
-            optimizer=optimizer,
+            _TorchSuffixOptions(loss_fn=loss_fn, optimizer=optimizer),
         )
         return TrainingStepResult(loss, grads, optimizer_applied=optimizer_applied)
 
@@ -1088,67 +1127,8 @@ def backward_prefix(
     )
 
 
-def build_feature_cache(runtime: Any, dataloader: Any, cache_dir: str | Path) -> list[Path]:
-    """Build a directory of boundary cache entries from a dataloader."""
-
-    paths: list[Path] = []
-    root = Path(cache_dir)
-    root.mkdir(parents=True, exist_ok=True)
-    for index, batch in enumerate(dataloader):
-        inputs = batch if isinstance(batch, tuple) else (batch,)
-        boundary = runtime.run_prefix(*inputs)
-        path = root / f"boundary_{index:06d}"
-        runtime.save_boundary(boundary, path)
-        paths.append(path)
-    return paths
-
-
-class BoundaryCacheDataset:
-    """Minimal dataset that yields cached replay boundaries."""
-
-    def __init__(self, runtime: Any, cache_dir: str | Path) -> None:
-        """Create a dataset over boundary cache directories."""
-
-        self.runtime = runtime
-        self.paths = sorted(Path(cache_dir).glob("boundary_*"))
-
-    def __len__(self) -> int:
-        """Return the number of cached boundaries."""
-
-        return len(self.paths)
-
-    def __getitem__(self, index: int) -> ReplayBoundary:
-        """Load one cached boundary."""
-
-        return self.runtime.load_boundary(self.paths[index])
-
-
-def train_suffix_from_cache(
-    runtime: Any,
-    dataset: BoundaryCacheDataset,
-    targets: Any,
-    loss_fn: Callable[[Any, Any], Any] | None = None,
-    optimizer: Any | None = None,
-) -> list[tuple[Any, BoundaryGradients]]:
-    """Train a suffix over cached boundaries."""
-
-    results: list[tuple[Any, BoundaryGradients]] = []
-    for index in range(len(dataset)):
-        results.append(
-            train_suffix(
-                runtime,
-                dataset[index],
-                targets[index] if hasattr(targets, "__getitem__") else targets,
-                loss_fn=loss_fn,
-                optimizer=optimizer,
-            )
-        )
-    return results
-
-
 __all__ = [
     "BackendTrainingEngine",
-    "BoundaryCacheDataset",
     "BoundaryGradients",
     "JaxTrainingEngine",
     "PaddleTrainingEngine",
@@ -1157,9 +1137,7 @@ __all__ = [
     "TorchTrainingEngine",
     "TrainingStepResult",
     "backward_prefix",
-    "build_feature_cache",
     "train_suffix",
     "train_suffix_result",
-    "train_suffix_from_cache",
     "training_engine_for",
 ]

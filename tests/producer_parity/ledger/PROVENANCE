@@ -427,3 +427,11 @@ env: py3.11-torch2.8.0
 torch: 2.8.0+cu128
 source: 3a40087c676a4ade1e128c0b6c57fed5aa882a33 (dirty)
 recorded: 2026-10-03T18:24:32.719008+00:00
+---
+generator: producer_parity/test_ledger.py (static half)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: Reviewed Native Split Runtime static consumer inventory: graph_profile.parents and ownership.kind are new reads; planner adds three parent-dependency reads. No capture producer, mutation channel or expected numerical value changed.
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: unknown (git unavailable)
+recorded: 2026-10-29T01:25:15.984161+00:00
