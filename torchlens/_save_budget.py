@@ -110,7 +110,8 @@ def _available_host_bytes() -> int | None:
     int | None
         Available bytes. Prefers ``MemAvailable`` from ``/proc/meminfo`` because
         it accounts for reclaimable cache, and falls back to the POSIX
-        available-pages count.
+        available-pages count. When neither is available, use optional psutil
+        (including on Windows). Swap is not counted as available RAM.
     """
 
     try:
@@ -126,6 +127,12 @@ def _available_host_bytes() -> int | None:
         if pages > 0 and page_size > 0:
             return int(pages) * int(page_size)
     except Exception:
+        pass
+    try:
+        import psutil
+
+        return int(psutil.virtual_memory().available)
+    except (ImportError, OSError):
         pass
     return None
 

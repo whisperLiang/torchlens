@@ -240,7 +240,7 @@ def _smoke_budget_load_factor() -> float:
         return _SESSION_LOAD_FACTOR
     try:
         load_per_cpu = os.getloadavg()[0] / max(os.cpu_count() or 1, 1)
-    except OSError:  # pragma: no cover - getloadavg unsupported on the platform.
+    except (AttributeError, OSError):  # getloadavg is absent on Windows.
         load_per_cpu = 1.0
     _SESSION_LOAD_FACTOR = min(max(load_per_cpu, 1.0), 4.0)
     return _SESSION_LOAD_FACTOR

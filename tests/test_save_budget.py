@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import gc
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -40,6 +42,19 @@ from torchlens._save_budget import (
 from torchlens.data_classes.trace import Trace
 from torchlens.fastlog import _storage_resolver
 from torchlens.options import CaptureOptions
+
+
+def test_host_headroom_without_posix_memory_queries() -> None:
+    """Platforms without procfs or sysconf still enforce measured RAM budgets."""
+    psutil = pytest.importorskip("psutil")
+    from torchlens import _save_budget
+
+    with (
+        patch("builtins.open", side_effect=FileNotFoundError),
+        patch.object(_save_budget.os, "sysconf", create=True, side_effect=AttributeError),
+        patch.object(psutil, "virtual_memory", return_value=SimpleNamespace(available=4096)),
+    ):
+        assert available_device_bytes(torch.device("cpu")) == 4096
 
 
 def _model() -> nn.Module:
