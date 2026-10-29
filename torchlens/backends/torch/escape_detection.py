@@ -516,7 +516,9 @@ def _is_audited_exemption(
         if (
             exemption.parent_wrapper == token.wrapper_name
             and exemption.child_qualname == child_name
-            and callsite.f_code.co_filename.endswith(exemption.caller_filename_suffix)
+            and callsite.f_code.co_filename.replace("\\", "/").endswith(
+                exemption.caller_filename_suffix
+            )
             and callsite.f_code.co_name == exemption.caller_name
         ):
             return True
