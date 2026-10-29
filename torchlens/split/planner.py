@@ -187,15 +187,15 @@ def _frontier_node_ids(
     return tuple(sorted(frontier, key=lambda node_id: order[node_id]))
 
 
-def _boundary_specs(
+def _boundary_metadata(
     graph: SplitTraceGraph,
     *,
     spec: SplitRequest,
     target: SplitTraceNode | None,
     boundary_kind: BoundaryKind,
     boundary_node_ids: tuple[str, ...],
-) -> dict[str, BoundarySchema]:
-    """Build public boundary specs for crossing node IDs."""
+) -> tuple[dict[str, BoundarySchema], dict[str, str]]:
+    """Build boundary schemas and canonical bindings from the same unique keys."""
 
     node_by_id = graph.node_by_id
     direct_parent_ids = {
@@ -209,9 +209,13 @@ def _boundary_specs(
         if output_shape is not None and len(output_shape) >= 4:
             spatial_shapes.add(tuple(output_shape[-2:]))
     specs: dict[str, BoundarySchema] = {}
+    bindings: dict[str, str] = {}
     for node_id in boundary_node_ids:
         node = node_by_id[node_id]
         key = boundary_key_for_node(node.canonical_id, node.output_container_path)
+        if key in bindings:
+            raise SplitRequestError("Split boundary contains duplicate canonical value bindings.")
+        bindings[key] = node_id
         role = classify_boundary_role(
             node_id=node.canonical_id,
             target_node_id=None if target is None else target.canonical_id,
@@ -228,23 +232,7 @@ def _boundary_specs(
             role=role,
             device_policy=spec.device_policy,
         )
-    return specs
-
-
-def _boundary_bindings(
-    graph: SplitTraceGraph,
-    boundary_node_ids: tuple[str, ...],
-) -> dict[str, str]:
-    """Bind public boundary keys to canonical graph value IDs."""
-
-    node_by_id = graph.node_by_id
-    bindings = {
-        boundary_key_for_node(node_id, node_by_id[node_id].output_container_path): node_id
-        for node_id in boundary_node_ids
-    }
-    if len(bindings) != len(boundary_node_ids):
-        raise SplitRequestError("Split boundary contains duplicate canonical value bindings.")
-    return bindings
+    return specs, bindings
 
 
 def _validate_replay_dependencies(graph: SplitTraceGraph) -> None:
@@ -459,6 +447,7 @@ class _MutationProof:
 
     prefix: frozenset[str]
     targets: _MutationTargets
+    ordered: frozenset[str]
     certified: set[str] = field(default_factory=set)
 
 
@@ -551,7 +540,7 @@ def _certify_local_write(
     origin = _local_storage_origin(graph, producer, proof, in_prefix)
     return (
         origin is not None
-        and _write_preserves_order(graph, node, prefix)
+        and node.canonical_id in proof.ordered
         and (
             has_out
             or origin.canonical_id in proof.certified
@@ -613,27 +602,24 @@ def _local_storage_origin(
     return producer
 
 
-def _write_preserves_order(
-    graph: SplitTraceGraph, node: SplitTraceNode, prefix: frozenset[str]
-) -> bool:
-    """Keep every earlier/later call on the safe side of an ordered write."""
+def _ordered_partition_nodes(graph: SplitTraceGraph, prefix: frozenset[str]) -> frozenset[str]:
+    """Find calls whose order relative to every other call survives the partition.
 
-    order = graph.order_by_id
-    in_prefix = node.canonical_id in prefix
-    for other in graph.compute_nodes:
-        if (
-            in_prefix
-            and order[other.canonical_id] < order[node.canonical_id]
-            and other.canonical_id not in prefix
-        ):
-            return False
-        if (
-            not in_prefix
-            and order[other.canonical_id] > order[node.canonical_id]
-            and other.canonical_id in prefix
-        ):
-            return False
-    return True
+    A prefix write must precede every suffix call; a suffix write must follow
+    every prefix call. Only the leading prefix and trailing suffix runs qualify.
+    Compute those runs once instead of scanning the graph for each write.
+    """
+
+    ordered: set[str] = set()
+    for node in graph.compute_nodes:
+        if node.canonical_id not in prefix:
+            break
+        ordered.add(node.canonical_id)
+    for node in reversed(graph.compute_nodes):
+        if node.canonical_id in prefix:
+            break
+        ordered.add(node.canonical_id)
+    return frozenset(ordered)
 
 
 def _is_readonly_batchnorm(producer: SplitTraceNode, batchnorm: frozenset[Any]) -> bool:
@@ -669,7 +655,12 @@ def _validate_partition_effects(
 
         known_identity = identity
         if prefix_node_ids is not None:
-            proof = _MutationProof(prefix_node_ids, _torch_mutation_targets(), certified)
+            proof = _MutationProof(
+                prefix_node_ids,
+                _torch_mutation_targets(),
+                _ordered_partition_nodes(graph, prefix_node_ids),
+                certified,
+            )
     for node in graph.compute_nodes:
         args, kwargs = _partition_call_arguments(node)
         if _node_mutates(node, args, kwargs):
@@ -784,16 +775,13 @@ def plan_split(graph: SplitTraceGraph, spec: SplitRequest) -> SplitPlan:
         prefix_node_ids=prefix_node_ids,
         suffix_node_ids=suffix_node_ids,
     )
-    boundary_spec = _boundary_specs(
+    boundary_spec, boundary_bindings = _boundary_metadata(
         graph,
         spec=spec,
         target=target,
         boundary_kind=boundary_kind,
         boundary_node_ids=boundary_node_ids,
     )
-    boundary_bindings = _boundary_bindings(graph, boundary_node_ids)
-    if boundary_spec.keys() != boundary_bindings.keys():
-        raise SplitRequestError("Split boundary schema and canonical bindings disagree.")
     return SplitPlan(
         split_id=_split_id(graph, spec, target),
         boundary_kind=boundary_kind,

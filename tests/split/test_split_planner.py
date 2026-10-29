@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from v2_helpers import split_request
 
@@ -96,6 +98,54 @@ def test_before_boundary_uses_direct_parents_as_primary() -> None:
     roles = {item.label: item.role for item in plan.boundary_spec.values()}
     assert roles["relu_1_1"] == "primary"
     assert roles["linear_1_1"] == "primary"
+
+
+def test_container_frontier_binds_schema_keys_to_canonical_values() -> None:
+    """Structured output paths belong to the ABI key, not the graph value identity."""
+
+    graph = _graph()
+    graph = replace(
+        graph,
+        nodes=tuple(
+            replace(node, output_container_path=("features", 1))
+            if node.canonical_id == "linear_1_1"
+            else node
+            for node in graph.nodes
+        ),
+    )
+    plan = plan_split(graph, split_request("after:relu"))
+
+    assert plan.boundary_bindings == {
+        "linear_1_1@'features'.1": "linear_1_1",
+        "relu_1_1": "relu_1_1",
+    }
+    assert tuple(plan.boundary_spec) == tuple(plan.boundary_bindings)
+    for key, value_id in plan.boundary_bindings.items():
+        schema = plan.boundary_spec[key]
+        assert schema.value_id == key
+        assert schema.container_path == graph.node_by_id[value_id].output_container_path
+
+
+def test_frontier_refuses_colliding_container_keys() -> None:
+    """Distinct graph values must never silently overwrite a transport binding."""
+
+    graph = SplitTraceGraph(
+        backend="torch",
+        nodes=(
+            _node("input", is_input=True),
+            replace(_node("value", parents=("input",), raw_index=1), output_container_path=(0,)),
+            _node("value@0", parents=("input",), raw_index=2),
+            _node("merge", parents=("value", "value@0"), raw_index=3),
+            _node("output", parents=("merge",), is_output=True, raw_index=4),
+        ),
+        input_node_ids=("input",),
+        output_node_ids=("output",),
+        graph_shape_hash="container-key-collision",
+        traced_batch_size=2,
+    )
+
+    with pytest.raises(SplitRequestError, match="duplicate canonical value bindings"):
+        plan_split(graph, split_request("before:merge"))
 
 
 def test_percent_boundary_selects_eligible_compute_node() -> None:

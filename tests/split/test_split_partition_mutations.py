@@ -184,6 +184,53 @@ def test_partition_cannot_reorder_independent_computation_across_write() -> None
         runtime.partition(GraphPartition(selected))
 
 
+@pytest.mark.parametrize(
+    ("independent_after_write", "selected_indexes", "supported"),
+    [
+        (False, (), True),
+        (False, (1,), True),
+        (False, (0,), False),
+        (False, (0, 2), False),
+        (False, (0, 1, 2), True),
+        (True, (2,), False),
+        (True, (0, 1), True),
+    ],
+)
+def test_write_barrier_allows_only_order_preserving_branch_moves(
+    independent_after_write: bool, selected_indexes: tuple[int, ...], supported: bool
+) -> None:
+    """An independent branch may move before a suffix write, never after a prefix write."""
+
+    class Interleaved(nn.Module):
+        """Place an independent read between fresh allocation and its write."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Return the written branch and the independent branch together."""
+            left = x + 1
+            if independent_after_write:
+                written = left.relu_()
+                return written + x * 2
+            right = x * 2
+            return left.relu_() + right
+
+    model = Interleaved()
+    runtime = prepare(model, torch.ones(2, 4), SplitRequest(after("relu")))
+    nodes = runtime.trace_graph.compute_nodes
+    assert len(nodes) == 4
+    partition = GraphPartition(frozenset(nodes[index].canonical_id for index in selected_indexes))
+    if not supported:
+        with pytest.raises(SplitUnsupportedError) as caught:
+            runtime.partition(partition)
+        assert caught.value.context.reason == "partition_effect_order_unproven"
+        return
+
+    cut = runtime.partition(partition)
+    write_index = 1 if independent_after_write else 2
+    assert cut.plan.ordered_mutation_node_ids == frozenset({nodes[write_index].canonical_id})
+    x = torch.randn(2, 4)
+    torch.testing.assert_close(cut.replay(x), model(x))
+
+
 def test_eval_batchnorm_fresh_output_can_be_mutated() -> None:
     """Native eval BatchNorm allocates output without updating its running buffers."""
     model = nn.Sequential(
