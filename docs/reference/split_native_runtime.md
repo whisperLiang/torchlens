@@ -70,7 +70,29 @@ Graph costs have a separate eight-batch bound. `clear_analysis_cache()` clears
 both caches for the lineage; `analysis_cache_info()` exposes hit/miss counts,
 current size and capacity. Caller mutations to returned boundary dictionaries or
 capability reports do not poison later cache hits. Replacing the normalized
-graph invalidates its cached plans. Parameter values are never hashed on replay.
+graph detaches that runtime's caches from its siblings, so costs from the replacement
+cannot contaminate the original capture. Parameter values are never hashed on replay.
+
+### Planning benchmark
+
+`python benchmarks/split_planner.py --writes 250 --repeats 25 --warmup 3`
+measures uncached planning for a synthetic 500-node chain with 250 native writes.
+Use the same script with `--source-root` pointing at each checkout. It reports
+the cold call separately, median, nearest-rank P95 and every measured sample.
+
+On an ARM64 NVIDIA Orin host with Python 3.10.12 and Torch 2.11.0, comparing
+`24e82949f` with this refactor gave:
+
+| Uncached planning | Before (ms) | After (ms) |
+| --- | ---: | ---: |
+| Median | 30.327 | 7.429 |
+| P95 | 30.414 | 7.536 |
+
+Boundary schemas and canonical bindings are built together. Write-order checks
+precompute the leading prefix and trailing suffix runs once, replacing one
+whole-graph scan per write. The write-order portion is O(V + W), previously
+O(V × W), for V compute nodes and W writes. This workload measures planning;
+it performs no tensor execution and establishes no replay or training speedup.
 
 ## Capability evidence and execution profiling
 
@@ -109,7 +131,10 @@ The layout evaluates the existing shape program and never executes the model.
 Forward byte totals exclude transport framing and serialization overhead.
 Backward bytes remain unknown for potentially differentiable values because a
 future loss may ignore any boundary leaf. Integer/boolean payloads require no
-gradient. The Torch training engine creates floating/complex suffix roots even
+gradient: both layout and partition metrics report zero backward bytes for an
+empty frontier or one containing only recognized integer/boolean dtypes.
+Floating, complex and unknown dtypes keep the backward byte total unknown.
+The Torch training engine creates floating/complex suffix roots even
 when capture inputs did not require gradients, so `requires_grad=False` alone
 is not evidence of zero backward payload. Captured frozen buffer/parameter state
 keeps its non-differentiable contract when suffix roots are created, including
