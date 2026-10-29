@@ -190,9 +190,10 @@ def test_cold_module_import_and_install_do_not_import_frameworks(
     spec = importlib.util.spec_from_file_location("_paddle_guard_unit_test", compat.__file__)
     assert spec is not None and spec.loader is not None
     standalone = importlib.util.module_from_spec(spec)
-    monkeypatch.setattr(builtins, "__import__", checked_import)
-    spec.loader.exec_module(standalone)
-    assert standalone.install_import_guard() is True
+    with monkeypatch.context() as import_patch:
+        import_patch.setattr(builtins, "__import__", checked_import)
+        spec.loader.exec_module(standalone)
+        assert standalone.install_import_guard() is True
     assert imports
     assert all(name.partition(".")[0] in sys.stdlib_module_names for name in imports)
 
