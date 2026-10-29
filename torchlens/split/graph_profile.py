@@ -10,12 +10,14 @@ from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass
 from math import prod
-from typing import Any
+from typing import Any, TypeVar
 
 from ..intervention.types import CapturedArgTemplate, LiteralTensor, LiteralValue
 from .errors import SplitUnsupportedError
 from .graph import ReplayValueRef, SplitTraceGraph, SplitTraceNode
 from .planner import SplitPlan
+
+_Cost = TypeVar("_Cost", int, float)
 
 
 @dataclass(frozen=True)
@@ -135,11 +137,23 @@ def tensor_bytes(shape: tuple[int, ...] | None, dtype: str | None) -> int | None
     return prod(shape) * width
 
 
-def _sum_known(values: Iterable[int | float | None]) -> Any:
+def _may_require_gradient(dtype: str | None) -> bool:
+    """Keep gradient requirements unknown for floating, complex and unrecognized dtypes."""
+
+    return dtype_bytes(dtype) is None or (
+        dtype is not None and ("float" in dtype or "complex" in dtype)
+    )
+
+
+def _sum_known(values: Iterable[_Cost | None]) -> _Cost | None:
     """Return an exact total only when every constituent cost is known."""
 
-    items = tuple(values)
-    return None if any(item is None for item in items) else sum(items)
+    total: _Cost = 0
+    for value in values:
+        if value is None:
+            return None
+        total += value
+    return total
 
 
 def _shape(value: Any) -> tuple[int, ...] | None:
@@ -375,7 +389,8 @@ def partition_metrics(
     diagnostics = list(profile.unknown_cost_diagnostics)
     # A static requires_grad flag does not prove the selected loss uses a boundary
     # leaf. Communication bytes for backward need an actual training contract.
-    if training:
+    backward_unknown = training and any(_may_require_gradient(t.dtype) for t in boundary)
+    if backward_unknown:
         diagnostics.append("backward_gradient_bytes:loss_path_not_observed")
     return PartitionMetrics(
         prefix_node_ids=plan.prefix_node_ids,
@@ -383,7 +398,7 @@ def partition_metrics(
         unique_boundary_tensors=len(boundary),
         forward_boundary_bytes=_sum_known(t.bytes for t in boundary),
         differentiable_boundary_bytes=differentiable,
-        backward_gradient_bytes=None if training else 0,
+        backward_gradient_bytes=None if backward_unknown else 0,
         parameter_bytes=_sum_known(p.bytes for p in params),
         prefix_parameter_bytes=_sum_known(
             p.bytes for p in params if set(p.consumer_ids) & plan.prefix_node_ids

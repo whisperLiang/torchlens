@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from unittest.mock import patch
 
 import torch
@@ -53,3 +54,20 @@ def test_cache_is_bounded_and_not_shared_between_captures() -> None:
     assert first.analysis_cache_info()["size"] == 32
     assert first.analysis_cache_info()["misses"] == 35
     assert second.analysis_cache_info()["size"] == 0
+
+
+def test_replaced_graph_does_not_poison_sibling_profile_cache() -> None:
+    """A recut that replaces its graph cannot change another runtime's costs."""
+    model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
+    seed = prepare(model, torch.ones(2, 4), SplitRequest(after("1")))
+    child = seed.at(before("2"))
+    original = seed.graph_profile()
+    child.trace_graph = replace(
+        child.trace_graph,
+        nodes=tuple(replace(node, dtype="float64") for node in child.trace_graph.nodes),
+    )
+    changed = child.graph_profile()
+    assert changed.tensors[0].bytes == 2 * original.tensors[0].bytes
+    assert seed.graph_profile().tensors[0].bytes == original.tensors[0].bytes
+    assert seed.analysis_cache_info()["size"] == 1
+    assert child.analysis_cache_info()["size"] == 0

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .errors import SplitBoundaryError, SplitErrorContext
-from .graph_profile import GraphProfile, dtype_bytes
+from .graph_profile import GraphProfile, _may_require_gradient, _sum_known
 from .planner import SplitPlan
 
 
@@ -96,9 +96,8 @@ def build_boundary_layout(
         dtype = schema.dtype or tensor.dtype
         # Every backend uses floating/complex values for differentiation. The
         # future loss can ignore any leaf, so these are potential requirements.
-        differentiable = dtype is not None and ("float" in dtype or "complex" in dtype)
         backward: bool | None = False
-        if training and (differentiable or dtype_bytes(dtype) is None):
+        if training and _may_require_gradient(dtype):
             backward = None
             unknown.append(f"backward_payload:{value_id}:loss_path_not_observed")
         if tensor.bytes is None:
@@ -121,7 +120,6 @@ def build_boundary_layout(
                 backward_required=backward,
             )
         )
-    sizes = tuple(row.bytes for row in rows)
     return BoundaryLayout(
         graph_identity=profile.graph_identity,
         split_id=plan.split_id,
@@ -129,9 +127,7 @@ def build_boundary_layout(
         training=training,
         tensors=tuple(rows),
         unique_tensor_count=len(rows),
-        forward_payload_bytes=None
-        if any(size is None for size in sizes)
-        else sum(size for size in sizes if size is not None),
+        forward_payload_bytes=_sum_known(row.bytes for row in rows),
         backward_payload_bytes=None if any(row.backward_required is None for row in rows) else 0,
         unknown_cost_diagnostics=tuple(unknown),
     )

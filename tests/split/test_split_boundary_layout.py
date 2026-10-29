@@ -11,6 +11,7 @@ from torch import nn
 
 from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, after, prepare
 from torchlens.split.boundary_layout import build_boundary_layout
+from torchlens.split.graph_profile import partition_metrics
 
 
 class ChunkBranches(nn.Module):
@@ -94,6 +95,63 @@ def test_training_integer_boundary_isolation() -> None:
     layout = build_boundary_layout(runtime.graph_profile(), runtime.plan, training=True)
     assert all(row.backward_required is False for row in layout.tensors)
     assert layout.backward_payload_bytes == 0
+    metrics = partition_metrics(runtime.graph_profile(), runtime.plan, training=True)
+    assert metrics.backward_gradient_bytes == layout.backward_payload_bytes
+    assert "backward_gradient_bytes:loss_path_not_observed" not in metrics.unknown_cost_diagnostics
+
+
+@pytest.mark.parametrize("dtype", ["torch.float32", "torch.complex64", "unknown", None])
+def test_training_costs_do_not_treat_capture_grad_flags_as_a_loss_contract(
+    dtype: str | None,
+) -> None:
+    """Floating and unknown boundary types retain unknown loss-dependent gradient costs."""
+
+    runtime = prepare(
+        nn.Sequential(nn.ReLU(), nn.Sigmoid()),
+        torch.randn(2, 4),
+        SplitRequest(after("relu"), features=SplitFeatures(training=True)),
+    )
+    profile = replace(
+        runtime.graph_profile(),
+        tensors=tuple(
+            replace(t, dtype=dtype, requires_grad=False) for t in runtime.graph_profile().tensors
+        ),
+    )
+    plan = replace(
+        runtime.plan,
+        boundary_spec={
+            key: replace(schema, dtype=dtype, requires_grad=False)
+            for key, schema in runtime.plan.boundary_spec.items()
+        },
+    )
+    layout = build_boundary_layout(profile, plan, training=True)
+    metrics = partition_metrics(profile, plan, training=True)
+    assert layout.backward_payload_bytes is metrics.backward_gradient_bytes is None
+    assert all(row.backward_required is None for row in layout.tensors)
+
+
+def test_empty_frontier_has_zero_payload_even_for_training() -> None:
+    """A source-only suffix transfers no tensors and requires no boundary gradients."""
+
+    class Constant(nn.Module):
+        """Produce a tensor independent of the supplied input."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Allocate the complete output in the suffix."""
+
+            return torch.ones(2, 4)
+
+    runtime = prepare(
+        Constant(),
+        torch.randn(2, 4),
+        SplitRequest(after("ones"), features=SplitFeatures(training=True)),
+    )
+    analysis = runtime.analyze_partition(GraphPartition(frozenset()))
+    layout = build_boundary_layout(runtime.graph_profile(), analysis.plan, training=True)
+    assert layout.tensors == ()
+    assert analysis.metrics.unique_boundary_tensors == 0
+    assert layout.forward_payload_bytes == analysis.metrics.forward_boundary_bytes == 0
+    assert layout.backward_payload_bytes == analysis.metrics.backward_gradient_bytes == 0
 
 
 def test_boundary_same_device_move_and_noncontiguous_clone() -> None:

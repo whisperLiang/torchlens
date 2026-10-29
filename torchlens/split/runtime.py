@@ -297,10 +297,12 @@ class SplitRuntime:
         return {**self._cache_counts, "size": len(self._analysis_cache), "capacity": 32}
 
     def _check_cache_graph(self) -> None:
-        """Invalidate plans if the runtime graph identity was replaced."""
+        """Detach caches when a runtime leaves its shared capture lineage."""
 
         if self._cache_graph is not self.trace_graph:
-            self.clear_analysis_cache()
+            self._analysis_cache = OrderedDict()
+            self._profile_cache = OrderedDict()
+            self._cache_counts = {"hits": 0, "misses": 0}
             self._cache_graph = self.trace_graph
 
     def analyze(self, point: SplitPoint) -> SplitPointAnalysis:
