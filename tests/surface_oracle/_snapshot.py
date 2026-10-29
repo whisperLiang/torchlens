@@ -129,10 +129,12 @@ def _is_measured_name(name: str) -> bool:
 def _normalize_string(value: str) -> str:
     """Normalize machine-specific path prefixes inside string values."""
 
-    if _REPO_ROOT in value:
-        value = value.replace(_REPO_ROOT, "<repo>")
-    if "/site-packages/" in value:
-        _, _, tail = value.partition("/site-packages/")
+    portable_value = value.replace("\\", "/")
+    portable_root = _REPO_ROOT.replace("\\", "/")
+    if portable_root in portable_value:
+        value = portable_value.replace(portable_root, "<repo>")
+    if "/site-packages/" in portable_value:
+        _, _, tail = portable_value.partition("/site-packages/")
         value = f"<site>/{tail}"
     if "/tmp/" in value or value.startswith("/tmp"):
         value = "<tmp-path>"
