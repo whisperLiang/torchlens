@@ -662,11 +662,16 @@ def test_large_late_held_generator_witnessed(preexisting_worker: Any) -> None:
     assert result.uncertain is False
 
 
+@pytest.mark.heavy
 def test_large_model_held_generator_end_to_end_unverifiable(
     preexisting_worker: Any, tmp_path: Path
 ) -> None:
     """End-to-end (the r40 hon1_2 repro shape): a model-held generator past the old
-    budget, drawn on a pre-existing thread, ceilings the runnable verdict."""
+    budget, drawn on a pre-existing thread, ceilings the runnable verdict.
+
+    This round trip serializes and checks all 302 parameter blobs, so it uses
+    the heavy tier rather than the five-second single-capture tier.
+    """
 
     class _BigHeldGen(nn.Module):
         def __init__(self) -> None:
