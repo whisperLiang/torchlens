@@ -4,6 +4,7 @@ benchmarks/*_results*.json
 benchmarks/*_results*.md
 benchmarks/split_results_*/
 benchmarks/perf/*_baseline.md
+benchmarks/perf/*.json
 
 __pycache__/
 *.py[cod]

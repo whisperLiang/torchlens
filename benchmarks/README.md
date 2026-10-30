@@ -3,6 +3,14 @@
 This directory contains standalone benchmark scripts. Generate result artifacts
 locally when measuring a change; historical run outputs are not committed.
 
+The facet-indirection benchmark reads a locally generated capture-spine measurement.
+Run these in order to create the ignored JSON files under `benchmarks/perf/`:
+
+```bash
+python benchmarks/s2_capture_spine_overhead.py
+python benchmarks/f1_facet_indirection.py
+```
+
 ## Split memory
 
 `split_memory.py` measures RF-DETR-N preparation and representative split replays
