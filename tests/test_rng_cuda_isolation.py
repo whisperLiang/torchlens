@@ -24,6 +24,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import textwrap
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -345,6 +346,54 @@ def test_cuda_initialized_probe_is_not_cached(monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.mark.smoke
+def test_cpu_only_seeding_does_not_queue_accelerator_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Seed the CPU reproducibly without queuing work for absent accelerators."""
+    torch.default_generator.manual_seed(1234)
+    expected = torch.randn(4)
+    queued: list[int] = []
+    monkeypatch.setattr(
+        torch,
+        "accelerator",
+        SimpleNamespace(current_accelerator=lambda *, check_available: None),
+        raising=False,
+    )
+    monkeypatch.setattr(torch.cuda, "manual_seed_all", queued.append)
+
+    tl_rng.set_random_seed(1234)
+
+    assert torch.equal(torch.randn(4), expected)
+    assert queued == []
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("probe_state", ["missing", "raising"])
+def test_seeding_preserves_accelerator_path_when_capability_is_unknown(
+    monkeypatch: pytest.MonkeyPatch, probe_state: str
+) -> None:
+    """An unavailable capability query must retain deferred accelerator seeds."""
+    queued: list[int] = []
+
+    def unavailable(*, check_available: bool) -> None:
+        """Simulate an accelerator query that cannot classify this runtime."""
+        raise RuntimeError("accelerator query unavailable")
+
+    namespace = (
+        SimpleNamespace()
+        if probe_state == "missing"
+        else SimpleNamespace(current_accelerator=unavailable)
+    )
+    monkeypatch.setattr(torch, "accelerator", namespace, raising=False)
+    monkeypatch.setattr(torch.cuda, "manual_seed_all", queued.append)
+
+    tl_rng.set_random_seed(1234)
+
+    assert queued == [1234]
+    assert torch.default_generator.initial_seed() == 1234
+
+
+@pytest.mark.smoke
 def test_seeding_degrades_when_accelerator_seed_leg_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -366,6 +415,12 @@ def test_seeding_degrades_when_accelerator_seed_leg_fails(
 
         raise IndexError("tuple index out of range")
 
+    monkeypatch.setattr(
+        torch,
+        "accelerator",
+        SimpleNamespace(current_accelerator=lambda *, check_available: torch.device("cuda")),
+        raising=False,
+    )
     monkeypatch.setattr(torch.cuda, "manual_seed_all", _explode)
 
     with pytest.warns(UserWarning, match="Could not seed torch accelerator RNG"):

@@ -303,6 +303,16 @@ def _seed_torch_engines(seed: int) -> None:
     seed:
         Seed value to set.
     """
+    # On a CPU-only build, torch.manual_seed still queues deferred accelerator
+    # callbacks and formats their tracebacks on every capture. There is no
+    # accelerator generator to seed; retain the full path whenever uncertain.
+    try:
+        cpu_only = torch.accelerator.current_accelerator(check_available=False) is None
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        cpu_only = False
+    if cpu_only:
+        torch.default_generator.manual_seed(seed)
+        return
     try:
         torch.manual_seed(seed)
     except Exception as exc:  # noqa: BLE001 - any broken-accelerator failure mode
