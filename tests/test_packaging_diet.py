@@ -181,15 +181,18 @@ def test_packaging_metadata_uses_resolvable_gradcam_and_guarded_tinygrad_extra()
 
 
 def test_precommit_and_conftest_guard_use_python3_safe_predicates() -> None:
-    """The hook entrypoints and menagerie guard stay on the hardened conditions."""
+    """Hooks own their Python interpreter and the crawler guard remains version-based."""
 
     project_root = Path(__file__).resolve().parent.parent
     precommit_text = project_root.joinpath(".pre-commit-config.yaml").read_text()
     conftest_text = project_root.joinpath("tests", "conftest.py").read_text()
 
-    assert "entry: python scripts/check_no_breaking_markers.py" not in precommit_text
-    assert "entry: scripts/check_no_breaking_markers.py --commit-msg" in precommit_text
-    assert "entry: scripts/check_no_breaking_markers.py --pre-push" in precommit_text
+    for stage in ("commit-msg", "pre-push"):
+        hook = precommit_text.split(f"      - id: no-breaking-markers-{stage}\n", 1)[1]
+        hook = hook.split("\n      - id:", 1)[0]
+        assert f"entry: python scripts/check_no_breaking_markers.py --{stage}" in hook
+        assert "language: python" in hook
+        assert f"stages: [{stage}]" in hook
     assert "if sys.version_info < (3, 11):" in conftest_text
     assert 'collect_ignore_glob.append("test_menagerie_*.py")' in conftest_text
     # Exclude the directory before its Python-3.11-only conftest is imported.

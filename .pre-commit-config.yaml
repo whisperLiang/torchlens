@@ -129,14 +129,15 @@ repos:
     hooks:
       - id: no-breaking-markers-commit-msg
         name: Block semantic-release major-bump triggers (commit-msg)
-        entry: scripts/check_no_breaking_markers.py --commit-msg
-        language: system
+        # Use the managed interpreter on Windows and POSIX, without host aliases.
+        entry: python scripts/check_no_breaking_markers.py --commit-msg
+        language: python
         stages: [commit-msg]
         pass_filenames: true
       - id: no-breaking-markers-pre-push
         name: Block semantic-release major-bump triggers (pre-push)
-        entry: scripts/check_no_breaking_markers.py --pre-push
-        language: system
+        entry: python scripts/check_no_breaking_markers.py --pre-push
+        language: python
         stages: [pre-push]
         pass_filenames: false
         always_run: true
