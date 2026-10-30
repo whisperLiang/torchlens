@@ -11,6 +11,7 @@ import time
 from collections import OrderedDict, deque
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -190,7 +191,7 @@ class _PinnedSmallCaptureChain(nn.Module):
 
 
 def _interleaved_median_capture_ms(models: list[nn.Module], value: torch.Tensor) -> list[float]:
-    """Return per-model median capture times, measured ROUND-ROBIN.
+    """Return per-model median capture times from round-robin CPU-time batches.
 
     Process-CPU clock, not wall (r7 R30, sol b4 MED): the wall spelling
     demonstrated a red/green flip on the SAME tip purely from runner load
@@ -205,6 +206,12 @@ def _interleaved_median_capture_ms(models: list[nn.Module], value: torch.Tensor)
     fixed cost at 22.9ms vs 13.4ms isolated and flipped the ratio red.
     Round-robin sampling spreads any drift evenly across all sizes, so the
     RATIO (the thing under test) stays drift-invariant.
+
+    Windows process-CPU timestamps can advance in 15.625-ms ticks despite
+    their nanosecond units. Time nine captures together before taking a
+    per-capture mean; single-capture medians can otherwise be equal and
+    erase the slope. Three rounds rotate which model runs first so every
+    model occupies each position. Cleanup stays outside the timed window.
     """
 
     for model in models:
@@ -212,21 +219,52 @@ def _interleaved_median_capture_ms(models: list[nn.Module], value: torch.Tensor)
             tl.trace(model, value).cleanup()
     gc.collect()
     samples: list[list[float]] = [[] for _ in models]
-    for _ in range(9):
-        for index, model in enumerate(models):
+    for round_index in range(3):
+        for offset in range(len(models)):
+            index = (round_index + offset) % len(models)
             start = time.process_time_ns()
-            trace = tl.trace(model, value)
-            samples[index].append(time.process_time_ns() - start)
-            trace.cleanup()
+            traces = [tl.trace(models[index], value) for _ in range(9)]
+            samples[index].append((time.process_time_ns() - start) / len(traces))
+            for trace in traces:
+                trace.cleanup()
     return [statistics.median(rows) / 1_000_000 for rows in samples]
+
+
+@pytest.mark.smoke
+def test_small_capture_timing_resolves_quantized_cpu_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recover distinct capture costs even when CPU clocks tick every 15.625 ms."""
+    elapsed_ns = 0
+    costs_ns = {1: 10_000_000, 16: 17_000_000, 64: 39_400_000}
+    input_value = torch.ones(8)
+
+    def clock_ns() -> int:
+        """Read a simulated Windows process-CPU clock."""
+        return elapsed_ns // 15_625_000 * 15_625_000
+
+    def capture(model: nn.Module, value: torch.Tensor) -> SimpleNamespace:
+        """Charge the pinned model's known CPU cost without running torch."""
+        nonlocal elapsed_ns
+        assert value is input_value
+        elapsed_ns += costs_ns[model.depth]
+        return SimpleNamespace(cleanup=lambda: None)
+
+    with monkeypatch.context() as patches:
+        patches.setattr(time, "process_time_ns", clock_ns)
+        patches.setattr(tl, "trace", capture)
+        measured = _interleaved_median_capture_ms(
+            [_PinnedSmallCaptureChain(depth) for depth in costs_ns], input_value
+        )
+
+    assert measured == pytest.approx([10.0, 17.0, 39.4], abs=2.0)
 
 
 @pytest.mark.heavy
 @pytest.mark.serial
 def test_pinned_small_capture_fixed_cost_ratio_gate() -> None:
-    # heavy, not unmarked (b2 R41 round 5): the moment serial stopped being a
-    # budget exemption, this 27-capture ratio gate measured 13.8s CPU in a
-    # loaded session — squarely in the 5-20s heavy band the tier docs define.
+    # Batched captures of all three sizes belong to the 5-20s heavy tier.
+    # The serial marker does not exempt their CPU cost from that budget.
     """A doubled fixed capture floor cannot hide behind large-model timings."""
 
     original_threads = torch.get_num_threads()
