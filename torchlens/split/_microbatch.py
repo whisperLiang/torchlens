@@ -12,6 +12,8 @@ from .training import (
     _allows_boundary_gradient,
     _default_loss,
     _is_diff_tensor,
+    _mutable_boundary_buffers,
+    _require_training_boundary,
 )
 
 
@@ -94,9 +96,13 @@ def _run_chunk(
 
     roots: dict[str, Any] = {}
     values: dict[str, Any] = {}
+    mutable_buffers = _mutable_boundary_buffers(runtime)
     for key, value in boundary.tensors.items():
         axis = axes[key]
         sliced = value if axis is None else value.narrow(axis, start, end - start)
+        if key in mutable_buffers:
+            values[key] = sliced
+            continue
         if _is_diff_tensor(torch, sliced) and _allows_boundary_gradient(runtime, key):
             # The transported logical boundary is already detached. A per-chunk
             # clone isolates public boundary storage from replay's in-place ops.
@@ -199,6 +205,8 @@ def train_torch_microbatches(
     if microbatch_reduction == "sum" and loss_fn is None:
         raise ValueError("microbatch_reduction='sum' requires a custom sum-reduced loss_fn")
     runtime.validate_boundary(boundary)
+    if _mutable_boundary_buffers(runtime):
+        _require_training_boundary(runtime, boundary)
     axes = _boundary_axes(runtime, boundary)
     batch = boundary.metadata.get("runtime_batch_size")
     if type(batch) is not int or batch < 1:

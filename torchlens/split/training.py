@@ -10,6 +10,8 @@ from typing import Any, Protocol
 from ._mlx_training import MlxTrainingEngine
 from .boundary import ReplayBoundary
 from .errors import SplitErrorContext, SplitUnsupportedError
+from .graph import ReplayValueRef
+from .planner import _partition_call_arguments
 
 BoundaryGradients = dict[str, Any]
 
@@ -137,6 +139,40 @@ def _allows_boundary_gradient(runtime: Any, key: str) -> bool:
     )
 
 
+def _mutable_boundary_buffers(runtime: Any) -> frozenset[str]:
+    """Find state sources written by suffix operations already certified by the planner."""
+    graph, plan = runtime.trace_graph, runtime.plan
+    written_sources: set[str] = set()
+    for node_id in plan.ordered_mutation_node_ids & plan.suffix_node_ids:
+        node = graph.node_by_id[node_id]
+        args, kwargs = _partition_call_arguments(node)
+        if "batchnorm" in node.op_type.replace("_", ""):
+            # Functional and native BatchNorm have different running-state
+            # positions. Affine weights and read-only operands are not writes.
+            positions = (
+                (1, 2)
+                if getattr(node.target, "__module__", "") == "torch.nn.functional"
+                else (3, 4)
+            )
+            operands = tuple(
+                kwargs.get(name, args[index] if len(args) > index else None)
+                for name, index in zip(("running_mean", "running_var"), positions, strict=True)
+            )
+        else:
+            output = kwargs.get("out")
+            operands = (output if output is not None else args[0] if args else kwargs.get("input"),)
+        written_sources.update(
+            graph.node_id_by_alias.get(value.value_id, value.value_id)
+            for value in operands
+            if isinstance(value, ReplayValueRef)
+        )
+    return frozenset(
+        key
+        for key, node_id in plan.boundary_bindings.items()
+        if node_id in written_sources and graph.node_by_id[node_id].is_buffer
+    )
+
+
 def _default_loss(torch: Any, output: Any, targets: Any) -> Any:
     """Compute the default split-training loss."""
 
@@ -255,8 +291,15 @@ def _execute_torch_suffix(
     runtime.validate_boundary(boundary)
     root_tensors: dict[str, Any] = {}
     replay_tensors: dict[str, Any] = {}
+    mutable_buffers = _mutable_boundary_buffers(runtime)
+    if mutable_buffers:
+        _require_training_boundary(runtime, boundary)
     for key, value in boundary.tensors.items():
-        if _is_diff_tensor(torch, value) and _allows_boundary_gradient(runtime, key):
+        if key in mutable_buffers:
+            # These are current runtime state, not differentiable input roots.
+            # Copying them discards native running-statistic/counter updates.
+            replay_tensors[key] = value
+        elif _is_diff_tensor(torch, value) and _allows_boundary_gradient(runtime, key):
             root = value.detach().clone().requires_grad_(True)
             root_tensors[key] = root
             replay_tensors[key] = root
