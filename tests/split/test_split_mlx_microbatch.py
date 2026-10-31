@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import partial
 from typing import Any
 
 import pytest
 from v2_helpers import (
     prepare_fixture,
+    select_node_prefix,
     split_request,
 )
 
@@ -59,7 +61,7 @@ def test_mlx_microbatches_match_logical_gradients(reduction: str, size: int) -> 
         model,
         x,
         split_request(
-            "through:transpose_1",
+            partial(select_node_prefix, node_id="transpose_1"),
             backend="mlx",
             trainable=True,
             placement=tl.split.PlacementPlan.on(mx.new_stream(mx.cpu)),
@@ -108,7 +110,11 @@ def test_mlx_cached_microbatch_updates_suffix_once() -> None:
     model = _Model()
     x = mx.arange(20, dtype=mx.float32).reshape(5, 4) / 10
     runtime = prepare_fixture(
-        model, x, split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        x,
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     optimizer = optim.SGD(0.01)
     seen: list[tuple[int, int, int]] = []
@@ -153,7 +159,11 @@ def test_mlx_stateful_microbatches_match_native_sequential_chunks() -> None:
     x = mx.sin(mx.arange(20, dtype=mx.float32).reshape(5, 4) / 3)
     targets = mx.cos(x)
     runtime = prepare_fixture(
-        model, x, split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        x,
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
 
     def native_loss(values: Any) -> Any:

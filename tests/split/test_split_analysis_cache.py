@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import partial
 from unittest.mock import patch
 
 import torch
@@ -12,6 +13,7 @@ from v2_helpers import (
     prepare_fixture,
     repartition_fixture,
     request_fixture,
+    select_node_prefix,
 )
 
 from torchlens.split import context as runtime_module
@@ -21,7 +23,7 @@ def test_cache_reuses_lowering_but_rechecks_state_and_isolates_reports() -> None
     """Repeated analysis shares plans only; caller edits cannot poison later hits."""
     model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
     x = torch.ones(2, 4)
-    runtime = prepare_fixture(model, x, request_fixture("through:" + "1"))
+    runtime = prepare_fixture(model, x, request_fixture(partial(select_node_prefix, node_id="1")))
     runtime.clear_analysis_cache()
     with (
         patch.object(
@@ -31,10 +33,10 @@ def test_cache_reuses_lowering_but_rechecks_state_and_isolates_reports() -> None
             runtime, "_validate_recut_state_for_plan", wraps=runtime._validate_recut_state_for_plan
         ) as validate,
     ):
-        first = analyze_fixture(runtime, "until:" + "2")
+        first = analyze_fixture(runtime, partial(select_node_prefix, node_id="2", include=False))
         first.plan.boundary_spec.clear()
         first.capability_report.features.clear()
-        second = analyze_fixture(runtime, "until:" + "2")
+        second = analyze_fixture(runtime, partial(select_node_prefix, node_id="2", include=False))
         assert second.plan.boundary_spec
         assert second.capability_report.features
         assert lower.call_count == 2
@@ -44,7 +46,7 @@ def test_cache_reuses_lowering_but_rechecks_state_and_isolates_reports() -> None
         model[2].weight.add_(1)
     recut = runtime.materialize(second)
     torch.testing.assert_close(recut.replay(x), model(x))
-    analyze_fixture(recut, "until:" + "2")
+    analyze_fixture(recut, partial(select_node_prefix, node_id="2", include=False))
     assert runtime.analysis_cache_info()["hits"] == 2
     recut.clear_analysis_cache()
     assert runtime.analysis_cache_info()["size"] == 0
@@ -54,10 +56,10 @@ def test_cache_is_bounded_and_not_shared_between_captures() -> None:
     """Each unrelated client starts empty and a rotating workload evicts plans."""
     model = nn.Sequential(*(nn.ReLU() for _ in range(35)))
     x = torch.randn(2, 4)
-    first = prepare_fixture(model, x, request_fixture("through:" + "0"))
-    second = prepare_fixture(model, x, request_fixture("through:" + "0"))
+    first = prepare_fixture(model, x, request_fixture(partial(select_node_prefix, node_id="0")))
+    second = prepare_fixture(model, x, request_fixture(partial(select_node_prefix, node_id="0")))
     for index in range(35):
-        analyze_fixture(first, "through:" + str(index))
+        analyze_fixture(first, partial(select_node_prefix, node_id=str(index)))
     assert first.analysis_cache_info()["size"] == 32
     assert first.analysis_cache_info()["misses"] == 35
     assert second.analysis_cache_info()["size"] == 1
@@ -66,8 +68,10 @@ def test_cache_is_bounded_and_not_shared_between_captures() -> None:
 def test_replaced_graph_does_not_poison_sibling_profile_cache() -> None:
     """A recut that replaces its graph cannot change another runtime's costs."""
     model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
-    seed = prepare_fixture(model, torch.ones(2, 4), request_fixture("through:" + "1"))
-    child = repartition_fixture(seed, "until:" + "2")
+    seed = prepare_fixture(
+        model, torch.ones(2, 4), request_fixture(partial(select_node_prefix, node_id="1"))
+    )
+    child = repartition_fixture(seed, partial(select_node_prefix, node_id="2", include=False))
     original = seed.graph_profile()
     child.trace_graph = replace(
         child.trace_graph,

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import partial
 
 import pytest
 from v2_helpers import (
     plan_fixture,
+    select_node_prefix,
+    select_prefix,
     split_request,
 )
 
@@ -80,10 +83,10 @@ def _graph(extra: tuple[SplitTraceNode, ...] = ()) -> SplitTraceGraph:
     )
 
 
-def test_after_boundary_frontier_includes_skip() -> None:
+def test_inclusive_prefix_frontier_includes_skip() -> None:
     """Splitting after ReLU includes both primary and residual skip tensors."""
 
-    plan = plan_fixture(_graph(), split_request("through:relu"))
+    plan = plan_fixture(_graph(), split_request(partial(select_node_prefix, node_id="relu")))
 
     assert "relu_1_1" in plan.prefix_node_ids
     assert set(plan.boundary_node_ids) == {"relu_1_1", "linear_1_1"}
@@ -92,10 +95,12 @@ def test_after_boundary_frontier_includes_skip() -> None:
     assert roles["linear_1_1"] == "activation"
 
 
-def test_before_boundary_uses_direct_parents_as_primary() -> None:
-    """until: targets pass direct parents across the boundary."""
+def test_excluded_merge_passes_direct_parents() -> None:
+    """The prefix passes direct parents of the excluded merge across the boundary."""
 
-    plan = plan_fixture(_graph(), split_request("until:add_1_1"))
+    plan = plan_fixture(
+        _graph(), split_request(partial(select_node_prefix, node_id="add_1_1", include=False))
+    )
 
     roles = {item.label: item.role for item in plan.boundary_spec.values()}
     assert roles["relu_1_1"] == "activation"
@@ -115,7 +120,7 @@ def test_container_frontier_binds_schema_keys_to_canonical_values() -> None:
             for node in graph.nodes
         ),
     )
-    plan = plan_fixture(graph, split_request("through:relu"))
+    plan = plan_fixture(graph, split_request(partial(select_node_prefix, node_id="relu")))
 
     assert plan.boundary_bindings == {
         "linear_1_1@'features'.1": "linear_1_1",
@@ -147,18 +152,23 @@ def test_frontier_refuses_colliding_container_keys() -> None:
     )
 
     with pytest.raises(SplitRequestError, match="duplicate canonical value bindings"):
-        plan_fixture(graph, split_request("until:merge"))
+        plan_fixture(
+            graph, split_request(partial(select_node_prefix, node_id="merge", include=False))
+        )
 
 
-def test_percent_boundary_selects_eligible_compute_node() -> None:
-    """Percent split indexes eligible compute nodes only."""
+def test_prefix_count_selects_eligible_compute_node() -> None:
+    """Prefix selection indexes eligible compute nodes only."""
 
-    plan = plan_fixture(_graph(), split_request("50%"))
+    plan = plan_fixture(
+        _graph(),
+        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    )
 
     assert "relu_1_1" in plan.prefix_node_ids
 
 
-def test_after_terminal_compute_without_output_node_keeps_boundary() -> None:
+def test_terminal_compute_without_output_node_keeps_boundary() -> None:
     """Backend traces without explicit output nodes still expose terminal split output."""
 
     graph = SplitTraceGraph(
@@ -173,7 +183,9 @@ def test_after_terminal_compute_without_output_node_keeps_boundary() -> None:
         traced_batch_size=2,
     )
 
-    plan = plan_fixture(graph, split_request("through:dense_1", backend="tf"))
+    plan = plan_fixture(
+        graph, split_request(partial(select_node_prefix, node_id="dense_1"), backend="tf")
+    )
 
     assert plan.suffix_node_ids == frozenset()
     assert plan.boundary_node_ids == ("dense_1",)
@@ -195,7 +207,12 @@ def test_before_first_compute_keeps_input_when_call_group_id_is_shared() -> None
         traced_batch_size=2,
     )
 
-    plan = plan_fixture(graph, split_request("until:linear_1", backend="paddle"))
+    plan = plan_fixture(
+        graph,
+        split_request(
+            partial(select_node_prefix, node_id="linear_1", include=False), backend="paddle"
+        ),
+    )
 
     assert "input_1" in plan.prefix_node_ids
     assert plan.boundary_node_ids == ("input_1",)
@@ -243,9 +260,9 @@ def test_repeated_layer_labels_require_canonical_target() -> None:
     )
 
     with pytest.raises(SplitRequestError, match="ambiguous"):
-        plan_fixture(graph, split_request("through:relu_1_1"))
+        plan_fixture(graph, split_request(partial(select_node_prefix, node_id="relu_1_1")))
 
-    plan = plan_fixture(graph, split_request("through:relu_1_1:2"))
+    plan = plan_fixture(graph, split_request(partial(select_node_prefix, node_id="relu_1_1:2")))
 
     assert "relu_1_1:2" in plan.prefix_node_ids
     assert plan.boundary_node_ids == ("relu_1_1:2",)

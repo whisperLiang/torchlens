@@ -5,6 +5,7 @@ from __future__ import annotations
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import Any
 
 import pytest
@@ -13,6 +14,8 @@ from torch import nn
 from v2_helpers import (
     prepare_fixture,
     repartition_fixture,
+    select_node_prefix,
+    select_prefix,
     split_request,
 )
 
@@ -64,7 +67,9 @@ def test_prefix_grad_policy_controls_execution_and_saved_tensors(
 
     model = LifetimeMlp()
     inputs = torch.randn(3, 4, requires_grad=True)
-    runtime = prepare_fixture(model, inputs, split_request("through:cut", trainable=True))
+    runtime = prepare_fixture(
+        model, inputs, split_request(partial(select_node_prefix, node_id="cut"), trainable=True)
+    )
     segment = runtime.segments.training_prefix if training else runtime.segments.prefix
     execute = segment._execute_func
     grad_modes: list[bool] = []
@@ -109,7 +114,9 @@ def test_public_suffix_preserves_reusable_boundary() -> None:
 
     model = LifetimeMlp()
     inputs = torch.randn(3, 4)
-    runtime = prepare_fixture(model, inputs, split_request("through:cut", trainable=True))
+    runtime = prepare_fixture(
+        model, inputs, split_request(partial(select_node_prefix, node_id="cut"), trainable=True)
+    )
     boundary = runtime.run_prefix(inputs)
     tensors = dict(boundary.tensors)
     snapshots = {key: value.clone() for key, value in tensors.items()}
@@ -132,7 +139,9 @@ def test_internal_replay_releases_source_boundary_before_transported_suffix(
 
     model = LifetimeMlp()
     inputs = torch.randn(3, 4)
-    runtime = prepare_fixture(model, inputs, split_request("through:cut", trainable=True))
+    runtime = prepare_fixture(
+        model, inputs, split_request(partial(select_node_prefix, node_id="cut"), trainable=True)
+    )
     run_prefix = runtime._run_prefix
     suffix = runtime.segments.suffix
     source_refs: list[weakref.ReferenceType[Any]] = []
@@ -190,7 +199,9 @@ def test_microbatch_releases_graph_roots_and_saved_payloads_before_next_forward(
 
     model = LifetimeMlp()
     inputs = torch.randn(7, 4)
-    runtime = prepare_fixture(model, inputs, split_request("through:cut", trainable=True))
+    runtime = prepare_fixture(
+        model, inputs, split_request(partial(select_node_prefix, node_id="cut"), trainable=True)
+    )
     boundary = runtime.run_training_prefix(inputs)
     suffix = runtime.segments.suffix
     tensor_refs: list[weakref.ReferenceType[Any]] = []
@@ -263,9 +274,18 @@ def test_multioutput_and_residual_values_die_after_their_final_consumer(
 
     model = MultioutputBranches()
     inputs = torch.randn(3, 8)
-    seed = prepare_fixture(model, inputs, split_request("50%"))
+    seed = prepare_fixture(
+        model,
+        inputs,
+        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    )
     runtime = repartition_fixture(
-        seed, "until:" + str(seed.trace_graph.compute_nodes[0].canonical_id)
+        seed,
+        partial(
+            select_node_prefix,
+            node_id=str(seed.trace_graph.compute_nodes[0].canonical_id),
+            include=False,
+        ),
     )
     segment = runtime.segments.suffix
     execute = segment._execute_func
@@ -328,7 +348,11 @@ def test_frozen_embedding_with_forward_mutation_keeps_independent_segment_state(
     runtime = prepare_fixture(
         model,
         inputs,
-        split_request("through:cut", trainable=True, placement=PlacementPlan.on("cpu")),
+        split_request(
+            partial(select_node_prefix, node_id="cut"),
+            trainable=True,
+            placement=PlacementPlan.on("cpu"),
+        ),
     )
     # Let the production adapter decide eligibility before observing cached state.
     runtime.segments.prefix.bound_state_values()

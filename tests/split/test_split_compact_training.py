@@ -6,6 +6,7 @@ import copy
 import gc
 import weakref
 from dataclasses import replace
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,6 +17,7 @@ from v2_helpers import (
     prepare_fixture,
     repartition_fixture,
     request_fixture,
+    select_node_prefix,
 )
 
 from torchlens.split import PlacementPlan, SplitFeatures, pipeline
@@ -51,7 +53,8 @@ def _request() -> FixtureRequest:
     """Opt into training compaction without changing default training policy."""
 
     return request_fixture(
-        "through:" + "middle", features=SplitFeatures(training=True, retain_trace=False)
+        partial(select_node_prefix, node_id="middle"),
+        features=SplitFeatures(training=True, retain_trace=False),
     )
 
 
@@ -104,7 +107,11 @@ def test_compact_tied_training_recut_preserves_gradients_and_optimizer_state(
                 actual_optimizer.state[actual], expected_optimizer.state[expected_param]
             )
         compute = runtime.trace_graph.compute_nodes
-        point = "until:" + str(compute[0].canonical_id) if step % 2 else "through:" + "middle"
+        point = (
+            partial(select_node_prefix, node_id=str(compute[0].canonical_id), include=False)
+            if step % 2
+            else partial(select_node_prefix, node_id="middle")
+        )
         runtime = repartition_fixture(runtime, point)
         assert tuple(id(value) for value in model.parameters()) == parameter_ids
         assert not runtime.retains_trace
@@ -175,7 +182,8 @@ def test_compact_training_updates_live_batchnorm_buffers() -> None:
     model = copy.deepcopy(reference)
     inputs = torch.randn(3, 4)
     request = request_fixture(
-        "through:" + "0", features=SplitFeatures(training=True, retain_trace=False, batch_axes={})
+        partial(select_node_prefix, node_id="0"),
+        features=SplitFeatures(training=True, retain_trace=False, batch_axes={}),
     )
     runtime = prepare_fixture(model, inputs, request)
     torch.testing.assert_close(model.state_dict(), reference.state_dict())
@@ -212,7 +220,8 @@ def test_compact_training_preserves_rng_and_matches_diagnostic_dropout(
     diagnostic_model = copy.deepcopy(model)
     inputs = torch.randn(3, 4)
     request = request_fixture(
-        "through:" + "0", features=SplitFeatures(training=True, retain_trace=False, batch_axes={})
+        partial(select_node_prefix, node_id="0"),
+        features=SplitFeatures(training=True, retain_trace=False, batch_axes={}),
     )
     rng = torch.random.get_rng_state().clone()
     runtime = prepare_fixture(model, inputs, request)
@@ -242,7 +251,8 @@ def test_compact_training_replays_cpu_autocast_gradients() -> None:
     model = torch.nn.Sequential(torch.nn.Linear(4, 8), torch.nn.GELU(), torch.nn.Linear(8, 2))
     inputs = torch.randn(3, 4, requires_grad=True)
     request = request_fixture(
-        "through:" + "1", features=SplitFeatures(training=True, retain_trace=False, batch_axes={})
+        partial(select_node_prefix, node_id="1"),
+        features=SplitFeatures(training=True, retain_trace=False, batch_axes={}),
     )
     with torch.autocast("cpu", dtype=torch.bfloat16):
         runtime = prepare_fixture(model, inputs, request)
@@ -265,7 +275,7 @@ def test_compact_training_cpu_cuda_gradient_handoff_and_update() -> None:
     reference = copy.deepcopy(model)
     original = {name: value.detach().clone() for name, value in model.state_dict().items()}
     request = request_fixture(
-        "through:" + "1",
+        partial(select_node_prefix, node_id="1"),
         features=SplitFeatures(training=True, retain_trace=False),
         placement=PlacementPlan.across("cpu", "cuda:0"),
     )

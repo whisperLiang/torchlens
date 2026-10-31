@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 from typing import Any
 
 import pytest
@@ -10,6 +11,7 @@ import torch
 from v2_helpers import (
     prepare_fixture,
     request_fixture,
+    select_node_prefix,
 )
 
 from torchlens.split import SplitFeatures, pipeline
@@ -56,7 +58,8 @@ def test_linear_vector_is_never_resized_or_probed(
     model = torch.nn.Linear(width, 3)
     example = torch.randn(width)
     request = request_fixture(
-        selection="through:" + "linear", features=SplitFeatures(batch_axes=axes)
+        selection=partial(select_node_prefix, node_id="linear"),
+        features=SplitFeatures(batch_axes=axes),
     )
     runtime = prepare_fixture(model, example, request)
 
@@ -78,7 +81,7 @@ def test_explicit_static_matrix_has_exact_runtime_shape_guards(
 
     model = torch.nn.Sequential(torch.nn.Linear(4, 5), torch.nn.ReLU(), torch.nn.Linear(5, 3))
     request = request_fixture(
-        selection="through:" + "relu",
+        selection=partial(select_node_prefix, node_id="relu"),
         features=SplitFeatures(batch_axes={}, training=True),
     )
     example = torch.randn(7, 4)
@@ -107,7 +110,8 @@ def test_rank_one_batch_requires_explicit_axis(
 
     model = Model()
     request = request_fixture(
-        selection="through:" + "relu", features=SplitFeatures(batch_axes={"/args/0": 0})
+        selection=partial(select_node_prefix, node_id="relu"),
+        features=SplitFeatures(batch_axes={"/args/0": 0}),
     )
     runtime = prepare_fixture(model, torch.randn(4), request)
     assert capture_shapes == [(1,), (2,)]
@@ -129,7 +133,9 @@ def test_nested_static_inputs_do_not_require_a_batch_declaration() -> None:
             return torch.relu(inputs["features"]) * 2
 
     model = Model()
-    request = request_fixture(selection="through:" + "relu", features=SplitFeatures(batch_axes={}))
+    request = request_fixture(
+        selection=partial(select_node_prefix, node_id="relu"), features=SplitFeatures(batch_axes={})
+    )
     value = {"features": torch.randn(4)}
     runtime = prepare_fixture(model, value, request)
     assert runtime.trace_graph.shape_program.input_batch_axes == {}
@@ -151,7 +157,9 @@ def test_scalar_auto_input_remains_static(capture_shapes: list[tuple[int, ...]])
 
     model = Model()
     runtime = prepare_fixture(
-        model, torch.tensor(3.0), request_fixture(selection="through:" + "relu")
+        model,
+        torch.tensor(3.0),
+        request_fixture(selection=partial(select_node_prefix, node_id="relu")),
     )
     assert capture_shapes == [()]
     assert runtime.trace_graph.shape_program.input_batch_axes == {}

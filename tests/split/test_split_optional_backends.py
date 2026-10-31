@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
 import pytest
 from _paddle_subprocess import run_paddle_subprocess
 from v2_helpers import (
     prepare_fixture,
+    select_node_prefix,
     split_request,
 )
 
@@ -34,13 +36,15 @@ def test_jax_optional_adapter_gate() -> None:
     adapter = resolve_split_adapter("jax")
 
     assert adapter.supports_replay is True
-    runtime = prepare_fixture(model, x, split_request("through:max", backend="jax"))
+    runtime = prepare_fixture(
+        model, x, split_request(partial(select_node_prefix, node_id="max"), backend="jax")
+    )
     replayed = runtime.replay(x)
     assert bool(jnp.allclose(replayed, model(x)))
     trainable = prepare_fixture(
         model,
         x,
-        split_request("through:max", backend="jax", trainable=True),
+        split_request(partial(select_node_prefix, node_id="max"), backend="jax", trainable=True),
     )
     assert trainable.segments.training_prefix is not None
 
@@ -57,7 +61,9 @@ def test_tinygrad_optional_adapter_gate() -> None:
     adapter = resolve_split_adapter("tinygrad")
 
     assert adapter.supports_replay is True
-    runtime = prepare_fixture(model, x, split_request("through:where", backend="tinygrad"))
+    runtime = prepare_fixture(
+        model, x, split_request(partial(select_node_prefix, node_id="where"), backend="tinygrad")
+    )
     replayed = runtime.replay(x)
     assert _flatten_numbers(replayed.tolist()) == pytest.approx(
         _flatten_numbers(model(x).realize().tolist())
@@ -65,7 +71,9 @@ def test_tinygrad_optional_adapter_gate() -> None:
     trainable = prepare_fixture(
         model,
         x,
-        split_request("through:where", backend="tinygrad", trainable=True),
+        split_request(
+            partial(select_node_prefix, node_id="where"), backend="tinygrad", trainable=True
+        ),
     )
     assert trainable.segments.training_prefix is not None
 
@@ -85,7 +93,9 @@ def test_mlx_optional_adapter_gate() -> None:
 
     assert adapter.supports_replay is True
     assert adapter.supports_boundary_cache is True
-    runtime = prepare_fixture(model, x, split_request("through:maximum", backend="mlx"))
+    runtime = prepare_fixture(
+        model, x, split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx")
+    )
     replayed = runtime.replay(x)
     mx.eval(replayed)
     expected = model(x)
@@ -96,7 +106,11 @@ def test_mlx_optional_adapter_gate() -> None:
     boundary = runtime.run_prefix(x).to("cpu")
     assert bool(mx.allclose(runtime.run_suffix(boundary), expected))
     training = prepare_fixture(
-        model, x, split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        x,
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     assert training.run_training_prefix(x).metadata["supports_prefix_backward"]
 
@@ -110,7 +124,9 @@ def test_mlx_split_reconstructs_direct_multi_output() -> None:
         return list(mx.split(mx.maximum(x, 0), 2, axis=-1))
 
     x = mx.arange(8, dtype=mx.float32).reshape((2, 4)) - 3
-    runtime = prepare_fixture(model, x, split_request("through:maximum", backend="mlx"))
+    runtime = prepare_fixture(
+        model, x, split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx")
+    )
     replayed = runtime.replay(x)
     expected = model(x)
     mx.eval(*replayed, *expected)
@@ -132,7 +148,9 @@ def test_mlx_split_reconstructs_nested_output_and_keeps_scalar_literals() -> Non
         return {"left": left, "right": [right, mx.add(mx.multiply(left, 2), right)]}
 
     x = mx.arange(8, dtype=mx.float32).reshape((2, 4)) - 3
-    runtime = prepare_fixture(model, x, split_request("through:maximum", backend="mlx"))
+    runtime = prepare_fixture(
+        model, x, split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx")
+    )
     replayed = runtime.replay(x)
     expected = model(x)
     assert isinstance(replayed, dict)
@@ -153,6 +171,8 @@ def test_paddle_optional_adapter_gate() -> None:
 
     run_paddle_subprocess(
         """
+        from functools import partial
+
         import paddle
         import torchlens as tl
         from torchlens.split.adapters import resolve_split_adapter
@@ -164,13 +184,13 @@ def test_paddle_optional_adapter_gate() -> None:
         adapter = resolve_split_adapter("paddle")
 
         assert adapter.supports_replay is True
-        runtime = prepare_fixture(model, x, split_request("through:relu", backend="paddle"))
+        runtime = prepare_fixture(model, x, split_request(partial(select_node_prefix, node_id='relu'), backend="paddle"))
         replayed = runtime.replay(x)
         assert bool(paddle.allclose(replayed, model(x)).item())
         trainable = prepare_fixture(
             model,
             x,
-            split_request("through:relu", backend="paddle", trainable=True),
+            split_request(partial(select_node_prefix, node_id='relu'), backend="paddle", trainable=True),
         )
         assert trainable.segments.training_prefix is not None
         """
@@ -203,12 +223,14 @@ def test_tf_optional_adapter_gate() -> None:
     adapter = resolve_split_adapter("tf")
 
     assert adapter.supports_replay is True
-    runtime = prepare_fixture(model, x, split_request("through:relu", backend="tf"))
+    runtime = prepare_fixture(
+        model, x, split_request(partial(select_node_prefix, node_id="relu"), backend="tf")
+    )
     replayed = runtime.replay(x)
     assert bool(tf.reduce_all(tf.abs(replayed - model(x)) < 1e-5).numpy())
     trainable = prepare_fixture(
         model,
         x,
-        split_request("through:relu", backend="tf", trainable=True),
+        split_request(partial(select_node_prefix, node_id="relu"), backend="tf", trainable=True),
     )
     assert trainable.segments.training_prefix is not None

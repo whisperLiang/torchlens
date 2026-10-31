@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import copy
+from functools import partial
 
 import pytest
 import torch
 from torch import nn
 from v2_helpers import (
     prepare_fixture,
+    select_node_prefix,
     split_request,
 )
 
@@ -54,7 +56,9 @@ def test_placed_prefix_optimizer_uses_training_state(
         model,
         x,
         split_request(
-            "through:relu", trainable=True, placement=PlacementPlan.across(device, "cpu")
+            partial(select_node_prefix, node_id="relu"),
+            trainable=True,
+            placement=PlacementPlan.across(device, "cpu"),
         ),
     )
     if warm_inference:
@@ -103,7 +107,10 @@ def test_training_prefix_parameters_with_captured_inference_sources() -> None:
     runtime = prepare_fixture(
         model,
         x,
-        split_request("through:relu", placement=PlacementPlan.across("cuda:0", "cpu")),
+        split_request(
+            partial(select_node_prefix, node_id="relu"),
+            placement=PlacementPlan.across("cuda:0", "cpu"),
+        ),
     )
     runtime.run_prefix(x)
     parameters = runtime.prefix_parameters()

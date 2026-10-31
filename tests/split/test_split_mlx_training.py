@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from v2_helpers import (
     candidate_report,
     prepare_fixture,
     repartition_fixture,
+    select_node_prefix,
     split_request,
 )
 
@@ -74,7 +76,11 @@ def test_mlx_optimizer_steps_match_unsplit_and_preserve_source(optimizer_cls: An
     x, targets = _input(), mx.array([[0.2, -0.5], [1, 0.3], [-0.7, 0.4]])
     source = dict(tree_flatten(model.parameters()))
     runtime = prepare_fixture(
-        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        _input(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     prefix_optimizer = optimizer_cls(learning_rate=0.01)
     suffix_optimizer = optimizer_cls(learning_rate=0.01)
@@ -103,7 +109,9 @@ def test_mlx_optimizer_steps_match_unsplit_and_preserve_source(optimizer_cls: An
         assert value is source[name]
     assert runtime.prefix_parameters() and runtime.suffix_parameters()
     migrated = runtime.with_placement(tl.split.PlacementPlan.on("cpu"))
-    recut = repartition_fixture(migrated, "until:" + "maximum")
+    recut = repartition_fixture(
+        migrated, partial(select_node_prefix, node_id="maximum", include=False)
+    )
     _assert_close(migrated.replay(x), reference(x))
     _assert_close(recut.replay(x), reference(x))
 
@@ -118,7 +126,11 @@ def test_mlx_gradients_match_at_every_cut_and_changed_batch() -> None:
         return mx.add(mx.multiply(left, 2), right)
 
     seed = prepare_fixture(
-        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        _input(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     for candidate in candidate_report(
         seed,
@@ -150,7 +162,7 @@ def test_mlx_nested_and_keyword_input_gradients() -> None:
         model,
         pair,
         split_request(
-            "through:maximum",
+            partial(select_node_prefix, node_id="maximum"),
             backend="mlx",
             trainable=True,
             batch_axes={"/args/0/a": 0, "/args/0/b": 0, "/kwargs/offset": 0},
@@ -182,7 +194,7 @@ def test_mlx_shared_input_gradient_survives_explicit_placement() -> None:
         model,
         (x, x),
         split_request(
-            "through:maximum",
+            partial(select_node_prefix, node_id="maximum"),
             backend="mlx",
             trainable=True,
             placement=tl.split.PlacementPlan.on("cpu"),
@@ -220,7 +232,11 @@ def test_mlx_native_conv_and_layernorm_parameter_gradients() -> None:
     model = Model()
     x = mx.arange(64, dtype=mx.float32).reshape(2, 4, 4, 2) / 50
     runtime = prepare_fixture(
-        model, x, split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        x,
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     targets = mx.ones((2, 3))
     _value, expected = nn.value_and_grad(model, lambda: _loss(model(x), targets))()
@@ -237,7 +253,11 @@ def test_mlx_training_rejects_detached_stale_and_invalid_gradients() -> None:
     """Prefix recomputation refuses boundaries that cannot attest the original forward."""
 
     runtime = prepare_fixture(
-        _Mlp(), _input(2), split_request("through:maximum", backend="mlx", trainable=True)
+        _Mlp(),
+        _input(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     x, targets = _input(2), mx.ones((2, 2))
     detached = runtime.run_prefix(x)
@@ -262,7 +282,11 @@ def test_mlx_default_classification_loss_and_frozen_parameters() -> None:
     model = _Mlp()
     model.hidden.freeze(keys="weight")
     runtime = prepare_fixture(
-        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        _input(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     x, targets = _input(3), mx.array([0, 1, 0])
     boundary = runtime.run_training_prefix(x)
@@ -282,7 +306,11 @@ def test_mlx_custom_nested_loss_and_non_scalar_refusal() -> None:
         return {"pair": mx.split(y, 2, axis=-1), "literal": "kept"}
 
     runtime = prepare_fixture(
-        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        _input(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     boundary = runtime.run_training_prefix(_input(2))
     result = runtime.train_suffix_result(
@@ -308,7 +336,11 @@ def test_mlx_training_boundary_snapshots_input_values() -> None:
     original = x.astype(x.dtype)
     mx.eval(original)
     runtime = prepare_fixture(
-        model, x, split_request("through:multiply", backend="mlx", trainable=True)
+        model,
+        x,
+        split_request(
+            partial(select_node_prefix, node_id="multiply"), backend="mlx", trainable=True
+        ),
     )
     targets = mx.zeros_like(x)
     boundary = runtime.run_training_prefix(x)
@@ -327,7 +359,12 @@ def test_mlx_cached_training_boundary_is_suffix_only(tmp_path: Path) -> None:
     runtime = prepare_fixture(
         _Mlp(),
         _input(2),
-        split_request("through:maximum", backend="mlx", trainable=True, boundary_cache=True),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"),
+            backend="mlx",
+            trainable=True,
+            boundary_cache=True,
+        ),
     )
     boundary = runtime.run_training_prefix(_input(2))
     path = tmp_path / "training.boundary"
@@ -346,7 +383,11 @@ def test_mlx_prefix_rejects_inplace_parameter_mutation() -> None:
     """External writes through exposed parameter arrays invalidate the training boundary."""
 
     runtime = prepare_fixture(
-        _Mlp(), _input(2), split_request("through:maximum", backend="mlx", trainable=True)
+        _Mlp(),
+        _input(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     boundary = runtime.run_training_prefix(_input(2))
     suffix = runtime.train_suffix_result(boundary, mx.ones((2, 2)))
@@ -380,7 +421,11 @@ def test_mlx_native_attention_parameter_and_input_gradients() -> None:
     x = mx.arange(24, dtype=mx.float32).reshape(2, 3, 4) / 10 - 1
     targets = mx.ones((2, 4))
     runtime = prepare_fixture(
-        model, x, split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        x,
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     expected_input = mx.grad(lambda a: _loss(model(a), targets))(x)
     _value, expected_params = nn.value_and_grad(model, lambda: _loss(model(x), targets))()
@@ -416,7 +461,11 @@ def test_mlx_integer_embedding_inputs_are_not_gradient_roots() -> None:
     tokens = mx.array([[1, 2, 3], [4, 1, 6]], dtype=mx.int32)
     targets = mx.ones((2, 2))
     runtime = prepare_fixture(
-        model, tokens, split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        tokens,
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     _value, expected = nn.value_and_grad(model, lambda: _loss(model(tokens), targets))()
     boundary = runtime.run_training_prefix(tokens)

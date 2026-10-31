@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import partial
 
 import pytest
 import torch
@@ -10,6 +11,7 @@ from torch import nn
 from v2_helpers import (
     prepare_fixture,
     request_fixture,
+    select_node_prefix,
 )
 
 from torchlens.split import (
@@ -81,7 +83,7 @@ def test_noncontiguous_cross_device_training_and_external_optimizer_migration(
         model,
         torch.randn(1, 4, dtype=torch.float64),
         request_fixture(
-            "through:" + "left_end",
+            partial(select_node_prefix, node_id="left_end"),
             features=SplitFeatures(training=True, retain_trace=retain_trace),
         ),
     )

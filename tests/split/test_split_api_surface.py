@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import warnings
+from functools import partial
 
 import pytest
 from v2_helpers import (
     prepare_fixture,
     request_fixture,
+    select_node_prefix,
 )
 
 import torchlens as tl
@@ -76,7 +78,7 @@ def test_split_named_state_exchange_refuses_unsupported_backend() -> None:
     runtime = prepare_fixture(
         torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.ReLU()),
         torch.ones(2, 4),
-        request_fixture(selection="through:" + "1"),
+        request_fixture(selection=partial(select_node_prefix, node_id="1")),
     )
     for method, args in ((runtime.state_dict, ()), (runtime.load_state_dict, ({},))):
         with pytest.raises(SplitUnsupportedError) as exc:
@@ -95,5 +97,7 @@ def test_prepare_uses_supported_capture_options() -> None:
     inputs = torch.ones(2, 4)
     with warnings.catch_warnings():
         warnings.simplefilter("error", TorchLensDeprecationWarning)
-        runtime = prepare_fixture(model, inputs, request_fixture(selection="through:" + "1"))
+        runtime = prepare_fixture(
+            model, inputs, request_fixture(selection=partial(select_node_prefix, node_id="1"))
+        )
         torch.testing.assert_close(runtime.replay(inputs), model(inputs))

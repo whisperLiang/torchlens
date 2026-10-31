@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import partial
 from typing import Any
 
 import pytest
@@ -12,6 +13,7 @@ from v2_helpers import (
     capture_fixture,
     prepare_fixture,
     request_fixture,
+    select_node_prefix,
 )
 
 from torchlens.split import GraphPartition, SplitFeatures
@@ -48,7 +50,8 @@ def test_ordered_fresh_writes_match_gradients_and_adam(activation: str) -> None:
         model,
         torch.randn(2, 4),
         request_fixture(
-            "through:" + "activation", features=SplitFeatures(training=True, retain_trace=False)
+            partial(select_node_prefix, node_id="activation"),
+            features=SplitFeatures(training=True, retain_trace=False),
         ),
     )
     selected = frozenset(
@@ -94,7 +97,9 @@ def test_boundary_between_fresh_producer_and_write_refuses() -> None:
     runtime = prepare_fixture(
         ResidualWrites("relu"),
         torch.ones(2, 4),
-        request_fixture("through:" + "activation", features=SplitFeatures(training=True)),
+        request_fixture(
+            partial(select_node_prefix, node_id="activation"), features=SplitFeatures(training=True)
+        ),
     )
     selected = frozenset(
         n.canonical_id for n in runtime.trace_graph.compute_nodes if n.module_path == "first"
@@ -115,7 +120,9 @@ def test_ordered_view_write_preserves_fresh_storage() -> None:
             fresh = x + 1
             return fresh.view_as(x).relu_()
 
-    runtime = prepare_fixture(ViewWrite(), torch.ones(2, 4), request_fixture("through:" + "relu"))
+    runtime = prepare_fixture(
+        ViewWrite(), torch.ones(2, 4), request_fixture(partial(select_node_prefix, node_id="relu"))
+    )
     cut = runtime.repartition(
         GraphPartition(frozenset(n.canonical_id for n in runtime.trace_graph.compute_nodes))
     )
@@ -147,7 +154,8 @@ def test_permuted_write_requires_fresh_local_storage(local_normalization: bool) 
             model,
             torch.randn(2, 3, 4),
             request_fixture(
-                "through:activation", features=SplitFeatures(training=True, retain_trace=False)
+                partial(select_node_prefix, node_id="activation"),
+                features=SplitFeatures(training=True, retain_trace=False),
             ),
         )
         with pytest.raises(SplitUnsupportedError):
@@ -159,7 +167,8 @@ def test_permuted_write_requires_fresh_local_storage(local_normalization: bool) 
         model,
         torch.randn(2, 3, 4),
         request_fixture(
-            "through:" + "activation", features=SplitFeatures(training=True, retain_trace=False)
+            partial(select_node_prefix, node_id="activation"),
+            features=SplitFeatures(training=True, retain_trace=False),
         ),
     )
     partition = GraphPartition(
@@ -200,7 +209,11 @@ def test_partition_reorders_only_data_independent_local_writes() -> None:
             right = x * 2
             return left.relu_() + right
 
-    runtime = prepare_fixture(Interleaved(), torch.ones(2, 4), request_fixture("through:" + "relu"))
+    runtime = prepare_fixture(
+        Interleaved(),
+        torch.ones(2, 4),
+        request_fixture(partial(select_node_prefix, node_id="relu")),
+    )
     nodes = runtime.trace_graph.compute_nodes
     selected = frozenset(n.canonical_id for n in nodes if n.op_type == "relu" or n is nodes[0])
     cut = runtime.repartition(GraphPartition(selected))
@@ -241,7 +254,9 @@ def test_write_barrier_distinguishes_storage_dependencies(
     runtime = prepare_fixture(
         model,
         torch.ones(2, 4),
-        request_fixture("through:" + "relu", features=SplitFeatures(training=True)),
+        request_fixture(
+            partial(select_node_prefix, node_id="relu"), features=SplitFeatures(training=True)
+        ),
     )
     nodes = runtime.trace_graph.compute_nodes
     assert len(nodes) == 4
@@ -265,7 +280,7 @@ def test_eval_batchnorm_fresh_output_can_be_mutated() -> None:
         nn.Conv2d(3, 4, 1), nn.BatchNorm2d(4), nn.ReLU(inplace=True), nn.Conv2d(4, 2, 1)
     ).eval()
     x = torch.randn(2, 3, 4, 4)
-    runtime = prepare_fixture(model, x, request_fixture("through:" + "2"))
+    runtime = prepare_fixture(model, x, request_fixture(partial(select_node_prefix, node_id="2")))
     selected = frozenset(
         n.canonical_id
         for n in runtime.trace_graph.compute_nodes
@@ -294,7 +309,9 @@ def test_certified_mutations_refuse_dispatch_modes_and_subclasses() -> None:
 
     model = ResidualWrites("relu")
     x = torch.ones(2, 4)
-    runtime = prepare_fixture(model, x, request_fixture("through:" + "activation"))
+    runtime = prepare_fixture(
+        model, x, request_fixture(partial(select_node_prefix, node_id="activation"))
+    )
     runtime = runtime.repartition(GraphPartition(frozenset()))
     with Passthrough(), pytest.raises(SplitUnsupportedError) as caught:
         runtime.replay(x)

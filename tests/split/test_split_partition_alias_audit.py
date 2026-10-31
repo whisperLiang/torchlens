@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import partial
 
 import pytest
 import torch
@@ -10,6 +11,7 @@ from torch import nn
 from v2_helpers import (
     prepare_fixture,
     request_fixture,
+    select_node_prefix,
 )
 
 from torchlens.split import GraphPartition, SplitFeatures
@@ -44,7 +46,7 @@ def test_read_alias_created_before_write_keeps_forward_and_backward_truth(
         model,
         torch.randn(2, 4, 4),
         request_fixture(
-            "through:" + "activation",
+            partial(select_node_prefix, node_id="activation"),
             features=SplitFeatures(training=True, retain_trace=retain_trace),
         ),
     )
@@ -82,7 +84,9 @@ def test_positional_functional_inplace_argument_is_not_missed(fresh: bool) -> No
             return nn.functional.relu(value, True) * 2
 
     model = PositionalWrite()
-    runtime = prepare_fixture(model, torch.randn(2, 4), request_fixture("through:" + "relu"))
+    runtime = prepare_fixture(
+        model, torch.randn(2, 4), request_fixture(partial(select_node_prefix, node_id="relu"))
+    )
     partition = GraphPartition(frozenset())
     if fresh:
         cut = runtime.repartition(partition)

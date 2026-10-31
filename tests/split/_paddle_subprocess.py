@@ -21,8 +21,10 @@ def run_paddle_subprocess(code: str, *, timeout: int = 180, require_cuda: bool =
     helper_path = str(Path(__file__).resolve().parent)
     env["PYTHONPATH"] = helper_path + os.pathsep + env.get("PYTHONPATH", "")
     source = (
-        "from v2_helpers import analyze_fixture, candidate_report, fixture_partition, plan_fixture, prepare_fixture, repartition_fixture, request_fixture, split_request\n"
-        + textwrap.dedent(code)
+        "from functools import partial\n"
+        "from v2_helpers import (select_node_prefix, select_prefix, analyze_fixture, "
+        "candidate_report, fixture_partition, plan_fixture, prepare_fixture, "
+        "repartition_fixture, request_fixture, split_request)\n" + textwrap.dedent(code)
     )
     cuda_skip_marker = "__torchlens_paddle_cuda_unavailable__"
     if require_cuda:

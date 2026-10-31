@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import partial
 from typing import Any
 
 import pytest
@@ -10,6 +11,7 @@ from v2_helpers import (
     candidate_report,
     prepare_fixture,
     repartition_fixture,
+    select_node_prefix,
     split_request,
 )
 
@@ -122,7 +124,11 @@ def test_mlx_tied_parameter_steps_match_native(optimizer_cls: Any, shared_optimi
     reference = deepcopy(model)
     source = dict(tree_flatten(model.parameters()))
     runtime = prepare_fixture(
-        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        _input(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     kwargs = {"momentum": 0.8} if optimizer_cls is optim.SGD else {}
     prefix_opt = optimizer_cls(learning_rate=0.01, **kwargs)
@@ -150,7 +156,9 @@ def test_mlx_tied_parameter_steps_match_native(optimizer_cls: Any, shared_optimi
     assert int(prefix_opt.step.item()) == int(suffix_opt.step.item()) == 3
     assert all(value is source[name] for name, value in tree_flatten(model.parameters()))
     migrated = runtime.with_placement(tl.split.PlacementPlan.on(mx.new_stream(mx.cpu)))
-    recut = repartition_fixture(migrated, "until:" + "maximum")
+    recut = repartition_fixture(
+        migrated, partial(select_node_prefix, node_id="maximum", include=False)
+    )
     _close(recut.replay(_input()), reference(_input()))
     assert all(
         candidate.training_supported
@@ -160,7 +168,13 @@ def test_mlx_tied_parameter_steps_match_native(optimizer_cls: Any, shared_optimi
     )
 
 
-@pytest.mark.parametrize("boundary_point", ["until:maximum", "through:maximum"])
+@pytest.mark.parametrize(
+    "boundary_point",
+    [
+        partial(select_node_prefix, node_id="maximum", include=False),
+        partial(select_node_prefix, node_id="maximum"),
+    ],
+)
 def test_mlx_batchnorm_dropout_and_ties_match_native(boundary_point: str) -> None:
     """Running statistics advance once per native call and VJPs reuse the original masks."""
 
@@ -207,7 +221,9 @@ def test_mlx_batchnorm_dropout_and_ties_match_native(boundary_point: str) -> Non
     _close(model.norm.running_mean, mx.zeros((4,)))
     _close(model.norm.running_var, mx.ones((4,)))
     migrated = runtime.with_placement(tl.split.PlacementPlan.on(mx.new_stream(mx.cpu)))
-    recut = repartition_fixture(migrated, "until:" + "maximum")
+    recut = repartition_fixture(
+        migrated, partial(select_node_prefix, node_id="maximum", include=False)
+    )
     for name, value in tree_flatten(reference.parameters()):
         _close(_runtime_values(recut)[name], value)
 
@@ -222,7 +238,11 @@ def test_mlx_explicit_random_producers_replay_fresh_then_reuse_vjp_keys() -> Non
         return mx.multiply(mx.maximum(noisy, 0), mx.random.normal(shape=x.shape))
 
     runtime = prepare_fixture(
-        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        _input(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     assert runtime.batch_validation["status"] == "passed"
     x, targets = _input(), mx.ones((5, 4))
@@ -247,7 +267,11 @@ def test_mlx_stateful_gradients_at_every_valid_cut() -> None:
     mx.random.seed(52)
     model = _StatefulModel()
     runtime = prepare_fixture(
-        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        _input(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     targets = mx.cos(_input())
     for candidate in candidate_report(
@@ -292,7 +316,11 @@ def test_mlx_tied_aliases_in_distinct_modules_and_suffix_optimizer_owner() -> No
     model = Model()
     source = model.left.weight
     runtime = prepare_fixture(
-        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        _input(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     targets = mx.cos(_input())
 
@@ -365,7 +393,11 @@ def test_mlx_batchnorm_minimum_batch_uses_independent_probe() -> None:
     mx.random.seed(22)
     model = Model()
     runtime = prepare_fixture(
-        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        _input(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     assert runtime.traced_batch_size == 2
     assert runtime.batch_validation["probe_batch_size"] == 3
@@ -392,7 +424,7 @@ def test_mlx_stateful_tied_updates_across_native_devices(
         model,
         _input(2),
         split_request(
-            "through:maximum",
+            partial(select_node_prefix, node_id="maximum"),
             backend="mlx",
             trainable=True,
             placement=tl.split.PlacementPlan.across(prefix_device, suffix_device),

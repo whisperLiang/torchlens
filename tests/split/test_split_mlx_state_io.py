@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
 import pytest
 from v2_helpers import (
     prepare_fixture,
     repartition_fixture,
+    select_node_prefix,
     split_request,
 )
 
@@ -74,7 +76,11 @@ def test_export_trained_state_matches_native_and_is_independent() -> None:
     model, reference = _Model(), _Model()
     source = dict(tree_flatten(model.parameters()))
     runtime = prepare_fixture(
-        model, _inputs(2), split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        _inputs(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     optimizer, native_optimizer = optim.Adam(0.01), optim.Adam(0.01)
     native_grad = nn.value_and_grad(reference, lambda x, y: _loss(reference(x), y))
@@ -108,7 +114,7 @@ def test_load_aggregate_updates_existing_segments_and_migrates(
         model,
         _inputs(2),
         split_request(
-            "through:maximum",
+            partial(select_node_prefix, node_id="maximum"),
             backend="mlx",
             trainable=training,
             placement=tl.split.PlacementPlan.on("cpu"),
@@ -131,7 +137,9 @@ def test_load_aggregate_updates_existing_segments_and_migrates(
         assert all(value is aggregate[name] for name, value in tree_flatten(model.parameters()))
         for updated in (
             runtime.with_placement(tl.split.PlacementPlan.on("cpu")),
-            repartition_fixture(runtime, "until:" + "maximum"),
+            repartition_fixture(
+                runtime, partial(select_node_prefix, node_id="maximum", include=False)
+            ),
         ):
             _assert_state(updated.state_dict(), aggregate)
             assert bool(mx.allclose(updated.replay(_inputs()), reference(_inputs()), atol=3e-5))
@@ -148,7 +156,11 @@ def test_training_after_aggregate_matches_native_across_rounds() -> None:
     model, reference = _Model(), _Model()
     source = dict(tree_flatten(model.parameters()))
     runtime = prepare_fixture(
-        model, _inputs(2), split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        _inputs(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     optimizer, native_optimizer = optim.Adam(0.01), optim.Adam(0.01)
     native_grad = nn.value_and_grad(reference, lambda x, y: _loss(reference(x), y))
@@ -179,7 +191,11 @@ def test_plain_callable_refuses_named_state_exchange() -> None:
 
         return mx.multiply(mx.maximum(inputs, 0), 2)
 
-    runtime = prepare_fixture(model, _inputs(2), split_request("through:maximum", backend="mlx"))
+    runtime = prepare_fixture(
+        model,
+        _inputs(2),
+        split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx"),
+    )
     for method, args in ((runtime.state_dict, ()), (runtime.load_state_dict, ({},))):
         with pytest.raises(SplitUnsupportedError) as exc:
             method(*args)
@@ -207,7 +223,11 @@ def test_alias_names_round_trip_and_conflicts_refuse_transactionally() -> None:
 
     model = _Aliases()
     runtime = prepare_fixture(
-        model, _inputs(2), split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        _inputs(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     exported = runtime.state_dict()
     assert exported.keys() == {"left.weight", "right.weight"}
@@ -233,7 +253,11 @@ def test_invalid_state_keeps_values_and_training_boundary(invalid: str) -> None:
     """Reject the whole aggregate before any owned state or boundary version changes."""
 
     runtime = prepare_fixture(
-        _Model(), _inputs(2), split_request("through:maximum", backend="mlx", trainable=True)
+        _Model(),
+        _inputs(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     boundary = runtime.run_training_prefix(_inputs())
     suffix = runtime.train_suffix_result(boundary, mx.ones((3, 2)))
@@ -261,7 +285,11 @@ def test_placement_failure_does_not_partially_commit(monkeypatch: pytest.MonkeyP
     """A failed suffix copy cannot leave the prefix on a different aggregate round."""
 
     runtime = prepare_fixture(
-        _Model(), _inputs(2), split_request("through:maximum", backend="mlx", trainable=True)
+        _Model(),
+        _inputs(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     original = runtime.state_dict()
     binding = runtime.segments.suffix._binding
@@ -306,7 +334,11 @@ def test_batchnorm_buffers_export_and_buffer_load_invalidates_old_boundary() -> 
 
     model, reference = Model(), Model()
     runtime = prepare_fixture(
-        model, _inputs(2), split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        _inputs(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     boundary = runtime.run_training_prefix(_inputs())
     suffix = runtime.train_suffix_result(boundary, mx.ones((3, 4)))

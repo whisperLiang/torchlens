@@ -14,6 +14,8 @@ def test_paddle_split_replay_equivalence() -> None:
 
     run_paddle_subprocess(
         """
+        from functools import partial
+
         import paddle
         import torchlens as tl
 
@@ -28,7 +30,7 @@ def test_paddle_split_replay_equivalence() -> None:
         runtime = prepare_fixture(
             model,
             x,
-            split_request("through:relu", backend="paddle"),
+            split_request(partial(select_node_prefix, node_id='relu'), backend="paddle"),
         )
 
         boundary = runtime.run_prefix(x)
@@ -44,6 +46,8 @@ def test_paddle_boundary_cache_roundtrip() -> None:
 
     run_paddle_subprocess(
         """
+        from functools import partial
+
         import tempfile
         from pathlib import Path
 
@@ -61,7 +65,7 @@ def test_paddle_boundary_cache_roundtrip() -> None:
         runtime = prepare_fixture(
             model,
             x,
-            split_request("through:relu", backend="paddle"),
+            split_request(partial(select_node_prefix, node_id='relu'), backend="paddle"),
         )
         boundary = runtime.run_prefix(x)
 
@@ -81,6 +85,8 @@ def test_paddle_batch_symbolic_replay_for_reshape() -> None:
 
     run_paddle_subprocess(
         """
+        from functools import partial
+
         import paddle
         import torchlens as tl
 
@@ -96,7 +102,7 @@ def test_paddle_batch_symbolic_replay_for_reshape() -> None:
         runtime = prepare_fixture(
             model,
             x,
-            split_request("through:reshape", backend="paddle"),
+            split_request(partial(select_node_prefix, node_id='reshape'), backend="paddle"),
         )
 
         for batch in (1, 2, 4):
@@ -111,6 +117,8 @@ def test_paddle_batch_symbolic_preserves_fixed_dim_matching_trace_batch() -> Non
 
     run_paddle_subprocess(
         """
+        from functools import partial
+
         import paddle
         import torchlens as tl
 
@@ -125,7 +133,7 @@ def test_paddle_batch_symbolic_preserves_fixed_dim_matching_trace_batch() -> Non
         runtime = prepare_fixture(
             model,
             x,
-            split_request("through:reshape", backend="paddle"),
+            split_request(partial(select_node_prefix, node_id='reshape'), backend="paddle"),
         )
 
         for batch in (1, 2, 4):
@@ -140,6 +148,8 @@ def test_paddle_layer_split_training_optimizer_step_matches_full_step() -> None:
 
     run_paddle_subprocess(
         """
+        from functools import partial
+
         import copy
 
         import paddle
@@ -166,7 +176,7 @@ def test_paddle_layer_split_training_optimizer_step_matches_full_step() -> None:
         runtime = prepare_fixture(
             split_model,
             x,
-            split_request("through:relu", backend="paddle", trainable=True),
+            split_request(partial(select_node_prefix, node_id='relu'), backend="paddle", trainable=True),
         )
         suffix_opt = paddle.optimizer.SGD(
             learning_rate=0.05,

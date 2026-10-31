@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import partial
 from typing import Any
 
 import pytest
 from v2_helpers import (
     prepare_fixture,
+    select_node_prefix,
     split_request,
 )
 
@@ -31,7 +33,11 @@ def output_runtime() -> Any:
         result = hidden * 2.0
         return {0: result, 1: [result + 1.0]}
 
-    return prepare_fixture(model, jnp.ones((2, 3)), split_request("through:max", backend="jax"))
+    return prepare_fixture(
+        model,
+        jnp.ones((2, 3)),
+        split_request(partial(select_node_prefix, node_id="max"), backend="jax"),
+    )
 
 
 @pytest.mark.parametrize("has_intermediate", [False, True])
@@ -108,7 +114,11 @@ def test_jax_repeated_output_without_occurrence_paths_refuses_typed() -> None:
         result = hidden * 2.0
         return {0: result, 1: [result, (result + 1.0,)]}
 
-    runtime = prepare_fixture(model, jnp.ones((2, 3)), split_request("through:max", backend="jax"))
+    runtime = prepare_fixture(
+        model,
+        jnp.ones((2, 3)),
+        split_request(partial(select_node_prefix, node_id="max"), backend="jax"),
+    )
     assert runtime.batch_validation["status"] == "failed"
     with pytest.raises(SplitUnsupportedError) as error:
         runtime.replay(jnp.ones((1, 3)))

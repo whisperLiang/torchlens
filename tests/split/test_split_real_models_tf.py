@@ -21,7 +21,7 @@ def test_tf_vgg16_split_replay_batch_symbolic_and_train() -> None:
         """
         import tensorflow as tf
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
 
         tf.keras.utils.set_random_seed(0)
         model = tf.keras.applications.VGG16(
@@ -33,7 +33,7 @@ def test_tf_vgg16_split_replay_batch_symbolic_and_train() -> None:
         runtime = prepare_fixture(
             model,
             x,
-            split_request("25%", backend="tf"),
+            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), backend="tf"),
         )
         for batch in (1, 2, 4):
             replay_x = tf.ones((batch, 32, 32, 3), dtype=tf.float32)
@@ -43,7 +43,7 @@ def test_tf_vgg16_split_replay_batch_symbolic_and_train() -> None:
         train_runtime = prepare_fixture(
             model,
             x,
-            split_request("75%", backend="tf", trainable=True),
+            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1), backend="tf", trainable=True),
         )
         boundary = train_runtime.run_training_prefix(x)
         loss, grads = train_runtime.train_suffix(
@@ -77,7 +77,7 @@ def test_tf_keras_application_matrix_split_replay_batch_symbolic(model_name: str
 
         import tensorflow as tf
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
 
         for gpu in tf.config.list_physical_devices("GPU"):
             try:
@@ -110,9 +110,9 @@ def test_tf_keras_application_matrix_split_replay_batch_symbolic(model_name: str
         seed_runtime = prepare_fixture(
             model,
             x,
-            split_request("25%", backend="tf"),
+            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), backend="tf"),
         )
-        for boundary in ("25%", "50%", "75%"):
+        for boundary in (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1)):
             runtime = repartition_fixture(seed_runtime, split_request(boundary, backend="tf").partition)
             for batch in (1, 3):
                 replay_x = tf.ones((batch, 32, 32, 3), dtype=tf.float32)
@@ -139,6 +139,8 @@ def test_tf_keras_cv_yolov8_complete_model_all_nodes_cross_batch_and_device() ->
     _skip_if_module_missing("keras_cv")
     _run_backend_subprocess(
         """
+        from functools import partial
+
         import os
         import hashlib
         from pathlib import Path
@@ -152,7 +154,7 @@ def test_tf_keras_cv_yolov8_complete_model_all_nodes_cross_batch_and_device() ->
         import keras_cv
 
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_node_prefix, select_prefix
 
         tf.keras.utils.set_random_seed(0)
         official_model = keras_cv.models.YOLOV8Detector.from_preset(
@@ -197,9 +199,9 @@ def test_tf_keras_cv_yolov8_complete_model_all_nodes_cross_batch_and_device() ->
         official_runtime = prepare_fixture(
             official_model,
             trace_x,
-            split_request("50%", backend="tf"),
+            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="tf"),
         )
-        for boundary in ("25%", "50%", "75%"):
+        for boundary in (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1)):
             runtime = repartition_fixture(official_runtime, split_request(boundary, backend="tf").partition)
             replay_x = tf.ones((1, 32, 32, 3), dtype=tf.float32)
             try:
@@ -266,19 +268,19 @@ def test_tf_keras_cv_yolov8_complete_model_all_nodes_cross_batch_and_device() ->
         compact_runtime = prepare_fixture(
             compact_model,
             trace_x,
-            split_request("50%", backend="tf"),
+            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="tf"),
         )
         boundaries = [
             (kind, node.canonical_id)
             for node in compact_runtime.trace_graph.compute_nodes
-            for kind in ("until", "through")
+            for include in (False, True)
         ]
         assert boundaries
 
         # Full-model arbitrary-node contract: no boundary is reduced to a
         # backbone/head split, and both before/after forms are covered.
         for kind, node_id in boundaries:
-            point = "through:" + str(node_id) if kind == "after" else "until:" + str(node_id)
+            point = partial(select_node_prefix, node_id=str(node_id)) if kind == "after" else partial(select_node_prefix, node_id=str(node_id), include=False)
             runtime = repartition_fixture(compact_runtime, point)
             assert runtime.capability_report is not None
             assert runtime.capability_report.preflight_ok
@@ -290,7 +292,7 @@ def test_tf_keras_cv_yolov8_complete_model_all_nodes_cross_batch_and_device() ->
 
         # The same complete detector is also batch-polymorphic at arbitrary
         # interior boundaries, not only at the default 50% point.
-        for boundary in ("25%", "50%", "75%"):
+        for boundary in (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1)):
             runtime = repartition_fixture(compact_runtime, split_request(boundary, backend="tf").partition)
             for batch in (2, 3):
                 replay_x = tf.ones((batch, 32, 32, 3), dtype=tf.float32)
@@ -298,7 +300,7 @@ def test_tf_keras_cv_yolov8_complete_model_all_nodes_cross_batch_and_device() ->
 
         gpus = tf.config.list_logical_devices("GPU")
         if gpus:
-            runtime = repartition_fixture(compact_runtime, split_request("50%", backend="tf").partition)
+            runtime = repartition_fixture(compact_runtime, split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="tf").partition)
             cpu_x = tf.ones((2, 32, 32, 3), dtype=tf.float32)
             boundary_cpu = runtime.run_prefix(cpu_x)
             boundary_gpu = boundary_cpu.to(gpus[0].name, adapter=runtime.adapter)
@@ -319,7 +321,7 @@ def test_tf_xception_split_replay_cross_batch_and_device() -> None:
         """
         import tensorflow as tf
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
 
         for gpu in tf.config.list_physical_devices("GPU"):
             try:
@@ -341,7 +343,7 @@ def test_tf_xception_split_replay_cross_batch_and_device() -> None:
                     classes=10,
                 )
                 x = tf.ones((2, 75, 75, 3), dtype=tf.float32)
-                for boundary in ("25%", "65%"):
+                for boundary in (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 65 // 100 + 1)):
                     runtime = prepare_fixture(
                         model,
                         x,
@@ -365,9 +367,11 @@ def test_tf_keras_cnn_all_split_nodes_cross_batch_and_device() -> None:
     _skip_if_module_missing("tensorflow")
     _run_backend_subprocess(
         """
+        from functools import partial
+
         import tensorflow as tf
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
 
         for gpu in tf.config.list_physical_devices("GPU"):
             try:
@@ -399,12 +403,12 @@ def test_tf_keras_cnn_all_split_nodes_cross_batch_and_device() -> None:
                 seed_runtime = prepare_fixture(
                     model,
                     x,
-                    split_request("50%", backend="tf"),
+                    split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="tf"),
                 )
                 boundaries = [
-                    f"{kind}:{node.canonical_id}"
+                    partial(select_node_prefix, node_id=node.canonical_id, include=include)
                     for node in seed_runtime.trace_graph.compute_nodes
-                    for kind in ("until", "through")
+                    for include in (False, True)
                 ]
                 for boundary in boundaries:
                     runtime = prepare_fixture(
@@ -430,9 +434,11 @@ def test_tf_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
     _skip_if_module_missing("tensorflow")
     _run_backend_subprocess(
         """
+        from functools import partial
+
         import tensorflow as tf
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_node_prefix, select_prefix
 
         for gpu in tf.config.list_physical_devices("GPU"):
             try:
@@ -473,7 +479,7 @@ def test_tf_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
             seed_runtime = prepare_fixture(
                 model,
                 trace_x,
-                split_request("50%", backend="tf", trainable=True),
+                split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="tf", trainable=True),
             )
             relu_id = next(
                 node.canonical_id
@@ -484,7 +490,7 @@ def test_tf_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
                 model,
                 trace_x,
                 split_request(
-                    f"through:{relu_id}",
+                    partial(select_node_prefix, node_id=relu_id),
                     backend="tf",
                     trainable=True,
                 ),

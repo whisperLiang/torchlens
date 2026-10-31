@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import partial
 
 import pytest
 import torch
@@ -10,6 +11,7 @@ from torch import nn
 from v2_helpers import (
     prepare_fixture,
     request_fixture,
+    select_node_prefix,
 )
 
 from torchlens.split import GraphPartition, SplitFeatures
@@ -45,7 +47,8 @@ def test_plain_tensor_state_training_replacement_and_recut(retain_trace: bool) -
         model,
         torch.randn(2, 4),
         request_fixture(
-            "through:" + "cut", features=SplitFeatures(training=True, retain_trace=retain_trace)
+            partial(select_node_prefix, node_id="cut"),
+            features=SplitFeatures(training=True, retain_trace=retain_trace),
         ),
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=0.002)
@@ -93,7 +96,8 @@ def test_removed_plain_tensor_state_refuses_typed(retain_trace: bool) -> None:
         model,
         torch.randn(2, 4),
         request_fixture(
-            "through:" + "cut", features=SplitFeatures(training=True, retain_trace=retain_trace)
+            partial(select_node_prefix, node_id="cut"),
+            features=SplitFeatures(training=True, retain_trace=retain_trace),
         ),
     )
     del model.stride

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
 import numpy as np
@@ -9,6 +10,8 @@ import pytest
 import torch
 from v2_helpers import (
     prepare_fixture,
+    select_node_prefix,
+    select_prefix,
     split_request,
 )
 
@@ -34,7 +37,9 @@ def test_same_geometry_aliases_preserve_the_captured_branch() -> None:
     example = torch.ones(4, 4)
     model = Model()
     runtime = prepare_fixture(
-        model, (example, example.view_as(example)), split_request("through:add")
+        model,
+        (example, example.view_as(example)),
+        split_request(partial(select_node_prefix, node_id="add")),
     )
     assert runtime.batch_validation["status"] == "passed"
     torch.testing.assert_close(example, torch.ones_like(example))
@@ -100,7 +105,11 @@ def test_partial_overlap_prepare_refuses_before_capture(monkeypatch: pytest.Monk
     monkeypatch.setattr(pipeline, "capture_model", unexpected_capture)
     source = torch.ones(4, 5)
     with pytest.raises(SplitUnsupportedError, match="input alias relationship"):
-        prepare_fixture(torch.nn.Identity(), (source[:, :4], source[:, 1:]), split_request("50%"))
+        prepare_fixture(
+            torch.nn.Identity(),
+            (source[:, :4], source[:, 1:]),
+            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+        )
 
 
 def test_disjoint_views_of_one_storage_remain_independent() -> None:

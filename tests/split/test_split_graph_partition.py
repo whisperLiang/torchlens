@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import partial
 from itertools import combinations
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ from v2_helpers import (
     plan_fixture,
     prepare_fixture,
     request_fixture,
+    select_node_prefix,
 )
 
 from torchlens.intervention.types import CapturedArgTemplate, LiteralValue
@@ -161,7 +163,9 @@ def test_multioutput_nested_alias_replay() -> None:
     """Every native output travels with its container metadata and replays correctly."""
     x = torch.randn(2, 8)
     model = MultiOutput()
-    runtime = prepare_fixture(model, x, request_fixture("through:" + "chunk_1_1"))
+    runtime = prepare_fixture(
+        model, x, request_fixture(partial(select_node_prefix, node_id="chunk_1_1"))
+    )
     ids = frozenset(
         n.canonical_id for n in runtime.trace_graph.compute_nodes if "chunk" in n.op_type
     )
@@ -180,12 +184,18 @@ def test_batchnorm_partition_preserves_ordered_training_state() -> None:
     from copy import deepcopy
 
     reference = deepcopy(model)
-    runtime = prepare_fixture(model, x, request_fixture("through:" + "linear"))
+    runtime = prepare_fixture(
+        model, x, request_fixture(partial(select_node_prefix, node_id="linear"))
+    )
     cut = runtime.repartition(GraphPartition(frozenset()))
     torch.testing.assert_close(cut.replay(x), model(x))
     model.train()
     training = prepare_fixture(
-        model, x, request_fixture("through:" + "linear", features=SplitFeatures(training=True))
+        model,
+        x,
+        request_fixture(
+            partial(select_node_prefix, node_id="linear"), features=SplitFeatures(training=True)
+        ),
     )
     cut = training.repartition(GraphPartition(frozenset()))
     reference.train()
@@ -213,7 +223,9 @@ def test_random_partition_preserves_rng() -> None:
             return a + b + torch.rand_like(x)
 
     x = torch.randn(2, 4)
-    runtime = prepare_fixture(RandomBranches(), x, request_fixture("through:" + "sin"))
+    runtime = prepare_fixture(
+        RandomBranches(), x, request_fixture(partial(select_node_prefix, node_id="sin"))
+    )
     cut = runtime.repartition(
         GraphPartition(
             frozenset(
@@ -232,7 +244,9 @@ def test_shared_trainable_cross_device_partition_refuses_without_allocation() ->
     runtime = prepare_fixture(
         nn.Sequential(layer, nn.ReLU(), layer),
         torch.ones(2, 4),
-        request_fixture("through:" + "1", features=SplitFeatures(training=True)),
+        request_fixture(
+            partial(select_node_prefix, node_id="1"), features=SplitFeatures(training=True)
+        ),
     )
     selected = frozenset(
         node.canonical_id

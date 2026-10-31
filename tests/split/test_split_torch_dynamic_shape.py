@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import pytest
 import torch
 from torch import nn
 from v2_helpers import (
     prepare_fixture,
     repartition_fixture,
+    select_node_prefix,
+    select_prefix,
     split_request,
 )
 
@@ -110,7 +114,7 @@ def test_batch_symbolic_replay_for_view_reshape_flatten() -> None:
     runtime = prepare_fixture(
         model,
         example,
-        split_request("50%"),
+        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
     )
 
     for batch in (1, 2, 4, 8):
@@ -129,7 +133,7 @@ def test_dynamic_shape_witness_solves_attention_view_and_preserves_state() -> No
     runtime = prepare_fixture(
         model,
         example,
-        split_request("50%"),
+        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
     )
 
     shape_program = runtime.trace_graph.shape_program
@@ -154,7 +158,7 @@ def test_reshape_does_not_guess_from_trace_batch_divisibility() -> None:
     runtime = prepare_fixture(
         model,
         torch.randn(2, 4),
-        split_request("50%"),
+        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
     )
 
     assert runtime.trace_graph.shape_program.unresolved == {}
@@ -187,7 +191,7 @@ def test_rank_change_and_reduction_use_witnesses_without_axis_guessing() -> None
     runtime = prepare_fixture(
         model,
         torch.randn(2, 4),
-        split_request("50%"),
+        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
     )
 
     shape_program = runtime.trace_graph.shape_program
@@ -214,11 +218,14 @@ def test_scalar_shape_refs_are_frontier_dependencies_at_every_boundary() -> None
     seed_runtime = prepare_fixture(
         model,
         trace_input,
-        split_request("50%"),
+        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
     )
 
     for node in seed_runtime.trace_graph.compute_nodes:
-        for point in ("until:" + str(node.canonical_id), "through:" + str(node.canonical_id)):
+        for point in (
+            partial(select_node_prefix, node_id=str(node.canonical_id), include=False),
+            partial(select_node_prefix, node_id=str(node.canonical_id)),
+        ):
             runtime = repartition_fixture(seed_runtime, point)
             for batch in (1, 3):
                 value = torch.randn(batch, 4)
@@ -232,7 +239,7 @@ def test_concat_and_slice_compile_additive_and_ceildiv_batch_expressions() -> No
     runtime = prepare_fixture(
         model,
         torch.randn(2, 4),
-        split_request("50%"),
+        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
     )
 
     shape_program = runtime.trace_graph.shape_program
@@ -250,13 +257,19 @@ def test_unresolved_shape_allows_captured_batch_and_refuses_changed_batch(segmen
     """A failed shape probe restricts changed batches across all executing segments."""
 
     model = InteriorBatchBranchModel().eval()
-    seed_runtime = prepare_fixture(model, torch.randn(2, 4), split_request("50%"))
+    seed_runtime = prepare_fixture(
+        model,
+        torch.randn(2, 4),
+        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    )
     shape_program = seed_runtime.trace_graph.shape_program
     assert shape_program is not None
     assert shape_program.unresolved
     unresolved_id = next(iter(shape_program.unresolved))
     point = (
-        "through:" + str(unresolved_id) if segment == "prefix" else "until:" + str(unresolved_id)
+        partial(select_node_prefix, node_id=str(unresolved_id))
+        if segment == "prefix"
+        else partial(select_node_prefix, node_id=str(unresolved_id), include=False)
     )
     runtime = repartition_fixture(seed_runtime, point)
 
@@ -284,7 +297,7 @@ def test_capture_transaction_restores_mutable_and_new_plain_attributes() -> None
     runtime = prepare_fixture(
         model,
         torch.randn(2, 4),
-        split_request("50%"),
+        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
     )
 
     assert runtime.trace_graph.shape_program.unresolved == {}

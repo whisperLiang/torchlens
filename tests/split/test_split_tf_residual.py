@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
 import pytest
 from v2_helpers import (
     prepare_fixture,
+    select_node_prefix,
+    select_prefix,
     split_request,
 )
 
@@ -14,7 +17,13 @@ from torchlens.split._tf_capture import batch_stable_keras_add
 
 
 @pytest.mark.tf_backend
-@pytest.mark.parametrize("point", ["until:add", "through:add"])
+@pytest.mark.parametrize(
+    "point",
+    [
+        partial(select_node_prefix, node_id="add", include=False),
+        partial(select_node_prefix, node_id="add"),
+    ],
+)
 def test_singleton_spatial_residual_replays_and_restores_keras(point: str) -> None:
     """Retain batch-changing residual shape, values, and original Keras callable.
 
@@ -110,7 +119,14 @@ def test_keras_subclass_probe_preserves_generated_layer_names(
         model(sample)
         names = tuple(layer.name for layer in model.layers)
         weights = tuple(variable.numpy().copy() for variable in model.weights)
-        runtime = prepare_fixture(model, sample, split_request("50%", backend="tf"))
+        runtime = prepare_fixture(
+            model,
+            sample,
+            split_request(
+                (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+                backend="tf",
+            ),
+        )
         assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
         assert tuple(layer.name for layer in model.layers) == names
         for variable, expected in zip(model.weights, weights, strict=True):

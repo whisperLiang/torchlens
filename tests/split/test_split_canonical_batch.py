@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import weakref
+from functools import partial
 from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,8 @@ import numpy as np
 import pytest
 from v2_helpers import (
     prepare_fixture,
+    select_node_prefix,
+    select_prefix,
     split_request,
 )
 
@@ -37,7 +40,7 @@ def _check_native_backend(backend: str) -> None:
 
             return native.maximum(x, 0)
 
-        boundary = "through:max"
+        boundary = partial(select_node_prefix, node_id="max")
     elif backend == "tf":
         native = pytest.importorskip("tensorflow")
         from torchlens.split.adapters.tf import TfSplitAdapter
@@ -45,7 +48,7 @@ def _check_native_backend(backend: str) -> None:
         adapter = TfSplitAdapter()
         make = native.constant
         relu = native.nn.relu
-        boundary = "through:relu"
+        boundary = partial(select_node_prefix, node_id="relu")
     elif backend == "paddle":
         native = pytest.importorskip("paddle")
         from torchlens.split.adapters.paddle import PaddleSplitAdapter
@@ -59,7 +62,7 @@ def _check_native_backend(backend: str) -> None:
 
             return native.nn.functional.relu(x)
 
-        boundary = "through:relu"
+        boundary = partial(select_node_prefix, node_id="relu")
     else:
         native = pytest.importorskip("tinygrad")
         from torchlens.split.adapters.tinygrad import TinygradSplitAdapter
@@ -76,7 +79,7 @@ def _check_native_backend(backend: str) -> None:
 
             return x.relu()
 
-        boundary = "through:where"
+        boundary = partial(select_node_prefix, node_id="where")
 
     for dtype in (np.float32, np.int32, np.bool_):
         values = np.arange(12).reshape(3, 4).astype(dtype)
@@ -217,7 +220,10 @@ def test_rebatch_failure_does_not_capture_original_batch(monkeypatch: pytest.Mon
     monkeypatch.setattr(pipeline, "capture_model", capture)
     with pytest.raises(SplitUnsupportedError, match="Cannot construct canonical batch B=1"):
         pipeline.capture_canonical_model(
-            object(), (torch.ones(32, 4),), split_request("through:relu"), adapter=adapter
+            object(),
+            (torch.ones(32, 4),),
+            split_request(partial(select_node_prefix, node_id="relu")),
+            adapter=adapter,
         )
     assert captures == []
 
@@ -247,7 +253,10 @@ def test_canonical_retry_does_not_retain_prior_exception_payload(
 
     monkeypatch.setattr(pipeline, "capture_model", capture)
     captured, _, _, _ = pipeline.capture_canonical_model(
-        object(), (torch.ones(4, 4),), split_request("50%"), adapter=TorchSplitAdapter()
+        object(),
+        (torch.ones(4, 4),),
+        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+        adapter=TorchSplitAdapter(),
     )
     assert captured is result
 
@@ -275,7 +284,11 @@ def test_canonical_capture_only_retries_at_two(
         return result
 
     monkeypatch.setattr(pipeline, "capture_model", capture)
-    args = (object(), (torch.ones(32, 4),), split_request("through:relu"))
+    args = (
+        object(),
+        (torch.ones(32, 4),),
+        split_request(partial(select_node_prefix, node_id="relu")),
+    )
     if accept_two:
         actual, inputs, _kwargs, batch_spec = pipeline.capture_canonical_model(
             *args, adapter=TorchSplitAdapter()

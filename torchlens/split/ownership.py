@@ -265,7 +265,7 @@ def plan_state_migration(runtime: Any, partition: GraphPartition) -> StateMigrat
     runtime:
         Source Torch runtime with current effective state.
     partition:
-        A legal canonical partition or a compatible point-based cut.
+        A legal canonical compute-node partition.
 
     Returns
     -------

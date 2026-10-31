@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from functools import partial
 
 import torch
 from v2_helpers import (
     analyze_fixture,
     prepare_fixture,
     request_fixture,
+    select_node_prefix,
+    select_prefix,
 )
 
 from torchlens.split import GraphPartition, PlacementPlan, SplitFeatures
@@ -24,7 +27,8 @@ def test_preflight_never_claims_unmeasured_training_or_placement_numerics() -> N
         model,
         torch.randn(3, 4),
         request_fixture(
-            "through:" + "1", features=SplitFeatures(training=True, retain_trace=False)
+            partial(select_node_prefix, node_id="1"),
+            features=SplitFeatures(training=True, retain_trace=False),
         ),
     )
     evidence = runtime.capability_report.feature_evidence
@@ -71,7 +75,9 @@ def test_no_batch_axes_means_unknown_numerical_evidence() -> None:
     runtime = prepare_fixture(
         torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Tanh()),
         torch.randn(3, 4),
-        request_fixture("through:" + "0", features=SplitFeatures(batch_axes={})),
+        request_fixture(
+            partial(select_node_prefix, node_id="0"), features=SplitFeatures(batch_axes={})
+        ),
     )
     evidence = runtime.capability_report.feature_evidence
     assert evidence is not None
@@ -86,7 +92,7 @@ def test_explicit_device_availability_does_not_claim_execution_success() -> None
     runtime = prepare_fixture(
         torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Tanh()),
         torch.randn(3, 4),
-        request_fixture("through:" + "0"),
+        request_fixture(partial(select_node_prefix, node_id="0")),
     )
     request = replace(runtime.request, placement=PlacementPlan.on("cpu"))
     evidence = _feature_evidence(runtime.adapter, runtime.trace_graph, request, True)
@@ -114,7 +120,13 @@ def test_failed_topology_probe_does_not_claim_numerical_comparison() -> None:
             hidden = torch.relu(x)
             return torch.sin(hidden) if x.shape[0] == 1 else torch.cos(hidden)
 
-    runtime = prepare_fixture(Branch(), torch.randn(3, 4), request_fixture("fraction:" + str(50)))
+    runtime = prepare_fixture(
+        Branch(),
+        torch.randn(3, 4),
+        request_fixture(
+            lambda g, count=50: select_prefix(g, (len(g.compute_nodes) - 1) * count // 100 + 1)
+        ),
+    )
     assert runtime.batch_validation["status"] == "failed"
     assert runtime.batch_validation["reason"].startswith("compare topology:")
     evidence = runtime.capability_report.feature_evidence

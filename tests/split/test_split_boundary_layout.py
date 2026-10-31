@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
+from functools import partial
 from unittest.mock import patch
 
 import pytest
@@ -12,6 +13,7 @@ from v2_helpers import (
     analyze_fixture,
     prepare_fixture,
     request_fixture,
+    select_node_prefix,
 )
 
 from torchlens.split import GraphPartition, SplitFeatures
@@ -31,7 +33,9 @@ class ChunkBranches(nn.Module):
 def test_layout_uses_canonical_bindings_and_static_shapes() -> None:
     """ABI keys with paths map to canonical values without executing a model."""
     model = ChunkBranches()
-    runtime = prepare_fixture(model, torch.randn(2, 8), request_fixture("through:" + "chunk_1_1"))
+    runtime = prepare_fixture(
+        model, torch.randn(2, 8), request_fixture(partial(select_node_prefix, node_id="chunk_1_1"))
+    )
     partition = GraphPartition(
         frozenset(n.canonical_id for n in runtime.trace_graph.compute_nodes if n.op_type == "chunk")
     )
@@ -58,7 +62,7 @@ def test_unknown_layout_bytes_and_inference_backward_requirement() -> None:
     runtime = prepare_fixture(
         nn.Sequential(nn.Linear(4, 4), nn.ReLU()),
         torch.randn(2, 4),
-        request_fixture("through:" + "linear"),
+        request_fixture(partial(select_node_prefix, node_id="linear")),
     )
     profile = runtime.graph_profile()
     profile = replace(
@@ -89,7 +93,11 @@ def test_training_integer_boundary_isolation() -> None:
     model = MutableIndices()
     inputs = torch.tensor([[0, 1], [2, 3]])
     runtime = prepare_fixture(
-        model, inputs, request_fixture("through:" + "clone", features=SplitFeatures(training=True))
+        model,
+        inputs,
+        request_fixture(
+            partial(select_node_prefix, node_id="clone"), features=SplitFeatures(training=True)
+        ),
     )
     boundary = runtime.run_training_prefix(inputs)
     before = {key: value.clone() for key, value in boundary.tensors.items()}
@@ -116,7 +124,9 @@ def test_training_costs_do_not_treat_capture_grad_flags_as_a_loss_contract(
     runtime = prepare_fixture(
         nn.Sequential(nn.ReLU(), nn.Sigmoid()),
         torch.randn(2, 4),
-        request_fixture("through:" + "relu", features=SplitFeatures(training=True)),
+        request_fixture(
+            partial(select_node_prefix, node_id="relu"), features=SplitFeatures(training=True)
+        ),
     )
     profile = replace(
         runtime.graph_profile(),
@@ -151,7 +161,9 @@ def test_empty_frontier_has_zero_payload_even_for_training() -> None:
     runtime = prepare_fixture(
         Constant(),
         torch.randn(2, 4),
-        request_fixture("through:" + "ones", features=SplitFeatures(training=True)),
+        request_fixture(
+            partial(select_node_prefix, node_id="ones"), features=SplitFeatures(training=True)
+        ),
     )
     analysis = analyze_fixture(runtime, GraphPartition(frozenset()))
     layout = build_boundary_layout(runtime.graph_profile(), analysis.plan, training=True)
@@ -166,7 +178,7 @@ def test_boundary_same_device_move_and_noncontiguous_clone() -> None:
     runtime = prepare_fixture(
         nn.Sequential(nn.Identity(), nn.ReLU()),
         torch.randn(2, 4),
-        request_fixture("through:" + "relu"),
+        request_fixture(partial(select_node_prefix, node_id="relu")),
     )
     boundary = runtime.run_prefix(torch.randn(2, 8)[:, ::2])
     moved = boundary.to("cpu")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import partial
 
 import pytest
 import torch
@@ -11,6 +12,8 @@ from v2_helpers import (
     prepare_fixture,
     repartition_fixture,
     request_fixture,
+    select_node_prefix,
+    select_prefix,
 )
 
 from torchlens.split import SplitFeatures
@@ -76,7 +79,7 @@ def test_learned_query_repeat_training_across_batches_and_recuts(
         model,
         torch.randn(1, 2, 4),
         request_fixture(
-            "through:" + "projection",
+            partial(select_node_prefix, node_id="projection"),
             features=SplitFeatures(training=True, retain_trace=retain_trace),
         ),
     )
@@ -111,7 +114,11 @@ def test_learned_query_repeat_training_across_batches_and_recuts(
             torch.testing.assert_close(actual, expected)
             torch.testing.assert_close(optimizer.state[actual], expected_optimizer.state[expected])
         graph = runtime.trace_graph
-        point = "through:" + str(repeat.canonical_id) if batch % 2 else "through:" + "projection"
+        point = (
+            partial(select_node_prefix, node_id=str(repeat.canonical_id))
+            if batch % 2
+            else partial(select_node_prefix, node_id="projection")
+        )
         runtime = repartition_fixture(runtime, point)
         assert runtime.trace_graph is graph
 
@@ -126,7 +133,13 @@ def test_fixed_repeat_of_dynamic_receiver_keeps_its_factor() -> None:
             return x.repeat(2, 1).sin()
 
     model = FixedRepeat().eval()
-    runtime = prepare_fixture(model, torch.randn(1, 4), request_fixture("fraction:" + str(50)))
+    runtime = prepare_fixture(
+        model,
+        torch.randn(1, 4),
+        request_fixture(
+            lambda g, count=50: select_prefix(g, (len(g.compute_nodes) - 1) * count // 100 + 1)
+        ),
+    )
     program = runtime.trace_graph.shape_program
     assert program is not None
     repeat = next(node for node in runtime.trace_graph.compute_nodes if node.op_type == "repeat")
@@ -147,7 +160,13 @@ def test_repeat_with_dynamic_receiver_and_factor_refuses_unproven_batches() -> N
             return x.repeat(x.shape[0], 1).sin()
 
     model = NonlinearRepeat().eval()
-    runtime = prepare_fixture(model, torch.randn(1, 4), request_fixture("fraction:" + str(50)))
+    runtime = prepare_fixture(
+        model,
+        torch.randn(1, 4),
+        request_fixture(
+            lambda g, count=50: select_prefix(g, (len(g.compute_nodes) - 1) * count // 100 + 1)
+        ),
+    )
     assert runtime.batch_validation["status"] == "failed"
     x = torch.randn(1, 4)
     torch.testing.assert_close(runtime.replay(x), model(x))

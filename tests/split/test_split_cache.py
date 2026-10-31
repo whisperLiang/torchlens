@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import pytest
 import torch
 from torch import nn
 from v2_helpers import (
     prepare_fixture,
+    select_node_prefix,
     split_request,
 )
 
@@ -32,7 +35,7 @@ def test_boundary_cache_roundtrip(tmp_path) -> None:
     torch.manual_seed(0)
     model = CacheModel().eval()
     x = torch.randn(2, 3)
-    runtime = prepare_fixture(model, x, split_request("through:relu"))
+    runtime = prepare_fixture(model, x, split_request(partial(select_node_prefix, node_id="relu")))
     boundary = runtime.run_prefix(x)
 
     runtime.save_boundary(boundary, tmp_path / "boundary")
@@ -49,7 +52,9 @@ def test_training_boundary_cache_is_suffix_only(tmp_path) -> None:
     model = CacheModel().train()
     x = torch.randn(2, 3)
     target = torch.randn(2, 2)
-    runtime = prepare_fixture(model, x, split_request("through:relu", trainable=True))
+    runtime = prepare_fixture(
+        model, x, split_request(partial(select_node_prefix, node_id="relu"), trainable=True)
+    )
     boundary = runtime.run_training_prefix(x)
 
     runtime.save_boundary(boundary, tmp_path / "training_boundary")

@@ -8,6 +8,7 @@ from v2_helpers import (
     FixtureRequest,
     prepare_fixture,
     request_fixture,
+    select_prefix,
 )
 
 from torchlens.split import SplitFeatures
@@ -18,7 +19,9 @@ def _request(*, batch_axes: dict[str, int] | None) -> FixtureRequest:
     """Return a strict dynamic-batch request for shape-program tests."""
 
     return request_fixture(
-        selection="fraction:" + str(50),
+        selection=lambda g, count=50: select_prefix(
+            g, (len(g.compute_nodes) - 1) * count // 100 + 1
+        ),
         backend="torch",
         features=SplitFeatures(batch_axes=batch_axes),
     )

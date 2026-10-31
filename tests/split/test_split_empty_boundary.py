@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 
 import pytest
 import torch
 from v2_helpers import (
     prepare_fixture,
+    select_node_prefix,
     split_request,
 )
 
@@ -25,7 +27,9 @@ def test_empty_boundary_roundtrip(batch: int, tmp_path: Path) -> None:
 
             return torch.relu(x[:, :0])
 
-    runtime = prepare_fixture(Model(), torch.ones(4, 4), split_request("through:relu"))
+    runtime = prepare_fixture(
+        Model(), torch.ones(4, 4), split_request(partial(select_node_prefix, node_id="relu"))
+    )
     assert runtime.batch_validation["status"] == "passed"
     boundary = runtime.run_prefix(torch.ones(batch, 4))
     for schema in boundary.spec.values():

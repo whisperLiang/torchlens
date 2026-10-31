@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import partial
 from unittest.mock import patch
 
 import pytest
@@ -12,6 +13,7 @@ from v2_helpers import (
     analyze_fixture,
     prepare_fixture,
     request_fixture,
+    select_node_prefix,
 )
 
 from torchlens.split import GraphPartition, SplitFeatures
@@ -44,7 +46,9 @@ def test_noncontiguous_partition_training_and_recut(optimizer_kind: str) -> None
     runtime = prepare_fixture(
         model,
         sample,
-        request_fixture("through:" + "left_end", features=SplitFeatures(training=True)),
+        request_fixture(
+            partial(select_node_prefix, node_id="left_end"), features=SplitFeatures(training=True)
+        ),
     )
     partition = GraphPartition(
         frozenset(
@@ -99,8 +103,12 @@ def test_noncontiguous_partition_training_and_recut(optimizer_kind: str) -> None
 def test_partition_analysis_rejects_foreign_capture() -> None:
     """Equivalent graph shapes do not authorize cross-client state sharing."""
     x = torch.ones(2, 4)
-    first = prepare_fixture(Branches(), x, request_fixture("through:" + "left_end"))
-    second = prepare_fixture(Branches(), x, request_fixture("through:" + "left_end"))
+    first = prepare_fixture(
+        Branches(), x, request_fixture(partial(select_node_prefix, node_id="left_end"))
+    )
+    second = prepare_fixture(
+        Branches(), x, request_fixture(partial(select_node_prefix, node_id="left_end"))
+    )
     analysis = analyze_fixture(first, GraphPartition(frozenset()))
     with pytest.raises(ValueError, match="another captured graph"):
         second.materialize(analysis)

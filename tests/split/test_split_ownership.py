@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from functools import partial
 from typing import Any
 
 import pytest
@@ -10,8 +11,8 @@ import torch
 from v2_helpers import (
     fixture_partition,
     prepare_fixture,
-    repartition_fixture,
     request_fixture,
+    select_node_prefix,
 )
 
 from torchlens.split import GraphPartition, PlacementPlan, SplitFeatures
@@ -45,7 +46,7 @@ def _runtime(model: torch.nn.Module, *, retain_trace: bool = False) -> Any:
         model,
         torch.randn(2, 4),
         request_fixture(
-            "through:" + "middle",
+            partial(select_node_prefix, node_id="middle"),
             features=SplitFeatures(training=True, retain_trace=retain_trace),
         ),
     )
@@ -131,7 +132,10 @@ def test_migration_refuses_ambiguous_shared_optimizer_histories(
     migration = plan_state_migration(
         runtime,
         fixture_partition(
-            runtime, "through:" + str(runtime.trace_graph.compute_nodes[-1].canonical_id)
+            runtime,
+            partial(
+                select_node_prefix, node_id=str(runtime.trace_graph.compute_nodes[-1].canonical_id)
+            ),
         ),
     )
     assert not migration.supported
@@ -200,11 +204,11 @@ def test_optimizer_bindings_remain_valid_after_repartition(kind: str) -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-def test_migration_reports_parameter_and_buffer_device_moves() -> None:
+def test_migration_reports_parameter_moves_and_prefix_buffer_ownership() -> None:
     """A new cut reports CUDA state moving to a CPU prefix and external Adam work."""
 
     class Buffered(torch.nn.Module):
-        """Keep a suffix-only buffer next to an independent suffix parameter."""
+        """Consume a prefix-owned buffer beside an independent suffix parameter."""
 
         def __init__(self) -> None:
             """Construct a sequential graph with state on both segments."""
@@ -223,9 +227,10 @@ def test_migration_reports_parameter_and_buffer_device_moves() -> None:
     model = Buffered()
     runtime = _runtime(model).with_placement(PlacementPlan.across("cpu", "cuda:0"))
     old_bindings = runtime.parameter_bindings()
-    migration = runtime.plan_state_migration(
-        "through:" + str(runtime.trace_graph.compute_nodes[-1].canonical_id)
+    partition = GraphPartition(
+        frozenset(node.canonical_id for node in runtime.trace_graph.compute_nodes)
     )
+    migration = runtime.plan_state_migration(partition)
     assert migration.supported
     rows = {row.state_id: row for row in migration.entries}
     moved_parameter = rows["parameter:right.weight"]
@@ -234,15 +239,13 @@ def test_migration_reports_parameter_and_buffer_device_moves() -> None:
     assert moved_parameter.source_devices == (("suffix", "cuda:0"),)
     assert moved_parameter.destination_devices == (("prefix", "cpu"),)
     moved_buffer = rows["buffer:offset"]
-    assert moved_buffer.source_devices == (("suffix", "cuda:0"),)
+    # GraphPartition owns compute IDs. This direct buffer source belongs to
+    # the prefix and reaches the suffix through boundary transport.
+    assert moved_buffer.source_devices == (("prefix", "cpu"),)
     assert moved_buffer.destination_devices == (("prefix", "cpu"),)
+    assert moved_buffer.identity_preserved
     assert moved_buffer.optimizer_action == "none"
-    recut = repartition_fixture(
-        runtime,
-        fixture_partition(
-            runtime, "through:" + str(runtime.trace_graph.compute_nodes[-1].canonical_id)
-        ),
-    )
+    recut = runtime.repartition(partition)
     new_bindings = recut.parameter_bindings()
     torch.testing.assert_close(
         new_bindings["parameter:right.weight"]["prefix"],

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import gc
 import weakref
+from functools import partial
 
 import pytest
 import torch
 from torch import nn
 from v2_helpers import (
     prepare_fixture,
+    select_node_prefix,
     split_request,
 )
 
@@ -53,7 +55,11 @@ def test_tied_replicas_share_only_frozen_state(
     runtime = prepare_fixture(
         model,
         inputs,
-        split_request("through:cut", trainable=True, placement=PlacementPlan.on(device)),
+        split_request(
+            partial(select_node_prefix, node_id="cut"),
+            trainable=True,
+            placement=PlacementPlan.on(device),
+        ),
     )
     prefix = runtime.segments.prefix._state
     suffix = runtime.segments.suffix._state
@@ -107,7 +113,9 @@ def test_captured_and_live_prefix_state_stay_separate(monkeypatch: pytest.Monkey
     runtime = prepare_fixture(
         model,
         inputs,
-        split_request("through:cut", placement=PlacementPlan.on("cpu")),
+        split_request(
+            partial(select_node_prefix, node_id="cut"), placement=PlacementPlan.on("cpu")
+        ),
     )
     inference = runtime.run_prefix(inputs)
     inference_values = {key: value.clone() for key, value in inference.tensors.items()}
@@ -163,7 +171,11 @@ def test_same_source_on_distinct_devices_has_distinct_replicas() -> None:
     runtime = prepare_fixture(
         model,
         inputs,
-        split_request("through:cut", trainable=True, placement=PlacementPlan.across("cuda", "cpu")),
+        split_request(
+            partial(select_node_prefix, node_id="cut"),
+            trainable=True,
+            placement=PlacementPlan.across("cuda", "cpu"),
+        ),
     )
     actual = runtime.replay(inputs)
     prefix_weight = runtime.segments.prefix._state.resolve(model.shared.weight, shareable=True)
@@ -193,7 +205,11 @@ def test_runtime_replica_pool_does_not_outlive_runtime(monkeypatch: pytest.Monke
     runtime = prepare_fixture(
         model,
         inputs,
-        split_request("through:cut", trainable=True, placement=PlacementPlan.on("cpu")),
+        split_request(
+            partial(select_node_prefix, node_id="cut"),
+            trainable=True,
+            placement=PlacementPlan.on("cpu"),
+        ),
     )
     runtime.replay(inputs)
     runtime_ref = weakref.ref(runtime)

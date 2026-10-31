@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from v2_helpers import (
     candidate_report,
     prepare_fixture,
     repartition_fixture,
+    select_node_prefix,
     split_request,
 )
 
@@ -58,7 +60,11 @@ def test_mlx_repeated_outputs_replay_and_cache_at_every_cut(container: str, tmp_
     seed = prepare_fixture(
         model,
         _input(2),
-        split_request("until:split_1_3", backend="mlx", boundary_cache=True),
+        split_request(
+            partial(select_node_prefix, node_id="split_1_3", include=False),
+            backend="mlx",
+            boundary_cache=True,
+        ),
     )
     assert seed.batch_validation["status"] == "passed"
     for index, candidate in enumerate(
@@ -100,7 +106,11 @@ def test_mlx_repeated_output_gradients_accumulate() -> None:
         return mx.mean(mx.square(output["a"])) + 3 * mx.mean(output["nested"][0])
 
     runtime = prepare_fixture(
-        model, _input(2), split_request("through:maximum", backend="mlx", trainable=True)
+        model,
+        _input(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     x = _input(5)
     boundary = runtime.run_training_prefix(x)
@@ -189,7 +199,7 @@ def test_mlx_multi_optimizer_matches_nested_tied_native_training(
         model,
         _input(2),
         split_request(
-            "through:maximum",
+            partial(select_node_prefix, node_id="maximum"),
             backend="mlx",
             trainable=True,
             placement=tl.split.PlacementPlan.across(*placement) if placement else None,
@@ -231,7 +241,11 @@ def test_mlx_multi_optimizer_detached_suffix_matches_native_updates() -> None:
     """Suffix-only steps restore nested list paths before native optimizer filtering."""
 
     runtime = prepare_fixture(
-        _GroupedModel(), _input(2), split_request("through:maximum", backend="mlx", trainable=True)
+        _GroupedModel(),
+        _input(2),
+        split_request(
+            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
+        ),
     )
     optimizer, reference_optimizer = _optimizer(), _optimizer()
     reference_parameters = dict(runtime.segments.suffix._binding.parameters())

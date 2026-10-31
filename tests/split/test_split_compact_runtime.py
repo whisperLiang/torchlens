@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import weakref
+from functools import partial
 from typing import Any
 
 import pytest
@@ -13,6 +14,8 @@ from v2_helpers import (
     prepare_fixture,
     repartition_fixture,
     request_fixture,
+    select_node_prefix,
+    select_prefix,
 )
 
 from torchlens.split import PlacementPlan, SplitFeatures, pipeline
@@ -29,7 +32,9 @@ def _request(
     """Build a typed request without opting existing fixtures into retention."""
 
     return request_fixture(
-        selection="fraction:" + str(50),
+        selection=lambda g, count=50: select_prefix(
+            g, (len(g.compute_nodes) - 1) * count // 100 + 1
+        ),
         features=SplitFeatures(
             retain_trace=retain_trace,
             training=training,
@@ -67,10 +72,19 @@ def test_inference_defaults_to_compact_recuttable_runtime(retain_trace: bool | N
         for changed in (
             runtime,
             repartition_fixture(
-                runtime, "until:" + str(runtime.trace_graph.compute_nodes[0].canonical_id)
+                runtime,
+                partial(
+                    select_node_prefix,
+                    node_id=str(runtime.trace_graph.compute_nodes[0].canonical_id),
+                    include=False,
+                ),
             ),
             repartition_fixture(
-                runtime, "through:" + str(runtime.trace_graph.compute_nodes[-1].canonical_id)
+                runtime,
+                partial(
+                    select_node_prefix,
+                    node_id=str(runtime.trace_graph.compute_nodes[-1].canonical_id),
+                ),
             ),
             runtime.with_placement(PlacementPlan.on("cpu")),
         ):
@@ -125,7 +139,12 @@ def test_diagnostic_retention_preserves_trace_values_and_recut_identity() -> Non
         assert runtime.trace is runtime._trace
         assert all(op.out is not None for op in runtime.trace)
         recut = repartition_fixture(
-            runtime, "until:" + str(runtime.trace_graph.compute_nodes[0].canonical_id)
+            runtime,
+            partial(
+                select_node_prefix,
+                node_id=str(runtime.trace_graph.compute_nodes[0].canonical_id),
+                include=False,
+            ),
         )
         assert recut.trace is runtime.trace
         torch.testing.assert_close(recut.replay(x), model(x))
@@ -151,8 +170,12 @@ def test_compact_replay_and_recut_restore_captured_cpu_autocast() -> None:
         first, last = runtime.trace_graph.compute_nodes[0], runtime.trace_graph.compute_nodes[-1]
         for changed in (
             runtime,
-            repartition_fixture(runtime, "until:" + str(first.canonical_id)),
-            repartition_fixture(runtime, "through:" + str(last.canonical_id)),
+            repartition_fixture(
+                runtime, partial(select_node_prefix, node_id=str(first.canonical_id), include=False)
+            ),
+            repartition_fixture(
+                runtime, partial(select_node_prefix, node_id=str(last.canonical_id))
+            ),
         ):
             actual = changed.replay(x)
             assert actual.dtype == torch.bfloat16
@@ -228,7 +251,10 @@ def test_compact_replay_keeps_required_state_constants_and_nested_outputs(batch:
         assert_output(runtime.replay(actual_input), expected)
         checked = 0
         for node in runtime.trace_graph.compute_nodes:
-            for point in ("until:" + str(node.canonical_id), "through:" + str(node.canonical_id)):
+            for point in (
+                partial(select_node_prefix, node_id=str(node.canonical_id), include=False),
+                partial(select_node_prefix, node_id=str(node.canonical_id)),
+            ):
                 try:
                     reference = repartition_fixture(diagnostic, point)
                 except SplitUnsupportedError as exc:
@@ -270,7 +296,10 @@ def test_compact_every_cut_preserves_residuals_views_and_inplace_updates() -> No
         runtime = prepare_fixture(model, x, _request())
         expected = model(x)
         for node in runtime.trace_graph.compute_nodes:
-            for point in ("until:" + str(node.canonical_id), "through:" + str(node.canonical_id)):
+            for point in (
+                partial(select_node_prefix, node_id=str(node.canonical_id), include=False),
+                partial(select_node_prefix, node_id=str(node.canonical_id)),
+            ):
                 torch.testing.assert_close(repartition_fixture(runtime, point).replay(x), expected)
 
 
@@ -371,7 +400,12 @@ def test_owned_buffer_replacement_preserves_effective_state_and_recut(
         assert not torch.equal(expected, model(inputs))
         torch.testing.assert_close(runtime.replay(inputs), expected)
         recut = repartition_fixture(
-            runtime, "until:" + str(runtime.trace_graph.compute_nodes[0].canonical_id)
+            runtime,
+            partial(
+                select_node_prefix,
+                node_id=str(runtime.trace_graph.compute_nodes[0].canonical_id),
+                include=False,
+            ),
         )
         torch.testing.assert_close(recut.replay(inputs), expected)
         if retain_trace:

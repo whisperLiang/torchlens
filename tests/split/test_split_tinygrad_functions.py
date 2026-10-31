@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from v2_helpers import (
     prepare_fixture,
+    select_prefix,
     split_request,
 )
 
@@ -43,7 +44,14 @@ def _nested_function_model() -> Any:
     return model
 
 
-@pytest.mark.parametrize("point", ["25%", "50%", "75%"])
+@pytest.mark.parametrize(
+    "point",
+    [
+        (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1)),
+        (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+        (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1)),
+    ],
+)
 def test_tinygrad_function_replay_uses_changed_inputs(point: str) -> None:
     """Bind new values through FUNCTION/GETTUPLE instead of replaying constants.
 

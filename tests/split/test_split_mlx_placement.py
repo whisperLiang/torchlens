@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from functools import wraps
+from functools import partial, wraps
 from typing import Any
 
 import pytest
 from v2_helpers import (
     prepare_fixture,
+    select_node_prefix,
     split_request,
 )
 
@@ -47,7 +48,9 @@ def test_mlx_accepts_native_cpu_devices_and_preserves_ambient_stream(device: Any
         _model,
         x,
         split_request(
-            "through:maximum", backend="mlx", placement=tl.split.PlacementPlan.on(device)
+            partial(select_node_prefix, node_id="maximum"),
+            backend="mlx",
+            placement=tl.split.PlacementPlan.on(device),
         ),
     )
     output, expected = runtime.replay(x), _model(x)
@@ -81,7 +84,9 @@ def test_mlx_distinct_segment_streams_override_captured_streams() -> None:
 
     model = Model()
     x = mx.ones((2, 4))
-    seed = prepare_fixture(model, x, split_request("through:maximum", backend="mlx"))
+    seed = prepare_fixture(
+        model, x, split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx")
+    )
     prefix_stream, suffix_stream = mx.new_stream(mx.cpu), mx.new_stream(mx.cpu)
     ambient = mx.default_stream(mx.cpu)
     observed: list[tuple[str, Any, Any]] = []
@@ -122,7 +127,9 @@ def test_mlx_invalid_devices_refuse_before_execution(device: Any) -> None:
     """Unknown devices and ignored CPU indexes never become successful placements."""
 
     x = mx.ones((2, 4))
-    runtime = prepare_fixture(_model, x, split_request("through:maximum", backend="mlx"))
+    runtime = prepare_fixture(
+        _model, x, split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx")
+    )
     with pytest.raises(SplitUnsupportedError, match="Cannot use MLX split device"):
         runtime.with_placement(tl.split.PlacementPlan.on(device))
 
@@ -136,7 +143,9 @@ def test_mlx_unavailable_gpu_backends_refuse_explicit_placement(name: str) -> No
     if available:
         pytest.skip(f"MLX {name} backend is available on this host")
     runtime = prepare_fixture(
-        _model, mx.ones((2, 4)), split_request("through:maximum", backend="mlx")
+        _model,
+        mx.ones((2, 4)),
+        split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx"),
     )
     with pytest.raises(SplitUnsupportedError, match="unavailable|without gpu backend"):
         runtime.with_placement(tl.split.PlacementPlan.across("cpu", name))
@@ -146,7 +155,9 @@ def test_mlx_execution_failure_restores_stream() -> None:
     """A failed captured operation unwinds the per-segment stream scope."""
 
     runtime = prepare_fixture(
-        _model, mx.ones((2, 4)), split_request("through:maximum", backend="mlx")
+        _model,
+        mx.ones((2, 4)),
+        split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx"),
     ).with_placement(tl.split.PlacementPlan.on(mx.new_stream(mx.cpu)))
     ambient = mx.default_stream(mx.cpu)
     target = next(
@@ -179,7 +190,7 @@ def test_mlx_cross_device_scopes_restore_both_device_defaults(ambient_device: An
             _model,
             mx.ones((2, 4)),
             split_request(
-                "through:maximum",
+                partial(select_node_prefix, node_id="maximum"),
                 backend="mlx",
                 placement=tl.split.PlacementPlan.across(
                     mx.new_stream(mx.cpu), mx.new_stream(mx.gpu)
@@ -231,7 +242,7 @@ def test_mlx_native_cross_device_replay_and_gradients(
         model,
         x,
         split_request(
-            "through:maximum",
+            partial(select_node_prefix, node_id="maximum"),
             backend="mlx",
             trainable=True,
             placement=tl.split.PlacementPlan.across(prefix_device, suffix_device),

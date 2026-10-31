@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
+from functools import partial
 from unittest.mock import patch
 
 import pytest
@@ -12,6 +13,7 @@ from v2_helpers import (
     analyze_fixture,
     prepare_fixture,
     request_fixture,
+    select_node_prefix,
 )
 
 from torchlens.split import GraphPartition, SplitFeatures
@@ -34,7 +36,11 @@ class SharedParameters(nn.Module):
 def test_static_profile_shapes_flops_state_aliases_and_no_execution() -> None:
     """Profiles never run the model and count tied state once with stable names."""
     model = SharedParameters()
-    runtime = prepare_fixture(model, torch.ones(2, 4), request_fixture("through:" + "linear_1_1:1"))
+    runtime = prepare_fixture(
+        model,
+        torch.ones(2, 4),
+        request_fixture(partial(select_node_prefix, node_id="linear_1_1:1")),
+    )
     with patch.object(model, "forward", side_effect=AssertionError("must not execute")):
         profile = runtime.graph_profile(batch_size=8)
     assert profile.batch_size == 8
@@ -51,7 +57,9 @@ def test_static_profile_shapes_flops_state_aliases_and_no_execution() -> None:
     with pytest.raises(FrozenInstanceError):
         profile.batch_size = 4
     other = prepare_fixture(
-        SharedParameters(), torch.ones(2, 4), request_fixture("through:" + "linear_1_1:1")
+        SharedParameters(),
+        torch.ones(2, 4),
+        request_fixture(partial(select_node_prefix, node_id="linear_1_1:1")),
     )
     assert [p.state_id for p in profile.parameters] == [
         p.state_id for p in other.graph_profile().parameters
@@ -63,7 +71,10 @@ def test_partition_metrics_count_unique_boundary_and_parameters() -> None:
     runtime = prepare_fixture(
         SharedParameters(),
         torch.ones(2, 4),
-        request_fixture("through:" + "linear_1_1:1", features=SplitFeatures(training=True)),
+        request_fixture(
+            partial(select_node_prefix, node_id="linear_1_1:1"),
+            features=SplitFeatures(training=True),
+        ),
     )
     profile = runtime.graph_profile(batch_size=8)
     first = next(node for node in profile.nodes if node.op_type == "linear")
@@ -84,7 +95,7 @@ def test_unknown_dtype_shape_and_invalid_batch() -> None:
     runtime = prepare_fixture(
         nn.Sequential(nn.Linear(4, 4), nn.ReLU()),
         torch.ones(2, 4),
-        request_fixture("through:" + "relu"),
+        request_fixture(partial(select_node_prefix, node_id="relu")),
     )
     graph = runtime.trace_graph
     graph = replace(
@@ -111,7 +122,10 @@ def test_matmul_cost_and_multioutput_atomic_metadata() -> None:
     runtime = prepare_fixture(
         Matrix(),
         (torch.randn(2, 3, 4), torch.randn(4, 6)),
-        request_fixture("through:" + "matmul", features=SplitFeatures(batch_axes={"/args/0": 0})),
+        request_fixture(
+            partial(select_node_prefix, node_id="matmul"),
+            features=SplitFeatures(batch_axes={"/args/0": 0}),
+        ),
     )
     profile = runtime.graph_profile(batch_size=2)
     matmul = next(node for node in profile.nodes if node.op_type == "matmul")

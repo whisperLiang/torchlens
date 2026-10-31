@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,6 +10,8 @@ import numpy as np
 import pytest
 from v2_helpers import (
     prepare_fixture,
+    select_node_prefix,
+    select_prefix,
     split_request,
 )
 
@@ -93,7 +96,9 @@ def _segment(monkeypatch: pytest.MonkeyPatch, rewrite: Any) -> Any:
             shape_program=SimpleNamespace(rewrite=rewrite),
         ),
         plan=None,
-        spec=split_request("50%", backend="tf"),
+        spec=split_request(
+            (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)), backend="tf"
+        ),
         node_ids=frozenset(),
     )
     segment._shape_binding = shape_program.ShapeBinding({"B": 3}, {})
@@ -207,7 +212,11 @@ def test_tf_literal_reshape_and_axis_replay_across_batches() -> None:
 
     with tf.device("/CPU:0"):
         sample = tf.ones((2, 2, 3), dtype=tf.float32)
-        runtime = prepare_fixture(model, sample, split_request("through:reshape", backend="tf"))
+        runtime = prepare_fixture(
+            model,
+            sample,
+            split_request(partial(select_node_prefix, node_id="reshape"), backend="tf"),
+        )
         assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
         for batch in (1, 2, 4):
             values = tf.reshape(tf.range(batch * 6, dtype=tf.float32), (batch, 2, 3))

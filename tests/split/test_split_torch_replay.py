@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
@@ -12,6 +13,8 @@ from torch import nn
 from v2_helpers import (
     prepare_fixture,
     repartition_fixture,
+    select_node_prefix,
+    select_prefix,
     split_request,
 )
 
@@ -81,7 +84,9 @@ def test_rng_fast_path_keeps_pure_ops_and_guards_random_ops(
             return self.linear(value) + torch.rand_like(value)
 
     inputs = torch.ones(2, 4)
-    runtime = prepare_fixture(RandomHead().eval(), inputs, split_request("through:linear"))
+    runtime = prepare_fixture(
+        RandomHead().eval(), inputs, split_request(partial(select_node_prefix, node_id="linear"))
+    )
     guarded: list[str] = []
     original = torch_adapter.execute_with_restored_rng_autocast
 
@@ -120,7 +125,9 @@ def test_rng_fast_path_falls_back_under_custom_dispatch_mode(
 
     inputs = torch.ones(2, 4)
     model = TinyMlp().eval()
-    runtime = prepare_fixture(model, inputs, split_request("through:relu"))
+    runtime = prepare_fixture(
+        model, inputs, split_request(partial(select_node_prefix, node_id="relu"))
+    )
     guarded: list[str] = []
     original = torch_adapter.execute_with_restored_rng_autocast
 
@@ -142,7 +149,9 @@ def test_pure_ops_restore_disabled_autocast_under_enabled_caller() -> None:
 
     model = TinyMlp().eval()
     inputs = torch.ones(2, 4)
-    runtime = prepare_fixture(model, inputs, split_request("through:relu"))
+    runtime = prepare_fixture(
+        model, inputs, split_request(partial(select_node_prefix, node_id="relu"))
+    )
     expected = model(inputs)
 
     with torch.autocast("cpu", dtype=torch.bfloat16):
@@ -157,7 +166,9 @@ def test_conditional_rng_fast_path_requires_disabled_dropout() -> None:
     """Dropout and attention bypass RNG isolation only with dropout disabled."""
 
     inputs = torch.ones(2, 4)
-    runtime = prepare_fixture(TinyMlp().eval(), inputs, split_request("through:relu"))
+    runtime = prepare_fixture(
+        TinyMlp().eval(), inputs, split_request(partial(select_node_prefix, node_id="relu"))
+    )
     segment = runtime.segments.prefix
     assert segment._can_skip_rng_guard(segment._dropout_target, (inputs, 0.5, False), {})
     assert not segment._can_skip_rng_guard(segment._dropout_target, (inputs, 0.5, True), {})
@@ -175,7 +186,9 @@ def test_certified_plain_segment_skips_per_call_mode_checks(
 
     model = TinyMlp().eval()
     inputs = torch.ones(2, 4)
-    runtime = prepare_fixture(model, inputs, split_request("through:relu"))
+    runtime = prepare_fixture(
+        model, inputs, split_request(partial(select_node_prefix, node_id="relu"))
+    )
     assert runtime.segments.prefix._fast_guard_certified
     assert runtime.segments.suffix._fast_guard_certified
 
@@ -194,7 +207,11 @@ def test_multi_output_boundaries_bind_canonical_values_not_display_labels() -> N
 
     model = SharedLabelMultiOutput().eval()
     example = torch.randn(2, 9)
-    seed_runtime = prepare_fixture(model, example, split_request("50%"))
+    seed_runtime = prepare_fixture(
+        model,
+        example,
+        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    )
     captured_chunk_nodes = tuple(
         node for node in seed_runtime.trace_graph.compute_nodes if node.op_type == "chunk"
     )
@@ -219,7 +236,10 @@ def test_multi_output_boundaries_bind_canonical_values_not_display_labels() -> N
     )
 
     for node in chunk_nodes:
-        for point in ("until:" + str(node.canonical_id), "through:" + str(node.canonical_id)):
+        for point in (
+            partial(select_node_prefix, node_id=str(node.canonical_id), include=False),
+            partial(select_node_prefix, node_id=str(node.canonical_id)),
+        ):
             runtime = repartition_fixture(seed_runtime, point)
             assert runtime.plan.boundary_spec.keys() == runtime.plan.boundary_bindings.keys()
             _assert_close(runtime.replay(example), model(example))
@@ -312,7 +332,11 @@ def test_mlp_replay_equivalence() -> None:
     model = TinyMlp().eval()
     x = torch.randn(2, 4)
 
-    runtime = prepare_fixture(model, x, split_request("50%"))
+    runtime = prepare_fixture(
+        model,
+        x,
+        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    )
 
     assert runtime.validate_equivalence(model, (x,))
     _assert_close(runtime.replay(x), model(x))
@@ -325,7 +349,11 @@ def test_cnn_replay_equivalence() -> None:
     model = TinyCnn().eval()
     x = torch.randn(2, 3, 8, 8)
 
-    runtime = prepare_fixture(model, x, split_request("50%"))
+    runtime = prepare_fixture(
+        model,
+        x,
+        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    )
 
     assert runtime.validate_equivalence(model, (x,))
 
@@ -337,8 +365,10 @@ def test_before_and_after_boundaries_work() -> None:
     model = TinyMlp().eval()
     x = torch.randn(2, 4)
 
-    after = prepare_fixture(model, x, split_request("through:relu"))
-    before = prepare_fixture(model, x, split_request("until:fc2"))
+    after = prepare_fixture(model, x, split_request(partial(select_node_prefix, node_id="relu")))
+    before = prepare_fixture(
+        model, x, split_request(partial(select_node_prefix, node_id="fc2", include=False))
+    )
 
     _assert_close(after.replay(x), model(x))
     _assert_close(before.replay(x), model(x))
@@ -351,7 +381,9 @@ def test_identity_output_marker_reconstructs_from_graph_parent() -> None:
     model = nn.Sequential(nn.Linear(6, 4), nn.Dropout(p=0.0)).eval()
     x = torch.ones(2, 6)
 
-    runtime = prepare_fixture(model, x, split_request("through:dropout"))
+    runtime = prepare_fixture(
+        model, x, split_request(partial(select_node_prefix, node_id="dropout"))
+    )
 
     for batch in (1, 3):
         replay_x = torch.ones(batch, 6)
@@ -365,7 +397,7 @@ def test_residual_frontier_includes_skip_tensor() -> None:
     model = ResidualMlp().eval()
     x = torch.randn(2, 4)
 
-    runtime = prepare_fixture(model, x, split_request("through:relu"))
+    runtime = prepare_fixture(model, x, split_request(partial(select_node_prefix, node_id="relu")))
     boundary = runtime.run_prefix(x)
 
     assert len(boundary.tensors) >= 2
@@ -380,7 +412,11 @@ def test_multi_output_dict_reconstruction() -> None:
     model = DictOutput().eval()
     x = torch.randn(2, 5)
 
-    runtime = prepare_fixture(model, x, split_request("50%"))
+    runtime = prepare_fixture(
+        model,
+        x,
+        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    )
 
     _assert_close(runtime.replay(x), model(x))
 
@@ -433,7 +469,7 @@ def test_targetless_suffix_compute_node_raises() -> None:
     suffix = GeneratedSuffix(
         graph=graph,
         plan=plan,
-        spec=split_request("through:h"),
+        spec=split_request(partial(select_node_prefix, node_id="h")),
         node_ids=plan.suffix_node_ids,
         use_live_param_sources=True,
     )

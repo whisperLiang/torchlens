@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import pytest
 import torch
 from torch import nn
 from v2_helpers import (
     prepare_fixture,
     request_fixture,
+    select_node_prefix,
 )
 
 from torchlens.split import PlacementPlan, SplitFeatures
@@ -22,7 +25,8 @@ def test_profile_isolates_parameters_gradients_rng_and_pending_autograd(training
         model,
         x,
         request_fixture(
-            "through:" + "1", features=SplitFeatures(training=True, retain_trace=False)
+            partial(select_node_prefix, node_id="1"),
+            features=SplitFeatures(training=True, retain_trace=False),
         ),
     )
     for param in model.parameters():
@@ -54,7 +58,11 @@ def test_profile_failure_restores_rng_and_lazy_state() -> None:
     model = nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 2))
     x = torch.ones(2, 4)
     runtime = prepare_fixture(
-        model, x, request_fixture("through:" + "1", features=SplitFeatures(training=True))
+        model,
+        x,
+        request_fixture(
+            partial(select_node_prefix, node_id="1"), features=SplitFeatures(training=True)
+        ),
     )
     states = [
         getattr(runtime.segments, name)._state for name in ("prefix", "training_prefix", "suffix")
@@ -86,7 +94,10 @@ def test_profile_preserves_prepared_keyword_inputs() -> None:
     x = torch.ones(2, 4)
     bias = torch.ones(2, 4)
     runtime = prepare_fixture(
-        KeywordModel(), x, request_fixture("through:" + "relu"), input_kwargs={"bias": bias}
+        KeywordModel(),
+        x,
+        request_fixture(partial(select_node_prefix, node_id="relu")),
+        input_kwargs={"bias": bias},
     )
     result = runtime.profile_split(x, warmup=0, repeats=1)
     assert result.suffix_forward.median_ms > 0
@@ -98,7 +109,11 @@ def test_profile_custom_loss_cannot_accumulate_into_caller_parameters() -> None:
     model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
     x = torch.ones(2, 4)
     runtime = prepare_fixture(
-        model, x, request_fixture("through:" + "1", features=SplitFeatures(training=True))
+        model,
+        x,
+        request_fixture(
+            partial(select_node_prefix, node_id="1"), features=SplitFeatures(training=True)
+        ),
     )
     runtime.profile_split(
         x,
@@ -115,7 +130,11 @@ def test_profile_cuda_phases() -> None:
     model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2)).cuda()
     x = torch.ones(2, 4, device="cuda")
     runtime = prepare_fixture(
-        model, x, request_fixture("through:" + "1", features=SplitFeatures(training=True))
+        model,
+        x,
+        request_fixture(
+            partial(select_node_prefix, node_id="1"), features=SplitFeatures(training=True)
+        ),
     )
     result = runtime.profile_split(x, targets=torch.zeros(2, 2, device="cuda"), warmup=1, repeats=2)
     assert result.suffix_backward.median_ms > 0
@@ -128,7 +147,11 @@ def test_profile_parameter_free_cross_device_synchronizes(monkeypatch: pytest.Mo
     model = nn.Sequential(nn.ReLU(), nn.Sigmoid())
     x = torch.ones(2, 4)
     runtime = prepare_fixture(
-        model, x, request_fixture("through:" + "0", placement=PlacementPlan.across("cpu", "cuda"))
+        model,
+        x,
+        request_fixture(
+            partial(select_node_prefix, node_id="0"), placement=PlacementPlan.across("cpu", "cuda")
+        ),
     )
     sync = torch.cuda.synchronize
     synchronized = []

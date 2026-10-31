@@ -66,13 +66,13 @@ def test_fresh_split_captures_held_activation_once_per_batch(
         get_dynamo_optimized_module_type(force_probe=True)
         import torchlens as tl
         sys.path.insert(0, str(__import__("pathlib").Path.cwd() / "tests" / "split"))
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix
         example = torch.randn(2, 4, 3, 4)
 
         for index in range(2):
             runtime = prepare_fixture(
                 model, example, request_fixture(
-                    selection="fraction:" + str(50),
+                    selection=lambda g, count=50: select_prefix(g, (len(g.compute_nodes) - 1) * count // 100 + 1),
                     features=tl.split.SplitFeatures(retain_trace=True),
                 )
             )

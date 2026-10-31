@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from v2_helpers import (
     prepare_fixture,
+    select_prefix,
     split_request,
 )
 
@@ -42,7 +43,14 @@ def _jax_matmul_bindings() -> list[tuple[Any, str]]:
     return bindings
 
 
-@pytest.mark.parametrize("point", ["25%", "50%", "75%"])
+@pytest.mark.parametrize(
+    "point",
+    [
+        lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1),
+        lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1),
+        lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1),
+    ],
+)
 def test_jax_attention_replays_singleton_and_larger_batches(point: str) -> None:
     """Compare nonuniform attention outputs across three cut positions.
 

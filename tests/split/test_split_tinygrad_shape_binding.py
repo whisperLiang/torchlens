@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 from unittest.mock import patch
 
@@ -10,6 +11,8 @@ import pytest
 from v2_helpers import (
     prepare_fixture,
     repartition_fixture,
+    select_node_prefix,
+    select_prefix,
     split_request,
 )
 
@@ -29,7 +32,10 @@ def test_tinygrad_fixed_batch_skips_dynamic_uop_rewrite() -> None:
     runtime = prepare_fixture(
         model,
         Tensor.ones(1, 4, 4, device="CPU").realize(),
-        split_request("50%", backend="tinygrad"),
+        split_request(
+            (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+            backend="tinygrad",
+        ),
     )
     prefix = runtime.segments.prefix
     suffix = runtime.segments.suffix
@@ -65,7 +71,11 @@ def test_tinygrad_reduce_does_not_rewrite_bound_parent_shape() -> None:
         return x.mean(axis=1)
 
     sample = Tensor.ones(2, 4, 4, device="CPU").realize()
-    for point in ("25%", "50%", "75%"):
+    for point in (
+        (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1)),
+        (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+        (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1)),
+    ):
         runtime = prepare_fixture(model, sample, split_request(point, backend="tinygrad"))
         assert runtime.trace_graph.shape_program.batch_probe.status == "passed"
         for batch in (1, 2, 4):
@@ -89,9 +99,20 @@ def test_tinygrad_constant_linear_weights_broadcast_at_runtime_batch() -> None:
         return (x @ weight.T).relu()
 
     sample = Tensor.ones(2, 6, device="CPU").realize()
-    runtime = prepare_fixture(model, sample, split_request("50%", backend="tinygrad"))
+    runtime = prepare_fixture(
+        model,
+        sample,
+        split_request(
+            (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+            backend="tinygrad",
+        ),
+    )
     assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
-    for point in ("25%", "50%", "75%"):
+    for point in (
+        (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1)),
+        (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+        (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1)),
+    ):
         selected = repartition_fixture(runtime, split_request(point, backend="tinygrad").partition)
         for batch in (1, 2, 3):
             data = np.arange(batch * 6, dtype=np.float32).reshape(batch, 6) - 4
@@ -123,12 +144,23 @@ def test_tinygrad_padding_does_not_broadcast_its_parameter_input() -> None:
 
     model = PaddedState()
     sample = Tensor.ones(2, 3, 4, device="CPU").realize()
-    runtime = prepare_fixture(model, sample, split_request("50%", backend="tinygrad"))
+    runtime = prepare_fixture(
+        model,
+        sample,
+        split_request(
+            (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+            backend="tinygrad",
+        ),
+    )
     assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
     for node in runtime.trace_graph.compute_nodes:
-        for kind in ("until", "through"):
+        for include in (False, True):
             selected = repartition_fixture(
-                runtime, split_request(f"{kind}:{node.canonical_id}", backend="tinygrad").partition
+                runtime,
+                split_request(
+                    partial(select_node_prefix, node_id=node.canonical_id, include=include),
+                    backend="tinygrad",
+                ).partition,
             )
             for batch in (1, 3):
                 data = np.arange(batch * 12, dtype=np.float32).reshape(batch, 3, 4)

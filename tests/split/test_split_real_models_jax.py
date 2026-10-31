@@ -24,7 +24,7 @@ def test_jax_stax_cnn_split_replay_batch_symbolic_and_train() -> None:
         from jax.example_libraries import stax
 
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
 
         init_fun, apply_fun = stax.serial(
             stax.Conv(4, (3, 3), padding="SAME"),
@@ -42,7 +42,7 @@ def test_jax_stax_cnn_split_replay_batch_symbolic_and_train() -> None:
         runtime = prepare_fixture(
             model,
             (params, x),
-            split_request("25%", backend="jax"),
+            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), backend="jax"),
         )
         for batch in (1, 2, 4):
             replay_x = jnp.ones((batch, 32, 32, 3), dtype=jnp.float32)
@@ -51,7 +51,7 @@ def test_jax_stax_cnn_split_replay_batch_symbolic_and_train() -> None:
         train_runtime = prepare_fixture(
             model,
             (params, x),
-            split_request("25%", backend="jax", trainable=True),
+            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), backend="jax", trainable=True),
         )
         boundary = train_runtime.run_training_prefix(params, x)
         loss, grads = train_runtime.train_suffix(
@@ -76,6 +76,8 @@ def test_jax_flax_haiku_equinox_all_split_nodes_cross_batch_and_device() -> None
     _skip_if_module_missing("equinox")
     _run_backend_subprocess(
         """
+        from functools import partial
+
         import equinox as eqx
         import flax.linen as nn
         import haiku as hk
@@ -83,7 +85,7 @@ def test_jax_flax_haiku_equinox_all_split_nodes_cross_batch_and_device() -> None
         import jax.numpy as jnp
 
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
 
         def platform_devices(platform):
             try:
@@ -101,9 +103,9 @@ def test_jax_flax_haiku_equinox_all_split_nodes_cross_batch_and_device() -> None
 
         def all_boundaries(runtime):
             return [
-                f"{kind}:{node.canonical_id}"
+                partial(select_node_prefix, node_id=node.canonical_id, include=include)
                 for node in runtime.trace_graph.compute_nodes
-                for kind in ("until", "through")
+                for include in (False, True)
             ]
 
         def assert_all_split_nodes(name, model, args_factory):
@@ -112,7 +114,7 @@ def test_jax_flax_haiku_equinox_all_split_nodes_cross_batch_and_device() -> None
                 seed_runtime = prepare_fixture(
                     model,
                     traced_args,
-                    split_request("50%", backend="jax"),
+                    split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="jax"),
                 )
             for boundary in all_boundaries(seed_runtime):
                 with jax.default_device(cpu):
@@ -237,11 +239,13 @@ def test_jax_flax_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
     _skip_if_module_missing("flax")
     _run_backend_subprocess(
         """
+        from functools import partial
+
         import flax.linen as nn
         import jax
         import jax.numpy as jnp
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_node_prefix, select_prefix
 
         try:
             cpu = jax.devices("cpu")[0]
@@ -280,7 +284,7 @@ def test_jax_flax_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
         seed_runtime = prepare_fixture(
             model,
             (params_cpu, trace_x),
-            split_request("50%", backend="jax", trainable=True),
+            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="jax", trainable=True),
         )
         activation_id = next(
             node.canonical_id
@@ -291,7 +295,7 @@ def test_jax_flax_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
             model,
             (params_cpu, trace_x),
             split_request(
-                f"through:{activation_id}",
+                partial(select_node_prefix, node_id=activation_id),
                 backend="jax",
                 trainable=True,
             ),
@@ -345,7 +349,7 @@ def test_jax_reference_resnet_transformer_and_vit_split_replay_batch_symbolic() 
         from jax.example_libraries import stax
 
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
 
         residual_init, residual_apply = stax.serial(
             stax.FanOut(2),
@@ -447,7 +451,7 @@ def test_jax_reference_resnet_transformer_and_vit_split_replay_batch_symbolic() 
 
         for model, params, input_factory in model_cases:
             x = input_factory(2)
-            for boundary in ("25%", "50%", "75%"):
+            for boundary in (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1)):
                 runtime = prepare_fixture(
                     model,
                     (params, x),
@@ -474,11 +478,13 @@ def test_jax_complete_multiscale_detector_all_nodes_cross_batch() -> None:
     _skip_if_module_missing("flax")
     _run_backend_subprocess(
         """
+        from functools import partial
+
         import flax.linen as nn
         import jax
         import jax.numpy as jnp
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_node_prefix, select_prefix
 
         class CompleteJaxDetector(nn.Module):
             @nn.compact
@@ -528,16 +534,16 @@ def test_jax_complete_multiscale_detector_all_nodes_cross_batch() -> None:
         seed_runtime = prepare_fixture(
             model,
             (params, trace_x),
-            split_request("50%", backend="jax"),
+            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="jax"),
         )
         boundaries = [
             (kind, node.canonical_id)
             for node in seed_runtime.trace_graph.compute_nodes
-            for kind in ("until", "through")
+            for include in (False, True)
         ]
         assert boundaries
         for kind, node_id in boundaries:
-            point = "through:" + str(node_id) if kind == "after" else "until:" + str(node_id)
+            point = partial(select_node_prefix, node_id=str(node_id)) if kind == "after" else partial(select_node_prefix, node_id=str(node_id), include=False)
             runtime = repartition_fixture(seed_runtime, point)
             try:
                 assert_same(runtime.replay(params, trace_x), model(params, trace_x))
@@ -550,7 +556,7 @@ def test_jax_complete_multiscale_detector_all_nodes_cross_batch() -> None:
         for batch in (2, 3):
             replay_x = jnp.ones((batch, 32, 32, 3), dtype=jnp.float32)
             runtime = repartition_fixture(seed_runtime,
-                split_request("50%", backend="jax").partition
+                split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="jax").partition
             )
             assert_same(runtime.replay(params, replay_x), model(params, replay_x))
         """,
@@ -570,7 +576,7 @@ def test_jax_stax_mlp_all_split_nodes_cross_batch_and_device() -> None:
         from jax.example_libraries import stax
 
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
 
         def platform_devices(platform):
             try:
@@ -600,9 +606,9 @@ def test_jax_stax_mlp_all_split_nodes_cross_batch_and_device() -> None:
         seed_runtime = prepare_fixture(
             model,
             (params_cpu, x_cpu),
-            split_request("50%", backend="jax"),
+            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="jax"),
         )
-        boundaries = ("25%", "50%", "75%")
+        boundaries = (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1))
         for boundary in boundaries:
             runtime = prepare_fixture(
                 model,

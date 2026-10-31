@@ -1,7 +1,8 @@
-"""Resolve test selection recipes after capture; production only receives GraphPartition."""
+"""Canonical graph selectors and capture policies shared by split tests."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -21,7 +22,7 @@ from torchlens.split.planner import plan_partition
 class FixtureRequest:
     """Capture policies and a test-only recipe for selecting canonical IDs."""
 
-    partition: GraphPartition | str
+    partition: GraphPartition | Callable[[Any], GraphPartition]
     backend: str | None = None
     features: SplitFeatures = SplitFeatures()
     placement: Any = PlacementPlan()
@@ -39,7 +40,7 @@ class FixtureRequest:
         return (
             self.partition.as_boundary()
             if isinstance(self.partition, GraphPartition)
-            else self.partition
+            else "test graph selection"
         )
 
     @property
@@ -51,13 +52,15 @@ class FixtureRequest:
     device_policy: str = "runtime"
 
 
-def request_fixture(selection: GraphPartition | str, **kwargs: Any) -> FixtureRequest:
+def request_fixture(
+    selection: GraphPartition | Callable[[Any], GraphPartition], **kwargs: Any
+) -> FixtureRequest:
     """Defer fixture selection until the graph exists."""
     return FixtureRequest(selection, **kwargs)
 
 
 def split_request(
-    boundary: GraphPartition | str,
+    boundary: GraphPartition | Callable[[Any], GraphPartition],
     *,
     trainable: bool = False,
     boundary_cache: bool = False,
@@ -80,42 +83,50 @@ def split_request(
     )
 
 
-def fixture_partition(subject: Any, selection: GraphPartition | str) -> GraphPartition:
-    """Choose a native-call-atomic topological prefix for a fixture."""
+def fixture_partition(
+    subject: Any, selection: GraphPartition | Callable[[Any], GraphPartition]
+) -> GraphPartition:
+    """Evaluate a graph selector; the planner receives only canonical node sets."""
     if isinstance(selection, GraphPartition):
         return selection
     graph = getattr(subject, "trace_graph", subject)
+    return selection(graph)
+
+
+def select_prefix(graph: Any, count: int) -> GraphPartition:
+    """Select compute nodes by count, keeping the last native call atomic."""
     compute = graph.compute_nodes
-    if selection.startswith(("through:", "until:")):
-        strategy, label = selection.split(":", 1)
-        matches = [
-            n for n in compute if label in {n.canonical_id, n.label, n.raw_label, n.module_path}
-        ]
-        if not matches:
-            matches = [
-                n
-                for n in compute
-                if any(
-                    label in str(v)
-                    for v in (n.canonical_id, n.label, n.raw_label, n.module_path)
-                    if v is not None
-                )
-            ]
-        if len(matches) != 1:
-            raise SplitRequestError(
-                f"Fixture selection {label!r} matched {len(matches)} compute nodes (ambiguous or missing)."
-            )
-        call = graph.replay_call_by_output_id[matches[0].canonical_id]
-        indexes = [i for i, n in enumerate(compute) if n.canonical_id in call.output_node_ids]
-        count = max(indexes) + 1 if strategy == "through" else min(indexes)
-    else:
-        fraction = float(selection.removeprefix("fraction:").removesuffix("%"))
-        if not 0 < fraction < 100:
-            raise ValueError("fixture fraction must be between 0 and 100")
-        count = int(fraction / 100 * (len(compute) - 1)) + 1
+    if not 0 <= count <= len(compute):
+        raise ValueError("compute count must be within the graph")
+    if count:
         call = graph.replay_call_by_output_id[compute[count - 1].canonical_id]
         count = max(i + 1 for i, n in enumerate(compute) if n.canonical_id in call.output_node_ids)
     return GraphPartition(frozenset(n.canonical_id for n in compute[:count]))
+
+
+def select_node_prefix(graph: Any, node_id: str, *, include: bool = True) -> GraphPartition:
+    """Select a canonical prefix using an unambiguous node or module anchor."""
+    compute = graph.compute_nodes
+    matches = [
+        n for n in compute if node_id in {n.canonical_id, n.label, n.raw_label, n.module_path}
+    ]
+    if not matches:
+        matches = [
+            n
+            for n in compute
+            if any(
+                node_id in str(v)
+                for v in (n.canonical_id, n.label, n.raw_label, n.module_path)
+                if v is not None
+            )
+        ]
+    if len(matches) != 1:
+        raise SplitRequestError(
+            f"Fixture selection {node_id!r} matched {len(matches)} compute nodes (ambiguous or missing)."
+        )
+    call = graph.replay_call_by_output_id[matches[0].canonical_id]
+    indexes = [i for i, n in enumerate(compute) if n.canonical_id in call.output_node_ids]
+    return select_prefix(graph, max(indexes) + 1 if include else min(indexes))
 
 
 def capture_fixture(
@@ -167,12 +178,16 @@ def prepare_fixture(
     return graph.materialize(graph.analyze(fixture_partition(graph, request.partition)))
 
 
-def analyze_fixture(runtime: Any, selection: GraphPartition | str) -> Any:
+def analyze_fixture(
+    runtime: Any, selection: GraphPartition | Callable[[Any], GraphPartition]
+) -> Any:
     """Analyze the selected canonical set."""
     return runtime.analyze(fixture_partition(runtime, selection))
 
 
-def repartition_fixture(runtime: Any, selection: GraphPartition | str) -> Any:
+def repartition_fixture(
+    runtime: Any, selection: GraphPartition | Callable[[Any], GraphPartition]
+) -> Any:
     """Repartition using the same graph and current state."""
     return runtime.repartition(fixture_partition(runtime, selection))
 

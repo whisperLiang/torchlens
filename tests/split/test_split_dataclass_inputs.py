@@ -10,6 +10,7 @@ import pytest
 import torch
 from v2_helpers import (
     prepare_fixture,
+    select_prefix,
     split_request,
 )
 
@@ -82,7 +83,12 @@ def test_equinox_custom_init_parameter_input_replays_larger_batch() -> None:
         params = Weights(3)
         original = params.weight
         runtime = prepare_fixture(
-            model, (params, jnp.ones((2, 3))), split_request("50%", backend="jax")
+            model,
+            (params, jnp.ones((2, 3))),
+            split_request(
+                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1),
+                backend="jax",
+            ),
         )
         assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
         for batch in (1, 2, 3):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from v2_helpers import (
     candidate_report,
     prepare_fixture,
     repartition_fixture,
+    select_node_prefix,
     split_request,
 )
 
@@ -37,7 +39,11 @@ def _split_merge(x: Any) -> Any:
 def test_mlx_replays_every_supported_cut_at_changed_batches() -> None:
     """One MLX capture supports cuts before and after each multi-output call."""
 
-    seed = prepare_fixture(_split_merge, _input(2), split_request("through:maximum", backend="mlx"))
+    seed = prepare_fixture(
+        _split_merge,
+        _input(2),
+        split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx"),
+    )
     graph = seed.trace_graph
     assert graph.shape_program.batch_probe.status == "passed"
     report = candidate_report(
@@ -63,7 +69,11 @@ def test_mlx_reshape_rewrites_only_the_shape_operand() -> None:
         reshaped = mx.reshape(hidden, shape=(hidden.shape[0], -1))
         return mx.multiply(reshaped, 2)
 
-    runtime = prepare_fixture(model, _input(2), split_request("through:maximum", backend="mlx"))
+    runtime = prepare_fixture(
+        model,
+        _input(2),
+        split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx"),
+    )
     x = _input(7)
     replayed, expected = runtime.replay(x), model(x)
     mx.eval(replayed, expected)
@@ -80,7 +90,7 @@ def test_mlx_binds_nested_inputs_and_keyword_arrays() -> None:
 
     x = _input(2)
     request = split_request(
-        "through:maximum",
+        partial(select_node_prefix, node_id="maximum"),
         backend="mlx",
         batch_axes={"/args/0/a": 0, "/args/0/z": 0, "/kwargs/extra/offset": 0},
     )
@@ -107,7 +117,9 @@ def test_mlx_shared_input_identities_must_be_preserved() -> None:
 
     example = _input(2)
     runtime = prepare_fixture(
-        model, (example, example), split_request("through:maximum", backend="mlx")
+        model,
+        (example, example),
+        split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx"),
     )
     x = _input(3)
     replayed, expected = runtime.replay(x, x), model(x, x)
@@ -138,7 +150,11 @@ def test_mlx_replays_native_module_calls_with_captured_parameters() -> None:
             return self.output(mx.maximum(self.hidden(x), 0))
 
     model = Model()
-    runtime = prepare_fixture(model, _input(2), split_request("through:maximum", backend="mlx"))
+    runtime = prepare_fixture(
+        model,
+        _input(2),
+        split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx"),
+    )
     for batch in (1, 3):
         x = _input(batch)
         replayed, expected = runtime.replay(x), model(x)
@@ -153,7 +169,9 @@ def test_mlx_boundary_cache_round_trips_split_outputs(tmp_path: Path) -> None:
     runtime = prepare_fixture(
         _split_merge,
         _input(2),
-        split_request("through:split_1_3", backend="mlx", boundary_cache=True),
+        split_request(
+            partial(select_node_prefix, node_id="split_1_3"), backend="mlx", boundary_cache=True
+        ),
     )
     x = _input(3)
     boundary = runtime.run_prefix(x)
@@ -176,7 +194,11 @@ def test_mlx_reconstructs_one_final_leaf_from_a_multi_output_call() -> None:
         left, right = mx.split(hidden, 2, axis=-1)
         return {"right": right, "sum": mx.add(left, right), "meta": ("mlx", 2, None, [])}
 
-    runtime = prepare_fixture(model, _input(2), split_request("through:maximum", backend="mlx"))
+    runtime = prepare_fixture(
+        model,
+        _input(2),
+        split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx"),
+    )
     x = _input(3)
     replayed, expected = runtime.replay(x), model(x)
     assert tuple(replayed) == tuple(expected) == ("right", "sum", "meta")

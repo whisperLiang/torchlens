@@ -26,7 +26,7 @@ def test_tinygrad_conv_and_transformerish_models_split_replay() -> None:
         from pathlib import Path
 
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
 
         def flatten(value):
             if isinstance(value, list):
@@ -72,7 +72,7 @@ def test_tinygrad_conv_and_transformerish_models_split_replay() -> None:
                 return head(hidden.flatten(1))
 
             x = Tensor.ones(2, 3, 16, 16, device=device).realize()
-            for boundary in ("25%", "50%", "75%"):
+            for boundary in (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1)):
                 runtime = prepare_fixture(
                     conv_model,
                     x,
@@ -103,7 +103,7 @@ def test_tinygrad_conv_and_transformerish_models_split_replay() -> None:
             return head(hidden).mean(axis=1)
 
         tokens = Tensor([[1, 2, 3, 4], [4, 3, 2, 1]], dtype=dtypes.int32).realize()
-        for boundary in ("25%", "50%", "75%"):
+        for boundary in (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1)):
             runtime = prepare_fixture(
                 token_model,
                 tokens,
@@ -140,7 +140,7 @@ def test_tinygrad_conv_split_replay_batch_symbolic_and_cpu_gpu() -> None:
         from pathlib import Path
 
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
 
         def flatten(value):
             if isinstance(value, list):
@@ -183,7 +183,7 @@ def test_tinygrad_conv_split_replay_batch_symbolic_and_cpu_gpu() -> None:
 
         model, _modules = make_model("CPU")
         trace_x = Tensor.ones(2, 3, 16, 16, device="CPU").realize()
-        for boundary in ("25%", "50%", "75%"):
+        for boundary in (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1)):
             runtime = prepare_fixture(
                 model,
                 trace_x,
@@ -216,7 +216,7 @@ def test_tinygrad_conv_split_replay_batch_symbolic_and_cpu_gpu() -> None:
         runtime = prepare_fixture(
             model,
             trace_x,
-            split_request("90%", backend="tinygrad"),
+            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 90 // 100 + 1), backend="tinygrad"),
         )
         for batch in (1, 3):
             cpu_x = Tensor.ones(batch, 3, 16, 16, device="CPU").realize()
@@ -254,7 +254,7 @@ def test_tinygrad_official_llm_transformer_block_split_replay() -> None:
         import tinygrad.nn.state as state
 
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
 
         def flatten(value):
             if isinstance(value, list):
@@ -290,7 +290,7 @@ def test_tinygrad_official_llm_transformer_block_split_replay() -> None:
             return block(x, 0)
 
         x = Tensor.ones(2, 4, 8).realize()
-        for boundary in ("25%", "50%", "75%"):
+        for boundary in (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1)):
             # This fixture exercises a fixed-batch, stateful KV-cache block.
             # Explicitly retain its B=2 input contract instead of requesting
             # automatic B=1 canonicalization and batch extrapolation.
@@ -316,13 +316,15 @@ def test_tinygrad_complete_multiscale_detector_all_nodes_cross_batch_and_device(
     _skip_if_module_missing("tinygrad")
     _run_backend_subprocess(
         """
+        from functools import partial
+
         import os
         from pathlib import Path
 
         from tinygrad import Tensor
         import tinygrad.nn as nn
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_node_prefix, select_prefix
 
         class CompleteTinygradDetector:
             def __init__(self, device):
@@ -384,25 +386,25 @@ def test_tinygrad_complete_multiscale_detector_all_nodes_cross_batch_and_device(
         seed_runtime = prepare_fixture(
             model,
             trace_x,
-            split_request("50%", backend="tinygrad"),
+            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="tinygrad"),
         )
         boundaries = [
             (kind, node.canonical_id)
             for node in seed_runtime.trace_graph.compute_nodes
-            for kind in ("until", "through")
+            for include in (False, True)
         ]
         assert boundaries
         expected_trace = model(trace_x)
         expected_trace = tuple(value.realize() for value in leaves(expected_trace))
         for kind, node_id in boundaries:
-            point = "through:" + str(node_id) if kind == "after" else "until:" + str(node_id)
+            point = partial(select_node_prefix, node_id=str(node_id)) if kind == "after" else partial(select_node_prefix, node_id=str(node_id), include=False)
             runtime = repartition_fixture(seed_runtime, point)
             assert_same(runtime.replay(trace_x), expected_trace)
 
         for batch in (2, 3):
             replay_x = Tensor.ones(batch, 3, 4, 4, device="CPU").realize()
             runtime = repartition_fixture(seed_runtime,
-                split_request("50%", backend="tinygrad").partition
+                split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="tinygrad").partition
             )
             expected = model(replay_x)
             expected = tuple(value.realize() for value in leaves(expected))
@@ -427,7 +429,7 @@ def test_tinygrad_complete_multiscale_detector_all_nodes_cross_batch_and_device(
         runtime = prepare_fixture(
             model,
             trace_x,
-            split_request("50%", backend="tinygrad"),
+            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="tinygrad"),
         )
         for batch in (1, 2):
             cpu_x = Tensor.ones(batch, 3, 4, 4, device="CPU").realize()
@@ -461,7 +463,7 @@ def test_tinygrad_nn_mlp_split_replay_batch_symbolic_and_train() -> None:
         from pathlib import Path
 
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
 
         fc1 = nn.Linear(6, 8)
         fc2 = nn.Linear(8, 3)
@@ -489,7 +491,7 @@ def test_tinygrad_nn_mlp_split_replay_batch_symbolic_and_train() -> None:
         runtime = prepare_fixture(
             model,
             x,
-            split_request("25%", backend="tinygrad"),
+            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), backend="tinygrad"),
         )
         for batch in (1, 2, 4):
             replay_x = Tensor.ones(batch, 2, 3).realize()
@@ -501,7 +503,7 @@ def test_tinygrad_nn_mlp_split_replay_batch_symbolic_and_train() -> None:
         train_runtime = prepare_fixture(
             model,
             train_x,
-            split_request("25%", backend="tinygrad", trainable=True),
+            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), backend="tinygrad", trainable=True),
         )
         boundary = train_runtime.run_training_prefix(train_x)
         loss, grads = train_runtime.train_suffix(boundary, Tensor.zeros(2, 3).realize())
@@ -521,13 +523,15 @@ def test_tinygrad_nn_mlp_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None
     _skip_if_module_missing("tinygrad")
     _run_backend_subprocess(
         """
+        from functools import partial
+
         from tinygrad import Tensor
         import tinygrad.nn as nn
         import os
         from pathlib import Path
 
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_node_prefix, select_prefix
 
         suffix_device = None
         for candidate in ("CUDA", "GPU", "NV"):
@@ -575,7 +579,7 @@ def test_tinygrad_nn_mlp_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None
             seed_runtime = prepare_fixture(
                 model,
                 trace_x,
-                split_request("50%", backend="tinygrad", trainable=True),
+                split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="tinygrad", trainable=True),
             )
             split_id = next(
                 node.canonical_id
@@ -586,7 +590,7 @@ def test_tinygrad_nn_mlp_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None
                 model,
                 trace_x,
                 split_request(
-                    f"through:{split_id}",
+                    partial(select_node_prefix, node_id=split_id),
                     backend="tinygrad",
                     trainable=True,
                 ),
@@ -629,13 +633,15 @@ def test_tinygrad_nn_mlp_all_split_nodes_cross_batch_and_device() -> None:
     _skip_if_module_missing("tinygrad")
     _run_backend_subprocess(
         """
+        from functools import partial
+
         from tinygrad import Tensor
         import tinygrad.nn as nn
         import os
         from pathlib import Path
 
         import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition
+        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
 
         def flatten(value):
             if isinstance(value, list):
@@ -690,21 +696,21 @@ def test_tinygrad_nn_mlp_all_split_nodes_cross_batch_and_device() -> None:
         seed_runtime = prepare_fixture(
             model,
             x,
-            split_request("50%", backend="tinygrad"),
+            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="tinygrad"),
         )
         op_types = {"reduce", "add", "where"}
         candidate_count = len(
             [node for node in seed_runtime.trace_graph.compute_nodes if node.op_type in op_types]
         )
         for candidate_index in range(candidate_count):
-            for kind in ("until", "through"):
+            for include in (False, True):
                 model, move_params = make_model()
                 move_params("CPU")
                 x = Tensor.ones(2, 6, device="CPU").realize()
                 seed_runtime = prepare_fixture(
                     model,
                     x,
-                    split_request("50%", backend="tinygrad"),
+                    split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="tinygrad"),
                 )
                 candidates = [
                     node
@@ -716,7 +722,7 @@ def test_tinygrad_nn_mlp_all_split_nodes_cross_batch_and_device() -> None:
                     model,
                     x,
                     split_request(
-                        f"{kind}:{target.canonical_id}",
+                        partial(select_node_prefix, node_id=target.canonical_id, include=include),
                         backend="tinygrad",
                     ),
                 )

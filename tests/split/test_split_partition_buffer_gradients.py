@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import partial
 
 import pytest
 import torch
@@ -10,6 +11,7 @@ from torch import nn
 from v2_helpers import (
     prepare_fixture,
     request_fixture,
+    select_node_prefix,
 )
 
 from torchlens.split import GraphPartition, SplitFeatures
@@ -42,7 +44,8 @@ def test_eval_batchnorm_state_stays_frozen_across_partition_and_recut(
         model,
         torch.randn(4, 4, device=device),
         request_fixture(
-            "through:" + "2", features=SplitFeatures(training=True, retain_trace=retain_trace)
+            partial(select_node_prefix, node_id="2"),
+            features=SplitFeatures(training=True, retain_trace=retain_trace),
         ),
     )
     selected = frozenset(

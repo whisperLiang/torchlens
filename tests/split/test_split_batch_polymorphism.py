@@ -7,6 +7,7 @@ whitelist: the runtime accepts any positive compatible batch.
 from __future__ import annotations
 
 import copy
+from functools import partial
 
 import pytest
 import torch
@@ -15,6 +16,8 @@ from v2_helpers import (
     candidate_report,
     prepare_fixture,
     repartition_fixture,
+    select_node_prefix,
+    select_prefix,
     split_request,
 )
 
@@ -51,7 +54,9 @@ def test_single_trace_replays_and_trains_across_runtime_batches() -> None:
     torch.manual_seed(0)
     model = TinyMlp()
     example = torch.randn(2, 4)
-    runtime = prepare_fixture(model, example, split_request("through:relu", trainable=True))
+    runtime = prepare_fixture(
+        model, example, split_request(partial(select_node_prefix, node_id="relu"), trainable=True)
+    )
 
     # One canonical capture at a small batch serves every runtime batch below.
     assert runtime.traced_batch_size in {1, 2}
@@ -97,7 +102,9 @@ def test_split_training_matches_full_model_training() -> None:
     split_model = copy.deepcopy(model)
     x = torch.randn(8, 4)
     y = torch.randn(8, 3)
-    runtime = prepare_fixture(split_model, x, split_request("through:relu", trainable=True))
+    runtime = prepare_fixture(
+        split_model, x, split_request(partial(select_node_prefix, node_id="relu"), trainable=True)
+    )
     boundary = runtime.run_training_prefix(x)
     suffix_opt = torch.optim.SGD(split_model.fc2.parameters(), lr=0.05)
     prefix_opt = torch.optim.SGD(split_model.fc1.parameters(), lr=0.05)
@@ -121,7 +128,9 @@ def test_canonical_capture_prefers_batch_one() -> None:
     torch.manual_seed(0)
     model = TinyMlp().eval()
     example = torch.randn(32, 4)
-    runtime = prepare_fixture(model, example, split_request("through:relu"))
+    runtime = prepare_fixture(
+        model, example, split_request(partial(select_node_prefix, node_id="relu"))
+    )
 
     assert runtime.traced_batch_size == 1
     replayed = runtime.replay(torch.randn(32, 4))
@@ -132,7 +141,9 @@ def test_untested_batch_is_not_range_rejected() -> None:
     """A compatible batch that no test used as a range bound is accepted."""
 
     model = TinyMlp().eval()
-    runtime = prepare_fixture(model, torch.randn(2, 4), split_request("through:relu"))
+    runtime = prepare_fixture(
+        model, torch.randn(2, 4), split_request(partial(select_node_prefix, node_id="relu"))
+    )
     x = torch.randn(7, 4)
     with torch.no_grad():
         torch.testing.assert_close(runtime.replay(x), model(x), atol=1e-5, rtol=1e-4)
@@ -142,7 +153,9 @@ def test_partition_candidates_enumerate_atomic_topological_prefixes() -> None:
     """Every before/after compute cut is discoverable with an explicit reason."""
 
     model = TinyMlp().eval()
-    runtime = prepare_fixture(model, torch.randn(2, 4), split_request("through:relu"))
+    runtime = prepare_fixture(
+        model, torch.randn(2, 4), split_request(partial(select_node_prefix, node_id="relu"))
+    )
     report = candidate_report(
         runtime,
     )
@@ -163,7 +176,9 @@ def test_every_valid_boundary_replays_across_batches_from_one_capture() -> None:
 
     torch.manual_seed(0)
     model = TinyMlp().eval()
-    seed = prepare_fixture(model, torch.randn(2, 4), split_request("through:relu"))
+    seed = prepare_fixture(
+        model, torch.randn(2, 4), split_request(partial(select_node_prefix, node_id="relu"))
+    )
     report = candidate_report(
         seed,
     )
@@ -203,7 +218,11 @@ def test_residual_and_multi_output_frontiers_cross_every_live_tensor() -> None:
             return self.fc2(h) + h
 
     model = Residual().eval()
-    seed = prepare_fixture(model, torch.randn(2, 4), split_request("50%"))
+    seed = prepare_fixture(
+        model,
+        torch.randn(2, 4),
+        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    )
     report = candidate_report(
         seed,
     )
@@ -221,7 +240,9 @@ def test_boundary_schema_is_batch_neutral() -> None:
     """A boundary schema spells the batch axis symbolically, not as traced B."""
 
     model = TinyMlp().eval()
-    runtime = prepare_fixture(model, torch.randn(2, 4), split_request("through:relu"))
+    runtime = prepare_fixture(
+        model, torch.randn(2, 4), split_request(partial(select_node_prefix, node_id="relu"))
+    )
     symbol = runtime.request.batch_symbol
     schemas = [item for item in runtime.boundary_schema if item.shape is not None]
     assert schemas
@@ -244,7 +265,9 @@ def test_cpu_prefix_cuda_suffix_replay_and_training() -> None:
     torch.manual_seed(0)
     model = TinyMlp().eval()
     example = torch.randn(2, 4)
-    runtime = prepare_fixture(model, example, split_request("through:relu", trainable=True))
+    runtime = prepare_fixture(
+        model, example, split_request(partial(select_node_prefix, node_id="relu"), trainable=True)
+    )
     placed = runtime.with_placement(PlacementPlan.across("cpu", "cuda:0"))
     x = torch.randn(3, 4)
     with torch.no_grad():
@@ -257,7 +280,7 @@ def test_cpu_prefix_cuda_suffix_replay_and_training() -> None:
         train_model,
         example,
         split_request(
-            "through:relu",
+            partial(select_node_prefix, node_id="relu"),
             trainable=True,
             placement=PlacementPlan.across("cpu", "cuda:0"),
         ),
@@ -280,5 +303,5 @@ def test_explicit_placement_on_unsupported_backend_fails_closed() -> None:
         require_placement_support(
             adapter,
             PlacementPlan.across("cpu", "cuda:0"),
-            split_point="through:relu",
+            split_point=partial(select_node_prefix, node_id="relu"),
         )

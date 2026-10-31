@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+from functools import partial
 
 import pytest
 import torch
@@ -13,6 +14,8 @@ from v2_helpers import (
     plan_fixture,
     prepare_fixture,
     request_fixture,
+    select_node_prefix,
+    select_prefix,
 )
 
 from torchlens.split import GraphPartition, SplitFeatures
@@ -55,7 +58,8 @@ def test_anchor_initialization_preserves_training_and_recuts(
         model,
         torch.randn(1, 4, device=device),
         request_fixture(
-            "through:" + "cut", features=SplitFeatures(training=True, retain_trace=retain_trace)
+            partial(select_node_prefix, node_id="cut"),
+            features=SplitFeatures(training=True, retain_trace=retain_trace),
         ),
     )
     graph = runtime.trace_graph
@@ -117,7 +121,13 @@ def test_uncertified_out_writes_stay_refused(destination: str) -> None:
                 return torch.add(x, 1, out=out)
             return torch.arange(4, out=out)
 
-    runtime = capture_fixture(UnprovenOut(), torch.ones(4), request_fixture("fraction:" + str(50)))
+    runtime = capture_fixture(
+        UnprovenOut(),
+        torch.ones(4),
+        request_fixture(
+            lambda g, count=50: select_prefix(g, (len(g.compute_nodes) - 1) * count // 100 + 1)
+        ),
+    )
     partition = GraphPartition(
         frozenset(node.canonical_id for node in runtime.trace_graph.compute_nodes)
     )
@@ -130,7 +140,9 @@ def test_anchor_destination_cannot_cross_the_boundary() -> None:
     """The allocation and write must remain in the same segment."""
 
     runtime = prepare_fixture(
-        AnchorInitialization(), torch.randn(2, 4), request_fixture("through:" + "cut")
+        AnchorInitialization(),
+        torch.randn(2, 4),
+        request_fixture(partial(select_node_prefix, node_id="cut")),
     )
     selected: set[str] = set()
     for node in runtime.trace_graph.compute_nodes:
@@ -155,7 +167,11 @@ def test_anchor_initialization_keeps_the_complete_effect_order_barrier() -> None
             return independent + anchors
 
     runtime = capture_fixture(
-        Interleaved(), torch.randn(2, 4), request_fixture("fraction:" + str(50))
+        Interleaved(),
+        torch.randn(2, 4),
+        request_fixture(
+            lambda g, count=50: select_prefix(g, (len(g.compute_nodes) - 1) * count // 100 + 1)
+        ),
     )
     selected = frozenset(
         node.canonical_id
@@ -171,7 +187,9 @@ def test_anchor_requires_matching_symbolic_destination_extents() -> None:
     """Matching B=1 metadata alone cannot certify a dynamically resizing destination."""
 
     runtime = prepare_fixture(
-        AnchorInitialization(), torch.randn(1, 4), request_fixture("through:" + "cut")
+        AnchorInitialization(),
+        torch.randn(1, 4),
+        request_fixture(partial(select_node_prefix, node_id="cut")),
     )
     graph = runtime.trace_graph
     allocation = next(node for node in graph.compute_nodes if node.op_type == "newfull")

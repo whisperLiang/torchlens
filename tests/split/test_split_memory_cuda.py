@@ -12,12 +12,14 @@ import gc
 import json
 import os
 from collections.abc import Callable
+from functools import partial
 
 import pytest
 import torch
 from torch import nn
 from v2_helpers import (
     prepare_fixture,
+    select_node_prefix,
     split_request,
 )
 
@@ -141,7 +143,11 @@ def test_cuda_microbatch_and_detached_prefix_reduce_peak_allocated_memory(
     model = ActivationHeavySplit().cuda().eval()
     inputs = torch.randn(12, 8, 128, 128, device="cuda")
     targets = torch.randint(0, 4, (12,), device="cuda")
-    runtime = prepare_fixture(model, inputs[:1], split_request("through:bridge", trainable=True))
+    runtime = prepare_fixture(
+        model,
+        inputs[:1],
+        split_request(partial(select_node_prefix, node_id="bridge"), trainable=True),
+    )
     graph_identity = runtime.graph_identity
     split_id = runtime.split_id
     boundary = runtime.run_prefix(inputs)
@@ -177,7 +183,7 @@ def test_cuda_microbatch_and_detached_prefix_reduce_peak_allocated_memory(
         "logical_batch": 12,
         "microbatch_size": 3,
         "input_shape": list(inputs.shape),
-        "split_point": "through:bridge",
+        "split_point": partial(select_node_prefix, node_id="bridge"),
         "partition": runtime.request.boundary,
         "suffix": suffix_measurements,
         "prefix": prefix_measurements,

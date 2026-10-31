@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import pytest
 import torch
 from v2_helpers import (
     prepare_fixture,
+    select_node_prefix,
     split_request,
 )
 
@@ -85,7 +88,13 @@ class _PooledClassifier(torch.nn.Module):
         return self.head(value)
 
 
-@pytest.mark.parametrize("boundary", ["until:flatten", "through:flatten"])
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        partial(select_node_prefix, node_id="flatten", include=False),
+        partial(select_node_prefix, node_id="flatten"),
+    ],
+)
 @pytest.mark.parametrize(
     ("spelling", "start_dim", "end_dim"),
     [

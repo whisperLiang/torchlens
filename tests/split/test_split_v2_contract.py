@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import pytest
 import torch
 from torch import nn
 from v2_helpers import (
     prepare_fixture,
     request_fixture,
+    select_node_prefix,
 )
 
 from torchlens.split import (
@@ -47,7 +50,7 @@ def test_v2_prepare_normalizes_graph_and_exposes_boundary_abi() -> None:
     model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
     inputs = torch.randn(2, 4)
     request = request_fixture(
-        selection="through:" + "relu",
+        selection=partial(select_node_prefix, node_id="relu"),
         backend="torch",
         features=SplitFeatures(boundary_cache=True),
         validation="strict",

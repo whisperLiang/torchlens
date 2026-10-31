@@ -957,9 +957,9 @@ DEVICE_GATED_SKIPIF_LEDGER: dict[str, str] = {
         "the same microbatch numerical contracts have unconditional CPU coverage. "
         "Executed on H100 PCIe; skipped on CPU-only CI"
     ),
-    "split/test_split_ownership.py::test_migration_reports_parameter_and_buffer_device_moves": (
-        "[2026-10-29] Parameter and buffer ownership across CPU/CUDA placement needs "
-        "both device types. Passed on Jetson Orin with Torch 2.11; skipped in the "
+    "split/test_split_ownership.py::test_migration_reports_parameter_moves_and_prefix_buffer_ownership": (
+        "[2026-10-30] Parameter moves and prefix buffer ownership need "
+        "both device types. Executed on Jetson Orin with Torch 2.11; skipped in the "
         "local CPU environment and CPU-only CI"
     ),
     "split/test_split_profiling.py::test_profile_cuda_phases": (

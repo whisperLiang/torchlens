@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from unittest.mock import patch
 
 import pytest
@@ -12,6 +13,7 @@ from v2_helpers import (
     candidate_report,
     prepare_fixture,
     repartition_fixture,
+    select_node_prefix,
     split_request,
 )
 
@@ -45,7 +47,9 @@ def test_candidate_diagnosis_never_builds_segments() -> None:
     """Only the selected point is materialized after candidate analysis."""
 
     x = torch.ones(2, 4)
-    runtime = prepare_fixture(PartitionModel().eval(), x, split_request("through:relu"))
+    runtime = prepare_fixture(
+        PartitionModel().eval(), x, split_request(partial(select_node_prefix, node_id="relu"))
+    )
     with (
         patch.object(
             runtime.adapter, "build_segments", wraps=runtime.adapter.build_segments
@@ -79,7 +83,11 @@ def test_partition_analysis_does_not_bind_lazy_owned_state(
     runtime = prepare_fixture(
         model,
         x,
-        split_request("through:relu", placement=PlacementPlan.on("cpu"), live_param_sources=True),
+        split_request(
+            partial(select_node_prefix, node_id="relu"),
+            placement=PlacementPlan.on("cpu"),
+            live_param_sources=True,
+        ),
     )
     states = (
         runtime.segments.prefix._state,
@@ -93,7 +101,7 @@ def test_partition_analysis_does_not_bind_lazy_owned_state(
         if state._replica_pool is not None
     }
     candidate_report(runtime, diagnose=True)
-    analyze_fixture(runtime, "until:" + "last")
+    analyze_fixture(runtime, partial(select_node_prefix, node_id="last", include=False))
     assert tuple(state._entries for state in states) == entries_before
     for state in states:
         if state._replica_pool is not None:
@@ -109,8 +117,10 @@ def test_explicit_analysis_and_repartition_materialize_equivalent_runtimes() -> 
 
     model = PartitionModel().eval()
     x = torch.ones(2, 4)
-    seed = prepare_fixture(model, x, split_request("through:relu", trainable=True))
-    point = "until:" + "last"
+    seed = prepare_fixture(
+        model, x, split_request(partial(select_node_prefix, node_id="relu"), trainable=True)
+    )
+    point = partial(select_node_prefix, node_id="last", include=False)
     analysis = analyze_fixture(seed, point)
     assert isinstance(analysis, PartitionAnalysis)
     assert analysis.source_graph is seed.trace_graph
@@ -134,7 +144,13 @@ def test_analysis_cannot_be_materialized_on_another_capture() -> None:
     """A same-shaped foreign graph cannot supply a point analysis."""
 
     x = torch.ones(2, 4)
-    first = prepare_fixture(PartitionModel().eval(), x, split_request("through:relu"))
-    second = prepare_fixture(PartitionModel().eval(), x, split_request("through:relu"))
+    first = prepare_fixture(
+        PartitionModel().eval(), x, split_request(partial(select_node_prefix, node_id="relu"))
+    )
+    second = prepare_fixture(
+        PartitionModel().eval(), x, split_request(partial(select_node_prefix, node_id="relu"))
+    )
     with pytest.raises(ValueError, match="another captured graph"):
-        second.materialize(analyze_fixture(first, "until:" + "last"))
+        second.materialize(
+            analyze_fixture(first, partial(select_node_prefix, node_id="last", include=False))
+        )

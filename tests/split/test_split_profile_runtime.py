@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from unittest.mock import patch
 
 import torch
@@ -10,6 +11,7 @@ from v2_helpers import (
     analyze_fixture,
     prepare_fixture,
     request_fixture,
+    select_node_prefix,
 )
 
 from torchlens.split import GraphPartition, SplitFeatures
@@ -22,7 +24,8 @@ def test_profile_and_partition_metrics_need_no_execution() -> None:
         model,
         torch.ones(2, 4),
         request_fixture(
-            "through:" + "1", features=SplitFeatures(training=True, retain_trace=False)
+            partial(select_node_prefix, node_id="1"),
+            features=SplitFeatures(training=True, retain_trace=False),
         ),
     )
     with (
@@ -61,7 +64,11 @@ def test_unproven_batch_costs_are_unknown() -> None:
             """Return distinct compute graphs for the two witness batches."""
             return torch.sigmoid(torch.relu(x)) if x.shape[0] > 1 else torch.relu(x)
 
-    runtime = prepare_fixture(BatchBranch(), torch.ones(2, 4), request_fixture("through:" + "relu"))
+    runtime = prepare_fixture(
+        BatchBranch(),
+        torch.ones(2, 4),
+        request_fixture(partial(select_node_prefix, node_id="relu")),
+    )
     assert runtime.batch_validation["status"] == "failed"
     profile = runtime.graph_profile(batch_size=8)
     assert "batch_shape:extrapolation_unproven" in profile.unknown_cost_diagnostics
