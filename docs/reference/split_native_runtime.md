@@ -213,6 +213,9 @@ turn a failing float32 experiment into a pass or change tolerances.
 RF-DETR is skipped without both the package and a trusted local checkpoint. A failed,
 skipped or unsupported row is never reported as a numerical pass.
 
+See the dated [acceptance report](split_runtime_acceptance.md) for executed
+configurations, measured distributions and outstanding validation.
+
 Repartition measurements also accept `--model`, `--weights`, `--prefix-device`
 and `--suffix-device`. CUDA work is synchronized at measurement boundaries.
 Run `--memory-policy latest`, `retain`, and `clear` in separate processes, each

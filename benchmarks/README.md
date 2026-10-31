@@ -42,6 +42,9 @@ arguments; `--source-root` selects the implementation under measurement.
 The `device_transfer` status is based on observed state-copy samples; different
 placement strings alone do not establish that a recut copied state.
 
+The dated [acceptance report](../docs/reference/split_runtime_acceptance.md)
+lists executed configurations, unsupported cases and remaining verification.
+
 The facet-indirection benchmark reads a locally generated capture-spine measurement.
 Run these in order to create the ignored JSON files under `benchmarks/perf/`:
 
