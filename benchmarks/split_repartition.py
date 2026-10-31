@@ -14,6 +14,7 @@ import statistics
 import sys
 import time
 import tracemalloc
+import weakref
 from collections import defaultdict
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -21,6 +22,17 @@ from math import ceil
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+
+from split_graph_partition import (
+    candidates,
+    effective_parameters,
+    load_model,
+    make_optimizer,
+    memory_snapshot,
+    rebind_optimizer,
+    scalar_loss,
+    synchronize,
+)
 
 
 def distribution(values: list[float]) -> dict[str, Any]:
@@ -38,14 +50,24 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--prefix-device")
+    parser.add_argument("--suffix-device")
+    parser.add_argument(
+        "--model", choices=("resnet18", "transformer", "yolov8", "rfdetr"), default="resnet18"
+    )
+    parser.add_argument("--weights", type=Path)
+    parser.add_argument("--memory-iterations", type=int, default=100)
+    parser.add_argument("--memory-policy", choices=("latest", "retain", "clear"), default="latest")
     parser.add_argument("--repeats", type=int, default=25)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--seed", type=int, default=73)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--prefix-counts", type=int, nargs=3, default=[18, 34, 51])
+    parser.add_argument("--prefix-counts", type=int, nargs=3)
     args = parser.parse_args()
-    if min(args.repeats, args.batch_size) < 1:
-        parser.error("repeats and batch-size must be positive")
+    if min(args.repeats, args.batch_size, args.memory_iterations) < 1:
+        parser.error("repeats, batch-size and memory-iterations must be positive")
+    args.prefix_device = args.prefix_device or args.device
+    args.suffix_device = args.suffix_device or args.device
     sys.path.insert(0, str(args.source_root.resolve()))
     import torch
     from torchvision.models import resnet18
@@ -53,6 +75,7 @@ def main() -> None:
     import torchlens.split as split
     from torchlens.split import (
         GraphPartition,
+        PlacementPlan,
         SplitFeatures,
         api,
         planner,
@@ -71,12 +94,15 @@ def main() -> None:
     if args.device == "cuda" and not torch.cuda.is_available():
         report = {"status": "not_run", "reason": "CUDA unavailable"}
     else:
-        model = resnet18(weights=None).eval().to(args.device)
-        x = torch.randn(args.batch_size, 3, 32, 32, device=args.device)
+        if args.model == "resnet18":
+            model, dimensions = resnet18(weights=None), (3, 32, 32)
+        else:
+            model, dimensions, _configuration = load_model(args.model, args.weights)
+        model.eval().to(args.device)
+        x = torch.randn(args.batch_size, *dimensions, device=args.prefix_device)
 
         def sync() -> None:
-            if args.device == "cuda":
-                torch.cuda.synchronize()
+            synchronize()
 
         def measure(
             action: Callable[[], Any], before: Callable[[], Any] | None = None
@@ -100,8 +126,10 @@ def main() -> None:
             """Record identical capture stages on both compared revisions."""
 
             def timed(*values: Any, **kwargs: Any) -> Any:
+                sync()
                 phase_start = time.perf_counter()
                 result = action(*values, **kwargs)
+                sync()
                 capture_phases[name] = 1000 * (time.perf_counter() - phase_start)
                 return result
 
@@ -120,19 +148,36 @@ def main() -> None:
             ),
         ):
             if hasattr(split, "prepare_graph"):
-                graph = split.prepare_graph(model, x, features=features)
+                graph = split.prepare_graph(
+                    model,
+                    x.to(args.device),
+                    features=features,
+                    placement=PlacementPlan.across(args.prefix_device, args.suffix_device),
+                )
             else:
                 graph = split.prepare(
                     model, x, split.SplitRequest(GraphPartition(frozenset()), features=features)
                 )
         capture_ms = 1000 * (time.perf_counter() - started)
         nodes = graph.trace_graph.compute_nodes
-        partitions = [
-            GraphPartition(frozenset(n.canonical_id for n in nodes[:count]))
-            for count in args.prefix_counts
-        ]
-        for partition in partitions:
-            graph.analyze(partition)
+        if args.model == "resnet18" or args.prefix_counts:
+            args.prefix_counts = args.prefix_counts or [18, 34, 51]
+            partitions = [
+                GraphPartition(frozenset(n.canonical_id for n in nodes[:count]))
+                for count in args.prefix_counts
+            ]
+            for partition in partitions:
+                graph.analyze(partition)
+        else:
+            partitions = []
+            for partition in candidates(graph.trace_graph, "sequential"):
+                try:
+                    graph.analyze(partition)
+                    partitions.append(partition)
+                except split.errors.SplitError:
+                    continue
+                if len(partitions) == 3:
+                    break
         if len(set(partitions)) != 3:
             raise AssertionError("benchmark requires three distinct partitions")
         runtime = graph.materialize(graph.analyze(partitions[0]))
@@ -171,14 +216,18 @@ def main() -> None:
         timings["same_partition_repartition"] = measure(lambda: recut(partitions[0]))
         timings["rotating_repartition"] = measure(rotate)
         timings["cold_repartition"] = measure(rotate, runtime.clear_analysis_cache)
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+        parameters = effective_parameters(runtime)
+        optimizer = make_optimizer("momentum", parameters.values())
         train_times, post_train = [], []
         for _ in range(min(args.repeats, 10)):
+            sync()
             start = time.perf_counter()
             optimizer.zero_grad(set_to_none=True)
             boundary = runtime.run_training_prefix(x)
             _, grads = runtime.train_suffix(
-                boundary, torch.zeros(args.batch_size, dtype=torch.long, device=args.device)
+                boundary,
+                None,
+                loss_fn=scalar_loss,
             )
             runtime.backward_prefix(boundary, grads)
             optimizer.step()
@@ -188,6 +237,9 @@ def main() -> None:
             rotate()
             sync()
             post_train.append(1000 * (time.perf_counter() - start))
+            current = effective_parameters(runtime)
+            optimizer = rebind_optimizer("momentum", optimizer, parameters, current)
+            parameters = current
         timings["training_step"] = distribution(train_times)
         timings["post_training_repartition"] = distribution(post_train)
         # Exclusive phase accounting in a SEPARATE instrumented pass.
@@ -196,12 +248,14 @@ def main() -> None:
 
         def instrument(name: str, action: Callable[..., Any]) -> Callable[..., Any]:
             def timed(*a: Any, **kw: Any) -> Any:
+                sync()
                 start = time.perf_counter()
                 frame = [0.0]
                 stack.append(frame)
                 try:
                     return action(*a, **kw)
                 finally:
+                    sync()
                     elapsed = time.perf_counter() - start
                     stack.pop()
                     if stack:
@@ -243,13 +297,56 @@ def main() -> None:
             for name, values in phases.items()
         }
         phase_report.setdefault("device_transfer", {"status": "not_run", "n": 0})
+        # No live optimizer may retain obsolete parameter replicas during the
+        # runtime-lifetime comparison. Each policy is run in its own process.
+        del optimizer, parameters, current, boundary, grads
         gc.collect()
+        references: list[Any] = []
+        held: list[Any] = []
+        memory_samples = []
         tracemalloc.start()
-        for _ in range(args.repeats):
-            rotate()
+
+        def memory_row(iteration: int, *, after_gc: bool) -> dict[str, Any]:
+            """Disclose allocator/storage metrics and actual runtime liveness separately."""
+            retained, peak = tracemalloc.get_traced_memory()
+            return {
+                "iteration": iteration,
+                "after_gc": after_gc,
+                **memory_snapshot(),
+                "python_metadata_retained_bytes": retained,
+                "python_metadata_peak_bytes": peak,
+                "active_measured_runtimes": sum(ref() is not None for ref in references),
+                "analysis_entries": runtime.analysis_cache_info()["size"],
+                "blueprint_entries": len(graph.trace_graph._segment_blueprints),
+                "profile_entries": len(runtime._profile_cache),
+            }
+
+        memory_samples.append(memory_row(0, after_gc=True))
+        # Repartition must reuse this capture, even when caches are cleared.
+        with patch.object(
+            api,
+            "capture_canonical_model",
+            side_effect=AssertionError("recapture during repartition"),
+        ):
+            for index in range(1, args.memory_iterations + 1):
+                rotate()
+                references.append(weakref.ref(runtime))
+                if args.memory_policy == "retain":
+                    held.append(runtime)
+                elif args.memory_policy == "clear":
+                    runtime.clear_analysis_cache()
+                if index % 25 == 0 or index == args.memory_iterations:
+                    sync()
+                    memory_samples.append(memory_row(index, after_gc=False))
+                    gc.collect()
+                    memory_samples.append(memory_row(index, after_gc=True))
+        held.clear()
         gc.collect()
+        memory_samples.append(memory_row(args.memory_iterations, after_gc=True))
         retained, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
+        if sum(ref() is not None for ref in references) != 1:
+            raise AssertionError("obsolete measured runtimes survived release and GC")
         host_memory = None
         try:
             import psutil
@@ -268,7 +365,8 @@ def main() -> None:
             "platform": platform.platform(),
             "torch": torch.__version__,
             "device": args.device,
-            "model": "torchvision.resnet18(weights=None).eval()",
+            "model": args.model,
+            "placement": {"prefix": args.prefix_device, "suffix": args.suffix_device},
             "seed": args.seed,
             "batch": args.batch_size,
             "threads": 1,
@@ -288,13 +386,17 @@ def main() -> None:
                 "python_metadata_peak_bytes": peak,
                 "python_metadata_retained_bytes": retained,
                 "host_memory": host_memory,
+                "policy": args.memory_policy,
+                "iterations": args.memory_iterations,
+                "samples": memory_samples,
+                "recut_capture_count": 0,
                 "cuda_peak_allocated": torch.cuda.max_memory_allocated()
                 if args.device == "cuda"
                 else None,
             },
-            "device_transfer": "not_run: CPU-only"
-            if not torch.cuda.is_available()
-            else "not_run: same-device benchmark",
+            "device_transfer": "measured"
+            if phase_report["device_transfer"]["n"] > 0
+            else "not_run: no state copies observed",
             "partition_ids": [p.as_boundary() for p in partitions],
             "prefix_counts": args.prefix_counts,
         }

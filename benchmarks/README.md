@@ -3,6 +3,45 @@
 This directory contains standalone benchmark scripts. Generate result artifacts
 locally when measuring a change; historical run outputs are not committed.
 
+## Native split acceptance and repartition
+
+Run a fresh process for each model, mode and placement. Strict acceptance writes
+JSON before exiting and returns zero only for `passed`:
+
+```bash
+python benchmarks/split_graph_partition.py --model resnet18 --training --strict --output resnet-eval.json
+python benchmarks/split_graph_partition.py --model transformer --model-mode train --strict --output distilbert-train.json
+python benchmarks/split_graph_partition.py --model yolov8 --model-mode train --strict --output yolo-train.json
+python benchmarks/split_graph_partition.py --model rfdetr --weights /trusted/rf-detr-nano.pth --training --strict --output rfdetr-eval.json
+python benchmarks/split_graph_partition.py --model resnet18 --training --strict --prefix-device cpu --suffix-device cuda:0 --output resnet-heterogeneous.json
+```
+
+The report separates sequential/noncontiguous partitions, forward, backward,
+optimizer, dynamic batch, repartition, cross-device and actual train-mode checks.
+Unsupported or unexecuted checks never count as passing. Eval-mode AD uses a
+synthetic objective; actual detection training uses the official criterion and
+synthetic annotations. Float32 remains the default. An additional `--dtype float64`
+experiment is labelled separately and retains the same tolerances.
+
+Collect synchronized raw repartition samples and separate memory evidence:
+
+```bash
+python benchmarks/split_repartition.py --device cuda --repeats 50 --output repartition-cuda.json
+python benchmarks/split_repartition.py --model transformer --prefix-device cpu --suffix-device cuda:0 --repeats 50 --output transformer-heterogeneous.json
+python benchmarks/split_repartition.py --device cuda --memory-policy retain --memory-iterations 100 --output retain.json
+python benchmarks/split_repartition.py --device cuda --memory-policy clear --memory-iterations 100 --output clear.json
+```
+
+The default memory policy keeps only the latest runtime. `retain` deliberately
+holds every measured runtime until the final GC checkpoint; `clear` invalidates
+analysis/profile caches on each iteration. All policies assert that only one
+measured runtime survives release and GC. Cache counts, RSS, tracemalloc and
+CUDA allocated/reserved/peak memory are separate metrics. Run policies and
+Before/After revisions in separate processes using identical environments and
+arguments; `--source-root` selects the implementation under measurement.
+The `device_transfer` status is based on observed state-copy samples; different
+placement strings alone do not establish that a recut copied state.
+
 The facet-indirection benchmark reads a locally generated capture-spine measurement.
 Run these in order to create the ignored JSON files under `benchmarks/perf/`:
 

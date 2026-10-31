@@ -80,6 +80,15 @@ def main() -> None:
     partition = choose_small_ready_calls(profile)
     analysis = graph.analyze(partition)
     runtime = graph.materialize(analysis)
+    ordered = [node.canonical_id for node in graph.trace_graph.compute_nodes]
+    assert partition.prefix_node_ids != frozenset(ordered[: len(partition.prefix_node_ids)])
+    alternate = GraphPartition(
+        frozenset(
+            node.canonical_id
+            for node in graph.trace_graph.compute_nodes
+            if node.module_path in {"right", "right_relu"}
+        )
+    )
     migration = runtime.plan_state_migration(partition)
     print("Selected prefix nodes:", sorted(partition.prefix_node_ids))
     print("Preflight:", analysis.capability_report.preflight_ok)
@@ -91,9 +100,11 @@ def main() -> None:
     # This same-device example retains the original parameter objects, so one
     # caller-owned optimizer is valid across recuts. Cross-device callers must
     # inspect parameter_bindings() and the external optimizer migration contract.
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    bindings = runtime.parameter_bindings()
+    parameters = {id(value): value for owners in bindings.values() for value in owners.values()}
+    optimizer = torch.optim.Adam(parameters.values(), lr=0.01)
     reference_optimizer = torch.optim.Adam(reference.parameters(), lr=0.01)
-    for _ in range(2):
+    for selected in (alternate, partition):
         optimizer.zero_grad()
         reference_optimizer.zero_grad()
         expected_loss = nn.functional.mse_loss(reference(inputs), targets)
@@ -108,7 +119,18 @@ def main() -> None:
         reference_optimizer.step()
         for actual, expected in zip(model.parameters(), reference.parameters(), strict=True):
             torch.testing.assert_close(actual, expected)
-        runtime = runtime.repartition(partition)
+        migration = runtime.plan_state_migration(selected)
+        assert migration.supported
+        runtime = runtime.repartition(selected)
+        rebound = {
+            id(value)
+            for owners in runtime.parameter_bindings().values()
+            for value in owners.values()
+        }
+        assert rebound == parameters.keys(), (
+            "Cross-device copies require explicit optimizer reassociation"
+        )
+        torch.testing.assert_close(runtime.replay(inputs), reference(inputs))
     print("Forward, parameter gradients and two Adam updates agree; recuts reused the capture.")
 
 

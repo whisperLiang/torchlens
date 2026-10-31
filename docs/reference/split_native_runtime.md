@@ -153,15 +153,24 @@ boundary leaves. That does not license mutating floating autograd leaves:
 at analysis time. Cross-device shared trainable parameters still require a gradient
 merge contract and refuse when the runtime cannot consolidate them.
 
+For connected Torch training, boundary buffers consumed by planner-certified
+suffix writes remain bound to current state. BatchNorm running means, variances
+and counters therefore update their owners in both full-batch and sequential
+microbatch execution. Ordinary activation/index roots still receive isolated
+copies. Mutable buffer training requires `run_training_prefix()`; a detached or
+cached state snapshot refuses instead of silently losing updates. Repartition
+inherits those updated values. BatchNorm microbatches follow native sequential
+chunk statistics, which differ from a single full-batch BatchNorm call.
+
 ## Real-model validation
 
 Run each command in a fresh process:
 
 ```bash
-python benchmarks/split_graph_partition.py --model resnet18 --training --output resnet18.json
-python benchmarks/split_graph_partition.py --model transformer --training --output distilbert.json
-python benchmarks/split_graph_partition.py --model yolov8 --training --output yolov8n.json
-python benchmarks/split_graph_partition.py --model rfdetr --training --weights /trusted/checkpoint.pth --output rfdetr.json
+python benchmarks/split_graph_partition.py --model resnet18 --training --strict --output resnet18.json
+python benchmarks/split_graph_partition.py --model transformer --model-mode train --strict --output distilbert-train.json
+python benchmarks/split_graph_partition.py --model yolov8 --model-mode train --strict --output yolov8n-train.json
+python benchmarks/split_graph_partition.py --model rfdetr --training --strict --weights /trusted/checkpoint.pth --output rfdetr.json
 ```
 
 Sequential and truly noncontiguous DAG results are independent; no fallback turns
@@ -172,14 +181,42 @@ A/B/C/A recut experiment. Every B=1/2/4/8 executes explicitly.
 
 The native reference is a separate model/optimizer. The script compares finite
 outputs, loss, input/parameter/connected-boundary gradients, buffers, parameter
-updates and momentum/Adam state. Native observation hooks align exact call targets
-and unambiguous functional facades; missing gradient coverage fails. Eval mode
+updates and momentum/Adam state. Native observation hooks align semantic call
+families in captured order and use captured output paths, including overloaded
+multi-output calls; missing gradient coverage fails. Eval mode
 permits gradients while controlling dropout/running-state changes. Tied state,
 train-mode BatchNorm, microbatches, cache isolation and device migration have
 additional tests under `tests/split/`. The split model is captured once plus its
 independent B=2 shape witness; replay/recuts add zero captures.
 
-The benchmark reports cross-device tests as not run; the explicit placement matrix
-lives in `tests/split/test_split_partition_cross_device.py` and state migration tests.
+`--model-mode eval` remains the default; `--training` adds AD/optimizer probes to
+that eval graph. `--model-mode train` runs the native training path and enables
+training checks automatically. DistilBERT then uses nonzero Dropout. Detection
+training uses official losses with synthetic labelled boxes; eval AD keeps its
+separate synthetic scalar objective. The native reference uses the same captured
+per-call RNG contexts. Different CPU/CUDA generators can still produce different
+dropout masks; the benchmark discloses the resulting failure.
+
+`--prefix-device cpu --suffix-device cuda:0` uses `PlacementPlan.across()` and
+actual boundary/gradient transport. Reverse placement and distinct CUDA device
+indices use the same path. Comparisons explicitly move values to a common device.
+Optimizers bind `parameter_bindings()` and explicitly reassociate their complete
+state after each recut; `plan_state_migration()` alone does not migrate history.
+
+`--strict` exits zero only for `passed`, after writing complete JSON. `failed`,
+`unsupported`, `skipped` and `not_validated` remain distinct, with per-partition
+attempts and per-capability statuses. Unrequested capabilities show `not_run`.
+Diagnostic mode permits incomplete reports but still exits nonzero on failures.
+Use `--dtype float64` for a separately labelled precision experiment; it does not
+turn a failing float32 experiment into a pass or change tolerances.
+
 RF-DETR is skipped without both the package and a trusted local checkpoint. A failed,
 skipped or unsupported row is never reported as a numerical pass.
+
+Repartition measurements also accept `--model`, `--weights`, `--prefix-device`
+and `--suffix-device`. CUDA work is synchronized at measurement boundaries.
+Run `--memory-policy latest`, `retain`, and `clear` in separate processes, each
+with `--memory-iterations 100`, to distinguish live runtime ownership from Python
+and CUDA allocator retention. Reports include RSS, tracemalloc, CUDA allocated,
+reserved and peak bytes, weak-reference liveness, cache counts and GC checkpoints.
+The stress test never calls `empty_cache()` in its loop.

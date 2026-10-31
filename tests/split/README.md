@@ -1,5 +1,21 @@
 # Split runtime acceptance
 
+Tests construct `GraphPartition` from canonical compute IDs. Shared fixture
+selectors accept a node count or an unambiguous node/module anchor and return a
+partition; there is no string-based point-interface emulator. True DAG tests keep
+their interleaved branch sets rather than replacing them with ordered prefixes.
+
+`test_partition_benchmark.py` exercises strict/diagnostic subprocess exits, saved
+JSON, missing trusted weights, native reference observation and current buffers.
+The heterogeneous DAG matrix trains A/B/C/A with SGD, Momentum and Adam across
+B=1/2/4/8, checking all optimizer state and rebinding parameters explicitly.
+CPU, CPU→CUDA, CUDA→CPU, same-GPU and two-GPU cases are separate; missing physical
+devices skip. BatchNorm state regressions cover compact/diagnostic products,
+connected training, sequential microbatches and state preservation after recuts.
+
+Duration-budget enforcement has been removed. Test markers
+still select suites; elapsed time does not change a correctness verdict.
+
 Run the repository quality gates with the versions declared in `[project.optional-dependencies.dev]`:
 in particular Ruff 0.15.4 and mypy 2.1.0. The full-suite oracle tests also require
 a committed environment fingerprint; see [oracle environments](../oracle_environments.md).
