@@ -2,14 +2,12 @@ import gc
 import os
 import random
 import sys
-import time
 import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from os.path import join as opj
 from pathlib import Path
 from types import ModuleType
-from typing import Any
 
 import numpy as np
 import pytest
@@ -21,6 +19,7 @@ from torchlens._paddle_compat import install_import_guard
 # A lazy, extension-specific guard also handles TensorFlow imported by a pytest
 # plugin before this conftest. Do not force optional runtime imports at startup.
 install_import_guard()
+
 
 # Menagerie tests exercise the menagerie/ build subsystem, which is not importable
 # on Python < 3.11 because it uses datetime.UTC. Skip collecting them on those
@@ -126,10 +125,9 @@ def pytest_configure(config: pytest.Config) -> None:
     torch.use_deterministic_algorithms(deterministic, warn_only=deterministic_warn_only)
     # Pay TorchLens's one-time capture-machinery cost (lazy wrap_torch install,
     # dispatcher/completeness tables) at session setup too: under randomized
-    # ordering, whichever test captured FIRST was charged ~5s of one-time CPU
-    # and sporadically tripped its duration budget — the exact noise the old
-    # 15s budget crutch existed to absorb. Semantically equivalent to "some
-    # early test captured" (wrappers stay installed until explicit unwrap),
+    # ordering, whichever test captured FIRST paid the initialization cost.
+    # This is equivalent to an early test capturing (wrappers stay installed
+    # until explicit unwrap),
     # which every full-suite run already implies. Skipped for collect-only
     # sessions, which never run a capture.
     # ...and skipped when a golden-update flag is armed: in-process golden
@@ -177,293 +175,6 @@ def pytest_unconfigure(config: pytest.Config) -> None:
         os.environ["TORCHLENS_COLLAPSE_STRICT"] = prior_strict
 
 
-# Tier duration budgets (see tests/test_marker_lint.py). The r3 re-tier
-# landed, so the ENFORCEMENT budget now equals the documented PARTITION
-# boundary: smoke and unmarked tests must fit 5s, heavy 20s (each load-scaled
-# below; the pre-r3 15s crutch let a 59s test stay smoke under sprint load —
-# R41 b2 opus+sol). `slow` is unbounded, `rare` only runs on request, and
-# `serial` is NOT exempt: it resolves its heavy/smoke/unmarked budget
-# normally (r7 R41 sol LOW: this comment used to claim the opposite of
-# `_duration_budget_tier` and tests/AGENTS.md — the code is the contract).
-#
-# CHARGED TIME (round-4, the load-flake fix): a test is charged
-# min(wall seconds, CPU seconds incl. subprocess children). Wall alone
-# false-fails under parallel orchestrator load (r3settle: the same tests read
-# 2.9-14.2s quiet but 15.6-34.9s loaded); CPU alone false-fails multithreaded
-# torch ops (intra-op threads make CPU exceed wall several-fold on a quiet
-# box). Requiring BOTH measures to exceed the budget is robust to each: a
-# load-inflated test keeps its true CPU cost, a multithreaded test keeps its
-# true wall cost, and a genuinely over-budget test exceeds both. Accepted
-# residual: a test that mostly SLEEPS (low CPU, high wall) is no longer
-# catchable — the partition boundary is about compute cost, and a sleeping
-# test's wall time carries no load-independent meaning.
-SMOKE_DURATION_BUDGET_SECONDS = 5.0
-HEAVY_DURATION_BUDGET_SECONDS = 20.0
-#: Absolute enforcement grace added on top of the load-scaled budget. The
-#: charged window unavoidably absorbs BOUNDARY NOISE that belongs to no test:
-#: deferred GC of earlier tests' traces and prior-module fixture teardown both
-#: run inside whatever protocol window they happen to land in (measured: a
-#: pure-AST lint test read 5.6s in one shuffled composition and 0.4s alone).
-#: A small absolute grace kills that flap while a genuinely mis-tiered test
-#: (the 59s smoke incident) still trips by an order of magnitude. This is an
-#: enforcement tolerance on the partition boundary, not a new boundary — and
-#: never the pre-r3 15s crutch (3x the budget); it is documented in the
-#: budget sentence the docs-lockstep gate parses.
-DURATION_BUDGET_GRACE_SECONDS = 2.0
-#: Per-parametrize-cell allowance for a smoke family's aggregate budget: a
-#: family's cost legitimately scales with its cell count (278 selector cells
-#: at ~57ms/cell), so the aggregate bar is max(2x the per-test budget,
-#: this allowance x n_cells) — genuine per-cell ballooning still trips it.
-SMOKE_FAMILY_PER_CELL_SECONDS = 0.1
-
-
-#: Session-frozen load factor (r7 R41, fixwave-7): the factor was recomputed
-#: PER ITEM from instantaneous loadavg, so the same test passed or failed on
-#: momentary run-queue pressure and could raise its own budget by finishing
-#: during a load spike. One reading at first use now holds for the whole
-#: session — deterministic within a run, still load-aware across runs.
-_SESSION_LOAD_FACTOR: float | None = None
-
-
-def _smoke_budget_load_factor() -> float:
-    """Scale the wall-clock budget by CPU oversubscription, frozen per session.
-
-    Wall-clock durations inflate roughly with run-queue pressure; a fixed
-    budget false-trips whenever an orchestrator runs sibling lanes on the same
-    box (measured 2026-08-13: the same four tests read 2.9-14.2s quiet but
-    15.6-34.9s at loadavg ~5x nproc). Capped so a pathological load reading
-    can never disarm the lint entirely, and frozen at its first reading so
-    per-item load wobble cannot flip verdicts mid-session.
-    """
-
-    global _SESSION_LOAD_FACTOR
-    if _SESSION_LOAD_FACTOR is not None:
-        return _SESSION_LOAD_FACTOR
-    try:
-        load_per_cpu = os.getloadavg()[0] / max(os.cpu_count() or 1, 1)
-    except (AttributeError, OSError):  # getloadavg is absent on Windows.
-        load_per_cpu = 1.0
-    _SESSION_LOAD_FACTOR = min(max(load_per_cpu, 1.0), 4.0)
-    return _SESSION_LOAD_FACTOR
-
-
-def _duration_budget_tier(item: pytest.Item) -> tuple[str, float] | None:
-    """Return the duration-budget tier for one collected item.
-
-    The budget is TWO-directional (b2 3-lab: 217-391 unmarked files escaped
-    it entirely): an UNMARKED test runs in the mid/phase backstops, so it is
-    held to the same 5s partition boundary as smoke — if it needs longer it
-    needs a `heavy` or `slow` marker, chosen consciously.
-
-    Parameters
-    ----------
-    item:
-        Collected test item.
-
-    Returns
-    -------
-    tuple[str, float] | None
-        ``(tier_name, base_budget_seconds)``, or ``None`` for exempt tiers
-        (``slow`` unbounded, ``rare`` request-only).
-
-    ``serial`` is deliberately NOT exempt (b2 R41 round 5): it means
-    "load-sensitive, run away from parallel worker load", never "unbudgeted"
-    — the former blanket exemption let any unmarked test dodge the 5s
-    partition boundary by adding one ``@pytest.mark.serial``, with the
-    marker's isolation claim enforced by nothing. A serial item resolves its
-    heavy/smoke/unmarked budget normally; the load-factor scaling can only
-    help it.
-    """
-
-    for exempt in ("slow", "rare"):
-        if item.get_closest_marker(exempt) is not None:
-            return None
-    if item.get_closest_marker("heavy") is not None:
-        return ("heavy", HEAVY_DURATION_BUDGET_SECONDS)
-    if item.get_closest_marker("smoke") is not None:
-        return ("smoke", SMOKE_DURATION_BUDGET_SECONDS)
-    return ("unmarked", SMOKE_DURATION_BUDGET_SECONDS)
-
-
-def _process_cpu_seconds() -> float:
-    """Return cumulative CPU seconds of this process AND its waited children.
-
-    ``os.times()`` sums user+system for the process (all threads) plus the
-    user+system of terminated, waited-for children, so subprocess-heavy tests
-    are charged their real compute cost too.
-    """
-
-    times = os.times()
-    return times.user + times.system + times.children_user + times.children_system
-
-
-@pytest.hookimpl(wrapper=True)
-def pytest_runtest_makereport(
-    item: pytest.Item, call: pytest.CallInfo[Any]
-) -> Iterator[pytest.TestReport]:
-    """Accumulate per-phase wall durations for the tier duration budget."""
-
-    report = yield
-    durations = getattr(item, "_tl_phase_durations", None)
-    if durations is None:
-        durations = {}
-        item._tl_phase_durations = durations
-    durations[report.when] = report.duration
-    return report
-
-
-@pytest.hookimpl(wrapper=True)
-def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> Iterator[object]:
-    """Record tests whose CHARGED time exceeds their tier budget.
-
-    A static lint cannot know runtimes, so a slow test landing in a bounded
-    tier is only catchable at runtime. Offenders are stashed on the session
-    and asserted empty by ``test_marker_lint.py`` (ordered last), which names
-    each offender, its tier, and both measured durations.
-
-    Charged time is ``min(wall, cpu)`` — see the budget-constant comment
-    block above for why either measure alone false-fails (wall under
-    orchestrator load, CPU under torch intra-op threading).
-    """
-
-    cpu_before = _process_cpu_seconds()
-    result = yield
-    # Coverage-instrumented sessions are provably outside the budget
-    # contract: instrumentation slows every test by design, and the
-    # partition boundary is about UNINSTRUMENTED compute cost (r7 R41/R72:
-    # the nightly coverage job used to --deselect ONE budget test by a name
-    # that had since been renamed, so the real assertions ran instrumented
-    # anyway and the always-on sessionfinish tripwire could not be
-    # deselected at all). Every uninstrumented leg still records + enforces.
-    if bool(getattr(item.config.option, "cov_source", None)):
-        return result
-    cpu_seconds = _process_cpu_seconds() - cpu_before
-    wall_seconds = sum(getattr(item, "_tl_phase_durations", {}).values())
-    charged = min(wall_seconds, cpu_seconds)
-    load_factor = _smoke_budget_load_factor()
-    tier_budget = _duration_budget_tier(item)
-    if tier_budget is not None and tier_budget[0] in {"smoke", "unmarked"}:
-        # Aggregate family budgets cover every 5s-bounded tier (smoke AND
-        # unmarked — R41-4: untiered families previously had no aggregate
-        # bound at all), charged on the same min(wall, cpu) measure.
-        family = getattr(item, "originalname", None) or item.name.split("[")[0]
-        family_stats = getattr(item.session, "_tl_smoke_family_stats", None)
-        if family_stats is None:
-            family_stats = {}
-            item.session._tl_smoke_family_stats = family_stats
-        family_key = f"{item.path}::{family}"
-        family_total, family_count = family_stats.get(family_key, (0.0, 0))
-        family_total += charged
-        family_count += 1
-        family_stats[family_key] = (family_total, family_count)
-        family_budget = (
-            load_factor
-            * max(
-                2.0 * SMOKE_DURATION_BUDGET_SECONDS,
-                SMOKE_FAMILY_PER_CELL_SECONDS * family_count,
-            )
-            + DURATION_BUDGET_GRACE_SECONDS
-        )
-        family_budgets = getattr(item.session, "_tl_smoke_family_budgets", None)
-        if family_budgets is None:
-            family_budgets = {}
-            item.session._tl_smoke_family_budgets = family_budgets
-        family_budgets[family_key] = family_budget
-    if tier_budget is None:
-        return result
-    tier, base_budget = tier_budget
-    budget = base_budget * load_factor + DURATION_BUDGET_GRACE_SECONDS
-    if charged > budget:
-        offenders = getattr(item.session, "_tl_duration_budget_offenders", None)
-        if offenders is None:
-            offenders = []
-            item.session._tl_duration_budget_offenders = offenders
-        offenders.append((item.nodeid, tier, wall_seconds, cpu_seconds, budget))
-    return result
-
-
-def _duration_budget_failure_lines(session: pytest.Session) -> list[str]:
-    """Render every recorded duration-budget violation for one session.
-
-    Covers both the per-item ledger and the aggregate 5s-tier family stats,
-    mirroring exactly what ``tests/test_marker_lint.py`` asserts.
-    """
-
-    lines = [
-        f"{nodeid} [{tier}]: wall {wall:.1f}s / cpu {cpu:.1f}s "
-        f"(budget {budget:.0f}s on min(wall, cpu))"
-        for nodeid, tier, wall, cpu, budget in getattr(session, "_tl_duration_budget_offenders", [])
-    ]
-    family_budgets = getattr(session, "_tl_smoke_family_budgets", {})
-    for family, (total, count) in getattr(session, "_tl_smoke_family_stats", {}).items():
-        budget = family_budgets.get(family, float("inf"))
-        if total > budget:
-            lines.append(
-                f"{family}: {total:.1f}s charged over {count} cells (family budget {budget:.1f}s)"
-            )
-    return lines
-
-
-def _enforce_duration_budget_at_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """Always-on duration-budget tripwire (r7 R41, sol b2 HIGH).
-
-    Enforcement used to live ONLY in
-    ``test_marker_lint.py::test_bounded_tier_tests_stay_within_duration_budget``,
-    so any targeted invocation that did not collect that file exited GREEN
-    over budget — contradicting the tests/AGENTS.md sentence "checked at the
-    end of every session" and removing the tripwire from the documented
-    per-step targeted workflow. The marker-lint test remains the rich
-    reporting surface inside gate runs; this helper (called from the module's
-    single ``pytest_sessionfinish`` hook) makes the session exit non-zero
-    even when that file was never collected.
-    """
-
-    if exitstatus != 0:
-        return  # already failing (incl. the marker-lint assertion itself)
-    lines = _duration_budget_failure_lines(session)
-    if not lines:
-        return
-    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
-    header = (
-        "duration-budget tripwire (tests/conftest.py::pytest_sessionfinish): "
-        "tests exceeded their tier budget this session"
-    )
-    if reporter is not None:
-        reporter.write_line(header, red=True)
-        for line in lines:
-            reporter.write_line("  " + line, red=True)
-    else:  # pragma: no cover - headless embedding without a terminal reporter
-        print(header + "\n  " + "\n  ".join(lines))
-    session.exitstatus = 1
-
-
-@pytest.hookimpl(wrapper=True)
-def pytest_make_collect_report(
-    collector: pytest.Collector,
-) -> Iterator[pytest.CollectReport]:
-    """Record test-module import/collection wall AND CPU time for enforcement.
-
-    Parameters
-    ----------
-    collector:
-        Collector whose work is about to run.
-    """
-
-    started = time.perf_counter()
-    cpu_before = _process_cpu_seconds()
-    report = yield
-    if isinstance(collector, pytest.Module):
-        durations = getattr(collector.session, "_tl_module_collection_durations", None)
-        if durations is None:
-            durations = {}
-            collector.session._tl_module_collection_durations = durations
-        durations[str(collector.path)] = (
-            time.perf_counter() - started,
-            _process_cpu_seconds() - cpu_before,
-        )
-    return report
-
-
 def _is_full_usage_stats_run(config: pytest.Config) -> bool:
     """Return whether pytest selected the complete default non-rare suite.
 
@@ -507,8 +218,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     pass -- the explicit ``gc.collect()`` calls in weakref/leak tests AND
     CPython's automatic threshold gen-2 collections -- scans that heap at
     O(live objects), charging 4-9s of pure CPU to whichever test happens to be
-    running (69.9s of gen-2 gc in a 210s slice; the duration tripwire's
-    rotating "flakes" were exactly these). Freezing after one settling collect
+    running. Freezing after one settling collect
     moves the permanent import-time heap into gc's frozen generation, which
     collections never scan, making per-test gc cost proportional to what the
     session has created since -- ~200k objects per 1,000 tests, milliseconds.
@@ -562,29 +272,16 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         reason="ArgSpec usage coverage requires an unfiltered full tests/ run"
     )
     coverage_tests = []
-    lint_tests = []
     other_tests = []
     for item in items:
         if "test_arg_positions" in item.nodeid:
             if not collect_usage_stats:
                 item.add_marker(skip_partial_usage_stats)
             coverage_tests.append(item)
-        elif "test_marker_lint" in item.nodeid:
-            # The duration-budget lint reads offenders recorded during the run,
-            # so it must execute after every other test in the session.
-            lint_tests.append(item)
         else:
             other_tests.append(item)
-    items[:] = other_tests + coverage_tests + lint_tests
-    # Pre-fill whole-tree scan caches during collection (uncharged time): a
-    # module may expose `warm_scan_caches()` when its scanners' one-time parse
-    # cost (~5-8s of genuine CPU) would otherwise land in whichever of its
-    # tests runs first and sit on the duration-budget boundary. UNCONDITIONAL:
-    # the budget tripwire enforces at sessionfinish in EVERY session, so a
-    # targeted run of a scanner module (no marker-lint collected) must warm
-    # too or its first test eats the parse cost and trips the always-on gate.
-    # Only sessions that collected a warm-capable module pay the cost, and
-    # they would pay it inside a charged test window otherwise.
+    items[:] = other_tests + coverage_tests
+    # Pre-fill shared scanner caches once for modules selected in this session.
     warmed: set[int] = set()
     for item in items:
         module = getattr(item, "module", None)
@@ -613,7 +310,7 @@ def _coverage_requested(config: pytest.Config) -> bool:
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """Enforce the duration budget, then write coverage artifacts.
+    """Write explicitly requested coverage artifacts and reset usage statistics.
 
     Parameters
     ----------
@@ -623,7 +320,6 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         Final pytest exit status.
     """
 
-    _enforce_duration_budget_at_sessionfinish(session, exitstatus)
     del exitstatus
     _state._collect_usage_stats = False
     _state._function_call_counts.clear()

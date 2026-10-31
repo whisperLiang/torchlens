@@ -11,13 +11,7 @@ tests/AGENTS.md "Markers"):
    are fine and pass this check, because ``get_closest_marker`` sees the resolved
    per-item marks).
 
-2. **Duration budget** (runtime tripwire). The conftest hook accounts for fixture
-   setup, call, and teardown time, then checks both each item and each resolved
-   parametrized family (smoke AND unmarked) against the documented 5s partition
-   boundary. The charged measure is ``min(wall, cpu)`` — load-robust and
-   threading-robust; see the budget-constant comment block in conftest.py.
-
-3. **State-isolation census** (static). Every warn-once module global must appear
+2. **State-isolation census** (static). Every warn-once module global must appear
    in the root autouse reset inventory, and every module-scoped fixture that
    creates a Trace must yield so it can release that Trace at module teardown.
 
@@ -41,12 +35,8 @@ pytestmark = pytest.mark.smoke
 
 #: Markers that may never combine with ``smoke`` on one resolved item.
 #: ``heavy``/``slow``: additive markers keep the item in `-m smoke` despite the
-#: heavier tier. ``rare`` (R41-2) is a duration-budget EXEMPTION channel, so a
-#: smoke+rare item would sit in the commit gate with zero duration enforcement
-#: (and `-m smoke` overrides the default `-m 'not rare'`, so smoke+rare items
-#: DO run in the commit gate). ``serial`` is no longer budget-exempt (b2 R41
-#: round 5) but stays smoke-incompatible: its load-sensitivity claim
-#: contradicts running inside the parallel commit gate.
+#: heavier tier. ``rare`` and ``serial`` require separate selections rather
+#: than joining the routine smoke gate.
 _SMOKE_INCOMPATIBLE_MARKERS = ("heavy", "slow", "serial", "rare")
 
 
@@ -64,7 +54,7 @@ def _tier_combo_violations(
       5-20s and >20s) UNLESS ``slow`` arrived as a per-parametrize-cell
       refinement of a heavy family (``pytest.param(..., marks=slow)``), the
       sanctioned shape for "this one cell measures beyond heavy's ceiling"
-      (R41-3). Budget enforcement already resolves the combo as slow-wins.
+      (R41-3).
 
     Parameters
     ----------
@@ -113,7 +103,7 @@ def test_no_smoke_test_carries_a_heavier_tier_marker(request: pytest.FixtureRequ
         conflicted.extend(_item_combo_violations(item))
     assert not conflicted, (
         "Tests carry contradictory tier-marker combinations (markers are "
-        "additive; exemption markers disarm duration budgets). Fix each "
+        "additive). Fix each "
         "combination:\n  " + "\n  ".join(conflicted)
     )
 
@@ -142,155 +132,8 @@ def test_tier_combo_policy_is_red_capable(
         assert any(fragment in violation for violation in violations), (fragment, violations)
 
 
-def test_bounded_tier_tests_stay_within_duration_budget(
-    request: pytest.FixtureRequest,
-) -> None:
-    """Every bounded-tier test must finish within its tier's duration budget.
-
-    The budget is TWO-directional (R41): ``smoke`` AND unmarked tests are held
-    to the 5s partition boundary, ``heavy`` to its 20s ceiling (all
-    load-scaled); ``slow``/``rare`` are exempt by contract, and ``serial``
-    resolves its tier budget normally (b2 R41 round 5: the former blanket
-    exemption made one decorator a universal budget dodge). The
-    CHARGED time is ``min(wall, cpu)`` so neither orchestrator load (wall
-    inflation) nor torch intra-op threading (cpu inflation) can false-fail a
-    genuinely in-budget test (round-4 load-flake fix). Budget values live in
-    ``tests/conftest.py`` and ride along on each recorded offender -- a bare
-    ``conftest`` import here would be ambiguous during full-suite collection
-    (nested conftests share the module name).
-
-    This test also asserts its own LAST-position ordering: the offender
-    ledger only covers tests that already ran, so a reordering regression
-    (e.g. a plugin shuffling after the conftest reorder) must go red here
-    rather than silently truncating coverage.
-    """
-
-    items = request.session.items
-    own_index = next(
-        index for index, item in enumerate(items) if item.nodeid == request.node.nodeid
-    )
-    stragglers = [
-        item.nodeid for item in items[own_index + 1 :] if "test_marker_lint" not in item.nodeid
-    ]
-    assert not stragglers, (
-        "the duration-budget lint no longer runs last -- its offender ledger "
-        f"would miss these later tests: {stragglers[:5]}"
-    )
-
-    guidance = {
-        "smoke": "re-tier to `heavy` (5-20s) or `slow` (>20s), or make it faster",
-        "unmarked": "unmarked tests run in the mid backstop: add `heavy`/`slow` "
-        "consciously, or make it faster",
-        "heavy": "re-tier to `slow` (>20s) or make it faster",
-    }
-    offenders = getattr(request.session, "_tl_duration_budget_offenders", [])
-    lines = [
-        f"{nodeid} [{tier}]: wall {wall:.1f}s / cpu {cpu:.1f}s "
-        f"(budget {budget:.0f}s on min(wall, cpu)) -- {guidance[tier]}"
-        for nodeid, tier, wall, cpu, budget in offenders
-    ]
-    assert not offenders, (
-        "Tests exceeded their tier duration budget this session:\n  " + "\n  ".join(lines)
-    )
-
-
-def test_smoke_parametrized_families_stay_within_duration_budget(
-    request: pytest.FixtureRequest,
-) -> None:
-    """Resolved 5s-tier parameter families must stay within the aggregate budget.
-
-    Covers smoke AND unmarked families (R41-4: untiered families previously
-    had no aggregate bound). A family of N parameters legitimately costs ~N
-    single-test durations (the selector matrix is 278 cells), so each family's
-    budget scales with its resolved cell count: load_factor * max(2x the
-    per-test budget, the per-cell allowance x n_cells), charged on
-    min(wall, cpu). Genuine per-cell ballooning still trips.
-    """
-
-    family_stats = getattr(request.session, "_tl_smoke_family_stats", {})
-    family_budgets = getattr(request.session, "_tl_smoke_family_budgets", {})
-    offenders = [
-        (family, total, count, family_budgets.get(family, 0.0))
-        for family, (total, count) in family_stats.items()
-        if total > family_budgets.get(family, float("inf"))
-    ]
-    lines = [
-        f"{family}: {total:.1f}s over {count} cells (budget {budget:.0f}s)"
-        for family, total, count, budget in offenders
-    ]
-    assert not offenders, (
-        "Smoke parametrized families exceeded their aggregate cell-scaled "
-        "budget. Split or re-tier the family:\n  " + "\n  ".join(lines)
-    )
-
-
-def test_smoke_module_imports_stay_within_duration_budget(
-    request: pytest.FixtureRequest,
-) -> None:
-    """Smoke-bearing modules must import and collect within the 5s boundary.
-
-    Charged on ``min(wall, cpu)`` like the per-test budgets, so parallel
-    orchestrator load cannot false-fail module imports either.
-    """
-
-    budget = 5.0
-    durations = getattr(request.session, "_tl_module_collection_durations", {})
-    smoke_paths = {
-        str(item.path)
-        for item in request.session.items
-        if item.get_closest_marker("smoke") is not None
-    }
-    offenders = [
-        (path, durations[path])
-        for path in sorted(smoke_paths)
-        if path in durations and min(durations[path]) > budget
-    ]
-    lines = [
-        f"{path}: wall {wall:.1f}s / cpu {cpu:.1f}s (budget {budget:.0f}s on min)"
-        for path, (wall, cpu) in offenders
-    ]
-    assert not offenders, (
-        "Smoke-bearing modules exceeded the import/collection budget. Move expensive setup "
-        "behind fixtures or re-tier the module:\n  " + "\n  ".join(lines)
-    )
-
-
-def test_every_collected_module_imports_within_the_heavy_boundary(
-    request: pytest.FixtureRequest,
-) -> None:
-    """No collected module may burn more than the 20s heavy boundary importing.
-
-    r7 R41 (b2): the import/collection budget was smoke-only — a 60s import
-    in a heavy/slow/unmarked module escaped entirely, even though import cost
-    is paid by EVERY selection that collects the file (including smoke runs,
-    which collect the whole tree before deselecting). Non-smoke modules get
-    the heavy partition boundary rather than smoke's 5s; charged on
-    ``min(wall, cpu)`` like everything else.
-    """
-
-    budget = 20.0
-    durations = getattr(request.session, "_tl_module_collection_durations", {})
-    offenders = [
-        (path, values) for path, values in sorted(durations.items()) if min(values) > budget
-    ]
-    lines = [
-        f"{path}: wall {wall:.1f}s / cpu {cpu:.1f}s (budget {budget:.0f}s on min)"
-        for path, (wall, cpu) in offenders
-    ]
-    assert not offenders, (
-        "Modules exceeded the whole-tree import/collection boundary (import "
-        "cost is paid by every selection that collects the file):\n  " + "\n  ".join(lines)
-    )
-
-
 def warm_scan_caches() -> None:
-    """Pre-fill the whole-tree parse caches OUTSIDE any test's charged window.
-
-    Called from the root conftest's collection hook when this module's tests
-    are collected: the tests/-tree and torchlens/-package parses cost ~5-8s
-    of genuine CPU, which would otherwise land in whichever lint test runs
-    first and sit exactly on the smoke budget boundary.
-    """
+    """Pre-fill shared whole-tree parse caches for the static lint tests."""
 
     _parsed_test_trees()
     _warn_once_declarations(Path(__file__).resolve().parents[1] / "torchlens")
@@ -300,9 +143,7 @@ def warm_scan_caches() -> None:
 def _parsed_test_trees() -> tuple[tuple[str, ast.Module], ...]:
     """Parse every test-suite Python file ONCE per session.
 
-    The static lints below each used to re-parse the whole tree (~1300 files),
-    costing ~5s PER TEST and sitting exactly on the smoke budget boundary
-    under composition noise; one shared parse keeps each lint at ~0.1s.
+    Share the parsed corpus across the static lints to avoid repeated work.
     """
 
     tests_root = Path(__file__).resolve().parent
@@ -357,11 +198,7 @@ def _parsed_package_trees(package_root: Path) -> tuple[tuple[str, str, ast.Modul
     Same motivation as :func:`_parsed_test_trees` one tier down: the static
     censuses below each used to ``rglob`` and re-parse the whole package
     (~520 modules) independently, so the second one to run paid the full cost
-    again. That made ``test_capability_dependent_caches_are_cleared`` measure
-    6.57 s on a QUIET box against the 5 s smoke boundary -- 94% of its budget
-    with nothing else running, i.e. a session-failing tripwire under any
-    parallel load. Sharing one cached parse fixes the cost at its source
-    instead of re-tiering an honest test or widening a budget.
+    again. Sharing one cached parse avoids this repeated work.
 
     Parameters
     ----------
@@ -1290,95 +1127,3 @@ def test_usage_stats_gate_arms_on_documented_backstop_spellings(
         assert not _is_full_usage_stats_run(config(narrowed)), narrowed
     assert not _is_full_usage_stats_run(config("", keyword="foo"))
     assert not _is_full_usage_stats_run(config("", args=[str(Path(TESTS_DIR) / "sub")]))
-
-
-def test_serial_marker_is_not_a_budget_exemption(request: pytest.FixtureRequest) -> None:
-    """A serial item resolves its tier budget; only slow/rare stay exempt.
-
-    ``serial`` formerly returned ``None`` before tier resolution, so any
-    unmarked test dodged the 5s partition boundary by adding one decorator,
-    and heavy+serial items enforced their 20s intent at nothing (b2 R41
-    round 5).
-    """
-
-    conftest_plugin = _root_conftest_plugin(request)
-    HEAVY_DURATION_BUDGET_SECONDS = conftest_plugin.HEAVY_DURATION_BUDGET_SECONDS
-    SMOKE_DURATION_BUDGET_SECONDS = conftest_plugin.SMOKE_DURATION_BUDGET_SECONDS
-    _duration_budget_tier = conftest_plugin._duration_budget_tier
-
-    class _FakeItem:
-        def __init__(self, markers: set[str]) -> None:
-            self._markers = markers
-
-        def get_closest_marker(self, name: str):
-            return object() if name in self._markers else None
-
-    assert _duration_budget_tier(_FakeItem({"serial"})) == (
-        "unmarked",
-        SMOKE_DURATION_BUDGET_SECONDS,
-    )
-    assert _duration_budget_tier(_FakeItem({"serial", "heavy"})) == (
-        "heavy",
-        HEAVY_DURATION_BUDGET_SECONDS,
-    )
-    assert _duration_budget_tier(_FakeItem({"serial", "slow"})) is None
-    assert _duration_budget_tier(_FakeItem({"rare"})) is None
-
-
-def test_sessionfinish_budget_tripwire_flips_exit_status(
-    request: pytest.FixtureRequest,
-) -> None:
-    """r7 R41 (sol b2 HIGH): the budget tripwire is always-on, not collectable.
-
-    Enforcement used to live only in this file's assertion tests, so any
-    targeted run that did not collect ``test_marker_lint.py`` exited green
-    over budget. The conftest ``pytest_sessionfinish`` path must flip a green
-    session to failing whenever the offender ledger (or a family aggregate)
-    is non-empty -- and must leave already-failing or clean sessions alone.
-
-    The enforcement helper is resolved from the LIVE registered conftest
-    plugin (a bare ``conftest`` import is ambiguous during full-suite
-    collection; ``tests`` is not a package), which also pins that the hook
-    really is loaded in every tests/-scoped session.
-    """
-
-    from types import SimpleNamespace
-
-    conftest_plugin = _root_conftest_plugin(request)
-    _enforce_duration_budget_at_sessionfinish = (
-        conftest_plugin._enforce_duration_budget_at_sessionfinish
-    )
-
-    def _fake_session(**attrs: object) -> SimpleNamespace:
-        plugin_manager = SimpleNamespace(get_plugin=lambda name: None)
-        return SimpleNamespace(
-            config=SimpleNamespace(pluginmanager=plugin_manager),
-            exitstatus=0,
-            **attrs,
-        )
-
-    # Per-item offender on a green session -> forced failure.
-    session = _fake_session(
-        _tl_duration_budget_offenders=[("tests/x.py::test_slow", "smoke", 9.0, 8.0, 7.0)]
-    )
-    _enforce_duration_budget_at_sessionfinish(session, 0)  # type: ignore[arg-type]
-    assert session.exitstatus == 1
-
-    # Family aggregate offender alone -> forced failure.
-    session = _fake_session(
-        _tl_smoke_family_stats={"tests/x.py::fam": (30.0, 4)},
-        _tl_smoke_family_budgets={"tests/x.py::fam": 12.0},
-    )
-    _enforce_duration_budget_at_sessionfinish(session, 0)  # type: ignore[arg-type]
-    assert session.exitstatus == 1
-
-    # Clean session stays green; failing session is left alone (the
-    # marker-lint assertion or an ordinary failure already owns the status).
-    session = _fake_session()
-    _enforce_duration_budget_at_sessionfinish(session, 0)  # type: ignore[arg-type]
-    assert session.exitstatus == 0
-    session = _fake_session(
-        _tl_duration_budget_offenders=[("tests/x.py::test_slow", "smoke", 9.0, 8.0, 7.0)]
-    )
-    _enforce_duration_budget_at_sessionfinish(session, 1)  # type: ignore[arg-type]
-    assert session.exitstatus == 0

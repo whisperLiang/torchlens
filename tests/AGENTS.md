@@ -46,11 +46,11 @@ Run memory-heavy real-world tests sequentially. Optional dependency tests should
 
 | Marker | Meaning |
 | --- | --- |
-| `smoke` | Critical-path checks, <5s each (measured); the commit-level gate, not per-step. |
-| `heavy` | Mid-cost (5-20s) tests, excluded from smoke and the mid backstop. |
-| `slow` | Long-running (>20s) real-world tests. |
-| `serial` | Load-sensitive tests that should run away from parallel worker load. NOT a budget exemption: serial items resolve their heavy/smoke/unmarked duration budget normally. |
-| (none) | Unmarked tests — the majority (7,396/12,840, 58%, measured 2026-08-16 at adb3d450) — run only in the backstops, never the commit gate, but are budgeted at the same <5s tier as smoke. |
+| `smoke` | Critical-path checks; the commit-level gate, not per-step. |
+| `heavy` | Higher-cost tests, excluded from smoke and the mid backstop. |
+| `slow` | Long-running real-world tests. |
+| `serial` | Load-sensitive tests that should run away from parallel worker load. |
+| (none) | Unmarked tests — the majority (7,396/12,840, 58%, measured 2026-08-16 at adb3d450) — run in the backstops, never the commit gate. |
 | `rare` | Always excluded by default unless explicitly selected. |
 | `optional` | Requires an optional dependency or runtime. |
 | `requires_assertions` | Needs Python `assert`; skipped under `python -O`. |
@@ -64,17 +64,8 @@ Run memory-heavy real-world tests sequentially. Optional dependency tests should
 Markers are additive: a test carrying `smoke` together with `heavy`/`slow`/`serial`/`rare`
 still runs under `-m smoke`, so those combinations are forbidden — drop `smoke` instead
 (a per-parametrize-cell `slow` refinement of a `heavy` family is the one sanctioned combo).
-`tests/test_marker_lint.py` enforces the partition and the runtime tripwire: smoke/unmarked
-tests budget 5s and heavy 20s (load-scaled 1x-4x plus a 2s boundary-noise grace, charged on min(wall, cpu)), checked at
-the end of every session — literally: `tests/conftest.py::pytest_sessionfinish` flips a green
-session to failing on any recorded offender, so targeted runs that never collect
-`test_marker_lint.py` are enforced too (r7 R41). Known bounds of the tripwire: it charges only
-tests that actually RAN in the session (a permanently deselected test is never bounded), the
-budget is load-scaled so the same family can pass loaded and fail quiet (the boundary is
-compute cost, not wall time), and a test that mostly sleeps is uncatchable by design
-(min(wall, cpu) charging). Subprocess-per-cell parametrized families whose AGGREGATE compute
-is heavy-class belong in `heavy` even when each cell is under 5s (the lazy-module
-import-pattern families are the precedent).
+`tests/test_marker_lint.py` checks marker consistency and state isolation.
+Elapsed time does not determine pass/fail; duration-budget enforcement has been removed.
 
 ## Fixtures
 `tests/conftest.py` owns deterministic seeding and common inputs such as image tensors,

@@ -320,10 +320,6 @@ jobs:
           uv pip check
 
       - name: Run the smoke tier under coverage with a floor
-        # No deselects: the duration-budget machinery itself skips recording
-        # under coverage instrumentation (tests/conftest.py, r7 R41/R72 --
-        # the old single --deselect here named a test that had been RENAMED,
-        # so it silently excluded nothing while claiming the carve-out).
         run: |
           pytest tests/ -m smoke --ignore-glob="*menagerie*" --ignore=tests/crawler \
             --cov=torchlens --cov-branch \

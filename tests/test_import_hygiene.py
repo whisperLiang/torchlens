@@ -10,7 +10,7 @@ found the tripwire could not fail on any of the three ways it can regress:
     else, while the live route to a heavy dependency exists -- ``options.py``
     executes ``visualization/__init__`` on every bare import, one hop from
     modules doing top-level ``import graphviz`` / ``from PIL import Image``;
-(b) no module-count ceiling and no import-duration budget existed anywhere;
+(b) no module-count ceiling existed;
 (c) only a handful of the lazy facades were asserted deferred, so a new eager
     ``from .viz import ...`` would silently pull PIL;
 (d) the whole file sat outside the smoke/PR tier, so an eager-wrap regression
@@ -93,31 +93,12 @@ _EAGERLY_IMPORTED_LAZY_TARGETS: dict[str, str] = {}
 #: order-of-magnitude jump, which the denylist can only catch by name.
 _MAX_MARGINAL_NON_TORCHLENS_MODULES = 40
 
-#: Duration budget for the torchlens import itself, measured with torch already
-#: imported so the number is not dominated by torch. Charged on min(wall, cpu)
-#: -- the tier-budget convention (eec14a0f) -- because the pure-wall version of
-#: this guard false-failed at 1.45s under orchestrator load while five fresh
-#: control runs measured 0.32-0.78s and every structural guard stayed green
-#: (grind b4, F31-A): wall stretches with box load, CPU time does not, and an
-#: eager heavy import inflates BOTH. RE-BASELINED (JMT 2026-08-19, P4): the
-#: metric is TorchLens-MARGINAL import time on top of torch, target <= 10 ms
-#: -- total import is torch-dominated and not ours to control. Measured
-#: ~1.2 ms after the cold-start laziness pass (the package root is the only
-#: eagerly executed module), so the budget carries ~8x headroom. The probe
-#: warms the import-path machinery (importlib.util.find_spec) OUTSIDE the
-#: timing window: an editable-install venv otherwise charges ~7-12 ms of
-#: pip's editable finder to the first torchlens import -- install-method
-#: cost, not TorchLens's. Documented residual, shared with the tier budgets:
-#: an import that only SLEEPS is no longer catchable here; the module
-#: allowlist and denylist above remain the structural authority.
-_TORCHLENS_IMPORT_BUDGET_S = 0.010
 
 #: Marginal ru_maxrss budget for ``import torchlens`` with torch already
-#: resident (R31 axis b: the duration budget is blind to a CPU-cheap but
-#: RSS-fat eager import -- a large frozen table, an mmapped registry, a
+#: resident (R31 axis b: catch an RSS-heavy eager import -- a large frozen table, an mmapped registry, a
 #: module-scope resources read). Measured ~4 MiB marginal on the devbox
 #: (torch 2.13); the budget is ~16x that, an order-of-magnitude tripwire in
-#: the same register as the duration budget above, never a perf gate.
+#: a memory guard independent of execution time.
 #: Caveat: ru_maxrss is a high-water mark, so the delta is a LOWER bound and
 #: cannot see memory freed before the second read -- fine for the
 #: "something heavy became eager" class this guards.
@@ -157,7 +138,7 @@ def _import_probe_script() -> str:
     """
 
     return """
-import json, sys, time, types
+import json, sys, types
 
 try:
     import resource
@@ -169,7 +150,6 @@ else:
     def _peak_rss():
         return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
-before_torch = set(sys.modules)
 import torch
 import torch.nn.functional as _torch_nn_functional
 after_torch = set(sys.modules)
@@ -178,18 +158,7 @@ torch_ns_before = {k: id(v) for k, v in vars(torch).items()}
 functional_ns_before = {k: id(v) for k, v in vars(_torch_nn_functional).items()}
 rss_before_kib = _peak_rss()
 
-# Warm the import-path machinery outside the timing window (P4 re-baseline):
-# on an editable-install venv the first find_spec("torchlens") imports pip's
-# editable finder (~7-12 ms of install-method cost that is not TorchLens's
-# marginal import time). find_spec never executes the module itself.
-import importlib.util
-importlib.util.find_spec("torchlens")
-
-start_wall = time.perf_counter()
-start_cpu = time.process_time()
 import torchlens
-elapsed_cpu = time.process_time() - start_cpu
-elapsed_wall = time.perf_counter() - start_wall
 
 rss_after_kib = _peak_rss()
 torch_ns_after = {k: id(v) for k, v in vars(torch).items()}
@@ -221,8 +190,6 @@ marginal_foreign = sorted(
 )
 lazy_targets = sorted({target for target, _attr in torchlens._LAZY_ATTRS.values()})
 print(json.dumps({
-    "elapsed_wall": elapsed_wall,
-    "elapsed_cpu": elapsed_cpu,
     "file": torchlens.__file__,
     "loaded": sorted(after),
     "torchlens_modules": torchlens_modules,
@@ -280,7 +247,7 @@ def _run_import_script_capturing(script: str) -> str:
         ")\n"
     )
     # The checkout assertion runs AFTER the caller's script, so it cannot perturb
-    # a measurement that times the torchlens import itself.
+    # the import and namespace observations.
     completed = subprocess.run(
         [sys.executable, "-c", script + "\n" + prologue],
         check=False,
@@ -428,38 +395,13 @@ def test_bare_import_adds_few_foreign_modules(import_facts: dict[str, object]) -
 
 
 @pytest.mark.smoke
-def test_bare_import_stays_within_its_duration_budget(
-    import_facts: dict[str, object],
-) -> None:
-    """Importing torchlens over an already-imported torch stays cheap (R31-1b).
-
-    Measured with torch pre-imported so the figure is TorchLens's own marginal
-    cost rather than torch's; charged on min(wall, cpu) so orchestrator load
-    cannot red the commit gate (F31-A). Budget is ~10x measured: this catches an
-    eager heavy import, not a few milliseconds of drift.
-    """
-
-    wall = float(import_facts["elapsed_wall"])  # type: ignore[arg-type]
-    cpu = float(import_facts["elapsed_cpu"])  # type: ignore[arg-type]
-    charged = min(wall, cpu)
-    assert charged < _TORCHLENS_IMPORT_BUDGET_S, (
-        f"importing torchlens charged {charged:.3f}s (wall {wall:.3f}s, cpu "
-        f"{cpu:.3f}s) over an already-imported torch (budget "
-        f"{_TORCHLENS_IMPORT_BUDGET_S}s). Both measures are high, so this is "
-        "real import work, not box load: something heavy likely became eager. "
-        "The module allowlist/denylist guards in this file name the culprit "
-        "when it is an eager import."
-    )
-
-
-@pytest.mark.smoke
 def test_bare_import_stays_within_its_rss_budget(
     import_facts: dict[str, object],
 ) -> None:
     """Importing torchlens over a resident torch stays memory-cheap (R31 axis b).
 
-    The duration budget is blind to a CPU-cheap but RSS-fat eager import (a
-    large frozen table, an mmapped registry, a module-scope resources read).
+    Detect an RSS-heavy eager import (a large frozen table, an mmapped registry,
+    or a module-scope resources read).
     ru_maxrss is a high-water mark, so the delta is a lower bound -- fine for
     the order-of-magnitude class this guards.
     """

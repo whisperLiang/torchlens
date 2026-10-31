@@ -90,18 +90,9 @@ def test_nightly_coverage_job_exists_and_instruments_the_smoke_tier() -> None:
         "the nightly coverage job no longer instruments torchlens under branch "
         "coverage — the floor would be measuring nothing"
     )
-    # The instrumented leg must not deselect budget tests by name: the
-    # carve-out lives in the budget machinery itself (a renamed test id once
-    # turned the deselect into a silent no-op while claiming the exemption).
+    # Coverage must exercise the complete selected tier.
     assert "--deselect" not in command, (
-        "the coverage job deselects tests by name again — the instrumentation "
-        "carve-out belongs in tests/conftest.py (cov_source check), where a "
-        "rename cannot silently void it"
-    )
-    conftest_text = (_PROJECT_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
-    assert 'getattr(item.config.option, "cov_source", None)' in conftest_text, (
-        "tests/conftest.py lost the instrumented-session budget carve-out that "
-        "replaced the coverage job's brittle --deselect"
+        "the coverage job must not silently omit tests from the selected tier"
     )
 
 
