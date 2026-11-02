@@ -411,6 +411,7 @@ def _certify_source_write(
 ) -> bool:
     """Certify ordered writes to input, buffer or parameter source storage."""
     prefix = proof.prefix
+    args, _kwargs = _partition_call_arguments(node)
     if producer.is_input or producer.is_buffer or producer.is_buffer_only_source:
         # Native source writes are safe only in the unchanged execution order.
         # An input must stay on its owning side; non-differentiable buffer writes
@@ -427,7 +428,16 @@ def _certify_source_write(
                 or (
                     producer.is_buffer
                     and producer.requires_grad is not True
-                    and (node.canonical_id in prefix or not proof.heterogeneous)
+                    and (
+                        node.canonical_id in prefix
+                        or not proof.heterogeneous
+                        or (
+                            bool(producer.buffer_refs)
+                            and bool(args)
+                            and isinstance(args[0], ReplayValueRef)
+                            and args[0].value_id == producer.canonical_id
+                        )
+                    )
                 )
             )
         )

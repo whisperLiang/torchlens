@@ -574,7 +574,12 @@ class SplitRuntime(SplitGraph):
         # retain the source boundary through this helper's argument frame.
         if not transported:
             boundary = self._transport_boundary(boundary, self.placement.suffix)
-        return self.segments.suffix(boundary)
+        output = self.segments.suffix(boundary)
+        if self.adapter.name == "torch" and self.plan.ordered_mutation_node_ids:
+            from ._torch_buffer_state import publish_transported_buffers
+
+            publish_transported_buffers(self, boundary)
+        return output
 
     def _transport_boundary(
         self,

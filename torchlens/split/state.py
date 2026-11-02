@@ -15,7 +15,7 @@ mutable buffers and independently owned trainable replicas remain separate.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -128,6 +128,38 @@ class SegmentState:
         """Return every effective source binding, including live references."""
 
         return tuple(self._entries.values())
+
+    def _stage_buffer_updates(self, values: Mapping[int, Any]) -> dict[int, StateEntry]:
+        """Stage owned buffer snapshots without writing storage saved by autograd.
+
+        Parameters
+        ----------
+        values
+            Certified writes keyed by the existing stable source identities.
+
+        Returns
+        -------
+        dict
+            Replacement entries for currently bound sources. Allocation completes
+            before callers publish the staged entries across segment bindings.
+        """
+        staged: dict[int, StateEntry] = {}
+        device_of = self.adapter.device_of
+        for source_id, value in values.items():
+            previous = self._entries.get(source_id)
+            if previous is None:
+                continue
+            if previous.trainable:
+                raise ValueError("Mutable buffer publication cannot replace trainable state.")
+            staged[source_id] = StateEntry(
+                ownership="owned",
+                value=self._replicate(
+                    value, trainable=False, shareable=False, device=device_of(previous.value)
+                ),
+                source_id=source_id,
+                trainable=False,
+            )
+        return staged
 
     @property
     def owns_state(self) -> bool:

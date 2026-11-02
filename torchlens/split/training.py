@@ -8,10 +8,9 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from ._mlx_training import MlxTrainingEngine
+from ._torch_buffer_state import _mutable_boundary_buffers
 from .boundary import ReplayBoundary
 from .errors import SplitErrorContext, SplitUnsupportedError
-from .graph import ReplayValueRef
-from .planner import _partition_call_arguments
 
 BoundaryGradients = dict[str, Any]
 
@@ -136,40 +135,6 @@ def _allows_boundary_gradient(runtime: Any, key: str) -> bool:
         node is not None
         and (node.is_buffer or node.is_param_source)
         and node.requires_grad is False
-    )
-
-
-def _mutable_boundary_buffers(runtime: Any) -> frozenset[str]:
-    """Find state sources written by suffix operations already certified by the planner."""
-    graph, plan = runtime.trace_graph, runtime.plan
-    written_sources: set[str] = set()
-    for node_id in plan.ordered_mutation_node_ids & plan.suffix_node_ids:
-        node = graph.node_by_id[node_id]
-        args, kwargs = _partition_call_arguments(node)
-        if "batchnorm" in node.op_type.replace("_", ""):
-            # Functional and native BatchNorm have different running-state
-            # positions. Affine weights and read-only operands are not writes.
-            positions = (
-                (1, 2)
-                if getattr(node.target, "__module__", "") == "torch.nn.functional"
-                else (3, 4)
-            )
-            operands = tuple(
-                kwargs.get(name, args[index] if len(args) > index else None)
-                for name, index in zip(("running_mean", "running_var"), positions, strict=True)
-            )
-        else:
-            output = kwargs.get("out")
-            operands = (output if output is not None else args[0] if args else kwargs.get("input"),)
-        written_sources.update(
-            graph.node_id_by_alias.get(value.value_id, value.value_id)
-            for value in operands
-            if isinstance(value, ReplayValueRef)
-        )
-    return frozenset(
-        key
-        for key, node_id in plan.boundary_bindings.items()
-        if node_id in written_sources and graph.node_by_id[node_id].is_buffer
     )
 
 

@@ -14,7 +14,7 @@ from v2_helpers import (
     select_node_prefix,
 )
 
-from torchlens.split import GraphPartition, SplitFeatures, prepare_graph
+from torchlens.split import GraphPartition, PlacementPlan, SplitFeatures, prepare_graph
 from torchlens.split.errors import SplitUnsupportedError
 
 
@@ -193,3 +193,116 @@ def test_readonly_buffer_operand_does_not_require_connected_training_boundary() 
     )
     torch.testing.assert_close(gradients[input_key], reference_x.grad)
     torch.testing.assert_close(model.offset, torch.ones(4))
+
+
+@pytest.mark.parametrize("prefix,suffix", [("cpu", "cuda"), ("cuda", "cpu")])
+@pytest.mark.parametrize("retain_trace", [False, True])
+@pytest.mark.parametrize("microbatch", [None, 2])
+def test_transported_mutable_buffers_survive_training_and_recuts(
+    prefix: str, suffix: str, retain_trace: bool, microbatch: int | None
+) -> None:
+    """Effective state, not a temporary device copy, retains every native buffer update."""
+    if not torch.cuda.is_available():
+        pytest.skip("Real CPU/CUDA buffer transport is required")
+    from torchlens.split.ownership import _inventory
+
+    model = nn.Sequential(nn.Conv2d(4, 4, 1, bias=False), nn.BatchNorm2d(4), nn.Tanh())
+    model = model.to(prefix).double().train()
+    reference = deepcopy(model)
+    graph = prepare_graph(
+        model,
+        torch.randn(4, 4, 2, 2, dtype=torch.float64, device=prefix),
+        features=SplitFeatures(training=True, retain_trace=retain_trace),
+        placement=PlacementPlan.across(prefix, suffix),
+    )
+    nodes = graph.trace_graph.compute_nodes
+    partial = GraphPartition(frozenset({nodes[0].canonical_id}))
+    full = GraphPartition(frozenset(node.canonical_id for node in nodes))
+    runtime = graph.materialize(graph.analyze(partial))
+    for partition in (partial, full, partial):
+        runtime = runtime.repartition(partition)
+        reference.zero_grad(set_to_none=True)
+        for owners in runtime.parameter_bindings().values():
+            for parameter in owners.values():
+                parameter.grad = None
+        x = torch.randn(4, 4, 2, 2, dtype=torch.float64, device=prefix, requires_grad=True)
+        ref_x = x.detach().clone().requires_grad_(True)
+        # Prefix execution is one logical forward; only suffix BatchNorm is chunked.
+        chunk = 4 if partition == full else microbatch or 4
+        expected = sum(
+            reference(ref_x[start : start + chunk]).square().mean() * chunk / 4
+            for start in range(0, 4, chunk)
+        )
+        expected.backward()
+        boundary = runtime.run_training_prefix(x)
+        loss, gradients = runtime.train_suffix(
+            boundary, None, loss_fn=lambda out, _: out.square().mean(), microbatch_size=microbatch
+        )
+        runtime.backward_prefix(boundary, gradients)
+        torch.testing.assert_close(loss.cpu(), expected.cpu())
+        torch.testing.assert_close(x.grad, ref_x.grad)
+        expected_params = dict(reference.named_parameters())
+        for name, owners in runtime.parameter_bindings().items():
+            for parameter in owners.values():
+                torch.testing.assert_close(
+                    parameter.grad.cpu(),
+                    expected_params[name.removeprefix("parameter:")].grad.cpu(),
+                )
+        rows, values = _inventory(runtime, runtime._segment_state_snapshots())
+        expected_buffers = dict(reference.named_buffers())
+        for row in rows:
+            if row.kind == "buffer":
+                for value in values[row.state_id].values():
+                    torch.testing.assert_close(value.cpu(), expected_buffers[row.aliases[0]].cpu())
+
+
+@pytest.mark.parametrize("prefix,suffix", [("cpu", "cpu"), ("cpu", "cuda"), ("cuda", "cpu")])
+def test_shared_buffer_writes_preserve_prefix_autograd_storage(prefix: str, suffix: str) -> None:
+    """Publication must not overwrite running statistics saved by prefix backward."""
+    if "cuda" in (prefix, suffix) and not torch.cuda.is_available():
+        pytest.skip("Real CPU/CUDA buffer transport is required")
+    from torchlens.split.ownership import _inventory
+
+    class ReusedNorm(nn.Module):
+        """Use one mutable state source on both sides without shared trainable weights."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.norm = nn.BatchNorm2d(4, affine=False)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Exercise two native writes and two connected gradient paths."""
+            return self.norm(self.norm(x).tanh()).sin()
+
+    model = ReusedNorm().to(prefix).double().train()
+    reference = deepcopy(model)
+    graph = prepare_graph(
+        model,
+        torch.randn(2, 4, 2, 2, dtype=torch.float64, device=prefix),
+        features=SplitFeatures(training=True, retain_trace=False),
+        placement=PlacementPlan.across(prefix, suffix),
+    )
+    nodes = graph.trace_graph.compute_nodes
+    cut = next(index + 1 for index, node in enumerate(nodes) if node.op_type == "tanh")
+    partition = GraphPartition(frozenset(node.canonical_id for node in nodes[:cut]))
+    runtime = graph.materialize(graph.analyze(partition))
+    for _step in range(2):
+        x = torch.randn(2, 4, 2, 2, dtype=torch.float64, device=prefix, requires_grad=True)
+        ref_x = x.detach().clone().requires_grad_(True)
+        expected = reference(ref_x).square().mean()
+        expected.backward()
+        boundary = runtime.run_training_prefix(x)
+        loss, gradients = runtime.train_suffix(
+            boundary, None, loss_fn=lambda out, _: out.square().mean()
+        )
+        runtime.backward_prefix(boundary, gradients)
+        torch.testing.assert_close(loss.cpu(), expected.cpu())
+        torch.testing.assert_close(x.grad, ref_x.grad)
+        rows, values = _inventory(runtime, runtime._segment_state_snapshots())
+        for row in rows:
+            if row.kind == "buffer":
+                for value in values[row.state_id].values():
+                    torch.testing.assert_close(
+                        value.cpu(), dict(reference.named_buffers())[row.aliases[0]].cpu()
+                    )
+        runtime = runtime.repartition(partition)

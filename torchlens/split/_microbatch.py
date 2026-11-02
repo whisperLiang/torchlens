@@ -120,7 +120,7 @@ def _run_chunk(
     )
     # Logical boundary identity and every chunk's batch eligibility were checked
     # before accumulation; suffix execution still performs its normal shape guards.
-    output = runtime.segments.suffix(replay)
+    output = runtime._run_suffix_unchecked(replay, transported=True)
     loss = (
         loss_fn(output, targets) if loss_fn is not None else _default_loss(torch, output, targets)
     )
