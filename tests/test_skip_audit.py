@@ -217,6 +217,7 @@ IMPORTORSKIP_LEDGER: dict[str, tuple[str, str]] = {
     ),
     "transformers": (TEST_EXTRA, "transformers"),
     "transformers.modeling_outputs": (TEST_EXTRA, "transformers"),
+    "ultralytics": (OPTIONAL_PREVIEW, "detection extra; native YOLO criterion FP64 oracle"),
     "visualpriors": (TEST_EXTRA, "visualpriors"),
     "wandb": (OPTIONAL_PREVIEW, "wandb extra"),
     "xarray": (
