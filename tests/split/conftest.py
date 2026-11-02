@@ -4,10 +4,29 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Iterator
 from importlib.util import find_spec
 from typing import Any
 
 import pytest
+
+
+@pytest.fixture
+def fp64_functional() -> Iterator[None]:
+    """Use FP64 for floating functional oracles and restore the caller's default.
+
+    This opt-in fixture affects test construction only. Explicit dtype
+    passthrough, integer/boolean contracts and performance tests keep their
+    declared precision; production replay never changes a tensor's dtype.
+    """
+    import torch
+
+    previous = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        yield
+    finally:
+        torch.set_default_dtype(previous)
 
 
 def _isolate_tinygrad_llvm(patches: pytest.MonkeyPatch) -> None:

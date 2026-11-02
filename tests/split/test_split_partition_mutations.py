@@ -20,6 +20,8 @@ from torchlens.split import GraphPartition, SplitFeatures
 from torchlens.split.errors import SplitUnsupportedError
 from torchlens.split.planner import _validate_partition_effects
 
+pytestmark = pytest.mark.usefixtures("fp64_functional")
+
 
 class ResidualWrites(nn.Module):
     """Two fresh projections with native activation and residual writes."""

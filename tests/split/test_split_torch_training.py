@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from functools import partial
 
+import pytest
 import torch
 from torch import nn
 from v2_helpers import (
@@ -12,6 +13,8 @@ from v2_helpers import (
     select_node_prefix,
     split_request,
 )
+
+pytestmark = pytest.mark.usefixtures("fp64_functional")
 
 
 class TrainMlp(nn.Module):

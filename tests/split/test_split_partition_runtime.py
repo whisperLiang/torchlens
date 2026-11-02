@@ -18,6 +18,8 @@ from v2_helpers import (
 
 from torchlens.split import GraphPartition, SplitFeatures
 
+pytestmark = pytest.mark.usefixtures("fp64_functional")
+
 
 class Branches(nn.Module):
     """Two independent branches captured in an interleaved order."""

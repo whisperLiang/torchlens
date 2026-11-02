@@ -14,6 +14,8 @@ from v2_helpers import (
     split_request,
 )
 
+pytestmark = pytest.mark.usefixtures("fp64_functional")
+
 
 class TinyMicrobatchMlp(nn.Module):
     """Small independently-sampleable suffix-training model."""

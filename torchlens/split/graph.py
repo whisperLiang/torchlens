@@ -96,6 +96,13 @@ class SplitTraceGraph:
     shape_program: Any | None = None
 
     @cached_property
+    def _partition_effect_index(self) -> Any:
+        """Cache structural storage effects once per immutable Torch capture graph."""
+        from ._effects import _build_effect_index
+
+        return _build_effect_index(self)
+
+    @cached_property
     def _segment_blueprints(self) -> OrderedDict[tuple[Any, ...], Any]:
         """Bound graph-local immutable scheduling metadata; never store client state."""
         return OrderedDict()

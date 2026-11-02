@@ -9,6 +9,8 @@ from torch import nn
 
 import torchlens.split as split
 
+pytestmark = pytest.mark.usefixtures("fp64_functional")
+
 
 def test_capture_first_then_choose_noncontiguous_partition() -> None:
     """Independent branches can execute across a noncontiguous cut after one capture."""

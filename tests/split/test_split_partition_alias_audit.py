@@ -17,6 +17,8 @@ from v2_helpers import (
 from torchlens.split import GraphPartition, SplitFeatures
 from torchlens.split.errors import SplitUnsupportedError
 
+pytestmark = pytest.mark.usefixtures("fp64_functional")
+
 
 @pytest.mark.parametrize("retain_trace", [False, True])
 def test_read_alias_created_before_write_keeps_forward_and_backward_truth(

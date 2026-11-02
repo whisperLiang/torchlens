@@ -17,6 +17,8 @@ from v2_helpers import (
 from torchlens.split import GraphPartition, PlacementPlan, SplitFeatures, prepare_graph
 from torchlens.split.errors import SplitUnsupportedError
 
+pytestmark = pytest.mark.usefixtures("fp64_functional")
+
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("microbatch", [None, 2])

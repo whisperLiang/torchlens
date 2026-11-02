@@ -17,6 +17,8 @@ from v2_helpers import (
 from torchlens.split import PlacementPlan
 from torchlens.split.state import SegmentState
 
+pytestmark = pytest.mark.usefixtures("fp64_functional")
+
 
 class PlacedMlp(nn.Module):
     """Small model whose trainable prefix can own a separate device replica."""

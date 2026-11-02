@@ -140,7 +140,7 @@ def tensor_leaves(value: Any) -> list[Any]:
     return []
 
 
-def finite_close(actual: Any, expected: Any, *, atol: float = 1e-4) -> float:
+def finite_close(actual: Any, expected: Any, *, atol: float = 1e-8) -> float:
     """Reject nonfinite values, then compare structure, dtype, shape and numeric values."""
     import torch
 
@@ -151,7 +151,12 @@ def finite_close(actual: Any, expected: Any, *, atol: float = 1e-4) -> float:
         raise AssertionError(
             f"gradient presence mismatch: {type(actual).__name__}, {type(expected).__name__}"
         )
-    torch.testing.assert_close(actual, expected, atol=atol, rtol=1e-3, check_device=False)
+    # Categorical leaves are exact. FP64 is the functional acceptance default;
+    # deployment precision can still be requested for compatibility experiments.
+    for a, b in zip(tensor_leaves(actual), tensor_leaves(expected), strict=True):
+        if not (a.is_floating_point() or a.is_complex()):
+            torch.testing.assert_close(a, b, atol=0, rtol=0, check_device=False)
+    torch.testing.assert_close(actual, expected, atol=atol, rtol=1e-7, check_device=False)
     return max(
         (
             float((a.detach().cpu() - b.detach().cpu()).abs().max())
@@ -180,9 +185,14 @@ def noncontiguous(graph: Any, selected: frozenset[str]) -> bool:
     )
 
 
-def candidates(graph: Any, kind: str) -> list[Any]:
+def candidates(graph: Any, kind: str, *, strategy: str = "effects") -> list[Any]:
     """Generate atomic ancestor closures or topological prefixes without exponential search."""
     from torchlens.split import GraphPartition
+
+    if kind == "noncontiguous_dag" and strategy == "effects":
+        from torchlens.split.candidates import _effect_closed_partitions
+
+        return list(_effect_closed_partitions(graph))
 
     compute = graph.compute_nodes
     compute_ids = frozenset(n.canonical_id for n in compute)
@@ -370,7 +380,7 @@ def training_targets(name: str, x: Any) -> Any:
         return {
             "img": x,
             "batch_idx": torch.arange(batch),
-            "cls": torch.zeros(batch, 1),
+            "cls": torch.zeros(batch, 1, dtype=torch.long),
             "bboxes": torch.tensor([[0.5, 0.5, 0.25, 0.25]], dtype=x.dtype).repeat(batch, 1),
         }
     if name == "rfdetr":
@@ -652,7 +662,13 @@ def _validate_kind(
         args.prefix_device
     ) != context.adapter.normalize_device(args.suffix_device)
     analysis_times, materialization_times = [], []
-    for partition in candidates(context.trace_graph, kind):
+    start = time.perf_counter()
+    generated = candidates(context.trace_graph, kind, strategy=args.candidate_strategy)
+    row["candidate_generation_ms"] = 1000 * (time.perf_counter() - start)
+    row["generated_candidate_count"] = len(generated)
+    row["candidate_strategy"] = args.candidate_strategy
+    valid_count = 0
+    for partition in generated:
         try:
             synchronize()
             start = time.perf_counter()
@@ -662,12 +678,15 @@ def _validate_kind(
             if not any(n in partition.prefix_node_ids for n in analysis.plan.boundary_node_ids):
                 raise AssertionError("frontier lacks a true compute dependency")
             start = time.perf_counter()
-            context.materialize(analysis)
+            if len(accepted) < 3:
+                context.materialize(analysis)
             synchronize()
             materialization_times.append(1000 * (time.perf_counter() - start))
-            accepted.append(analysis)
+            valid_count += 1
+            if len(accepted) < 3:
+                accepted.append(analysis)
             row["attempts"].append({"partition": partition.as_boundary(), "status": "accepted"})
-            if len(accepted) == 3:
+            if len(accepted) == 3 and not args.candidate_census:
                 break
         except SplitError as error:
             row["attempts"].append(
@@ -676,8 +695,39 @@ def _validate_kind(
                     "status": "unsupported",
                     "reason": getattr(getattr(error, "context", None), "reason", error.code),
                     "error": str(error),
+                    "diagnostic": getattr(error, "_partition_diagnostic", None),
                 }
             )
+    row["analyzed_candidate_count"] = len(row["attempts"])
+    row["legal_candidate_count"] = valid_count
+    from collections import Counter
+
+    row["refusal_distribution"] = dict(
+        Counter(
+            (attempt.get("diagnostic") or {}).get("category", attempt.get("reason", "accepted"))
+            for attempt in row["attempts"]
+        )
+    )
+    reasons = Counter(attempt.get("reason", "accepted") for attempt in row["attempts"])
+    row["candidate_statistics"] = {
+        "generated": len(generated),
+        "analyzed": len(row["attempts"]),
+        "native_call_atomic": len(row["attempts"])
+        - reasons["partition_call_split"]
+        - reasons["partition_node_invalid"],
+        "data_dependency_valid": len(row["attempts"])
+        - sum(
+            reasons[code]
+            for code in (
+                "partition_call_split",
+                "partition_node_invalid",
+                "partition_reverse_dependency",
+                "partition_dependency_unresolved",
+                "partition_mutable_state_unsupported",
+            )
+        ),
+        "legal": valid_count,
+    }
     if not accepted:
         return {
             **row,
@@ -893,7 +943,11 @@ def main() -> None:
     parser.add_argument("--prefix-device", help="Prefix placement, e.g. cpu or cuda:0")
     parser.add_argument("--suffix-device", help="Suffix placement, e.g. cpu or cuda:1")
     parser.add_argument("--model-mode", choices=("eval", "train"), default="eval")
-    parser.add_argument("--dtype", choices=("float32", "float64"), default="float32")
+    parser.add_argument("--dtype", choices=("float32", "float64"), default="float64")
+    parser.add_argument("--candidate-strategy", choices=("effects", "ancestors"), default="effects")
+    parser.add_argument(
+        "--candidate-census", action="store_true", help="Analyze every bounded candidate"
+    )
     parser.add_argument("--source-root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--weights", type=Path)
     parser.add_argument("--training", action="store_true")
@@ -962,7 +1016,7 @@ def main() -> None:
         ),
         "cross_device_tested": False,
         "results": [],
-        "tolerance": {"atol": 1e-4, "rtol": 1e-3},
+        "tolerance": {"atol": 1e-8, "rtol": 1e-7, "integer_boolean": "exact"},
     }
     report["libraries"] = {}
     for package in ("torchvision", "transformers", "ultralytics", "rfdetr"):

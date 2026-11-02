@@ -25,6 +25,8 @@ from torchlens.split.graph import SplitTraceGraph
 from torchlens.split.placement import PlacementPlan
 from torchlens.utils.display import identity
 
+pytestmark = pytest.mark.usefixtures("fp64_functional")
+
 
 def _diamond() -> SplitTraceGraph:
     """Return an interleaved two-branch graph with input and output placeholders."""

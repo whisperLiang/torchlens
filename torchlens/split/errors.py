@@ -71,6 +71,7 @@ class SplitError(Exception):
 
         super().__init__(message)
         self.context = context
+        self._partition_diagnostic: dict[str, Any] | None = None
 
     def __str__(self) -> str:
         """Return the message plus compact context when present."""

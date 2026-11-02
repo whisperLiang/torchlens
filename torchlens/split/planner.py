@@ -161,7 +161,7 @@ def _partition_refusal(
 ) -> SplitUnsupportedError:
     """Build a stable partition refusal without inventing a point target."""
 
-    return SplitUnsupportedError(
+    error = SplitUnsupportedError(
         message,
         context=SplitErrorContext(
             backend=graph.backend,
@@ -172,6 +172,11 @@ def _partition_refusal(
             layer_label=None if node is None else node.label,
         ),
     )
+    if graph.backend == TORCH_BACKEND_NAME and isinstance(spec.partition, GraphPartition):
+        from ._effects import _partition_diagnostic
+
+        error._partition_diagnostic = _partition_diagnostic(graph, spec, reason, node)
+    return error
 
 
 def _partition_sets(
@@ -413,12 +418,11 @@ def _certify_source_write(
     prefix = proof.prefix
     args, _kwargs = _partition_call_arguments(node)
     if producer.is_input or producer.is_buffer or producer.is_buffer_only_source:
-        # Native source writes are safe only in the unchanged execution order.
-        # An input must stay on its owning side; non-differentiable buffer writes
-        # may consume the source across a sequential frontier.
+        # Input writes retain the historical order restriction. Buffer writes
+        # may reorder only after the graph's storage-effect edges are checked.
         return (
             not has_out
-            and node.canonical_id in proof.ordered
+            and (node.canonical_id in proof.ordered or producer.is_buffer)
             and (
                 (
                     producer.is_input
@@ -529,10 +533,7 @@ def _certify_local_write(
         return True
     return (
         origin is not None
-        and (
-            node.canonical_id in proof.ordered
-            or (not has_out and _independent_crossings(graph, node, origin, proof))
-        )
+        and (node.canonical_id in proof.ordered or not has_out)
         and (
             has_out
             or origin.canonical_id in proof.certified
@@ -541,63 +542,6 @@ def _certify_local_write(
             or (origin.is_input and not proof.training)
         )
     )
-
-
-def _crossed_operation_is_independent(
-    graph: SplitTraceGraph,
-    crossed: SplitTraceNode,
-    origin: SplitTraceNode,
-    proof: _MutationProof,
-    in_prefix: bool,
-) -> bool:
-    """Check a crossed native call's data and storage independence."""
-    if origin.canonical_id in graph.ancestors(crossed.canonical_id):
-        return False
-    args, kwargs = _partition_call_arguments(crossed)
-    if not _node_mutates(crossed, args, kwargs):
-        return True
-    argument = args[0] if args else kwargs.get("input")
-    if (
-        crossed.target not in proof.targets.writes
-        or kwargs.get("out") is not None
-        or not isinstance(argument, ReplayValueRef)
-    ):
-        return False
-    producer = graph.node_by_id.get(argument.value_id)
-    if producer is None or (producer.canonical_id in proof.prefix) == in_prefix:
-        return False
-    other = _local_storage_origin(graph, producer, proof, not in_prefix)
-    return (
-        other is not None
-        and other.target in proof.targets.fresh | proof.targets.batchnorm
-        and other.canonical_id != origin.canonical_id
-        and other.canonical_id not in graph.ancestors(origin.canonical_id)
-        and origin.canonical_id not in graph.ancestors(other.canonical_id)
-    )
-
-
-def _independent_crossings(
-    graph: SplitTraceGraph, node: SplitTraceNode, origin: SplitTraceNode, proof: _MutationProof
-) -> bool:
-    """Allow fresh storage writes to cross only data-independent native operations.
-
-    Unknown alias roots, source writes, out= initialization and mutable state
-    keep their original ordering barrier. A crossed local write must have its own
-    proven fresh allocation, independent of this allocation in both directions.
-    """
-    if origin.target not in proof.targets.fresh | proof.targets.batchnorm:
-        return False
-    order = graph.order_by_id
-    index = order[node.canonical_id]
-    in_prefix = node.canonical_id in proof.prefix
-    for crossed in graph.compute_nodes:
-        if (crossed.canonical_id in proof.prefix) == in_prefix:
-            continue
-        if (order[crossed.canonical_id] < index) != in_prefix:
-            continue
-        if not _crossed_operation_is_independent(graph, crossed, origin, proof, in_prefix):
-            return False
-    return True
 
 
 def _out_initialization_matches(
@@ -672,6 +616,45 @@ def _ordered_partition_nodes(graph: SplitTraceGraph, prefix: frozenset[str]) -> 
     return frozenset(ordered)
 
 
+def _validate_effect_order(
+    graph: SplitTraceGraph, spec: SplitRequest, prefix: frozenset[str]
+) -> None:
+    """Reject effect inversions and unproven aliasing between mutable state sources."""
+    from ._effects import (
+        _alias_conflict_category,
+        _effect_inversions,
+        _source_alias_conflict,
+        _source_values,
+    )
+
+    inversions = _effect_inversions(graph, prefix)
+    if inversions:
+        before, after = inversions[0]
+        raise _partition_refusal(
+            graph,
+            spec,
+            "partition_effect_order_unproven",
+            f"Required storage effect {before!r} -> {after!r} runs suffix -> prefix.",
+            graph.node_by_id[after],
+        )
+    if not prefix - _ordered_partition_nodes(graph, prefix):
+        return
+    index = graph._partition_effect_index
+    conflict = _source_alias_conflict(_source_values(graph), index.source_writes)
+    if conflict is not None:
+        error = _partition_refusal(
+            graph,
+            spec,
+            "partition_effect_order_unproven",
+            f"Written state has overlapping or unknown source aliases: {conflict!r}.",
+        )
+        if error._partition_diagnostic is not None:
+            error._partition_diagnostic.update(
+                category=_alias_conflict_category(conflict), source_alias_conflict=conflict
+            )
+        raise error
+
+
 def _validate_partition_effects(
     graph: SplitTraceGraph,
     spec: SplitRequest,
@@ -693,6 +676,7 @@ def _validate_partition_effects(
 
         known_identity = identity
         if prefix_node_ids is not None:
+            _validate_effect_order(graph, spec, prefix_node_ids)
             proof = _MutationProof(
                 prefix_node_ids,
                 _torch_mutation_targets(),
@@ -706,7 +690,7 @@ def _validate_partition_effects(
         if _node_mutates(node, args, kwargs):
             if proof is not None and (
                 _certify_local_write(graph, node, args, kwargs, proof)
-                or (node.target in proof.targets.batchnorm and node.canonical_id in proof.ordered)
+                or node.target in proof.targets.batchnorm
             ):
                 certified.add(node.canonical_id)
             else:

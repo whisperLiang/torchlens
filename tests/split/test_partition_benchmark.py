@@ -14,6 +14,8 @@ from torch import nn
 
 from torchlens.split import GraphPartition, SplitFeatures, prepare_graph
 
+pytestmark = pytest.mark.usefixtures("fp64_functional")
+
 ROOT = Path(__file__).resolve().parents[2]
 DRIVER = ROOT / "benchmarks" / "split_graph_partition.py"
 
@@ -27,6 +29,9 @@ def test_detection_targets_preserve_input_precision(model: str) -> None:
     assert boxes.dtype == torch.float64
     if model == "rfdetr":
         assert targets[0]["labels"].dtype == torch.int64
+    else:
+        assert targets["cls"].dtype == torch.int64
+        assert targets["batch_idx"].dtype == torch.int64
 
 
 @pytest.mark.parametrize("retain_trace", [False, True])

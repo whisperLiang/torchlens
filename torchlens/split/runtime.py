@@ -353,6 +353,9 @@ class SplitRuntime(SplitGraph):
         split_point: str,
     ) -> None:
         """Detect state mergers that would fail during segment materialization."""
+        super()._validate_recut_state_for_plan(
+            plan, state_snapshots=state_snapshots, split_point=split_point
+        )
 
         previous = {
             "prefix": self.segments.prefix,
@@ -484,6 +487,10 @@ class SplitRuntime(SplitGraph):
         """Move runtime inputs onto the prefix placement."""
 
         runtime_kwargs = self.prepared_input_kwargs if input_kwargs is None else input_kwargs
+        if self.adapter.name == "torch" and self.plan.ordered_mutation_node_ids:
+            from ._effects import _guard_effect_sources
+
+            _guard_effect_sources(self, (inputs, runtime_kwargs or {}))
         placement = self.placement.prefix
         if not placement.is_explicit:
             return inputs, dict(runtime_kwargs or {})
@@ -570,6 +577,10 @@ class SplitRuntime(SplitGraph):
         revalidating a boundary that they created and checked in the same call.
         """
 
+        if self.adapter.name == "torch" and self.plan.ordered_mutation_node_ids:
+            from ._effects import _guard_effect_sources
+
+            _guard_effect_sources(self, ())
         # Rebind before entering the suffix so a transported replay does not
         # retain the source boundary through this helper's argument frame.
         if not transported:

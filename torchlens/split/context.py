@@ -72,7 +72,11 @@ class SplitGraph:
     def _validate_recut_state_for_plan(
         self, plan: SplitPlan, *, state_snapshots: dict[str, dict[str, Any]], split_point: str
     ) -> None:
-        """A first materialization has no prior client state to merge."""
+        """Recheck mutable source aliases even when reusing a cached analysis."""
+        if self.adapter.name == "torch" and plan.ordered_mutation_node_ids:
+            from ._effects import _guard_effect_sources
+
+            _guard_effect_sources(self, (), plan=plan, snapshots=state_snapshots)
 
     def _inherit_segment_state(
         self,
