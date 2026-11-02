@@ -7,6 +7,8 @@ import runpy
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -18,6 +20,34 @@ pytestmark = pytest.mark.usefixtures("fp64_functional")
 
 ROOT = Path(__file__).resolve().parents[2]
 DRIVER = ROOT / "benchmarks" / "split_graph_partition.py"
+
+
+def test_state_only_candidate_is_refused_without_failing_the_search() -> None:
+    """A lone BN counter has no real compute frontier and cannot attest a DAG cut."""
+    namespace = runpy.run_path(str(DRIVER), run_name="benchmark_test")
+    model = nn.Sequential(nn.Conv2d(2, 2, 1), nn.BatchNorm2d(2), nn.ReLU(inplace=True)).train()
+    context = prepare_graph(
+        model,
+        torch.ones(1, 2, 3, 3),
+        features=SplitFeatures(training=True, retain_trace=False),
+    )
+    counter = next(n for n in context.trace_graph.compute_nodes if n.op_type == "add")
+    partition = GraphPartition(frozenset({counter.canonical_id}))
+    analyze = context.analyze(partition)
+    assert not set(analyze.plan.boundary_node_ids) & partition.prefix_node_ids
+    args = SimpleNamespace(
+        prefix_device="cpu",
+        suffix_device="cpu",
+        candidate_strategy="ancestors",
+        candidate_census=True,
+    )
+    validate = namespace["validate_kind"]
+    with patch.dict(validate.__globals__, candidates=lambda *a, **kw: [partition]):
+        row = validate(context, model, model.state_dict(), (2, 3, 3), "noncontiguous_dag", args)
+    assert row["status"] == "unsupported"
+    assert row["attempts"][0]["reason"] == "candidate_compute_frontier_absent"
+    assert row["legal_candidate_count"] == 0
+    assert row["checks"]["backward"] == "not_run"
 
 
 @pytest.mark.parametrize("model", ["rfdetr", "yolov8"])
@@ -32,6 +62,85 @@ def test_detection_targets_preserve_input_precision(model: str) -> None:
     else:
         assert targets["cls"].dtype == torch.int64
         assert targets["batch_idx"].dtype == torch.int64
+
+
+def test_official_loss_factory_scope_follows_output_dtype_and_restores_ambient() -> None:
+    """Native loss temporaries must use the selected oracle precision, without leaking it."""
+    pytest.importorskip("ultralytics")
+    namespace = runpy.run_path(str(DRIVER), run_name="benchmark_test")
+
+    class NativeStyleCriterion(nn.Module):
+        def forward(self, output: torch.Tensor, targets: dict) -> tuple:
+            """Match the official preprocess allocation and indexed assignment pattern."""
+            result = torch.zeros(output.shape, device=output.device)
+            result[torch.ones(output.shape, device=output.device, dtype=torch.bool)] = (
+                output.flatten()
+            )
+            return result.sum().unsqueeze(0), {}
+
+    class LossModel(nn.Module):
+        def init_criterion(self) -> nn.Module:
+            """Provide the native model's criterion construction interface."""
+            return NativeStyleCriterion()
+
+    original = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float32)
+    try:
+        loss_fn = namespace["training_objective"](
+            LossModel(), SimpleNamespace(model="yolov8", model_mode="train"), {}
+        )
+        output = torch.ones(1, dtype=torch.float64, requires_grad=True)
+        loss = loss_fn(output, {})
+        assert loss.dtype == torch.float64
+        assert torch.get_default_dtype() == torch.float32
+        loss.backward()
+        torch.testing.assert_close(output.grad, torch.ones_like(output))
+    finally:
+        torch.set_default_dtype(original)
+
+
+def test_native_frontier_observer_uses_post_prefix_alias_values_and_gradients() -> None:
+    """A prefix write may rebase an earlier view even when its own output is internal."""
+    from copy import deepcopy
+
+    class AliasedBranch(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.left = nn.Linear(4, 4, bias=False)
+            self.right = nn.Linear(4, 4, bias=False)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Keep the view frontier and the inplace writer on the selected branch."""
+            a = self.left(x)
+            alias = a.view_as(x)
+            b = self.right(x)
+            a.relu_()
+            return (a * 2).sin() + b + alias
+
+    model = AliasedBranch()
+    with torch.no_grad():
+        model.left.weight.copy_(torch.eye(4))
+    reference = deepcopy(model)
+    context = prepare_graph(
+        model, torch.ones(1, 4), features=SplitFeatures(training=True, retain_trace=False)
+    )
+    selected = frozenset(
+        n.canonical_id
+        for n in context.trace_graph.compute_nodes
+        if n.module_path == "left" or n.op_type in {"viewas", "relu", "mul", "sin"}
+    )
+    runtime = context.materialize(context.analyze(GraphPartition(selected)))
+    namespace = runpy.run_path(str(DRIVER), run_name="benchmark_test")
+    errors = namespace["training_step"](
+        runtime,
+        reference,
+        torch.tensor([[-1.0, 0.5, 1.0, -2.0], [-0.2, 2.0, -3.0, 4.0]], requires_grad=True),
+        namespace["make_optimizer"]("adam", namespace["effective_parameters"](runtime).values()),
+        namespace["make_optimizer"]("adam", reference.parameters()),
+    )
+    assert errors["boundary_values_checked"] > 0
+    assert errors["boundary_value_error"] < 1e-10
+    assert errors["connected_boundary_gradient_error"] < 1e-10
 
 
 @pytest.mark.parametrize("retain_trace", [False, True])

@@ -451,3 +451,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cpu
 source: d2d5abc61872bdd97402c57ce40eb570d1717031 (dirty)
 recorded: 2026-10-29T17:37:31.427331+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: Reviewed training partition effect index and bounded candidate metadata reads: native func_call_id/raw_index, internal access kind and graph parents. Capture producers, runtime read surface, step-0 closure, amendment registry and numeric goldens are unchanged.
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: faec92205ccf4d2a962dde79b1322370e82b5f30 (dirty)
+recorded: 2026-11-02T16:16:22.385509+00:00

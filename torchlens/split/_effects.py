@@ -245,38 +245,40 @@ def _source_alias_conflict(
     values: dict[str, list[Any]], writes: frozenset[str]
 ) -> tuple[str, str, str] | None:
     """Check current written sources against other logical sources, failing closed."""
+    from .._state import pause_logging
     from ..utils.alias_footprint import tensor_byte_footprint, touched_bytes_relation
 
     unique = {
         root: tuple({id(value): value for value in items}.values())
         for root, items in values.items()
     }
-    footprints = {
-        id(value): tensor_byte_footprint(value) for items in unique.values() for value in items
-    }
-    for root in writes:
-        for value in unique.get(root, ()):
-            for other, items in unique.items():
-                if root == other:
-                    continue
-                left = footprints[id(value)]
-                for item in items:
-                    right = footprints[id(item)]
-                    # Use the shared engine's absolute device-scoped geometry
-                    # once per source, rather than once per pair of sources.
-                    if (
-                        left is not None
-                        and right is not None
-                        and (
-                            left.device_key != right.device_key
-                            or left.end_byte <= right.start_byte
-                            or right.end_byte <= left.start_byte
-                        )
-                    ):
+    with pause_logging():
+        footprints = {
+            id(value): tensor_byte_footprint(value) for items in unique.values() for value in items
+        }
+        for root in writes:
+            for value in unique.get(root, ()):
+                for other, items in unique.items():
+                    if root == other:
                         continue
-                    relation = touched_bytes_relation(value, item)
-                    if relation != "disjoint":
-                        return root, other, relation
+                    left = footprints[id(value)]
+                    for item in items:
+                        right = footprints[id(item)]
+                        # Use the shared engine's absolute device-scoped geometry
+                        # once per source, rather than once per pair of sources.
+                        if (
+                            left is not None
+                            and right is not None
+                            and (
+                                left.device_key != right.device_key
+                                or left.end_byte <= right.start_byte
+                                or right.end_byte <= left.start_byte
+                            )
+                        ):
+                            continue
+                        relation = touched_bytes_relation(value, item)
+                        if relation != "disjoint":
+                            return root, other, relation
     return None
 
 
@@ -297,12 +299,9 @@ def _guard_effect_sources(
     """Recheck source alias assumptions against current inputs and effective state."""
     from .adapters.torch import _flatten_tensor_leaves, _torch
     from .errors import SplitErrorContext, SplitUnsupportedError
-    from .planner import _ordered_partition_nodes
 
     graph = runtime.trace_graph
     plan = runtime.plan if plan is None else plan
-    if not (plan.ordered_mutation_node_ids - _ordered_partition_nodes(graph, plan.prefix_node_ids)):
-        return
     index = graph._partition_effect_index
     if not index.source_writes:
         return
@@ -344,6 +343,32 @@ def _effect_inversions(
         if child in prefix
         for parent in sorted(parents, key=graph.order_by_id.__getitem__)
         if parent not in prefix
+    )
+
+
+def _boundary_state_aliases(
+    graph: SplitTraceGraph,
+    boundary: tuple[str, ...],
+    suffix: frozenset[str],
+) -> tuple[tuple[str, str], ...]:
+    """Find activation frontiers that may alias state subsequently written by the suffix.
+
+    Training leaf isolation and device transport do not preserve such aliases.
+    Dedicated mutable buffer slots use the existing publication contract; an
+    additional activation view of that storage has no corresponding contract.
+    """
+    index = graph._partition_effect_index
+    writes = {
+        node_id: access.writes & index.source_writes
+        for node_id, access in index.accesses.items()
+        if node_id in suffix and access.writes & index.source_writes
+    }
+    return tuple(
+        (node_id, writer)
+        for node_id in boundary
+        if not graph.node_by_id[node_id].is_buffer
+        for writer, roots in writes.items()
+        if roots & index.origins.get(node_id, frozenset())
     )
 
 

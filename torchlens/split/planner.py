@@ -637,9 +637,9 @@ def _validate_effect_order(
             f"Required storage effect {before!r} -> {after!r} runs suffix -> prefix.",
             graph.node_by_id[after],
         )
-    if not prefix - _ordered_partition_nodes(graph, prefix):
-        return
     index = graph._partition_effect_index
+    if not index.source_writes:
+        return
     conflict = _source_alias_conflict(_source_values(graph), index.source_writes)
     if conflict is not None:
         error = _partition_refusal(
@@ -772,6 +772,35 @@ def _node_mutates(node: SplitTraceNode, args: tuple[Any, ...], kwargs: dict[str,
     return mutates
 
 
+def _validate_boundary_state_aliases(
+    graph: SplitTraceGraph,
+    spec: SplitRequest,
+    boundary: tuple[str, ...],
+    suffix: frozenset[str],
+) -> None:
+    """Refuse activation aliases outside the mutable-buffer boundary contract."""
+    if graph.backend != TORCH_BACKEND_NAME:
+        return
+    from ._effects import _boundary_state_aliases
+
+    aliases = _boundary_state_aliases(graph, boundary, suffix)
+    if aliases:
+        value, writer = aliases[0]
+        error = _partition_refusal(
+            graph,
+            spec,
+            "partition_effect_order_unproven",
+            f"Boundary value {value!r} may alias state written by {writer!r}; "
+            "leaf isolation/transport cannot preserve that storage relationship.",
+            graph.node_by_id[writer],
+        )
+        if error._partition_diagnostic is not None:
+            error._partition_diagnostic.update(
+                category="cross_segment_state_conflict", boundary_state_aliases=aliases
+            )
+        raise error
+
+
 def plan_partition(graph: SplitTraceGraph, spec: SplitRequest) -> SplitPlan:
     """Validate a canonical partition and derive its unique live frontier."""
 
@@ -781,6 +810,7 @@ def plan_partition(graph: SplitTraceGraph, spec: SplitRequest) -> SplitPlan:
     boundary_node_ids = _frontier_node_ids(
         graph, prefix_node_ids=prefix_node_ids, suffix_node_ids=suffix_node_ids
     )
+    _validate_boundary_state_aliases(graph, spec, boundary_node_ids, suffix_node_ids)
     boundary_spec, boundary_bindings = _boundary_metadata(
         graph, spec=spec, boundary_node_ids=boundary_node_ids
     )

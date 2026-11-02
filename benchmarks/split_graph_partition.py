@@ -15,7 +15,8 @@ import subprocess
 import sys
 import time
 import traceback
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from copy import deepcopy
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -175,6 +176,24 @@ def scalar_loss(output: Any, targets: Any = None) -> Any:
     return sum(t.square().mean() for t in tensors)
 
 
+@contextmanager
+def functional_loss_factories(dtype: Any) -> Iterator[None]:
+    """Construct native loss temporaries in oracle precision, restoring ambient dtype.
+
+    This is isolated benchmark setup, not a runtime cast or operator patch.
+    Native model forward/replay and deployment performance keep their own dtype
+    behavior. Explicit dtype arguments inside a native criterion remain intact.
+    """
+    import torch
+
+    previous = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        yield
+    finally:
+        torch.set_default_dtype(previous)
+
+
 def noncontiguous(graph: Any, selected: frozenset[str]) -> bool:
     """Verify nonempty sides and an inversion against the ORIGINAL compute order."""
     ordered = [node.canonical_id for node in graph.compute_nodes]
@@ -327,14 +346,16 @@ def training_objective(model: Any, args: Any, configuration: dict[str, Any]) -> 
         criteria: dict[str, Any] = {}
 
         def yolo_loss(output: Any, targets: Any) -> Any:
-            device = tensor_leaves(output)[0].device
+            tensor = tensor_leaves(output)[0]
+            device = tensor.device
             batch = {key: value.to(device) for key, value in targets.items()}
             key = str(device)
-            if key not in criteria:
-                # The official criterion keeps device-local anchors/strides.
-                # Give each comparison device its own native loss object.
-                criteria[key] = deepcopy(model).to(device).init_criterion()
-            return criteria[key](output, batch)[0].sum()
+            with functional_loss_factories(tensor.dtype):
+                if key not in criteria:
+                    # The official criterion keeps device-local anchors/strides.
+                    # Give each comparison device its own native loss object.
+                    criteria[key] = deepcopy(model).to(device).init_criterion()
+                return criteria[key](output, batch)[0].sum()
 
         return yolo_loss
     if args.model == "rfdetr":
@@ -426,14 +447,29 @@ def training_step(
 
     from torchlens.split.adapters.torch import _slice_output_by_path
     from torchlens.split.graph import ReplayCall
+    from torchlens.utils.display import identity
 
     actual_opt.zero_grad(set_to_none=True)
     expected_opt.zero_grad(set_to_none=True)
     ref_x = x.detach().to(next(reference.parameters()).device).clone().requires_grad_(True)
     observed_gradients: dict[str, Any] = {}
+    observed_values: dict[str, Any] = {}
+    observed_refs: dict[str, Any] = {}
+    gradient_handles: dict[str, Any] = {}
     attached: set[str] = set()
     graph = runtime.trace_graph
     boundary_ids = {value: key for key, value in runtime.plan.boundary_bindings.items()}
+    value_keys = {
+        key
+        for key, node_id in runtime.plan.boundary_bindings.items()
+        if (node := graph.node_by_id[node_id]).is_input
+        or (
+            node.target is not None
+            and node.target is not identity
+            and not node.is_buffer
+            and not node.is_param_source
+        )
+    }
     calls_by_family: dict[str, list[Any]] = {}
     # Native observation also sees state writes. The partition's compute-call
     # inventory excludes buffer nodes; using it here shifts occurrence indexes
@@ -451,13 +487,31 @@ def training_step(
     counts: dict[str, int] = {}
 
     def attach(tensor: Any, key: str) -> None:
+        observed_refs[key] = tensor
+        if key in value_keys:
+            observed_values[key] = tensor.detach().clone()
+        previous = gradient_handles.pop(key, None)
+        if previous is not None:
+            previous.remove()
         if tensor.requires_grad:
             attached.add(key)
 
             def save_gradient(gradient: Any) -> None:
                 observed_gradients[key] = gradient.detach().clone()
 
-            tensor.register_hook(save_gradient)
+            grad_fn = tensor.grad_fn
+            if grad_fn is None:
+                gradient_handles[key] = tensor.register_hook(save_gradient)
+            else:
+                # Tensor hooks remain attached to the original grad_fn after
+                # a view is rebased. Observe its current output slot directly.
+                output_nr = tensor.output_nr
+
+                def save_node_gradient(gradients: tuple[Any, ...]) -> None:
+                    if gradients[output_nr] is not None:
+                        save_gradient(gradients[output_nr])
+
+                gradient_handles[key] = grad_fn.register_prehook(save_node_gradient)
 
     for node_id, key in boundary_ids.items():
         if graph.node_by_id[node_id].is_input:
@@ -488,8 +542,6 @@ def training_step(
                 rng_states=getattr(op, "func_rng_states", None),
                 autocast_state=getattr(op, "func_autocast_state", None),
             )
-            if not boundary_ids.keys() & set(call.output_node_ids):
-                return result
             for node_id in call.output_node_ids:
                 if node_id in boundary_ids:
                     tensor = _slice_output_by_path(
@@ -498,6 +550,19 @@ def training_step(
                     if not isinstance(tensor, torch.Tensor):
                         raise AssertionError(f"native frontier path is not a tensor: {node_id}")
                     attach(tensor, boundary_ids[node_id])
+            if leader.canonical_id in runtime.plan.prefix_node_ids:
+                index = graph._partition_effect_index
+                access = index.accesses.get(leader.canonical_id)
+                if access is not None and access.writes:
+                    # Observe the final prefix value and autograd version after
+                    # alias writes, while leaving later suffix writes out.
+                    for key, tensor in observed_refs.items():
+                        value_id = runtime.plan.boundary_bindings[key]
+                        if (
+                            value_id not in call.output_node_ids
+                            and access.writes & index.origins.get(value_id, frozenset())
+                        ):
+                            attach(tensor, key)
             return result
 
     torch.manual_seed(317)
@@ -509,6 +574,14 @@ def training_step(
     synchronize()
     start = time.perf_counter()
     boundary = runtime.run_training_prefix(x)
+    if not value_keys <= observed_values.keys():
+        raise AssertionError(
+            f"native boundary value coverage missing: {value_keys - observed_values.keys()}"
+        )
+    boundary_value_error = max(
+        (finite_close(boundary.tensors[key], observed_values[key]) for key in value_keys),
+        default=0.0,
+    )
     for tensor in boundary.tensors.values():
         if tensor.requires_grad:
             tensor.retain_grad()
@@ -570,6 +643,13 @@ def training_step(
         "forward_ms": timing["forward_ms"],
         "loss_and_backward_ms": backward_ms,
         "loss": float(actual_loss.detach()),
+        "loss_dtype": str(actual_loss.dtype),
+        "boundary_value_error": boundary_value_error,
+        "boundary_values_checked": len(value_keys),
+        "boundary_values_total": len(boundary.tensors),
+        "floating_output_dtypes": sorted(
+            {str(t.dtype) for t in tensor_leaves(expected_output) if t.is_floating_point()}
+        ),
         "loss_error": loss_error,
         "input_gradient_error": input_error,
         "parameter_gradient_error": gradient_error,
@@ -622,7 +702,7 @@ def _validate_kind(
     """Independently report one partition kind; never substitute sequential success for DAG success."""
     import torch
 
-    from torchlens.split.errors import SplitError
+    from torchlens.split.errors import SplitError, SplitErrorContext, SplitUnsupportedError
 
     row.update(
         {
@@ -676,7 +756,14 @@ def _validate_kind(
             synchronize()
             analysis_times.append(1000 * (time.perf_counter() - start))
             if not any(n in partition.prefix_node_ids for n in analysis.plan.boundary_node_ids):
-                raise AssertionError("frontier lacks a true compute dependency")
+                raise SplitUnsupportedError(
+                    "Candidate has no real compute dependency across its frontier.",
+                    context=SplitErrorContext(
+                        backend=context.trace_graph.backend,
+                        split_point=partition.as_boundary(),
+                        reason="candidate_compute_frontier_absent",
+                    ),
+                )
             start = time.perf_counter()
             if len(accepted) < 3:
                 context.materialize(analysis)

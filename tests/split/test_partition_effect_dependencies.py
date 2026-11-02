@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import runpy
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -102,6 +103,8 @@ def test_independent_norm_mutations_train_and_repartition_in_fp64(
             actual_opt,
             expected_opt,
         )
+        assert errors["boundary_values_checked"] > 0
+        assert errors["boundary_value_error"] < 1e-10
         assert max(v for k, v in errors.items() if k.endswith("_error")) < 1e-10
     assert reference.left_norm.num_batches_tracked.item() == 4
     assert reference.right_norm.num_batches_tracked.item() == 4
@@ -243,6 +246,91 @@ def test_unknown_runtime_storage_relation_is_not_reported_as_proven_overlap() ->
     diagnostic = caught.value._partition_diagnostic
     assert diagnostic["category"] == "alias_provenance_unknown"
     assert diagnostic["source_alias_conflict"][2] == "unknown"
+
+
+def test_ordered_heterogeneous_cut_refuses_distinct_overlapping_buffer_sources() -> None:
+    """Transport cannot turn two overlapping native state sources into independent replicas."""
+    from torchlens.split.planner import plan_partition
+
+    model = NormBranches().double().train()
+    model.right_norm.running_mean = model.left_norm.running_mean.view_as(
+        model.left_norm.running_mean
+    )
+    context = prepare_graph(
+        model,
+        torch.randn(1, 2, 3, 3, dtype=torch.float64),
+        features=SplitFeatures(training=True, retain_trace=False),
+    )
+    request = replace(
+        context.request,
+        partition=GraphPartition(frozenset()),
+        placement=PlacementPlan.across("cpu", "cuda"),
+    )
+    with pytest.raises(SplitUnsupportedError) as caught:
+        plan_partition(context.trace_graph, request)
+    assert caught.value.context.reason == "partition_effect_order_unproven"
+    assert caught.value._partition_diagnostic["source_alias_conflict"][2] == "overlap"
+
+
+@pytest.mark.parametrize("copy_state,training", [(False, False), (False, True), (True, True)])
+def test_boundary_alias_of_suffix_batchnorm_state_requires_a_real_copy(
+    copy_state: bool, training: bool
+) -> None:
+    """Isolating a view leaf must not disconnect it from a later native state update."""
+
+    class StateAlias(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.norm = nn.BatchNorm2d(4)
+            self.project = nn.Conv2d(4, 4, 1)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Observe running mean after BN through either an alias or an earlier copy."""
+            state = self.norm.running_mean.clone() if copy_state else self.norm.running_mean
+            alias = state.view(1, 4, 1, 1)
+            projected = self.project(x)
+            branch = x + 1
+            return self.norm(projected) + branch + alias
+
+    model = StateAlias().double().train()
+    reference = deepcopy(model)
+    context = prepare_graph(
+        model,
+        torch.ones(1, 4, 2, 2, dtype=torch.float64),
+        features=SplitFeatures(training=training, retain_trace=False),
+    )
+    selected = frozenset(
+        n.canonical_id
+        for n in context.trace_graph.compute_nodes
+        if n.op_type in {"clone", "view"}
+        or (n.op_type == "add" and n.parents == context.trace_graph.input_node_ids)
+    )
+    partition = GraphPartition(selected)
+    if not copy_state:
+        with pytest.raises(SplitUnsupportedError) as caught:
+            context.analyze(partition)
+        assert caught.value.context.reason == "partition_effect_order_unproven"
+        assert "alias" in str(caught.value).lower()
+        return
+    runtime = context.materialize(context.analyze(partition))
+    for batch in (1, 2, 4, 8):
+        x = torch.randn(batch, 4, 2, 2, dtype=torch.float64, requires_grad=True)
+        ref_x = x.detach().clone().requires_grad_(True)
+        expected = reference(ref_x).square().mean()
+        expected.backward()
+        boundary = runtime.run_training_prefix(x)
+        loss, gradients = runtime.train_suffix(
+            boundary, None, loss_fn=lambda out, _: out.square().mean()
+        )
+        runtime.backward_prefix(boundary, gradients)
+        torch.testing.assert_close(loss, expected)
+        torch.testing.assert_close(x.grad, ref_x.grad)
+        for actual, target in zip(model.parameters(), reference.parameters(), strict=True):
+            torch.testing.assert_close(actual.grad, target.grad)
+        for actual, target in zip(model.buffers(), reference.buffers(), strict=True):
+            torch.testing.assert_close(actual, target)
+        model.zero_grad(set_to_none=True)
+        reference.zero_grad(set_to_none=True)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32, torch.float64])
