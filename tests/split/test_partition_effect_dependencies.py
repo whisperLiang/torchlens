@@ -248,6 +248,48 @@ def test_unknown_runtime_storage_relation_is_not_reported_as_proven_overlap() ->
     assert diagnostic["source_alias_conflict"][2] == "unknown"
 
 
+@pytest.mark.parametrize(
+    "case,expected",
+    [
+        ("nested", "overlap"),
+        ("duplicate", "overlap"),
+        ("one_source", None),
+        ("strided", None),
+        ("empty", None),
+        ("unknown", "unknown"),
+        ("read_only_overlap", None),
+        ("write_inside_read_cluster", "overlap"),
+    ],
+)
+def test_current_source_geometry_keeps_logical_aliases_and_exact_byte_relations(
+    case: str, expected: str | None
+) -> None:
+    """Nested source views cannot hide another owner; disjoint strided bytes remain usable."""
+    from torchlens.split._effects import _source_alias_conflict
+
+    storage = torch.arange(12, dtype=torch.float64)
+    sources = {
+        "nested": {"read": [storage[:8], storage[2:4]], "write": [storage[6:10]]},
+        "duplicate": {"read": [storage], "write": [storage]},
+        "one_source": {"write": [storage[:8], storage[2:4]], "read": [storage[8:]]},
+        "strided": {"write": [storage[::2]], "read": [storage[1::2]]},
+        "empty": {"write": [torch.empty(0)], "read": [storage]},
+        "unknown": {"write": [storage], "read": [torch.empty(12, device="meta")]},
+        "read_only_overlap": {
+            "write": [torch.zeros(4)],
+            "read_a": [storage[:8]],
+            "read_b": [storage[2:10]],
+        },
+        "write_inside_read_cluster": {
+            "write": [storage[9:11]],
+            "read_a": [storage[:8]],
+            "read_b": [storage[6:10]],
+        },
+    }[case]
+    conflict = _source_alias_conflict(sources, frozenset({"write"}))
+    assert (conflict[2] if conflict is not None else None) == expected
+
+
 def test_ordered_heterogeneous_cut_refuses_distinct_overlapping_buffer_sources() -> None:
     """Transport cannot turn two overlapping native state sources into independent replicas."""
     from torchlens.split.planner import plan_partition

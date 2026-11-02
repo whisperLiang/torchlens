@@ -7,10 +7,13 @@ again at analysis and execution; activation addresses never enter the proof.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..intervention.types import CapturedArgTemplate, LiteralTensor
 from .graph import ReplayValueRef, SplitTraceGraph, SplitTraceNode
+
+if TYPE_CHECKING:
+    from ..utils.alias_footprint import TensorByteFootprint
 
 
 @dataclass(frozen=True)
@@ -241,6 +244,79 @@ def _source_values(graph: SplitTraceGraph) -> dict[str, list[Any]]:
     return result
 
 
+def _source_bounds(
+    values: dict[str, tuple[Any, ...]],
+    footprints: dict[int, TensorByteFootprint | None],
+) -> dict[tuple[str, int | None], list[tuple[int, int, str]]] | None:
+    """Collect known source spans without retaining geometry beyond this check.
+
+    Parameters
+    ----------
+    values:
+        Current tensor occurrences grouped by logical source identity.
+    footprints:
+        Current byte geometry, evaluated once per tensor object.
+
+    Returns
+    -------
+    dict or None
+        Device-scoped intervals, or ``None`` when geometry or device identity
+        is unproven and the common overlap engine must decide each relation.
+    """
+    bounds: dict[tuple[str, int | None], list[tuple[int, int, str]]] = {}
+    device_indices: dict[str, int | None] = {}
+    for root, items in values.items():
+        for value in items:
+            footprint = footprints[id(value)]
+            if footprint is None:
+                return None
+            if footprint.numel == 0:
+                continue
+            device_type, index = footprint.device_key
+            first_index = device_indices.setdefault(device_type, index)
+            if first_index != index and None in (first_index, index):
+                return None
+            bounds.setdefault(footprint.device_key, []).append(
+                (footprint.start_byte, footprint.end_byte, root)
+            )
+    return bounds
+
+
+def _written_bounds_are_disjoint(
+    bounds: dict[tuple[str, int | None], list[tuple[int, int, str]]],
+    writes: frozenset[str],
+) -> bool:
+    """Prove written sources are disjoint from other logical sources by bounds.
+
+    Parameters
+    ----------
+    bounds:
+        Known device-scoped intervals from :func:`_source_bounds`.
+    writes:
+        Logical sources that the captured native program may write.
+
+    Returns
+    -------
+    bool
+        True only if every cluster containing a written source has one owner.
+        Overlaps between read-only sources require no ordering constraint.
+    """
+    for intervals in bounds.values():
+        furthest_end = -1
+        owner = None
+        written = False
+        for start, end, root in sorted(intervals):
+            if start >= furthest_end:
+                owner = root
+                written = root in writes
+            elif root != owner:
+                if written or root in writes:
+                    return False
+                owner = None
+            furthest_end = max(furthest_end, end)
+    return True
+
+
 def _source_alias_conflict(
     values: dict[str, list[Any]], writes: frozenset[str]
 ) -> tuple[str, str, str] | None:
@@ -248,6 +324,8 @@ def _source_alias_conflict(
     from .._state import pause_logging
     from ..utils.alias_footprint import tensor_byte_footprint, touched_bytes_relation
 
+    if not writes:
+        return None
     unique = {
         root: tuple({id(value): value for value in items}.values())
         for root, items in values.items()
@@ -256,26 +334,15 @@ def _source_alias_conflict(
         footprints = {
             id(value): tensor_byte_footprint(value) for items in unique.values() for value in items
         }
+        bounds = _source_bounds(unique, footprints)
+        if bounds is not None and _written_bounds_are_disjoint(bounds, writes):
+            return None
         for root in writes:
             for value in unique.get(root, ()):
                 for other, items in unique.items():
                     if root == other:
                         continue
-                    left = footprints[id(value)]
                     for item in items:
-                        right = footprints[id(item)]
-                        # Use the shared engine's absolute device-scoped geometry
-                        # once per source, rather than once per pair of sources.
-                        if (
-                            left is not None
-                            and right is not None
-                            and (
-                                left.device_key != right.device_key
-                                or left.end_byte <= right.start_byte
-                                or right.end_byte <= left.start_byte
-                            )
-                        ):
-                            continue
                         relation = touched_bytes_relation(value, item)
                         if relation != "disjoint":
                             return root, other, relation
