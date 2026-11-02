@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -336,10 +337,18 @@ def training_objective(model: Any, args: Any, configuration: dict[str, Any]) -> 
         )
 
         def detr_loss(output: Any, targets: Any) -> Any:
-            device = tensor_leaves(output)[0].device
-            criterion.to(device)
+            tensor = output["pred_logits"]
+            device = tensor.device
+            criterion.to(device=device, dtype=tensor.dtype)
             annotations = [
-                {key: value.to(device) for key, value in item.items()} for item in targets
+                {
+                    key: value.to(
+                        device=device,
+                        dtype=tensor.dtype if value.is_floating_point() else value.dtype,
+                    )
+                    for key, value in item.items()
+                }
+                for item in targets
             ]
             losses = criterion(output, annotations)
             return sum(
@@ -362,11 +371,14 @@ def training_targets(name: str, x: Any) -> Any:
             "img": x,
             "batch_idx": torch.arange(batch),
             "cls": torch.zeros(batch, 1),
-            "bboxes": torch.tensor([[0.5, 0.5, 0.25, 0.25]]).repeat(batch, 1),
+            "bboxes": torch.tensor([[0.5, 0.5, 0.25, 0.25]], dtype=x.dtype).repeat(batch, 1),
         }
     if name == "rfdetr":
         return [
-            {"labels": torch.tensor([0]), "boxes": torch.tensor([[0.5, 0.5, 0.25, 0.25]])}
+            {
+                "labels": torch.tensor([0]),
+                "boxes": torch.tensor([[0.5, 0.5, 0.25, 0.25]], dtype=x.dtype),
+            }
             for _ in range(batch)
         ]
     return None
@@ -886,6 +898,11 @@ def main() -> None:
     parser.add_argument("--weights", type=Path)
     parser.add_argument("--training", action="store_true")
     parser.add_argument("--strict", action="store_true", help="Only passed exits successfully")
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Require deterministic native algorithms; unsupported kernels remain failures",
+    )
     parser.add_argument("--batches", type=int, nargs="+", default=[1, 2, 4, 8])
     parser.add_argument(
         "--optimizers",
@@ -904,12 +921,18 @@ def main() -> None:
     args.prefix_device = args.prefix_device or args.device
     args.suffix_device = args.suffix_device or args.device
     sys.path.insert(0, str(args.source_root.resolve()))
+    if args.deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     import torch
 
     from torchlens.split import PlacementPlan, SplitFeatures, pipeline, prepare_graph
     from torchlens.split.errors import SplitError
 
     torch.set_num_threads(1)
+    if args.deterministic:
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
     torch.manual_seed(42)
     report = {
         "model": args.model,
@@ -923,10 +946,20 @@ def main() -> None:
         "seed": 42,
         "model_mode": args.model_mode,
         "dtype": args.dtype,
+        "execution_context": {
+            "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+            "deterministic_warn_only": torch.is_deterministic_algorithms_warn_only_enabled(),
+            "cudnn_deterministic": torch.backends.cudnn.deterministic,
+            "cudnn_benchmark": torch.backends.cudnn.benchmark,
+            "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+        },
         "objective": "official detection criterion with synthetic annotated boxes"
         if args.model_mode == "train" and args.model in {"yolov8", "rfdetr"}
         else "synthetic scalar graph AD objective",
-        "rng_policy": "native reference and split replay use the same captured per-call RNG states",
+        "rng_policy": (
+            "captured per-call RNG states; recognized native stochastic calls execute on "
+            "their captured generator device, with outputs and autograd copied to segment placement"
+        ),
         "cross_device_tested": False,
         "results": [],
         "tolerance": {"atol": 1e-4, "rtol": 1e-3},

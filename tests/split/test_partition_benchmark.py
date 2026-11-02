@@ -18,6 +18,17 @@ ROOT = Path(__file__).resolve().parents[2]
 DRIVER = ROOT / "benchmarks" / "split_graph_partition.py"
 
 
+@pytest.mark.parametrize("model", ["rfdetr", "yolov8"])
+def test_detection_targets_preserve_input_precision(model: str) -> None:
+    """Double-precision controls need double boxes while categorical labels stay integral."""
+    namespace = runpy.run_path(str(DRIVER), run_name="benchmark_test")
+    targets = namespace["training_targets"](model, torch.ones(2, 3, 8, 8, dtype=torch.float64))
+    boxes = targets[0]["boxes"] if model == "rfdetr" else targets["bboxes"]
+    assert boxes.dtype == torch.float64
+    if model == "rfdetr":
+        assert targets[0]["labels"].dtype == torch.int64
+
+
 @pytest.mark.parametrize("retain_trace", [False, True])
 @pytest.mark.parametrize("device", ["cpu", "cuda:0"])
 def test_native_observer_keeps_state_writes_and_augmented_assignment_in_order(
@@ -175,11 +186,12 @@ with patch.dict(main.__globals__, load_model=load_model, validate_kind=validate)
         str(output),
     ]
     if strict:
-        command.append("--strict")
+        command.extend(("--strict", "--deterministic"))
     completed = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
     assert output.is_file(), completed.stderr
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["status"] == status
+    assert report["execution_context"]["deterministic_algorithms"] is strict
     assert len(report["results"]) == 2
     assert all(row["reason"] == "controlled outcome" for row in report["results"])
     assert json.loads(completed.stdout) == report
