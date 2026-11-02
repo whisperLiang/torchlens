@@ -1,5 +1,9 @@
 # Native split runtime acceptance — 2026-10-31
 
+This report preserves the 2026-10-31 source snapshot and its measurements. For
+the subsequent repairs and resumed GPU verification, see the
+[2026-11-02 repair and validation report](split_runtime_repairs.md).
+
 This change repairs mutable-buffer training, makes benchmark exits reflect the
 evidence, and replaces the remaining test-only point strings with canonical
 `GraphPartition` selections. Acceptance is partial: the supported CPU paths below

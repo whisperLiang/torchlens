@@ -1,5 +1,11 @@
 # Split runtime acceptance
 
+The transport regressions include exact dynamic split operand lowering
+(`test_split_dynamic_operands.py`), persistent mutable buffers and prefix autograd
+storage (`test_split_partition_buffer_gradients.py`), and native stochastic replay
+across real CPU/CUDA devices (`test_split_rng_devices.py`). They compare values,
+gradients and effective state across recuts; hardware skips are not passes.
+
 Tests construct `GraphPartition` from canonical compute IDs. Shared fixture
 selectors accept a node count or an unambiguous node/module anchor and return a
 partition; there is no string-based point-interface emulator. True DAG tests keep

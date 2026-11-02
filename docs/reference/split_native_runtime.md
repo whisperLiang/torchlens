@@ -162,6 +162,21 @@ cached state snapshot refuses instead of silently losing updates. Repartition
 inherits those updated values. BatchNorm microbatches follow native sequential
 chunk statistics, which differ from a single full-batch BatchNorm call.
 
+Across devices, certified suffix writes update transported storage. After the
+native call completes, the runtime stages owned snapshots under the existing
+source identities and publishes them to the effective segment bindings. It
+preserves the old storage for prefix autograd; copying back into tensors saved
+for backward would invalidate their versions. Direct non-gradient buffer writes
+may cross the cut only with certified buffer provenance and unchanged effect
+order. Parameters, unproven aliases and custom dispatch retain their refusals.
+
+Dynamic native `split` and `split_with_sizes` operands have exact argument-slot
+recipes. Lowering requires a symbolic receiver axis, complete output partitioning
+and independent shape witnesses. Scalar equal chunks and complete positive section vectors
+are supported when that evidence agrees. The axis and unrelated integer literals
+are preserved. The numerical batch probe remains mandatory; a shape match alone
+does not establish correct sample membership or authorize a changed Python branch.
+
 ## Real-model validation
 
 Run each command in a fresh process:
@@ -194,8 +209,13 @@ that eval graph. `--model-mode train` runs the native training path and enables
 training checks automatically. DistilBERT then uses nonzero Dropout. Detection
 training uses official losses with synthetic labelled boxes; eval AD keeps its
 separate synthetic scalar objective. The native reference uses the same captured
-per-call RNG contexts. Different CPU/CUDA generators can still produce different
-dropout masks; the benchmark discloses the resulting failure.
+per-call RNG contexts. Recognized native stochastic calls preserve the captured
+generator device: a placed segment transfers that call's inputs to the capture
+device, runs the original native operator, and transfers its outputs back with
+autograd copy edges intact. Other calls keep their segment placement. This can
+add transfer and compute cost for stochastic calls; CPU/CUDA seeds alone do not
+establish identical masks. Explicit generators and random `out=` cross-device
+calls refuse until their independent state/alias contract is supported.
 
 `--prefix-device cpu --suffix-device cuda:0` uses `PlacementPlan.across()` and
 actual boundary/gradient transport. Reverse placement and distinct CUDA device
@@ -210,11 +230,19 @@ Diagnostic mode permits incomplete reports but still exits nonzero on failures.
 Use `--dtype float64` for a separately labelled precision experiment; it does not
 turn a failing float32 experiment into a pass or change tolerances.
 
+`--deterministic` explicitly requires PyTorch deterministic algorithms, disables
+cuDNN benchmarking and records those settings with the cuBLAS workspace
+configuration in JSON. Unsupported deterministic kernels remain failures. This
+controls algorithm nondeterminism; it does not guarantee identical CPU/CUDA
+rounding. Near-zero gradients can amplify small rounding differences through
+Adam's normalization. Keep each dtype and execution context separately labelled.
+
 RF-DETR is skipped without both the package and a trusted local checkpoint. A failed,
 skipped or unsupported row is never reported as a numerical pass.
 
-See the dated [acceptance report](split_runtime_acceptance.md) for executed
-configurations, measured distributions and outstanding validation.
+See the [repair and validation report](split_runtime_repairs.md) for the current
+fixes and resumed GPU evidence. The [2026-10-31 acceptance report](split_runtime_acceptance.md)
+preserves the earlier configurations and historical CPU measurements.
 
 Repartition measurements also accept `--model`, `--weights`, `--prefix-device`
 and `--suffix-device`. CUDA work is synchronized at measurement boundaries.

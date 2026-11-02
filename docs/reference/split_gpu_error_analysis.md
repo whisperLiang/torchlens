@@ -1,5 +1,8 @@
 # Split runtime error analysis — 2026-11-02
 
+This page preserves the pre-repair diagnosis. See the
+[repair design and validation](split_runtime_repairs.md) for subsequent changes.
+
 These observations use committed source `1026a6650bd010cea64266e50348efcfa667137d`
 on one NVIDIA Orin with PyTorch 2.11.0 and CUDA 12.6. They extend the
 [acceptance report](split_runtime_acceptance.md) with separately reproduced
@@ -49,11 +52,18 @@ A small deterministic CPU model reproduces the same failure in float32 and
 float64, without attention, Dropout or a detector checkpoint:
 
 ```python
+import torch
+
+
 class Grouped(torch.nn.Module):
     def forward(self, x):
         batch = x.shape[0]
         grouped = torch.cat(x.split(2, dim=1), dim=0) * 2
         return x + torch.cat(grouped.split(batch, dim=0), dim=1)
+
+
+x = torch.arange(2 * 6 * 8, dtype=torch.float64).reshape(2, 6, 8)
+torch.testing.assert_close(Grouped()(x), 3 * x, rtol=0, atol=0)
 ```
 
 For input `[2, 6, 8]`, grouping produces `[6, 2, 8]`. The captured split size 1

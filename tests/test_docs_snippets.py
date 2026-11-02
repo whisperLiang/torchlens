@@ -38,6 +38,7 @@ DOC_FILES = (
     "reference/collapse.md",
     "reference/split_memory.md",
     "reference/split_native_runtime.md",
+    "reference/split_gpu_error_analysis.md",
 )
 BLOCK_RE = re.compile(r"```python\n(?P<code>.*?)\n```", re.DOTALL)
 

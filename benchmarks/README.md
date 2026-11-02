@@ -23,6 +23,14 @@ synthetic objective; actual detection training uses the official criterion and
 synthetic annotations. Float32 remains the default. An additional `--dtype float64`
 experiment is labelled separately and retains the same tolerances.
 
+`--deterministic` requires deterministic native algorithms and records the
+execution settings in JSON. Unsupported kernels remain failures. Neither this
+option nor float64 changes tolerances or makes a failed float32 run pass.
+
+Recognized native stochastic replay calls execute on their captured generator
+device, then copy outputs and autograd edges to segment placement. This preserves
+native masks across CPU/CUDA placement and can add transfer/compute cost.
+
 Collect synchronized raw repartition samples and separate memory evidence:
 
 ```bash
@@ -42,8 +50,10 @@ arguments; `--source-root` selects the implementation under measurement.
 The `device_transfer` status is based on observed state-copy samples; different
 placement strings alone do not establish that a recut copied state.
 
-The dated [acceptance report](../docs/reference/split_runtime_acceptance.md)
-lists executed configurations, unsupported cases and remaining verification.
+The [repair and validation report](../docs/reference/split_runtime_repairs.md)
+lists current fixes and resumed GPU evidence. The earlier
+[acceptance report](../docs/reference/split_runtime_acceptance.md) preserves
+historical CPU measurements and their source provenance.
 
 The facet-indirection benchmark reads a locally generated capture-spine measurement.
 Run these in order to create the ignored JSON files under `benchmarks/perf/`:
