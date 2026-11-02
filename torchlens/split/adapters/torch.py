@@ -518,8 +518,25 @@ class _GeneratedSegmentBase:
             else frozenset()
         )
         self._empty_param_cursor = _LiveParamCursor([])
+        self._initialize_call_guards()
+        resolved_placement = (
+            placement if placement is not None else spec.placement.for_segment(self.segment)
+        )
+        self._state = (
+            state
+            if state is not None
+            else SegmentState(adapter=TorchSplitAdapter(), placement=resolved_placement)
+        )
+        self._fast_guard_state_refs: tuple[Any, ...] = ()
+        self._fast_guard_certified = self._prepare_fast_guard()
+
+    def _initialize_call_guards(self) -> None:
+        """Resolve native call identities and dispatch guards once per segment."""
         self._rng_free_targets = _rng_free_torch_targets(_torch())
         self._rng_free_target_ids = frozenset(id(target) for target in self._rng_free_targets)
+        from .._torch_rng_replay import stochastic_targets
+
+        self._stochastic_targets = stochastic_targets()
         torch = _torch()
         decorated_to_orig, _ = _state.wrap_epoch_ledgers()
         self._dropout_target = decorated_to_orig.get(id(torch.dropout), torch.dropout)
@@ -537,16 +554,6 @@ class _GeneratedSegmentBase:
             self._dispatch_mode_stack = get_current_dispatch_mode_stack
         else:
             self._dispatch_mode_stack = _get_current_dispatch_mode_stack
-        resolved_placement = (
-            placement if placement is not None else spec.placement.for_segment(self.segment)
-        )
-        self._state = (
-            state
-            if state is not None
-            else SegmentState(adapter=TorchSplitAdapter(), placement=resolved_placement)
-        )
-        self._fast_guard_state_refs: tuple[Any, ...] = ()
-        self._fast_guard_certified = self._prepare_fast_guard()
 
     def _prepare_fast_guard(self) -> bool:
         """Certify a segment whose plain builtins cannot change execution modes."""
@@ -1008,6 +1015,17 @@ class _GeneratedSegmentBase:
                 context=self._context(node, "missing replay target"),
             )
         autocast_state = getattr(node.op, "func_autocast_state", None)
+        from .._torch_rng_replay import route_stochastic_call
+
+        routed, output = route_stochastic_call(
+            node,
+            getattr(self, "_stochastic_targets", {}).get(id(target)),
+            args,
+            kwargs,
+            self.placement.device,
+        )
+        if routed:
+            return output
         if self._can_skip_rng_guard(target, args, kwargs):
             if self._can_skip_autocast_restore(autocast_state):
                 return target(*args, **kwargs)

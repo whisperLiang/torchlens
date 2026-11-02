@@ -91,6 +91,7 @@ class _ReplayOpState:
     multi_output_index: Any
     is_inplace: bool = False
     out: Any = None
+    device_ref: str | None = None
 
 
 def _needs_source_payload(node: SplitTraceNode) -> bool:
@@ -248,6 +249,9 @@ def compact_torch_graph(graph: SplitTraceGraph, *, training: bool = False) -> Sp
             multi_output_index=getattr(node.op, "multi_output_index", None),
             is_inplace=bool(getattr(node.op, "is_inplace", False)),
             out=getattr(node.op, "out", None) if _needs_source_payload(node) else None,
+            device_ref=str(device)
+            if (device := getattr(node.op, "device_ref", None)) is not None
+            else None,
         )
         # TensorRef is metadata plus an optional strong activation reference.
         # Replay never consumes output_ref, but its portable metadata is useful

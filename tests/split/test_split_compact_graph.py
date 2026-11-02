@@ -83,8 +83,18 @@ def test_compact_graph_releases_diagnostic_payloads_and_capture_objects() -> Non
         graph, trace = _capture_compact(model, x)
     assert all(
         {field.name for field in fields(node.op)}
-        == {"func_rng_states", "func_autocast_state", "multi_output_index", "is_inplace", "out"}
+        == {
+            "func_rng_states",
+            "func_autocast_state",
+            "multi_output_index",
+            "is_inplace",
+            "out",
+            "device_ref",
+        }
         for node in graph.nodes
+    )
+    assert all(
+        node.op.device_ref is None or type(node.op.device_ref) is str for node in graph.nodes
     )
     assert [node.module_path for node in graph.nodes] == [
         node.module_path for node in split_graph_from_trace(trace).nodes
