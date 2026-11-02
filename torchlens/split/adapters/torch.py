@@ -870,8 +870,9 @@ class _GeneratedSegmentBase:
         node_id = node.canonical_id
         if node_id not in self._shape_rewrite_node_ids and node_id not in self._reshape_node_ids:
             return args, kwargs
-        rewritten_args = self.graph.shape_program.rewrite(node_id, args, self._shape_binding)
-        rewritten_kwargs = self.graph.shape_program.rewrite(node_id, kwargs, self._shape_binding)
+        rewritten_args, rewritten_kwargs = self.graph.shape_program.rewrite_call(
+            node_id, args, kwargs, self._shape_binding
+        )
         if node_id not in self._reshape_node_ids:
             return rewritten_args, rewritten_kwargs
         runtime_shape = self.graph.shape_program.value_shape(

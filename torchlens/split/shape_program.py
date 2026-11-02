@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from ..backends.registry import TINYGRAD_BACKEND_NAME, TORCH_BACKEND_NAME
 from ..intervention.types import CapturedArgTemplate, LiteralTensor, LiteralValue
+from ._shape_witnesses import _witness_axis_diagnostics, _witness_scaled_axes
 from .batch_probe import BatchProbeResult
 from .errors import SplitBoundaryError, SplitErrorContext, SplitUnsupportedError
 from .graph import iter_replay_value_refs
@@ -221,6 +222,7 @@ class ShapeRecipe:
     captured: tuple[int, ...]
     dims: tuple[DimExpr, ...]
     target: str = "shape_literal"
+    argument: int | str | None = None
 
     def evaluate(self, binding: ShapeBinding) -> tuple[int, ...]:
         """Evaluate the replacement descriptor."""
@@ -407,10 +409,34 @@ class ShapeProgram:
     def rewrite(self, node_id: str, value: Any, binding: ShapeBinding) -> Any:
         """Apply an exact lowered recipe to a captured literal tree."""
 
-        node_recipes = self.recipes.get(node_id, ())
+        node_recipes = tuple(r for r in self.recipes.get(node_id, ()) if r.argument is None)
         if not node_recipes:
             return value
         return _rewrite_recipe_tree(value, node_recipes, binding)
+
+    def rewrite_call(
+        self, node_id: str, args: tuple[Any, ...], kwargs: dict[str, Any], binding: ShapeBinding
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        """Rewrite proven scalar/vector operands at their exact positional or keyword slots."""
+        args, kwargs = self.rewrite(node_id, args, binding), self.rewrite(node_id, kwargs, binding)
+        for recipe in self.recipes.get(node_id, ()):
+            slot = recipe.argument
+            if slot is None:
+                continue
+            value = args[slot] if isinstance(slot, int) else kwargs[slot]
+            replacement = recipe.evaluate(binding)
+            result = (
+                tuple(replacement)
+                if isinstance(value, tuple)
+                else list(replacement)
+                if isinstance(value, list)
+                else replacement[0]
+            )
+            if isinstance(slot, int):
+                args = (*args[:slot], result, *args[slot + 1 :])
+            else:
+                kwargs = {**kwargs, slot: result}
+        return args, kwargs
 
     def value_shape(self, node_id: str, binding: ShapeBinding) -> tuple[int, ...] | None:
         """Evaluate one graph value shape for the current runtime symbols."""
@@ -564,6 +590,12 @@ def compile_shape_program(
         },
         "witness_batch_sizes": sorted(shape_witnesses or {}),
     }
+    if addressed := {
+        key: [recipe.argument for recipe in values if recipe.argument is not None]
+        for key, values in recipes.items()
+        if any(recipe.argument is not None for recipe in values)
+    }:
+        payload["operand_locations"] = addressed
     fingerprint = sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
     witness_axis_diagnostics = _witness_axis_diagnostics(
         graph,
@@ -1246,7 +1278,15 @@ def _compile_recipes(
 ) -> dict[str, tuple[ShapeRecipe, ...]]:
     """Lower symbolic output descriptors to exact per-node recipes."""
 
-    recipes: dict[str, tuple[ShapeRecipe, ...]] = {}
+    from ._shape_operands import compile_split_operands
+
+    recipes = (
+        compile_split_operands(
+            graph, value_shapes, batch_symbol, traced_batch_size, shape_witnesses
+        )
+        if graph.backend == TORCH_BACKEND_NAME
+        else {}
+    )
     for node in graph.nodes:
         if graph.backend == TORCH_BACKEND_NAME and shape_semantic_for_node(node) == "repeat":
             repeat_recipe = _compile_repeat_recipe(
@@ -1885,72 +1925,6 @@ def shape_semantic_for_node(node: SplitTraceNode) -> ShapeSemantic | None:
     if isinstance(namespace, str) and isinstance(qualname, str):
         return _TORCH_SHAPE_SEMANTICS.get((namespace, qualname.rsplit(".", 1)[-1]))
     return None
-
-
-def _witness_scaled_axes(
-    node_id: str,
-    traced_shape: tuple[int, ...],
-    traced_batch_size: int,
-    witnesses: Mapping[int, Mapping[str, tuple[int, ...] | None]],
-) -> set[int]:
-    """Return axes observed to be a fixed multiple of batch at every sample."""
-
-    if not witnesses:
-        return set()
-    witnessed_shapes: list[tuple[int, tuple[int, ...]]] = []
-    for batch_size, shapes in witnesses.items():
-        shape = shapes.get(node_id)
-        if shape is None or len(shape) != len(traced_shape):
-            return set()
-        witnessed_shapes.append((batch_size, shape))
-    return {
-        axis
-        for axis, traced_dim in enumerate(traced_shape)
-        if traced_dim > 0
-        and traced_dim % traced_batch_size == 0
-        and all(
-            shape[axis] * traced_batch_size == traced_dim * batch_size
-            for batch_size, shape in witnessed_shapes
-        )
-    }
-
-
-def _witness_axis_diagnostics(
-    graph: SplitTraceGraph,
-    traced_batch_size: int,
-    witnesses: Mapping[int, Mapping[str, tuple[int, ...] | None]],
-) -> dict[str, dict[str, tuple[int, ...]]]:
-    """Describe finite axis candidates accepted or eliminated by witnesses."""
-
-    if not witnesses:
-        return {}
-    diagnostics: dict[str, dict[str, tuple[int, ...]]] = {}
-    for node in graph.nodes:
-        if node.output_shape is None:
-            continue
-        candidates = tuple(
-            axis
-            for axis, dim in enumerate(node.output_shape)
-            if traced_batch_size > 0 and dim > 0 and dim % traced_batch_size == 0
-        )
-        if not candidates:
-            continue
-        accepted = tuple(
-            sorted(
-                _witness_scaled_axes(
-                    node.canonical_id,
-                    node.output_shape,
-                    traced_batch_size,
-                    witnesses,
-                )
-            )
-        )
-        diagnostics[node.canonical_id] = {
-            "candidate_axes": candidates,
-            "accepted_axes": accepted,
-            "eliminated_axes": tuple(axis for axis in candidates if axis not in accepted),
-        }
-    return diagnostics
 
 
 def _shape_proof_sources(
