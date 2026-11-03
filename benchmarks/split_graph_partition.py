@@ -17,11 +17,53 @@ import time
 import traceback
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+
+_STRICT_TOLERANCE = (1e-8, 1e-7)
+_COMPARISON_TOLERANCE: ContextVar[tuple[float, float]] = ContextVar(
+    "split_benchmark_tolerance", default=_STRICT_TOLERANCE
+)
+
+
+def numeric_tolerance(profile: str) -> tuple[float, float]:
+    """Resolve an explicit, versioned benchmark comparison policy.
+
+    Parameters
+    ----------
+    profile:
+        Strict default or the opt-in CPU/CUDA FP64 comparison profile.
+
+    Returns
+    -------
+    tuple of float
+        Absolute and relative tolerance, respectively.
+    """
+    if profile == "strict":
+        return _STRICT_TOLERANCE
+    if profile == "cross-device-fp64-v1":
+        return 1e-7, 1e-7
+    raise ValueError(f"Unknown comparison tolerance profile: {profile!r}")
+
+
+@contextmanager
+def comparison_tolerance(profile: str) -> Iterator[None]:
+    """Scope floating acceptance checks without changing native computation.
+
+    Parameters
+    ----------
+    profile:
+        Benchmark tolerance policy, restored on both normal and exceptional exit.
+    """
+    token = _COMPARISON_TOLERANCE.set(numeric_tolerance(profile))
+    try:
+        yield
+    finally:
+        _COMPARISON_TOLERANCE.reset(token)
 
 
 def result_status(rows: list[dict[str, Any]]) -> str:
@@ -141,7 +183,7 @@ def tensor_leaves(value: Any) -> list[Any]:
     return []
 
 
-def finite_close(actual: Any, expected: Any, *, atol: float = 1e-8) -> float:
+def finite_close(actual: Any, expected: Any, *, atol: float | None = None) -> float:
     """Reject nonfinite values, then compare structure, dtype, shape and numeric values."""
     import torch
 
@@ -157,7 +199,10 @@ def finite_close(actual: Any, expected: Any, *, atol: float = 1e-8) -> float:
     for a, b in zip(tensor_leaves(actual), tensor_leaves(expected), strict=True):
         if not (a.is_floating_point() or a.is_complex()):
             torch.testing.assert_close(a, b, atol=0, rtol=0, check_device=False)
-    torch.testing.assert_close(actual, expected, atol=atol, rtol=1e-7, check_device=False)
+    active_atol, rtol = _COMPARISON_TOLERANCE.get()
+    torch.testing.assert_close(
+        actual, expected, atol=active_atol if atol is None else atol, rtol=rtol, check_device=False
+    )
     return max(
         (
             float((a.detach().cpu() - b.detach().cpu()).abs().max())
@@ -1031,6 +1076,12 @@ def main() -> None:
     parser.add_argument("--suffix-device", help="Suffix placement, e.g. cpu or cuda:1")
     parser.add_argument("--model-mode", choices=("eval", "train"), default="eval")
     parser.add_argument("--dtype", choices=("float32", "float64"), default="float64")
+    parser.add_argument(
+        "--tolerance-profile",
+        choices=("strict", "cross-device-fp64-v1"),
+        default="strict",
+        help="Explicit numerical acceptance policy; the CPU/CUDA profile requires FP64",
+    )
     parser.add_argument("--candidate-strategy", choices=("effects", "ancestors"), default="effects")
     parser.add_argument(
         "--candidate-census", action="store_true", help="Analyze every bounded candidate"
@@ -1069,6 +1120,13 @@ def main() -> None:
     from torchlens.split import PlacementPlan, SplitFeatures, pipeline, prepare_graph
     from torchlens.split.errors import SplitError
 
+    if args.tolerance_profile != "strict" and (
+        args.dtype != "float64"
+        or {torch.device(args.prefix_device).type, torch.device(args.suffix_device).type}
+        != {"cpu", "cuda"}
+    ):
+        parser.error("cross-device-fp64-v1 requires float64 and one CPU and one CUDA segment")
+    atol, rtol = numeric_tolerance(args.tolerance_profile)
     torch.set_num_threads(1)
     if args.deterministic:
         torch.use_deterministic_algorithms(True)
@@ -1103,7 +1161,12 @@ def main() -> None:
         ),
         "cross_device_tested": False,
         "results": [],
-        "tolerance": {"atol": 1e-8, "rtol": 1e-7, "integer_boolean": "exact"},
+        "tolerance": {
+            "profile": args.tolerance_profile,
+            "atol": atol,
+            "rtol": rtol,
+            "integer_boolean": "exact",
+        },
     }
     report["libraries"] = {}
     for package in ("torchvision", "transformers", "ultralytics", "rfdetr"):
@@ -1149,7 +1212,10 @@ def main() -> None:
             counts["shape_witness" if kw.get("shape_witness") else "canonical"] += 1
             return capture(*a, **kw)
 
-        with patch.object(pipeline, "capture_model", side_effect=counted):
+        with (
+            patch.object(pipeline, "capture_model", side_effect=counted),
+            comparison_tolerance(args.tolerance_profile),
+        ):
             synchronize()
             started = time.perf_counter()
             context = prepare_graph(

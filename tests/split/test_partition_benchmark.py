@@ -22,6 +22,76 @@ ROOT = Path(__file__).resolve().parents[2]
 DRIVER = ROOT / "benchmarks" / "split_graph_partition.py"
 
 
+def test_cross_device_tolerance_is_explicit_scoped_and_restores_after_failure() -> None:
+    """A selected floating budget must not leak into the default or a nested strict check."""
+    namespace = runpy.run_path(str(DRIVER), run_name="benchmark_test")
+    close = namespace["finite_close"]
+    expected = torch.zeros(2, dtype=torch.float64)
+    actual = torch.full_like(expected, 5e-8)
+    with pytest.raises(AssertionError):
+        close(actual, expected)
+    with (
+        pytest.raises(RuntimeError, match="scope interrupted"),
+        namespace["comparison_tolerance"]("cross-device-fp64-v1"),
+    ):
+        assert close(actual, expected) == pytest.approx(5e-8)
+        with namespace["comparison_tolerance"]("strict"), pytest.raises(AssertionError):
+            close(actual, expected)
+        assert close(actual, expected) == pytest.approx(5e-8)
+        raise RuntimeError("scope interrupted")
+    with pytest.raises(AssertionError):
+        close(actual, expected)
+
+
+@pytest.mark.parametrize("case", ["integer", "boolean", "dtype", "shape", "nan", "inf", "gradient"])
+def test_cross_device_tolerance_keeps_non_numeric_contracts(case: str) -> None:
+    """A looser floating budget cannot admit categorical, structural or nonfinite errors."""
+    namespace = runpy.run_path(str(DRIVER), run_name="benchmark_test")
+    pairs = {
+        "integer": (torch.tensor([1_000_000_001]), torch.tensor([1_000_000_000])),
+        "boolean": (torch.tensor([True]), torch.tensor([False])),
+        "dtype": (torch.zeros(2, dtype=torch.float32), torch.zeros(2, dtype=torch.float64)),
+        "shape": (torch.zeros(1), torch.zeros(2)),
+        "nan": (torch.tensor([float("nan")]), torch.zeros(1)),
+        "inf": (torch.tensor([float("inf")]), torch.zeros(1)),
+        "gradient": (None, torch.zeros(1)),
+    }
+    with namespace["comparison_tolerance"]("cross-device-fp64-v1"), pytest.raises(AssertionError):
+        namespace["finite_close"](*pairs[case])
+
+
+@pytest.mark.heavy
+@pytest.mark.parametrize(
+    "prefix,suffix,dtype",
+    [("cpu", "cpu", "float64"), ("cuda", "cuda", "float64"), ("cpu", "cuda", "float32")],
+)
+def test_cross_device_tolerance_cli_refuses_unrelated_precision_or_placement(
+    prefix: str, suffix: str, dtype: str
+) -> None:
+    """The opt-in budget must not silently weaken a same-backend or float32 oracle."""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(DRIVER),
+            "--model",
+            "yolov8",
+            "--tolerance-profile",
+            "cross-device-fp64-v1",
+            "--prefix-device",
+            prefix,
+            "--suffix-device",
+            suffix,
+            "--dtype",
+            dtype,
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 2
+    assert "requires float64 and one CPU and one CUDA segment" in completed.stderr
+
+
 def test_state_only_candidate_is_refused_without_failing_the_search() -> None:
     """A lone BN counter has no real compute frontier and cannot attest a DAG cut."""
     namespace = runpy.run_path(str(DRIVER), run_name="benchmark_test")
@@ -306,6 +376,12 @@ with patch.dict(main.__globals__, load_model=load_model, validate_kind=validate)
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["status"] == status
     assert report["execution_context"]["deterministic_algorithms"] is strict
+    assert report["tolerance"] == {
+        "profile": "strict",
+        "atol": 1e-8,
+        "rtol": 1e-7,
+        "integer_boolean": "exact",
+    }
     assert len(report["results"]) == 2
     assert all(row["reason"] == "controlled outcome" for row in report["results"])
     assert json.loads(completed.stdout) == report
