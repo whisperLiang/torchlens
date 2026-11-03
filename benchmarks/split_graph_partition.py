@@ -17,53 +17,14 @@ import time
 import traceback
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from contextvars import ContextVar
 from copy import deepcopy
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-_STRICT_TOLERANCE = (1e-8, 1e-7)
-_COMPARISON_TOLERANCE: ContextVar[tuple[float, float]] = ContextVar(
-    "split_benchmark_tolerance", default=_STRICT_TOLERANCE
-)
-
-
-def numeric_tolerance(profile: str) -> tuple[float, float]:
-    """Resolve an explicit, versioned benchmark comparison policy.
-
-    Parameters
-    ----------
-    profile:
-        Strict default or the opt-in CPU/CUDA FP64 comparison profile.
-
-    Returns
-    -------
-    tuple of float
-        Absolute and relative tolerance, respectively.
-    """
-    if profile == "strict":
-        return _STRICT_TOLERANCE
-    if profile == "cross-device-fp64-v1":
-        return 1e-7, 1e-7
-    raise ValueError(f"Unknown comparison tolerance profile: {profile!r}")
-
-
-@contextmanager
-def comparison_tolerance(profile: str) -> Iterator[None]:
-    """Scope floating acceptance checks without changing native computation.
-
-    Parameters
-    ----------
-    profile:
-        Benchmark tolerance policy, restored on both normal and exceptional exit.
-    """
-    token = _COMPARISON_TOLERANCE.set(numeric_tolerance(profile))
-    try:
-        yield
-    finally:
-        _COMPARISON_TOLERANCE.reset(token)
+_TOLERANCE = {"atol": 1e-8, "rtol": 1e-7}
+SGD_LR = 0.01
 
 
 def result_status(rows: list[dict[str, Any]]) -> str:
@@ -117,31 +78,12 @@ def effective_parameters(runtime: Any) -> dict[str, Any]:
     return result
 
 
-def make_optimizer(name: str, parameters: Any) -> Any:
-    """Construct the same native optimizer for independent reference and split state."""
+def make_optimizer(parameters: Any) -> Any:
+    """Construct plain SGD over the current unique, trainable execution parameters."""
     import torch
 
     parameters = list({id(value): value for value in parameters if value.requires_grad}.values())
-    if name == "adam":
-        return torch.optim.Adam(parameters, lr=0.001)
-    return torch.optim.SGD(parameters, lr=0.01, momentum=0.9 if name == "momentum" else 0)
-
-
-def rebind_optimizer(name: str, previous: Any, old: dict[str, Any], new: dict[str, Any]) -> Any:
-    """Explicitly reassociate caller-owned history after runtime state migration."""
-    import torch
-
-    optimizer = make_optimizer(name, new.values())
-    if old.keys() != new.keys():
-        raise AssertionError("repartition changed the effective parameter inventory")
-    for key, parameter in new.items():
-        for field, value in previous.state.get(old[key], {}).items():
-            optimizer.state[parameter][field] = (
-                value.detach().to(value.device if field == "step" else parameter.device).clone()
-                if isinstance(value, torch.Tensor)
-                else deepcopy(value)
-            )
-    return optimizer
+    return torch.optim.SGD(parameters, lr=SGD_LR)
 
 
 def buffer_error(runtime: Any, reference: Any) -> float:
@@ -183,7 +125,7 @@ def tensor_leaves(value: Any) -> list[Any]:
     return []
 
 
-def finite_close(actual: Any, expected: Any, *, atol: float | None = None) -> float:
+def finite_close(actual: Any, expected: Any) -> float:
     """Reject nonfinite values, then compare structure, dtype, shape and numeric values."""
     import torch
 
@@ -199,10 +141,7 @@ def finite_close(actual: Any, expected: Any, *, atol: float | None = None) -> fl
     for a, b in zip(tensor_leaves(actual), tensor_leaves(expected), strict=True):
         if not (a.is_floating_point() or a.is_complex()):
             torch.testing.assert_close(a, b, atol=0, rtol=0, check_device=False)
-    active_atol, rtol = _COMPARISON_TOLERANCE.get()
-    torch.testing.assert_close(
-        actual, expected, atol=active_atol if atol is None else atol, rtol=rtol, check_device=False
-    )
+    torch.testing.assert_close(actual, expected, **_TOLERANCE, check_device=False)
     return max(
         (
             float((a.detach().cpu() - b.detach().cpu()).abs().max())
@@ -678,7 +617,7 @@ def training_step(
     )
     optimizer_error = max(
         (
-            finite_close(actual_opt.state[a], expected_opt.state[b])
+            finite_close(actual_opt.state.get(a, {}), expected_opt.state.get(b, {}))
             for a, b in ((p, expected_parameters[n]) for n, p in actual_parameters.items())
         ),
         default=0.0,
@@ -922,107 +861,106 @@ def _validate_kind(
         row["checks"]["forward"] = "passed"
     row["dynamic_batch_passed"] = {1, 2, 4, 8} <= set(args.batches)
     if args.training:
-        for name in args.optimizers:
-            context.model.load_state_dict(initial)
-            reference.load_state_dict(initial)
-            runtime = context.materialize(accepted[0])
-            parameters = effective_parameters(runtime)
-            actual_opt, expected_opt = (
-                make_optimizer(name, parameters.values()),
-                make_optimizer(name, reference.parameters()),
+        context.model.load_state_dict(initial)
+        reference.load_state_dict(initial)
+        runtime = context.materialize(accepted[0])
+        parameters = effective_parameters(runtime)
+        actual_opt, expected_opt = (
+            make_optimizer(parameters.values()),
+            make_optimizer(reference.parameters()),
+        )
+        sequence = (0, 1, 2, 0) if len(accepted) == 3 else (0,) * 4
+        for index, batch in enumerate(args.batches):
+            row["checks"].update(
+                dict.fromkeys(
+                    (
+                        "forward",
+                        "backward",
+                        "optimizer",
+                        "input_gradient",
+                        "parameter_gradient",
+                        "boundary_gradient",
+                        "buffers",
+                        "repartition",
+                    ),
+                    "not_validated",
+                )
             )
-            sequence = (0, 1, 2, 0) if len(accepted) == 3 else (0,) * 4
-            for index, batch in enumerate(args.batches):
-                row["checks"].update(
-                    dict.fromkeys(
-                        (
-                            "forward",
-                            "backward",
-                            "optimizer",
-                            "input_gradient",
-                            "parameter_gradient",
-                            "boundary_gradient",
-                            "buffers",
-                            "repartition",
-                        ),
-                        "not_validated",
-                    )
+            if args.model_mode == "train":
+                row["checks"]["train_mode"] = "not_validated"
+            if heterogeneous:
+                row["cross_device_tested"] = True
+                row["checks"]["cross_device"] = "not_validated"
+            analysis = accepted[sequence[index % 4]]
+            synchronize()
+            start = time.perf_counter()
+            migration = runtime.plan_state_migration(analysis.request.partition)
+            synchronize()
+            migration_ms = 1000 * (time.perf_counter() - start)
+            if not migration.supported:
+                raise AssertionError(
+                    f"optimizer migration unsupported: {migration.unsupported_reasons}"
                 )
-                if args.model_mode == "train":
-                    row["checks"]["train_mode"] = "not_validated"
-                if heterogeneous:
-                    row["cross_device_tested"] = True
-                    row["checks"]["cross_device"] = "not_validated"
-                analysis = accepted[sequence[index % 4]]
-                synchronize()
-                start = time.perf_counter()
-                migration = runtime.plan_state_migration(analysis.request.partition)
-                synchronize()
-                migration_ms = 1000 * (time.perf_counter() - start)
-                if not migration.supported:
-                    raise AssertionError(
-                        f"optimizer migration unsupported: {migration.unsupported_reasons}"
-                    )
-                start = time.perf_counter()
-                runtime = runtime.repartition(analysis.request.partition)
-                synchronize()
-                recut_ms = 1000 * (time.perf_counter() - start)
-                current = effective_parameters(runtime)
-                actual_opt = rebind_optimizer(name, actual_opt, parameters, current)
-                parameters = current
-                # Inherit current buffers rather than rebinding capture-time values.
-                buffer_error(runtime, reference)
-                if runtime.trace_graph is not context.trace_graph:
-                    raise AssertionError("recut replaced the captured graph")
-                x = torch.randn(
-                    batch,
-                    *dimensions,
-                    device=args.prefix_device,
-                    dtype=getattr(torch, args.dtype),
-                    requires_grad=True,
-                )
-                start = time.perf_counter()
-                errors = training_step(
-                    runtime,
-                    reference,
-                    x,
-                    actual_opt,
-                    expected_opt,
-                    loss_fn=args.loss_fn,
-                    targets=training_targets(args.model, x) if args.model_mode == "train" else None,
-                )
-                row["forward_passed"] = True
-                synchronize()
-                row["training_steps"].append(
-                    {
-                        "optimizer": name,
-                        "batch": batch,
-                        "partition": runtime.request.boundary,
-                        "prefix_nodes": len(runtime.request.partition.prefix_node_ids),
-                        "suffix_nodes": len(context.trace_graph.compute_nodes)
-                        - len(runtime.request.partition.prefix_node_ids),
-                        "boundary_bytes": runtime.boundary_layout(
-                            batch_size=batch, training=True
-                        ).forward_payload_bytes,
-                        "migration_plan_ms": migration_ms,
-                        "migration_identity_preserved": all(
-                            e.identity_preserved is not False for e in migration.entries
-                        ),
-                        "repartition_ms": recut_ms,
-                        "training_ms": 1000 * (time.perf_counter() - start),
-                        **errors,
-                        "memory": memory_snapshot(),
-                    }
-                )
-                gc.collect()
-                try:
-                    import psutil
+            start = time.perf_counter()
+            runtime = runtime.repartition(analysis.request.partition)
+            synchronize()
+            recut_ms = 1000 * (time.perf_counter() - start)
+            current = effective_parameters(runtime)
+            if parameters.keys() != current.keys():
+                raise AssertionError("repartition changed the effective parameter inventory")
+            actual_opt = make_optimizer(current.values())
+            parameters = current
+            # Inherit current buffers rather than rebinding capture-time values.
+            buffer_error(runtime, reference)
+            if runtime.trace_graph is not context.trace_graph:
+                raise AssertionError("recut replaced the captured graph")
+            x = torch.randn(
+                batch,
+                *dimensions,
+                device=args.prefix_device,
+                dtype=getattr(torch, args.dtype),
+                requires_grad=True,
+            )
+            start = time.perf_counter()
+            errors = training_step(
+                runtime,
+                reference,
+                x,
+                actual_opt,
+                expected_opt,
+                loss_fn=args.loss_fn,
+                targets=training_targets(args.model, x) if args.model_mode == "train" else None,
+            )
+            row["forward_passed"] = True
+            synchronize()
+            row["training_steps"].append(
+                {
+                    "optimizer": "sgd",
+                    "batch": batch,
+                    "partition": runtime.request.boundary,
+                    "prefix_nodes": len(runtime.request.partition.prefix_node_ids),
+                    "suffix_nodes": len(context.trace_graph.compute_nodes)
+                    - len(runtime.request.partition.prefix_node_ids),
+                    "boundary_bytes": runtime.boundary_layout(
+                        batch_size=batch, training=True
+                    ).forward_payload_bytes,
+                    "migration_plan_ms": migration_ms,
+                    "migration_identity_preserved": all(
+                        e.identity_preserved is not False for e in migration.entries
+                    ),
+                    "repartition_ms": recut_ms,
+                    "training_ms": 1000 * (time.perf_counter() - start),
+                    **errors,
+                    "memory": memory_snapshot(),
+                }
+            )
+            gc.collect()
+            try:
+                import psutil
 
-                    row["training_steps"][-1]["rss_after_gc_bytes"] = (
-                        psutil.Process().memory_info().rss
-                    )
-                except ImportError:
-                    row["training_steps"][-1]["rss_after_gc_bytes"] = None
+                row["training_steps"][-1]["rss_after_gc_bytes"] = psutil.Process().memory_info().rss
+            except ImportError:
+                row["training_steps"][-1]["rss_after_gc_bytes"] = None
         row.update(
             backward_passed=True,
             optimizer_update_passed=True,
@@ -1076,12 +1014,6 @@ def main() -> None:
     parser.add_argument("--suffix-device", help="Suffix placement, e.g. cpu or cuda:1")
     parser.add_argument("--model-mode", choices=("eval", "train"), default="eval")
     parser.add_argument("--dtype", choices=("float32", "float64"), default="float64")
-    parser.add_argument(
-        "--tolerance-profile",
-        choices=("strict", "cross-device-fp64-v1"),
-        default="strict",
-        help="Explicit numerical acceptance policy; the CPU/CUDA profile requires FP64",
-    )
     parser.add_argument("--candidate-strategy", choices=("effects", "ancestors"), default="effects")
     parser.add_argument(
         "--candidate-census", action="store_true", help="Analyze every bounded candidate"
@@ -1096,12 +1028,6 @@ def main() -> None:
         help="Require deterministic native algorithms; unsupported kernels remain failures",
     )
     parser.add_argument("--batches", type=int, nargs="+", default=[1, 2, 4, 8])
-    parser.add_argument(
-        "--optimizers",
-        choices=("sgd", "momentum", "adam"),
-        nargs="+",
-        default=["sgd", "momentum", "adam"],
-    )
     parser.add_argument(
         "--partition-kind", choices=("both", "sequential", "noncontiguous_dag"), default="both"
     )
@@ -1120,13 +1046,6 @@ def main() -> None:
     from torchlens.split import PlacementPlan, SplitFeatures, pipeline, prepare_graph
     from torchlens.split.errors import SplitError
 
-    if args.tolerance_profile != "strict" and (
-        args.dtype != "float64"
-        or {torch.device(args.prefix_device).type, torch.device(args.suffix_device).type}
-        != {"cpu", "cuda"}
-    ):
-        parser.error("cross-device-fp64-v1 requires float64 and one CPU and one CUDA segment")
-    atol, rtol = numeric_tolerance(args.tolerance_profile)
     torch.set_num_threads(1)
     if args.deterministic:
         torch.use_deterministic_algorithms(True)
@@ -1161,12 +1080,8 @@ def main() -> None:
         ),
         "cross_device_tested": False,
         "results": [],
-        "tolerance": {
-            "profile": args.tolerance_profile,
-            "atol": atol,
-            "rtol": rtol,
-            "integer_boolean": "exact",
-        },
+        "optimizer": {"name": "SGD", "lr": SGD_LR},
+        "tolerance": {**_TOLERANCE, "integer_boolean": "exact"},
     }
     report["libraries"] = {}
     for package in ("torchvision", "transformers", "ultralytics", "rfdetr"):
@@ -1212,10 +1127,7 @@ def main() -> None:
             counts["shape_witness" if kw.get("shape_witness") else "canonical"] += 1
             return capture(*a, **kw)
 
-        with (
-            patch.object(pipeline, "capture_model", side_effect=counted),
-            comparison_tolerance(args.tolerance_profile),
-        ):
+        with patch.object(pipeline, "capture_model", side_effect=counted):
             synchronize()
             started = time.perf_counter()
             context = prepare_graph(

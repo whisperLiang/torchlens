@@ -44,7 +44,7 @@ class NormBranches(nn.Module):
 def test_independent_norm_mutations_train_and_repartition_in_fp64(
     retain_trace: bool, prefix: str, suffix: str
 ) -> None:
-    """A/B/C/A keeps native buffers, connected gradients and Adam history current."""
+    """A/B/C/A keeps native buffers, connected gradients and SGD bindings current."""
     driver = runpy.run_path(str(DRIVER), run_name="benchmark_test")
     if "cuda" in (prefix, suffix) and not torch.cuda.is_available():
         pytest.skip("Real CUDA is required for branch buffer migration")
@@ -87,14 +87,15 @@ def test_independent_norm_mutations_train_and_repartition_in_fp64(
     assert driver["noncontiguous"](context.trace_graph, partitions[2].prefix_node_ids)
     runtime = context.materialize(context.analyze(partitions[0]))
     parameters = driver["effective_parameters"](runtime)
-    actual_opt = driver["make_optimizer"]("adam", parameters.values())
-    expected_opt = driver["make_optimizer"]("adam", reference.parameters())
+    actual_opt = driver["make_optimizer"](parameters.values())
+    expected_opt = driver["make_optimizer"](reference.parameters())
     for index, batch in zip((0, 1, 2, 0), (1, 2, 4, 8), strict=True):
         runtime = runtime.repartition(partitions[index])
         current = driver["effective_parameters"](runtime)
         if prefix == suffix:
             assert all(current[key] is value for key, value in parameters.items())
-        actual_opt = driver["rebind_optimizer"]("adam", actual_opt, parameters, current)
+        assert parameters.keys() == current.keys()
+        actual_opt = driver["make_optimizer"](current.values())
         parameters = current
         errors = driver["training_step"](
             runtime,

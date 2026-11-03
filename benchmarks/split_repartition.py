@@ -29,7 +29,6 @@ from split_graph_partition import (
     load_model,
     make_optimizer,
     memory_snapshot,
-    rebind_optimizer,
     scalar_loss,
     synchronize,
 )
@@ -217,7 +216,7 @@ def main() -> None:
         timings["rotating_repartition"] = measure(rotate)
         timings["cold_repartition"] = measure(rotate, runtime.clear_analysis_cache)
         parameters = effective_parameters(runtime)
-        optimizer = make_optimizer("momentum", parameters.values())
+        optimizer = make_optimizer(parameters.values())
         train_times, post_train = [], []
         for _ in range(min(args.repeats, 10)):
             sync()
@@ -238,7 +237,9 @@ def main() -> None:
             sync()
             post_train.append(1000 * (time.perf_counter() - start))
             current = effective_parameters(runtime)
-            optimizer = rebind_optimizer("momentum", optimizer, parameters, current)
+            if parameters.keys() != current.keys():
+                raise AssertionError("repartition changed the effective parameter inventory")
+            optimizer = make_optimizer(current.values())
             parameters = current
         timings["training_step"] = distribution(train_times)
         timings["post_training_repartition"] = distribution(post_train)

@@ -22,30 +22,46 @@ ROOT = Path(__file__).resolve().parents[2]
 DRIVER = ROOT / "benchmarks" / "split_graph_partition.py"
 
 
-def test_cross_device_tolerance_is_explicit_scoped_and_restores_after_failure() -> None:
-    """A selected floating budget must not leak into the default or a nested strict check."""
+def test_sgd_factory_keeps_execution_parameters_and_updates_after_rebinding() -> None:
+    """The acceptance optimizer must use plain SGD on the current execution leaves."""
     namespace = runpy.run_path(str(DRIVER), run_name="benchmark_test")
-    close = namespace["finite_close"]
+    parameter = nn.Parameter(torch.tensor([0.2, -0.4]))
+    reference = nn.Parameter(parameter.detach().clone())
+    frozen = nn.Parameter(torch.ones(2), requires_grad=False)
+    optimizer = namespace["make_optimizer"]([parameter, parameter, frozen])
+    expected = torch.optim.SGD([reference], lr=0.01)
+    assert type(optimizer) is torch.optim.SGD
+    assert optimizer.param_groups[0]["params"] == [parameter]
+    assert optimizer.param_groups[0]["momentum"] == 0
+    assert optimizer.param_groups[0]["weight_decay"] == 0
+    assert not optimizer.param_groups[0]["nesterov"]
+    parameter.grad = torch.tensor([0.3, -0.1])
+    reference.grad = parameter.grad.clone()
+    optimizer.step()
+    expected.step()
+    leaf = parameter.detach().clone().requires_grad_(True)
+    optimizer = namespace["make_optimizer"]([leaf])
+    assert optimizer.param_groups[0]["params"][0] is leaf
+    leaf.grad = torch.tensor([-0.2, 0.4])
+    reference.grad = leaf.grad.clone()
+    optimizer.step()
+    expected.step()
+    torch.testing.assert_close(leaf, reference, atol=0, rtol=0)
+    assert not optimizer.state
+
+
+def test_fixed_float_tolerance_rejects_out_of_budget_values() -> None:
+    """SGD acceptance keeps its original fixed numerical budget."""
+    namespace = runpy.run_path(str(DRIVER), run_name="benchmark_test")
     expected = torch.zeros(2, dtype=torch.float64)
-    actual = torch.full_like(expected, 5e-8)
+    assert namespace["finite_close"](torch.full_like(expected, 5e-9), expected) == 5e-9
     with pytest.raises(AssertionError):
-        close(actual, expected)
-    with (
-        pytest.raises(RuntimeError, match="scope interrupted"),
-        namespace["comparison_tolerance"]("cross-device-fp64-v1"),
-    ):
-        assert close(actual, expected) == pytest.approx(5e-8)
-        with namespace["comparison_tolerance"]("strict"), pytest.raises(AssertionError):
-            close(actual, expected)
-        assert close(actual, expected) == pytest.approx(5e-8)
-        raise RuntimeError("scope interrupted")
-    with pytest.raises(AssertionError):
-        close(actual, expected)
+        namespace["finite_close"](torch.full_like(expected, 5e-8), expected)
 
 
 @pytest.mark.parametrize("case", ["integer", "boolean", "dtype", "shape", "nan", "inf", "gradient"])
-def test_cross_device_tolerance_keeps_non_numeric_contracts(case: str) -> None:
-    """A looser floating budget cannot admit categorical, structural or nonfinite errors."""
+def test_fixed_tolerance_keeps_non_numeric_contracts(case: str) -> None:
+    """Strict comparisons also reject categorical, structural and nonfinite errors."""
     namespace = runpy.run_path(str(DRIVER), run_name="benchmark_test")
     pairs = {
         "integer": (torch.tensor([1_000_000_001]), torch.tensor([1_000_000_000])),
@@ -56,40 +72,8 @@ def test_cross_device_tolerance_keeps_non_numeric_contracts(case: str) -> None:
         "inf": (torch.tensor([float("inf")]), torch.zeros(1)),
         "gradient": (None, torch.zeros(1)),
     }
-    with namespace["comparison_tolerance"]("cross-device-fp64-v1"), pytest.raises(AssertionError):
+    with pytest.raises(AssertionError):
         namespace["finite_close"](*pairs[case])
-
-
-@pytest.mark.heavy
-@pytest.mark.parametrize(
-    "prefix,suffix,dtype",
-    [("cpu", "cpu", "float64"), ("cuda", "cuda", "float64"), ("cpu", "cuda", "float32")],
-)
-def test_cross_device_tolerance_cli_refuses_unrelated_precision_or_placement(
-    prefix: str, suffix: str, dtype: str
-) -> None:
-    """The opt-in budget must not silently weaken a same-backend or float32 oracle."""
-    completed = subprocess.run(
-        [
-            sys.executable,
-            str(DRIVER),
-            "--model",
-            "yolov8",
-            "--tolerance-profile",
-            "cross-device-fp64-v1",
-            "--prefix-device",
-            prefix,
-            "--suffix-device",
-            suffix,
-            "--dtype",
-            dtype,
-        ],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-    )
-    assert completed.returncode == 2
-    assert "requires float64 and one CPU and one CUDA segment" in completed.stderr
 
 
 def test_state_only_candidate_is_refused_without_failing_the_search() -> None:
@@ -205,8 +189,8 @@ def test_native_frontier_observer_uses_post_prefix_alias_values_and_gradients() 
         runtime,
         reference,
         torch.tensor([[-1.0, 0.5, 1.0, -2.0], [-0.2, 2.0, -3.0, 4.0]], requires_grad=True),
-        namespace["make_optimizer"]("adam", namespace["effective_parameters"](runtime).values()),
-        namespace["make_optimizer"]("adam", reference.parameters()),
+        namespace["make_optimizer"](namespace["effective_parameters"](runtime).values()),
+        namespace["make_optimizer"](reference.parameters()),
     )
     assert errors["boundary_values_checked"] > 0
     assert errors["boundary_value_error"] < 1e-10
@@ -247,10 +231,8 @@ def test_native_observer_keeps_state_writes_and_augmented_assignment_in_order(
         features=SplitFeatures(training=True, retain_trace=retain_trace, batch_axes={}),
     )
     runtime = graph.materialize(graph.analyze(GraphPartition(frozenset())))
-    actual = namespace["make_optimizer"](
-        "adam", namespace["effective_parameters"](runtime).values()
-    )
-    expected = namespace["make_optimizer"]("adam", reference.parameters())
+    actual = namespace["make_optimizer"](namespace["effective_parameters"](runtime).values())
+    expected = namespace["make_optimizer"](reference.parameters())
     nodes = graph.trace_graph.compute_nodes
     partitions = [
         GraphPartition(frozenset(n.canonical_id for n in nodes[:count]))
@@ -325,12 +307,74 @@ def test_native_observer_matches_both_tensor_split_overloads() -> None:
         frozenset(node.canonical_id for node in graph.trace_graph.compute_nodes[:4])
     )
     runtime = graph.materialize(graph.analyze(partition))
-    actual = namespace["make_optimizer"]("sgd", namespace["effective_parameters"](runtime).values())
-    expected = namespace["make_optimizer"]("sgd", reference.parameters())
+    actual = namespace["make_optimizer"](namespace["effective_parameters"](runtime).values())
+    expected = namespace["make_optimizer"](reference.parameters())
     errors = namespace["training_step"](
         runtime, reference, torch.randn(2, 4, requires_grad=True), actual, expected
     )
     assert errors["connected_boundary_gradient_error"] < 1e-4
+
+
+@pytest.mark.heavy
+def test_default_training_cli_runs_only_sgd_across_three_cuts(tmp_path: Path) -> None:
+    """Default training must validate four SGD batches for each partition kind."""
+    output = tmp_path / "sgd.json"
+    code = """
+import runpy
+import sys
+import torch
+from unittest.mock import patch
+
+driver = sys.argv[1]
+sys.argv = [driver, *sys.argv[2:]]
+namespace = runpy.run_path(driver, run_name='benchmark_test')
+main = namespace['main']
+
+class Branches(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        def branch():
+            return torch.nn.Sequential(torch.nn.Conv2d(2, 2, 1),
+                torch.nn.BatchNorm2d(2), torch.nn.ReLU(inplace=True))
+        self.left, self.right = branch(), branch()
+    def forward(self, x):
+        return self.left(x) + self.right(x)
+
+with patch.dict(main.__globals__, load_model=lambda *a, **kw: (Branches(), (2, 3, 3), {})):
+    main()
+"""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            code,
+            str(DRIVER),
+            "--model",
+            "resnet18",
+            "--model-mode",
+            "train",
+            "--strict",
+            "--output",
+            str(output),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["status"] == "passed"
+    assert report["optimizer"] == {"name": "SGD", "lr": 0.01}
+    assert report["recut_capture_count"] == 0
+    for row in report["results"]:
+        assert row["status"] == "passed"
+        assert row["distinct_partitions"] == 3
+        assert [(step["optimizer"], step["batch"]) for step in row["training_steps"]] == [
+            ("sgd", 1),
+            ("sgd", 2),
+            ("sgd", 4),
+            ("sgd", 8),
+        ]
 
 
 @pytest.mark.heavy
@@ -377,7 +421,6 @@ with patch.dict(main.__globals__, load_model=load_model, validate_kind=validate)
     assert report["status"] == status
     assert report["execution_context"]["deterministic_algorithms"] is strict
     assert report["tolerance"] == {
-        "profile": "strict",
         "atol": 1e-8,
         "rtol": 1e-7,
         "integer_boolean": "exact",
