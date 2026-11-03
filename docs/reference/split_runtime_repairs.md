@@ -1,5 +1,11 @@
 # Native split runtime repairs — 2026-11-02
 
+The subsequent [training DAG and FP64 acceptance report](split_training_dag_fp64.md)
+extends effect-order proofs and candidate discovery. It also establishes FP64
+as the functional oracle; runtime dtype remains user-selected. The float32
+failures and controls in this report retain their original historical verdicts,
+and are not the current cross-device functional acceptance criteria.
+
 The dynamic split operand, transported mutable-buffer state and device-specific
 random mapping defects described in the [causal analysis](split_gpu_error_analysis.md)
 have separate repairs. Existing numerical tolerances and refusal boundaries remain.

@@ -4,6 +4,11 @@ This report preserves the 2026-10-31 source snapshot and its measurements. For
 the subsequent repairs and resumed GPU verification, see the
 [2026-11-02 repair and validation report](split_runtime_repairs.md).
 
+Current functional acceptance uses FP64 with a precision-agnostic runtime; see
+the [training DAG and FP64 acceptance report](split_training_dag_fp64.md).
+The float32 measurements below remain historical evidence. They no longer
+define a required CPU/CUDA functional-equivalence matrix.
+
 This change repairs mutable-buffer training, makes benchmark exits reflect the
 evidence, and replaces the remaining test-only point strings with canonical
 `GraphPartition` selections. Acceptance is partial: the supported CPU paths below

@@ -46,6 +46,85 @@ Partitioning is over the captured taken path; it does not prove unseen Python
 control flow. Dynamic batches retain the existing independent batch probe and
 shape guards.
 
+## Data and storage effects in training partitions
+
+The planner also checks storage-effect order. A data edge describes which value
+a call consumes; a storage-effect edge preserves read-after-write,
+write-after-read or write-after-write order on possible aliases. A legal
+partition must be closed under both. In particular, a required suffix-to-prefix
+effect edge refuses: this runtime executes the entire prefix before the suffix.
+It does not alternate segments to satisfy an otherwise impossible schedule.
+
+Torch derives these constraints once per immutable graph, at atomic native-call
+granularity. Exact callable identities certify Conv, Linear, Add, Multiply,
+Embedding gather, Clone, LayerNorm and BatchNorm output allocations. Supported
+local ReLU, SiLU and residual additions keep their allocation and alias chain in
+the same segment.
+Independent branch writes and independent BatchNorm counters/running statistics
+may reorder when the storage constraints permit it. Shared BatchNorm state
+retains its required order. There is no global chain connecting all mutations.
+
+View, view-as, reshape, transpose, permute, flatten, detach, split and chunk
+propagate possible source storage. A reshape or flatten that sometimes copies
+is conservatively treated as possibly aliasing its source. Multi-output calls
+remain atomic. Unknown allocation/view provenance, unsupported writes, floating
+training-boundary writes, and heterogeneous shared trainable parameters without
+a gradient merge contract still refuse. Basic/advanced indexing does not gain a
+new write-through proof. No operation is rewritten to remove `inplace=True`.
+
+Activation addresses are never an independence proof for future batches. Live
+mutable state is checked against current source handles, inputs and effective
+segment bindings using the common byte-overlap engine. Analysis cache hits,
+prefix execution and suffix execution recheck the relevant source assumptions;
+buffer replacement cannot turn an old proof into permission for new aliases.
+The shared engine's current byte footprints support a sorted, device-scoped
+interval prefilter. It skips pairwise checks only when every interval cluster
+containing a written source belongs to that source. Possible overlaps and
+unknown geometry fall back to the shared exact relation; overlapping bounds
+alone never establish overlapping touched bytes. This metadata is temporary.
+An activation frontier that aliases state subsequently written by the suffix
+refuses: leaf isolation or transport cannot preserve that storage relationship.
+Dedicated mutable-buffer slots retain their existing publication contract;
+an additional activation view is not such a slot.
+The existing mutable-buffer publication, state inheritance and optimizer
+ownership mechanisms still apply. Effect metadata contains structural resource
+identifiers, not tensor payloads, runtime state snapshots or replicas.
+
+Ordinary native random calls retain their captured per-call RNG/device context.
+Explicit Generator identities can be independently copied by argument capture,
+so their copied identities do not prove independence: their native order remains
+constrained. Cross-device explicit generators retain the existing refusal.
+
+The benchmark's bounded effect-closure search is an internal discovery aid. It
+combines call/data ancestors, storage-effect predecessors and local write
+groups, then samples subgraph unions. Every result still passes the same
+`analyze()` planner. `partition_candidates()` keeps its existing topological
+prefix contract. To compare with the old single-call ancestor search, use
+`--candidate-strategy ancestors`; `--candidate-census` analyzes the whole bounded
+set and reports accepted/refused counts rather than stopping after three cuts.
+Internal refusal evidence records the call/order, operands' possible storage
+origins, aliases, crossings and conflicting effect edges without changing the
+public error codes.
+
+## Functional precision policy
+
+Runtime replay preserves the model's native dtype, including lower-precision
+floating, integer and boolean tensors. It has no FP64 conversion or dtype
+allowlist. Floating functional acceptance uses FP64 where native operators
+support it. The isolated model driver defaults to `--dtype float64`, checks
+finite values, and uses `atol=1e-8`, `rtol=1e-7`; integer and boolean leaves
+compare exactly. Unsupported FP64 kernels remain unsupported or unexecuted.
+The official YOLO criterion's implicit floating factories run in a scoped default
+dtype matching its output. The scope is limited to criterion construction/calls
+and restores the ambient dtype; model forward and replay receive no dtype patch.
+An explicit lower-precision experiment does not become a required cross-device
+numerical equivalence matrix. Performance benchmarks keep deployment precision.
+FP64 is not a universal guarantee for multi-step optimizer trajectories across
+native kernels. The [acceptance report](split_training_dag_fp64.md) records a
+strict YOLO Adam limitation reproduced by independent full native models,
+including the separate deterministic controls. Those failed contexts remain
+failed; precision policy does not weaken their tolerance or patch their gradients.
+
 ## Compact training
 
 Torch supports explicit `SplitFeatures(training=True, retain_trace=False)`.
@@ -182,10 +261,10 @@ does not establish correct sample membership or authorize a changed Python branc
 Run each command in a fresh process:
 
 ```bash
-python benchmarks/split_graph_partition.py --model resnet18 --training --strict --output resnet18.json
+python benchmarks/split_graph_partition.py --model resnet18 --model-mode train --strict --output resnet18.json
 python benchmarks/split_graph_partition.py --model transformer --model-mode train --strict --output distilbert-train.json
 python benchmarks/split_graph_partition.py --model yolov8 --model-mode train --strict --output yolov8n-train.json
-python benchmarks/split_graph_partition.py --model rfdetr --training --strict --weights /trusted/checkpoint.pth --output rfdetr.json
+python benchmarks/split_graph_partition.py --model rfdetr --model-mode train --strict --weights /trusted/checkpoint.pth --output rfdetr.json
 ```
 
 Sequential and truly noncontiguous DAG results are independent; no fallback turns
@@ -195,10 +274,14 @@ The script records every refusal and requires three different partitions for its
 A/B/C/A recut experiment. Every B=1/2/4/8 executes explicitly.
 
 The native reference is a separate model/optimizer. The script compares finite
-outputs, loss, input/parameter/connected-boundary gradients, buffers, parameter
+outputs, loss, real compute/input boundary values,
+input/parameter/connected-boundary gradients, buffers, parameter
 updates and momentum/Adam state. Native observation hooks align semantic call
 families in captured order and use captured output paths, including overloaded
-multi-output calls; missing gradient coverage fails. Eval mode
+multi-output calls. Prefix alias writes refresh both the observed value and its
+autograd output slot; later suffix writes do not replace that snapshot. Missing
+value or gradient coverage fails. Dedicated source-state slots are checked by the
+buffer/state oracle. Eval mode
 permits gradients while controlling dropout/running-state changes. Tied state,
 train-mode BatchNorm, microbatches, cache isolation and device migration have
 additional tests under `tests/split/`. The split model is captured once plus its
@@ -227,15 +310,14 @@ state after each recut; `plan_state_migration()` alone does not migrate history.
 `unsupported`, `skipped` and `not_validated` remain distinct, with per-partition
 attempts and per-capability statuses. Unrequested capabilities show `not_run`.
 Diagnostic mode permits incomplete reports but still exits nonzero on failures.
-Use `--dtype float64` for a separately labelled precision experiment; it does not
-turn a failing float32 experiment into a pass or change tolerances.
+The functional default is `--dtype float64`. Explicit dtype experiments retain
+their own results and do not rewrite historical lower-precision verdicts.
 
 `--deterministic` explicitly requires PyTorch deterministic algorithms, disables
 cuDNN benchmarking and records those settings with the cuBLAS workspace
 configuration in JSON. Unsupported deterministic kernels remain failures. This
 controls algorithm nondeterminism; it does not guarantee identical CPU/CUDA
-rounding. Near-zero gradients can amplify small rounding differences through
-Adam's normalization. Keep each dtype and execution context separately labelled.
+rounding. Keep each dtype and execution context separately labelled.
 
 RF-DETR is skipped without both the package and a trusted local checkpoint. A failed,
 skipped or unsupported row is never reported as a numerical pass.

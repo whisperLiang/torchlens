@@ -1,5 +1,30 @@
 # Split runtime acceptance
 
+Floating functional acceptance uses FP64 where supported; production replay
+keeps the caller's dtype. The opt-in `fp64_functional` fixture supplies double
+test construction for the partition/mutation/buffer/workflow oracles and restores
+the prior default afterward. Explicit dtype contracts, optional backend
+compatibility tests and performance workloads retain their declared precision.
+`test_partition_effect_dependencies.py` covers native independent BatchNorm
+branches, inplace activations, A/B/C/A buffer and Adam continuity, RAW/WAR/WAW
+refusals, later buffer alias replacement, explicit Generator ordering, bounded
+candidate unions and float16/bfloat16/float32/float64 passthrough.
+
+The isolated model driver defaults to FP64 and exact integer/boolean checks:
+
+```bash
+python benchmarks/split_graph_partition.py --model resnet18 --model-mode train --candidate-census --strict --output resnet-training.json
+python benchmarks/split_graph_partition.py --model yolov8 --model-mode train --candidate-census --strict --output yolo-training.json
+```
+
+Use `--candidate-strategy ancestors` for the former data-only search. The default
+search closes both data and required storage effects and still calls the one
+production planner. A required suffix-before-prefix effect remains unsupported.
+Legal candidate counts are analysis coverage; only the cuts that actually run
+forward, backward and optimizer checks count as numerical validation. See the
+[training DAG and FP64 report](../../docs/reference/split_training_dag_fp64.md)
+for measured counts, device coverage, limits and performance.
+
 The transport regressions include exact dynamic split operand lowering
 (`test_split_dynamic_operands.py`), persistent mutable buffers and prefix autograd
 storage (`test_split_partition_buffer_gradients.py`), and native stochastic replay
