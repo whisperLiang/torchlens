@@ -25,6 +25,13 @@ forward, backward and optimizer checks count as numerical validation. See the
 [training DAG and FP64 report](../../docs/reference/split_training_dag_fp64.md)
 for measured counts, device coverage, limits and performance.
 
+The benchmark-only `--tolerance-profile cross-device-fp64-v1` explicitly uses
+`atol=1e-7`, `rtol=1e-7` for FP64 CPU/CUDA comparisons. Same-backend and
+float32 requests refuse that profile. Tests pin strict defaults, scoped/nested
+restoration and rejection of dtype, shape, categorical, nonfinite and missing
+gradient errors. Results are separate from the historical strict matrix; see
+the [YOLO revalidation](../../docs/reference/split_yolo_cross_device_tolerance.md).
+
 The transport regressions include exact dynamic split operand lowering
 (`test_split_dynamic_operands.py`), persistent mutable buffers and prefix autograd
 storage (`test_split_partition_buffer_gradients.py`), and native stochastic replay

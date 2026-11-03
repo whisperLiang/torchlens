@@ -1,5 +1,9 @@
 # Training DAG partitions and FP64 functional acceptance
 
+The subsequent [YOLO CPU/CUDA tolerance revalidation](split_yolo_cross_device_tolerance.md)
+uses an explicitly requested, separate comparison profile. This report keeps
+its original strict tolerance and historical verdicts.
+
 This report records the training partition repair against
 `fabc570dfc5cd6440bb9fe220b652d6b9c858b97`. GraphPartition remains the only partition abstraction;
 `prepare_graph`, `analyze`, `materialize`, `repartition` and native replay retain their APIs.

@@ -313,6 +313,14 @@ Diagnostic mode permits incomplete reports but still exits nonzero on failures.
 The functional default is `--dtype float64`. Explicit dtype experiments retain
 their own results and do not rewrite historical lower-precision verdicts.
 
+The opt-in `--tolerance-profile cross-device-fp64-v1` selects floating
+`atol=1e-7`, `rtol=1e-7` for FP64 CPU/CUDA segment pairs only. The default
+`strict` profile keeps `atol=1e-8`, `rtol=1e-7`. Both retain finite-value,
+structure/dtype, integer/boolean and gradient-presence checks. The policy is
+scoped to the benchmark and recorded in its JSON; runtime numerics and the
+capture-time batch probe retain their own contracts. See the separate
+[YOLO tolerance revalidation](split_yolo_cross_device_tolerance.md).
+
 `--deterministic` explicitly requires PyTorch deterministic algorithms, disables
 cuDNN benchmarking and records those settings with the cuBLAS workspace
 configuration in JSON. Unsupported deterministic kernels remain failures. This
