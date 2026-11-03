@@ -6,11 +6,12 @@ test construction for the partition/mutation/buffer/workflow oracles and restore
 the prior default afterward. Explicit dtype contracts, optional backend
 compatibility tests and performance workloads retain their declared precision.
 `test_partition_effect_dependencies.py` covers native independent BatchNorm
-branches, inplace activations, A/B/C/A buffer and Adam continuity, RAW/WAR/WAW
+branches, inplace activations, A/B/C/A buffer and SGD parameter bindings, RAW/WAR/WAW
 refusals, later buffer alias replacement, explicit Generator ordering, bounded
 candidate unions and float16/bfloat16/float32/float64 passthrough.
 
-The isolated model driver defaults to FP64 and exact integer/boolean checks:
+The isolated model driver uses plain SGD (`lr=0.01`), defaults to FP64, and
+checks integer/boolean values exactly:
 
 ```bash
 python benchmarks/split_graph_partition.py --model resnet18 --model-mode train --candidate-census --strict --output resnet-training.json
@@ -25,12 +26,9 @@ forward, backward and optimizer checks count as numerical validation. See the
 [training DAG and FP64 report](../../docs/reference/split_training_dag_fp64.md)
 for measured counts, device coverage, limits and performance.
 
-The benchmark-only `--tolerance-profile cross-device-fp64-v1` explicitly uses
-`atol=1e-7`, `rtol=1e-7` for FP64 CPU/CUDA comparisons. Same-backend and
-float32 requests refuse that profile. Tests pin strict defaults, scoped/nested
-restoration and rejection of dtype, shape, categorical, nonfinite and missing
-gradient errors. Results are separate from the historical strict matrix; see
-the [YOLO revalidation](../../docs/reference/split_yolo_cross_device_tolerance.md).
+The comparison budget is fixed at `atol=1e-8`, `rtol=1e-7`. Tests reject
+out-of-budget floating values, dtype/shape mismatches, categorical differences,
+nonfinite values and missing gradients.
 
 The transport regressions include exact dynamic split operand lowering
 (`test_split_dynamic_operands.py`), persistent mutable buffers and prefix autograd
@@ -45,8 +43,8 @@ their interleaved branch sets rather than replacing them with ordered prefixes.
 
 `test_partition_benchmark.py` exercises strict/diagnostic subprocess exits, saved
 JSON, missing trusted weights, native reference observation and current buffers.
-The heterogeneous DAG matrix trains A/B/C/A with SGD, Momentum and Adam across
-B=1/2/4/8, checking all optimizer state and rebinding parameters explicitly.
+The acceptance driver trains A/B/C/A with SGD across B=1/2/4/8, checking
+optimizer bindings and rebinding the current execution parameters explicitly.
 CPU, CPU→CUDA, CUDA→CPU, same-GPU and two-GPU cases are separate; missing physical
 devices skip. BatchNorm state regressions cover compact/diagnostic products,
 connected training, sequential microbatches and state preservation after recuts.

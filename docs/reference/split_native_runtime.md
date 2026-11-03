@@ -119,11 +119,9 @@ dtype matching its output. The scope is limited to criterion construction/calls
 and restores the ambient dtype; model forward and replay receive no dtype patch.
 An explicit lower-precision experiment does not become a required cross-device
 numerical equivalence matrix. Performance benchmarks keep deployment precision.
-FP64 is not a universal guarantee for multi-step optimizer trajectories across
-native kernels. The [acceptance report](split_training_dag_fp64.md) records a
-strict YOLO Adam limitation reproduced by independent full native models,
-including the separate deterministic controls. Those failed contexts remain
-failed; precision policy does not weaken their tolerance or patch their gradients.
+The [acceptance report](split_training_dag_fp64.md) records plain-SGD functional
+checks against an independent full-model reference, including gradients,
+buffers, parameter bindings and state after recuts.
 
 ## Compact training
 
@@ -276,7 +274,7 @@ A/B/C/A recut experiment. Every B=1/2/4/8 executes explicitly.
 The native reference is a separate model/optimizer. The script compares finite
 outputs, loss, real compute/input boundary values,
 input/parameter/connected-boundary gradients, buffers, parameter
-updates and momentum/Adam state. Native observation hooks align semantic call
+updates and SGD parameter bindings. Native observation hooks align semantic call
 families in captured order and use captured output paths, including overloaded
 multi-output calls. Prefix alias writes refresh both the observed value and its
 autograd output slot; later suffix writes do not replace that snapshot. Missing
@@ -313,13 +311,10 @@ Diagnostic mode permits incomplete reports but still exits nonzero on failures.
 The functional default is `--dtype float64`. Explicit dtype experiments retain
 their own results and do not rewrite historical lower-precision verdicts.
 
-The opt-in `--tolerance-profile cross-device-fp64-v1` selects floating
-`atol=1e-7`, `rtol=1e-7` for FP64 CPU/CUDA segment pairs only. The default
-`strict` profile keeps `atol=1e-8`, `rtol=1e-7`. Both retain finite-value,
-structure/dtype, integer/boolean and gradient-presence checks. The policy is
-scoped to the benchmark and recorded in its JSON; runtime numerics and the
-capture-time batch probe retain their own contracts. See the separate
-[YOLO tolerance revalidation](split_yolo_cross_device_tolerance.md).
+The driver uses plain SGD (`lr=0.01`) and fixed `atol=1e-8`, `rtol=1e-7`.
+Finite-value, structure/dtype, integer/boolean and gradient-presence checks
+remain mandatory. The full-model reference is part of each Split validation;
+no separate optimizer or full-model diagnostic sweep is required.
 
 `--deterministic` explicitly requires PyTorch deterministic algorithms, disables
 cuDNN benchmarking and records those settings with the cuBLAS workspace

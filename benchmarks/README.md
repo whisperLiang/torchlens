@@ -18,10 +18,11 @@ python benchmarks/split_graph_partition.py --model resnet18 --training --strict 
 
 The report separates sequential/noncontiguous partitions, forward, backward,
 optimizer, dynamic batch, repartition, cross-device and actual train-mode checks.
-Unsupported or unexecuted checks never count as passing. Eval-mode AD uses a
-synthetic objective; actual detection training uses the official criterion and
-synthetic annotations. Float32 remains the default. An additional `--dtype float64`
-experiment is labelled separately and retains the same tolerances.
+Unsupported or unexecuted checks never count as passing. Training acceptance
+uses plain SGD (`lr=0.01`) and FP64 by default, with fixed `atol=1e-8`,
+`rtol=1e-7`. Eval-mode AD uses a synthetic objective; actual detection training
+uses the official criterion and synthetic annotations. Explicit float32
+compatibility runs retain their declared precision and the same checks.
 
 `--deterministic` requires deterministic native algorithms and records the
 execution settings in JSON. Unsupported kernels remain failures. Neither this
