@@ -7,7 +7,7 @@ import sys
 import types
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, fields, is_dataclass, replace
 from hashlib import sha256
@@ -506,31 +506,40 @@ def capture_model(
         common["capture"] = CaptureOptions(**capture_kwargs)
     else:
         common.update(capture_kwargs)
-    if str(backend_spec.name) == TINYGRAD_BACKEND_NAME:
+    with _backend_capture_state(str(backend_spec.name), model):
+        return trace(model, inputs, **common)
+
+
+def _backend_capture_state(backend: str, model: Any) -> AbstractContextManager[None]:
+    """Isolate native state while keeping backend imports lazy.
+
+    Parameters
+    ----------
+    backend
+        Resolved backend name.
+    model
+        Callable whose native state must survive internal capture unchanged.
+    """
+
+    if backend == TINYGRAD_BACKEND_NAME:
         from ._tinygrad_state import tinygrad_capture_state
 
-        with tinygrad_capture_state(model):
-            return trace(model, inputs, **common)
-    if str(backend_spec.name) in {"tf", "tensorflow"}:
+        return tinygrad_capture_state(model)
+    if backend in {"tf", "tensorflow"}:
         from ._tf_capture import batch_stable_keras_add
 
-        with batch_stable_keras_add():
-            return trace(model, inputs, **common)
-    if str(backend_spec.name) == JAX_BACKEND_NAME:
+        return batch_stable_keras_add()
+    if backend == JAX_BACKEND_NAME:
         from ._jax_capture import batch_stable_matmul
 
-        with batch_stable_matmul():
-            return trace(model, inputs, **common)
-    if str(backend_spec.name) == MLX_BACKEND_NAME:
+        return batch_stable_matmul()
+    if backend == MLX_BACKEND_NAME:
         from ._mlx_capture import mlx_capture_state
 
-        with mlx_capture_state(model):
-            return trace(model, inputs, **common)
-    if str(backend_spec.name) != TORCH_BACKEND_NAME:
-        return trace(model, inputs, **common)
-
-    with _torch_capture_state(model):
-        return trace(model, inputs, **common)
+        return mlx_capture_state(model)
+    if backend == TORCH_BACKEND_NAME:
+        return _torch_capture_state(model)
+    return nullcontext()
 
 
 @contextmanager
