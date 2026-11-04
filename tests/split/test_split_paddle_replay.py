@@ -9,6 +9,57 @@ from _paddle_subprocess import run_paddle_subprocess
 pytestmark = pytest.mark.heavy
 
 
+def test_paddle_native_batchnorm_eval_is_readonly_and_training_refuses() -> None:
+    """Interpret native BatchNorm state flags without granting unproved training writes."""
+
+    run_paddle_subprocess(
+        """
+        import paddle
+        import pytest
+        from torchlens.split import SplitFeatures, prepare_graph
+        from torchlens.split.errors import SplitUnsupportedError
+
+        class NativeBatchNorm(paddle.nn.Layer):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("mean", paddle.zeros([3], dtype="float64"))
+                self.register_buffer("variance", paddle.ones([3], dtype="float64"))
+                self.weight = self.create_parameter(
+                    [3], dtype="float64", default_initializer=paddle.nn.initializer.Constant(1)
+                )
+                self.bias = self.create_parameter(
+                    [3], dtype="float64", default_initializer=paddle.nn.initializer.Constant(0)
+                )
+
+            def forward(self, x):
+                output = paddle._C_ops.batch_norm(
+                    x, self.mean, self.variance, self.weight, self.bias, not self.training,
+                    0.9, 1e-5, "NCHW", not self.training, False,
+                )[0]
+                return output * 2
+
+        paddle.set_device("cpu")
+        for training in (False, True):
+            model = NativeBatchNorm()
+            model.train() if training else model.eval()
+            x = paddle.arange(6, dtype="float64").reshape([2, 3])
+            graph = prepare_graph(
+                model, x, backend="paddle", features=SplitFeatures(batch_axes={})
+            )
+            partition = graph.partition_candidates()[1]
+            if training:
+                with pytest.raises(SplitUnsupportedError, match="partition_effect_order_unproven"):
+                    graph.analyze(partition)
+                continue
+            runtime = graph.materialize(graph.analyze(partition))
+            old_mean, old_variance = model.mean.clone(), model.variance.clone()
+            assert bool(paddle.allclose(runtime.replay(x), model(x), atol=1e-8, rtol=1e-7))
+            assert bool(paddle.equal_all(model.mean, old_mean))
+            assert bool(paddle.equal_all(model.variance, old_variance))
+        """
+    )
+
+
 def test_paddle_split_replay_equivalence() -> None:
     """Paddle prefix + suffix replay matches the original callable."""
 

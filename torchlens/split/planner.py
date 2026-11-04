@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from hashlib import sha256
+from inspect import unwrap
 from types import BuiltinFunctionType
 from typing import Any
 
-from ..backends.registry import TORCH_BACKEND_NAME
+from ..backends.registry import MLX_BACKEND_NAME, PADDLE_BACKEND_NAME, TORCH_BACKEND_NAME
 from ..intervention.types import CapturedArgTemplate, LiteralTensor, LiteralValue
 from .errors import SplitErrorContext, SplitRequestError, SplitUnsupportedError
 from .frontier import (
@@ -673,30 +674,26 @@ def _validate_partition_effects(
     example when a profiler cannot isolate arbitrary alias relationships).
     """
 
-    known_identity: Any = None
     proof = None
     certified: set[str] = set()
-    if graph.backend == TORCH_BACKEND_NAME:
-        from ..utils.display import identity
-
-        known_identity = identity
-        if prefix_node_ids is not None:
-            _validate_effect_order(graph, spec, prefix_node_ids)
-            proof = _MutationProof(
-                prefix_node_ids,
-                _torch_mutation_targets(),
-                _ordered_partition_nodes(graph, prefix_node_ids),
-                certified,
-                spec.trainable,
-                spec.placement.is_heterogeneous,
-            )
+    if graph.backend == TORCH_BACKEND_NAME and prefix_node_ids is not None:
+        _validate_effect_order(graph, spec, prefix_node_ids)
+        proof = _MutationProof(
+            prefix_node_ids,
+            _torch_mutation_targets(),
+            _ordered_partition_nodes(graph, prefix_node_ids),
+            certified,
+            spec.trainable,
+            spec.placement.is_heterogeneous,
+        )
     for node in graph.compute_nodes:
-        args, kwargs = _partition_call_arguments(node)
+        # Native multi-output calls keep their argument recipe on the owning
+        # output. Every sibling has the same effects and must use that recipe.
+        call = graph.replay_call_by_output_id[node.canonical_id]
+        owner = graph.node_by_id[call.output_node_ids[0]]
+        args, kwargs = _partition_call_arguments(owner)
         if _node_mutates(node, args, kwargs):
-            if proof is not None and (
-                _certify_local_write(graph, node, args, kwargs, proof)
-                or node.target in proof.targets.batchnorm
-            ):
+            if _certify_partition_write(graph, node, args, kwargs, proof, prefix_node_ids):
                 certified.add(node.canonical_id)
             else:
                 raise _partition_refusal(
@@ -708,25 +705,76 @@ def _validate_partition_effects(
                     "or use an out-of-place graph.",
                     node,
                 )
-        if (
-            graph.backend == TORCH_BACKEND_NAME
-            and node.target is not None
-            and node.target is not known_identity
-        ):
-            module = str(getattr(node.target, "__module__", "") or "")
-            owner = getattr(node.target, "__objclass__", None)
-            owner_module = str(getattr(owner, "__module__", "") or "")
-            if not any(
-                name == "torch" or name.startswith("torch.") for name in (module, owner_module)
-            ):
-                raise _partition_refusal(
-                    graph,
-                    spec,
-                    "partition_custom_effects_unproven",
-                    f"Partition cannot certify side effects of custom target at {node.canonical_id!r}.",
-                    node,
-                )
+        _validate_partition_target(graph, spec, node)
     return frozenset(certified)
+
+
+def _certify_partition_write(
+    graph: SplitTraceGraph,
+    node: SplitTraceNode,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    proof: _MutationProof | None,
+    prefix: frozenset[str] | None,
+) -> bool:
+    """Discharge write obligations through the owning backend's native state model."""
+
+    if proof is not None:
+        return (
+            _certify_local_write(graph, node, args, kwargs, proof)
+            or node.target in proof.targets.batchnorm
+        )
+    if prefix is None:
+        return False
+    return _certify_mlx_buffer_write(graph, node, prefix)
+
+
+def _certify_mlx_buffer_write(
+    graph: SplitTraceGraph, node: SplitTraceNode, prefix: frozenset[str]
+) -> bool:
+    """Certify native BatchNorm replacements only when every call retains its order."""
+
+    if graph.backend != MLX_BACKEND_NAME:
+        return False
+    from ..backends.mlx.validation import MLXOpCapture
+
+    capture = node.target
+    if not isinstance(capture, MLXOpCapture):
+        return False
+    import mlx.nn as nn
+
+    if type(capture.module_ref) is not nn.BatchNorm:
+        return False
+    if capture.func is not unwrap(nn.BatchNorm.__call__):
+        return False
+    # The MLX binding executes on a private module and publishes native buffer
+    # replacements through its coordinator. A topological prefix preserves the
+    # original ordering of those reads/writes, including reused module state.
+    return len(_ordered_partition_nodes(graph, prefix)) == len(graph.compute_nodes)
+
+
+def _validate_partition_target(
+    graph: SplitTraceGraph, spec: SplitRequest, node: SplitTraceNode
+) -> None:
+    """Keep custom Torch effects outside the certified native target inventory."""
+
+    if graph.backend != TORCH_BACKEND_NAME or node.target is None:
+        return
+    from ..utils.display import identity
+
+    if node.target is identity:
+        return
+    module = str(getattr(node.target, "__module__", "") or "")
+    owner = getattr(node.target, "__objclass__", None)
+    owner_module = str(getattr(owner, "__module__", "") or "")
+    if not any(name == "torch" or name.startswith("torch.") for name in (module, owner_module)):
+        raise _partition_refusal(
+            graph,
+            spec,
+            "partition_custom_effects_unproven",
+            f"Partition cannot certify side effects of custom target at {node.canonical_id!r}.",
+            node,
+        )
 
 
 def _partition_call_arguments(node: SplitTraceNode) -> tuple[tuple[Any, ...], dict[str, Any]]:
@@ -758,23 +806,60 @@ def _node_mutates(node: SplitTraceNode, args: tuple[Any, ...], kwargs: dict[str,
     """Recognize write markers and conservatively classify BatchNorm training."""
 
     names = (node.op_type.lower(), str(getattr(node.target, "__name__", "")).lower())
-    if any(name in {"dropout", "dropout_"} for name in names):
-        training = kwargs.get("training", kwargs.get("train", args[2] if len(args) > 2 else None))
-        if training is False:
-            # Affirmatively disabled native dropout is an identity even when
-            # the module requested its inplace spelling.
-            return False
-    mutates = (
+    if _disabled_dropout(names, args, kwargs):
+        return False
+    if _has_write_marker(node, names, kwargs):
+        return True
+    return any(
+        "batch_norm" in name or "batchnorm" in name for name in names
+    ) and _batchnorm_mutates(node, args, kwargs)
+
+
+def _disabled_dropout(
+    names: tuple[str, ...], args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> bool:
+    """Identify affirmatively disabled native Dropout, including its inplace spelling."""
+
+    if not any(name in {"dropout", "dropout_"} for name in names):
+        return False
+    training = kwargs.get("training", kwargs.get("train", args[2] if len(args) > 2 else None))
+    return training is False
+
+
+def _mutator_name(name: str) -> bool:
+    """Recognize explicit native write spellings."""
+
+    return name in {"__setitem__", "setitem"} or (name.endswith("_") and not name.endswith("__"))
+
+
+def _has_write_marker(node: SplitTraceNode, names: tuple[str, ...], kwargs: dict[str, Any]) -> bool:
+    """Keep explicit output destinations and in-place markers independent of state flags."""
+
+    return (
         bool(getattr(node.op, "is_inplace", False))
-        or any(name.endswith("_") and not name.endswith("__") for name in names)
-        or any(name in {"__setitem__", "setitem"} for name in names)
+        or any(_mutator_name(name) for name in names)
         or kwargs.get("inplace") is True
         or kwargs.get("out") is not None
     )
-    if any("batch_norm" in name or "batchnorm" in name for name in names):
-        training = kwargs.get("training", args[5] if len(args) > 5 else None)
-        mutates = mutates or training is not False
-    return mutates
+
+
+def _batchnorm_mutates(node: SplitTraceNode, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
+    """Interpret native BatchNorm flags using the captured callable's actual ABI."""
+
+    if node.backend == PADDLE_BACKEND_NAME:
+        import paddle
+
+        if node.target is unwrap(paddle._C_ops.batch_norm):
+            # Paddle's C kernel carries is_test at position 5, unlike Torch's
+            # training flag. Affirmative global stats with trainable statistics
+            # disabled leaves running buffers unchanged; unknown flags refuse.
+            global_stats = kwargs.get("use_global_stats", args[9] if len(args) > 9 else None)
+            trainable_stats = kwargs.get(
+                "trainable_statistics", args[10] if len(args) > 10 else None
+            )
+            return not (global_stats is True and trainable_stats is False)
+    training = kwargs.get("training", args[5] if len(args) > 5 else None)
+    return training is not False
 
 
 def _validate_boundary_state_aliases(

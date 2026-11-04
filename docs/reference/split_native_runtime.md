@@ -64,6 +64,16 @@ Independent branch writes and independent BatchNorm counters/running statistics
 may reorder when the storage constraints permit it. Shared BatchNorm state
 retains its required order. There is no global chain connecting all mutations.
 
+MLX native BatchNorm calls replace buffers through the runtime's private state
+coordinator. These calls are certified for topological-prefix partitions that
+preserve every native call's order. Cuts that reorder such calls, custom module
+implementations and unknown writes retain the typed effect-order refusal.
+
+Paddle's native BatchNorm kernel uses `is_test` and global-statistics flags
+rather than Torch's positional training flag. Affirmative read-only global-stat
+calls may replay; unproved training writes still refuse. Every output of an
+atomic native call shares its owning output's argument recipe for this check.
+
 View, view-as, reshape, transpose, permute, flatten, detach, split and chunk
 propagate possible source storage. A reshape or flatten that sometimes copies
 is conservatively treated as possibly aliasing its source. Multi-output calls

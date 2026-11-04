@@ -26,6 +26,32 @@ import torchlens as tl  # noqa: E402
 pytestmark = pytest.mark.backend_mlx
 
 
+def test_batchnorm_partition_preserves_shared_buffer_call_order() -> None:
+    """Allow ordered native writes and refuse reordering two calls sharing their buffers."""
+
+    class SharedNorm(nn.Module):
+        """Reuse one native running-state owner on independent data branches."""
+
+        def __init__(self) -> None:
+            """Create the shared native buffer owner."""
+            super().__init__()
+            self.norm = nn.BatchNorm(4)
+
+        def __call__(self, x: Any) -> Any:
+            """Read and update the same running buffers twice."""
+            first = self.norm(x)
+            return first + self.norm(x)
+
+    from torchlens.split.errors import SplitUnsupportedError
+
+    graph = tl.split.prepare_graph(SharedNorm(), mx.ones((2, 4)), backend="mlx")
+    calls = [node for node in graph.trace_graph.compute_nodes if node.op_type == "batchnorm"]
+    assert len(calls) == 2
+    graph.analyze(tl.split.GraphPartition(frozenset({calls[0].canonical_id})))
+    with pytest.raises(SplitUnsupportedError, match="partition_effect_order_unproven"):
+        graph.analyze(tl.split.GraphPartition(frozenset({calls[1].canonical_id})))
+
+
 def _input(batch: int = 5) -> Any:
     """Construct nonuniform samples with nonlinear feature correlations."""
 
