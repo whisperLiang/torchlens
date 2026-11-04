@@ -183,7 +183,7 @@ def test_cuda_microbatch_and_detached_prefix_reduce_peak_allocated_memory(
         "logical_batch": 12,
         "microbatch_size": 3,
         "input_shape": list(inputs.shape),
-        "split_point": partial(select_node_prefix, node_id="bridge"),
+        "prefix_node_ids": sorted(runtime.request.partition.prefix_node_ids),
         "partition": runtime.request.boundary,
         "suffix": suffix_measurements,
         "prefix": prefix_measurements,
