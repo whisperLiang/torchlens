@@ -691,9 +691,9 @@ def _validate_partition_effects(
         # output. Every sibling has the same effects and must use that recipe.
         call = graph.replay_call_by_output_id[node.canonical_id]
         owner = graph.node_by_id[call.output_node_ids[0]]
-        args, kwargs = _partition_call_arguments(owner)
-        if _node_mutates(node, args, kwargs):
-            if _certify_partition_write(graph, node, args, kwargs, proof, prefix_node_ids):
+        arguments = _partition_call_arguments(owner)
+        if _node_mutates(node, *arguments):
+            if _certify_partition_write(graph, node, arguments, proof, prefix_node_ids):
                 certified.add(node.canonical_id)
             else:
                 raise _partition_refusal(
@@ -712,8 +712,7 @@ def _validate_partition_effects(
 def _certify_partition_write(
     graph: SplitTraceGraph,
     node: SplitTraceNode,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
+    arguments: tuple[tuple[Any, ...], dict[str, Any]],
     proof: _MutationProof | None,
     prefix: frozenset[str] | None,
 ) -> bool:
@@ -721,7 +720,7 @@ def _certify_partition_write(
 
     if proof is not None:
         return (
-            _certify_local_write(graph, node, args, kwargs, proof)
+            _certify_local_write(graph, node, *arguments, proof)
             or node.target in proof.targets.batchnorm
         )
     if prefix is None:
