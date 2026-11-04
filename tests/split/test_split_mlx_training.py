@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pytest
-from v2_helpers import (
-    prepare_fixture,
-    repartition_fixture,
-    select_node_prefix,
-    split_request,
-)
+from dag_helpers import call_ids, close_call_ids, smallest_transfer_partitions
+
+from torchlens.split import SplitFeatures, prepare_graph
 
 mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 nn = pytest.importorskip("mlx.nn", exc_type=ImportError)
@@ -74,13 +70,14 @@ def test_mlx_optimizer_steps_match_unsplit_and_preserve_source(optimizer_cls: An
     model, reference = _Mlp(), _Mlp()
     x, targets = _input(), mx.array([[0.2, -0.5], [1, 0.3], [-0.7, 0.4]])
     source = dict(tree_flatten(model.parameters()))
-    runtime = prepare_fixture(
-        model,
-        _input(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, _input(2), backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     prefix_optimizer = optimizer_cls(learning_rate=0.01)
     suffix_optimizer = optimizer_cls(learning_rate=0.01)
     reference_optimizer = optimizer_cls(learning_rate=0.01)
@@ -108,14 +105,26 @@ def test_mlx_optimizer_steps_match_unsplit_and_preserve_source(optimizer_cls: An
         assert value is source[name]
     assert runtime.prefix_parameters() and runtime.suffix_parameters()
     migrated = runtime.with_placement(tl.split.PlacementPlan.on("cpu"))
-    recut = repartition_fixture(
-        migrated, partial(select_node_prefix, node_id="maximum", include=False)
+    recut = migrated.repartition(
+        migrated.compute_dag().to_partition(
+            close_call_ids(
+                migrated.compute_dag(),
+                frozenset(
+                    source
+                    for source, target, _ in migrated.compute_dag().data_edges
+                    if target
+                    in call_ids(
+                        migrated, modules=frozenset({"maximum"}), ops=frozenset({"maximum"})
+                    )
+                ),
+            )
+        )
     )
     _assert_close(migrated.replay(x), reference(x))
     _assert_close(recut.replay(x), reference(x))
 
 
-def test_mlx_gradients_match_at_every_cut_and_changed_batch() -> None:
+def test_mlx_gradients_match_at_native_dag_partitions_and_changed_batch() -> None:
     """Multi-output cuts retain all contributions to the native input gradient."""
 
     def model(x: Any) -> Any:
@@ -124,16 +133,19 @@ def test_mlx_gradients_match_at_every_cut_and_changed_batch() -> None:
         left, right = mx.split(mx.maximum(x, 0), 2, axis=-1)
         return mx.add(mx.multiply(left, 2), right)
 
-    seed = prepare_fixture(
-        model,
-        _input(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    seed_graph = prepare_graph(
+        model, _input(2), backend="mlx", features=SplitFeatures(training=True)
     )
-    dag = seed.compute_dag()
-    for count in range(len(dag.nodes) + 1):
-        runtime = seed.repartition(dag.to_partition(c.call_id for c in dag.nodes[:count]))
+    seed_dag = seed_graph.compute_dag()
+    seed_partition = seed_dag.to_partition(
+        close_call_ids(
+            seed_dag,
+            call_ids(seed_graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"})),
+        )
+    )
+    seed = seed_graph.materialize(seed_graph.analyze(seed_partition))
+    for partition in smallest_transfer_partitions(seed):
+        runtime = seed.repartition(partition)
         x = _input(5)
         targets = mx.ones((5, 2))
         expected = mx.grad(lambda a, targets=targets: _loss(model(a), targets))(x)
@@ -156,17 +168,22 @@ def test_mlx_nested_and_keyword_input_gradients() -> None:
 
     x = _input(2)
     pair, offset = {"b": mx.add(x, 2), "a": x}, mx.ones_like(x)
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         model,
         pair,
-        split_request(
-            partial(select_node_prefix, node_id="maximum"),
-            backend="mlx",
-            trainable=True,
-            batch_axes={"/args/0/a": 0, "/args/0/b": 0, "/kwargs/offset": 0},
+        backend="mlx",
+        features=SplitFeatures(
+            training=True, batch_axes={"/args/0/a": 0, "/args/0/b": 0, "/kwargs/offset": 0}
         ),
         input_kwargs={"offset": offset},
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     targets = mx.zeros_like(x)
     _value, expected = mx.value_and_grad(
         lambda a, b: _loss(model(a, offset=b), targets), argnums=(0, 1)
@@ -188,16 +205,20 @@ def test_mlx_shared_input_gradient_survives_explicit_placement() -> None:
         return mx.multiply(mx.maximum(x, 0), y)
 
     x = _input(2)
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         model,
         (x, x),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"),
-            backend="mlx",
-            trainable=True,
-            placement=tl.split.PlacementPlan.on("cpu"),
-        ),
+        backend="mlx",
+        placement=tl.split.PlacementPlan.on("cpu"),
+        features=SplitFeatures(training=True),
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     targets = mx.ones_like(x)
     boundary = runtime.run_training_prefix(x, x)
     suffix = runtime.train_suffix_result(boundary, targets)
@@ -229,13 +250,14 @@ def test_mlx_native_conv_and_layernorm_parameter_gradients() -> None:
 
     model = Model()
     x = mx.arange(64, dtype=mx.float32).reshape(2, 4, 4, 2) / 50
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, x, backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     targets = mx.ones((2, 3))
     _value, expected = nn.value_and_grad(model, lambda: _loss(model(x), targets))()
     boundary = runtime.run_training_prefix(x)
@@ -250,13 +272,14 @@ def test_mlx_native_conv_and_layernorm_parameter_gradients() -> None:
 def test_mlx_training_rejects_detached_stale_and_invalid_gradients() -> None:
     """Prefix recomputation refuses boundaries that cannot attest the original forward."""
 
-    runtime = prepare_fixture(
-        _Mlp(),
-        _input(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(_Mlp(), _input(2), backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     x, targets = _input(2), mx.ones((2, 2))
     detached = runtime.run_prefix(x)
     result = runtime.train_suffix_result(detached, targets)
@@ -279,13 +302,14 @@ def test_mlx_default_classification_loss_and_frozen_parameters() -> None:
 
     model = _Mlp()
     model.hidden.freeze(keys="weight")
-    runtime = prepare_fixture(
-        model,
-        _input(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, _input(2), backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     x, targets = _input(3), mx.array([0, 1, 0])
     boundary = runtime.run_training_prefix(x)
     suffix = runtime.train_suffix_result(boundary, targets)
@@ -303,13 +327,14 @@ def test_mlx_custom_nested_loss_and_non_scalar_refusal() -> None:
         y = mx.maximum(x, 0)
         return {"pair": mx.split(y, 2, axis=-1), "literal": "kept"}
 
-    runtime = prepare_fixture(
-        model,
-        _input(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, _input(2), backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     boundary = runtime.run_training_prefix(_input(2))
     result = runtime.train_suffix_result(
         boundary,
@@ -333,13 +358,14 @@ def test_mlx_training_boundary_snapshots_input_values() -> None:
     x = _input(2)
     original = x.astype(x.dtype)
     mx.eval(original)
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(
-            partial(select_node_prefix, node_id="multiply"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, x, backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"multiply"}), ops=frozenset({"multiply"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     targets = mx.zeros_like(x)
     boundary = runtime.run_training_prefix(x)
     suffix = runtime.train_suffix_result(boundary, targets)
@@ -354,16 +380,16 @@ def test_mlx_cached_training_boundary_is_suffix_only(tmp_path: Path) -> None:
 
     from torchlens.split.cache import load_boundary, save_boundary
 
-    runtime = prepare_fixture(
-        _Mlp(),
-        _input(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"),
-            backend="mlx",
-            trainable=True,
-            boundary_cache=True,
-        ),
+    graph = prepare_graph(
+        _Mlp(), _input(2), backend="mlx", features=SplitFeatures(training=True, boundary_cache=True)
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     boundary = runtime.run_training_prefix(_input(2))
     path = tmp_path / "training.boundary"
     save_boundary(boundary, path, adapter=runtime.adapter)
@@ -380,13 +406,14 @@ def test_mlx_cached_training_boundary_is_suffix_only(tmp_path: Path) -> None:
 def test_mlx_prefix_rejects_inplace_parameter_mutation() -> None:
     """External writes through exposed parameter arrays invalidate the training boundary."""
 
-    runtime = prepare_fixture(
-        _Mlp(),
-        _input(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(_Mlp(), _input(2), backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     boundary = runtime.run_training_prefix(_input(2))
     suffix = runtime.train_suffix_result(boundary, mx.ones((2, 2)))
     parameter = runtime.prefix_parameters()[0]
@@ -418,13 +445,14 @@ def test_mlx_native_attention_parameter_and_input_gradients() -> None:
     model = Model()
     x = mx.arange(24, dtype=mx.float32).reshape(2, 3, 4) / 10 - 1
     targets = mx.ones((2, 4))
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, x, backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     expected_input = mx.grad(lambda a: _loss(model(a), targets))(x)
     _value, expected_params = nn.value_and_grad(model, lambda: _loss(model(x), targets))()
     boundary = runtime.run_training_prefix(x)
@@ -458,13 +486,14 @@ def test_mlx_integer_embedding_inputs_are_not_gradient_roots() -> None:
     model = Model()
     tokens = mx.array([[1, 2, 3], [4, 1, 6]], dtype=mx.int32)
     targets = mx.ones((2, 2))
-    runtime = prepare_fixture(
-        model,
-        tokens,
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, tokens, backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     _value, expected = nn.value_and_grad(model, lambda: _loss(model(tokens), targets))()
     boundary = runtime.run_training_prefix(tokens)
     suffix = runtime.train_suffix_result(boundary, targets)

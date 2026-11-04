@@ -2,21 +2,18 @@
 
 from __future__ import annotations
 
-from functools import partial
 from pathlib import Path
 
 import pytest
 import torch
+from dag_helpers import call_ids, close_call_ids
 from torch import nn
-from v2_helpers import (
-    analyze_fixture,
-    prepare_fixture,
-    repartition_fixture,
-    select_node_prefix,
-    split_request,
-)
 
-from torchlens.split import PlacementPlan
+from torchlens.split import (
+    PlacementPlan,
+    SplitFeatures,
+    prepare_graph,
+)
 from torchlens.split.boundary import ReplayBoundary
 from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
 from torchlens.split.state import SegmentState
@@ -55,15 +52,14 @@ def test_trained_state_survives_replacement_and_recut(
     model = StateMigrationMlp()
     original = {key: value.clone() for key, value in model.state_dict().items()}
     inputs = torch.ones(3, 4)
-    runtime = prepare_fixture(
-        model,
-        inputs,
-        split_request(
-            partial(select_node_prefix, node_id="relu"),
-            trainable=True,
-            placement=PlacementPlan.on(device),
-        ),
+    graph = prepare_graph(
+        model, inputs, placement=PlacementPlan.on(device), features=SplitFeatures(training=True)
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     prefix = runtime.prefix_parameters()
     suffix = runtime.suffix_parameters()
     boundary = runtime.run_training_prefix(inputs)
@@ -87,11 +83,9 @@ def test_trained_state_survives_replacement_and_recut(
         assert len(moved.prefix_parameters()) == 2
         torch.testing.assert_close(moved.replay(inputs), expected)
 
-    for point in (
-        partial(select_node_prefix, node_id="fc1", include=False),
-        partial(select_node_prefix, node_id="fc2"),
-    ):
-        recut = repartition_fixture(runtime, point)
+    dag = runtime.compute_dag()
+    for partition in (dag.to_partition(()), dag.to_partition(call.call_id for call in dag.nodes)):
+        recut = runtime.repartition(partition)
         torch.testing.assert_close(recut.replay(inputs).cpu(), expected)
         assert len(recut.prefix_parameters()) + len(recut.suffix_parameters()) == 4
     for key, value in model.state_dict().items():
@@ -107,15 +101,14 @@ def test_owned_suffix_updates_allow_direct_and_cached_boundaries(
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
     model = StateMigrationMlp()
     inputs = torch.ones(3, 4)
-    runtime = prepare_fixture(
-        model,
-        inputs,
-        split_request(
-            partial(select_node_prefix, node_id="relu"),
-            trainable=True,
-            placement=PlacementPlan.on("cpu"),
-        ),
+    graph = prepare_graph(
+        model, inputs, placement=PlacementPlan.on("cpu"), features=SplitFeatures(training=True)
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     boundary = (
         runtime.run_training_prefix(inputs) if training_boundary else runtime.run_prefix(inputs)
     )
@@ -144,13 +137,12 @@ def test_cached_training_boundary_keeps_backward_metadata_without_state_identity
     """Cached training boundaries retain their graph ABI after dropping backward state."""
 
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
-    runtime = prepare_fixture(
-        StateMigrationMlp(),
-        torch.ones(3, 4),
-        split_request(
-            partial(select_node_prefix, node_id="relu"), placement=PlacementPlan.on("cpu")
-        ),
+    graph = prepare_graph(StateMigrationMlp(), torch.ones(3, 4), placement=PlacementPlan.on("cpu"))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     inputs = torch.ones(3, 4)
     inference = runtime.run_prefix(inputs)
     parameters = runtime.prefix_parameters()
@@ -177,13 +169,12 @@ def test_recut_refuses_merging_distinct_inference_and_training_prefix_state(
 
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
     inputs = torch.ones(3, 4)
-    runtime = prepare_fixture(
-        StateMigrationMlp(),
-        inputs,
-        split_request(
-            partial(select_node_prefix, node_id="relu"), placement=PlacementPlan.on("cpu")
-        ),
+    graph = prepare_graph(StateMigrationMlp(), inputs, placement=PlacementPlan.on("cpu"))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     parameters = runtime.prefix_parameters()
     if divergent:
         with torch.no_grad():
@@ -194,7 +185,7 @@ def test_recut_refuses_merging_distinct_inference_and_training_prefix_state(
     assert torch.equal(expected_inference, expected_training) is not divergent
 
     for rebuilt in (
-        repartition_fixture(runtime, runtime.request.partition),
+        runtime.repartition(runtime.request.partition),
         runtime.with_placement(runtime.placement),
     ):
         torch.testing.assert_close(rebuilt.replay(inputs), expected_inference)
@@ -204,10 +195,32 @@ def test_recut_refuses_merging_distinct_inference_and_training_prefix_state(
 
     if divergent:
         with pytest.raises(SplitUnsupportedError, match="divergent inference and training"):
-            repartition_fixture(runtime, partial(select_node_prefix, node_id="fc1", include=False))
+            runtime.repartition(
+                runtime.compute_dag().to_partition(
+                    close_call_ids(
+                        runtime.compute_dag(),
+                        frozenset(
+                            source
+                            for source, target, _ in runtime.compute_dag().data_edges
+                            if target
+                            in call_ids(runtime, modules=frozenset({"fc1"}), ops=frozenset({"fc1"}))
+                        ),
+                    )
+                )
+            )
     else:
-        recut = repartition_fixture(
-            runtime, partial(select_node_prefix, node_id="fc1", include=False)
+        recut = runtime.repartition(
+            runtime.compute_dag().to_partition(
+                close_call_ids(
+                    runtime.compute_dag(),
+                    frozenset(
+                        source
+                        for source, target, _ in runtime.compute_dag().data_edges
+                        if target
+                        in call_ids(runtime, modules=frozenset({"fc1"}), ops=frozenset({"fc1"}))
+                    ),
+                )
+            )
         )
         torch.testing.assert_close(recut.replay(inputs), expected_inference)
         torch.testing.assert_close(
@@ -232,13 +245,12 @@ def test_recut_moves_updated_suffix_into_both_prefix_paths(
     model = StateMigrationMlp()
     original = {key: value.clone() for key, value in model.state_dict().items()}
     inputs = torch.ones(3, 4)
-    runtime = prepare_fixture(
-        model,
-        inputs,
-        split_request(
-            partial(select_node_prefix, node_id="relu"), placement=PlacementPlan.on("cpu")
-        ),
+    graph = prepare_graph(model, inputs, placement=PlacementPlan.on("cpu"))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     runtime.run_prefix(inputs)
     parameters = runtime.suffix_parameters()
     assert len(parameters) == 2
@@ -249,7 +261,14 @@ def test_recut_moves_updated_suffix_into_both_prefix_paths(
     expected = runtime.replay(inputs).detach()
     assert not torch.equal(expected, model(inputs))
 
-    recut = repartition_fixture(runtime, partial(select_node_prefix, node_id="fc2"))
+    recut = runtime.repartition(
+        runtime.compute_dag().to_partition(
+            close_call_ids(
+                runtime.compute_dag(),
+                call_ids(runtime, modules=frozenset({"fc2"}), ops=frozenset({"fc2"})),
+            )
+        )
+    )
     torch.testing.assert_close(recut.replay(inputs), expected)
     torch.testing.assert_close(recut.run_suffix(recut.run_training_prefix(inputs)), expected)
     assert {id(value) for value in parameters} <= {id(value) for value in recut.prefix_parameters()}
@@ -282,16 +301,25 @@ def test_recut_preserves_tied_identity_or_refuses_divergent_replicas(
 
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
     inputs = torch.ones(3, 4)
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         TiedModel(),
         inputs,
-        split_request(
-            partial(select_node_prefix, node_id="relu"),
-            trainable=True,
-            placement=PlacementPlan.on("cpu"),
-        ),
+        placement=PlacementPlan.on("cpu"),
+        features=SplitFeatures(training=True),
     )
-    analysis = analyze_fixture(runtime, partial(select_node_prefix, node_id="tail"))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
+    analysis = runtime.analyze(
+        runtime.compute_dag().to_partition(
+            close_call_ids(
+                runtime.compute_dag(),
+                call_ids(runtime, modules=frozenset({"tail"}), ops=frozenset({"tail"})),
+            )
+        )
+    )
     target_partition = analysis.request.partition
     if divergent:
         with torch.no_grad():
@@ -302,15 +330,29 @@ def test_recut_preserves_tied_identity_or_refuses_divergent_replicas(
     else:
         assert runtime.analyze(target_partition).capability_report.replay.supported
     expected = runtime.replay(inputs)
-    same_cut = repartition_fixture(runtime, runtime.request.partition)
+    same_cut = runtime.repartition(runtime.request.partition)
     torch.testing.assert_close(same_cut.replay(inputs), expected)
     if divergent:
         with pytest.raises(SplitUnsupportedError, match="divergent replicas"):
-            repartition_fixture(runtime, partial(select_node_prefix, node_id="tail"))
+            runtime.repartition(
+                runtime.compute_dag().to_partition(
+                    close_call_ids(
+                        runtime.compute_dag(),
+                        call_ids(runtime, modules=frozenset({"tail"}), ops=frozenset({"tail"})),
+                    )
+                )
+            )
         with pytest.raises(SplitUnsupportedError, match="divergent replicas"):
             runtime.materialize(analysis)
     else:
-        recut = repartition_fixture(runtime, partial(select_node_prefix, node_id="tail"))
+        recut = runtime.repartition(
+            runtime.compute_dag().to_partition(
+                close_call_ids(
+                    runtime.compute_dag(),
+                    call_ids(runtime, modules=frozenset({"tail"}), ops=frozenset({"tail"})),
+                )
+            )
+        )
         assert len(recut.prefix_parameters()) == 1
         torch.testing.assert_close(recut.replay(inputs), expected)
 
@@ -318,11 +360,12 @@ def test_recut_preserves_tied_identity_or_refuses_divergent_replicas(
 def test_replay_boundary_still_refuses_structural_mismatches() -> None:
     """Removing value checks leaves split, graph, dtype, and shape checks intact."""
 
-    runtime = prepare_fixture(
-        StateMigrationMlp().eval(),
-        torch.ones(3, 4),
-        split_request(partial(select_node_prefix, node_id="relu")),
+    graph = prepare_graph(StateMigrationMlp().eval(), torch.ones(3, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     boundary = runtime.run_prefix(torch.ones(3, 4))
     for field, replacement in (("split_id", "other"), ("graph_shape_hash", "other")):
         bad_metadata = dict(boundary.metadata)
@@ -350,9 +393,12 @@ def test_explicit_replay_does_not_read_model_state(monkeypatch: pytest.MonkeyPat
 
     model = StateMigrationMlp().eval()
     inputs = torch.ones(3, 4)
-    runtime = prepare_fixture(
-        model, inputs, split_request(partial(select_node_prefix, node_id="relu"))
+    graph = prepare_graph(model, inputs)
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     def unexpected_state_read(*args: object, **kwargs: object) -> None:
         raise AssertionError("split replay must not scan model state")

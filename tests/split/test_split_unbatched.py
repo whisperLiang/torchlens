@@ -3,18 +3,13 @@
 from __future__ import annotations
 
 import json
-from functools import partial
 from typing import Any
 
 import pytest
 import torch
-from v2_helpers import (
-    prepare_fixture,
-    request_fixture,
-    select_node_prefix,
-)
+from dag_helpers import call_ids, close_call_ids
 
-from torchlens.split import SplitFeatures, pipeline
+from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, pipeline, prepare_graph
 from torchlens.split.errors import SplitBoundaryError
 
 
@@ -57,11 +52,15 @@ def test_linear_vector_is_never_resized_or_probed(
 
     model = torch.nn.Linear(width, 3)
     example = torch.randn(width)
-    request = request_fixture(
-        selection=partial(select_node_prefix, node_id="linear"),
-        features=SplitFeatures(batch_axes=axes),
+    SplitRequest(GraphPartition(frozenset()), features=SplitFeatures(batch_axes=axes))
+    graph = prepare_graph(model, example, features=SplitFeatures(batch_axes=axes))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"linear"}), ops=frozenset({"linear"}))
+        )
     )
-    runtime = prepare_fixture(model, example, request)
+    runtime = graph.materialize(graph.analyze(partition))
 
     assert capture_shapes == [(width,)]
     assert runtime.trace_graph.shape_program.input_batch_axes == {}
@@ -80,12 +79,14 @@ def test_explicit_static_matrix_has_exact_runtime_shape_guards(
     """No-axis matrix inputs are not normalized, probed, or silently rebatched."""
 
     model = torch.nn.Sequential(torch.nn.Linear(4, 5), torch.nn.ReLU(), torch.nn.Linear(5, 3))
-    request = request_fixture(
-        selection=partial(select_node_prefix, node_id="relu"),
-        features=SplitFeatures(batch_axes={}, training=True),
-    )
+    SplitRequest(GraphPartition(frozenset()), features=SplitFeatures(batch_axes={}, training=True))
     example = torch.randn(7, 4)
-    runtime = prepare_fixture(model, example, request)
+    graph = prepare_graph(model, example, features=SplitFeatures(batch_axes={}, training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
 
     assert capture_shapes == [(7, 4)]
     assert runtime.trace_graph.shape_program.input_batch_axes == {}
@@ -109,11 +110,13 @@ def test_rank_one_batch_requires_explicit_axis(
             return torch.relu(x) * 2
 
     model = Model()
-    request = request_fixture(
-        selection=partial(select_node_prefix, node_id="relu"),
-        features=SplitFeatures(batch_axes={"/args/0": 0}),
+    SplitRequest(GraphPartition(frozenset()), features=SplitFeatures(batch_axes={"/args/0": 0}))
+    graph = prepare_graph(model, torch.randn(4), features=SplitFeatures(batch_axes={"/args/0": 0}))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
-    runtime = prepare_fixture(model, torch.randn(4), request)
+    runtime = graph.materialize(graph.analyze(partition))
     assert capture_shapes == [(1,), (2,)]
     assert runtime.trace_graph.shape_program.input_batch_axes == {"/args/0": 0}
     assert runtime.batch_validation["status"] == "passed"
@@ -133,11 +136,14 @@ def test_nested_static_inputs_do_not_require_a_batch_declaration() -> None:
             return torch.relu(inputs["features"]) * 2
 
     model = Model()
-    request = request_fixture(
-        selection=partial(select_node_prefix, node_id="relu"), features=SplitFeatures(batch_axes={})
-    )
+    SplitRequest(GraphPartition(frozenset()), features=SplitFeatures(batch_axes={}))
     value = {"features": torch.randn(4)}
-    runtime = prepare_fixture(model, value, request)
+    graph = prepare_graph(model, value, features=SplitFeatures(batch_axes={}))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.trace_graph.shape_program.input_batch_axes == {}
     assert runtime.trace_graph.shape_program.traced_input_shapes == {"/args/0/features": (4,)}
     assert runtime.trace_graph.shape_program.witness_batch_sizes == ()
@@ -156,11 +162,12 @@ def test_scalar_auto_input_remains_static(capture_shapes: list[tuple[int, ...]])
             return torch.relu(x) * 2
 
     model = Model()
-    runtime = prepare_fixture(
-        model,
-        torch.tensor(3.0),
-        request_fixture(selection=partial(select_node_prefix, node_id="relu")),
+    graph = prepare_graph(model, torch.tensor(3.0))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert capture_shapes == [()]
     assert runtime.trace_graph.shape_program.input_batch_axes == {}
     torch.testing.assert_close(runtime.replay(torch.tensor(4.0)), model(torch.tensor(4.0)))

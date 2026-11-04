@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from v2_helpers import (
-    plan_fixture,
-    select_node_prefix,
-    split_request,
-)
 
+from torchlens.split import GraphPartition, SplitRequest
 from torchlens.split.adapters.torch import TorchSplitAdapter
 from torchlens.split.errors import SplitUnsupportedError
 from torchlens.split.graph import SplitTraceGraph, SplitTraceNode
+from torchlens.split.planner import plan_partition
 from torchlens.split.program import (
     build_capability_report,
     ensure_capability_report_supported,
@@ -83,8 +79,8 @@ def test_replay_program_preflight_rejects_targetless_suffix_compute() -> None:
         graph_shape_hash="abc",
         traced_batch_size=2,
     )
-    spec = split_request(partial(select_node_prefix, node_id="h"))
-    plan = plan_fixture(graph, spec)
+    spec = SplitRequest(GraphPartition(frozenset({"h"})))
+    plan = plan_partition(graph, spec)
     prefix_program = lower_replay_program(graph, plan, spec, segment="prefix")
     suffix_program = lower_replay_program(graph, plan, spec, segment="suffix")
 

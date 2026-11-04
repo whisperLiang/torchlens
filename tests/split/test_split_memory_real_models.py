@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-from functools import partial
 from importlib import import_module
 
 import pytest
 import torch
 from real_model_helpers import _skip_if_module_missing, _skip_unless_enabled
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    split_request,
-)
+
+from torchlens.split import SplitFeatures, prepare_graph
 
 pytestmark = [pytest.mark.slow, pytest.mark.real_model]
 
@@ -34,11 +30,14 @@ def test_resnet18_frozen_prefix_suffix_training(microbatch_size: int | None) -> 
     model = torchvision.models.resnet18(weights=None, num_classes=4).eval()
     inputs = torch.randn(3, 3, 64, 64)
     targets = torch.tensor([0, 1, 3])
-    runtime = prepare_fixture(
-        model,
-        inputs[:1],
-        split_request(partial(select_node_prefix, node_id="fc", include=False), trainable=True),
+    graph = prepare_graph(model, inputs[:1], features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        call.call_id
+        for call in dag.nodes
+        if graph.trace_graph.node_by_id[call.output_node_ids[0]].module_path != "fc"
     )
+    runtime = graph.materialize(graph.analyze(partition))
     prefix_parameters = [
         param for name, param in model.named_parameters() if not name.startswith("fc.")
     ]

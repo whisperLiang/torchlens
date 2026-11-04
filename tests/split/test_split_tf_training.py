@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-from functools import partial
 from typing import Any
 
 import pytest
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    split_request,
-)
+from dag_helpers import call_ids, close_call_ids
 
+from torchlens.split import SplitFeatures, prepare_graph
 from torchlens.split.errors import SplitUnsupportedError
 
 
@@ -58,13 +54,14 @@ def test_tf_module_split_training_optimizer_step_matches_full_step() -> None:
         split_model = clone_from(base)
         x = tf.reshape(tf.linspace(-1.0, 1.0, 8), (2, 4))
         y = tf.reshape(tf.linspace(0.25, -0.25, 6), (2, 3))
-        runtime = prepare_fixture(
-            split_model,
-            x,
-            split_request(
-                partial(select_node_prefix, node_id="relu"), backend="tf", trainable=True
-            ),
+        graph = prepare_graph(split_model, x, backend="tf", features=SplitFeatures(training=True))
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"}))
+            )
         )
+        runtime = graph.materialize(graph.analyze(partition))
         full_opt = tf.keras.optimizers.SGD(learning_rate=0.05)
         suffix_opt = tf.keras.optimizers.SGD(learning_rate=0.05)
         prefix_opt = tf.keras.optimizers.SGD(learning_rate=0.05)
@@ -99,11 +96,12 @@ def test_tf_training_boundary_cache_strips_gradient_tape(tmp_path) -> None:
 
     x = tf.ones((2, 2), dtype=tf.float32)
     target = tf.zeros_like(x)
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(partial(select_node_prefix, node_id="relu"), backend="tf", trainable=True),
+    graph = prepare_graph(model, x, backend="tf", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     boundary = runtime.run_training_prefix(x)
 
     runtime.save_boundary(boundary, tmp_path / "boundary")

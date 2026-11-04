@@ -1,138 +1,46 @@
-"""Opt-in PyTorch real-world split replay tests."""
+"""PyTorch real-model native DAG replay tests."""
 
 from __future__ import annotations
 
-import os
-from functools import partial
 from importlib import import_module
 
 import pytest
 import torch
+from dag_helpers import close_call_ids, smallest_transfer_partitions
 from real_model_helpers import (
     _run_backend_subprocess,
     _skip_if_module_missing,
     _skip_unless_enabled,
 )
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    select_prefix,
-    split_request,
-)
+
+from torchlens.split import prepare_graph
 
 pytestmark = [pytest.mark.slow, pytest.mark.real_model]
 
 
-def _skip_unless_rfdetr_exhaustive() -> None:
-    """Skip the RF-DETR all-boundary matrix unless explicitly requested."""
-
-    if os.environ.get("TORCHLENS_RFDETR_EXHAUSTIVE") != "1":
-        pytest.skip("TORCHLENS_RFDETR_EXHAUSTIVE=1 enables the RF-DETR all-boundary matrix.")
-
-
-def _skip_unless_yolov8_exhaustive() -> None:
-    """Skip the YOLOv8n all-boundary matrix unless explicitly requested."""
-
-    if os.environ.get("TORCHLENS_YOLOV8_EXHAUSTIVE") != "1":
-        pytest.skip("TORCHLENS_YOLOV8_EXHAUSTIVE=1 enables the YOLOv8n all-boundary matrix.")
-
-
-def _all_compute_split_boundaries(runtime: object) -> list[str]:
-    """Return before/after split boundaries for every compute node in a runtime."""
-
-    return [
-        partial(select_node_prefix, node_id=node.canonical_id, include=include)
-        for node in runtime.trace_graph.compute_nodes
-        for include in (False, True)
-    ]
-
-
 def _torch_test_devices() -> list[torch.device]:
     """Return the torch devices covered by cross-device split tests."""
-
     devices = [torch.device("cpu")]
     if torch.cuda.is_available():
         devices.append(torch.device("cuda:0"))
     return devices
 
 
-def test_resnet18_representative_splits_skip_cleanly_when_disabled() -> None:
-    """ResNet18 split replay validates a small number of representative boundaries."""
-
-    _skip_unless_enabled()
-    _skip_if_module_missing("torchvision")
-    torchvision = import_module("torchvision")
-    model = torchvision.models.resnet18(weights=None).eval()
-    x = torch.randn(1, 3, 64, 64)
-
-    for spec in (
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1)),
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
-        split_request(partial(select_node_prefix, node_id="fc", include=False)),
-    ):
-        runtime = prepare_fixture(model, x, spec)
-        boundary = runtime.run_prefix(x)
-        runtime.validate_boundary(boundary)
-        assert torch.allclose(runtime.run_suffix(boundary), model(x), atol=1e-4, rtol=1e-3)
-
-
-def test_tiny_transformer_config_split_skip_cleanly_when_disabled() -> None:
-    """A no-download transformer config exercises attention-style structure."""
-
-    _skip_unless_enabled()
-    _skip_if_module_missing("transformers")
-    transformers = import_module("transformers")
-    config = transformers.DistilBertConfig(
-        vocab_size=128,
-        n_layers=1,
-        dim=32,
-        hidden_dim=64,
-        n_heads=4,
-    )
-    model = transformers.DistilBertModel(config).eval()
-    x = torch.randint(0, 128, (2, 8))
-
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
-    )
-    boundary = runtime.run_prefix(x)
-    runtime.validate_boundary(boundary)
-    split_output = runtime.run_suffix(boundary).last_hidden_state
-    full_output = model(x).last_hidden_state
-
-    assert torch.allclose(split_output, full_output, atol=1e-4, rtol=1e-3)
-
-
 def test_torch_transformer_cross_batch_and_device() -> None:
     """A real Transformer output container replays across batch and device."""
-
     _skip_unless_enabled()
     _skip_if_module_missing("transformers")
     transformers = import_module("transformers")
     config = transformers.DistilBertConfig(
-        vocab_size=128,
-        n_layers=2,
-        dim=32,
-        hidden_dim=64,
-        n_heads=4,
+        vocab_size=128, n_layers=2, dim=32, hidden_dim=64, n_heads=4
     )
     torch.manual_seed(0)
-
     for device in _torch_test_devices():
         model = transformers.DistilBertModel(config).to(device).eval()
         x = torch.randint(0, 128, (2, 12), device=device)
-        for boundary in (
-            lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1),
-            lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 60 // 100 + 1),
-            lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 85 // 100 + 1),
-        ):
-            runtime = prepare_fixture(
-                model,
-                x,
-                split_request(boundary),
-            )
+        dag_graph_1 = prepare_graph(model, x)
+        for boundary in smallest_transfer_partitions(dag_graph_1):
+            runtime = dag_graph_1.materialize(dag_graph_1.analyze(boundary))
             for batch in (1, 4):
                 replay_x = torch.randint(0, 128, (batch, 12), device=device)
                 with torch.no_grad():
@@ -141,14 +49,13 @@ def test_torch_transformer_cross_batch_and_device() -> None:
                 assert torch.allclose(
                     split_output.last_hidden_state,
                     full_output.last_hidden_state,
-                    atol=1e-4,
-                    rtol=1e-3,
+                    atol=0.0001,
+                    rtol=0.001,
                 )
 
 
 def test_torchvision_extra_real_models_cross_batch_and_device() -> None:
-    """Additional torchvision models replay representative splits across batch/device."""
-
+    """Additional torchvision models replay native DAG partitions across batch/device."""
     _skip_unless_enabled()
     _skip_if_module_missing("torchvision")
     torchvision = import_module("torchvision")
@@ -158,87 +65,59 @@ def test_torchvision_extra_real_models_cross_batch_and_device() -> None:
             "mobilenet_v2",
             lambda: torchvision.models.mobilenet_v2(weights=None, num_classes=10),
             (2, 3, 64, 64),
-            (
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 20 // 100 + 1),
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1),
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 80 // 100 + 1),
-            ),
         ),
         (
             "squeezenet1_0",
             lambda: torchvision.models.squeezenet1_0(weights=None, num_classes=10),
             (2, 3, 64, 64),
-            (
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 20 // 100 + 1),
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1),
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 80 // 100 + 1),
-            ),
         ),
         (
             "efficientnet_b0",
             lambda: torchvision.models.efficientnet_b0(weights=None, num_classes=10),
             (2, 3, 64, 64),
-            (
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 20 // 100 + 1),
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1),
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 80 // 100 + 1),
-            ),
         ),
         (
             "convnext_tiny",
             lambda: torchvision.models.convnext_tiny(weights=None, num_classes=10),
             (2, 3, 64, 64),
-            (
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 20 // 100 + 1),
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1),
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 80 // 100 + 1),
-            ),
         ),
     )
-
     for device in _torch_test_devices():
-        for _name, factory, shape, boundaries in model_cases:
+        for _name, factory, shape in model_cases:
             model = factory().to(device).eval()
             x = torch.ones(shape, device=device)
-            for boundary in boundaries:
-                runtime = prepare_fixture(
-                    model,
-                    x,
-                    split_request(boundary),
-                )
+            graph = prepare_graph(model, x)
+            for partition in smallest_transfer_partitions(graph):
+                runtime = graph.materialize(graph.analyze(partition))
                 for batch in (1, 3):
                     replay_x = torch.ones((batch, *shape[1:]), device=device)
                     with torch.no_grad():
                         split_output = runtime.replay(replay_x)
                         full_output = model(replay_x)
-                    atol = 5e-4 if device.type == "cuda" else 1e-4
-                    assert torch.allclose(split_output, full_output, atol=atol, rtol=1e-3)
+                    atol = 0.0005 if device.type == "cuda" else 0.0001
+                    assert torch.allclose(split_output, full_output, atol=atol, rtol=0.001)
 
 
 @pytest.mark.parametrize("cross_device", [False, True])
 def test_yolo26_detection_split_replay_cross_batch_and_device(cross_device: bool) -> None:
     """YOLO26 official weights cover full detection and backbone split replay."""
-
-    if cross_device and not torch.cuda.is_available():
+    if cross_device and (not torch.cuda.is_available()):
         pytest.skip("CUDA unavailable; CPU detection replay is covered separately.")
     _skip_unless_enabled()
     _skip_if_module_missing("ultralytics")
     _run_backend_subprocess(
         """
-        import os
         import hashlib
+        import os
         from pathlib import Path
 
         import torch
+        from dag_helpers import close_call_ids, smallest_transfer_partitions
         from torch import nn
 
-        import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
+        from torchlens.split import SplitFeatures, prepare_graph
         from torchlens.utils._torch_compat import get_dynamo_optimized_module_type
 
-        # Initialize Dynamo/Triton before Ultralytics can import TensorFlow.
-        # The default probe is lazy and does not initialize an unseen Dynamo;
-        # loading its LLVM extension after TensorFlow can crash this process.
         get_dynamo_optimized_module_type(force_probe=True)
         from ultralytics import YOLO
 
@@ -252,6 +131,7 @@ def test_yolo26_detection_split_replay_cross_batch_and_device(cross_device: bool
         digest = hashlib.sha256(weight_path.read_bytes()).hexdigest()
         assert digest == "9b09cc8bf347f0fc8a5f7657480587f25db09b34bf33b0652110fb03a8ad4fef"  # pragma: allowlist secret
 
+
         def tensor_leaves(value):
             if isinstance(value, torch.Tensor):
                 return [value]
@@ -261,48 +141,37 @@ def test_yolo26_detection_split_replay_cross_batch_and_device(cross_device: bool
                 return [leaf for item in value for leaf in tensor_leaves(item)]
             return []
 
-        def assert_same(left, right, *, atol=1e-4):
+
+        def assert_same(left, right, *, atol=0.0001):
             left_leaves = tensor_leaves(left)
             right_leaves = tensor_leaves(right)
             assert len(left_leaves) == len(right_leaves)
             for actual, expected in zip(left_leaves, right_leaves, strict=True):
-                torch.testing.assert_close(actual, expected, atol=atol, rtol=1e-3)
+                torch.testing.assert_close(actual, expected, atol=atol, rtol=0.001)
 
-        # End-to-end YOLO26 detection-head replay.  These fixed-batch checks
-        # include the model's tuple/dict output and the x[..., :] decode path.
+
         full_input = torch.zeros(2, 3, 160, 160)
-        # 75% keeps the complete decode region on the prefix side; an earlier
-        # boundary can expose Ultralytics' auxiliary ``full`` shape seed whose
-        # scalar provenance is not present in TorchLens' portable graph yet.
-        for boundary in (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1),):
-            runtime = prepare_fixture(
-                detector,
-                full_input,
-                split_request(boundary, backend="torch"),
-            )
+        dag_graph_1 = prepare_graph(detector, full_input, backend="torch")
+        for boundary in smallest_transfer_partitions(dag_graph_1):
+            runtime = dag_graph_1.materialize(dag_graph_1.analyze(boundary))
             with torch.no_grad():
                 assert_same(runtime.replay(full_input), detector(full_input))
-
-        # The first eleven official YOLO26 layers are the backbone and have a
-        # tensor output.  Use this real pretrained submodule for dynamic batch
-        # and CPU-prefix/GPU-suffix coverage without conflating detection decode
-        # shape policy with the backbone's batch-polymorphic contract.
         backbone = nn.Sequential(*list(detector.model[:11])).eval()
         trace_input = torch.zeros(2, 3, 160, 160)
-        runtime = prepare_fixture(
-            backbone,
-            trace_input,
-            split_request(
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1),
-                backend="torch",
-                live_param_sources=True,
-            ),
+        graph = prepare_graph(
+            backbone, trace_input, backend="torch", features=SplitFeatures(live_param_sources=True)
         )
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag, frozenset((call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]))
+            )
+        )
+        runtime = graph.materialize(graph.analyze(partition))
         for batch in (1, 2, 3):
             replay_input = torch.zeros(batch, 3, 160, 160)
             with torch.no_grad():
                 assert_same(runtime.replay(replay_input), backbone(replay_input))
-
         if os.environ["TORCHLENS_REAL_MODEL_CROSS_DEVICE"] != "1":
             raise SystemExit(0)
         for batch in (1, 3):
@@ -313,47 +182,39 @@ def test_yolo26_detection_split_replay_cross_batch_and_device(cross_device: bool
             gpu_boundary = boundary.to("cuda", adapter=runtime.adapter)
             gpu_input = torch.zeros(batch, 3, 160, 160, device="cuda")
             with torch.no_grad():
-                assert_same(
-                    runtime.run_suffix(gpu_boundary),
-                    backbone(gpu_input),
-                    atol=5e-3,
-                )
-
+                assert_same(runtime.run_suffix(gpu_boundary), backbone(gpu_input), atol=0.005)
         os._exit(0)
+
         """,
         timeout=300,
         env_overrides={"TORCHLENS_REAL_MODEL_CROSS_DEVICE": "1" if cross_device else "0"},
     )
 
 
-def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
-    """YOLOv8n replays every before/after boundary across batch and device."""
-
+def test_yolov8n_smallest_dag_partitions_cross_batch_and_device() -> None:
+    """YOLOv8n replays the 100 smallest native DAG partitions across batch and device."""
     _skip_unless_enabled()
-    _skip_unless_yolov8_exhaustive()
     _skip_if_module_missing("ultralytics")
     _run_backend_subprocess(
         """
-        from functools import partial
-
         import copy
         import os
 
         import torch
+        from dag_helpers import smallest_transfer_partitions
 
-        import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_node_prefix, select_prefix
+        from torchlens.split import prepare_graph
         from torchlens.utils._torch_compat import get_dynamo_optimized_module_type
 
         torch.set_num_threads(1)
         get_dynamo_optimized_module_type(force_probe=True)
-        import ultralytics
         from ultralytics import YOLO
+
 
         def assert_same(actual, expected):
             if isinstance(expected, torch.Tensor):
                 assert isinstance(actual, torch.Tensor)
-                torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-3)
+                torch.testing.assert_close(actual, expected, atol=0.0001, rtol=0.001)
                 return
             assert type(actual) is type(expected)
             if isinstance(expected, dict):
@@ -367,6 +228,7 @@ def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
                     assert_same(actual_item, expected_item)
                 return
             assert actual == expected
+
 
         def assert_structure(actual, expected, device):
             if isinstance(expected, torch.Tensor):
@@ -388,64 +250,35 @@ def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
                 for actual_item, expected_item in zip(actual, expected, strict=True):
                     assert_structure(actual_item, expected_item, device)
 
+
         torch.manual_seed(0)
         cpu_model = YOLO("yolov8n.yaml").model.eval()
         gpu_model = copy.deepcopy(cpu_model).cuda().eval() if torch.cuda.is_available() else None
-        request = split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1))
-        cpu_seed = prepare_fixture(
-            cpu_model,
-            torch.zeros(2, 3, 160, 160),
-            request,
-        )
-        # The verified 8.4.152 anchor helper allocates arange(out=new_full)
-        # for both axes at three scales: six extra nodes over the 279-node
-        # legacy graph. Keep this enrollment version-specific; every added
-        # boundary receives the same native-output and device checks below.
-        # Source: ultralytics/ultralytics v8.4.152, utils/tal.py::make_anchors.
-        expected_compute_nodes = 285 if ultralytics.__version__ == "8.4.152" else 279
-        assert len(cpu_seed.trace_graph.compute_nodes) == expected_compute_nodes
-        if ultralytics.__version__ == "8.4.152":
-            assert sum(
-                node.op_type == "newfull" for node in cpu_seed.trace_graph.compute_nodes
-            ) == 9
+        cpu_seed_graph = prepare_graph(cpu_model, torch.zeros(2, 3, 160, 160))
+        cpu_seed_dag = cpu_seed_graph.compute_dag()
+        cpu_seed_partition = cpu_seed_dag.to_partition(())
+        cpu_seed = cpu_seed_graph.materialize(cpu_seed_graph.analyze(cpu_seed_partition))
         assert cpu_seed.trace_graph.shape_program.unresolved == {}
         assert cpu_seed.traced_batch_size == 1
         assert cpu_seed.trace_graph.shape_program.witness_batch_sizes == (2,)
         assert cpu_seed.batch_validation["status"] == "passed"
-
         gpu_seed = None
         if gpu_model is not None:
-            gpu_seed = prepare_fixture(
-                gpu_model,
-                torch.zeros(2, 3, 160, 160, device="cuda"),
-                request,
-            )
-            assert [
-                node.canonical_id for node in gpu_seed.trace_graph.compute_nodes
-            ] == [node.canonical_id for node in cpu_seed.trace_graph.compute_nodes]
-
-        all_points = [
-            point
-            for node in cpu_seed.trace_graph.compute_nodes
-            for point in (partial(select_node_prefix, node_id=str(node.canonical_id), include=False), partial(select_node_prefix, node_id=str(node.canonical_id)))
-        ]
-        assert len(all_points) == 2 * expected_compute_nodes
-        partition_count = int(os.environ.get("TORCHLENS_YOLOV8_PARTITIONS", "1"))
-        partition_index = int(os.environ.get("TORCHLENS_YOLOV8_PARTITION", "0"))
-        assert partition_count >= 1
-        assert 0 <= partition_index < partition_count
-        points = all_points[partition_index::partition_count]
-        cpu_inputs = {
-            batch: torch.zeros(batch, 3, 160, 160) for batch in (1, 2, 3)
-        }
-
+            gpu_seed_graph = prepare_graph(gpu_model, torch.zeros(2, 3, 160, 160, device="cuda"))
+            gpu_seed_dag = gpu_seed_graph.compute_dag()
+            gpu_seed_partition = gpu_seed_dag.to_partition(())
+            gpu_seed = gpu_seed_graph.materialize(gpu_seed_graph.analyze(gpu_seed_partition))
+            assert [node.canonical_id for node in gpu_seed.trace_graph.compute_nodes] == [
+                node.canonical_id for node in cpu_seed.trace_graph.compute_nodes
+            ]
+        partitions = smallest_transfer_partitions(cpu_seed)
+        assert len(partitions) == 100
+        points = partitions
+        cpu_inputs = {batch: torch.zeros(batch, 3, 160, 160) for batch in (1, 2, 3)}
         with torch.inference_mode():
             cpu_expected = {batch: cpu_model(value) for batch, value in cpu_inputs.items()}
             gpu_inputs = (
-                {
-                    batch: torch.zeros(batch, 3, 160, 160, device="cuda")
-                    for batch in (1, 2, 3)
-                }
+                {batch: torch.zeros(batch, 3, 160, 160, device="cuda") for batch in (1, 2, 3)}
                 if gpu_model is not None
                 else {}
             )
@@ -454,11 +287,10 @@ def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
                 if gpu_model is not None
                 else {}
             )
-
             counts = {"cpu": 0, "cuda": 0, "cpu_cuda": 0, "cuda_cpu": 0}
             for point in points:
-                cpu_runtime = repartition_fixture(cpu_seed, point)
-                gpu_runtime = None if gpu_seed is None else repartition_fixture(gpu_seed, point)
+                cpu_runtime = cpu_seed.repartition(point)
+                gpu_runtime = None if gpu_seed is None else gpu_seed.repartition(point)
                 for batch in (1, 2, 3):
                     assert_same(cpu_runtime.replay(cpu_inputs[batch]), cpu_expected[batch])
                     counts["cpu"] += 1
@@ -475,7 +307,6 @@ def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
                     )
                     assert_structure(cpu_to_cuda, gpu_expected[batch], "cuda")
                     counts["cpu_cuda"] += 1
-
                     gpu_boundary = gpu_runtime.run_prefix(gpu_inputs[batch])
                     assert gpu_boundary.tensors.keys() == gpu_boundary.spec.keys()
                     cuda_to_cpu = cpu_runtime.run_suffix(
@@ -483,7 +314,6 @@ def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
                     )
                     assert_structure(cuda_to_cpu, cpu_expected[batch], "cpu")
                     counts["cuda_cpu"] += 1
-
         expected_counts = {
             "cpu": len(points) * 3,
             "cuda": len(points) * 3,
@@ -493,129 +323,38 @@ def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
         assert counts["cpu"] == expected_counts["cpu"]
         if gpu_seed is not None:
             assert counts == expected_counts
-        print(partition_index, partition_count, len(points), counts, flush=True)
+        print(len(points), counts, flush=True)
         os._exit(0)
+
         """,
         timeout=7200,
     )
 
 
-def test_rfdetr_detection_split_replay_fixed_batch() -> None:
-    """RF-DETR-N official weights replay the full detection core at boundaries."""
-
+def test_rfdetr_smallest_dag_partitions_cross_batch_and_device() -> None:
+    """RF-DETR-N replays the 100 smallest native DAG partitions across batch and device."""
     _skip_unless_enabled()
     _skip_if_module_missing("rfdetr")
     _run_backend_subprocess(
         """
-        import os
-        import hashlib
-        from pathlib import Path
-
-        import torch
-        from torch import nn
-
-        import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
-        from torchlens.utils._torch_compat import get_dynamo_optimized_module_type
-
-        torch.set_num_threads(1)
-        os.environ.setdefault(
-            "RF_HOME",
-            str(Path.home() / ".cache" / "torchlens" / "models" / "rfdetr"),
-        )
-        get_dynamo_optimized_module_type(force_probe=True)
-        from rfdetr import RFDETRNano
-        from rfdetr.utilities.tensors import NestedTensor
-
-        class RFDETRTensorModel(nn.Module):
-            # Expose the official RF-DETR core through a tensor-only ABI.
-
-            def __init__(self, core):
-                super().__init__()
-                self.core = core
-
-            def forward(self, images):
-                mask = torch.zeros(
-                    (images.shape[0], images.shape[2], images.shape[3]),
-                    device=images.device,
-                    dtype=torch.bool,
-                )
-                return self.core(NestedTensor(images, mask))
-
-        detector = RFDETRNano()
-        checkpoint_path = Path(os.environ["RF_HOME"]) / "rf-detr-nano.pth"
-        hasher = hashlib.sha256()
-        with checkpoint_path.open("rb") as checkpoint:
-            for chunk in iter(lambda: checkpoint.read(1024 * 1024), b""):
-                hasher.update(chunk)
-        digest = hasher.hexdigest()
-        assert digest == "d8d6b9ee57d4d0ed2b1f305163624712a0532cb7bce0c747317984fc5457440d"  # pragma: allowlist secret
-        model = RFDETRTensorModel(detector.model.model).eval()
-        inputs = torch.zeros(2, 3, 384, 384)
-
-        def tensor_leaves(value):
-            if isinstance(value, torch.Tensor):
-                return [value]
-            if isinstance(value, dict):
-                return [leaf for key in sorted(value) for leaf in tensor_leaves(value[key])]
-            if isinstance(value, (list, tuple)):
-                return [leaf for item in value for leaf in tensor_leaves(item)]
-            return []
-
-        with torch.no_grad():
-            seed = prepare_fixture(
-                model,
-                inputs,
-                split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), backend="torch"),
-            )
-            expected = model(inputs)
-            for percent in (25, 50, 75):
-                runtime = repartition_fixture(seed, lambda g, count=percent: select_prefix(g, (len(g.compute_nodes) - 1) * count // 100 + 1))
-                actual = runtime.replay(inputs)
-                actual_leaves = tensor_leaves(actual)
-                expected_leaves = tensor_leaves(expected)
-                assert len(actual_leaves) == len(expected_leaves)
-                for actual_leaf, expected_leaf in zip(actual_leaves, expected_leaves, strict=True):
-                    torch.testing.assert_close(actual_leaf, expected_leaf, atol=1e-4, rtol=1e-3)
-        assert not seed.retains_trace
-
-        os._exit(0)
-        """,
-        timeout=420,
-    )
-
-
-def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
-    """RF-DETR-N replays every before/after boundary across batch and device."""
-
-    _skip_unless_enabled()
-    _skip_unless_rfdetr_exhaustive()
-    _skip_if_module_missing("rfdetr")
-    _run_backend_subprocess(
-        """
-        from functools import partial
-
         import copy
-        import os
         import hashlib
-        from importlib.metadata import version
+        import os
         from pathlib import Path
 
         import torch
+        from dag_helpers import smallest_transfer_partitions
         from torch import nn
 
-        import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_node_prefix, select_prefix
+        from torchlens.split import prepare_graph
         from torchlens.utils._torch_compat import get_dynamo_optimized_module_type
 
         torch.set_num_threads(1)
-        os.environ.setdefault(
-            "RF_HOME",
-            str(Path.home() / ".cache" / "torchlens" / "models" / "rfdetr"),
-        )
+        os.environ.setdefault("RF_HOME", str(Path.home() / ".cache" / "torchlens" / "models" / "rfdetr"))
         get_dynamo_optimized_module_type(force_probe=True)
         from rfdetr import RFDETRNano
         from rfdetr.utilities.tensors import NestedTensor
+
 
         class RFDETRTensorModel(nn.Module):
             def __init__(self, core):
@@ -629,11 +368,12 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
                     dtype=torch.bool,
                 )
                 return self.core(NestedTensor(images, mask))
+
 
         def assert_same(actual, expected):
             if isinstance(expected, torch.Tensor):
                 assert isinstance(actual, torch.Tensor)
-                torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-3)
+                torch.testing.assert_close(actual, expected, atol=0.0001, rtol=0.001)
                 return
             assert type(actual) is type(expected)
             if isinstance(expected, dict):
@@ -647,6 +387,7 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
                     assert_same(actual_item, expected_item)
                 return
             assert actual == expected
+
 
         def assert_structure(actual, expected, device):
             if isinstance(expected, torch.Tensor):
@@ -668,6 +409,7 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
                 for actual_item, expected_item in zip(actual, expected, strict=True):
                     assert_structure(actual_item, expected_item, device)
 
+
         detector = RFDETRNano()
         checkpoint_path = Path(os.environ["RF_HOME"]) / "rf-detr-nano.pth"
         hasher = hashlib.sha256()
@@ -678,72 +420,35 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
         assert digest == "d8d6b9ee57d4d0ed2b1f305163624712a0532cb7bce0c747317984fc5457440d"  # pragma: allowlist secret
         cpu_model = RFDETRTensorModel(detector.model.model).eval()
         gpu_model = copy.deepcopy(cpu_model).cuda().eval() if torch.cuda.is_available() else None
-
-        request = split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1))
         cpu_example = torch.zeros(2, 3, 384, 384)
-        # This matrix tests inference. Do not retain backward graphs for the
-        # B=1 capture and B=2 probe alongside both CPU and GPU runtimes.
         with torch.no_grad():
-            cpu_seed = prepare_fixture(cpu_model, cpu_example, request)
-        # Keep the established Torch 2.8 inventory and explicitly admit the
-        # measured Torch 2.10-2.11 / RF-DETR 1.8.3 inventory. Torch 2.11 has
-        # the same 860 nodes in the untouched baseline and refactored runtime.
-        # The full numeric matrix
-        # below remains required; the historical Torch 2.13 count is not a
-        # cross-version graph identity.
-        torch_release = tuple(torch.__version__.split('.')[:2])
-        rfdetr_version = version("rfdetr")
-        expected_compute_nodes = (
-            860
-            if torch_release == ("2", "8")
-            or (torch_release in {("2", "10"), ("2", "11")} and rfdetr_version == "1.8.3")
-            else 858
-        )
-        actual_compute_nodes = len(cpu_seed.trace_graph.compute_nodes)
-        assert actual_compute_nodes == expected_compute_nodes, (
-            f"RF-DETR compute inventory: torch={torch.__version__}, "
-            f"rfdetr={rfdetr_version}, actual={actual_compute_nodes}, "
-            f"expected={expected_compute_nodes}"
-        )
+            cpu_seed_graph = prepare_graph(cpu_model, cpu_example)
+            cpu_seed_dag = cpu_seed_graph.compute_dag()
+            cpu_seed_partition = cpu_seed_dag.to_partition(())
+            cpu_seed = cpu_seed_graph.materialize(cpu_seed_graph.analyze(cpu_seed_partition))
         assert cpu_seed.trace_graph.shape_program.unresolved == {}
         assert cpu_seed.traced_batch_size == 1
         assert cpu_seed.trace_graph.shape_program.witness_batch_sizes == (2,)
         assert cpu_seed.batch_validation["status"] == "passed"
-
         gpu_seed = None
         if gpu_model is not None:
             with torch.no_grad():
-                gpu_seed = prepare_fixture(
-                    gpu_model,
-                    torch.zeros(2, 3, 384, 384, device="cuda"),
-                    request,
-                )
-            assert [
-                node.canonical_id for node in gpu_seed.trace_graph.compute_nodes
-            ] == [node.canonical_id for node in cpu_seed.trace_graph.compute_nodes]
-
-        all_points = [
-            point
-            for node in cpu_seed.trace_graph.compute_nodes
-            for point in (partial(select_node_prefix, node_id=str(node.canonical_id), include=False), partial(select_node_prefix, node_id=str(node.canonical_id)))
-        ]
-        assert len(all_points) == 2 * expected_compute_nodes
-        partition_count = int(os.environ.get("TORCHLENS_RFDETR_PARTITIONS", "1"))
-        partition_index = int(os.environ.get("TORCHLENS_RFDETR_PARTITION", "0"))
+                gpu_seed_graph = prepare_graph(gpu_model, torch.zeros(2, 3, 384, 384, device="cuda"))
+                gpu_seed_dag = gpu_seed_graph.compute_dag()
+                gpu_seed_partition = gpu_seed_dag.to_partition(())
+                gpu_seed = gpu_seed_graph.materialize(gpu_seed_graph.analyze(gpu_seed_partition))
+            assert [node.canonical_id for node in gpu_seed.trace_graph.compute_nodes] == [
+                node.canonical_id for node in cpu_seed.trace_graph.compute_nodes
+            ]
+        partitions = smallest_transfer_partitions(cpu_seed)
+        assert len(partitions) == 100
         progress_prefix = os.environ.get("TORCHLENS_RFDETR_PROGRESS")
-        assert partition_count >= 1
-        assert 0 <= partition_index < partition_count
-        points = all_points[partition_index::partition_count]
-        cpu_inputs = {
-            batch: torch.zeros(batch, 3, 384, 384) for batch in (1, 2, 3)
-        }
+        points = partitions
+        cpu_inputs = {batch: torch.zeros(batch, 3, 384, 384) for batch in (1, 2, 3)}
         with torch.inference_mode():
             cpu_expected = {batch: cpu_model(value) for batch, value in cpu_inputs.items()}
             gpu_inputs = (
-                {
-                    batch: torch.zeros(batch, 3, 384, 384, device="cuda")
-                    for batch in (1, 2, 3)
-                }
+                {batch: torch.zeros(batch, 3, 384, 384, device="cuda") for batch in (1, 2, 3)}
                 if gpu_model is not None
                 else {}
             )
@@ -752,11 +457,10 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
                 if gpu_model is not None
                 else {}
             )
-
             counts = {"cpu": 0, "cuda": 0, "cpu_cuda": 0, "cuda_cpu": 0}
             for point in points:
-                cpu_runtime = repartition_fixture(cpu_seed, point)
-                gpu_runtime = None if gpu_seed is None else repartition_fixture(gpu_seed, point)
+                cpu_runtime = cpu_seed.repartition(point)
+                gpu_runtime = None if gpu_seed is None else gpu_seed.repartition(point)
                 for batch in (1, 2, 3):
                     cpu_actual = cpu_runtime.replay(cpu_inputs[batch])
                     assert_same(cpu_actual, cpu_expected[batch])
@@ -778,7 +482,6 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
                     assert_structure(cpu_to_cuda, gpu_expected[batch], "cuda")
                     counts["cpu_cuda"] += 1
                     del cpu_boundary, cpu_to_cuda
-
                     gpu_boundary = gpu_runtime.run_prefix(gpu_inputs[batch])
                     assert gpu_boundary.tensors.keys() == gpu_boundary.spec.keys()
                     cuda_to_cpu = cpu_runtime.run_suffix(
@@ -787,11 +490,9 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
                     assert_structure(cuda_to_cpu, cpu_expected[batch], "cpu")
                     counts["cuda_cpu"] += 1
                     del gpu_boundary, cuda_to_cpu
-
                 if progress_prefix:
-                    with open(f"{progress_prefix}.{partition_index}.log", "a") as progress:
+                    with open(f"{progress_prefix}.dag.log", "a") as progress:
                         print(counts["cpu"] // 3, len(points), point, counts, file=progress)
-
         expected_counts = {
             "cpu": len(points) * 3,
             "cuda": len(points) * 3,
@@ -801,47 +502,44 @@ def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
         assert counts["cpu"] == expected_counts["cpu"]
         if gpu_seed is not None:
             assert counts == expected_counts
-        print(partition_index, partition_count, len(points), counts, flush=True)
+        print(len(points), counts, flush=True)
         assert not cpu_seed.retains_trace
         if gpu_seed is not None:
             assert not gpu_seed.retains_trace
         os._exit(0)
+
         """,
         timeout=7200,
     )
 
 
-def test_torchvision_ops_mlp_all_split_nodes_cross_batch_and_device() -> None:
-    """Every compute-node before/after split replays for a torchvision module block."""
-
+def test_torchvision_ops_mlp_smallest_dag_partitions_cross_batch_and_device() -> None:
+    """The smallest native DAG partitions replay for a torchvision module block."""
     _skip_unless_enabled()
     _skip_if_module_missing("torchvision")
     torchvision = import_module("torchvision")
     torch.manual_seed(0)
-
     for device in _torch_test_devices():
-        model = torchvision.ops.MLP(
-            in_channels=6,
-            hidden_channels=[8, 4],
-            dropout=0.0,
-        ).to(device)
+        model = torchvision.ops.MLP(in_channels=6, hidden_channels=[8, 4], dropout=0.0).to(device)
         model.eval()
         x = torch.ones((2, 6), device=device)
-        seed_runtime = prepare_fixture(
-            model,
-            x,
-            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
-        )
-
-        for boundary in _all_compute_split_boundaries(seed_runtime):
-            runtime = prepare_fixture(
-                model,
-                x,
-                split_request(boundary),
+        seed_graph = prepare_graph(model, x)
+        seed_dag = seed_graph.compute_dag()
+        seed_partition = seed_dag.to_partition(
+            close_call_ids(
+                seed_dag,
+                frozenset(
+                    call.call_id
+                    for call in seed_dag.nodes[: (len(seed_dag.nodes) - 1) * 50 // 100 + 1]
+                ),
             )
+        )
+        seed_runtime = seed_graph.materialize(seed_graph.analyze(seed_partition))
+        for boundary in smallest_transfer_partitions(seed_runtime):
+            runtime = seed_runtime.repartition(boundary)
             for batch in (1, 3):
                 replay_x = torch.ones((batch, 6), device=device)
                 with torch.no_grad():
                     split_output = runtime.replay(replay_x)
                     full_output = model(replay_x)
-                assert torch.allclose(split_output, full_output, atol=1e-5, rtol=1e-4)
+                assert torch.allclose(split_output, full_output, atol=1e-05, rtol=0.0001)

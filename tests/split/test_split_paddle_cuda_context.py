@@ -13,10 +13,11 @@ def test_cpu_split_never_loads_the_cuda_driver() -> None:
 
     run_paddle_subprocess(
         """
-        from functools import partial
+        from torchlens.split import SplitFeatures, prepare_graph
+        from dag_helpers import call_ids, close_call_ids
+
 
         import paddle
-        import torchlens as tl
         from unittest.mock import patch
 
         paddle.set_device('cpu')
@@ -26,9 +27,10 @@ def test_cpu_split_never_loads_the_cuda_driver() -> None:
         x, y = paddle.ones([2, 3]), paddle.ones([2, 2])
         optimizer = paddle.optimizer.SGD(0.02, parameters=model.parameters())
         with patch('torchlens.backends.paddle._cuda._cuda_driver', side_effect=AssertionError):
-            runtime = prepare_fixture(
-                model, x, split_request(partial(select_node_prefix, node_id='relu'), backend='paddle', trainable=True)
-            )
+            graph = prepare_graph(model, x, backend='paddle', features=SplitFeatures(training=True))
+            dag = graph.compute_dag()
+            partition = dag.to_partition(close_call_ids(dag, call_ids(graph, modules=frozenset({'relu'}), ops=frozenset({'functional.relu'}))))
+            runtime = graph.materialize(graph.analyze(partition))
             assert runtime.validate_equivalence(model, (x,))
             boundary = runtime.run_training_prefix(x)
             loss, grads = runtime.train_suffix(boundary, y, optimizer=optimizer)
@@ -76,9 +78,12 @@ def test_rocm_gpu_scope_never_loads_the_nvidia_driver(cuda_build: bool) -> None:
                     raise RuntimeError('scope failure')
             rocm_tensor.data_ptr.assert_not_called()
 
-            runtime = prepare_fixture(
-                model, x, split_request(partial(select_node_prefix, node_id='relu'), backend='paddle', trainable=True)
-            )
+            from torchlens.split import SplitFeatures, prepare_graph
+            from dag_helpers import call_ids, close_call_ids
+            graph = prepare_graph(model, x, backend='paddle', features=SplitFeatures(training=True))
+            dag = graph.compute_dag()
+            partition = dag.to_partition(close_call_ids(dag, call_ids(graph, ops=frozenset({{'functional.relu'}}))))
+            runtime = graph.materialize(graph.analyze(partition))
             assert runtime.validate_equivalence(model, (x,))
             boundary = runtime.run_training_prefix(x)
             loss, grads = runtime.train_suffix(boundary, y, optimizer=optimizer)
@@ -94,7 +99,9 @@ def test_gpu_split_restores_foreign_context_and_matches_native_training() -> Non
 
     run_paddle_subprocess(
         """
-        from functools import partial
+        from torchlens.split import SplitFeatures, prepare_graph
+        from dag_helpers import call_ids, close_call_ids
+
 
         import copy
         import ctypes
@@ -153,9 +160,10 @@ def test_gpu_split_restores_foreign_context_and_matches_native_training() -> Non
 
         try:
             # A private context on the same GPU reproduces tinygrad's driver behavior.
-            runtime = prepare_fixture(
-                model, x, split_request(partial(select_node_prefix, node_id='relu'), backend='paddle', trainable=True)
-            )
+            graph = prepare_graph(model, x, backend='paddle', features=SplitFeatures(training=True))
+            dag = graph.compute_dag()
+            partition = dag.to_partition(close_call_ids(dag, call_ids(graph, modules=frozenset({'relu'}), ops=frozenset({'functional.relu'}))))
+            runtime = graph.materialize(graph.analyze(partition))
             assert_restored()
             assert runtime.trace_graph.shape_program.batch_probe.status == 'passed', (
                 runtime.trace_graph.shape_program.batch_probe

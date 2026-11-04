@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pytest
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    split_request,
-)
+from dag_helpers import call_ids, close_call_ids, smallest_transfer_partitions
+
+from torchlens.split import SplitFeatures, prepare_graph
 
 mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 nn = pytest.importorskip("mlx.nn", exc_type=ImportError)
@@ -40,7 +37,9 @@ def _close(actual: Any, expected: Any) -> None:
 
 
 @pytest.mark.parametrize("container", ["dict", "tuple", "nested"])
-def test_mlx_repeated_outputs_replay_and_cache_at_every_cut(container: str, tmp_path: Path) -> None:
+def test_mlx_repeated_outputs_replay_and_cache_at_native_dag_partitions(
+    container: str, tmp_path: Path
+) -> None:
     """Every final occurrence survives changed batches, cuts and cached boundaries."""
 
     def model(x: Any) -> Any:
@@ -55,19 +54,25 @@ def test_mlx_repeated_outputs_replay_and_cache_at_every_cut(container: str, tmp_
             return (total, total, "mlx")
         return {"pair": [right, total, right], "early": (hidden, hidden), "input": [x, x]}
 
-    seed = prepare_fixture(
-        model,
-        _input(2),
-        split_request(
-            partial(select_node_prefix, node_id="split_1_3", include=False),
-            backend="mlx",
-            boundary_cache=True,
-        ),
+    seed_graph = prepare_graph(
+        model, _input(2), backend="mlx", features=SplitFeatures(boundary_cache=True)
     )
+    seed_dag = seed_graph.compute_dag()
+    seed_partition = seed_dag.to_partition(
+        close_call_ids(
+            seed_dag,
+            frozenset(
+                source
+                for source, target, _ in seed_dag.data_edges
+                if target
+                in call_ids(seed_graph, modules=frozenset({"split_1_3"}), ops=frozenset({"split"}))
+            ),
+        )
+    )
+    seed = seed_graph.materialize(seed_graph.analyze(seed_partition))
     assert seed.batch_validation["status"] == "passed"
-    dag = seed.compute_dag()
-    for index in range(len(dag.nodes) + 1):
-        runtime = seed.repartition(dag.to_partition(c.call_id for c in dag.nodes[:index]))
+    for index, partition in enumerate(smallest_transfer_partitions(seed)):
+        runtime = seed.repartition(partition)
         for batch in (1, 2, 5):
             x = _input(batch)
             expected = iter_arrays_with_paths(model(x), runtime.adapter.is_tensor)
@@ -100,13 +105,14 @@ def test_mlx_repeated_output_gradients_accumulate() -> None:
 
         return mx.mean(mx.square(output["a"])) + 3 * mx.mean(output["nested"][0])
 
-    runtime = prepare_fixture(
-        model,
-        _input(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, _input(2), backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     x = _input(5)
     boundary = runtime.run_training_prefix(x)
     suffix = runtime.train_suffix_result(boundary, None, loss_fn=loss)
@@ -190,16 +196,22 @@ def test_mlx_multi_optimizer_matches_nested_tied_native_training(
     original = dict(tree_flatten(model.parameters()))
     snapshots = {name: value.astype(value.dtype) for name, value in original.items()}
     mx.eval(snapshots)
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         model,
         _input(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"),
-            backend="mlx",
-            trainable=True,
-            placement=tl.split.PlacementPlan.across(*placement) if placement else None,
-        ),
+        backend="mlx",
+        placement=tl.split.PlacementPlan.across(*placement)
+        if placement
+        else tl.split.PlacementPlan(),
+        features=SplitFeatures(training=True),
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     prefix_optimizer, native_optimizer = _optimizer(), _optimizer()
     suffix_optimizer = prefix_optimizer if shared_optimizer else _optimizer()
     native_grad = nn.value_and_grad(reference, lambda x, targets: _loss(reference(x), targets))
@@ -235,13 +247,16 @@ def test_mlx_multi_optimizer_matches_nested_tied_native_training(
 def test_mlx_multi_optimizer_detached_suffix_matches_native_updates() -> None:
     """Suffix-only steps restore nested list paths before native optimizer filtering."""
 
-    runtime = prepare_fixture(
-        _GroupedModel(),
-        _input(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(
+        _GroupedModel(), _input(2), backend="mlx", features=SplitFeatures(training=True)
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     optimizer, reference_optimizer = _optimizer(), _optimizer()
     reference_parameters = dict(runtime.segments.suffix._binding.parameters())
     x, targets = _input(3), mx.ones((3, 2))

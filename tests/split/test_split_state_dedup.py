@@ -4,25 +4,24 @@ from __future__ import annotations
 
 import gc
 import weakref
-from functools import partial
 
 import pytest
 import torch
+from dag_helpers import call_ids, close_call_ids
 from torch import nn
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    split_request,
-)
 
-from torchlens.split import PlacementPlan
+from torchlens.split import (
+    PlacementPlan,
+    SplitFeatures,
+    prepare_graph,
+)
 from torchlens.split.adapters.torch import TorchSplitAdapter
 from torchlens.split.placement import DevicePlacement
 from torchlens.split.state import SegmentState, _StateReplicaPool
 
 
 class TiedStateModel(nn.Module):
-    """Reuse one weight before and after a named split point."""
+    """Reuse one weight in both native execution segments."""
 
     def __init__(self, *, frozen: bool) -> None:
         """Keep a trainable output layer even when the shared weight is frozen."""
@@ -52,15 +51,14 @@ def test_tied_replicas_share_only_frozen_state(
         monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
     model = TiedStateModel(frozen=frozen)
     inputs = torch.randn(3, 4)
-    runtime = prepare_fixture(
-        model,
-        inputs,
-        split_request(
-            partial(select_node_prefix, node_id="cut"),
-            trainable=True,
-            placement=PlacementPlan.on(device),
-        ),
+    graph = prepare_graph(
+        model, inputs, placement=PlacementPlan.on(device), features=SplitFeatures(training=True)
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"cut"}), ops=frozenset({"cut"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     prefix = runtime.segments.prefix._state
     suffix = runtime.segments.suffix._state
     # Exercise the adapter's sharing proof before inspecting its cached binding.
@@ -110,13 +108,12 @@ def test_captured_and_live_prefix_state_stay_separate(monkeypatch: pytest.Monkey
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
     model = TiedStateModel(frozen=False)
     inputs = torch.ones(3, 4)
-    runtime = prepare_fixture(
-        model,
-        inputs,
-        split_request(
-            partial(select_node_prefix, node_id="cut"), placement=PlacementPlan.on("cpu")
-        ),
+    graph = prepare_graph(model, inputs, placement=PlacementPlan.on("cpu"))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"cut"}), ops=frozenset({"cut"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     inference = runtime.run_prefix(inputs)
     inference_values = {key: value.clone() for key, value in inference.tensors.items()}
     prefix = runtime.segments.prefix._state
@@ -168,15 +165,17 @@ def test_same_source_on_distinct_devices_has_distinct_replicas() -> None:
 
     model = TiedStateModel(frozen=True)
     inputs = torch.randn(3, 4)
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         model,
         inputs,
-        split_request(
-            partial(select_node_prefix, node_id="cut"),
-            trainable=True,
-            placement=PlacementPlan.across("cuda", "cpu"),
-        ),
+        placement=PlacementPlan.across("cuda", "cpu"),
+        features=SplitFeatures(training=True),
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"cut"}), ops=frozenset({"cut"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     actual = runtime.replay(inputs)
     prefix_weight = runtime.segments.prefix._state.resolve(model.shared.weight, shareable=True)
     suffix_weight = runtime.segments.suffix._state.resolve(model.shared.weight, shareable=True)
@@ -202,15 +201,14 @@ def test_runtime_replica_pool_does_not_outlive_runtime(monkeypatch: pytest.Monke
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
     model = TiedStateModel(frozen=True)
     inputs = torch.ones(3, 4)
-    runtime = prepare_fixture(
-        model,
-        inputs,
-        split_request(
-            partial(select_node_prefix, node_id="cut"),
-            trainable=True,
-            placement=PlacementPlan.on("cpu"),
-        ),
+    graph = prepare_graph(
+        model, inputs, placement=PlacementPlan.on("cpu"), features=SplitFeatures(training=True)
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"cut"}), ops=frozenset({"cut"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     runtime.replay(inputs)
     runtime_ref = weakref.ref(runtime)
     pool_ref = weakref.ref(runtime.segments.prefix._state._replica_pool)

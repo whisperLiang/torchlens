@@ -3,22 +3,18 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from functools import partial
 
 import pytest
 import torch
+from dag_helpers import call_ids, close_call_ids
 from torch import nn
-from v2_helpers import (
-    prepare_fixture,
-    request_fixture,
-    select_node_prefix,
-)
 
 from torchlens.split import (
     GraphPartition,
     PlacementPlan,
     SplitFeatures,
     SplitRuntime,
+    prepare_graph,
 )
 
 
@@ -91,14 +87,18 @@ def test_noncontiguous_cross_device_training_and_external_optimizer_migration(
     # choices; no global TF32 setting or numerical tolerance is changed.
     model = InterleavedBranches().double()
     reference = deepcopy(model)
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         model,
         torch.randn(1, 4, dtype=torch.float64),
-        request_fixture(
-            partial(select_node_prefix, node_id="left_end"),
-            features=SplitFeatures(training=True, retain_trace=retain_trace),
-        ),
+        features=SplitFeatures(training=True, retain_trace=retain_trace),
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"left_end"}), ops=frozenset({"left"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     partitions = tuple(_branch_partition(runtime, branch) for branch in ("left", "right", "third"))
     runtime = runtime.repartition(partitions[0]).with_placement(
         PlacementPlan.across(prefix_device, suffix_device)

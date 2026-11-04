@@ -39,11 +39,24 @@ storage (`test_split_partition_buffer_gradients.py`), and native stochastic repl
 across real CPU/CUDA devices (`test_split_rng_devices.py`). They compare values,
 gradients and effective state across recuts; hardware skips are not passes.
 
-New workflow tests select native calls with `compute_dag().to_partition(call_ids)`.
-Planner/refusal tests also construct `GraphPartition` directly from canonical compute IDs. Shared fixture
-selectors accept a node count or an unambiguous node/module anchor and return a
-partition; there is no string-based point-interface emulator. True DAG tests keep
-their interleaved branch sets rather than replacing them with ordered prefixes.
+All workflow tests select native calls with `compute_dag().to_partition(call_ids)`.
+Planner/refusal tests also construct `GraphPartition` directly from canonical compute IDs.
+True DAG tests retain interleaved branch sets. There is no deferred request or point-selector
+compatibility layer.
+
+`dag_helpers.py` is an external, test-only partition oracle. Small graphs enumerate all
+assignments under the current DAG's directed data/effect dependencies and co-location groups.
+Real-model matrices execute the 100 native-legal partitions with the smallest forward boundary
+transfer, or every legal partition if fewer than 100 exist. A bounded minimum-cut algorithm
+searches disjoint assignment regions in exact cost order; it does not restrict the search to
+linear prefixes. Native `analyze()` is the final legality authority, including conditional
+mutation refusals. Independent small-graph exhaustive oracles check completeness and ranking.
+
+Costs come from `graph.graph_profile()` at the graph's canonical capture batch. Each frontier
+tensor value is charged once, including fan-out, fixed input/buffer provenance and returned
+outputs. Effects carry no communication charge. Unknown tensor sizes refuse ranked search;
+when the entire small legal set is tested, ranking is unnecessary. The production package
+contains no partition candidate generator.
 
 `test_partition_benchmark.py` exercises strict/diagnostic subprocess exits, saved
 JSON, missing trusted weights, native reference observation and current buffers.
@@ -66,7 +79,7 @@ the renderer output is unchanged. Never regenerate oracle expectations merely
 to make a new environment pass.
 
 The split suite includes optional native backends, pretrained model checks, and
-exhaustive boundary matrices. Missing GPU builds are environment failures in the
+native DAG partition matrices. Missing GPU builds are environment failures in the
 cross-device real-model tests; a CPU-only JAX or Paddle installation does not cover
 them. TensorFlow GPU XLA also needs the CUDA compiler package's
 `nvvm/libdevice/libdevice.10.bc`, in addition to runtime libraries. Install a compiler
@@ -89,60 +102,37 @@ alongside the required native backend runtimes:
 python -m pip install 'rfdetr==1.8.3' 'ultralytics==8.4.152' 'keras-cv==0.9.0'
 ```
 
-RF-DETR 1.8.3 follows the repository's declared `>=1.8,<1.9` dependency range.
-Its measured Torch 2.10 and 2.11 captures contain 860 compute nodes (1,720 before/after
-boundaries), which the inventory assertion explicitly admits for these version
-pairs. Torch 2.11's inventory was independently reproduced on the untouched
-baseline and refactored runtime. The complete replay matrix below must still pass.
-Other version pairs retain their existing inventory expectations.
+RF-DETR 1.8.3 follows the declared `>=1.8,<1.9` dependency range. Pretrained
+weight digests remain checked; raw operation counts are not acceptance oracles.
 
-Enable the complete suite, including all YOLOv8 and RF-DETR boundaries and allocated
-memory comparisons:
+Enable all model matrices and allocated-memory comparisons, including rare tests:
 
 ```bash
 export TORCHLENS_REAL_MODEL_TESTS=1 TORCHLENS_REAL_MODEL_STRICT=1
-export TORCHLENS_YOLOV8_EXHAUSTIVE=1 TORCHLENS_RFDETR_EXHAUSTIVE=1
 export TORCHLENS_CUDA_MEMORY_TESTS=1
-export TORCHLENS_YOLOV8_PARTITIONS=1 TORCHLENS_YOLOV8_PARTITION=0
-export TORCHLENS_RFDETR_PARTITIONS=1 TORCHLENS_RFDETR_PARTITION=0
 export CUBLAS_WORKSPACE_CONFIG=:4096:8 NVIDIA_TF32_OVERRIDE=0
 export TF_FORCE_GPU_ALLOW_GROWTH=true XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
-python -m pytest tests/split -q -rs --tb=short --randomly-seed=20260920
+python -m pytest -o addopts= tests/split -q -rs --tb=short --randomly-seed=20260920
 ```
 
-The exhaustive tests can each take up to two hours. Their partition controls are
-for separately scheduled coverage; `PARTITIONS=1` runs every boundary in one test.
-The first pretrained run may download model weights.
-On slower devices, increase `PARTITIONS` and run every index to keep each shard
-within the unchanged timeout. Optional `TORCHLENS_RFDETR_PROGRESS=/path/prefix`
-appends a progress row after all checks for each GPU-enabled cut to
-`/path/prefix.<partition-index>.log`; the final count assertions remain mandatory.
-
-On a shared GPU with limited free memory, run these selections **sequentially**,
-in place of the final command above:
+Run optional backends in their own compatible environments. On a shared GPU, schedule
+memory-heavy models sequentially in fresh pytest processes:
 
 ```bash
-python -m pytest tests/split -m slow \
-  -k 'not yolov8n_all_split_nodes and not rfdetr_all_split_nodes' \
-  -v -rs --tb=short --randomly-seed=20260920
-python -m pytest tests/split/test_split_real_models.py::test_yolov8n_all_split_nodes_cross_batch_and_device \
-  -v -rs --tb=short --randomly-seed=20260920
-python -m pytest tests/split/test_split_real_models.py::test_rfdetr_all_split_nodes_cross_batch_and_device \
-  -v -rs --tb=short --randomly-seed=20260920
-python -m pytest tests/split -m 'not slow' -v -rs --tb=short --randomly-seed=20260920
+python -m pytest -o addopts= tests/split -m slow \
+  -k 'not yolov8n_smallest_dag_partitions and not rfdetr_smallest_dag_partitions' -v -rs
+python -m pytest -o addopts= tests/split/test_split_real_models.py::test_yolov8n_smallest_dag_partitions_cross_batch_and_device -v -rs
+python -m pytest -o addopts= tests/split/test_split_real_models.py::test_rfdetr_smallest_dag_partitions_cross_batch_and_device -v -rs
+python -m pytest -o addopts= tests/split -m 'not slow' -v -rs
 ```
 
-These disjoint selections cover every split test exactly once. The exhaustive
-models get fresh parent processes, so earlier Torch tests cannot retain CUDA
-contexts while those model subprocesses capture. The helper clears existing parent
-Torch caches but never initializes a new parent CUDA context merely to clean it up.
-A fresh process cannot compensate for insufficient free device memory: RF-DETR's
-GPU capture can still refuse its activation budget on a heavily occupied device.
-Provide more free GPU memory rather than treating that refusal as a skipped check.
+The YOLOv8 and RF-DETR matrices assert 100 tested native DAG partitions. Both check CPU
+and CUDA replay at B=1/2/3 and transfer boundaries in both directions at B=1/3. Independent
+training cases retain gradient, optimizer, mutable-state and recut assertions. The first
+pretrained run may download model weights. Optional `TORCHLENS_RFDETR_PROGRESS=/path/prefix`
+appends completed-partition progress to `/path/prefix.dag.log`.
 
-The YOLOv8 inventory explicitly admits Ultralytics 8.4.152's 285 compute nodes
-(570 before/after boundaries), including nine `new_full` nodes. This official
-anchor builder adds six allocation nodes over the legacy 279-node profile. Other
-versions retain the legacy assertion until their graph change is reviewed; the
-test does not silently accept an arbitrary node count.
+Fresh model subprocesses avoid retained parent CUDA contexts. Cleanup clears existing
+Torch caches without creating a new context. Provide sufficient free GPU memory; capture
+budget refusals are failures in strict runs.

@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from functools import partial, wraps
+from functools import wraps
 from typing import Any
 
 import pytest
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    split_request,
-)
+from dag_helpers import call_ids, close_call_ids
+
+from torchlens.split import SplitFeatures, prepare_graph
 
 mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 
@@ -44,15 +42,14 @@ def test_mlx_accepts_native_cpu_devices_and_preserves_ambient_stream(device: Any
 
     x = mx.arange(8, dtype=mx.float32).reshape(2, 4) - 2
     ambient = mx.default_stream(mx.cpu)
-    runtime = prepare_fixture(
-        _model,
-        x,
-        split_request(
-            partial(select_node_prefix, node_id="maximum"),
-            backend="mlx",
-            placement=tl.split.PlacementPlan.on(device),
-        ),
+    graph = prepare_graph(_model, x, backend="mlx", placement=tl.split.PlacementPlan.on(device))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     output, expected = runtime.replay(x), _model(x)
     mx.eval(output, expected)
     assert bool(mx.allclose(output, expected))
@@ -84,9 +81,15 @@ def test_mlx_distinct_segment_streams_override_captured_streams() -> None:
 
     model = Model()
     x = mx.ones((2, 4))
-    seed = prepare_fixture(
-        model, x, split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx")
+    seed_graph = prepare_graph(model, x, backend="mlx")
+    seed_dag = seed_graph.compute_dag()
+    seed_partition = seed_dag.to_partition(
+        close_call_ids(
+            seed_dag,
+            call_ids(seed_graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"})),
+        )
     )
+    seed = seed_graph.materialize(seed_graph.analyze(seed_partition))
     prefix_stream, suffix_stream = mx.new_stream(mx.cpu), mx.new_stream(mx.cpu)
     ambient = mx.default_stream(mx.cpu)
     observed: list[tuple[str, Any, Any]] = []
@@ -127,9 +130,14 @@ def test_mlx_invalid_devices_refuse_before_execution(device: Any) -> None:
     """Unknown devices and ignored CPU indexes never become successful placements."""
 
     x = mx.ones((2, 4))
-    runtime = prepare_fixture(
-        _model, x, split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx")
+    graph = prepare_graph(_model, x, backend="mlx")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     with pytest.raises(SplitUnsupportedError, match="Cannot use MLX split device"):
         runtime.with_placement(tl.split.PlacementPlan.on(device))
 
@@ -142,11 +150,14 @@ def test_mlx_unavailable_gpu_backends_refuse_explicit_placement(name: str) -> No
     available = _gpu_available() if name == "gpu" else callable(native) and native()
     if available:
         pytest.skip(f"MLX {name} backend is available on this host")
-    runtime = prepare_fixture(
-        _model,
-        mx.ones((2, 4)),
-        split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx"),
+    graph = prepare_graph(_model, mx.ones((2, 4)), backend="mlx")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     with pytest.raises(SplitUnsupportedError, match="unavailable|without gpu backend"):
         runtime.with_placement(tl.split.PlacementPlan.across("cpu", name))
 
@@ -154,11 +165,16 @@ def test_mlx_unavailable_gpu_backends_refuse_explicit_placement(name: str) -> No
 def test_mlx_execution_failure_restores_stream() -> None:
     """A failed captured operation unwinds the per-segment stream scope."""
 
-    runtime = prepare_fixture(
-        _model,
-        mx.ones((2, 4)),
-        split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx"),
-    ).with_placement(tl.split.PlacementPlan.on(mx.new_stream(mx.cpu)))
+    graph = prepare_graph(_model, mx.ones((2, 4)), backend="mlx")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition)).with_placement(
+        tl.split.PlacementPlan.on(mx.new_stream(mx.cpu))
+    )
     ambient = mx.default_stream(mx.cpu)
     target = next(
         node.target
@@ -186,17 +202,19 @@ def test_mlx_cross_device_scopes_restore_both_device_defaults(ambient_device: An
     cpu_stream, gpu_stream = mx.default_stream(mx.cpu), mx.default_stream(mx.gpu)
     try:
         mx.set_default_device(ambient_device)
-        runtime = prepare_fixture(
+        graph = prepare_graph(
             _model,
             mx.ones((2, 4)),
-            split_request(
-                partial(select_node_prefix, node_id="maximum"),
-                backend="mlx",
-                placement=tl.split.PlacementPlan.across(
-                    mx.new_stream(mx.cpu), mx.new_stream(mx.gpu)
-                ),
-            ),
+            backend="mlx",
+            placement=tl.split.PlacementPlan.across(mx.new_stream(mx.cpu), mx.new_stream(mx.gpu)),
         )
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+            )
+        )
+        runtime = graph.materialize(graph.analyze(partition))
         result = runtime.replay(mx.ones((5, 4)))
         assert bool(mx.array_equal(result, mx.full((5, 4), 2)))
         assert mx.default_device() == mx.Device(ambient_device)
@@ -238,16 +256,20 @@ def test_mlx_native_cross_device_replay_and_gradients(
     model = Model()
     x = mx.arange(12, dtype=mx.float32).reshape(3, 4) - 2
     targets = mx.ones((3, 2))
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         model,
         x,
-        split_request(
-            partial(select_node_prefix, node_id="maximum"),
-            backend="mlx",
-            trainable=True,
-            placement=tl.split.PlacementPlan.across(prefix_device, suffix_device),
-        ),
+        backend="mlx",
+        placement=tl.split.PlacementPlan.across(prefix_device, suffix_device),
+        features=SplitFeatures(training=True),
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     boundary = runtime.run_training_prefix(x)
     suffix = runtime.train_suffix_result(boundary, targets, optimizer=optim.SGD(0.01))
     prefix = runtime.backward_prefix(boundary, suffix.boundary_grads, optimizer=optim.SGD(0.01))

@@ -7,21 +7,14 @@ import os
 import subprocess
 import sys
 import weakref
-from functools import partial
 from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    select_prefix,
-    split_request,
-)
 
-from torchlens.split import pipeline
+from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, pipeline, prepare_graph
 from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
 
 
@@ -40,7 +33,6 @@ def _check_native_backend(backend: str) -> None:
 
             return native.maximum(x, 0)
 
-        boundary = partial(select_node_prefix, node_id="max")
     elif backend == "tf":
         native = pytest.importorskip("tensorflow")
         from torchlens.split.adapters.tf import TfSplitAdapter
@@ -48,7 +40,6 @@ def _check_native_backend(backend: str) -> None:
         adapter = TfSplitAdapter()
         make = native.constant
         relu = native.nn.relu
-        boundary = partial(select_node_prefix, node_id="relu")
     elif backend == "paddle":
         native = pytest.importorskip("paddle")
         from torchlens.split.adapters.paddle import PaddleSplitAdapter
@@ -62,7 +53,6 @@ def _check_native_backend(backend: str) -> None:
 
             return native.nn.functional.relu(x)
 
-        boundary = partial(select_node_prefix, node_id="relu")
     else:
         native = pytest.importorskip("tinygrad")
         from torchlens.split.adapters.tinygrad import TinygradSplitAdapter
@@ -78,8 +68,6 @@ def _check_native_backend(backend: str) -> None:
             """Apply the tinygrad boundary operation."""
 
             return x.relu()
-
-        boundary = partial(select_node_prefix, node_id="where")
 
     for dtype in (np.float32, np.int32, np.bool_):
         values = np.arange(12).reshape(3, 4).astype(dtype)
@@ -104,11 +92,12 @@ def _check_native_backend(backend: str) -> None:
 
     for axes, shape in ((None, (4,)), ({}, (4,)), ({}, (7, 4))):
         static_input = make(np.ones(shape, dtype=np.float32))
-        static = prepare_fixture(
-            model,
-            static_input,
-            split_request(boundary, backend=backend, batch_axes=axes),
+        static_graph = prepare_graph(
+            model, static_input, backend=backend, features=SplitFeatures(batch_axes=axes)
         )
+        static_dag = static_graph.compute_dag()
+        static_partition = static_dag.to_partition([static_dag.nodes[0].call_id])
+        static = static_graph.materialize(static_graph.analyze(static_partition))
         program = static.trace_graph.shape_program
         assert program.input_batch_axes == {}
         assert program.traced_input_shapes == {"/args/0": shape}
@@ -120,14 +109,12 @@ def _check_native_backend(backend: str) -> None:
         with pytest.raises(SplitBoundaryError, match="non-batch input"):
             static.run_prefix(make(np.ones((shape[0] + 1, *shape[1:]), dtype=np.float32)))
 
-    runtimes = [
-        prepare_fixture(
-            model,
-            make(np.ones((batch, 4), dtype=np.float32)),
-            split_request(boundary, backend=backend),
-        )
-        for batch in (32, 8)
-    ]
+    runtimes = []
+    for batch in (32, 8):
+        graph = prepare_graph(model, make(np.ones((batch, 4), dtype=np.float32)), backend=backend)
+        dag = graph.compute_dag()
+        partition = dag.to_partition([dag.nodes[0].call_id])
+        runtimes.append(graph.materialize(graph.analyze(partition)))
     assert all(runtime.traced_batch_size == 1 for runtime in runtimes)
     assert all(runtime.batch_validation["status"] == "passed" for runtime in runtimes)
     assert runtimes[0].graph_identity == runtimes[1].graph_identity
@@ -143,11 +130,12 @@ def _check_native_backend(backend: str) -> None:
 
         return relu(x) * (3.0 if x.shape[0] >= 2 else 2.0)
 
-    restricted = prepare_fixture(
-        branch_model,
-        make(np.ones((8, 4), dtype=np.float32)),
-        split_request(boundary, backend=backend),
+    restricted_graph = prepare_graph(
+        branch_model, make(np.ones((8, 4), dtype=np.float32)), backend=backend
     )
+    restricted_dag = restricted_graph.compute_dag()
+    restricted_partition = restricted_dag.to_partition(frozenset({restricted_dag.nodes[0].call_id}))
+    restricted = restricted_graph.materialize(restricted_graph.analyze(restricted_partition))
     assert restricted.batch_validation["status"] == "failed"
     assert "numeric mismatch" in restricted.batch_validation["reason"]
     singleton = make(np.ones((1, 4), dtype=np.float32))
@@ -222,7 +210,7 @@ def test_rebatch_failure_does_not_capture_original_batch(monkeypatch: pytest.Mon
         pipeline.capture_canonical_model(
             object(),
             (torch.ones(32, 4),),
-            split_request(partial(select_node_prefix, node_id="relu")),
+            SplitRequest(GraphPartition(frozenset())),
             adapter=adapter,
         )
     assert captures == []
@@ -255,7 +243,7 @@ def test_canonical_retry_does_not_retain_prior_exception_payload(
     captured, _, _, _ = pipeline.capture_canonical_model(
         object(),
         (torch.ones(4, 4),),
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+        SplitRequest(GraphPartition(frozenset())),
         adapter=TorchSplitAdapter(),
     )
     assert captured is result
@@ -287,7 +275,7 @@ def test_canonical_capture_only_retries_at_two(
     args = (
         object(),
         (torch.ones(32, 4),),
-        split_request(partial(select_node_prefix, node_id="relu")),
+        SplitRequest(GraphPartition(frozenset())),
     )
     if accept_two:
         actual, inputs, _kwargs, batch_spec = pipeline.capture_canonical_model(

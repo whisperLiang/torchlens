@@ -3,19 +3,14 @@
 from __future__ import annotations
 
 import random
-from functools import partial
 from typing import Any
 
 import numpy as np
 import pytest
 import torch
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    split_request,
-)
+from dag_helpers import call_ids, close_call_ids
 
-from torchlens.split import pipeline
+from torchlens.split import pipeline, prepare_graph
 
 
 class StochasticProbeModel(torch.nn.Module):
@@ -66,11 +61,12 @@ def test_probe_matches_native_random_draws_without_mutating_capture(
         return result
 
     monkeypatch.setattr(pipeline, "capture_model", capture)
-    runtime = prepare_fixture(
-        StochasticProbeModel(kind),
-        torch.ones(8, 16),
-        split_request(partial(select_node_prefix, node_id="relu")),
+    graph = prepare_graph(StochasticProbeModel(kind), torch.ones(8, 16))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.batch_validation["status"] == "passed", runtime.batch_validation["reason"]
     assert [batch for batch, _seed in captures] == [1, 2]
     assert captures[0][1] == captures[1][1]
@@ -94,7 +90,12 @@ def test_stochastic_probe_preserves_user_rng_states() -> None:
     numpy_state = np.random.get_state()
     torch_state = torch.random.get_rng_state().clone()
     cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else []
-    runtime = prepare_fixture(model, x, split_request(partial(select_node_prefix, node_id="relu")))
+    graph = prepare_graph(model, x)
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.batch_validation["status"] == "passed", runtime.batch_validation["reason"]
     assert random.getstate() == python_state
     actual_numpy = np.random.get_state()
@@ -117,8 +118,11 @@ def test_stochastic_probe_does_not_mask_real_scalar_branch() -> None:
             x = torch.relu(x)
             return (x + torch.rand_like(x)) * (3 if x.shape[0] >= 2 else 2)
 
-    runtime = prepare_fixture(
-        Model(), torch.ones(8, 16), split_request(partial(select_node_prefix, node_id="relu"))
+    graph = prepare_graph(Model(), torch.ones(8, 16))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.batch_validation["status"] == "failed"
     assert "numeric mismatch" in runtime.batch_validation["reason"]

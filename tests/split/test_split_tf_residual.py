@@ -2,35 +2,21 @@
 
 from __future__ import annotations
 
-from functools import partial
 from typing import Any
 
 import pytest
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    select_prefix,
-    split_request,
-)
+from dag_helpers import close_call_ids, smallest_transfer_partitions
 
+from torchlens.split import prepare_graph
 from torchlens.split._tf_capture import batch_stable_keras_add
 
 
 @pytest.mark.tf_backend
-@pytest.mark.parametrize(
-    "point",
-    [
-        partial(select_node_prefix, node_id="add", include=False),
-        partial(select_node_prefix, node_id="add"),
-    ],
-)
-def test_singleton_spatial_residual_replays_and_restores_keras(point: str) -> None:
+def test_singleton_spatial_residual_replays_and_restores_keras() -> None:
     """Retain batch-changing residual shape, values, and original Keras callable.
 
     Parameters
     ----------
-    point:
-        Cut on either side of the residual addition.
     """
 
     tf = pytest.importorskip("tensorflow")
@@ -41,13 +27,15 @@ def test_singleton_spatial_residual_replays_and_restores_keras(point: str) -> No
     model = tf.keras.Model(inputs, tf.keras.layers.ReLU()(residual))
     original = keras_numpy.add
     with tf.device("/CPU:0"):
-        runtime = prepare_fixture(model, tf.ones((2, 1, 1, 4)), split_request(point, backend="tf"))
-        assert keras_numpy.add is original
-        assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
-        for batch in (1, 2, 3):
-            value = tf.reshape(tf.range(batch * 4, dtype=tf.float32), (batch, 1, 1, 4))
-            tf.debugging.assert_equal(runtime.replay(value), model(value))
+        graph = prepare_graph(model, tf.ones((2, 1, 1, 4)), backend="tf")
+        for partition in smallest_transfer_partitions(graph):
+            runtime = graph.materialize(graph.analyze(partition))
             assert keras_numpy.add is original
+            assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
+            for batch in (1, 2, 3):
+                value = tf.reshape(tf.range(batch * 4, dtype=tf.float32), (batch, 1, 1, 4))
+                tf.debugging.assert_equal(runtime.replay(value), model(value))
+                assert keras_numpy.add is original
 
 
 @pytest.mark.tf_backend
@@ -119,14 +107,17 @@ def test_keras_subclass_probe_preserves_generated_layer_names(
         model(sample)
         names = tuple(layer.name for layer in model.layers)
         weights = tuple(variable.numpy().copy() for variable in model.weights)
-        runtime = prepare_fixture(
-            model,
-            sample,
-            split_request(
-                (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
-                backend="tf",
-            ),
+        graph = prepare_graph(model, sample, backend="tf")
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag,
+                frozenset(
+                    call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
         )
+        runtime = graph.materialize(graph.analyze(partition))
         assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
         assert tuple(layer.name for layer in model.layers) == names
         for variable, expected in zip(model.weights, weights, strict=True):

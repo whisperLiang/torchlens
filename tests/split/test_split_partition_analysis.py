@@ -2,23 +2,17 @@
 
 from __future__ import annotations
 
-from functools import partial
 from unittest.mock import patch
 
 import pytest
 import torch
+from dag_helpers import call_ids, close_call_ids
 from torch import nn
-from v2_helpers import (
-    analyze_fixture,
-    prepare_fixture,
-    repartition_fixture,
-    select_node_prefix,
-    split_request,
-)
 
 from torchlens.split import (
     PartitionAnalysis,
     PlacementPlan,
+    SplitFeatures,
     context as runtime_module,
     pipeline as pipeline_module,
     prepare_graph,
@@ -76,15 +70,14 @@ def test_partition_analysis_does_not_bind_lazy_owned_state(
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
     model = PartitionModel().eval().requires_grad_(not frozen)
     x = torch.ones(2, 4)
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(
-            partial(select_node_prefix, node_id="relu"),
-            placement=PlacementPlan.on("cpu"),
-            live_param_sources=True,
-        ),
+    graph = prepare_graph(
+        model, x, placement=PlacementPlan.on("cpu"), features=SplitFeatures(live_param_sources=True)
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     states = (
         runtime.segments.prefix._state,
         runtime.segments.training_prefix._state,
@@ -96,7 +89,19 @@ def test_partition_analysis_does_not_bind_lazy_owned_state(
         for state in states
         if state._replica_pool is not None
     }
-    analyze_fixture(runtime, partial(select_node_prefix, node_id="last", include=False))
+    runtime.analyze(
+        runtime.compute_dag().to_partition(
+            close_call_ids(
+                runtime.compute_dag(),
+                frozenset(
+                    source
+                    for source, target, _ in runtime.compute_dag().data_edges
+                    if target
+                    in call_ids(runtime, modules=frozenset({"last"}), ops=frozenset({"last"}))
+                ),
+            )
+        )
+    )
     assert tuple(state._entries for state in states) == entries_before
     for state in states:
         if state._replica_pool is not None:
@@ -112,16 +117,44 @@ def test_explicit_analysis_and_repartition_materialize_equivalent_runtimes() -> 
 
     model = PartitionModel().eval()
     x = torch.ones(2, 4)
-    seed = prepare_fixture(
-        model, x, split_request(partial(select_node_prefix, node_id="relu"), trainable=True)
+    seed_graph = prepare_graph(model, x, features=SplitFeatures(training=True))
+    seed_dag = seed_graph.compute_dag()
+    seed_partition = seed_dag.to_partition(
+        close_call_ids(
+            seed_dag, call_ids(seed_graph, modules=frozenset({"relu"}), ops=frozenset({"relu"}))
+        )
     )
-    point = partial(select_node_prefix, node_id="last", include=False)
-    analysis = analyze_fixture(seed, point)
+    seed = seed_graph.materialize(seed_graph.analyze(seed_partition))
+    analysis = seed.analyze(
+        seed.compute_dag().to_partition(
+            close_call_ids(
+                seed.compute_dag(),
+                frozenset(
+                    source
+                    for source, target, _ in seed.compute_dag().data_edges
+                    if target
+                    in call_ids(seed, modules=frozenset({"last"}), ops=frozenset({"last"}))
+                ),
+            )
+        )
+    )
     assert isinstance(analysis, PartitionAnalysis)
     assert analysis.source_graph is seed.trace_graph
     assert analysis.graph_ir.values is seed.graph_ir.values
     explicit = seed.materialize(analysis)
-    implicit = repartition_fixture(seed, point)
+    implicit = seed.repartition(
+        seed.compute_dag().to_partition(
+            close_call_ids(
+                seed.compute_dag(),
+                frozenset(
+                    source
+                    for source, target, _ in seed.compute_dag().data_edges
+                    if target
+                    in call_ids(seed, modules=frozenset({"last"}), ops=frozenset({"last"}))
+                ),
+            )
+        )
+    )
     assert explicit.split_id == implicit.split_id
     assert explicit.boundary_schema == implicit.boundary_schema
     assert explicit.capability_report == implicit.capability_report
@@ -136,16 +169,38 @@ def test_explicit_analysis_and_repartition_materialize_equivalent_runtimes() -> 
 
 
 def test_analysis_cannot_be_materialized_on_another_capture() -> None:
-    """A same-shaped foreign graph cannot supply a point analysis."""
+    """A same-shaped foreign graph cannot supply a partition analysis."""
 
     x = torch.ones(2, 4)
-    first = prepare_fixture(
-        PartitionModel().eval(), x, split_request(partial(select_node_prefix, node_id="relu"))
+    first_graph = prepare_graph(PartitionModel().eval(), x)
+    first_dag = first_graph.compute_dag()
+    first_partition = first_dag.to_partition(
+        close_call_ids(
+            first_dag, call_ids(first_graph, modules=frozenset({"relu"}), ops=frozenset({"relu"}))
+        )
     )
-    second = prepare_fixture(
-        PartitionModel().eval(), x, split_request(partial(select_node_prefix, node_id="relu"))
+    first = first_graph.materialize(first_graph.analyze(first_partition))
+    second_graph = prepare_graph(PartitionModel().eval(), x)
+    second_dag = second_graph.compute_dag()
+    second_partition = second_dag.to_partition(
+        close_call_ids(
+            second_dag, call_ids(second_graph, modules=frozenset({"relu"}), ops=frozenset({"relu"}))
+        )
     )
+    second = second_graph.materialize(second_graph.analyze(second_partition))
     with pytest.raises(ValueError, match="another captured graph"):
         second.materialize(
-            analyze_fixture(first, partial(select_node_prefix, node_id="last", include=False))
+            first.analyze(
+                first.compute_dag().to_partition(
+                    close_call_ids(
+                        first.compute_dag(),
+                        frozenset(
+                            source
+                            for source, target, _ in first.compute_dag().data_edges
+                            if target
+                            in call_ids(first, modules=frozenset({"last"}), ops=frozenset({"last"}))
+                        ),
+                    )
+                )
+            )
         )

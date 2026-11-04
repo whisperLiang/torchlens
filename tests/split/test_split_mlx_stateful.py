@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from functools import partial
 from typing import Any
 
 import pytest
-from v2_helpers import (
-    prepare_fixture,
-    repartition_fixture,
-    select_node_prefix,
-    split_request,
-)
+from dag_helpers import call_ids, close_call_ids, smallest_transfer_partitions
+
+from torchlens.split import SplitFeatures, prepare_graph
 
 mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 nn = pytest.importorskip("mlx.nn", exc_type=ImportError)
@@ -148,13 +144,14 @@ def test_mlx_tied_parameter_steps_match_native(optimizer_cls: Any, shared_optimi
     model = _TiedModel()
     reference = deepcopy(model)
     source = dict(tree_flatten(model.parameters()))
-    runtime = prepare_fixture(
-        model,
-        _input(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, _input(2), backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     kwargs = {"momentum": 0.8} if optimizer_cls is optim.SGD else {}
     prefix_opt = optimizer_cls(learning_rate=0.01, **kwargs)
     suffix_opt = prefix_opt if shared_optimizer else optimizer_cls(learning_rate=0.01, **kwargs)
@@ -181,21 +178,26 @@ def test_mlx_tied_parameter_steps_match_native(optimizer_cls: Any, shared_optimi
     assert int(prefix_opt.step.item()) == int(suffix_opt.step.item()) == 3
     assert all(value is source[name] for name, value in tree_flatten(model.parameters()))
     migrated = runtime.with_placement(tl.split.PlacementPlan.on(mx.new_stream(mx.cpu)))
-    recut = repartition_fixture(
-        migrated, partial(select_node_prefix, node_id="maximum", include=False)
+    recut = migrated.repartition(
+        migrated.compute_dag().to_partition(
+            close_call_ids(
+                migrated.compute_dag(),
+                frozenset(
+                    source
+                    for source, target, _ in migrated.compute_dag().data_edges
+                    if target
+                    in call_ids(
+                        migrated, modules=frozenset({"maximum"}), ops=frozenset({"maximum"})
+                    )
+                ),
+            )
+        )
     )
     _close(recut.replay(_input()), reference(_input()))
     assert recut.capability_report.training.supported
 
 
-@pytest.mark.parametrize(
-    "boundary_point",
-    [
-        partial(select_node_prefix, node_id="maximum", include=False),
-        partial(select_node_prefix, node_id="maximum"),
-    ],
-)
-def test_mlx_batchnorm_dropout_and_ties_match_native(boundary_point: str) -> None:
+def test_mlx_batchnorm_dropout_and_ties_match_native() -> None:
     """Running statistics advance once per native call and VJPs reuse the original masks."""
 
     mx.random.seed(41)
@@ -204,9 +206,10 @@ def test_mlx_batchnorm_dropout_and_ties_match_native(boundary_point: str) -> Non
     source = dict(tree_flatten(model.parameters()))
     initial_rng = tuple(value.astype(value.dtype) for value in mx.random.state)
     mx.eval(initial_rng)
-    runtime = prepare_fixture(
-        model, _input(2), split_request(boundary_point, backend="mlx", trainable=True)
-    ).with_placement(
+    graph = prepare_graph(model, _input(2), backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(close_call_ids(dag, call_ids(graph, ops=frozenset({"maximum"}))))
+    runtime = graph.materialize(graph.analyze(partition)).with_placement(
         tl.split.PlacementPlan(
             prefix=tl.split.DevicePlacement(mx.new_stream(mx.cpu)),
             suffix=tl.split.DevicePlacement(mx.new_stream(mx.cpu)),
@@ -241,8 +244,20 @@ def test_mlx_batchnorm_dropout_and_ties_match_native(boundary_point: str) -> Non
     _close(model.norm.running_mean, mx.zeros((4,)))
     _close(model.norm.running_var, mx.ones((4,)))
     migrated = runtime.with_placement(tl.split.PlacementPlan.on(mx.new_stream(mx.cpu)))
-    recut = repartition_fixture(
-        migrated, partial(select_node_prefix, node_id="maximum", include=False)
+    recut = migrated.repartition(
+        migrated.compute_dag().to_partition(
+            close_call_ids(
+                migrated.compute_dag(),
+                frozenset(
+                    source
+                    for source, target, _ in migrated.compute_dag().data_edges
+                    if target
+                    in call_ids(
+                        migrated, modules=frozenset({"maximum"}), ops=frozenset({"maximum"})
+                    )
+                ),
+            )
+        )
     )
     for name, value in tree_flatten(reference.parameters()):
         _close(_runtime_values(recut)[name], value)
@@ -257,13 +272,14 @@ def test_mlx_explicit_random_producers_replay_fresh_then_reuse_vjp_keys() -> Non
         noisy = mx.multiply(x, mx.random.uniform(shape=x.shape))
         return mx.multiply(mx.maximum(noisy, 0), mx.random.normal(shape=x.shape))
 
-    runtime = prepare_fixture(
-        model,
-        _input(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, _input(2), backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.batch_validation["status"] == "passed"
     x, targets = _input(), mx.ones((5, 4))
     mx.random.seed(87)
@@ -281,23 +297,23 @@ def test_mlx_explicit_random_producers_replay_fresh_then_reuse_vjp_keys() -> Non
         _close(left, right)
 
 
-def test_mlx_stateful_gradients_at_every_valid_cut() -> None:
+def test_mlx_stateful_gradients_at_native_dag_partitions() -> None:
     """Cuts through either normalization or random region preserve native training semantics."""
 
     mx.random.seed(52)
     model = _StatefulModel()
-    runtime = prepare_fixture(
-        model,
-        _input(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, _input(2), backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     targets = mx.cos(_input())
-    dag = runtime.compute_dag()
-    for count in range(len(dag.nodes) + 1):
+    for partition in smallest_transfer_partitions(runtime):
         reference = deepcopy(model)
-        split = runtime.repartition(dag.to_partition(c.call_id for c in dag.nodes[:count]))
+        split = runtime.repartition(partition)
         mx.random.seed(82)
         expected_value, gradients = _native_gradients(reference, _input(), targets)
         mx.random.seed(82)
@@ -334,13 +350,14 @@ def test_mlx_tied_aliases_in_distinct_modules_and_suffix_optimizer_owner() -> No
     mx.random.seed(25)
     model = Model()
     source = model.left.weight
-    runtime = prepare_fixture(
-        model,
-        _input(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, _input(2), backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     targets = mx.cos(_input())
 
     def native_loss(values: Any) -> Any:
@@ -411,13 +428,14 @@ def test_mlx_batchnorm_minimum_batch_uses_independent_probe() -> None:
 
     mx.random.seed(22)
     model = Model()
-    runtime = prepare_fixture(
-        model,
-        _input(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, _input(2), backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.traced_batch_size == 2
     assert runtime.batch_validation["probe_batch_size"] == 3
     assert runtime.batch_validation["status"] == "passed"
@@ -439,16 +457,20 @@ def test_mlx_stateful_tied_updates_across_native_devices(
     mx.random.seed(43)
     model = _StatefulModel()
     reference = deepcopy(model)
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         model,
         _input(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"),
-            backend="mlx",
-            trainable=True,
-            placement=tl.split.PlacementPlan.across(prefix_device, suffix_device),
-        ),
+        backend="mlx",
+        placement=tl.split.PlacementPlan.across(prefix_device, suffix_device),
+        features=SplitFeatures(training=True),
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     targets = mx.cos(_input())
     mx.random.seed(63)
     expected_value, gradients = _native_gradients(reference, _input(), targets)

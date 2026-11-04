@@ -7,20 +7,17 @@ whitelist: the runtime accepts any positive compatible batch.
 from __future__ import annotations
 
 import copy
-from functools import partial
 
 import pytest
 import torch
+from dag_helpers import call_ids, close_call_ids, smallest_transfer_partitions
 from torch import nn
-from v2_helpers import (
-    prepare_fixture,
-    repartition_fixture,
-    select_node_prefix,
-    select_prefix,
-    split_request,
-)
 
-from torchlens.split import PlacementPlan
+from torchlens.split import (
+    PlacementPlan,
+    SplitFeatures,
+    prepare_graph,
+)
 from torchlens.split.errors import SplitUnsupportedError
 
 
@@ -53,9 +50,12 @@ def test_single_trace_replays_and_trains_across_runtime_batches() -> None:
     torch.manual_seed(0)
     model = TinyMlp()
     example = torch.randn(2, 4)
-    runtime = prepare_fixture(
-        model, example, split_request(partial(select_node_prefix, node_id="relu"), trainable=True)
+    graph = prepare_graph(model, example, features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     # One canonical capture at a small batch serves every runtime batch below.
     assert runtime.traced_batch_size in {1, 2}
@@ -101,9 +101,12 @@ def test_split_training_matches_full_model_training() -> None:
     split_model = copy.deepcopy(model)
     x = torch.randn(8, 4)
     y = torch.randn(8, 3)
-    runtime = prepare_fixture(
-        split_model, x, split_request(partial(select_node_prefix, node_id="relu"), trainable=True)
+    graph = prepare_graph(split_model, x, features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     boundary = runtime.run_training_prefix(x)
     suffix_opt = torch.optim.SGD(split_model.fc2.parameters(), lr=0.05)
     prefix_opt = torch.optim.SGD(split_model.fc1.parameters(), lr=0.05)
@@ -127,9 +130,12 @@ def test_canonical_capture_prefers_batch_one() -> None:
     torch.manual_seed(0)
     model = TinyMlp().eval()
     example = torch.randn(32, 4)
-    runtime = prepare_fixture(
-        model, example, split_request(partial(select_node_prefix, node_id="relu"))
+    graph = prepare_graph(model, example)
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     assert runtime.traced_batch_size == 1
     replayed = runtime.replay(torch.randn(32, 4))
@@ -140,25 +146,32 @@ def test_untested_batch_is_not_range_rejected() -> None:
     """A compatible batch that no test used as a range bound is accepted."""
 
     model = TinyMlp().eval()
-    runtime = prepare_fixture(
-        model, torch.randn(2, 4), split_request(partial(select_node_prefix, node_id="relu"))
+    graph = prepare_graph(model, torch.randn(2, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     x = torch.randn(7, 4)
     with torch.no_grad():
         torch.testing.assert_close(runtime.replay(x), model(x), atol=1e-5, rtol=1e-4)
 
 
-def test_every_valid_boundary_replays_across_batches_from_one_capture() -> None:
+def test_native_dag_partitions_replay_across_batches_from_one_capture() -> None:
     """Every native call boundary in a small model reuses one captured graph."""
 
     torch.manual_seed(0)
     model = TinyMlp().eval()
-    seed = prepare_fixture(
-        model, torch.randn(2, 4), split_request(partial(select_node_prefix, node_id="relu"))
+    seed_graph = prepare_graph(model, torch.randn(2, 4))
+    seed_dag = seed_graph.compute_dag()
+    seed_partition = seed_dag.to_partition(
+        close_call_ids(
+            seed_dag, call_ids(seed_graph, modules=frozenset({"relu"}), ops=frozenset({"relu"}))
+        )
     )
-    dag = seed.compute_dag()
-    for count in range(len(dag.nodes) + 1):
-        runtime = seed.repartition(dag.to_partition(c.call_id for c in dag.nodes[:count]))
+    seed = seed_graph.materialize(seed_graph.analyze(seed_partition))
+    for partition in smallest_transfer_partitions(seed):
+        runtime = seed.repartition(partition)
         assert not runtime.retains_trace and not seed.retains_trace
         assert runtime.trace_graph is seed.trace_graph
         for batch in (1, 3, 8):
@@ -186,12 +199,25 @@ def test_residual_and_multi_output_frontiers_cross_every_live_tensor() -> None:
             return self.fc2(h) + h
 
     model = Residual().eval()
-    seed = prepare_fixture(
-        model,
-        torch.randn(2, 4),
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    seed_graph = prepare_graph(model, torch.randn(2, 4))
+    seed_dag = seed_graph.compute_dag()
+    seed_partition = seed_dag.to_partition(
+        close_call_ids(
+            seed_dag,
+            frozenset(
+                call.call_id for call in seed_dag.nodes[: (len(seed_dag.nodes) - 1) * 50 // 100 + 1]
+            ),
+        )
     )
-    runtime = repartition_fixture(seed, partial(select_node_prefix, node_id="fc2"))
+    seed = seed_graph.materialize(seed_graph.analyze(seed_partition))
+    runtime = seed.repartition(
+        seed.compute_dag().to_partition(
+            close_call_ids(
+                seed.compute_dag(),
+                call_ids(seed, modules=frozenset({"fc2"}), ops=frozenset({"fc2"})),
+            )
+        )
+    )
     assert len(runtime.plan.boundary_node_ids) == 2
     for batch in (1, 3):
         x = torch.randn(batch, 4)
@@ -203,9 +229,12 @@ def test_boundary_schema_is_batch_neutral() -> None:
     """A boundary schema spells the batch axis symbolically, not as traced B."""
 
     model = TinyMlp().eval()
-    runtime = prepare_fixture(
-        model, torch.randn(2, 4), split_request(partial(select_node_prefix, node_id="relu"))
+    graph = prepare_graph(model, torch.randn(2, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     symbol = runtime.request.batch_symbol
     schemas = [item for item in runtime.boundary_schema if item.shape is not None]
     assert schemas
@@ -228,9 +257,12 @@ def test_cpu_prefix_cuda_suffix_replay_and_training() -> None:
     torch.manual_seed(0)
     model = TinyMlp().eval()
     example = torch.randn(2, 4)
-    runtime = prepare_fixture(
-        model, example, split_request(partial(select_node_prefix, node_id="relu"), trainable=True)
+    graph = prepare_graph(model, example, features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     placed = runtime.with_placement(PlacementPlan.across("cpu", "cuda:0"))
     x = torch.randn(3, 4)
     with torch.no_grad():
@@ -239,15 +271,19 @@ def test_cpu_prefix_cuda_suffix_replay_and_training() -> None:
     torch.testing.assert_close(replayed.cpu(), full, atol=1e-4, rtol=1e-3)
 
     train_model = TinyMlp()
-    train_runtime = prepare_fixture(
+    train_graph = prepare_graph(
         train_model,
         example,
-        split_request(
-            partial(select_node_prefix, node_id="relu"),
-            trainable=True,
-            placement=PlacementPlan.across("cpu", "cuda:0"),
-        ),
+        placement=PlacementPlan.across("cpu", "cuda:0"),
+        features=SplitFeatures(training=True),
     )
+    train_dag = train_graph.compute_dag()
+    train_partition = train_dag.to_partition(
+        close_call_ids(
+            train_dag, call_ids(train_graph, modules=frozenset({"relu"}), ops=frozenset({"relu"}))
+        )
+    )
+    train_runtime = train_graph.materialize(train_graph.analyze(train_partition))
     boundary = train_runtime.run_training_prefix(x)
     y = torch.randn(3, 3, device="cuda:0")
     loss, grads = train_runtime.train_suffix(boundary, y)
@@ -266,5 +302,5 @@ def test_explicit_placement_on_unsupported_backend_fails_closed() -> None:
         require_placement_support(
             adapter,
             PlacementPlan.across("cpu", "cuda:0"),
-            split_point=partial(select_node_prefix, node_id="relu"),
+            split_point="partition:unsupported-placement",
         )

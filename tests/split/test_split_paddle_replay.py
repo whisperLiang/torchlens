@@ -65,10 +65,11 @@ def test_paddle_split_replay_equivalence() -> None:
 
     run_paddle_subprocess(
         """
-        from functools import partial
+        from torchlens.split import prepare_graph
+        from dag_helpers import call_ids, close_call_ids
+
 
         import paddle
-        import torchlens as tl
 
         def assert_close(left, right):
             assert bool(paddle.allclose(left, right, atol=1e-5, rtol=1e-4).item())
@@ -78,11 +79,10 @@ def test_paddle_split_replay_equivalence() -> None:
             return hidden * 2.0 + 1.0
 
         x = paddle.randn([2, 3], dtype="float32")
-        runtime = prepare_fixture(
-            model,
-            x,
-            split_request(partial(select_node_prefix, node_id='relu'), backend="paddle"),
-        )
+        graph = prepare_graph(model, x, backend='paddle')
+        dag = graph.compute_dag()
+        partition = dag.to_partition(close_call_ids(dag, call_ids(graph, modules=frozenset({'relu'}), ops=frozenset({'functional.relu'}))))
+        runtime = graph.materialize(graph.analyze(partition))
 
         boundary = runtime.run_prefix(x)
         runtime.validate_boundary(boundary)
@@ -97,13 +97,14 @@ def test_paddle_boundary_cache_roundtrip() -> None:
 
     run_paddle_subprocess(
         """
-        from functools import partial
+        from torchlens.split import prepare_graph
+        from dag_helpers import call_ids, close_call_ids
+
 
         import tempfile
         from pathlib import Path
 
         import paddle
-        import torchlens as tl
 
         def assert_close(left, right):
             assert bool(paddle.allclose(left, right, atol=1e-5, rtol=1e-4).item())
@@ -113,11 +114,10 @@ def test_paddle_boundary_cache_roundtrip() -> None:
             return hidden * 2.0 + 1.0
 
         x = paddle.randn([2, 3], dtype="float32")
-        runtime = prepare_fixture(
-            model,
-            x,
-            split_request(partial(select_node_prefix, node_id='relu'), backend="paddle"),
-        )
+        graph = prepare_graph(model, x, backend='paddle')
+        dag = graph.compute_dag()
+        partition = dag.to_partition(close_call_ids(dag, call_ids(graph, modules=frozenset({'relu'}), ops=frozenset({'functional.relu'}))))
+        runtime = graph.materialize(graph.analyze(partition))
         boundary = runtime.run_prefix(x)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -136,10 +136,11 @@ def test_paddle_batch_symbolic_replay_for_reshape() -> None:
 
     run_paddle_subprocess(
         """
-        from functools import partial
+        from torchlens.split import prepare_graph
+        from dag_helpers import call_ids, close_call_ids
+
 
         import paddle
-        import torchlens as tl
 
         def assert_close(left, right):
             assert bool(paddle.allclose(left, right, atol=1e-5, rtol=1e-4).item())
@@ -150,11 +151,10 @@ def test_paddle_batch_symbolic_replay_for_reshape() -> None:
             return paddle.nn.functional.relu(flat) * 2.0
 
         x = paddle.randn([2, 3, 2], dtype="float32")
-        runtime = prepare_fixture(
-            model,
-            x,
-            split_request(partial(select_node_prefix, node_id='reshape'), backend="paddle"),
-        )
+        graph = prepare_graph(model, x, backend='paddle')
+        dag = graph.compute_dag()
+        partition = dag.to_partition(close_call_ids(dag, call_ids(graph, modules=frozenset({'reshape'}), ops=frozenset({'reshape'}))))
+        runtime = graph.materialize(graph.analyze(partition))
 
         for batch in (1, 2, 4):
             replay_x = paddle.randn([batch, 3, 2], dtype="float32")
@@ -168,10 +168,11 @@ def test_paddle_batch_symbolic_preserves_fixed_dim_matching_trace_batch() -> Non
 
     run_paddle_subprocess(
         """
-        from functools import partial
+        from torchlens.split import prepare_graph
+        from dag_helpers import call_ids, close_call_ids
+
 
         import paddle
-        import torchlens as tl
 
         def assert_close(left, right):
             assert bool(paddle.allclose(left, right, atol=1e-5, rtol=1e-4).item())
@@ -181,11 +182,10 @@ def test_paddle_batch_symbolic_preserves_fixed_dim_matching_trace_batch() -> Non
             return paddle.nn.functional.relu(flat)
 
         x = paddle.randn([2, 1, 2], dtype="float32")
-        runtime = prepare_fixture(
-            model,
-            x,
-            split_request(partial(select_node_prefix, node_id='reshape'), backend="paddle"),
-        )
+        graph = prepare_graph(model, x, backend='paddle')
+        dag = graph.compute_dag()
+        partition = dag.to_partition(close_call_ids(dag, call_ids(graph, modules=frozenset({'reshape'}), ops=frozenset({'reshape'}))))
+        runtime = graph.materialize(graph.analyze(partition))
 
         for batch in (1, 2, 4):
             replay_x = paddle.randn([batch, 1, 2], dtype="float32")
@@ -199,12 +199,13 @@ def test_paddle_layer_split_training_optimizer_step_matches_full_step() -> None:
 
     run_paddle_subprocess(
         """
-        from functools import partial
+        from torchlens.split import SplitFeatures, prepare_graph
+        from dag_helpers import call_ids, close_call_ids
+
 
         import copy
 
         import paddle
-        import torchlens as tl
 
         def assert_close(left, right):
             assert bool(paddle.allclose(left, right, atol=1e-5, rtol=1e-4).item())
@@ -224,11 +225,10 @@ def test_paddle_layer_split_training_optimizer_step_matches_full_step() -> None:
         split_model = copy.deepcopy(model)
         x = paddle.randn([2, 4], dtype="float32")
         y = paddle.randn([2, 3], dtype="float32")
-        runtime = prepare_fixture(
-            split_model,
-            x,
-            split_request(partial(select_node_prefix, node_id='relu'), backend="paddle", trainable=True),
-        )
+        graph = prepare_graph(split_model, x, backend='paddle', features=SplitFeatures(training=True))
+        dag = graph.compute_dag()
+        partition = dag.to_partition(close_call_ids(dag, call_ids(graph, modules=frozenset({'relu'}), ops=frozenset({'functional.relu'}))))
+        runtime = graph.materialize(graph.analyze(partition))
         suffix_opt = paddle.optimizer.SGD(
             learning_rate=0.05,
             parameters=split_model.fc2.parameters(),

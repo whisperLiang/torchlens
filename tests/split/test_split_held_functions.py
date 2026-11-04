@@ -27,6 +27,9 @@ def test_fresh_split_captures_held_activation_once_per_batch(
 
     source = textwrap.dedent(
         """
+        from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, prepare_graph
+        from torchlens.split.planner import plan_partition
+
         import sys
         import torch
         import torch.nn.functional as functional
@@ -66,16 +69,14 @@ def test_fresh_split_captures_held_activation_once_per_batch(
         get_dynamo_optimized_module_type(force_probe=True)
         import torchlens as tl
         sys.path.insert(0, str(__import__("pathlib").Path.cwd() / "tests" / "split"))
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix
+        from dag_helpers import call_ids, close_call_ids
         example = torch.randn(2, 4, 3, 4)
 
         for index in range(2):
-            runtime = prepare_fixture(
-                model, example, request_fixture(
-                    selection=lambda g, count=50: select_prefix(g, (len(g.compute_nodes) - 1) * count // 100 + 1),
-                    features=tl.split.SplitFeatures(retain_trace=True),
-                )
-            )
+            graph = prepare_graph(model, example, features=tl.split.SplitFeatures(retain_trace=True))
+            dag = graph.compute_dag()
+            partition = dag.to_partition(close_call_ids(dag, frozenset(call.call_id for call in dag.nodes[:(len(dag.nodes) - 1) * 50 // 100 + 1])))
+            runtime = graph.materialize(graph.analyze(partition))
             assert calls == [1, 2] * (index + 1), calls
             assert model.activation.act is held
             assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
@@ -93,6 +94,7 @@ def test_fresh_split_captures_held_activation_once_per_batch(
             torch.testing.assert_close(actual, expected)
             assert model.activation.act is held
         print("held-activation-split-ok")
+
         """
     )
     monkeypatch.setenv("DEBUG", "0")

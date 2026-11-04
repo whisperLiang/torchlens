@@ -8,12 +8,9 @@ from typing import Any
 
 import pytest
 import torch
-from v2_helpers import (
-    prepare_fixture,
-    select_prefix,
-    split_request,
-)
+from dag_helpers import close_call_ids
 
+from torchlens.split import SplitFeatures, prepare_graph
 from torchlens.split.adapters.torch import GeneratedSuffix
 from torchlens.split.errors import SplitUnsupportedError
 
@@ -27,14 +24,17 @@ def test_missing_output_parent_never_uses_historical_activation(
     model = torch.nn.Sequential(torch.nn.ReLU(), torch.nn.Sigmoid())
     x = torch.randn(2, 4)
     with torch.no_grad():
-        runtime = prepare_fixture(
-            model,
-            x,
-            split_request(
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1),
-                retain_trace=retain_trace,
-            ),
+        graph = prepare_graph(model, x, features=SplitFeatures(retain_trace=retain_trace))
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag,
+                frozenset(
+                    call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
         )
+        runtime = graph.materialize(graph.analyze(partition))
         suffix = runtime.segments.suffix
         execute = suffix._execute_nodes
         outputs = [
@@ -67,11 +67,17 @@ def test_missing_output_records_never_guess_last_intermediate(has_intermediate: 
     """Neither a nonempty overlay nor an empty one defines the final-output contract."""
 
     with torch.no_grad():
-        runtime = prepare_fixture(
-            torch.nn.ReLU(),
-            torch.ones(2, 4),
-            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+        graph = prepare_graph(torch.nn.ReLU(), torch.ones(2, 4))
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag,
+                frozenset(
+                    call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
         )
+        runtime = graph.materialize(graph.analyze(partition))
     graph = replace(runtime.trace_graph, output_node_ids=())
     suffix = GeneratedSuffix(
         graph=graph,
@@ -90,11 +96,17 @@ def test_declared_constant_output_keeps_its_explicit_source_value() -> None:
     """A genuine parent-less output is required state, not a historical fallback."""
 
     with torch.no_grad():
-        runtime = prepare_fixture(
-            torch.nn.ReLU(),
-            torch.ones(2, 4),
-            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+        graph = prepare_graph(torch.nn.ReLU(), torch.ones(2, 4))
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag,
+                frozenset(
+                    call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
         )
+        runtime = graph.materialize(graph.analyze(partition))
     node = runtime.trace_graph.node_by_id[runtime.trace_graph.output_node_ids[0]]
     constant = torch.tensor([7.0])
     declared = replace(node, parents=(), op=SimpleNamespace(out=constant))

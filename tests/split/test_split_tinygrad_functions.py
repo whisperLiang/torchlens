@@ -6,14 +6,11 @@ from typing import Any
 
 import numpy as np
 import pytest
-from v2_helpers import (
-    prepare_fixture,
-    select_prefix,
-    split_request,
-)
+from dag_helpers import smallest_transfer_partitions
 
 import torchlens as tl
 from torchlens.backends.tinygrad import TinygradBackend
+from torchlens.split import SplitFeatures, prepare_graph
 
 
 def _nested_function_model() -> Any:
@@ -44,41 +41,34 @@ def _nested_function_model() -> Any:
     return model
 
 
-@pytest.mark.parametrize(
-    "point",
-    [
-        (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1)),
-        (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
-        (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1)),
-    ],
-)
-def test_tinygrad_function_replay_uses_changed_inputs(point: str) -> None:
+def test_tinygrad_function_replay_uses_changed_inputs() -> None:
     """Bind new values through FUNCTION/GETTUPLE instead of replaying constants.
 
     Parameters
     ----------
-    point:
-        Representative cut before, between, or after function projections.
     """
 
     Tensor = pytest.importorskip("tinygrad").Tensor
     model = _nested_function_model()
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         model,
         Tensor.ones(2, 3, device="CPU", dtype="float32").realize(),
-        split_request(point, backend="tinygrad", batch_axes={}),
+        backend="tinygrad",
+        features=SplitFeatures(batch_axes={}),
     )
-    values = np.array([[-3, 2, 1], [4, -5, 6]], dtype=np.float32)
-    replay_input = Tensor(values, device="CPU").realize()
-    np.testing.assert_allclose(model(replay_input).numpy(), 4 * np.maximum(values, 0))
-    np.testing.assert_allclose(runtime.replay(replay_input).numpy(), 4 * np.maximum(values, 0))
-    input_node = runtime.trace_graph.input_node_ids[0]
-    assert any(
-        runtime.trace_graph.parent_id_for_alias(node, parent) == input_node
-        for node in runtime.trace_graph.nodes
-        for parent in node.parents
-    )
-    assert TinygradBackend().validate_trace(runtime.trace) is True
+    for partition in smallest_transfer_partitions(graph):
+        runtime = graph.materialize(graph.analyze(partition))
+        values = np.array([[-3, 2, 1], [4, -5, 6]], dtype=np.float32)
+        replay_input = Tensor(values, device="CPU").realize()
+        np.testing.assert_allclose(model(replay_input).numpy(), 4 * np.maximum(values, 0))
+        np.testing.assert_allclose(runtime.replay(replay_input).numpy(), 4 * np.maximum(values, 0))
+        input_node = runtime.trace_graph.input_node_ids[0]
+        assert any(
+            runtime.trace_graph.parent_id_for_alias(node, parent) == input_node
+            for node in runtime.trace_graph.nodes
+            for parent in node.parents
+        )
+        assert TinygradBackend().validate_trace(runtime.trace) is True
 
 
 def test_tinygrad_function_validation_rejects_tampered_nested_path() -> None:

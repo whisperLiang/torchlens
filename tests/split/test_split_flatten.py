@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-from functools import partial
-
 import pytest
 import torch
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    split_request,
-)
+from dag_helpers import smallest_transfer_partitions
+
+from torchlens.split import prepare_graph
 
 pytestmark = pytest.mark.smoke
 
@@ -89,13 +85,6 @@ class _PooledClassifier(torch.nn.Module):
 
 
 @pytest.mark.parametrize(
-    "boundary",
-    [
-        partial(select_node_prefix, node_id="flatten", include=False),
-        partial(select_node_prefix, node_id="flatten"),
-    ],
-)
-@pytest.mark.parametrize(
     ("spelling", "start_dim", "end_dim"),
     [
         ("module", 1, -1),
@@ -106,14 +95,12 @@ class _PooledClassifier(torch.nn.Module):
     ],
 )
 def test_pooled_classifier_flatten_axes_survive_batch_changes(
-    boundary: str, spelling: str, start_dim: int, end_dim: int
+    spelling: str, start_dim: int, end_dim: int
 ) -> None:
     """B=1 axis literals stay fixed in both replay segments at B=2 and B=3.
 
     Parameters
     ----------
-    boundary:
-        Whether flatten executes in the prefix or suffix segment.
     spelling:
         Public Torch flatten spelling exercised by the model.
     start_dim, end_dim:
@@ -121,25 +108,27 @@ def test_pooled_classifier_flatten_axes_survive_batch_changes(
     """
 
     model = _PooledClassifier(spelling, start_dim, end_dim).eval()
-    runtime = prepare_fixture(model, torch.randn(2, 4, 5, 5), split_request(boundary))
-    assert runtime.traced_batch_size == 1
-    assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
-    assert runtime.batch_validation["probe_batch_size"] == 2
-    assert runtime.batch_validation["universal_proof"] is False
+    graph = prepare_graph(model, torch.randn(2, 4, 5, 5))
+    for partition in smallest_transfer_partitions(graph):
+        runtime = graph.materialize(graph.analyze(partition))
+        assert runtime.traced_batch_size == 1
+        assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
+        assert runtime.batch_validation["probe_batch_size"] == 2
+        assert runtime.batch_validation["universal_proof"] is False
 
-    shape_program = runtime.trace_graph.shape_program
-    assert shape_program is not None
-    flatten_node = next(
-        node for node in runtime.trace_graph.compute_nodes if node.op_type == "flatten"
-    )
-    assert not shape_program.recipes.get(flatten_node.canonical_id)
-    for batch in (1, 2, 3):
-        values = torch.randn(batch, 4, 5, 5)
-        assert shape_program.value_shape(
-            flatten_node.canonical_id, shape_program.binding_from_batch(batch)
-        ) == (batch, 4)
-        with torch.no_grad():
-            actual = runtime.replay(values)
-            expected = model(values)
-        assert actual.shape == (batch, 3)
-        torch.testing.assert_close(actual, expected)
+        shape_program = runtime.trace_graph.shape_program
+        assert shape_program is not None
+        flatten_node = next(
+            node for node in runtime.trace_graph.compute_nodes if node.op_type == "flatten"
+        )
+        assert not shape_program.recipes.get(flatten_node.canonical_id)
+        for batch in (1, 2, 3):
+            values = torch.randn(batch, 4, 5, 5)
+            assert shape_program.value_shape(
+                flatten_node.canonical_id, shape_program.binding_from_batch(batch)
+            ) == (batch, 4)
+            with torch.no_grad():
+                actual = runtime.replay(values)
+                expected = model(values)
+            assert actual.shape == (batch, 3)
+            torch.testing.assert_close(actual, expected)

@@ -4,18 +4,16 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from functools import partial
 
 import torch
-from v2_helpers import (
-    analyze_fixture,
-    prepare_fixture,
-    request_fixture,
-    select_node_prefix,
-    select_prefix,
-)
+from dag_helpers import call_ids, close_call_ids
 
-from torchlens.split import GraphPartition, PlacementPlan, SplitFeatures
+from torchlens.split import (
+    GraphPartition,
+    PlacementPlan,
+    SplitFeatures,
+    prepare_graph,
+)
 from torchlens.split.program import _feature_evidence
 
 
@@ -23,14 +21,14 @@ def test_preflight_never_claims_unmeasured_training_or_placement_numerics() -> N
     """An implemented feature is distinct from model, device, and numerical support."""
 
     model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Tanh(), torch.nn.Linear(4, 2))
-    runtime = prepare_fixture(
-        model,
-        torch.randn(3, 4),
-        request_fixture(
-            partial(select_node_prefix, node_id="1"),
-            features=SplitFeatures(training=True, retain_trace=False),
-        ),
+    graph = prepare_graph(
+        model, torch.randn(3, 4), features=SplitFeatures(training=True, retain_trace=False)
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"1"}), ops=frozenset({"1"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     evidence = runtime.capability_report.feature_evidence
     assert evidence is not None
     assert set(evidence) == {
@@ -61,7 +59,7 @@ def test_preflight_never_claims_unmeasured_training_or_placement_numerics() -> N
     # Inspecting a new partition establishes only its static analysis, not a
     # new numerical trial or a claim about all possible graph partitions.
     partition = GraphPartition(frozenset())
-    changed = analyze_fixture(runtime, partition).capability_report.feature_evidence
+    changed = runtime.analyze(GraphPartition(frozenset())).capability_report.feature_evidence
     assert changed is not None
     assert changed["arbitrary_dag_partition"].model_supported is True
     assert changed["arbitrary_dag_partition"].numerically_verified is None
@@ -72,13 +70,16 @@ def test_preflight_never_claims_unmeasured_training_or_placement_numerics() -> N
 def test_no_batch_axes_means_unknown_numerical_evidence() -> None:
     """A missing probe must not turn into a successful numerical assertion."""
 
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Tanh()),
         torch.randn(3, 4),
-        request_fixture(
-            partial(select_node_prefix, node_id="0"), features=SplitFeatures(batch_axes={})
-        ),
+        features=SplitFeatures(batch_axes={}),
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"0"}), ops=frozenset({"0"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     evidence = runtime.capability_report.feature_evidence
     assert evidence is not None
     assert evidence["dynamic_batch"].numerically_verified is None
@@ -89,11 +90,14 @@ def test_no_batch_axes_means_unknown_numerical_evidence() -> None:
 def test_explicit_device_availability_does_not_claim_execution_success() -> None:
     """Device discovery examines availability without constructing device replicas."""
 
-    runtime = prepare_fixture(
-        torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Tanh()),
-        torch.randn(3, 4),
-        request_fixture(partial(select_node_prefix, node_id="0")),
+    graph = prepare_graph(
+        torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Tanh()), torch.randn(3, 4)
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"0"}), ops=frozenset({"0"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     request = replace(runtime.request, placement=PlacementPlan.on("cpu"))
     evidence = _feature_evidence(runtime.adapter, runtime.trace_graph, request, True)
     assert evidence["cross_device"].device_supported is True
@@ -120,13 +124,15 @@ def test_failed_topology_probe_does_not_claim_numerical_comparison() -> None:
             hidden = torch.relu(x)
             return torch.sin(hidden) if x.shape[0] == 1 else torch.cos(hidden)
 
-    runtime = prepare_fixture(
-        Branch(),
-        torch.randn(3, 4),
-        request_fixture(
-            lambda g, count=50: select_prefix(g, (len(g.compute_nodes) - 1) * count // 100 + 1)
-        ),
+    graph = prepare_graph(Branch(), torch.randn(3, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            frozenset(call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]),
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.batch_validation["status"] == "failed"
     assert runtime.batch_validation["reason"].startswith("compare topology:")
     evidence = runtime.capability_report.feature_evidence

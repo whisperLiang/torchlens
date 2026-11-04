@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
-from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pytest
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    select_prefix,
-    split_request,
-)
+from dag_helpers import call_ids, close_call_ids
 
 from torchlens.backends.tf.op_callback_capture import TFInputCapture, TFOpCapture
-from torchlens.split import shape_program
+from torchlens.split import (
+    GraphPartition,
+    SplitRequest,
+    prepare_graph,
+    shape_program,
+)
 from torchlens.split.adapters import tf as tf_adapter
 
 
@@ -96,9 +95,7 @@ def _segment(monkeypatch: pytest.MonkeyPatch, rewrite: Any) -> Any:
             shape_program=SimpleNamespace(rewrite=rewrite),
         ),
         plan=None,
-        spec=split_request(
-            (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)), backend="tf"
-        ),
+        spec=SplitRequest(GraphPartition(frozenset()), backend="tf"),
         node_ids=frozenset(),
     )
     segment._shape_binding = shape_program.ShapeBinding({"B": 3}, {})
@@ -212,11 +209,14 @@ def test_tf_literal_reshape_and_axis_replay_across_batches() -> None:
 
     with tf.device("/CPU:0"):
         sample = tf.ones((2, 2, 3), dtype=tf.float32)
-        runtime = prepare_fixture(
-            model,
-            sample,
-            split_request(partial(select_node_prefix, node_id="reshape"), backend="tf"),
+        graph = prepare_graph(model, sample, backend="tf")
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag, call_ids(graph, modules=frozenset({"reshape"}), ops=frozenset({"reshape"}))
+            )
         )
+        runtime = graph.materialize(graph.analyze(partition))
         assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
         for batch in (1, 2, 4):
             values = tf.reshape(tf.range(batch * 6, dtype=tf.float32), (batch, 2, 3))

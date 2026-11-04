@@ -1,4 +1,4 @@
-"""Opt-in JAX real-world split replay tests."""
+"""JAX real-model native DAG replay tests."""
 
 from __future__ import annotations
 
@@ -14,17 +14,16 @@ pytestmark = [pytest.mark.slow, pytest.mark.real_model]
 
 def test_jax_stax_cnn_split_replay_batch_symbolic_and_train() -> None:
     """JAX stax CNN exercises library-model split replay and VJP handoff."""
-
     _skip_unless_enabled()
     _skip_if_module_missing("jax")
     _run_backend_subprocess(
         """
         import jax
         import jax.numpy as jnp
+        from dag_helpers import close_call_ids
         from jax.example_libraries import stax
 
-        import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
+        from torchlens.split import SplitFeatures, prepare_graph
 
         init_fun, apply_fun = stax.serial(
             stax.Conv(4, (3, 3), padding="SAME"),
@@ -35,40 +34,49 @@ def test_jax_stax_cnn_split_replay_batch_symbolic_and_train() -> None:
         )
         _shape, params = init_fun(jax.random.PRNGKey(0), (-1, 32, 32, 3))
 
+
         def model(params, x):
             return apply_fun(params, x)
 
+
         x = jnp.ones((2, 32, 32, 3), dtype=jnp.float32)
-        runtime = prepare_fixture(
-            model,
-            (params, x),
-            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), backend="jax"),
+        graph = prepare_graph(model, (params, x), backend="jax")
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag, frozenset((call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 25 // 100 + 1]))
+            )
         )
+        runtime = graph.materialize(graph.analyze(partition))
         for batch in (1, 2, 4):
             replay_x = jnp.ones((batch, 32, 32, 3), dtype=jnp.float32)
             assert bool(jnp.allclose(runtime.replay(params, replay_x), model(params, replay_x)))
-
-        train_runtime = prepare_fixture(
-            model,
-            (params, x),
-            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), backend="jax", trainable=True),
+        train_graph = prepare_graph(
+            model, (params, x), backend="jax", features=SplitFeatures(training=True)
         )
+        train_dag = train_graph.compute_dag()
+        train_partition = train_dag.to_partition(
+            close_call_ids(
+                train_dag,
+                frozenset(
+                    (call.call_id for call in train_dag.nodes[: (len(train_dag.nodes) - 1) * 25 // 100 + 1])
+                ),
+            )
+        )
+        train_runtime = train_graph.materialize(train_graph.analyze(train_partition))
         boundary = train_runtime.run_training_prefix(params, x)
-        loss, grads = train_runtime.train_suffix(
-            boundary,
-            jnp.zeros((2, 10), dtype=jnp.float32),
-        )
+        loss, grads = train_runtime.train_suffix(boundary, jnp.zeros((2, 10), dtype=jnp.float32))
         assert float(loss) >= 0.0
         assert grads
         prefix_grads = train_runtime.backward_prefix(boundary, grads)
         assert "inputs" in prefix_grads
-        """,
+
+        """
     )
 
 
-def test_jax_flax_haiku_equinox_all_split_nodes_cross_batch_and_device() -> None:
-    """Flax, Haiku, and Equinox models replay every split across batch/device."""
-
+def test_jax_flax_haiku_equinox_smallest_dag_partitions_cross_batch_and_device() -> None:
+    """Flax, Haiku, and Equinox models replay the smallest native partitions across batch/device."""
     _skip_unless_enabled()
     _skip_if_module_missing("jax")
     _skip_if_module_missing("flax")
@@ -76,16 +84,15 @@ def test_jax_flax_haiku_equinox_all_split_nodes_cross_batch_and_device() -> None
     _skip_if_module_missing("equinox")
     _run_backend_subprocess(
         """
-        from functools import partial
-
         import equinox as eqx
         import flax.linen as nn
         import haiku as hk
         import jax
         import jax.numpy as jnp
+        from dag_helpers import smallest_transfer_partitions
 
-        import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
+        from torchlens.split import prepare_graph
+
 
         def platform_devices(platform):
             try:
@@ -93,55 +100,46 @@ def test_jax_flax_haiku_equinox_all_split_nodes_cross_batch_and_device() -> None
             except RuntimeError:
                 return []
 
+
         cpu_devices = platform_devices("cpu")
         gpu_devices = platform_devices("gpu")
         if not cpu_devices or not gpu_devices:
-            print("No JAX CPU/GPU pair available for CPU-prefix/GPU-suffix all-node replay.")
+            print("No JAX CPU/GPU pair available for CPU-prefix/GPU-suffix DAG partition replay.")
             raise SystemExit(75)
         cpu = cpu_devices[0]
         gpu = gpu_devices[0]
 
-        def all_boundaries(runtime):
-            return [
-                partial(select_node_prefix, node_id=node.canonical_id, include=include)
-                for node in runtime.trace_graph.compute_nodes
-                for include in (False, True)
-            ]
 
-        def assert_all_split_nodes(name, model, args_factory):
+        def assert_smallest_dag_partitions(name, model, args_factory):
             with jax.default_device(cpu):
                 traced_args = args_factory(2, cpu)
-                seed_runtime = prepare_fixture(
-                    model,
-                    traced_args,
-                    split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="jax"),
-                )
-            for boundary in all_boundaries(seed_runtime):
+                seed_graph = prepare_graph(model, traced_args, backend="jax")
+                seed_dag = seed_graph.compute_dag()
+                seed_partition = seed_dag.to_partition(())
+                seed_runtime = seed_graph.materialize(seed_graph.analyze(seed_partition))
+            for boundary in smallest_transfer_partitions(seed_runtime):
                 with jax.default_device(cpu):
-                    runtime = prepare_fixture(
-                        model,
-                        traced_args,
-                        split_request(boundary, backend="jax"),
-                    )
+                    runtime = seed_runtime.repartition(boundary)
                 for batch in (1, 3):
                     with jax.default_device(cpu):
                         prefix_args = args_factory(batch, cpu)
                         boundary_cpu = runtime.run_prefix(*prefix_args)
                     for value in boundary_cpu.tensors.values():
                         assert value.device == cpu
-
                     boundary_gpu = boundary_cpu.to(gpu, adapter=runtime.adapter)
                     for value in boundary_gpu.tensors.values():
                         assert value.device == gpu
-
                     with jax.default_device(gpu):
                         split_output = runtime.run_suffix(boundary_gpu)
                         full_args = args_factory(batch, gpu)
                         full_output = model(*full_args)
                     assert split_output.device == gpu
-                    assert bool(
-                        jnp.allclose(split_output, full_output, atol=1e-4, rtol=1e-3)
-                    ), (name, boundary, batch)
+                    assert bool(jnp.allclose(split_output, full_output, atol=0.0001, rtol=0.001)), (
+                        name,
+                        boundary,
+                        batch,
+                    )
+
 
         class FlaxCNN(nn.Module):
             @nn.compact
@@ -151,21 +149,23 @@ def test_jax_flax_haiku_equinox_all_split_nodes_cross_batch_and_device() -> None
                 x = x.reshape((x.shape[0], -1))
                 return nn.Dense(5)(x)
 
+
         flax_module = FlaxCNN()
-        flax_params = flax_module.init(
-            jax.random.PRNGKey(0),
-            jnp.ones((2, 8, 8, 3), dtype=jnp.float32),
-        )
+        flax_params = flax_module.init(jax.random.PRNGKey(0), jnp.ones((2, 8, 8, 3), dtype=jnp.float32))
+
 
         def flax_model(params, x):
             return flax_module.apply(params, x)
 
+
         def flax_args(batch, device):
             params = jax.tree_util.tree_map(lambda value: jax.device_put(value, device), flax_params)
             x = jax.device_put(jnp.ones((batch, 8, 8, 3), dtype=jnp.float32), device)
-            return params, x
+            return (params, x)
 
-        assert_all_split_nodes("flax-cnn", flax_model, flax_args)
+
+        assert_smallest_dag_partitions("flax-cnn", flax_model, flax_args)
+
 
         def haiku_forward(x):
             hidden = hk.Linear(8)(x)
@@ -173,28 +173,27 @@ def test_jax_flax_haiku_equinox_all_split_nodes_cross_batch_and_device() -> None
             key = hk.Linear(8)(hidden)
             value = hk.Linear(8)(hidden)
             scale = jnp.sqrt(jnp.array(8.0, dtype=jnp.float32))
-            attn = jax.nn.softmax(
-                (query @ jnp.swapaxes(key, -1, -2)) / scale,
-                axis=-1,
-            )
+            attn = jax.nn.softmax(query @ jnp.swapaxes(key, -1, -2) / scale, axis=-1)
             hidden = hk.Linear(8)(attn @ value) + hidden
             return hk.Linear(4)(jax.nn.relu(hidden).mean(axis=1))
 
+
         haiku_transform = hk.without_apply_rng(hk.transform(haiku_forward))
-        haiku_params = haiku_transform.init(
-            jax.random.PRNGKey(1),
-            jnp.ones((2, 4, 8), dtype=jnp.float32),
-        )
+        haiku_params = haiku_transform.init(jax.random.PRNGKey(1), jnp.ones((2, 4, 8), dtype=jnp.float32))
+
 
         def haiku_model(params, x):
             return haiku_transform.apply(params, x)
 
+
         def haiku_args(batch, device):
             params = jax.tree_util.tree_map(lambda value: jax.device_put(value, device), haiku_params)
             x = jax.device_put(jnp.ones((batch, 4, 8), dtype=jnp.float32), device)
-            return params, x
+            return (params, x)
 
-        assert_all_split_nodes("haiku-attention", haiku_model, haiku_args)
+
+        assert_smallest_dag_partitions("haiku-attention", haiku_model, haiku_args)
+
 
         class EquinoxBatchedMLP(eqx.Module):
             w1: jax.Array
@@ -212,10 +211,13 @@ def test_jax_flax_haiku_equinox_all_split_nodes_cross_batch_and_device() -> None
             def __call__(self, x):
                 return jax.nn.relu(x @ self.w1 + self.b1) @ self.w2 + self.b2
 
+
         equinox_module = EquinoxBatchedMLP(jax.random.PRNGKey(2))
+
 
         def equinox_model(module, x):
             return module(x)
+
 
         def equinox_args(batch, device):
             module = jax.tree_util.tree_map(
@@ -223,9 +225,11 @@ def test_jax_flax_haiku_equinox_all_split_nodes_cross_batch_and_device() -> None
                 equinox_module,
             )
             x = jax.device_put(jnp.ones((batch, 6), dtype=jnp.float32), device)
-            return module, x
+            return (module, x)
 
-        assert_all_split_nodes("equinox-mlp", equinox_model, equinox_args)
+
+        assert_smallest_dag_partitions("equinox-mlp", equinox_model, equinox_args)
+
         """,
         timeout=360,
     )
@@ -233,19 +237,17 @@ def test_jax_flax_haiku_equinox_all_split_nodes_cross_batch_and_device() -> None
 
 def test_jax_flax_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
     """Flax split training runs CPU prefix and GPU suffix for multiple batches."""
-
     _skip_unless_enabled()
     _skip_if_module_missing("jax")
     _skip_if_module_missing("flax")
     _run_backend_subprocess(
         """
-        from functools import partial
-
         import flax.linen as nn
         import jax
         import jax.numpy as jnp
-        import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_node_prefix, select_prefix
+        from dag_helpers import close_call_ids
+
+        from torchlens.split import SplitFeatures, prepare_graph
 
         try:
             cpu = jax.devices("cpu")[0]
@@ -254,84 +256,91 @@ def test_jax_flax_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
             print("No JAX CPU/GPU pair available for CPU-prefix/GPU-suffix split training.")
             raise SystemExit(75)
 
+
         class FlaxMlp(nn.Module):
             @nn.compact
             def __call__(self, x):
                 hidden = nn.relu(nn.Dense(5)(x))
                 return nn.Dense(3)(hidden)
 
+
         module = FlaxMlp()
         params_cpu = module.init(
-            jax.random.PRNGKey(0),
-            jax.device_put(jnp.ones((2, 4), dtype=jnp.float32), cpu),
+            jax.random.PRNGKey(0), jax.device_put(jnp.ones((2, 4), dtype=jnp.float32), cpu)
         )
         params_cpu = jax.tree_util.tree_map(lambda value: jax.device_put(value, cpu), params_cpu)
+
 
         def model(params, x):
             return module.apply(params, x)
 
+
         def tree_allclose(left, right):
             checks = jax.tree_util.tree_leaves(
                 jax.tree_util.tree_map(
-                    lambda a, b: jnp.allclose(a, b, atol=1e-5, rtol=1e-4),
-                    left,
-                    right,
+                    lambda a, b: jnp.allclose(a, b, atol=1e-05, rtol=0.0001), left, right
                 )
             )
-            return all(bool(check) for check in checks)
+            return all((bool(check) for check in checks))
+
 
         trace_x = jax.device_put(jnp.ones((2, 4), dtype=jnp.float32), cpu)
-        seed_runtime = prepare_fixture(
-            model,
-            (params_cpu, trace_x),
-            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="jax", trainable=True),
+        seed_graph = prepare_graph(
+            model, (params_cpu, trace_x), backend="jax", features=SplitFeatures(training=True)
         )
+        seed_dag = seed_graph.compute_dag()
+        seed_partition = seed_dag.to_partition(
+            close_call_ids(
+                seed_dag,
+                frozenset(
+                    (call.call_id for call in seed_dag.nodes[: (len(seed_dag.nodes) - 1) * 50 // 100 + 1])
+                ),
+            )
+        )
+        seed_runtime = seed_graph.materialize(seed_graph.analyze(seed_partition))
         activation_id = next(
-            node.canonical_id
-            for node in seed_runtime.trace_graph.compute_nodes
-            if node.op_type in {"max", "jax_region"}
+            (
+                node.canonical_id
+                for node in seed_runtime.trace_graph.compute_nodes
+                if node.op_type in {"max", "jax_region"}
+            )
         )
-        runtime = prepare_fixture(
-            model,
-            (params_cpu, trace_x),
-            split_request(
-                partial(select_node_prefix, node_id=activation_id),
-                backend="jax",
-                trainable=True,
-            ),
+        graph = prepare_graph(
+            model, (params_cpu, trace_x), backend="jax", features=SplitFeatures(training=True)
         )
-
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag, frozenset({graph.trace_graph.replay_call_by_output_id[activation_id].call_id})
+            )
+        )
+        runtime = graph.materialize(graph.analyze(partition))
         for batch in (1, 3):
             x_cpu = jax.device_put(jnp.ones((batch, 4), dtype=jnp.float32), cpu)
             y_cpu = jax.device_put(jnp.zeros((batch, 3), dtype=jnp.float32), cpu)
             boundary_cpu = runtime.run_training_prefix(params_cpu, x_cpu)
             for value in boundary_cpu.tensors.values():
                 assert value.device == cpu
-
             boundary_gpu = boundary_cpu.to(gpu, adapter=runtime.adapter)
             for value in boundary_gpu.tensors.values():
                 assert value.device == gpu
-
             y_gpu = jax.device_put(y_cpu, gpu)
             loss, grads_gpu = runtime.train_suffix(boundary_gpu, y_gpu)
             assert loss.device == gpu
             assert grads_gpu
             for grad in grads_gpu.values():
                 assert grad.device == gpu
-
             grads_cpu = {key: jax.device_put(grad, cpu) for key, grad in grads_gpu.items()}
             prefix_grads = runtime.backward_prefix(boundary_cpu, grads_cpu)
 
             def full_loss(params, x):
                 return jnp.mean((model(params, x) - y_cpu) ** 2)
 
-            expected_param_grads, expected_x_grad = jax.grad(full_loss, argnums=(0, 1))(
-                params_cpu,
-                x_cpu,
-            )
+            expected_param_grads, expected_x_grad = jax.grad(full_loss, argnums=(0, 1))(params_cpu, x_cpu)
             actual_param_grads, actual_x_grad = prefix_grads["inputs"]
             assert tree_allclose(actual_param_grads, expected_param_grads)
-            assert bool(jnp.allclose(actual_x_grad, expected_x_grad, atol=1e-5, rtol=1e-4))
+            assert bool(jnp.allclose(actual_x_grad, expected_x_grad, atol=1e-05, rtol=0.0001))
+
         """,
         timeout=240,
     )
@@ -339,32 +348,30 @@ def test_jax_flax_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
 
 def test_jax_reference_resnet_transformer_and_vit_split_replay_batch_symbolic() -> None:
     """JAX reference ResNet/Transformer/ViT-style architectures replay dynamic splits."""
-
     _skip_unless_enabled()
     _skip_if_module_missing("jax")
     _run_backend_subprocess(
         """
         import jax
         import jax.numpy as jnp
+        from dag_helpers import smallest_transfer_partitions
         from jax.example_libraries import stax
 
-        import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
+        from torchlens.split import prepare_graph
 
         residual_init, residual_apply = stax.serial(
             stax.FanOut(2),
-            stax.parallel(
-                stax.serial(stax.Dense(8), stax.Relu, stax.Dense(8)),
-                stax.Identity,
-            ),
+            stax.parallel(stax.serial(stax.Dense(8), stax.Relu, stax.Dense(8)), stax.Identity),
             stax.FanInSum,
             stax.Relu,
             stax.Dense(4),
         )
         _shape, residual_params = residual_init(jax.random.PRNGKey(0), (-1, 8))
 
+
         def residual_model(params, x):
             return residual_apply(params, x)
+
 
         def init_transformer_params(key):
             keys = jax.random.split(key, 6)
@@ -381,19 +388,22 @@ def test_jax_reference_resnet_transformer_and_vit_split_replay_batch_symbolic() 
                 "ff2": weight(keys[5], (16, 8)),
             }
 
+
         transformer_params = init_transformer_params(jax.random.PRNGKey(1))
+
 
         def transformer_model(params, x):
             query = x @ params["q"]
             key = x @ params["k"]
             value = x @ params["v"]
             scale = jnp.sqrt(jnp.array(8.0, dtype=jnp.float32))
-            scores = (query @ jnp.swapaxes(key, -1, -2)) / scale
+            scores = query @ jnp.swapaxes(key, -1, -2) / scale
             attn = jax.nn.softmax(scores, axis=-1)
-            hidden = (attn @ value) @ params["o"]
+            hidden = attn @ value @ params["o"]
             residual = hidden + x
             ff = jax.nn.relu(residual @ params["ff1"]) @ params["ff2"]
             return ff + residual
+
 
         def init_vit_params(key):
             keys = jax.random.split(key, 8)
@@ -412,79 +422,63 @@ def test_jax_reference_resnet_transformer_and_vit_split_replay_batch_symbolic() 
                 "head": weight(keys[7], (8, 4)),
             }
 
+
         vit_params = init_vit_params(jax.random.PRNGKey(2))
+
 
         def vit_encoder_model(params, x):
             batch = x.shape[0]
             patches = (
-                x.reshape(batch, 4, 4, 4, 4, 3)
-                .transpose(0, 1, 3, 2, 4, 5)
-                .reshape(batch, 16, 4 * 4 * 3)
+                x.reshape(batch, 4, 4, 4, 4, 3).transpose(0, 1, 3, 2, 4, 5).reshape(batch, 16, 4 * 4 * 3)
             )
             tokens = patches @ params["patch"]
             query = tokens @ params["q"]
             key = tokens @ params["k"]
             value = tokens @ params["v"]
             scale = jnp.sqrt(jnp.array(8.0, dtype=jnp.float32))
-            attn = jax.nn.softmax((query @ jnp.swapaxes(key, -1, -2)) / scale, axis=-1)
-            hidden = (attn @ value) @ params["o"] + tokens
+            attn = jax.nn.softmax(query @ jnp.swapaxes(key, -1, -2) / scale, axis=-1)
+            hidden = attn @ value @ params["o"] + tokens
             mlp = jax.nn.relu(hidden @ params["ff1"]) @ params["ff2"]
             return (hidden + mlp).mean(axis=1) @ params["head"]
 
+
         model_cases = (
-            (
-                residual_model,
-                residual_params,
-                lambda batch: jnp.ones((batch, 8), dtype=jnp.float32),
-            ),
+            (residual_model, residual_params, lambda batch: jnp.ones((batch, 8), dtype=jnp.float32)),
             (
                 transformer_model,
                 transformer_params,
                 lambda batch: jnp.ones((batch, 4, 8), dtype=jnp.float32),
             ),
-            (
-                vit_encoder_model,
-                vit_params,
-                lambda batch: jnp.ones((batch, 16, 16, 3), dtype=jnp.float32),
-            ),
+            (vit_encoder_model, vit_params, lambda batch: jnp.ones((batch, 16, 16, 3), dtype=jnp.float32)),
         )
-
         for model, params, input_factory in model_cases:
             x = input_factory(2)
-            for boundary in (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1)):
-                runtime = prepare_fixture(
-                    model,
-                    (params, x),
-                    split_request(boundary, backend="jax"),
-                )
+            dag_graph_1 = prepare_graph(model, (params, x), backend="jax")
+            for boundary in smallest_transfer_partitions(dag_graph_1):
+                runtime = dag_graph_1.materialize(dag_graph_1.analyze(boundary))
                 for batch in (1, 3):
                     replay_x = input_factory(batch)
-                    assert bool(
-                        jnp.allclose(
-                            runtime.replay(params, replay_x),
-                            model(params, replay_x),
-                        )
-                    )
+                    assert bool(jnp.allclose(runtime.replay(params, replay_x), model(params, replay_x)))
+
         """,
         timeout=240,
     )
 
 
-def test_jax_complete_multiscale_detector_all_nodes_cross_batch() -> None:
-    """A complete Flax multiscale detector replays every JAX split boundary."""
-
+def test_jax_complete_multiscale_detector_smallest_dag_partitions_cross_batch() -> None:
+    """A complete Flax multiscale detector replays the smallest native DAG partitions."""
     _skip_unless_enabled()
     _skip_if_module_missing("jax")
     _skip_if_module_missing("flax")
     _run_backend_subprocess(
         """
-        from functools import partial
-
         import flax.linen as nn
         import jax
         import jax.numpy as jnp
-        import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_node_prefix, select_prefix
+        from dag_helpers import smallest_transfer_partitions
+
+        from torchlens.split import GraphPartition, prepare_graph
+
 
         class CompleteJaxDetector(nn.Module):
             @nn.compact
@@ -508,75 +502,64 @@ def test_jax_complete_multiscale_detector_all_nodes_cross_batch() -> None:
                     ],
                     axis=1,
                 )
-                return {
-                    "boxes": predictions[..., :4],
-                    "classes": jax.nn.sigmoid(predictions[..., 4:]),
-                }
+                return {"boxes": predictions[..., :4], "classes": jax.nn.sigmoid(predictions[..., 4:])}
+
 
         module = CompleteJaxDetector()
         trace_x = jnp.ones((1, 32, 32, 3), dtype=jnp.float32)
         params = module.init(jax.random.PRNGKey(0), trace_x)
 
+
         def model(params, inputs):
             return module.apply(params, inputs)
+
 
         def assert_same(actual, expected):
             for key in expected:
                 if actual[key].shape != expected[key].shape:
                     raise AssertionError(
-                        f"JAX detector shape mismatch {key=} {actual[key].shape=} "
-                        f"{expected[key].shape=}"
+                        f"JAX detector shape mismatch key={key!r} actual[key].shape={actual[key].shape!r} expected[key].shape={expected[key].shape!r}"
                     )
-                if not bool(jnp.allclose(actual[key], expected[key], atol=1e-4, rtol=1e-4)):
+                if not bool(jnp.allclose(actual[key], expected[key], atol=0.0001, rtol=0.0001)):
                     diff = float(jnp.max(jnp.abs(actual[key] - expected[key])))
-                    raise AssertionError(f"JAX detector mismatch {key=} {diff=}")
+                    raise AssertionError(f"JAX detector mismatch key={key!r} diff={diff!r}")
 
-        seed_runtime = prepare_fixture(
-            model,
-            (params, trace_x),
-            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="jax"),
-        )
-        boundaries = [
-            (kind, node.canonical_id)
-            for node in seed_runtime.trace_graph.compute_nodes
-            for kind in ("before", "after")
-        ]
+
+        seed_graph = prepare_graph(model, (params, trace_x), backend="jax")
+        seed_dag = seed_graph.compute_dag()
+        seed_partition = seed_dag.to_partition(())
+        seed_runtime = seed_graph.materialize(seed_graph.analyze(seed_partition))
+        boundaries = smallest_transfer_partitions(seed_runtime)
         assert boundaries
-        for kind, node_id in boundaries:
-            point = partial(select_node_prefix, node_id=str(node_id)) if kind == "after" else partial(select_node_prefix, node_id=str(node_id), include=False)
-            runtime = repartition_fixture(seed_runtime, point)
+        for point in boundaries:
+            runtime = seed_runtime.repartition(point)
             try:
                 assert_same(runtime.replay(params, trace_x), model(params, trace_x))
             except AssertionError as exc:
-                node = seed_runtime.trace_graph.node_by_id[node_id]
-                raise AssertionError(
-                    f"JAX detector boundary failed {kind=} {node_id=} {node.label=}: {exc}"
-                ) from None
-
+                raise AssertionError(f"JAX detector partition failed {point!r}: {exc}") from exc
         for batch in (2, 3):
             replay_x = jnp.ones((batch, 32, 32, 3), dtype=jnp.float32)
-            runtime = repartition_fixture(seed_runtime,
-                split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="jax").partition
-            )
+            runtime = seed_runtime.repartition(GraphPartition(frozenset()))
             assert_same(runtime.replay(params, replay_x), model(params, replay_x))
+
         """,
         timeout=600,
     )
 
 
-def test_jax_stax_mlp_all_split_nodes_cross_batch_and_device() -> None:
-    """Every compute-node before/after split replays for a JAX stax MLP."""
-
+def test_jax_stax_mlp_smallest_dag_partitions_cross_batch_and_device() -> None:
+    """The smallest native DAG partitions replay for a JAX stax MLP."""
     _skip_unless_enabled()
     _skip_if_module_missing("jax")
     _run_backend_subprocess(
         """
         import jax
         import jax.numpy as jnp
+        from dag_helpers import smallest_transfer_partitions
         from jax.example_libraries import stax
 
-        import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
+        from torchlens.split import prepare_graph
+
 
         def platform_devices(platform):
             try:
@@ -584,15 +567,14 @@ def test_jax_stax_mlp_all_split_nodes_cross_batch_and_device() -> None:
             except RuntimeError:
                 return []
 
-        init_fun, apply_fun = stax.serial(
-            stax.Dense(8),
-            stax.Relu,
-            stax.Dense(4),
-        )
+
+        init_fun, apply_fun = stax.serial(stax.Dense(8), stax.Relu, stax.Dense(4))
         _shape, base_params = init_fun(jax.random.PRNGKey(0), (-1, 6))
+
 
         def model(params, x):
             return apply_fun(params, x)
+
 
         cpu_devices = platform_devices("cpu")
         gpu_devices = platform_devices("gpu")
@@ -603,47 +585,23 @@ def test_jax_stax_mlp_all_split_nodes_cross_batch_and_device() -> None:
         gpu = gpu_devices[0]
         params_cpu = jax.tree_util.tree_map(lambda value: jax.device_put(value, cpu), base_params)
         x_cpu = jax.device_put(jnp.ones((2, 6), dtype=jnp.float32), cpu)
-        seed_runtime = prepare_fixture(
-            model,
-            (params_cpu, x_cpu),
-            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="jax"),
-        )
-        boundaries = (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1))
-        for boundary in boundaries:
-            runtime = prepare_fixture(
-                model,
-                (params_cpu, x_cpu),
-                split_request(boundary, backend="jax"),
-            )
+        dag_graph_1 = prepare_graph(model, (params_cpu, x_cpu), backend="jax")
+        for boundary in smallest_transfer_partitions(dag_graph_1):
+            runtime = dag_graph_1.materialize(dag_graph_1.analyze(boundary))
             for batch in (1, 3):
-                replay_x_cpu = jax.device_put(
-                    jnp.ones((batch, 6), dtype=jnp.float32),
-                    cpu,
-                )
+                replay_x_cpu = jax.device_put(jnp.ones((batch, 6), dtype=jnp.float32), cpu)
                 boundary_cpu = runtime.run_prefix(params_cpu, replay_x_cpu)
                 for value in boundary_cpu.tensors.values():
                     assert value.device == cpu
-
                 boundary_gpu = boundary_cpu.to(gpu, adapter=runtime.adapter)
                 for value in boundary_gpu.tensors.values():
                     assert value.device == gpu
-
-                params_gpu = jax.tree_util.tree_map(
-                    lambda value: jax.device_put(value, gpu),
-                    base_params,
-                )
-                replay_x_gpu = jax.device_put(
-                    jnp.ones((batch, 6), dtype=jnp.float32),
-                    gpu,
-                )
+                params_gpu = jax.tree_util.tree_map(lambda value: jax.device_put(value, gpu), base_params)
+                replay_x_gpu = jax.device_put(jnp.ones((batch, 6), dtype=jnp.float32), gpu)
                 split_output = runtime.run_suffix(boundary_gpu)
                 assert split_output.device == gpu
-                assert bool(
-                    jnp.allclose(
-                        split_output,
-                        model(params_gpu, replay_x_gpu),
-                    )
-                )
+                assert bool(jnp.allclose(split_output, model(params_gpu, replay_x_gpu)))
+
         """,
         timeout=240,
     )

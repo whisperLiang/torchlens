@@ -3,20 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pytest
 import torch
-from v2_helpers import (
-    prepare_fixture,
-    repartition_fixture,
-    select_node_prefix,
-    split_request,
-)
+from dag_helpers import call_ids, close_call_ids
 
-from torchlens.split import PlacementPlan, pipeline
+from torchlens.split import (
+    GraphPartition,
+    PlacementPlan,
+    SplitFeatures,
+    SplitRequest,
+    pipeline,
+    prepare_graph,
+)
 from torchlens.split.batching import witness_probe_sizes
 from torchlens.split.errors import SplitBoundaryError
 
@@ -52,9 +53,12 @@ def test_only_two_capture_batches_and_no_runtime_recapture(monkeypatch: pytest.M
 
     monkeypatch.setattr(pipeline, "capture_model", count_capture)
     model = torch.nn.Sequential(torch.nn.Linear(4, 5), torch.nn.ReLU(), torch.nn.Linear(5, 2))
-    runtime = prepare_fixture(
-        model, torch.ones(32, 4), split_request(partial(select_node_prefix, node_id="relu"))
+    graph = prepare_graph(model, torch.ones(32, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert captures == [1, 2]
     assert witness_probe_sizes(1) == (2,)
     assert witness_probe_sizes(2) == ()
@@ -80,10 +84,17 @@ def test_same_topology_numeric_failure_restricts_all_entrypoints(
     """A scalar branch missed by topology checks must fail the numeric B=2 check."""
 
     model = ThresholdModel()
-    request = split_request(partial(select_node_prefix, node_id="relu"), trainable=True)
+    request = SplitRequest(GraphPartition(frozenset()), features=SplitFeatures(training=True))
     if validation != "strict":
         request = replace(request, validation="permissive")
-    runtime = prepare_fixture(model, torch.ones(32, 4), request)
+    graph = prepare_graph(
+        model, torch.ones(32, 4), features=SplitFeatures(training=True), validation="permissive"
+    )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.batch_validation["status"] == "failed"
     assert "numeric mismatch" in runtime.batch_validation["reason"]
     torch.testing.assert_close(runtime.replay(torch.ones(1, 4)), model(torch.ones(1, 4)))
@@ -91,7 +102,19 @@ def test_same_topology_numeric_failure_restricts_all_entrypoints(
         with pytest.raises(SplitBoundaryError, match="probe did not pass"):
             replay(torch.ones(2, 4))
     for derived in (
-        repartition_fixture(runtime, partial(select_node_prefix, node_id="relu", include=False)),
+        runtime.repartition(
+            runtime.compute_dag().to_partition(
+                close_call_ids(
+                    runtime.compute_dag(),
+                    frozenset(
+                        source
+                        for source, target, _ in runtime.compute_dag().data_edges
+                        if target
+                        in call_ids(runtime, modules=frozenset({"relu"}), ops=frozenset({"relu"}))
+                    ),
+                )
+            )
+        ),
         runtime.with_placement(PlacementPlan()),
     ):
         assert derived.batch_validation == runtime.batch_validation
@@ -138,9 +161,12 @@ def test_probe_failure_preserves_captured_batch(kind: str) -> None:
             return out
 
     model = Model()
-    runtime = prepare_fixture(
-        model, torch.ones(4, 4), split_request(partial(select_node_prefix, node_id="relu"))
+    graph = prepare_graph(model, torch.ones(4, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.batch_validation["status"] == "failed"
     assert runtime.batch_validation["reason"]
     torch.testing.assert_close(runtime.replay(torch.ones(1, 4)), model(torch.ones(1, 4)))
@@ -152,9 +178,12 @@ def test_later_branch_is_explicitly_an_unverified_extrapolation() -> None:
     """The chosen heuristic deliberately cannot detect a branch starting at B=8."""
 
     model = ThresholdModel(threshold=8)
-    runtime = prepare_fixture(
-        model, torch.ones(32, 4), split_request(partial(select_node_prefix, node_id="relu"))
+    graph = prepare_graph(model, torch.ones(32, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.batch_validation["status"] == "passed"
     boundary = runtime.run_prefix(torch.ones(8, 4))
     assert boundary.metadata["runtime_batch_validation"] == "extrapolated"
@@ -176,9 +205,12 @@ def test_unavailable_isolated_probe_keeps_only_captured_batch(
 
     monkeypatch.setattr(_capture_state_helpers, "_model_for_validation_replay", cannot_copy)
     model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.ReLU())
-    runtime = prepare_fixture(
-        model, torch.ones(32, 4), split_request(partial(select_node_prefix, node_id="relu"))
+    graph = prepare_graph(model, torch.ones(32, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.batch_validation["status"] == "unavailable"
     assert "Cannot copy the model" in runtime.batch_validation["reason"]
     torch.testing.assert_close(runtime.replay(torch.ones(1, 4)), model(torch.ones(1, 4)))
@@ -208,9 +240,12 @@ def test_fallback_capture_at_two_has_no_additional_probe(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(pipeline, "capture_model", capture)
     model = Model()
-    runtime = prepare_fixture(
-        model, torch.ones(32, 4), split_request(partial(select_node_prefix, node_id="relu"))
+    graph = prepare_graph(model, torch.ones(32, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert seen == [1, 2]
     assert runtime.traced_batch_size == 2
     assert runtime.batch_validation["mode"] == "captured_only"

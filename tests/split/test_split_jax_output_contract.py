@@ -3,17 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from functools import partial
 from typing import Any
 
 import pytest
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    split_request,
-)
+from dag_helpers import call_ids, close_call_ids
 
 from torchlens.ir.container import DictKey, TupleIndex
+from torchlens.split import prepare_graph
 from torchlens.split.adapters.jax import JaxGeneratedSuffix, _slice_output_by_path
 from torchlens.split.errors import SplitUnsupportedError
 
@@ -33,11 +29,15 @@ def output_runtime() -> Any:
         result = hidden * 2.0
         return {0: result, 1: [result + 1.0]}
 
-    return prepare_fixture(
-        model,
-        jnp.ones((2, 3)),
-        split_request(partial(select_node_prefix, node_id="max"), backend="jax"),
+    capture_1_graph = prepare_graph(model, jnp.ones((2, 3)), backend="jax")
+    capture_1_dag = capture_1_graph.compute_dag()
+    capture_1_partition = capture_1_dag.to_partition(
+        close_call_ids(
+            capture_1_dag,
+            call_ids(capture_1_graph, modules=frozenset({"max"}), ops=frozenset({"max"})),
+        )
     )
+    return capture_1_graph.materialize(capture_1_graph.analyze(capture_1_partition))
 
 
 @pytest.mark.parametrize("has_intermediate", [False, True])
@@ -114,11 +114,12 @@ def test_jax_repeated_output_without_occurrence_paths_refuses_typed() -> None:
         result = hidden * 2.0
         return {0: result, 1: [result, (result + 1.0,)]}
 
-    runtime = prepare_fixture(
-        model,
-        jnp.ones((2, 3)),
-        split_request(partial(select_node_prefix, node_id="max"), backend="jax"),
+    graph = prepare_graph(model, jnp.ones((2, 3)), backend="jax")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"max"}), ops=frozenset({"max"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.batch_validation["status"] == "failed"
     with pytest.raises(SplitUnsupportedError) as error:
         runtime.replay(jnp.ones((1, 3)))

@@ -3,22 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
+from dag_helpers import call_ids, close_call_ids, iter_dag_partitions
 from torch import nn
-from v2_helpers import (
-    prepare_fixture,
-    repartition_fixture,
-    select_node_prefix,
-    select_prefix,
-    split_request,
-)
 
-from torchlens.split import BoundarySchema
+from torchlens.split import (
+    BoundarySchema,
+    GraphPartition,
+    SplitRequest,
+    prepare_graph,
+)
 from torchlens.split.adapters import torch as torch_adapter
 from torchlens.split.adapters.torch import GeneratedSuffix, _is_template_dict
 from torchlens.split.boundary import ReplayBoundary
@@ -84,9 +82,14 @@ def test_rng_fast_path_keeps_pure_ops_and_guards_random_ops(
             return self.linear(value) + torch.rand_like(value)
 
     inputs = torch.ones(2, 4)
-    runtime = prepare_fixture(
-        RandomHead().eval(), inputs, split_request(partial(select_node_prefix, node_id="linear"))
+    graph = prepare_graph(RandomHead().eval(), inputs)
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"linear"}), ops=frozenset({"linear"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     guarded: list[str] = []
     original = torch_adapter.execute_with_restored_rng_autocast
 
@@ -125,9 +128,12 @@ def test_rng_fast_path_falls_back_under_custom_dispatch_mode(
 
     inputs = torch.ones(2, 4)
     model = TinyMlp().eval()
-    runtime = prepare_fixture(
-        model, inputs, split_request(partial(select_node_prefix, node_id="relu"))
+    graph = prepare_graph(model, inputs)
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     guarded: list[str] = []
     original = torch_adapter.execute_with_restored_rng_autocast
 
@@ -149,9 +155,12 @@ def test_pure_ops_restore_disabled_autocast_under_enabled_caller() -> None:
 
     model = TinyMlp().eval()
     inputs = torch.ones(2, 4)
-    runtime = prepare_fixture(
-        model, inputs, split_request(partial(select_node_prefix, node_id="relu"))
+    graph = prepare_graph(model, inputs)
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     expected = model(inputs)
 
     with torch.autocast("cpu", dtype=torch.bfloat16):
@@ -166,9 +175,12 @@ def test_conditional_rng_fast_path_requires_disabled_dropout() -> None:
     """Dropout and attention bypass RNG isolation only with dropout disabled."""
 
     inputs = torch.ones(2, 4)
-    runtime = prepare_fixture(
-        TinyMlp().eval(), inputs, split_request(partial(select_node_prefix, node_id="relu"))
+    graph = prepare_graph(TinyMlp().eval(), inputs)
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     segment = runtime.segments.prefix
     assert segment._can_skip_rng_guard(segment._dropout_target, (inputs, 0.5, False), {})
     assert not segment._can_skip_rng_guard(segment._dropout_target, (inputs, 0.5, True), {})
@@ -186,9 +198,12 @@ def test_certified_plain_segment_skips_per_call_mode_checks(
 
     model = TinyMlp().eval()
     inputs = torch.ones(2, 4)
-    runtime = prepare_fixture(
-        model, inputs, split_request(partial(select_node_prefix, node_id="relu"))
+    graph = prepare_graph(model, inputs)
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.segments.prefix._fast_guard_certified
     assert runtime.segments.suffix._fast_guard_certified
 
@@ -203,15 +218,21 @@ def test_certified_plain_segment_skips_per_call_mode_checks(
 
 
 def test_multi_output_boundaries_bind_canonical_values_not_display_labels() -> None:
-    """Every chunk output survives before/after boundaries with duplicate labels."""
+    """Every native DAG assignment preserves atomic chunk outputs with duplicate labels."""
 
     model = SharedLabelMultiOutput().eval()
     example = torch.randn(2, 9)
-    seed_runtime = prepare_fixture(
-        model,
-        example,
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    seed_graph = prepare_graph(model, example)
+    seed_dag = seed_graph.compute_dag()
+    seed_partition = seed_dag.to_partition(
+        close_call_ids(
+            seed_dag,
+            frozenset(
+                call.call_id for call in seed_dag.nodes[: (len(seed_dag.nodes) - 1) * 50 // 100 + 1]
+            ),
+        )
     )
+    seed_runtime = seed_graph.materialize(seed_graph.analyze(seed_partition))
     captured_chunk_nodes = tuple(
         node for node in seed_runtime.trace_graph.compute_nodes if node.op_type == "chunk"
     )
@@ -235,14 +256,10 @@ def test_multi_output_boundaries_bind_canonical_values_not_display_labels() -> N
         for operation in seed_runtime.graph_ir.ops
     )
 
-    for node in chunk_nodes:
-        for point in (
-            partial(select_node_prefix, node_id=str(node.canonical_id), include=False),
-            partial(select_node_prefix, node_id=str(node.canonical_id)),
-        ):
-            runtime = repartition_fixture(seed_runtime, point)
-            assert runtime.plan.boundary_spec.keys() == runtime.plan.boundary_bindings.keys()
-            _assert_close(runtime.replay(example), model(example))
+    for partition in iter_dag_partitions(seed_runtime.compute_dag()):
+        runtime = seed_runtime.repartition(partition)
+        assert runtime.plan.boundary_spec.keys() == runtime.plan.boundary_bindings.keys()
+        _assert_close(runtime.replay(example), model(example))
 
 
 class TinyCnn(nn.Module):
@@ -332,11 +349,15 @@ def test_mlp_replay_equivalence() -> None:
     model = TinyMlp().eval()
     x = torch.randn(2, 4)
 
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    graph = prepare_graph(model, x)
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            frozenset(call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]),
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     assert runtime.validate_equivalence(model, (x,))
     _assert_close(runtime.replay(x), model(x))
@@ -349,29 +370,17 @@ def test_cnn_replay_equivalence() -> None:
     model = TinyCnn().eval()
     x = torch.randn(2, 3, 8, 8)
 
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    graph = prepare_graph(model, x)
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            frozenset(call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]),
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     assert runtime.validate_equivalence(model, (x,))
-
-
-def test_before_and_after_boundaries_work() -> None:
-    """Both explicit boundary directions execute."""
-
-    torch.manual_seed(0)
-    model = TinyMlp().eval()
-    x = torch.randn(2, 4)
-
-    after = prepare_fixture(model, x, split_request(partial(select_node_prefix, node_id="relu")))
-    before = prepare_fixture(
-        model, x, split_request(partial(select_node_prefix, node_id="fc2", include=False))
-    )
-
-    _assert_close(after.replay(x), model(x))
-    _assert_close(before.replay(x), model(x))
 
 
 def test_identity_output_marker_reconstructs_from_graph_parent() -> None:
@@ -381,9 +390,14 @@ def test_identity_output_marker_reconstructs_from_graph_parent() -> None:
     model = nn.Sequential(nn.Linear(6, 4), nn.Dropout(p=0.0)).eval()
     x = torch.ones(2, 6)
 
-    runtime = prepare_fixture(
-        model, x, split_request(partial(select_node_prefix, node_id="dropout"))
+    graph = prepare_graph(model, x)
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"dropout"}), ops=frozenset({"dropout"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     for batch in (1, 3):
         replay_x = torch.ones(batch, 6)
@@ -397,7 +411,12 @@ def test_residual_frontier_includes_skip_tensor() -> None:
     model = ResidualMlp().eval()
     x = torch.randn(2, 4)
 
-    runtime = prepare_fixture(model, x, split_request(partial(select_node_prefix, node_id="relu")))
+    graph = prepare_graph(model, x)
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     boundary = runtime.run_prefix(x)
 
     assert len(boundary.tensors) >= 2
@@ -412,11 +431,15 @@ def test_multi_output_dict_reconstruction() -> None:
     model = DictOutput().eval()
     x = torch.randn(2, 5)
 
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    graph = prepare_graph(model, x)
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            frozenset(call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]),
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     _assert_close(runtime.replay(x), model(x))
 
@@ -469,7 +492,7 @@ def test_targetless_suffix_compute_node_raises() -> None:
     suffix = GeneratedSuffix(
         graph=graph,
         plan=plan,
-        spec=split_request(partial(select_node_prefix, node_id="h")),
+        spec=SplitRequest(GraphPartition(frozenset())),
         node_ids=plan.suffix_node_ids,
         use_live_param_sources=True,
     )

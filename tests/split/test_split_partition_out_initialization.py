@@ -4,22 +4,15 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
-from functools import partial
 
 import pytest
 import torch
+from dag_helpers import call_ids, close_call_ids
 from torch import nn
-from v2_helpers import (
-    capture_fixture,
-    plan_fixture,
-    prepare_fixture,
-    request_fixture,
-    select_node_prefix,
-    select_prefix,
-)
 
-from torchlens.split import GraphPartition, SplitFeatures
+from torchlens.split import GraphPartition, SplitFeatures, prepare_graph
 from torchlens.split.errors import SplitUnsupportedError
+from torchlens.split.planner import plan_partition
 from torchlens.split.shape_program import DimExpr
 
 
@@ -54,14 +47,16 @@ def test_anchor_initialization_preserves_training_and_recuts(
     torch.manual_seed(428)
     model = AnchorInitialization().to(device)
     reference = deepcopy(model)
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         model,
         torch.randn(1, 4, device=device),
-        request_fixture(
-            partial(select_node_prefix, node_id="cut"),
-            features=SplitFeatures(training=True, retain_trace=retain_trace),
-        ),
+        features=SplitFeatures(training=True, retain_trace=retain_trace),
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"cut"}), ops=frozenset({"cut"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     graph = runtime.trace_graph
     initial = GraphPartition(
         frozenset(
@@ -121,13 +116,7 @@ def test_uncertified_out_writes_stay_refused(destination: str) -> None:
                 return torch.add(x, 1, out=out)
             return torch.arange(4, out=out)
 
-    runtime = capture_fixture(
-        UnprovenOut(),
-        torch.ones(4),
-        request_fixture(
-            lambda g, count=50: select_prefix(g, (len(g.compute_nodes) - 1) * count // 100 + 1)
-        ),
-    )
+    runtime = prepare_graph(UnprovenOut(), torch.ones(4))
     partition = GraphPartition(
         frozenset(node.canonical_id for node in runtime.trace_graph.compute_nodes)
     )
@@ -139,11 +128,12 @@ def test_uncertified_out_writes_stay_refused(destination: str) -> None:
 def test_anchor_destination_cannot_cross_the_boundary() -> None:
     """The allocation and write must remain in the same segment."""
 
-    runtime = prepare_fixture(
-        AnchorInitialization(),
-        torch.randn(2, 4),
-        request_fixture(partial(select_node_prefix, node_id="cut")),
+    graph = prepare_graph(AnchorInitialization(), torch.randn(2, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"cut"}), ops=frozenset({"cut"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     selected: set[str] = set()
     for node in runtime.trace_graph.compute_nodes:
         selected.add(node.canonical_id)
@@ -166,13 +156,7 @@ def test_anchor_initialization_keeps_the_complete_effect_order_barrier() -> None
             anchors = torch.arange(4, out=destination)
             return independent + anchors
 
-    runtime = capture_fixture(
-        Interleaved(),
-        torch.randn(2, 4),
-        request_fixture(
-            lambda g, count=50: select_prefix(g, (len(g.compute_nodes) - 1) * count // 100 + 1)
-        ),
-    )
+    runtime = prepare_graph(Interleaved(), torch.randn(2, 4))
     selected = frozenset(
         node.canonical_id
         for node in runtime.trace_graph.compute_nodes
@@ -186,11 +170,12 @@ def test_anchor_initialization_keeps_the_complete_effect_order_barrier() -> None
 def test_anchor_requires_matching_symbolic_destination_extents() -> None:
     """Matching B=1 metadata alone cannot certify a dynamically resizing destination."""
 
-    runtime = prepare_fixture(
-        AnchorInitialization(),
-        torch.randn(1, 4),
-        request_fixture(partial(select_node_prefix, node_id="cut")),
+    graph = prepare_graph(AnchorInitialization(), torch.randn(1, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"cut"}), ops=frozenset({"cut"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     graph = runtime.trace_graph
     allocation = next(node for node in graph.compute_nodes if node.op_type == "newfull")
     program = graph.shape_program
@@ -202,5 +187,5 @@ def test_anchor_requires_matching_symbolic_destination_extents() -> None:
     changed = replace(graph, shape_program=replace(program, value_shapes=shapes))
     request = replace(runtime.request, partition=GraphPartition(frozenset()))
     with pytest.raises(SplitUnsupportedError) as caught:
-        plan_fixture(changed, request)
+        plan_partition(changed, request)
     assert caught.value.context.reason == "partition_effect_order_unproven"

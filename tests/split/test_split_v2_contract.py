@@ -2,22 +2,19 @@
 
 from __future__ import annotations
 
-from functools import partial
-
 import pytest
 import torch
+from dag_helpers import call_ids, close_call_ids
 from torch import nn
-from v2_helpers import (
-    prepare_fixture,
-    request_fixture,
-    select_node_prefix,
-)
 
 from torchlens.split import (
+    GraphPartition,
     SplitFeatures,
     SplitModelProfile,
+    SplitRequest,
     SplitVerificationStatus,
     checkpoint_cache_path,
+    prepare_graph,
     register_model_profile,
 )
 from torchlens.split.errors import (
@@ -49,14 +46,25 @@ def test_v2_prepare_normalizes_graph_and_exposes_boundary_abi() -> None:
 
     model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
     inputs = torch.randn(2, 4)
-    request = request_fixture(
-        selection=partial(select_node_prefix, node_id="relu"),
+    request = SplitRequest(
+        GraphPartition(frozenset()),
         backend="torch",
         features=SplitFeatures(boundary_cache=True),
         validation="strict",
     )
 
-    runtime = prepare_fixture(model, inputs, request)
+    graph = prepare_graph(
+        model,
+        inputs,
+        backend="torch",
+        features=SplitFeatures(boundary_cache=True),
+        validation="strict",
+    )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
 
     assert runtime.request.features == request.features
     assert runtime.graph_ir is not None

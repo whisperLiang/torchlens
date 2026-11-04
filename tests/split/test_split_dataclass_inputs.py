@@ -8,12 +8,9 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
-from v2_helpers import (
-    prepare_fixture,
-    select_prefix,
-    split_request,
-)
+from dag_helpers import close_call_ids
 
+from torchlens.split import prepare_graph
 from torchlens.split.adapters.torch import TorchSplitAdapter
 from torchlens.split.batching import rebatch_inputs
 from torchlens.split.pipeline import _snapshot_probe_output
@@ -82,14 +79,17 @@ def test_equinox_custom_init_parameter_input_replays_larger_batch() -> None:
     with jax.default_device(jax.devices("cpu")[0]):
         params = Weights(3)
         original = params.weight
-        runtime = prepare_fixture(
-            model,
-            (params, jnp.ones((2, 3))),
-            split_request(
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1),
-                backend="jax",
-            ),
+        graph = prepare_graph(model, (params, jnp.ones((2, 3))), backend="jax")
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag,
+                frozenset(
+                    call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
         )
+        runtime = graph.materialize(graph.analyze(partition))
         assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
         for batch in (1, 2, 3):
             x = jnp.arange(batch * 3, dtype=jnp.float32).reshape(batch, 3) - 2

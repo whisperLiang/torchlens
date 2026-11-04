@@ -8,12 +8,9 @@ from typing import Any
 
 import numpy as np
 import pytest
-from v2_helpers import (
-    prepare_fixture,
-    select_prefix,
-    split_request,
-)
+from dag_helpers import smallest_transfer_partitions
 
+from torchlens.split import prepare_graph
 from torchlens.split._jax_capture import batch_stable_matmul
 
 pytestmark = pytest.mark.backend_jax
@@ -43,21 +40,11 @@ def _jax_matmul_bindings() -> list[tuple[Any, str]]:
     return bindings
 
 
-@pytest.mark.parametrize(
-    "point",
-    [
-        lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1),
-        lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1),
-        lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1),
-    ],
-)
-def test_jax_attention_replays_singleton_and_larger_batches(point: str) -> None:
+def test_jax_attention_replays_singleton_and_larger_batches() -> None:
     """Compare nonuniform attention outputs across three cut positions.
 
     Parameters
     ----------
-    point:
-        Relative position of the split in the attention graph.
     """
 
     jax = pytest.importorskip("jax")
@@ -70,11 +57,13 @@ def test_jax_attention_replays_singleton_and_larger_batches(point: str) -> None:
         return jnp.matmul(jax.nn.softmax(scores, axis=-1), x) + x
 
     with jax.default_device(jax.devices("cpu")[0]):
-        runtime = prepare_fixture(model, jnp.ones((2, 3, 4)), split_request(point, backend="jax"))
-        assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
-        for batch in (1, 2, 3):
-            x = jnp.arange(batch * 12, dtype=jnp.float32).reshape(batch, 3, 4) / 20
-            np.testing.assert_allclose(runtime.replay(x), model(x), rtol=1e-5, atol=1e-6)
+        graph = prepare_graph(model, jnp.ones((2, 3, 4)), backend="jax")
+        for partition in smallest_transfer_partitions(graph):
+            runtime = graph.materialize(graph.analyze(partition))
+            assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
+            for batch in (1, 2, 3):
+                x = jnp.arange(batch * 12, dtype=jnp.float32).reshape(batch, 3, 4) / 20
+                np.testing.assert_allclose(runtime.replay(x), model(x), rtol=1e-5, atol=1e-6)
 
 
 def test_jax_matmul_scope_delegates_broadcasts_and_restores_on_error() -> None:

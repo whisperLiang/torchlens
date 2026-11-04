@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import copy
-from functools import partial
 
 import pytest
 import torch
+from dag_helpers import call_ids, close_call_ids
 from torch import nn
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    split_request,
-)
 
-from torchlens.split import PlacementPlan
+from torchlens.split import (
+    PlacementPlan,
+    SplitFeatures,
+    prepare_graph,
+)
 from torchlens.split.state import SegmentState
 
 pytestmark = pytest.mark.usefixtures("fp64_functional")
@@ -54,15 +53,17 @@ def test_placed_prefix_optimizer_uses_training_state(
     x = torch.randn(3, 4)
     y = torch.randn(3, 3)
     original_prefix = [value.detach().clone() for value in model.fc1.parameters()]
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         model,
         x,
-        split_request(
-            partial(select_node_prefix, node_id="relu"),
-            trainable=True,
-            placement=PlacementPlan.across(device, "cpu"),
-        ),
+        placement=PlacementPlan.across(device, "cpu"),
+        features=SplitFeatures(training=True),
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     if warm_inference:
         runtime.run_prefix(x)
     prefix_parameters = runtime.prefix_parameters()
@@ -106,14 +107,12 @@ def test_training_prefix_parameters_with_captured_inference_sources() -> None:
         pytest.skip("CUDA is required for heterogeneous state replicas.")
     model = PlacedMlp()
     x = torch.randn(3, 4)
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(
-            partial(select_node_prefix, node_id="relu"),
-            placement=PlacementPlan.across("cuda:0", "cpu"),
-        ),
+    graph = prepare_graph(model, x, placement=PlacementPlan.across("cuda:0", "cpu"))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     runtime.run_prefix(x)
     parameters = runtime.prefix_parameters()
     assert len(parameters) == 2

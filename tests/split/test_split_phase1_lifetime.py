@@ -5,21 +5,18 @@ from __future__ import annotations
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from functools import partial
 from typing import Any
 
 import pytest
 import torch
+from dag_helpers import call_ids, close_call_ids
 from torch import nn
-from v2_helpers import (
-    prepare_fixture,
-    repartition_fixture,
-    select_node_prefix,
-    select_prefix,
-    split_request,
-)
 
-from torchlens.split import PlacementPlan
+from torchlens.split import (
+    PlacementPlan,
+    SplitFeatures,
+    prepare_graph,
+)
 from torchlens.split.boundary import ReplayBoundary
 from torchlens.split.state import SegmentState
 
@@ -67,9 +64,12 @@ def test_prefix_grad_policy_controls_execution_and_saved_tensors(
 
     model = LifetimeMlp()
     inputs = torch.randn(3, 4, requires_grad=True)
-    runtime = prepare_fixture(
-        model, inputs, split_request(partial(select_node_prefix, node_id="cut"), trainable=True)
+    graph = prepare_graph(model, inputs, features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"cut"}), ops=frozenset({"cut"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     segment = runtime.segments.training_prefix if training else runtime.segments.prefix
     execute = segment._execute_func
     grad_modes: list[bool] = []
@@ -114,9 +114,12 @@ def test_public_suffix_preserves_reusable_boundary() -> None:
 
     model = LifetimeMlp()
     inputs = torch.randn(3, 4)
-    runtime = prepare_fixture(
-        model, inputs, split_request(partial(select_node_prefix, node_id="cut"), trainable=True)
+    graph = prepare_graph(model, inputs, features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"cut"}), ops=frozenset({"cut"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     boundary = runtime.run_prefix(inputs)
     tensors = dict(boundary.tensors)
     snapshots = {key: value.clone() for key, value in tensors.items()}
@@ -139,9 +142,12 @@ def test_internal_replay_releases_source_boundary_before_transported_suffix(
 
     model = LifetimeMlp()
     inputs = torch.randn(3, 4)
-    runtime = prepare_fixture(
-        model, inputs, split_request(partial(select_node_prefix, node_id="cut"), trainable=True)
+    graph = prepare_graph(model, inputs, features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"cut"}), ops=frozenset({"cut"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     run_prefix = runtime._run_prefix
     suffix = runtime.segments.suffix
     source_refs: list[weakref.ReferenceType[Any]] = []
@@ -199,9 +205,12 @@ def test_microbatch_releases_graph_roots_and_saved_payloads_before_next_forward(
 
     model = LifetimeMlp()
     inputs = torch.randn(7, 4)
-    runtime = prepare_fixture(
-        model, inputs, split_request(partial(select_node_prefix, node_id="cut"), trainable=True)
+    graph = prepare_graph(model, inputs, features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"cut"}), ops=frozenset({"cut"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     boundary = runtime.run_training_prefix(inputs)
     suffix = runtime.segments.suffix
     tensor_refs: list[weakref.ReferenceType[Any]] = []
@@ -274,18 +283,35 @@ def test_multioutput_and_residual_values_die_after_their_final_consumer(
 
     model = MultioutputBranches()
     inputs = torch.randn(3, 8)
-    seed = prepare_fixture(
-        model,
-        inputs,
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    seed_graph = prepare_graph(model, inputs)
+    seed_dag = seed_graph.compute_dag()
+    seed_partition = seed_dag.to_partition(
+        close_call_ids(
+            seed_dag,
+            frozenset(
+                call.call_id for call in seed_dag.nodes[: (len(seed_dag.nodes) - 1) * 50 // 100 + 1]
+            ),
+        )
     )
-    runtime = repartition_fixture(
-        seed,
-        partial(
-            select_node_prefix,
-            node_id=str(seed.trace_graph.compute_nodes[0].canonical_id),
-            include=False,
-        ),
+    seed = seed_graph.materialize(seed_graph.analyze(seed_partition))
+    runtime = seed.repartition(
+        seed.compute_dag().to_partition(
+            close_call_ids(
+                seed.compute_dag(),
+                frozenset(
+                    source
+                    for source, target, _ in seed.compute_dag().data_edges
+                    if target
+                    in frozenset(
+                        {
+                            seed.trace_graph.replay_call_by_output_id[
+                                str(seed.trace_graph.compute_nodes[0].canonical_id)
+                            ].call_id
+                        }
+                    )
+                ),
+            )
+        )
     )
     segment = runtime.segments.suffix
     execute = segment._execute_func
@@ -345,15 +371,14 @@ def test_frozen_embedding_with_forward_mutation_keeps_independent_segment_state(
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
     model = FrozenEmbedding()
     inputs = torch.tensor([[0, 1], [1, 2], [2, 3]])
-    runtime = prepare_fixture(
-        model,
-        inputs,
-        split_request(
-            partial(select_node_prefix, node_id="cut"),
-            trainable=True,
-            placement=PlacementPlan.on("cpu"),
-        ),
+    graph = prepare_graph(
+        model, inputs, placement=PlacementPlan.on("cpu"), features=SplitFeatures(training=True)
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"cut"}), ops=frozenset({"cut"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     # Let the production adapter decide eligibility before observing cached state.
     runtime.segments.prefix.bound_state_values()
     runtime.segments.suffix.bound_state_values()

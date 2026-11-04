@@ -17,13 +17,15 @@ from torchlens.split.graph_profile import TensorCostFeatures, partition_metrics
 def call_ids(
     graph: SplitGraph, *, modules: frozenset[str] = frozenset(), ops: frozenset[str] = frozenset()
 ) -> frozenset[str]:
-    """Query native calls by exact module membership or operation type, without ordering."""
-    return frozenset(
+    """Require matching calls by exact native metadata, without ordering or aliases."""
+    selected = frozenset(
         call.call_id
         for call in graph.compute_dag().nodes
         if (node := graph.trace_graph.node_by_id[call.output_node_ids[0]]).module_path in modules
         or node.op_type in ops
     )
+    assert selected, f"No native calls match modules={modules!r}, ops={ops!r}"
+    return selected
 
 
 def _closures(dag: ComputeDAG) -> tuple[list[int], list[int]]:

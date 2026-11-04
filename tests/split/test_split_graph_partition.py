@@ -3,26 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from functools import partial
 from itertools import combinations
 from types import SimpleNamespace
 
 import pytest
 import torch
+from dag_helpers import call_ids, close_call_ids
 from test_split_planner import _node
 from torch import nn
-from v2_helpers import (
-    plan_fixture,
-    prepare_fixture,
-    request_fixture,
-    select_node_prefix,
-)
 
 from torchlens.intervention.types import CapturedArgTemplate, LiteralValue
-from torchlens.split import GraphPartition, SplitFeatures
+from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, prepare_graph
 from torchlens.split.errors import SplitUnsupportedError
 from torchlens.split.graph import SplitTraceGraph
 from torchlens.split.placement import PlacementPlan
+from torchlens.split.planner import plan_partition
 from torchlens.utils.display import identity
 
 pytestmark = pytest.mark.usefixtures("fp64_functional")
@@ -67,13 +62,13 @@ def test_exhaustive_small_dag_partitions() -> None:
                 for node in graph.compute_nodes
                 if node.canonical_id in selected
             )
-            request = request_fixture(GraphPartition(selected))
+            SplitRequest(GraphPartition(selected))
             if not legal:
                 with pytest.raises(SplitUnsupportedError) as caught:
-                    plan_fixture(graph, request)
+                    plan_partition(graph, SplitRequest(GraphPartition(selected)))
                 assert caught.value.context.reason == "partition_reverse_dependency"
                 continue
-            plan = plan_fixture(graph, request)
+            plan = plan_partition(graph, SplitRequest(GraphPartition(selected)))
             assert plan.prefix_node_ids == selected | {"input"}
             assert plan.suffix_node_ids == frozenset(graph.node_by_id) - plan.prefix_node_ids
             expected = {
@@ -90,7 +85,7 @@ def test_noncontiguous_frontier_deduplicates_consumers() -> None:
     """A shared branch source crosses once, independent of its consumer count."""
     graph = _diamond()
     partition = GraphPartition(frozenset({"A", "B", "D"}))
-    plan = plan_fixture(graph, request_fixture(partition))
+    plan = plan_partition(graph, SplitRequest(partition))
     assert plan.boundary_node_ids == ("A", "D")
     assert all(item.role == "activation" for item in plan.boundary_spec.values())
     assert partition.as_boundary() == GraphPartition(frozenset({"D", "B", "A"})).as_boundary()
@@ -100,7 +95,7 @@ def test_noncontiguous_frontier_deduplicates_consumers() -> None:
 def test_partition_rejects_noncanonical_compute_ids(bad_id: str) -> None:
     """Sources, sinks and display aliases cannot substitute for canonical IDs."""
     with pytest.raises(SplitUnsupportedError) as caught:
-        plan_fixture(_diamond(), request_fixture(GraphPartition(frozenset({bad_id}))))
+        plan_partition(_diamond(), SplitRequest(GraphPartition(frozenset({bad_id}))))
     assert caught.value.context.reason == "partition_node_invalid"
     assert caught.value.context.split_point.startswith("partition:")
 
@@ -115,7 +110,7 @@ def test_native_multioutput_call_is_atomic() -> None:
         ),
     )
     with pytest.raises(SplitUnsupportedError) as caught:
-        plan_fixture(graph, request_fixture(GraphPartition(frozenset({"A", "B"}))))
+        plan_partition(graph, SplitRequest(GraphPartition(frozenset({"A", "B"}))))
     assert caught.value.context.reason == "partition_call_split"
 
 
@@ -144,7 +139,7 @@ def test_partition_refuses_unproven_effects(kind: str) -> None:
         node = replace(node, target=lambda x: x)
     graph = replace(graph, nodes=tuple(node if n.canonical_id == "B" else n for n in graph.nodes))
     with pytest.raises(SplitUnsupportedError) as caught:
-        plan_fixture(graph, request_fixture(GraphPartition(frozenset({"A", "B", "D"}))))
+        plan_partition(graph, SplitRequest(GraphPartition(frozenset({"A", "B", "D"}))))
     assert caught.value.context.reason == (
         "partition_custom_effects_unproven"
         if kind == "custom"
@@ -165,9 +160,14 @@ def test_multioutput_nested_alias_replay() -> None:
     """Every native output travels with its container metadata and replays correctly."""
     x = torch.randn(2, 8)
     model = MultiOutput()
-    runtime = prepare_fixture(
-        model, x, request_fixture(partial(select_node_prefix, node_id="chunk_1_1"))
+    graph = prepare_graph(model, x)
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"chunk_1_1"}), ops=frozenset({"chunk"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     ids = frozenset(
         n.canonical_id for n in runtime.trace_graph.compute_nodes if "chunk" in n.op_type
     )
@@ -186,19 +186,26 @@ def test_batchnorm_partition_preserves_ordered_training_state() -> None:
     from copy import deepcopy
 
     reference = deepcopy(model)
-    runtime = prepare_fixture(
-        model, x, request_fixture(partial(select_node_prefix, node_id="linear"))
+    graph = prepare_graph(model, x)
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"linear"}), ops=frozenset({"linear"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     cut = runtime.repartition(GraphPartition(frozenset()))
     torch.testing.assert_close(cut.replay(x), model(x))
     model.train()
-    training = prepare_fixture(
-        model,
-        x,
-        request_fixture(
-            partial(select_node_prefix, node_id="linear"), features=SplitFeatures(training=True)
-        ),
+    training_graph = prepare_graph(model, x, features=SplitFeatures(training=True))
+    training_dag = training_graph.compute_dag()
+    training_partition = training_dag.to_partition(
+        close_call_ids(
+            training_dag,
+            call_ids(training_graph, modules=frozenset({"linear"}), ops=frozenset({"linear"})),
+        )
     )
+    training = training_graph.materialize(training_graph.analyze(training_partition))
     cut = training.repartition(GraphPartition(frozenset()))
     reference.train()
     actual = cut.run_suffix(cut.run_training_prefix(x))
@@ -225,9 +232,12 @@ def test_random_partition_preserves_rng() -> None:
             return a + b + torch.rand_like(x)
 
     x = torch.randn(2, 4)
-    runtime = prepare_fixture(
-        RandomBranches(), x, request_fixture(partial(select_node_prefix, node_id="sin"))
+    graph = prepare_graph(RandomBranches(), x)
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"sin"}), ops=frozenset({"sin"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     cut = runtime.repartition(
         GraphPartition(
             frozenset(
@@ -243,13 +253,16 @@ def test_random_partition_preserves_rng() -> None:
 def test_shared_trainable_cross_device_partition_refuses_without_allocation() -> None:
     """Tied weights require a gradient merge contract before heterogeneous training."""
     layer = nn.Linear(4, 4)
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         nn.Sequential(layer, nn.ReLU(), layer),
         torch.ones(2, 4),
-        request_fixture(
-            partial(select_node_prefix, node_id="1"), features=SplitFeatures(training=True)
-        ),
+        features=SplitFeatures(training=True),
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"1"}), ops=frozenset({"1"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     selected = frozenset(
         node.canonical_id
         for node in runtime.trace_graph.compute_nodes
@@ -261,9 +274,9 @@ def test_shared_trainable_cross_device_partition_refuses_without_allocation() ->
         placement=PlacementPlan.across("cpu", "cuda:0"),
     )
     with pytest.raises(SplitUnsupportedError) as caught:
-        plan_fixture(runtime.trace_graph, request)
+        plan_partition(runtime.trace_graph, request)
     assert caught.value.context.reason == "partition_shared_trainable_cross_device"
-    assert plan_fixture(runtime.trace_graph, replace(request, placement=PlacementPlan.on("cpu")))
+    assert plan_partition(runtime.trace_graph, replace(request, placement=PlacementPlan.on("cpu")))
 
 
 def test_exact_internal_identity_is_safe_but_namesakes_refuse() -> None:
@@ -275,8 +288,8 @@ def test_exact_internal_identity_is_safe_but_namesakes_refuse() -> None:
             replace(n, target=identity) if n.canonical_id == "B" else n for n in graph.nodes
         ),
     )
-    request = request_fixture(GraphPartition(frozenset({"A", "B", "D"})))
-    assert plan_fixture(graph, request)
+    SplitRequest(GraphPartition(frozenset({"A", "B", "D"})))
+    assert plan_partition(graph, SplitRequest(GraphPartition(frozenset({"A", "B", "D"}))))
 
     def namesake(value: torch.Tensor) -> torch.Tensor:
         """An arbitrary callable cannot inherit the known no-op's certification."""
@@ -290,5 +303,5 @@ def test_exact_internal_identity_is_safe_but_namesakes_refuse() -> None:
         ),
     )
     with pytest.raises(SplitUnsupportedError) as caught:
-        plan_fixture(graph, request)
+        plan_partition(graph, SplitRequest(GraphPartition(frozenset({"A", "B", "D"}))))
     assert caught.value.context.reason == "partition_custom_effects_unproven"

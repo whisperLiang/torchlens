@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 import copy
-from functools import partial
 from typing import Any
 
 import pytest
 import torch
-from v2_helpers import (
-    fixture_partition,
-    prepare_fixture,
-    request_fixture,
-    select_node_prefix,
-)
+from dag_helpers import call_ids, close_call_ids
 
-from torchlens.split import GraphPartition, PlacementPlan, SplitFeatures
+from torchlens.split import (
+    GraphPartition,
+    PlacementPlan,
+    SplitFeatures,
+    prepare_graph,
+)
 from torchlens.split.ownership import parameter_bindings, parameter_ownership, plan_state_migration
 from torchlens.split.state import SegmentState
 
@@ -42,14 +41,17 @@ class SharedState(torch.nn.Module):
 def _runtime(model: torch.nn.Module, *, retain_trace: bool = False) -> Any:
     """Prepare live Torch state with either supported retention mode."""
 
-    return prepare_fixture(
-        model,
-        torch.randn(2, 4),
-        request_fixture(
-            partial(select_node_prefix, node_id="middle"),
-            features=SplitFeatures(training=True, retain_trace=retain_trace),
-        ),
+    capture_1_graph = prepare_graph(
+        model, torch.randn(2, 4), features=SplitFeatures(training=True, retain_trace=retain_trace)
     )
+    capture_1_dag = capture_1_graph.compute_dag()
+    capture_1_partition = capture_1_dag.to_partition(
+        close_call_ids(
+            capture_1_dag,
+            call_ids(capture_1_graph, modules=frozenset({"middle"}), ops=frozenset({"middle"})),
+        )
+    )
+    return capture_1_graph.materialize(capture_1_graph.analyze(capture_1_partition))
 
 
 @pytest.mark.parametrize("retain_trace", [False, True])
@@ -146,11 +148,17 @@ def test_migration_refuses_ambiguous_shared_optimizer_histories(
     assert bindings["prefix"] is not bindings["suffix"]
     migration = plan_state_migration(
         runtime,
-        fixture_partition(
-            runtime,
-            partial(
-                select_node_prefix, node_id=str(runtime.trace_graph.compute_nodes[-1].canonical_id)
-            ),
+        runtime.compute_dag().to_partition(
+            close_call_ids(
+                runtime.compute_dag(),
+                frozenset(
+                    {
+                        runtime.trace_graph.replay_call_by_output_id[
+                            str(runtime.trace_graph.compute_nodes[-1].canonical_id)
+                        ].call_id
+                    }
+                ),
+            )
         ),
     )
     assert not migration.supported

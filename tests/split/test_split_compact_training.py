@@ -6,21 +6,21 @@ import copy
 import gc
 import weakref
 from dataclasses import replace
-from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
-from v2_helpers import (
-    FixtureRequest,
-    prepare_fixture,
-    repartition_fixture,
-    request_fixture,
-    select_node_prefix,
-)
+from dag_helpers import call_ids, close_call_ids
 
-from torchlens.split import PlacementPlan, SplitFeatures, pipeline
+from torchlens.split import (
+    GraphPartition,
+    PlacementPlan,
+    SplitFeatures,
+    SplitRequest,
+    pipeline,
+    prepare_graph,
+)
 from torchlens.split._torch_compact import compact_torch_graph
 from torchlens.split.errors import SplitUnsupportedError
 from torchlens.split.graph import split_graph_from_trace
@@ -49,12 +49,11 @@ def _loss(output: dict[str, Any], targets: torch.Tensor) -> torch.Tensor:
     return (output["prediction"] - targets).square().mean() + output["aux"][0].square().mean()
 
 
-def _request() -> FixtureRequest:
+def _request() -> SplitRequest:
     """Opt into training compaction without changing default training policy."""
 
-    return request_fixture(
-        partial(select_node_prefix, node_id="middle"),
-        features=SplitFeatures(training=True, retain_trace=False),
+    return SplitRequest(
+        GraphPartition(frozenset()), features=SplitFeatures(training=True, retain_trace=False)
     )
 
 
@@ -67,7 +66,16 @@ def test_compact_tied_training_recut_preserves_gradients_and_optimizer_state(
     torch.manual_seed(71)
     reference = TiedBranches()
     model = copy.deepcopy(reference)
-    runtime = prepare_fixture(model, torch.randn(2, 4), _request())
+    graph = prepare_graph(
+        model, torch.randn(2, 4), features=SplitFeatures(training=True, retain_trace=False)
+    )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"middle"}), ops=frozenset({"middle"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     assert not runtime.retains_trace
     assert runtime.batch_validation["status"] == "passed"
 
@@ -106,13 +114,7 @@ def test_compact_tied_training_recut_preserves_gradients_and_optimizer_state(
             torch.testing.assert_close(
                 actual_optimizer.state[actual], expected_optimizer.state[expected_param]
             )
-        compute = runtime.trace_graph.compute_nodes
-        point = (
-            partial(select_node_prefix, node_id=str(compute[0].canonical_id), include=False)
-            if step % 2
-            else partial(select_node_prefix, node_id="middle")
-        )
-        runtime = repartition_fixture(runtime, point)
+        runtime = runtime.repartition(GraphPartition(frozenset()) if step % 2 else partition)
         assert tuple(id(value) for value in model.parameters()) == parameter_ids
         assert not runtime.retains_trace
 
@@ -143,7 +145,18 @@ def test_compact_training_collects_capture_and_preserves_existing_gradients(
     for parameter in model.parameters():
         parameter.grad = torch.ones_like(parameter)
     gradients = tuple(parameter.grad for parameter in model.parameters())
-    runtime = prepare_fixture(model, torch.randn(2, 4, requires_grad=True), _request())
+    graph = prepare_graph(
+        model,
+        torch.randn(2, 4, requires_grad=True),
+        features=SplitFeatures(training=True, retain_trace=False),
+    )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"middle"}), ops=frozenset({"middle"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     gc.collect()
     assert traces and all(reference() is None for reference in traces)
     assert payloads and all(reference() is None for reference in payloads)
@@ -181,11 +194,18 @@ def test_compact_training_updates_live_batchnorm_buffers() -> None:
     )
     model = copy.deepcopy(reference)
     inputs = torch.randn(3, 4)
-    request = request_fixture(
-        partial(select_node_prefix, node_id="0"),
+    SplitRequest(
+        GraphPartition(frozenset()),
         features=SplitFeatures(training=True, retain_trace=False, batch_axes={}),
     )
-    runtime = prepare_fixture(model, inputs, request)
+    graph = prepare_graph(
+        model, inputs, features=SplitFeatures(training=True, retain_trace=False, batch_axes={})
+    )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"0"}), ops=frozenset({"0"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     torch.testing.assert_close(model.state_dict(), reference.state_dict())
     for _ in range(3):
         model.zero_grad(set_to_none=True)
@@ -219,17 +239,30 @@ def test_compact_training_preserves_rng_and_matches_diagnostic_dropout(
     model = torch.nn.Sequential(torch.nn.Linear(4, 8), torch.nn.Dropout(0.3), torch.nn.Linear(8, 2))
     diagnostic_model = copy.deepcopy(model)
     inputs = torch.randn(3, 4)
-    request = request_fixture(
-        partial(select_node_prefix, node_id="0"),
+    request = SplitRequest(
+        GraphPartition(frozenset()),
         features=SplitFeatures(training=True, retain_trace=False, batch_axes={}),
     )
     rng = torch.random.get_rng_state().clone()
-    runtime = prepare_fixture(model, inputs, request)
-    diagnostic = prepare_fixture(
-        diagnostic_model,
-        inputs,
-        replace(request, features=replace(request.features, retain_trace=True)),
+    graph = prepare_graph(
+        model, inputs, features=SplitFeatures(training=True, retain_trace=False, batch_axes={})
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"0"}), ops=frozenset({"0"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
+    diagnostic_graph = prepare_graph(
+        diagnostic_model, inputs, features=replace(request.features, retain_trace=True)
+    )
+    diagnostic_dag = diagnostic_graph.compute_dag()
+    diagnostic_partition = diagnostic_dag.to_partition(
+        close_call_ids(
+            diagnostic_dag,
+            call_ids(diagnostic_graph, modules=frozenset({"0"}), ops=frozenset({"0"})),
+        )
+    )
+    diagnostic = diagnostic_graph.materialize(diagnostic_graph.analyze(diagnostic_partition))
     try:
         assert torch.equal(torch.random.get_rng_state(), rng)
         for _ in range(2):
@@ -250,12 +283,19 @@ def test_compact_training_replays_cpu_autocast_gradients() -> None:
 
     model = torch.nn.Sequential(torch.nn.Linear(4, 8), torch.nn.GELU(), torch.nn.Linear(8, 2))
     inputs = torch.randn(3, 4, requires_grad=True)
-    request = request_fixture(
-        partial(select_node_prefix, node_id="1"),
+    SplitRequest(
+        GraphPartition(frozenset()),
         features=SplitFeatures(training=True, retain_trace=False, batch_axes={}),
     )
     with torch.autocast("cpu", dtype=torch.bfloat16):
-        runtime = prepare_fixture(model, inputs, request)
+        graph = prepare_graph(
+            model, inputs, features=SplitFeatures(training=True, retain_trace=False, batch_axes={})
+        )
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(dag, call_ids(graph, modules=frozenset({"1"}), ops=frozenset({"1"})))
+        )
+        runtime = graph.materialize(graph.analyze(partition))
         expected = model(inputs)
     actual = runtime.run_suffix(runtime.run_training_prefix(inputs))
     assert actual.dtype == torch.bfloat16
@@ -274,12 +314,22 @@ def test_compact_training_cpu_cuda_gradient_handoff_and_update() -> None:
     model = torch.nn.Sequential(torch.nn.Linear(4, 8), torch.nn.Tanh(), torch.nn.Linear(8, 2))
     reference = copy.deepcopy(model)
     original = {name: value.detach().clone() for name, value in model.state_dict().items()}
-    request = request_fixture(
-        partial(select_node_prefix, node_id="1"),
+    SplitRequest(
+        GraphPartition(frozenset()),
         features=SplitFeatures(training=True, retain_trace=False),
         placement=PlacementPlan.across("cpu", "cuda:0"),
     )
-    runtime = prepare_fixture(model, torch.randn(3, 4), request)
+    graph = prepare_graph(
+        model,
+        torch.randn(3, 4),
+        features=SplitFeatures(training=True, retain_trace=False),
+        placement=PlacementPlan.across("cpu", "cuda:0"),
+    )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"1"}), ops=frozenset({"1"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     runtime.prefix_parameters()
     runtime.suffix_parameters()
     # Bindings expose parameter collections without promising model traversal

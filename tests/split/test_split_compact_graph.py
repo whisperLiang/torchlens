@@ -5,25 +5,20 @@ from __future__ import annotations
 import gc
 import weakref
 from dataclasses import fields, replace
-from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
-from v2_helpers import (
-    plan_fixture,
-    resolved_request,
-    select_node_prefix,
-    select_prefix,
-    split_request,
-)
+from dag_helpers import smallest_transfer_partitions
 
 from torchlens.ir.refs import TensorRef
+from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, prepare_graph
 from torchlens.split._torch_compact import compact_torch_graph
 from torchlens.split.adapters.torch import TorchSplitAdapter
 from torchlens.split.graph import SplitTraceGraph, split_graph_from_trace
 from torchlens.split.pipeline import capture_model
+from torchlens.split.planner import plan_partition
 
 
 class StatefulBranches(torch.nn.Module):
@@ -51,9 +46,7 @@ def _capture_compact(model: torch.nn.Module, x: torch.Tensor) -> tuple[SplitTrac
     trace = capture_model(
         model,
         (x,),
-        split_request(
-            lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), batch_axes={}
-        ),
+        SplitRequest(GraphPartition(frozenset()), features=SplitFeatures(batch_axes={})),
     )
     return compact_torch_graph(split_graph_from_trace(trace)), trace
 
@@ -120,7 +113,7 @@ def test_compact_graph_releases_diagnostic_payloads_and_capture_objects() -> Non
 
 
 @pytest.mark.parametrize("live_sources", [False, True])
-def test_compact_graph_replays_every_cut_after_original_capture_cleanup(
+def test_compact_native_dag_replays_without_original_capture(
     live_sources: bool,
 ) -> None:
     """Captured and live state policies survive cleanup and preserve output trees."""
@@ -128,23 +121,21 @@ def test_compact_graph_replays_every_cut_after_original_capture_cleanup(
     model = StatefulBranches().eval()
     x = torch.randn(2, 4)
     with torch.no_grad():
-        graph, trace = _capture_compact(model, x)
-        trace.cleanup()
+        graph = prepare_graph(
+            model,
+            x,
+            features=SplitFeatures(
+                retain_trace=False, live_param_sources=live_sources, batch_axes={}
+            ),
+        )
+        assert not graph.retains_trace
         expected = model(x)
-        for node in graph.compute_nodes:
-            for include in (False, True):
-                spec = split_request(
-                    partial(select_node_prefix, node_id=node.canonical_id, include=include),
-                    live_param_sources=live_sources,
-                    batch_axes={},
-                )
-                segments = TorchSplitAdapter().build_segments(
-                    graph, plan_fixture(graph, spec), resolved_request(graph, spec)
-                )
-                actual = segments.suffix(segments.prefix(x, detach_boundary=True))
-                assert actual.keys() == expected.keys()
-                for key in actual:
-                    torch.testing.assert_close(actual[key], expected[key])
+        for partition in smallest_transfer_partitions(graph):
+            runtime = graph.materialize(graph.analyze(partition))
+            actual = runtime.replay(x)
+            assert actual.keys() == expected.keys()
+            for key in actual:
+                torch.testing.assert_close(actual[key], expected[key])
 
 
 def test_compact_graph_preserves_live_parameter_buffer_and_gradient_identity() -> None:
@@ -161,14 +152,13 @@ def test_compact_graph_preserves_live_parameter_buffer_and_gradient_identity() -
     buffer_handles = [buffer.handle for node in graph.nodes for buffer in node.buffer_refs]
     assert buffer_handles and {id(handle) for handle in buffer_handles} <= buffer_ids
     trace.cleanup()
-    spec = split_request(
-        lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1),
-        live_param_sources=True,
-        batch_axes={},
+    spec = SplitRequest(
+        GraphPartition(
+            frozenset(value for call in graph.replay_calls[:2] for value in call.output_node_ids)
+        ),
+        features=SplitFeatures(live_param_sources=True, batch_axes={}),
     )
-    segments = TorchSplitAdapter().build_segments(
-        graph, plan_fixture(graph, spec), resolved_request(graph, spec)
-    )
+    segments = TorchSplitAdapter().build_segments(graph, plan_partition(graph, spec), spec)
     actual = segments.suffix(segments.training_prefix(x, detach_boundary=False))
     expected = model(x)
     parameters = tuple(model.parameters())

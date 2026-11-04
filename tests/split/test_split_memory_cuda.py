@@ -12,18 +12,18 @@ import gc
 import json
 import os
 from collections.abc import Callable
-from functools import partial
 
 import pytest
 import torch
+from dag_helpers import call_ids, close_call_ids
 from torch import nn
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    split_request,
-)
 
-from torchlens.split import ReplayBoundary, SplitRuntime
+from torchlens.split import (
+    ReplayBoundary,
+    SplitFeatures,
+    SplitRuntime,
+    prepare_graph,
+)
 
 pytestmark = [
     pytest.mark.slow,
@@ -143,11 +143,14 @@ def test_cuda_microbatch_and_detached_prefix_reduce_peak_allocated_memory(
     model = ActivationHeavySplit().cuda().eval()
     inputs = torch.randn(12, 8, 128, 128, device="cuda")
     targets = torch.randint(0, 4, (12,), device="cuda")
-    runtime = prepare_fixture(
-        model,
-        inputs[:1],
-        split_request(partial(select_node_prefix, node_id="bridge"), trainable=True),
+    graph = prepare_graph(model, inputs[:1], features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"bridge"}), ops=frozenset({"bridge"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     graph_identity = runtime.graph_identity
     split_id = runtime.split_id
     boundary = runtime.run_prefix(inputs)

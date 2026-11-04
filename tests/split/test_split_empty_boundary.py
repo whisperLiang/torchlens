@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-from functools import partial
 from pathlib import Path
 
 import pytest
 import torch
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    split_request,
-)
+from dag_helpers import call_ids, close_call_ids
 
+from torchlens.split import prepare_graph
 from torchlens.split.graph import _portable_dim
 from torchlens.split.shape_program import DimExpr
 
@@ -27,9 +23,12 @@ def test_empty_boundary_roundtrip(batch: int, tmp_path: Path) -> None:
 
             return torch.relu(x[:, :0])
 
-    runtime = prepare_fixture(
-        Model(), torch.ones(4, 4), split_request(partial(select_node_prefix, node_id="relu"))
+    graph = prepare_graph(Model(), torch.ones(4, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.batch_validation["status"] == "passed"
     boundary = runtime.run_prefix(torch.ones(batch, 4))
     for schema in boundary.spec.values():

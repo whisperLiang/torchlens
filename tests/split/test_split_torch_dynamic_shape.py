@@ -2,19 +2,12 @@
 
 from __future__ import annotations
 
-from functools import partial
-
 import pytest
 import torch
+from dag_helpers import close_call_ids, smallest_transfer_partitions
 from torch import nn
-from v2_helpers import (
-    prepare_fixture,
-    repartition_fixture,
-    select_node_prefix,
-    select_prefix,
-    split_request,
-)
 
+from torchlens.split import prepare_graph
 from torchlens.split.errors import SplitBoundaryError
 
 
@@ -111,11 +104,15 @@ def test_batch_symbolic_replay_for_view_reshape_flatten() -> None:
     torch.manual_seed(0)
     model = DynamicShapeModel().eval()
     example = torch.randn(2, 3, 4)
-    runtime = prepare_fixture(
-        model,
-        example,
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    graph = prepare_graph(model, example)
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            frozenset(call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]),
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     for batch in (1, 2, 4, 8):
         x = torch.randn(batch, 3, 4)
@@ -130,11 +127,15 @@ def test_dynamic_shape_witness_solves_attention_view_and_preserves_state() -> No
     model = AttentionLikeDynamicShapeModel().eval()
     example = torch.randn(2, 3, 8)
     rng_state = torch.random.get_rng_state().clone()
-    runtime = prepare_fixture(
-        model,
-        example,
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    graph = prepare_graph(model, example)
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            frozenset(call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]),
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     shape_program = runtime.trace_graph.shape_program
     assert shape_program.unresolved == {}
@@ -155,11 +156,15 @@ def test_reshape_does_not_guess_from_trace_batch_divisibility() -> None:
     """A coincidental trace dimension stays constant after witness disambiguation."""
 
     model = CoincidentalBatchSizedReshape().eval()
-    runtime = prepare_fixture(
-        model,
-        torch.randn(2, 4),
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    graph = prepare_graph(model, torch.randn(2, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            frozenset(call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]),
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     assert runtime.trace_graph.shape_program.unresolved == {}
     assert runtime.traced_batch_size == 1
@@ -188,11 +193,15 @@ def test_rank_change_and_reduction_use_witnesses_without_axis_guessing() -> None
     """Stack and reduction distinguish fixed trace coincidences from batch axes."""
 
     model = CoincidentalStackAndReduction().eval()
-    runtime = prepare_fixture(
-        model,
-        torch.randn(2, 4),
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    graph = prepare_graph(model, torch.randn(2, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            frozenset(call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]),
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     shape_program = runtime.trace_graph.shape_program
     assert shape_program.unresolved == {}
@@ -215,32 +224,38 @@ def test_scalar_shape_refs_are_frontier_dependencies_at_every_boundary() -> None
 
     model = ScalarShapeDependencyModel().eval()
     trace_input = torch.randn(2, 4)
-    seed_runtime = prepare_fixture(
-        model,
-        trace_input,
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    seed_graph = prepare_graph(model, trace_input)
+    seed_dag = seed_graph.compute_dag()
+    seed_partition = seed_dag.to_partition(
+        close_call_ids(
+            seed_dag,
+            frozenset(
+                call.call_id for call in seed_dag.nodes[: (len(seed_dag.nodes) - 1) * 50 // 100 + 1]
+            ),
+        )
     )
+    seed_runtime = seed_graph.materialize(seed_graph.analyze(seed_partition))
 
-    for node in seed_runtime.trace_graph.compute_nodes:
-        for point in (
-            partial(select_node_prefix, node_id=str(node.canonical_id), include=False),
-            partial(select_node_prefix, node_id=str(node.canonical_id)),
-        ):
-            runtime = repartition_fixture(seed_runtime, point)
-            for batch in (1, 3):
-                value = torch.randn(batch, 4)
-                torch.testing.assert_close(runtime.replay(value), model(value))
+    for partition in smallest_transfer_partitions(seed_runtime):
+        runtime = seed_runtime.repartition(partition)
+        for batch in (1, 3):
+            value = torch.randn(batch, 4)
+            torch.testing.assert_close(runtime.replay(value), model(value))
 
 
 def test_concat_and_slice_compile_additive_and_ceildiv_batch_expressions() -> None:
     """Semantic rules represent B+C and ceildiv(B,k) without proportional guessing."""
 
     model = AffineConcatAndSliceModel().eval()
-    runtime = prepare_fixture(
-        model,
-        torch.randn(2, 4),
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    graph = prepare_graph(model, torch.randn(2, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            frozenset(call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]),
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     shape_program = runtime.trace_graph.shape_program
     assert shape_program.unresolved == {}
@@ -257,21 +272,25 @@ def test_unresolved_shape_allows_captured_batch_and_refuses_changed_batch(segmen
     """A failed shape probe restricts changed batches across all executing segments."""
 
     model = InteriorBatchBranchModel().eval()
-    seed_runtime = prepare_fixture(
-        model,
-        torch.randn(2, 4),
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    seed_graph = prepare_graph(model, torch.randn(2, 4))
+    seed_dag = seed_graph.compute_dag()
+    seed_partition = seed_dag.to_partition(
+        close_call_ids(
+            seed_dag,
+            frozenset(
+                call.call_id for call in seed_dag.nodes[: (len(seed_dag.nodes) - 1) * 50 // 100 + 1]
+            ),
+        )
     )
+    seed_runtime = seed_graph.materialize(seed_graph.analyze(seed_partition))
     shape_program = seed_runtime.trace_graph.shape_program
     assert shape_program is not None
     assert shape_program.unresolved
-    unresolved_id = next(iter(shape_program.unresolved))
-    point = (
-        partial(select_node_prefix, node_id=str(unresolved_id))
-        if segment == "prefix"
-        else partial(select_node_prefix, node_id=str(unresolved_id), include=False)
+    dag = seed_runtime.compute_dag()
+    partition = dag.to_partition(
+        (call.call_id for call in dag.nodes) if segment == "prefix" else ()
     )
-    runtime = repartition_fixture(seed_runtime, point)
+    runtime = seed_runtime.repartition(partition)
 
     assert runtime.capability_report.preflight_ok
     assert runtime.capability_report.replay.supported
@@ -294,11 +313,15 @@ def test_capture_transaction_restores_mutable_and_new_plain_attributes() -> None
     """Preparing a runtime does not retain ordinary model-state mutations."""
 
     model = MutableCaptureStateModel().eval()
-    runtime = prepare_fixture(
-        model,
-        torch.randn(2, 4),
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+    graph = prepare_graph(model, torch.randn(2, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            frozenset(call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]),
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     assert runtime.trace_graph.shape_program.unresolved == {}
     assert model.history == ["initial"]

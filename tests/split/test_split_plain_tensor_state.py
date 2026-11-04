@@ -3,18 +3,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from functools import partial
 
 import pytest
 import torch
+from dag_helpers import call_ids, close_call_ids
 from torch import nn
-from v2_helpers import (
-    prepare_fixture,
-    request_fixture,
-    select_node_prefix,
-)
 
-from torchlens.split import GraphPartition, SplitFeatures
+from torchlens.split import GraphPartition, SplitFeatures, prepare_graph
 from torchlens.split.errors import SplitUnsupportedError
 
 
@@ -43,14 +38,14 @@ def test_plain_tensor_state_training_replacement_and_recut(retain_trace: bool) -
     torch.manual_seed(717)
     model = PlainTensorState()
     reference = deepcopy(model)
-    runtime = prepare_fixture(
-        model,
-        torch.randn(2, 4),
-        request_fixture(
-            partial(select_node_prefix, node_id="cut"),
-            features=SplitFeatures(training=True, retain_trace=retain_trace),
-        ),
+    graph = prepare_graph(
+        model, torch.randn(2, 4), features=SplitFeatures(training=True, retain_trace=retain_trace)
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"cut"}), ops=frozenset({"cut"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     optimizer = torch.optim.Adam(model.parameters(), lr=0.002)
     expected_optimizer = torch.optim.Adam(reference.parameters(), lr=0.002)
     for step in range(3):
@@ -92,14 +87,14 @@ def test_removed_plain_tensor_state_refuses_typed(retain_trace: bool) -> None:
     """Missing live state must never fall back to a stale captured value."""
 
     model = PlainTensorState()
-    runtime = prepare_fixture(
-        model,
-        torch.randn(2, 4),
-        request_fixture(
-            partial(select_node_prefix, node_id="cut"),
-            features=SplitFeatures(training=True, retain_trace=retain_trace),
-        ),
+    graph = prepare_graph(
+        model, torch.randn(2, 4), features=SplitFeatures(training=True, retain_trace=retain_trace)
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"cut"}), ops=frozenset({"cut"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     del model.stride
     with pytest.raises(SplitUnsupportedError, match="live buffer value is unavailable"):
         boundary = runtime.run_training_prefix(torch.randn(2, 4))

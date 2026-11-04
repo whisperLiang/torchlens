@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-from functools import partial
 from typing import Any
 
 import pytest
 from _paddle_subprocess import run_paddle_subprocess
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    split_request,
-)
+from dag_helpers import call_ids, close_call_ids
 
+from torchlens.split import SplitFeatures, prepare_graph
 from torchlens.split.adapters import resolve_split_adapter
 
 
@@ -36,16 +32,23 @@ def test_jax_optional_adapter_gate() -> None:
     adapter = resolve_split_adapter("jax")
 
     assert adapter.supports_replay is True
-    runtime = prepare_fixture(
-        model, x, split_request(partial(select_node_prefix, node_id="max"), backend="jax")
+    graph = prepare_graph(model, x, backend="jax")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"max"}), ops=frozenset({"max"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     replayed = runtime.replay(x)
     assert bool(jnp.allclose(replayed, model(x)))
-    trainable = prepare_fixture(
-        model,
-        x,
-        split_request(partial(select_node_prefix, node_id="max"), backend="jax", trainable=True),
+    trainable_graph = prepare_graph(model, x, backend="jax", features=SplitFeatures(training=True))
+    trainable_dag = trainable_graph.compute_dag()
+    trainable_partition = trainable_dag.to_partition(
+        close_call_ids(
+            trainable_dag,
+            call_ids(trainable_graph, modules=frozenset({"max"}), ops=frozenset({"max"})),
+        )
     )
+    trainable = trainable_graph.materialize(trainable_graph.analyze(trainable_partition))
     assert trainable.segments.training_prefix is not None
 
 
@@ -61,20 +64,27 @@ def test_tinygrad_optional_adapter_gate() -> None:
     adapter = resolve_split_adapter("tinygrad")
 
     assert adapter.supports_replay is True
-    runtime = prepare_fixture(
-        model, x, split_request(partial(select_node_prefix, node_id="where"), backend="tinygrad")
+    graph = prepare_graph(model, x, backend="tinygrad")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"where"}), ops=frozenset({"where"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     replayed = runtime.replay(x)
     assert _flatten_numbers(replayed.tolist()) == pytest.approx(
         _flatten_numbers(model(x).realize().tolist())
     )
-    trainable = prepare_fixture(
-        model,
-        x,
-        split_request(
-            partial(select_node_prefix, node_id="where"), backend="tinygrad", trainable=True
-        ),
+    trainable_graph = prepare_graph(
+        model, x, backend="tinygrad", features=SplitFeatures(training=True)
     )
+    trainable_dag = trainable_graph.compute_dag()
+    trainable_partition = trainable_dag.to_partition(
+        close_call_ids(
+            trainable_dag,
+            call_ids(trainable_graph, modules=frozenset({"where"}), ops=frozenset({"where"})),
+        )
+    )
+    trainable = trainable_graph.materialize(trainable_graph.analyze(trainable_partition))
     assert trainable.segments.training_prefix is not None
 
 
@@ -93,9 +103,14 @@ def test_mlx_optional_adapter_gate() -> None:
 
     assert adapter.supports_replay is True
     assert adapter.supports_boundary_cache is True
-    runtime = prepare_fixture(
-        model, x, split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx")
+    graph = prepare_graph(model, x, backend="mlx")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     replayed = runtime.replay(x)
     mx.eval(replayed)
     expected = model(x)
@@ -105,13 +120,15 @@ def test_mlx_optional_adapter_gate() -> None:
     assert adapter.supports_state_placement is True
     boundary = runtime.run_prefix(x).to("cpu")
     assert bool(mx.allclose(runtime.run_suffix(boundary), expected))
-    training = prepare_fixture(
-        model,
-        x,
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    training_graph = prepare_graph(model, x, backend="mlx", features=SplitFeatures(training=True))
+    training_dag = training_graph.compute_dag()
+    training_partition = training_dag.to_partition(
+        close_call_ids(
+            training_dag,
+            call_ids(training_graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"})),
+        )
     )
+    training = training_graph.materialize(training_graph.analyze(training_partition))
     assert training.run_training_prefix(x).metadata["supports_prefix_backward"]
 
 
@@ -124,9 +141,14 @@ def test_mlx_split_reconstructs_direct_multi_output() -> None:
         return list(mx.split(mx.maximum(x, 0), 2, axis=-1))
 
     x = mx.arange(8, dtype=mx.float32).reshape((2, 4)) - 3
-    runtime = prepare_fixture(
-        model, x, split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx")
+    graph = prepare_graph(model, x, backend="mlx")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     replayed = runtime.replay(x)
     expected = model(x)
     mx.eval(*replayed, *expected)
@@ -148,9 +170,14 @@ def test_mlx_split_reconstructs_nested_output_and_keeps_scalar_literals() -> Non
         return {"left": left, "right": [right, mx.add(mx.multiply(left, 2), right)]}
 
     x = mx.arange(8, dtype=mx.float32).reshape((2, 4)) - 3
-    runtime = prepare_fixture(
-        model, x, split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx")
+    graph = prepare_graph(model, x, backend="mlx")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     replayed = runtime.replay(x)
     expected = model(x)
     assert isinstance(replayed, dict)
@@ -171,10 +198,11 @@ def test_paddle_optional_adapter_gate() -> None:
 
     run_paddle_subprocess(
         """
-        from functools import partial
+        from torchlens.split import SplitFeatures, prepare_graph
+        from dag_helpers import call_ids, close_call_ids
+
 
         import paddle
-        import torchlens as tl
         from torchlens.split.adapters import resolve_split_adapter
 
         def model(x):
@@ -184,14 +212,16 @@ def test_paddle_optional_adapter_gate() -> None:
         adapter = resolve_split_adapter("paddle")
 
         assert adapter.supports_replay is True
-        runtime = prepare_fixture(model, x, split_request(partial(select_node_prefix, node_id='relu'), backend="paddle"))
+        graph = prepare_graph(model, x, backend='paddle')
+        dag = graph.compute_dag()
+        partition = dag.to_partition(close_call_ids(dag, call_ids(graph, modules=frozenset({'relu'}), ops=frozenset({'functional.relu'}))))
+        runtime = graph.materialize(graph.analyze(partition))
         replayed = runtime.replay(x)
         assert bool(paddle.allclose(replayed, model(x)).item())
-        trainable = prepare_fixture(
-            model,
-            x,
-            split_request(partial(select_node_prefix, node_id='relu'), backend="paddle", trainable=True),
-        )
+        trainable_graph = prepare_graph(model, x, backend='paddle', features=SplitFeatures(training=True))
+        trainable_dag = trainable_graph.compute_dag()
+        trainable_partition = trainable_dag.to_partition(close_call_ids(trainable_dag, call_ids(trainable_graph, modules=frozenset({'relu'}), ops=frozenset({'functional.relu'}))))
+        trainable = trainable_graph.materialize(trainable_graph.analyze(trainable_partition))
         assert trainable.segments.training_prefix is not None
         """
     )
@@ -223,14 +253,21 @@ def test_tf_optional_adapter_gate() -> None:
     adapter = resolve_split_adapter("tf")
 
     assert adapter.supports_replay is True
-    runtime = prepare_fixture(
-        model, x, split_request(partial(select_node_prefix, node_id="relu"), backend="tf")
+    graph = prepare_graph(model, x, backend="tf")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     replayed = runtime.replay(x)
     assert bool(tf.reduce_all(tf.abs(replayed - model(x)) < 1e-5).numpy())
-    trainable = prepare_fixture(
-        model,
-        x,
-        split_request(partial(select_node_prefix, node_id="relu"), backend="tf", trainable=True),
+    trainable_graph = prepare_graph(model, x, backend="tf", features=SplitFeatures(training=True))
+    trainable_dag = trainable_graph.compute_dag()
+    trainable_partition = trainable_dag.to_partition(
+        close_call_ids(
+            trainable_dag,
+            call_ids(trainable_graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})),
+        )
     )
+    trainable = trainable_graph.materialize(trainable_graph.analyze(trainable_partition))
     assert trainable.segments.training_prefix is not None

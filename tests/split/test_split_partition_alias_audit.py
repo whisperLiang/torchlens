@@ -3,18 +3,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from functools import partial
 
 import pytest
 import torch
+from dag_helpers import call_ids, close_call_ids
 from torch import nn
-from v2_helpers import (
-    prepare_fixture,
-    request_fixture,
-    select_node_prefix,
-)
 
-from torchlens.split import GraphPartition, SplitFeatures
+from torchlens.split import GraphPartition, SplitFeatures, prepare_graph
 from torchlens.split.errors import SplitUnsupportedError
 
 pytestmark = pytest.mark.usefixtures("fp64_functional")
@@ -44,14 +39,18 @@ def test_read_alias_created_before_write_keeps_forward_and_backward_truth(
 
     model = AliasRead()
     reference = deepcopy(model)
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         model,
         torch.randn(2, 4, 4),
-        request_fixture(
-            partial(select_node_prefix, node_id="activation"),
-            features=SplitFeatures(training=True, retain_trace=retain_trace),
-        ),
+        features=SplitFeatures(training=True, retain_trace=retain_trace),
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"activation"}), ops=frozenset({"activation"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     selected = frozenset(
         node.canonical_id
         for node in runtime.trace_graph.compute_nodes
@@ -86,9 +85,12 @@ def test_positional_functional_inplace_argument_is_not_missed(fresh: bool) -> No
             return nn.functional.relu(value, True) * 2
 
     model = PositionalWrite()
-    runtime = prepare_fixture(
-        model, torch.randn(2, 4), request_fixture(partial(select_node_prefix, node_id="relu"))
+    graph = prepare_graph(model, torch.randn(2, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     partition = GraphPartition(frozenset())
     if fresh:
         cut = runtime.repartition(partition)

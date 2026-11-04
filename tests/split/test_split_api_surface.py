@@ -3,14 +3,9 @@
 from __future__ import annotations
 
 import warnings
-from functools import partial
 
 import pytest
-from v2_helpers import (
-    prepare_fixture,
-    request_fixture,
-    select_node_prefix,
-)
+from dag_helpers import call_ids, close_call_ids
 
 import torchlens as tl
 from torchlens.split import (
@@ -22,6 +17,7 @@ from torchlens.split import (
     SplitRuntime,
     SplitVerificationStatus,
     prepare,
+    prepare_graph,
 )
 
 
@@ -51,7 +47,7 @@ def test_split_v2_exports_are_public() -> None:
 
 
 def test_split_request_validation() -> None:
-    """Typed points and declared batch axes reject invalid v2 requests."""
+    """Native partitions and declared batch axes reject invalid v2 requests."""
 
     request = SplitRequest(GraphPartition(frozenset({"relu_1:1"})))
     assert request.boundary.startswith("partition:")
@@ -75,11 +71,14 @@ def test_split_named_state_exchange_refuses_unsupported_backend() -> None:
 
     from torchlens.split.errors import SplitUnsupportedError
 
-    runtime = prepare_fixture(
-        torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.ReLU()),
-        torch.ones(2, 4),
-        request_fixture(selection=partial(select_node_prefix, node_id="1")),
+    graph = prepare_graph(
+        torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.ReLU()), torch.ones(2, 4)
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"1"}), ops=frozenset({"1"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     for method, args in ((runtime.state_dict, ()), (runtime.load_state_dict, ({},))):
         with pytest.raises(SplitUnsupportedError) as exc:
             method(*args)
@@ -97,7 +96,10 @@ def test_prepare_uses_supported_capture_options() -> None:
     inputs = torch.ones(2, 4)
     with warnings.catch_warnings():
         warnings.simplefilter("error", TorchLensDeprecationWarning)
-        runtime = prepare_fixture(
-            model, inputs, request_fixture(selection=partial(select_node_prefix, node_id="1"))
+        graph = prepare_graph(model, inputs)
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(dag, call_ids(graph, modules=frozenset({"1"}), ops=frozenset({"1"})))
         )
+        runtime = graph.materialize(graph.analyze(partition))
         torch.testing.assert_close(runtime.replay(inputs), model(inputs))

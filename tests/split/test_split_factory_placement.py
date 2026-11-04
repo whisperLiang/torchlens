@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
-from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    split_request,
-)
+from dag_helpers import call_ids, close_call_ids
 
-from torchlens.split import PlacementPlan
+from torchlens.split import (
+    PlacementPlan,
+    prepare_graph,
+)
 from torchlens.split.adapters.torch import (
     _GeneratedSegmentBase,
     _rewrite_placement_device_args,
@@ -119,14 +117,12 @@ def test_cpu_captured_factory_runs_on_cuda_suffix(kind: str, explicit_device: bo
     model = Model().eval()
     x = torch.randn(3, 4)
     expected = model(x)
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(
-            partial(select_node_prefix, node_id="relu"),
-            placement=PlacementPlan.across("cpu", "cuda:0"),
-        ),
+    graph = prepare_graph(model, x, placement=PlacementPlan.across("cpu", "cuda:0"))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.batch_validation["status"] == "passed"
     output = runtime.replay(x)
     assert output.device == torch.device("cuda:0")

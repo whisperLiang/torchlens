@@ -14,14 +14,15 @@ def test_parameter_binding_matches_native_training_across_batches(call_style: st
 
     run_paddle_subprocess(
         """
-        from functools import partial
+        from torchlens.split import SplitFeatures, prepare_graph
+        from dag_helpers import call_ids, close_call_ids
+
 
         CALL_STYLE = __CALL_STYLE__
 
         import copy
 
         import paddle
-        import torchlens as tl
 
         def assert_close(left, right):
             assert bool(paddle.allclose(left, right, atol=1e-5, rtol=1e-4).item())
@@ -56,10 +57,10 @@ def test_parameter_binding_matches_native_training_across_batches(call_style: st
             paddle.seed(123)
             model = Model()
             reference = copy.deepcopy(model)
-            runtime = prepare_fixture(
-                model, paddle.ones([2, 4]),
-                split_request(partial(select_node_prefix, node_id='relu'), backend='paddle', trainable=True),
-            )
+            graph = prepare_graph(model, paddle.ones([2, 4]), backend='paddle', features=SplitFeatures(training=True))
+            dag = graph.compute_dag()
+            partition = dag.to_partition(close_call_ids(dag, call_ids(graph, modules=frozenset({'relu'}), ops=frozenset({'functional.relu'}))))
+            runtime = graph.materialize(graph.analyze(partition))
             assert runtime.trace_graph.shape_program.batch_probe.status == 'passed'
             for segment, expected in (
                 (runtime.plan.prefix_node_ids, {'first.weight', 'first.bias'}),
@@ -102,10 +103,11 @@ def test_repeated_and_reversed_operands_keep_exact_live_state() -> None:
 
     run_paddle_subprocess(
         """
-        from functools import partial
+        from torchlens.split import prepare_graph
+        from dag_helpers import call_ids, close_call_ids
+
 
         import paddle
-        import torchlens as tl
 
         def assert_close(left, right):
             assert bool(paddle.allclose(left, right, atol=1e-5, rtol=1e-4).item())
@@ -131,13 +133,14 @@ def test_repeated_and_reversed_operands_keep_exact_live_state() -> None:
             paddle.set_device(device)
             paddle.seed(12)
             model = Model()
-            runtime = prepare_fixture(
-                model, paddle.ones([2, 4]), split_request(partial(select_node_prefix, node_id='relu'), backend='paddle'),
-            )
+            graph = prepare_graph(model, paddle.ones([2, 4]), backend='paddle')
+            dag = graph.compute_dag()
+            partition = dag.to_partition(close_call_ids(dag, call_ids(graph, modules=frozenset({'relu'}), ops=frozenset({'functional.relu'}))))
+            runtime = graph.materialize(graph.analyze(partition))
             assert runtime.trace_graph.shape_program.batch_probe.status == 'passed'
             for shift in (0.0, 0.2):
                 model.set_state_dict({name: value + shift for name, value in model.state_dict().items()})
-                for updated in (runtime, repartition_fixture(runtime, partial(select_node_prefix, node_id=str('relu'), include=False))):
+                for updated in (runtime, runtime.repartition(runtime.compute_dag().to_partition(close_call_ids(runtime.compute_dag(), frozenset(source for source, target, _ in runtime.compute_dag().data_edges if target in call_ids(runtime, ops=frozenset({'functional.relu'}))))))):
                     for batch in (1, 2, 4):
                         x = paddle.arange(batch * 4, dtype='float32').reshape([batch, 4]) / 7
                         assert_close(updated.replay(x), model(x))
@@ -150,19 +153,21 @@ def test_missing_state_provenance_refuses_instead_of_guessing_parameter() -> Non
 
     run_paddle_subprocess(
         """
-        from functools import partial
+        from torchlens.split import prepare_graph
+        from dag_helpers import call_ids, close_call_ids
+
 
         import paddle
-        import torchlens as tl
         from torchlens.split.errors import SplitUnsupportedError
 
         paddle.set_device('cpu')
         model = paddle.nn.Sequential(
             paddle.nn.Linear(4, 4), paddle.nn.ReLU(), paddle.nn.Linear(4, 4)
         )
-        runtime = prepare_fixture(
-            model, paddle.ones([2, 4]), split_request(partial(select_node_prefix, node_id='relu', include=False), backend='paddle'),
-        )
+        graph = prepare_graph(model, paddle.ones([2, 4]), backend='paddle')
+        dag = graph.compute_dag()
+        partition = dag.to_partition(close_call_ids(dag, frozenset(source for source, target, _ in dag.data_edges if target in call_ids(graph, modules=frozenset({'relu'}), ops=frozenset({'functional.relu'})))))
+        runtime = graph.materialize(graph.analyze(partition))
         node = next(node for node in runtime.trace_graph.nodes if node.op_type == 'functional.linear')
         marker = node.kwargs_template['weight']
         assert marker['label'] is None
@@ -182,10 +187,11 @@ def test_unwrapped_intermediate_never_becomes_a_historical_state_literal() -> No
 
     run_paddle_subprocess(
         """
-        from functools import partial
+        from torchlens.split import prepare_graph
+        from dag_helpers import call_ids, close_call_ids
+
 
         import paddle
-        import torchlens as tl
         from torchlens.backends.paddle import wrappers
         from torchlens.split.errors import SplitUnsupportedError
 
@@ -197,9 +203,10 @@ def test_unwrapped_intermediate_never_becomes_a_historical_state_literal() -> No
             hidden = paddle.add(x, paddle.ones_like(x))
             return paddle.nn.functional.relu(hidden) * 2
 
-        runtime = prepare_fixture(
-            model, paddle.ones([2, 4]), split_request(partial(select_node_prefix, node_id='relu'), backend='paddle'),
-        )
+        graph = prepare_graph(model, paddle.ones([2, 4]), backend='paddle')
+        dag = graph.compute_dag()
+        partition = dag.to_partition(close_call_ids(dag, call_ids(graph, modules=frozenset({'relu'}), ops=frozenset({'functional.relu'}))))
+        runtime = graph.materialize(graph.analyze(partition))
         try:
             runtime.replay(paddle.ones([1, 4]) * 5)
         except SplitUnsupportedError as exc:

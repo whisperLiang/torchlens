@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import copy
-from functools import partial
 
 import pytest
 import torch
+from dag_helpers import call_ids, close_call_ids
 from torch import nn
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    split_request,
-)
+
+from torchlens.split import SplitFeatures, prepare_graph
 
 pytestmark = pytest.mark.usefixtures("fp64_functional")
 
@@ -57,12 +54,22 @@ def test_uneven_microbatches_match_full_suffix_and_prefix_update() -> None:
     micro_model = copy.deepcopy(full_model)
     x = torch.randn(7, 4)
     targets = torch.randn(7, 3)
-    full_runtime = prepare_fixture(
-        full_model, x, split_request(partial(select_node_prefix, node_id="relu"), trainable=True)
+    full_graph = prepare_graph(full_model, x, features=SplitFeatures(training=True))
+    full_dag = full_graph.compute_dag()
+    full_partition = full_dag.to_partition(
+        close_call_ids(
+            full_dag, call_ids(full_graph, modules=frozenset({"relu"}), ops=frozenset({"relu"}))
+        )
     )
-    micro_runtime = prepare_fixture(
-        micro_model, x, split_request(partial(select_node_prefix, node_id="relu"), trainable=True)
+    full_runtime = full_graph.materialize(full_graph.analyze(full_partition))
+    micro_graph = prepare_graph(micro_model, x, features=SplitFeatures(training=True))
+    micro_dag = micro_graph.compute_dag()
+    micro_partition = micro_dag.to_partition(
+        close_call_ids(
+            micro_dag, call_ids(micro_graph, modules=frozenset({"relu"}), ops=frozenset({"relu"}))
+        )
     )
+    micro_runtime = micro_graph.materialize(micro_graph.analyze(micro_partition))
     full_suffix = CountingSgd(full_model.fc2.parameters(), lr=0.03)
     full_prefix = CountingSgd(full_model.fc1.parameters(), lr=0.03)
     micro_suffix = CountingSgd(micro_model.fc2.parameters(), lr=0.03)
@@ -96,9 +103,12 @@ def test_microbatch_target_callback_and_nested_targets() -> None:
     model = TinyMicrobatchMlp()
     x = torch.randn(7, 4)
     target = {"value": torch.randn(7, 3), "constant": torch.tensor(2.0)}
-    runtime = prepare_fixture(
-        model, x, split_request(partial(select_node_prefix, node_id="relu"), trainable=True)
+    graph = prepare_graph(model, x, features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     boundary = runtime.run_training_prefix(x)
     seen: list[tuple[int, int, int]] = []
 
@@ -125,11 +135,12 @@ def test_run_prefix_has_no_autograd_graph_but_training_prefix_does() -> None:
     """Frozen prefix execution owns no autograd graph; training remains connected."""
 
     model = TinyMicrobatchMlp()
-    runtime = prepare_fixture(
-        model,
-        torch.randn(2, 4),
-        split_request(partial(select_node_prefix, node_id="relu"), trainable=True),
+    graph = prepare_graph(model, torch.randn(2, 4), features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     detached = runtime.run_prefix(torch.randn(7, 4))
     assert all(
         not value.requires_grad
@@ -154,9 +165,12 @@ def test_microbatch_refuses_invalid_size_and_non_torch_backend() -> None:
 
     model = TinyMicrobatchMlp()
     x = torch.randn(7, 4)
-    runtime = prepare_fixture(
-        model, x, split_request(partial(select_node_prefix, node_id="relu"), trainable=True)
+    graph = prepare_graph(model, x, features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     boundary = runtime.run_prefix(x)
     with pytest.raises(ValueError, match="positive"):
         runtime.train_suffix(boundary, torch.randn(7, 3), microbatch_size=0)

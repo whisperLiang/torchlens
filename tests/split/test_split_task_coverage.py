@@ -12,14 +12,14 @@ from importlib.util import find_spec
 
 import pytest
 import torch
+from dag_helpers import close_call_ids, smallest_transfer_partitions
 from torch import nn
-from v2_helpers import (
-    prepare_fixture,
-    select_prefix,
-    split_request,
-)
 
-from torchlens.split import PlacementPlan
+from torchlens.split import (
+    PlacementPlan,
+    SplitFeatures,
+    prepare_graph,
+)
 
 pytestmark = [pytest.mark.slow, pytest.mark.real_model]
 
@@ -69,13 +69,15 @@ def test_image_classification_resnet18_replay_and_train() -> None:
     # canonical B=1 capture is legal for this architecture.
     model = torchvision.models.resnet18(weights=None, num_classes=10).eval()
     example = torch.randn(2, 3, 64, 64)
-    runtime = prepare_fixture(
-        model,
-        example,
-        split_request(
-            (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)), trainable=True
-        ),
+    graph = prepare_graph(model, example, features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            frozenset(call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]),
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     assert runtime.traced_batch_size == 1
     capture_id = id(runtime.trace)
@@ -116,14 +118,20 @@ def test_text_classification_distilbert_replay_and_train() -> None:
     model = transformers.DistilBertForSequenceClassification(config).eval()
     input_ids = torch.randint(0, 128, (2, 8))
     attention_mask = torch.ones(2, 8, dtype=torch.long)
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         model,
         input_ids,
-        split_request(
-            (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)), trainable=True
-        ),
+        features=SplitFeatures(training=True),
         input_kwargs={"attention_mask": attention_mask},
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            frozenset(call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]),
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.traced_batch_size == 1
     capture_id = id(runtime.trace)
     for batch in (1, 2, 3):
@@ -176,17 +184,23 @@ def test_object_detection_rfdetr_representative_splits() -> None:
     model = RFDETRTensorModel(detector.model.model).eval()
     example = torch.randn(1, 3, 384, 384)
     with torch.no_grad():
-        seed = prepare_fixture(
-            model,
-            example,
-            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1)),
+        seed_graph = prepare_graph(model, example)
+        seed_dag = seed_graph.compute_dag()
+        seed_partition = seed_dag.to_partition(
+            close_call_ids(
+                seed_dag,
+                frozenset(
+                    call.call_id
+                    for call in seed_dag.nodes[: (len(seed_dag.nodes) - 1) * 25 // 100 + 1]
+                ),
+            )
         )
+        seed = seed_graph.materialize(seed_graph.analyze(seed_partition))
     assert seed.traced_batch_size == 1
     capture_id = id(seed.trace_graph)
     graph_id = seed.graph_identity
-    nodes = seed.trace_graph.compute_nodes
-    for count in ((len(nodes) + 3) // 4, (len(nodes) + 1) // 2, (3 * len(nodes) + 1) // 4):
-        runtime = seed.repartition(select_prefix(seed.trace_graph, count))
+    for partition in smallest_transfer_partitions(seed):
+        runtime = seed.repartition(partition)
         x = torch.randn(1, 3, 384, 384)
         with torch.no_grad():
             _nested_allclose(runtime.replay(x), model(x), atol=2e-3)
@@ -211,13 +225,15 @@ def test_semantic_segmentation_deeplabv3_replay_and_train() -> None:
         aux_loss=False,
     ).eval()
     example = torch.randn(2, 3, 64, 64)
-    runtime = prepare_fixture(
-        model,
-        example,
-        split_request(
-            (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)), trainable=True
-        ),
+    graph = prepare_graph(model, example, features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            frozenset(call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]),
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.traced_batch_size == 1
     capture_id = id(runtime.trace)
     for batch in (1, 2):
@@ -249,14 +265,15 @@ def test_resnet18_cpu_prefix_cuda_suffix_when_available() -> None:
     torch.manual_seed(0)
     model = torchvision.models.resnet18(weights=None, num_classes=10).eval()
     example = torch.randn(1, 3, 64, 64)
-    runtime = prepare_fixture(
-        model,
-        example,
-        split_request(
-            (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
-            placement=PlacementPlan.across("cpu", "cuda:0"),
-        ),
+    graph = prepare_graph(model, example, placement=PlacementPlan.across("cpu", "cuda:0"))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            frozenset(call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]),
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     x = torch.randn(2, 3, 64, 64)
     with torch.no_grad():
         replayed = runtime.replay(x)

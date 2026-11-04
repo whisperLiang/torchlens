@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pytest
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    split_request,
-)
+from dag_helpers import call_ids, close_call_ids, smallest_transfer_partitions
+
+from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, prepare_graph
 
 mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 
@@ -34,19 +31,22 @@ def _split_merge(x: Any) -> Any:
     return mx.add(mx.multiply(left, 2), right)
 
 
-def test_mlx_replays_every_supported_cut_at_changed_batches() -> None:
-    """One MLX capture supports cuts before and after each multi-output call."""
+def test_mlx_replays_native_dag_partitions_at_changed_batches() -> None:
+    """One MLX capture supports every native-legal multi-output DAG partition."""
 
-    seed = prepare_fixture(
-        _split_merge,
-        _input(2),
-        split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx"),
+    seed_graph = prepare_graph(_split_merge, _input(2), backend="mlx")
+    seed_dag = seed_graph.compute_dag()
+    seed_partition = seed_dag.to_partition(
+        close_call_ids(
+            seed_dag,
+            call_ids(seed_graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"})),
+        )
     )
+    seed = seed_graph.materialize(seed_graph.analyze(seed_partition))
     graph = seed.trace_graph
     assert graph.shape_program.batch_probe.status == "passed"
-    dag = seed.compute_dag()
-    for count in range(len(dag.nodes) + 1):
-        runtime = seed.repartition(dag.to_partition(c.call_id for c in dag.nodes[:count]))
+    for partition in smallest_transfer_partitions(seed):
+        runtime = seed.repartition(partition)
         assert runtime.trace_graph is graph
         for batch in (1, 3, 7):
             x = _input(batch)
@@ -64,11 +64,14 @@ def test_mlx_reshape_rewrites_only_the_shape_operand() -> None:
         reshaped = mx.reshape(hidden, shape=(hidden.shape[0], -1))
         return mx.multiply(reshaped, 2)
 
-    runtime = prepare_fixture(
-        model,
-        _input(2),
-        split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx"),
+    graph = prepare_graph(model, _input(2), backend="mlx")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     x = _input(7)
     replayed, expected = runtime.replay(x), model(x)
     mx.eval(replayed, expected)
@@ -84,17 +87,29 @@ def test_mlx_binds_nested_inputs_and_keyword_arrays() -> None:
         return mx.add(hidden, extra["offset"])
 
     x = _input(2)
-    request = split_request(
-        partial(select_node_prefix, node_id="maximum"),
+    SplitRequest(
+        GraphPartition(frozenset()),
         backend="mlx",
-        batch_axes={"/args/0/a": 0, "/args/0/z": 0, "/kwargs/extra/offset": 0},
+        features=SplitFeatures(
+            batch_axes={"/args/0/a": 0, "/args/0/z": 0, "/kwargs/extra/offset": 0}
+        ),
     )
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         model,
         {"z": x, "a": mx.multiply(x, 3)},
-        request,
+        backend="mlx",
+        features=SplitFeatures(
+            batch_axes={"/args/0/a": 0, "/args/0/z": 0, "/kwargs/extra/offset": 0}
+        ),
         input_kwargs={"extra": {"offset": mx.add(x, 1)}},
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     x = _input(3)
     pair = {"a": mx.multiply(x, 3), "z": x}
     kwargs = {"extra": {"offset": mx.add(x, 1)}}
@@ -111,11 +126,14 @@ def test_mlx_shared_input_identities_must_be_preserved() -> None:
         return mx.subtract(mx.maximum(x, 0), y)
 
     example = _input(2)
-    runtime = prepare_fixture(
-        model,
-        (example, example),
-        split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx"),
+    graph = prepare_graph(model, (example, example), backend="mlx")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     x = _input(3)
     replayed, expected = runtime.replay(x, x), model(x, x)
     mx.eval(replayed, expected)
@@ -145,11 +163,14 @@ def test_mlx_replays_native_module_calls_with_captured_parameters() -> None:
             return self.output(mx.maximum(self.hidden(x), 0))
 
     model = Model()
-    runtime = prepare_fixture(
-        model,
-        _input(2),
-        split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx"),
+    graph = prepare_graph(model, _input(2), backend="mlx")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     for batch in (1, 3):
         x = _input(batch)
         replayed, expected = runtime.replay(x), model(x)
@@ -161,13 +182,16 @@ def test_mlx_replays_native_module_calls_with_captured_parameters() -> None:
 def test_mlx_boundary_cache_round_trips_split_outputs(tmp_path: Path) -> None:
     """Native MLX boundary values survive signed cache save/load and suffix replay."""
 
-    runtime = prepare_fixture(
-        _split_merge,
-        _input(2),
-        split_request(
-            partial(select_node_prefix, node_id="split_1_3"), backend="mlx", boundary_cache=True
-        ),
+    graph = prepare_graph(
+        _split_merge, _input(2), backend="mlx", features=SplitFeatures(boundary_cache=True)
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"split_1_3"}), ops=frozenset({"split"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     x = _input(3)
     boundary = runtime.run_prefix(x)
     assert len(boundary.tensors) == 2
@@ -189,11 +213,14 @@ def test_mlx_reconstructs_one_final_leaf_from_a_multi_output_call() -> None:
         left, right = mx.split(hidden, 2, axis=-1)
         return {"right": right, "sum": mx.add(left, right), "meta": ("mlx", 2, None, [])}
 
-    runtime = prepare_fixture(
-        model,
-        _input(2),
-        split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx"),
+    graph = prepare_graph(model, _input(2), backend="mlx")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     x = _input(3)
     replayed, expected = runtime.replay(x), model(x)
     assert tuple(replayed) == tuple(expected) == ("right", "sum", "meta")

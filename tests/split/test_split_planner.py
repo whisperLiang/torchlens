@@ -3,18 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from functools import partial
 
 import pytest
-from v2_helpers import (
-    plan_fixture,
-    select_node_prefix,
-    select_prefix,
-    split_request,
-)
 
+from torchlens.split import GraphPartition, SplitRequest
 from torchlens.split.errors import SplitRequestError
 from torchlens.split.graph import SplitTraceGraph, SplitTraceNode
+from torchlens.split.planner import plan_partition
 
 
 def _node(
@@ -83,25 +78,15 @@ def _graph(extra: tuple[SplitTraceNode, ...] = ()) -> SplitTraceGraph:
     )
 
 
-def test_inclusive_prefix_frontier_includes_skip() -> None:
-    """Splitting after ReLU includes both primary and residual skip tensors."""
+def test_residual_dag_frontier_includes_every_live_value() -> None:
+    """An explicit native assignment communicates both residual values."""
 
-    plan = plan_fixture(_graph(), split_request(partial(select_node_prefix, node_id="relu")))
+    plan = plan_partition(
+        _graph(), SplitRequest(GraphPartition(frozenset({"linear_1_1", "relu_1_1"})))
+    )
 
     assert "relu_1_1" in plan.prefix_node_ids
     assert set(plan.boundary_node_ids) == {"relu_1_1", "linear_1_1"}
-    roles = {item.label: item.role for item in plan.boundary_spec.values()}
-    assert roles["relu_1_1"] == "activation"
-    assert roles["linear_1_1"] == "activation"
-
-
-def test_excluded_merge_passes_direct_parents() -> None:
-    """The prefix passes direct parents of the excluded merge across the boundary."""
-
-    plan = plan_fixture(
-        _graph(), split_request(partial(select_node_prefix, node_id="add_1_1", include=False))
-    )
-
     roles = {item.label: item.role for item in plan.boundary_spec.values()}
     assert roles["relu_1_1"] == "activation"
     assert roles["linear_1_1"] == "activation"
@@ -120,7 +105,9 @@ def test_container_frontier_binds_schema_keys_to_canonical_values() -> None:
             for node in graph.nodes
         ),
     )
-    plan = plan_fixture(graph, split_request(partial(select_node_prefix, node_id="relu")))
+    plan = plan_partition(
+        graph, SplitRequest(GraphPartition(frozenset({"linear_1_1", "relu_1_1"})))
+    )
 
     assert plan.boundary_bindings == {
         "linear_1_1@'features'.1": "linear_1_1",
@@ -152,20 +139,7 @@ def test_frontier_refuses_colliding_container_keys() -> None:
     )
 
     with pytest.raises(SplitRequestError, match="duplicate canonical value bindings"):
-        plan_fixture(
-            graph, split_request(partial(select_node_prefix, node_id="merge", include=False))
-        )
-
-
-def test_prefix_count_selects_eligible_compute_node() -> None:
-    """Prefix selection indexes eligible compute nodes only."""
-
-    plan = plan_fixture(
-        _graph(),
-        split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
-    )
-
-    assert "relu_1_1" in plan.prefix_node_ids
+        plan_partition(graph, SplitRequest(GraphPartition(frozenset({"value@0", "value"}))))
 
 
 def test_terminal_compute_without_output_node_keeps_boundary() -> None:
@@ -183,15 +157,13 @@ def test_terminal_compute_without_output_node_keeps_boundary() -> None:
         traced_batch_size=2,
     )
 
-    plan = plan_fixture(
-        graph, split_request(partial(select_node_prefix, node_id="dense_1"), backend="tf")
-    )
+    plan = plan_partition(graph, SplitRequest(GraphPartition(frozenset({"dense_1"})), backend="tf"))
 
     assert plan.suffix_node_ids == frozenset()
     assert plan.boundary_node_ids == ("dense_1",)
 
 
-def test_before_first_compute_keeps_input_when_call_group_id_is_shared() -> None:
+def test_input_sources_do_not_join_atomic_native_calls() -> None:
     """Input placeholders sharing a backend call ID are not part of the compute group."""
 
     graph = SplitTraceGraph(
@@ -207,11 +179,9 @@ def test_before_first_compute_keeps_input_when_call_group_id_is_shared() -> None
         traced_batch_size=2,
     )
 
-    plan = plan_fixture(
+    plan = plan_partition(
         graph,
-        split_request(
-            partial(select_node_prefix, node_id="linear_1", include=False), backend="paddle"
-        ),
+        SplitRequest(GraphPartition(frozenset()), backend="paddle"),
     )
 
     assert "input_1" in plan.prefix_node_ids
@@ -222,7 +192,6 @@ def test_invalid_canonical_partition_ids() -> None:
     """Missing, ambiguous display, input, output and buffer IDs all refuse typed."""
     from torchlens.split import GraphPartition, SplitRequest
     from torchlens.split.errors import SplitUnsupportedError
-    from torchlens.split.planner import plan_partition
 
     graph = _graph((_node("buffer_1_1", is_buffer=True, raw_index=5),))
     for node_id in ("missing", "raw_", "input_1_1", "output_1_1", "buffer_1_1"):
@@ -259,10 +228,12 @@ def test_repeated_layer_labels_require_canonical_target() -> None:
         traced_batch_size=2,
     )
 
-    with pytest.raises(SplitRequestError, match="ambiguous"):
-        plan_fixture(graph, split_request(partial(select_node_prefix, node_id="relu_1_1")))
+    from torchlens.split.errors import SplitUnsupportedError
 
-    plan = plan_fixture(graph, split_request(partial(select_node_prefix, node_id="relu_1_1:2")))
-
-    assert "relu_1_1:2" in plan.prefix_node_ids
+    with pytest.raises(SplitUnsupportedError) as caught:
+        plan_partition(graph, SplitRequest(GraphPartition(frozenset({"relu_1_1"}))))
+    assert caught.value.context.reason == "partition_node_invalid"
+    plan = plan_partition(
+        graph, SplitRequest(GraphPartition(frozenset({"relu_1_1:1", "relu_1_1:2"})))
+    )
     assert plan.boundary_node_ids == ("relu_1_1:2",)

@@ -2,17 +2,11 @@
 
 from __future__ import annotations
 
-from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pytest
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    select_prefix,
-    split_request,
-)
+from dag_helpers import call_ids, close_call_ids
 
 from torchlens.split import prepare_graph
 from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
@@ -103,14 +97,15 @@ def test_tinygrad_split_does_not_bind_derived_weight_to_its_buffers() -> None:
 
     model = Model()
     x = Tensor([3.0, 4.0], device="CPU").realize()
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(
-            lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1),
-            backend="tinygrad",
-        ),
+    graph = prepare_graph(model, x, backend="tinygrad")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            frozenset(call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]),
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.replay(x).tolist() == model(x).tolist() == [14.0, 26.0]
 
 
@@ -170,9 +165,12 @@ def test_jax_split_replay_preserves_integer_dict_and_list_containers() -> None:
         return {0: result, 1: [result + 1.0, (result + 2.0, {3: result + 3.0})]}
 
     x = jnp.ones((2, 3))
-    runtime = prepare_fixture(
-        model, x, split_request(partial(select_node_prefix, node_id="max"), backend="jax")
+    graph = prepare_graph(model, x, backend="jax")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"max"}), ops=frozenset({"max"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.batch_validation["status"] == "passed"
     for batch in (1, 2, 4):
         replay_x = jnp.arange(batch * 3, dtype=jnp.float32).reshape(batch, 3) - 2.0
@@ -204,9 +202,12 @@ def test_tf_split_replay_preserves_integer_dict_and_list_containers() -> None:
         return {0: result, 1: [result + 1.0]}
 
     x = tf.ones((2, 3), dtype=tf.float32)
-    runtime = prepare_fixture(
-        model, x, split_request(partial(select_node_prefix, node_id="relu"), backend="tf")
+    graph = prepare_graph(model, x, backend="tf")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     output = runtime.replay(x)
     assert isinstance(output, dict)
     assert isinstance(output[1], list)
@@ -226,11 +227,14 @@ def test_jax_batch_symbolic_replay_for_reshape() -> None:
         return jnp.maximum(flat, 0) * 2.0
 
     x = jnp.ones((2, 3, 2))
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(partial(select_node_prefix, node_id="reshape"), backend="jax"),
+    graph = prepare_graph(model, x, backend="jax")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"reshape"}), ops=frozenset({"reshape"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     for batch in (1, 2, 4):
         replay_x = jnp.ones((batch, 3, 2))
@@ -247,13 +251,15 @@ def test_jax_batch_symbolic_replay_for_broadcast_bias() -> None:
         return hidden * 2.0
 
     x = jnp.ones((2, 4))
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(
-            partial(select_node_prefix, node_id="broadcast_in_dim_2_3_raw"), backend="jax"
-        ),
+    graph = prepare_graph(model, x, backend="jax")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            call_ids(graph, ops=frozenset({"broadcast_in_dim"})),
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     for batch in (1, 2, 4):
         replay_x = jnp.ones((batch, 4))
@@ -270,11 +276,14 @@ def test_jax_batch_symbolic_preserves_fixed_dim_matching_trace_batch() -> None:
         return jnp.maximum(flat, 0)
 
     x = jnp.ones((2, 1, 2))
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(partial(select_node_prefix, node_id="reshape"), backend="jax"),
+    graph = prepare_graph(model, x, backend="jax")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"reshape"}), ops=frozenset({"reshape"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     for batch in (1, 2, 4):
         replay_x = jnp.ones((batch, 1, 2))
@@ -291,11 +300,14 @@ def test_tf_batch_symbolic_replay_for_reshape() -> None:
         return tf.nn.relu(flat) * 2.0
 
     x = tf.ones((2, 3, 2), dtype=tf.float32)
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(partial(select_node_prefix, node_id="reshape"), backend="tf"),
+    graph = prepare_graph(model, x, backend="tf")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"reshape"}), ops=frozenset({"reshape"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     for batch in (1, 2, 4):
         replay_x = tf.ones((batch, 3, 2), dtype=tf.float32)
@@ -313,11 +325,14 @@ def test_tf_batch_symbolic_preserves_fixed_dim_matching_trace_batch() -> None:
         return tf.nn.relu(flat)
 
     x = tf.ones((2, 1, 2), dtype=tf.float32)
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(partial(select_node_prefix, node_id="reshape"), backend="tf"),
+    graph = prepare_graph(model, x, backend="tf")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"reshape"}), ops=frozenset({"reshape"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     for batch in (1, 2, 4):
         replay_x = tf.ones((batch, 1, 2), dtype=tf.float32)
@@ -335,11 +350,14 @@ def test_tinygrad_batch_symbolic_replay_for_reshape() -> None:
         return flat.relu() * 2.0
 
     x = tinygrad.Tensor.ones(2, 3, 2).realize()
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(partial(select_node_prefix, node_id="reshape_3"), backend="tinygrad"),
+    graph = prepare_graph(model, x, backend="tinygrad")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"reshape_3"}), ops=frozenset({"reshape"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     # B=1 may retain a singleton UOp that B=2 optimizes away. The native
     # output comparison must still run without inventing aligned shape rows.
@@ -362,11 +380,14 @@ def test_tinygrad_unaligned_shape_probe_still_requires_numeric_equivalence() -> 
         flat = x.reshape(x.shape[0], -1)
         return flat.relu() * (3.0 if x.shape[0] >= 2 else 2.0)
 
-    runtime = prepare_fixture(
-        model,
-        tinygrad.Tensor.ones(2, 3, 2).realize(),
-        split_request(partial(select_node_prefix, node_id="reshape_3"), backend="tinygrad"),
+    graph = prepare_graph(model, tinygrad.Tensor.ones(2, 3, 2).realize(), backend="tinygrad")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"reshape_3"}), ops=frozenset({"reshape"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.batch_validation["status"] == "failed"
     assert "numeric mismatch" in runtime.batch_validation["reason"]
     singleton = tinygrad.Tensor.ones(1, 3, 2).realize()
@@ -385,11 +406,14 @@ def test_tinygrad_batch_symbolic_accepts_untested_batch() -> None:
         return flat.relu() * 2.0
 
     x = tinygrad.Tensor.ones(2, 3, 2).realize()
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(partial(select_node_prefix, node_id="reshape_3"), backend="tinygrad"),
+    graph = prepare_graph(model, x, backend="tinygrad")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"reshape_3"}), ops=frozenset({"reshape"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     replay_x = tinygrad.Tensor.ones(5, 3, 2).realize()
     actual = runtime.replay(replay_x)
@@ -409,11 +433,14 @@ def test_tinygrad_batch_symbolic_rejects_non_batch_dim_change() -> None:
         return flat.relu() * 2.0
 
     x = tinygrad.Tensor.ones(2, 3, 2).realize()
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(partial(select_node_prefix, node_id="reshape_3"), backend="tinygrad"),
+    graph = prepare_graph(model, x, backend="tinygrad")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"reshape_3"}), ops=frozenset({"reshape"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     with pytest.raises((SplitUnsupportedError, ValueError, RuntimeError)):
         runtime.replay(tinygrad.Tensor.ones(2, 4, 2).realize())

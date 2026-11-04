@@ -1,4 +1,4 @@
-"""Opt-in Paddle real-world split replay tests."""
+"""Paddle real-model native DAG replay tests."""
 
 from __future__ import annotations
 
@@ -14,14 +14,15 @@ pytestmark = [pytest.mark.slow, pytest.mark.real_model]
 
 def test_paddle_layer_model_split_replay_batch_symbolic_and_train() -> None:
     """Paddle Layer stack exercises preview split replay and training on real modules."""
-
     _skip_unless_enabled()
     _skip_if_module_missing("paddle")
     _run_backend_subprocess(
         """
         import paddle
-        import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
+        from dag_helpers import close_call_ids
+
+        from torchlens.split import SplitFeatures, prepare_graph
+
 
         class PaddleMLP(paddle.nn.Layer):
             def __init__(self):
@@ -34,54 +35,60 @@ def test_paddle_layer_model_split_replay_batch_symbolic_and_train() -> None:
             def forward(self, x):
                 return self.fc2(self.relu(self.fc1(self.flatten(x))))
 
+
         paddle.seed(0)
         model = PaddleMLP()
         model.eval()
         x = paddle.ones([2, 2, 3], dtype="float32")
-        runtime = prepare_fixture(
-            model,
-            x,
-            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), backend="paddle"),
+        graph = prepare_graph(model, x, backend="paddle")
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag, frozenset((call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 25 // 100 + 1]))
+            )
         )
+        runtime = graph.materialize(graph.analyze(partition))
         for batch in (1, 2, 4):
             replay_x = paddle.ones([batch, 2, 3], dtype="float32")
             diff = paddle.max(paddle.abs(runtime.replay(replay_x) - model(replay_x)))
-            assert float(diff.item()) < 1e-5
-
+            assert float(diff.item()) < 1e-05
         model.train()
-        train_runtime = prepare_fixture(
-            model,
-            x,
-            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), backend="paddle", trainable=True),
+        train_graph = prepare_graph(model, x, backend="paddle", features=SplitFeatures(training=True))
+        train_dag = train_graph.compute_dag()
+        train_partition = train_dag.to_partition(
+            close_call_ids(
+                train_dag,
+                frozenset(
+                    (call.call_id for call in train_dag.nodes[: (len(train_dag.nodes) - 1) * 25 // 100 + 1])
+                ),
+            )
         )
+        train_runtime = train_graph.materialize(train_graph.analyze(train_partition))
         boundary = train_runtime.run_training_prefix(x)
-        loss, grads = train_runtime.train_suffix(
-            boundary,
-            paddle.zeros([2, 3], dtype="float32"),
-        )
+        loss, grads = train_runtime.train_suffix(boundary, paddle.zeros([2, 3], dtype="float32"))
         assert float(loss.item()) >= 0.0
         assert grads
         assert train_runtime.backward_prefix(boundary, grads)
-        """,
+
+        """
     )
 
 
 def test_paddle_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
     """Paddle split training runs CPU prefix and GPU suffix for multiple batches."""
-
     _skip_unless_enabled()
     _skip_if_module_missing("paddle")
     _run_backend_subprocess(
         """
-        from functools import partial
-
         import paddle
-        import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_node_prefix, select_prefix
+        from dag_helpers import close_call_ids
+
+        from torchlens.split import SplitFeatures, prepare_graph
 
         if paddle.device.cuda.device_count() == 0:
             print("No Paddle GPU available for CPU-prefix/GPU-suffix split training.")
             raise SystemExit(75)
+
 
         class PaddleTrainMlp(paddle.nn.Layer):
             def __init__(self):
@@ -93,33 +100,35 @@ def test_paddle_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
             def forward(self, x):
                 return self.fc2(self.relu(self.fc1(x)))
 
+
         def assert_place(tensor, token):
             assert token in str(tensor.place).lower(), tensor.place
+
 
         paddle.seed(123)
         paddle.set_device("cpu")
         model = PaddleTrainMlp()
         trace_x = paddle.randn([2, 4], dtype="float32")
-        seed_runtime = prepare_fixture(
-            model,
-            trace_x,
-            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="paddle", trainable=True),
+        seed_graph = prepare_graph(model, trace_x, backend="paddle", features=SplitFeatures(training=True))
+        seed_dag = seed_graph.compute_dag()
+        seed_partition = seed_dag.to_partition(
+            close_call_ids(
+                seed_dag,
+                frozenset(
+                    (call.call_id for call in seed_dag.nodes[: (len(seed_dag.nodes) - 1) * 50 // 100 + 1])
+                ),
+            )
         )
+        seed_runtime = seed_graph.materialize(seed_graph.analyze(seed_partition))
         relu_id = next(
-            node.canonical_id
-            for node in seed_runtime.trace_graph.compute_nodes
-            if "relu" in node.op_type
+            (node.canonical_id for node in seed_runtime.trace_graph.compute_nodes if "relu" in node.op_type)
         )
-        runtime = prepare_fixture(
-            model,
-            trace_x,
-            split_request(
-                partial(select_node_prefix, node_id=relu_id),
-                backend="paddle",
-                trainable=True,
-            ),
+        graph = prepare_graph(model, trace_x, backend="paddle", features=SplitFeatures(training=True))
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(dag, frozenset({graph.trace_graph.replay_call_by_output_id[relu_id].call_id}))
         )
-
+        runtime = graph.materialize(graph.analyze(partition))
         for batch in (1, 3):
             paddle.set_device("cpu")
             train_x = paddle.randn([batch, 4], dtype="float32")
@@ -127,43 +136,40 @@ def test_paddle_split_train_cpu_prefix_gpu_suffix_cross_batch() -> None:
             boundary_cpu = runtime.run_training_prefix(train_x)
             for value in boundary_cpu.tensors.values():
                 assert_place(value, "cpu")
-
             model.fc2.to("gpu:0")
             paddle.set_device("gpu:0")
             boundary_gpu = boundary_cpu.to("gpu:0", adapter=runtime.adapter)
             for value in boundary_gpu.tensors.values():
                 assert_place(value, "gpu")
-
             targets = paddle.zeros([batch, 3], dtype="float32")
             loss, grads_gpu = runtime.train_suffix(boundary_gpu, targets)
             assert_place(loss, "gpu")
             assert grads_gpu
             for grad in grads_gpu.values():
                 assert_place(grad, "gpu")
-
             grads_cpu = {key: grad.cpu() for key, grad in grads_gpu.items()}
             model.fc2.to("cpu")
             paddle.set_device("cpu")
             prefix_result = runtime.backward_prefix(boundary_cpu, grads_cpu)
             assert prefix_result
             assert train_x.grad is not None
+
         """,
         timeout=240,
     )
 
 
-def test_paddle_mlp_all_split_nodes_cross_batch_and_device() -> None:
-    """Every compute-node before/after split replays for a Paddle Layer MLP."""
-
+def test_paddle_mlp_smallest_dag_partitions_cross_batch_and_device() -> None:
+    """The smallest native DAG partitions replay for a Paddle Layer MLP."""
     _skip_unless_enabled()
     _skip_if_module_missing("paddle")
     _run_backend_subprocess(
         """
-        from functools import partial
-
         import paddle
-        import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
+        from dag_helpers import smallest_transfer_partitions
+
+        from torchlens.split import prepare_graph
+
 
         class PaddleMLP(paddle.nn.Layer):
             def __init__(self):
@@ -175,36 +181,24 @@ def test_paddle_mlp_all_split_nodes_cross_batch_and_device() -> None:
             def forward(self, x):
                 return self.fc2(self.relu(self.fc1(x)))
 
+
         def assert_place(tensor, token):
             assert token in str(tensor.place).lower(), tensor.place
 
-        if paddle.device.cuda.device_count() == 0:
-            print("No Paddle GPU available for CPU-prefix/GPU-suffix all-node replay.")
-            raise SystemExit(75)
 
+        if paddle.device.cuda.device_count() == 0:
+            print("No Paddle GPU available for CPU-prefix/GPU-suffix DAG partition replay.")
+            raise SystemExit(75)
         paddle.seed(0)
         paddle.set_device("cpu")
         model = PaddleMLP()
         model.eval()
         x = paddle.ones([2, 6], dtype="float32")
-        seed_runtime = prepare_fixture(
-            model,
-            x,
-            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="paddle"),
-        )
-        boundaries = [
-            partial(select_node_prefix, node_id=node.canonical_id, include=include)
-            for node in seed_runtime.trace_graph.compute_nodes
-            for include in (False, True)
-        ]
-        for boundary in boundaries:
+        dag_graph_1 = prepare_graph(model, x, backend="paddle")
+        for boundary in smallest_transfer_partitions(dag_graph_1):
             paddle.set_device("cpu")
             model.to("cpu")
-            runtime = prepare_fixture(
-                model,
-                x,
-                split_request(boundary, backend="paddle"),
-            )
+            runtime = dag_graph_1.materialize(dag_graph_1.analyze(boundary))
             for batch in (1, 3):
                 paddle.set_device("cpu")
                 model.to("cpu")
@@ -212,7 +206,6 @@ def test_paddle_mlp_all_split_nodes_cross_batch_and_device() -> None:
                 boundary_cpu = runtime.run_prefix(replay_x_cpu)
                 for value in boundary_cpu.tensors.values():
                     assert_place(value, "cpu")
-
                 model.to("gpu:0")
                 paddle.set_device("gpu:0")
                 boundary_gpu = boundary_cpu.to("gpu:0", adapter=runtime.adapter)
@@ -223,7 +216,8 @@ def test_paddle_mlp_all_split_nodes_cross_batch_and_device() -> None:
                 full_output = model(replay_x_gpu)
                 assert_place(split_output, "gpu")
                 diff = paddle.max(paddle.abs(split_output - full_output))
-                assert float(diff.item()) < 1e-5
+                assert float(diff.item()) < 1e-05
+
         """,
         timeout=240,
     )
@@ -231,15 +225,16 @@ def test_paddle_mlp_all_split_nodes_cross_batch_and_device() -> None:
 
 def test_paddle_transformer_block_split_replay_batch_symbolic_and_device() -> None:
     """A Paddle attention/FFN block replays representative splits across batch/device."""
-
     _skip_unless_enabled()
     _skip_if_module_missing("paddle")
     _run_backend_subprocess(
         """
         import paddle
         import paddle.nn.functional as F
-        import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
+        from dag_helpers import smallest_transfer_partitions
+
+        from torchlens.split import prepare_graph
+
 
         class PaddleTransformerBlock(paddle.nn.Layer):
             def __init__(self):
@@ -255,49 +250,49 @@ def test_paddle_transformer_block_split_replay_batch_symbolic_and_device() -> No
                 query = self.q(x)
                 key = self.k(x)
                 value = self.v(x)
-                scores = paddle.matmul(query, key, transpose_y=True) / (8 ** 0.5)
+                scores = paddle.matmul(query, key, transpose_y=True) / 8**0.5
                 attn = F.softmax(scores, axis=-1)
                 hidden = self.o(paddle.matmul(attn, value)) + x
                 return self.ff2(F.relu(self.ff1(hidden))) + hidden
+
 
         paddle.seed(0)
         devices = ["cpu"]
         if paddle.device.cuda.device_count() > 0:
             devices.append("gpu:0")
-
         for device in devices:
             paddle.set_device(device)
             model = PaddleTransformerBlock()
             model.eval()
             x = paddle.ones([2, 4, 8], dtype="float32")
-            for boundary in (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1)):
-                runtime = prepare_fixture(
-                    model,
-                    x,
-                    split_request(boundary, backend="paddle"),
-                )
+            dag_graph_1 = prepare_graph(model, x, backend="paddle")
+            for boundary in smallest_transfer_partitions(dag_graph_1):
+                runtime = dag_graph_1.materialize(dag_graph_1.analyze(boundary))
                 for batch in (1, 3):
                     replay_x = paddle.ones([batch, 4, 8], dtype="float32")
                     diff = paddle.max(paddle.abs(runtime.replay(replay_x) - model(replay_x)))
-                    assert float(diff.item()) < 1e-5
+                    assert float(diff.item()) < 1e-05
+
         """,
         timeout=240,
     )
 
 
 def test_paddle_official_vision_models_split_replay_batch_symbolic() -> None:
-    """Official Paddle vision models replay representative splits across dynamic batch."""
-
+    """Official Paddle vision models replay native DAG partitions across dynamic batch."""
     _skip_unless_enabled()
     _skip_if_module_missing("paddle")
     _run_backend_subprocess(
         """
         import paddle
-        import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
+        from dag_helpers import smallest_transfer_partitions
 
-        def assert_close(left, right, *, atol=1e-5, rtol=1e-4):
+        from torchlens.split import prepare_graph
+
+
+        def assert_close(left, right, *, atol=1e-05, rtol=0.0001):
             assert bool(paddle.allclose(left, right, atol=atol, rtol=rtol).item())
+
 
         def assert_model_replays(name, factory, shape):
             paddle.seed(0)
@@ -305,53 +300,43 @@ def test_paddle_official_vision_models_split_replay_batch_symbolic() -> None:
             model = factory()
             model.eval()
             x = paddle.ones(shape, dtype="float32")
-            for boundary in (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1)):
-                runtime = prepare_fixture(
-                    model,
-                    x,
-                    split_request(boundary, backend="paddle"),
-                )
+            dag_graph_1 = prepare_graph(model, x, backend="paddle")
+            for boundary in smallest_transfer_partitions(dag_graph_1):
+                runtime = dag_graph_1.materialize(dag_graph_1.analyze(boundary))
                 for batch in (1, 3):
                     replay_x = paddle.ones([batch, *shape[1:]], dtype="float32")
                     assert_close(runtime.replay(replay_x), model(replay_x))
+
 
         assert_model_replays(
             "resnet18",
             lambda: paddle.vision.models.resnet18(pretrained=False, num_classes=10),
             [2, 3, 32, 32],
         )
-        assert_model_replays(
-            "lenet",
-            lambda: paddle.vision.models.LeNet(num_classes=10),
-            [2, 1, 28, 28],
-        )
+        assert_model_replays("lenet", lambda: paddle.vision.models.LeNet(num_classes=10), [2, 1, 28, 28])
         assert_model_replays(
             "mobilenet_v2",
-            lambda: paddle.vision.models.mobilenet_v2(
-                pretrained=False,
-                scale=0.25,
-                num_classes=10,
-            ),
+            lambda: paddle.vision.models.mobilenet_v2(pretrained=False, scale=0.25, num_classes=10),
             [2, 3, 32, 32],
         )
+
         """,
         timeout=240,
     )
 
 
-def test_paddle_complete_multiscale_detector_all_nodes_cross_batch() -> None:
-    """Paddle's complete multiscale detector graph replays at every boundary."""
-
+def test_paddle_complete_multiscale_detector_smallest_dag_partitions_cross_batch() -> None:
+    """Paddle's complete multiscale detector graph replays the smallest native DAG partitions."""
     _skip_unless_enabled()
     _skip_if_module_missing("paddle")
     _run_backend_subprocess(
         """
-        from functools import partial
-
         import paddle
         import paddle.nn.functional as F
-        import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_node_prefix, select_prefix
+        from dag_helpers import smallest_transfer_partitions
+
+        from torchlens.split import GraphPartition, prepare_graph
+
 
         class CompletePaddleDetector(paddle.nn.Layer):
             def __init__(self):
@@ -385,40 +370,35 @@ def test_paddle_complete_multiscale_detector_all_nodes_cross_batch() -> None:
                     ],
                     axis=1,
                 )
-                return predictions[:, :, :4], F.sigmoid(predictions[:, :, 4:])
+                return (predictions[:, :, :4], F.sigmoid(predictions[:, :, 4:]))
+
 
         paddle.set_device("cpu")
         paddle.seed(0)
         model = CompletePaddleDetector()
         model.eval()
         trace_x = paddle.ones([1, 3, 32, 32], dtype="float32")
-        seed_runtime = prepare_fixture(
-            model,
-            trace_x,
-            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="paddle"),
-        )
-        boundaries = [
-            (kind, node.canonical_id)
-            for node in seed_runtime.trace_graph.compute_nodes
-            for kind in ("before", "after")
-        ]
+        seed_graph = prepare_graph(model, trace_x, backend="paddle")
+        seed_dag = seed_graph.compute_dag()
+        seed_partition = seed_dag.to_partition(())
+        seed_runtime = seed_graph.materialize(seed_graph.analyze(seed_partition))
+        boundaries = smallest_transfer_partitions(seed_runtime)
         assert boundaries
-        for kind, node_id in boundaries:
-            point = partial(select_node_prefix, node_id=str(node_id)) if kind == "after" else partial(select_node_prefix, node_id=str(node_id), include=False)
-            runtime = repartition_fixture(seed_runtime, point)
+        for point in boundaries:
+            runtime = seed_runtime.repartition(point)
             actual = runtime.replay(trace_x)
             expected = model(trace_x)
             for actual_leaf, expected_leaf in zip(actual, expected, strict=True):
-                assert float(paddle.max(paddle.abs(actual_leaf - expected_leaf)).item()) < 1e-4
-
+                assert float(paddle.max(paddle.abs(actual_leaf - expected_leaf)).item()) < 0.0001
         for batch in (2, 3):
-            runtime = repartition_fixture(seed_runtime, split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="paddle").partition)
+            runtime = seed_runtime.repartition(GraphPartition(frozenset()))
             replay_x = paddle.ones([batch, 3, 32, 32], dtype="float32")
             actual = runtime.replay(replay_x)
             expected = model(replay_x)
             for actual_leaf, expected_leaf in zip(actual, expected, strict=True):
                 assert actual_leaf.shape == expected_leaf.shape
-                assert float(paddle.max(paddle.abs(actual_leaf - expected_leaf)).item()) < 1e-4
+                assert float(paddle.max(paddle.abs(actual_leaf - expected_leaf)).item()) < 0.0001
+
         """,
         timeout=600,
     )
@@ -426,37 +406,33 @@ def test_paddle_complete_multiscale_detector_all_nodes_cross_batch() -> None:
 
 def test_paddle_official_resnet_cross_batch_and_device() -> None:
     """Official Paddle ResNet18 replays CPU-prefix/GPU-suffix boundaries."""
-
     _skip_unless_enabled()
     _skip_if_module_missing("paddle")
     _run_backend_subprocess(
         """
         import paddle
-        import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
+        from dag_helpers import smallest_transfer_partitions
+
+        from torchlens.split import prepare_graph
 
         if paddle.device.cuda.device_count() == 0:
             print("No Paddle GPU available for official ResNet cross-device replay.")
             raise SystemExit(75)
 
+
         def assert_place(tensor, token):
             assert token in str(tensor.place).lower(), tensor.place
 
-        paddle.seed(0)
 
-        for boundary in (lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 25 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 75 // 100 + 1)):
-            paddle.set_device("cpu")
-            model = paddle.vision.models.resnet18(pretrained=False, num_classes=10)
-            model.eval()
-            # FP32 CPU and GPU kernels differ more than the split replay error
-            # budget here. FP64 isolates boundary transport and replay fidelity.
-            model.to(dtype="float64")
-            trace_x = paddle.ones([2, 3, 32, 32], dtype="float64")
-            runtime = prepare_fixture(
-                model,
-                trace_x,
-                split_request(boundary, backend="paddle"),
-            )
+        paddle.seed(0)
+        paddle.set_device("cpu")
+        model = paddle.vision.models.resnet18(pretrained=False, num_classes=10)
+        model.eval()
+        model.to(dtype="float64")
+        trace_x = paddle.ones([2, 3, 32, 32], dtype="float64")
+        dag_graph_1 = prepare_graph(model, trace_x, backend="paddle")
+        for boundary in smallest_transfer_partitions(dag_graph_1):
+            runtime = dag_graph_1.materialize(dag_graph_1.analyze(boundary))
             for batch in (1, 3):
                 paddle.set_device("cpu")
                 model.to("cpu")
@@ -466,8 +442,7 @@ def test_paddle_official_resnet_cross_batch_and_device() -> None:
                     assert_place(value, "cpu")
                 cpu_split_output = runtime.run_suffix(boundary_cpu)
                 cpu_full_output = model(replay_x_cpu)
-                assert float(paddle.max(paddle.abs(cpu_split_output - cpu_full_output)).item()) < 1e-9
-
+                assert float(paddle.max(paddle.abs(cpu_split_output - cpu_full_output)).item()) < 1e-09
                 model.to("gpu:0")
                 paddle.set_device("gpu:0")
                 boundary_gpu = boundary_cpu.to("gpu:0", adapter=runtime.adapter)
@@ -477,56 +452,42 @@ def test_paddle_official_resnet_cross_batch_and_device() -> None:
                 split_output = runtime.run_suffix(boundary_gpu)
                 full_output = model(replay_x_gpu)
                 assert_place(split_output, "gpu")
-                assert float(paddle.max(paddle.abs(split_output - full_output)).item()) < 1e-9
+                assert float(paddle.max(paddle.abs(split_output - full_output)).item()) < 1e-09
+
         """,
         timeout=300,
     )
 
 
-def test_paddle_official_lenet_all_split_nodes_cross_batch_and_device() -> None:
-    """Every split before/after node replays for official Paddle LeNet across batch/device."""
-
+def test_paddle_official_lenet_smallest_dag_partitions_cross_batch_and_device() -> None:
+    """The smallest native DAG partitions replay for official Paddle LeNet across batch/device."""
     _skip_unless_enabled()
     _skip_if_module_missing("paddle")
     _run_backend_subprocess(
         """
-        from functools import partial
-
         import paddle
-        import torchlens as tl
-        from v2_helpers import prepare_fixture, analyze_fixture, repartition_fixture, request_fixture, fixture_partition, select_prefix, select_node_prefix
+        from dag_helpers import smallest_transfer_partitions
+
+        from torchlens.split import prepare_graph
+
 
         def assert_place(tensor, token):
             assert token in str(tensor.place).lower(), tensor.place
 
-        if paddle.device.cuda.device_count() == 0:
-            print("No Paddle GPU available for CPU-prefix/GPU-suffix LeNet all-node replay.")
-            raise SystemExit(75)
 
+        if paddle.device.cuda.device_count() == 0:
+            print("No Paddle GPU available for CPU-prefix/GPU-suffix LeNet DAG partition replay.")
+            raise SystemExit(75)
         paddle.seed(0)
         paddle.set_device("cpu")
         model = paddle.vision.models.LeNet(num_classes=10)
         model.eval()
         x = paddle.ones([2, 1, 28, 28], dtype="float32")
-        seed_runtime = prepare_fixture(
-            model,
-            x,
-            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), backend="paddle"),
-        )
-        boundaries = [
-            partial(select_node_prefix, node_id=node.canonical_id, include=include)
-            for node in seed_runtime.trace_graph.compute_nodes
-            if node.parents
-            for include in (False, True)
-        ]
-        for boundary in boundaries:
+        dag_graph_1 = prepare_graph(model, x, backend="paddle")
+        for boundary in smallest_transfer_partitions(dag_graph_1):
             paddle.set_device("cpu")
             model.to("cpu")
-            runtime = prepare_fixture(
-                model,
-                x,
-                split_request(boundary, backend="paddle"),
-            )
+            runtime = dag_graph_1.materialize(dag_graph_1.analyze(boundary))
             for batch in (1, 3):
                 paddle.set_device("cpu")
                 model.to("cpu")
@@ -534,7 +495,6 @@ def test_paddle_official_lenet_all_split_nodes_cross_batch_and_device() -> None:
                 boundary_cpu = runtime.run_prefix(replay_x_cpu)
                 for value in boundary_cpu.tensors.values():
                     assert_place(value, "cpu")
-
                 model.to("gpu:0")
                 paddle.set_device("gpu:0")
                 boundary_gpu = boundary_cpu.to("gpu:0", adapter=runtime.adapter)
@@ -545,7 +505,8 @@ def test_paddle_official_lenet_all_split_nodes_cross_batch_and_device() -> None:
                 full_output = model(replay_x_gpu)
                 assert_place(split_output, "gpu")
                 diff = paddle.max(paddle.abs(split_output - full_output))
-                assert float(diff.item()) < 1e-5
+                assert float(diff.item()) < 1e-05
+
         """,
         timeout=240,
     )

@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from functools import partial
 from typing import Any
 
 import pytest
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    split_request,
-)
+from dag_helpers import call_ids, close_call_ids
+
+from torchlens.split import SplitFeatures, prepare_graph
 
 mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 nn = pytest.importorskip("mlx.nn", exc_type=ImportError)
@@ -57,16 +54,20 @@ def test_mlx_microbatches_match_logical_gradients(reduction: str, size: int) -> 
     reference = deepcopy(model)
     x = mx.arange(20, dtype=mx.float32).reshape(5, 4) / 7 - 0.8
     targets = {"answer": mx.cos(x)}
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         model,
         x,
-        split_request(
-            partial(select_node_prefix, node_id="transpose_1"),
-            backend="mlx",
-            trainable=True,
-            placement=tl.split.PlacementPlan.on(mx.new_stream(mx.cpu)),
-        ),
+        backend="mlx",
+        placement=tl.split.PlacementPlan.on(mx.new_stream(mx.cpu)),
+        features=SplitFeatures(training=True),
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"transpose_1"}), ops=frozenset({"transpose"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
 
     def loss(output: Any, target: Any) -> Any:
         """Apply the requested additive reduction over nested targets."""
@@ -109,13 +110,14 @@ def test_mlx_cached_microbatch_updates_suffix_once() -> None:
 
     model = _Model()
     x = mx.arange(20, dtype=mx.float32).reshape(5, 4) / 10
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, x, backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     optimizer = optim.SGD(0.01)
     seen: list[tuple[int, int, int]] = []
 
@@ -158,13 +160,14 @@ def test_mlx_stateful_microbatches_match_native_sequential_chunks() -> None:
     reference = deepcopy(model)
     x = mx.sin(mx.arange(20, dtype=mx.float32).reshape(5, 4) / 3)
     targets = mx.cos(x)
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, x, backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
 
     def native_loss(values: Any) -> Any:
         """Compute one weighted logical objective over sequential native chunks."""

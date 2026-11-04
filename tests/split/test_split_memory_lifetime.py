@@ -3,20 +3,13 @@
 from __future__ import annotations
 
 import weakref
-from functools import partial
 from typing import Any
 
 import pytest
 import torch
-from v2_helpers import (
-    prepare_fixture,
-    repartition_fixture,
-    select_node_prefix,
-    select_prefix,
-    split_request,
-)
+from dag_helpers import close_call_ids, smallest_transfer_partitions
 
-from torchlens.split import pipeline
+from torchlens.split import SplitFeatures, pipeline, prepare_graph
 from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
 
 
@@ -40,21 +33,23 @@ def test_replay_releases_dead_tensor_objects_within_segment(
     x = torch.randn(2, 8)
     model = Chain()
     with torch.no_grad():
-        seed = prepare_fixture(
-            model,
-            x,
-            split_request(
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1),
-                retain_trace=True,
-            ),
+        seed_graph = prepare_graph(model, x, features=SplitFeatures(retain_trace=True))
+        seed_dag = seed_graph.compute_dag()
+        seed_partition = seed_dag.to_partition(
+            close_call_ids(
+                seed_dag,
+                frozenset(
+                    call.call_id
+                    for call in seed_dag.nodes[: (len(seed_dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
         )
-    nodes = seed.trace_graph.compute_nodes
-    point = (
-        partial(select_node_prefix, node_id=str(nodes[-1].canonical_id))
-        if segment_name == "prefix"
-        else partial(select_node_prefix, node_id=str(nodes[0].canonical_id), include=False)
+        seed = seed_graph.materialize(seed_graph.analyze(seed_partition))
+    dag = seed.compute_dag()
+    partition = dag.to_partition(
+        (call.call_id for call in dag.nodes) if segment_name == "prefix" else ()
     )
-    runtime = repartition_fixture(seed, point)
+    runtime = seed.repartition(partition)
     segment = getattr(runtime.segments, segment_name)
     execute = segment._execute_func
     references: list[weakref.ReferenceType[torch.Tensor]] = []
@@ -101,22 +96,25 @@ def test_every_cut_keeps_multioutput_aliases_and_early_output() -> None:
     model = AliasedBranches()
     x = torch.randn(2, 8)
     with torch.no_grad():
-        seed = prepare_fixture(
-            model,
-            x,
-            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+        seed_graph = prepare_graph(model, x)
+        seed_dag = seed_graph.compute_dag()
+        seed_partition = seed_dag.to_partition(
+            close_call_ids(
+                seed_dag,
+                frozenset(
+                    call.call_id
+                    for call in seed_dag.nodes[: (len(seed_dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
         )
+        seed = seed_graph.materialize(seed_graph.analyze(seed_partition))
         expected = model(x)
-        for node in seed.trace_graph.compute_nodes:
-            for point in (
-                partial(select_node_prefix, node_id=str(node.canonical_id), include=False),
-                partial(select_node_prefix, node_id=str(node.canonical_id)),
-            ):
-                runtime = repartition_fixture(seed, point)
-                actual = runtime.replay(x)
-                assert actual.keys() == expected.keys()
-                for name in expected:
-                    torch.testing.assert_close(actual[name], expected[name])
+        for partition in smallest_transfer_partitions(seed):
+            runtime = seed.repartition(partition)
+            actual = runtime.replay(x)
+            assert actual.keys() == expected.keys()
+            for name in expected:
+                torch.testing.assert_close(actual[name], expected[name])
     assert not seed.retains_trace
 
 
@@ -127,13 +125,15 @@ def test_graph_connected_replay_still_computes_input_gradients() -> None:
     x = torch.randn(2, 8, requires_grad=True)
     expected = model(x)
     expected_grad = torch.autograd.grad(expected.sum(), x)[0]
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(
-            lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1), trainable=True
-        ),
+    graph = prepare_graph(model, x, features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            frozenset(call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]),
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     boundary = runtime.run_training_prefix(x)
     actual = runtime.run_suffix(boundary)
     actual_grad = torch.autograd.grad(actual.sum(), x)[0]
@@ -148,17 +148,37 @@ def test_cuda_replay_peak_tracks_frontier_not_chain_length() -> None:
 
     x = torch.ones(2, 32768, device="cuda")
     with torch.no_grad():
-        seed = prepare_fixture(
-            Chain(),
-            x,
-            split_request(
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1),
-                batch_axes={},
-            ),
+        seed_graph = prepare_graph(Chain(), x, features=SplitFeatures(batch_axes={}))
+        seed_dag = seed_graph.compute_dag()
+        seed_partition = seed_dag.to_partition(
+            close_call_ids(
+                seed_dag,
+                frozenset(
+                    call.call_id
+                    for call in seed_dag.nodes[: (len(seed_dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
         )
+        seed = seed_graph.materialize(seed_graph.analyze(seed_partition))
         first = seed.trace_graph.compute_nodes[0]
-        runtime = repartition_fixture(
-            seed, partial(select_node_prefix, node_id=str(first.canonical_id), include=False)
+        runtime = seed.repartition(
+            seed.compute_dag().to_partition(
+                close_call_ids(
+                    seed.compute_dag(),
+                    frozenset(
+                        source
+                        for source, target, _ in seed.compute_dag().data_edges
+                        if target
+                        in frozenset(
+                            {
+                                seed.trace_graph.replay_call_by_output_id[
+                                    str(first.canonical_id)
+                                ].call_id
+                            }
+                        )
+                    ),
+                )
+            )
         )
         torch.cuda.synchronize()
         baseline = torch.cuda.memory_allocated()
@@ -204,14 +224,17 @@ def test_probe_releases_witness_capture_before_generated_replay(
     monkeypatch.setattr(pipeline, "capture_model", observe_capture)
     monkeypatch.setattr(pipeline, "execute_split_runtime", observe_segments)
     with torch.no_grad():
-        runtime = prepare_fixture(
-            Chain(),
-            torch.ones(4, 8),
-            split_request(
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1),
-                retain_trace=True,
-            ),
+        graph = prepare_graph(Chain(), torch.ones(4, 8), features=SplitFeatures(retain_trace=True))
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag,
+                frozenset(
+                    call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
         )
+        runtime = graph.materialize(graph.analyze(partition))
     assert checked
     assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
     assert all(op.out is not None for op in runtime.trace)
@@ -243,14 +266,17 @@ def test_shape_witness_omits_values_without_changing_retained_trace(
 
     monkeypatch.setattr(pipeline, "capture_model", observe)
     with torch.no_grad():
-        runtime = prepare_fixture(
-            Chain(),
-            torch.ones(4, 8),
-            split_request(
-                lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1),
-                retain_trace=True,
-            ),
+        graph = prepare_graph(Chain(), torch.ones(4, 8), features=SplitFeatures(retain_trace=True))
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag,
+                frozenset(
+                    call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
         )
+        runtime = graph.materialize(graph.analyze(partition))
     assert len(observations) == 2
     assert observations[0][0] == 1
     assert observations[0][1] > 0 and observations[0][2] > 0
@@ -288,11 +314,17 @@ def test_failed_shape_witness_never_recaptures_with_full_values(
     inputs = torch.ones(4, 8)
     rng = torch.random.get_rng_state().clone()
     with torch.no_grad():
-        runtime = prepare_fixture(
-            MutatingModel(),
-            inputs,
-            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+        graph = prepare_graph(MutatingModel(), inputs)
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag,
+                frozenset(
+                    call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
         )
+        runtime = graph.materialize(graph.analyze(partition))
     assert attempts == [True, False]
     assert runtime.batch_validation["status"] == "failed", runtime.batch_validation
     assert "scalar parent requires saved arguments" in runtime.batch_validation["reason"]

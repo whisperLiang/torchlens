@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from functools import partial
 
 import pytest
 import torch
+from dag_helpers import call_ids, close_call_ids
 from torch import nn
-from v2_helpers import (
-    prepare_fixture,
-    request_fixture,
-    select_node_prefix,
-)
 
-from torchlens.split import GraphPartition, PlacementPlan, SplitFeatures, prepare_graph
+from torchlens.split import (
+    GraphPartition,
+    PlacementPlan,
+    SplitFeatures,
+    prepare_graph,
+)
 from torchlens.split.errors import SplitUnsupportedError
 
 pytestmark = pytest.mark.usefixtures("fp64_functional")
@@ -43,14 +43,16 @@ def test_eval_batchnorm_state_stays_frozen_across_partition_and_recut(
         .eval()
     )
     reference = deepcopy(model)
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         model,
         torch.randn(4, 4, device=device),
-        request_fixture(
-            partial(select_node_prefix, node_id="2"),
-            features=SplitFeatures(training=True, retain_trace=retain_trace),
-        ),
+        features=SplitFeatures(training=True, retain_trace=retain_trace),
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"2"}), ops=frozenset({"2"})))
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     selected = frozenset(
         node.canonical_id
         for node in runtime.trace_graph.compute_nodes

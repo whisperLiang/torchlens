@@ -2,19 +2,14 @@
 
 from __future__ import annotations
 
-from functools import partial
 from typing import Any
 
 import numpy as np
 import pytest
 import torch
-from v2_helpers import (
-    prepare_fixture,
-    select_node_prefix,
-    select_prefix,
-    split_request,
-)
+from dag_helpers import call_ids, close_call_ids
 
+from torchlens.split import prepare_graph
 from torchlens.split.adapters.torch import TorchSplitAdapter
 from torchlens.split.batching import rebatch_inputs
 from torchlens.split.errors import SplitUnsupportedError
@@ -36,11 +31,12 @@ def test_same_geometry_aliases_preserve_the_captured_branch() -> None:
 
     example = torch.ones(4, 4)
     model = Model()
-    runtime = prepare_fixture(
-        model,
-        (example, example.view_as(example)),
-        split_request(partial(select_node_prefix, node_id="add")),
+    graph = prepare_graph(model, (example, example.view_as(example)))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"add"}), ops=frozenset({"add"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.batch_validation["status"] == "passed"
     torch.testing.assert_close(example, torch.ones_like(example))
     for batch in (1, 2, 4):
@@ -105,11 +101,20 @@ def test_partial_overlap_prepare_refuses_before_capture(monkeypatch: pytest.Monk
     monkeypatch.setattr(pipeline, "capture_model", unexpected_capture)
     source = torch.ones(4, 5)
     with pytest.raises(SplitUnsupportedError, match="input alias relationship"):
-        prepare_fixture(
-            torch.nn.Identity(),
-            (source[:, :4], source[:, 1:]),
-            split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
+        capture_2_graph = prepare_graph(torch.nn.Identity(), (source[:, :4], source[:, 1:]))
+        capture_2_dag = capture_2_graph.compute_dag()
+        capture_2_partition = capture_2_dag.to_partition(
+            close_call_ids(
+                capture_2_dag,
+                frozenset(
+                    call.call_id
+                    for call in capture_2_dag.nodes[
+                        : (len(capture_2_dag.nodes) - 1) * 50 // 100 + 1
+                    ]
+                ),
+            )
         )
+        capture_2_graph.materialize(capture_2_graph.analyze(capture_2_partition))
 
 
 def test_disjoint_views_of_one_storage_remain_independent() -> None:

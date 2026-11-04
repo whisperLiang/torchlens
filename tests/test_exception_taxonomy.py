@@ -1395,7 +1395,7 @@ def test_split_exception_submodule_contract(
     assert issubclass(cls, split_errors.SplitError)
     assert issubclass(cls, builtin_base)
     context = split_errors.SplitErrorContext(
-        backend="torch", split_point="before:relu", reason="test boundary"
+        backend="torch", split_point="partition:test", reason="test boundary"
     )
     error = cls("split refused", context=context)
     assert error.code == code

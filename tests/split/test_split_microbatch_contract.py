@@ -6,22 +6,17 @@ import copy
 import weakref
 from collections import namedtuple
 from dataclasses import replace
-from functools import partial
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
+from dag_helpers import call_ids, close_call_ids
 from torch import nn
-from v2_helpers import (
-    prepare_fixture,
-    repartition_fixture,
-    select_node_prefix,
-    split_request,
-)
 
 import torchlens as tl
+from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, prepare_graph
 from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
 from torchlens.split.shape_program import DimExpr
 from torchlens.split.training import train_suffix_result
@@ -102,10 +97,16 @@ def _prepare(model: nn.Module | None = None) -> tuple[Any, torch.Tensor, torch.T
     torch.manual_seed(314)
     model = ContractMlp() if model is None else model
     x, targets = torch.randn(7, 4), torch.randn(7, 3)
+    capture_1_graph = prepare_graph(model, x, features=SplitFeatures(training=True))
+    capture_1_dag = capture_1_graph.compute_dag()
+    capture_1_partition = capture_1_dag.to_partition(
+        close_call_ids(
+            capture_1_dag,
+            call_ids(capture_1_graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})),
+        )
+    )
     return (
-        prepare_fixture(
-            model, x, split_request(partial(select_node_prefix, node_id="relu"), trainable=True)
-        ),
+        capture_1_graph.materialize(capture_1_graph.analyze(capture_1_partition)),
         x,
         targets,
     )
@@ -130,11 +131,26 @@ def test_nonleading_batch_and_shared_value_match_full_prefix_backward() -> None:
     shared = torch.randn(6, requires_grad=True)
     micro_shared = shared.detach().clone().requires_grad_(True)
     targets = torch.randn(7, 3)
-    request = split_request(
-        partial(select_node_prefix, node_id="sin"), trainable=True, batch_axes={"/args/0": 0}
+    SplitRequest(
+        GraphPartition(frozenset()),
+        features=SplitFeatures(training=True, batch_axes={"/args/0": 0}),
     )
-    full = prepare_fixture(model, (x, shared), request)
-    micro = prepare_fixture(micro_model, (x, micro_shared), request)
+    full_graph = prepare_graph(
+        model, (x, shared), features=SplitFeatures(training=True, batch_axes={"/args/0": 0})
+    )
+    full_dag = full_graph.compute_dag()
+    full_partition = full_dag.to_partition(frozenset(call.call_id for call in full_dag.nodes[:3]))
+    full = full_graph.materialize(full_graph.analyze(full_partition))
+    micro_graph = prepare_graph(
+        micro_model,
+        (x, micro_shared),
+        features=SplitFeatures(training=True, batch_axes={"/args/0": 0}),
+    )
+    micro_dag = micro_graph.compute_dag()
+    micro_partition = micro_dag.to_partition(
+        frozenset(call.call_id for call in micro_dag.nodes[:3])
+    )
+    micro = micro_graph.materialize(micro_graph.analyze(micro_partition))
     boundary = full.run_training_prefix(x, shared)
     micro_boundary = micro.run_training_prefix(x, micro_shared)
     assert sorted(tuple(value.shape) for value in boundary.tensors.values()) == [(6,), (6, 7)]
@@ -153,7 +169,14 @@ def test_residual_and_integer_frontier_matches_full_and_stays_reusable() -> None
     """Slice every batched crossing, exclude integer gradients, and preserve input."""
 
     runtime, x, targets = _prepare(ResidualAndIndexModel())
-    runtime = repartition_fixture(runtime, partial(select_node_prefix, node_id="argmax"))
+    runtime = runtime.repartition(
+        runtime.compute_dag().to_partition(
+            close_call_ids(
+                runtime.compute_dag(),
+                call_ids(runtime, modules=frozenset({"relu"}), ops=frozenset({"argmax"})),
+            )
+        )
+    )
     boundary = runtime.run_prefix(x)
     snapshots = {key: value.clone() for key, value in boundary.tensors.items()}
     integer_keys = {key for key, value in boundary.tensors.items() if not value.is_floating_point()}
@@ -174,7 +197,14 @@ def test_integer_chunk_mutation_does_not_write_caller_boundary(
     """Nondifferentiable inputs need storage isolation just like autograd roots."""
 
     runtime, x, targets = _prepare(ResidualAndIndexModel())
-    runtime = repartition_fixture(runtime, partial(select_node_prefix, node_id="argmax"))
+    runtime = runtime.repartition(
+        runtime.compute_dag().to_partition(
+            close_call_ids(
+                runtime.compute_dag(),
+                call_ids(runtime, modules=frozenset({"relu"}), ops=frozenset({"argmax"})),
+            )
+        )
+    )
     boundary = runtime.run_prefix(x)
     snapshots = {key: value.clone() for key, value in boundary.tensors.items()}
     execute = runtime.segments.suffix._execute_nodes
@@ -253,9 +283,14 @@ def test_sum_reduction_matches_full_batch_and_optimizer_is_lazy() -> None:
     full, x, targets = _prepare()
     micro_model = ContractMlp()
     micro_model.load_state_dict(full.model.state_dict())
-    micro = prepare_fixture(
-        micro_model, x, split_request(partial(select_node_prefix, node_id="relu"), trainable=True)
+    micro_graph = prepare_graph(micro_model, x, features=SplitFeatures(training=True))
+    micro_dag = micro_graph.compute_dag()
+    micro_partition = micro_dag.to_partition(
+        close_call_ids(
+            micro_dag, call_ids(micro_graph, modules=frozenset({"relu"}), ops=frozenset({"relu"}))
+        )
     )
+    micro = micro_graph.materialize(micro_graph.analyze(micro_partition))
     full_optimizer = CountingAdam(full.model.fc2.parameters())
     micro_optimizer = CountingAdam(micro.model.fc2.parameters())
     boundary = full.run_prefix(x)

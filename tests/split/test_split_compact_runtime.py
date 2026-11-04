@@ -4,44 +4,19 @@ from __future__ import annotations
 
 import gc
 import weakref
-from functools import partial
 from typing import Any
 
 import pytest
 import torch
-from v2_helpers import (
-    FixtureRequest,
-    prepare_fixture,
-    repartition_fixture,
-    request_fixture,
-    select_node_prefix,
-    select_prefix,
+from dag_helpers import close_call_ids, smallest_transfer_partitions
+
+from torchlens.split import (
+    PlacementPlan,
+    SplitFeatures,
+    pipeline,
+    prepare_graph,
 )
-
-from torchlens.split import PlacementPlan, SplitFeatures, pipeline
 from torchlens.split.errors import SplitUnsupportedError
-
-
-def _request(
-    *,
-    retain_trace: bool | None = None,
-    training: bool = False,
-    live_param_sources: bool | None = None,
-    batch_axes: dict[str, int] | None = None,
-) -> FixtureRequest:
-    """Build a typed request without opting existing fixtures into retention."""
-
-    return request_fixture(
-        selection=lambda g, count=50: select_prefix(
-            g, (len(g.compute_nodes) - 1) * count // 100 + 1
-        ),
-        features=SplitFeatures(
-            retain_trace=retain_trace,
-            training=training,
-            live_param_sources=live_param_sources,
-            batch_axes=batch_axes,
-        ),
-    )
 
 
 class AllocationChain(torch.nn.Module):
@@ -62,7 +37,23 @@ def test_inference_defaults_to_compact_recuttable_runtime(retain_trace: bool | N
     model = AllocationChain()
     x = torch.randn(3, 4)
     with torch.no_grad():
-        runtime = prepare_fixture(model, x, _request(retain_trace=retain_trace))
+        graph = prepare_graph(
+            model,
+            x,
+            features=SplitFeatures(
+                retain_trace=retain_trace, training=False, live_param_sources=None, batch_axes=None
+            ),
+        )
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag,
+                frozenset(
+                    call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
+        )
+        runtime = graph.materialize(graph.analyze(partition))
         assert not runtime.retains_trace
         assert runtime._trace is None
         with pytest.raises(SplitUnsupportedError, match="retain_trace=True"):
@@ -71,20 +62,38 @@ def test_inference_defaults_to_compact_recuttable_runtime(retain_trace: bool | N
         expected = model(x)
         for changed in (
             runtime,
-            repartition_fixture(
-                runtime,
-                partial(
-                    select_node_prefix,
-                    node_id=str(runtime.trace_graph.compute_nodes[0].canonical_id),
-                    include=False,
-                ),
+            runtime.repartition(
+                runtime.compute_dag().to_partition(
+                    close_call_ids(
+                        runtime.compute_dag(),
+                        frozenset(
+                            source
+                            for source, target, _ in runtime.compute_dag().data_edges
+                            if target
+                            in frozenset(
+                                {
+                                    runtime.trace_graph.replay_call_by_output_id[
+                                        str(runtime.trace_graph.compute_nodes[0].canonical_id)
+                                    ].call_id
+                                }
+                            )
+                        ),
+                    )
+                )
             ),
-            repartition_fixture(
-                runtime,
-                partial(
-                    select_node_prefix,
-                    node_id=str(runtime.trace_graph.compute_nodes[-1].canonical_id),
-                ),
+            runtime.repartition(
+                runtime.compute_dag().to_partition(
+                    close_call_ids(
+                        runtime.compute_dag(),
+                        frozenset(
+                            {
+                                runtime.trace_graph.replay_call_by_output_id[
+                                    str(runtime.trace_graph.compute_nodes[-1].canonical_id)
+                                ].call_id
+                            }
+                        ),
+                    )
+                )
             ),
             runtime.with_placement(PlacementPlan.on("cpu")),
         ):
@@ -119,7 +128,23 @@ def test_compact_runtime_releases_original_trace_and_intermediate_snapshots(
     model = AllocationChain()
     x = torch.randn(3, 4)
     with torch.no_grad():
-        runtime = prepare_fixture(model, x, _request(batch_axes={}))
+        graph = prepare_graph(
+            model,
+            x,
+            features=SplitFeatures(
+                retain_trace=None, training=False, live_param_sources=None, batch_axes={}
+            ),
+        )
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag,
+                frozenset(
+                    call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
+        )
+        runtime = graph.materialize(graph.analyze(partition))
     gc.collect()
     assert traces and all(reference() is None for reference in traces)
     assert all(reference() is None for reference in payloads)
@@ -134,17 +159,44 @@ def test_diagnostic_retention_preserves_trace_values_and_recut_identity() -> Non
     model = AllocationChain()
     x = torch.randn(3, 4)
     with torch.no_grad():
-        runtime = prepare_fixture(model, x, _request(retain_trace=True))
+        graph = prepare_graph(
+            model,
+            x,
+            features=SplitFeatures(
+                retain_trace=True, training=False, live_param_sources=None, batch_axes=None
+            ),
+        )
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag,
+                frozenset(
+                    call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
+        )
+        runtime = graph.materialize(graph.analyze(partition))
         assert runtime.retains_trace
         assert runtime.trace is runtime._trace
         assert all(op.out is not None for op in runtime.trace)
-        recut = repartition_fixture(
-            runtime,
-            partial(
-                select_node_prefix,
-                node_id=str(runtime.trace_graph.compute_nodes[0].canonical_id),
-                include=False,
-            ),
+        recut = runtime.repartition(
+            runtime.compute_dag().to_partition(
+                close_call_ids(
+                    runtime.compute_dag(),
+                    frozenset(
+                        source
+                        for source, target, _ in runtime.compute_dag().data_edges
+                        if target
+                        in frozenset(
+                            {
+                                runtime.trace_graph.replay_call_by_output_id[
+                                    str(runtime.trace_graph.compute_nodes[0].canonical_id)
+                                ].call_id
+                            }
+                        )
+                    ),
+                )
+            )
         )
         assert recut.trace is runtime.trace
         torch.testing.assert_close(recut.replay(x), model(x))
@@ -159,7 +211,23 @@ def test_compact_replay_and_recut_restore_captured_cpu_autocast() -> None:
     with torch.no_grad():
         with torch.autocast("cpu", dtype=torch.bfloat16):
             expected = model(x)
-            runtime = prepare_fixture(model, x, _request(batch_axes={}))
+            graph = prepare_graph(
+                model,
+                x,
+                features=SplitFeatures(
+                    retain_trace=None, training=False, live_param_sources=None, batch_axes={}
+                ),
+            )
+            dag = graph.compute_dag()
+            partition = dag.to_partition(
+                close_call_ids(
+                    dag,
+                    frozenset(
+                        call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                    ),
+                )
+            )
+            runtime = graph.materialize(graph.analyze(partition))
         assert expected.dtype == torch.bfloat16
         assert not torch.is_autocast_enabled("cpu")
         assert not runtime.retains_trace
@@ -170,11 +238,38 @@ def test_compact_replay_and_recut_restore_captured_cpu_autocast() -> None:
         first, last = runtime.trace_graph.compute_nodes[0], runtime.trace_graph.compute_nodes[-1]
         for changed in (
             runtime,
-            repartition_fixture(
-                runtime, partial(select_node_prefix, node_id=str(first.canonical_id), include=False)
+            runtime.repartition(
+                runtime.compute_dag().to_partition(
+                    close_call_ids(
+                        runtime.compute_dag(),
+                        frozenset(
+                            source
+                            for source, target, _ in runtime.compute_dag().data_edges
+                            if target
+                            in frozenset(
+                                {
+                                    runtime.trace_graph.replay_call_by_output_id[
+                                        str(first.canonical_id)
+                                    ].call_id
+                                }
+                            )
+                        ),
+                    )
+                )
             ),
-            repartition_fixture(
-                runtime, partial(select_node_prefix, node_id=str(last.canonical_id))
+            runtime.repartition(
+                runtime.compute_dag().to_partition(
+                    close_call_ids(
+                        runtime.compute_dag(),
+                        frozenset(
+                            {
+                                runtime.trace_graph.replay_call_by_output_id[
+                                    str(last.canonical_id)
+                                ].call_id
+                            }
+                        ),
+                    )
+                )
             ),
         ):
             actual = changed.replay(x)
@@ -194,7 +289,26 @@ def test_compact_preparation_releases_cuda_activation_archive() -> None:
         for retain_trace in (True, False):
             gc.collect()
             baseline = torch.cuda.memory_allocated()
-            runtime = prepare_fixture(model, x, _request(retain_trace=retain_trace, batch_axes={}))
+            graph = prepare_graph(
+                model,
+                x,
+                features=SplitFeatures(
+                    retain_trace=retain_trace,
+                    training=False,
+                    live_param_sources=None,
+                    batch_axes={},
+                ),
+            )
+            dag = graph.compute_dag()
+            partition = dag.to_partition(
+                close_call_ids(
+                    dag,
+                    frozenset(
+                        call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                    ),
+                )
+            )
+            runtime = graph.materialize(graph.analyze(partition))
             gc.collect()
             torch.cuda.synchronize()
             retained[retain_trace] = torch.cuda.memory_allocated() - baseline
@@ -244,31 +358,62 @@ def test_compact_replay_keeps_required_state_constants_and_nested_outputs(batch:
     model = ConstantSources().eval()
     x = torch.randn(3, 4)
     with torch.no_grad():
-        runtime = prepare_fixture(model, x, _request())
-        diagnostic = prepare_fixture(model, x, _request(retain_trace=True))
+        graph = prepare_graph(
+            model,
+            x,
+            features=SplitFeatures(
+                retain_trace=None, training=False, live_param_sources=None, batch_axes=None
+            ),
+        )
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag,
+                frozenset(
+                    call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
+        )
+        runtime = graph.materialize(graph.analyze(partition))
+        diagnostic_graph = prepare_graph(
+            model,
+            x,
+            features=SplitFeatures(
+                retain_trace=True, training=False, live_param_sources=None, batch_axes=None
+            ),
+        )
+        diagnostic_dag = diagnostic_graph.compute_dag()
+        diagnostic_partition = diagnostic_dag.to_partition(
+            close_call_ids(
+                diagnostic_dag,
+                frozenset(
+                    call.call_id
+                    for call in diagnostic_dag.nodes[
+                        : (len(diagnostic_dag.nodes) - 1) * 50 // 100 + 1
+                    ]
+                ),
+            )
+        )
+        diagnostic = diagnostic_graph.materialize(diagnostic_graph.analyze(diagnostic_partition))
         actual_input = x[:batch]
         expected = model(actual_input)
         assert_output(runtime.replay(actual_input), expected)
         checked = 0
-        for node in runtime.trace_graph.compute_nodes:
-            for point in (
-                partial(select_node_prefix, node_id=str(node.canonical_id), include=False),
-                partial(select_node_prefix, node_id=str(node.canonical_id)),
-            ):
-                try:
-                    reference = repartition_fixture(diagnostic, point)
-                except SplitUnsupportedError as exc:
-                    # Plain tensor sources can have no live buffer handle.
-                    # The established recut guard then rejects merging the
-                    # inference and training-prefix states in either mode.
-                    with pytest.raises(SplitUnsupportedError) as compact_error:
-                        repartition_fixture(runtime, point)
-                    assert compact_error.value.context == exc.context
-                    continue
-                actual = repartition_fixture(runtime, point).replay(actual_input)
-                assert_output(actual, expected)
-                assert_output(actual, reference.replay(actual_input))
-                checked += 1
+        for partition in smallest_transfer_partitions(diagnostic):
+            try:
+                reference = diagnostic.repartition(partition)
+            except SplitUnsupportedError as exc:
+                # Plain tensor sources can have no live buffer handle.
+                # The established recut guard then rejects merging the
+                # inference and training-prefix states in either mode.
+                with pytest.raises(SplitUnsupportedError) as compact_error:
+                    runtime.repartition(partition)
+                assert compact_error.value.context == exc.context
+                continue
+            actual = runtime.repartition(partition).replay(actual_input)
+            assert_output(actual, expected)
+            assert_output(actual, reference.replay(actual_input))
+            checked += 1
         assert checked > 0
         diagnostic.trace.cleanup()
 
@@ -293,14 +438,26 @@ def test_compact_every_cut_preserves_residuals_views_and_inplace_updates() -> No
     model = AliasedResidual()
     x = torch.randn(3, 8)
     with torch.no_grad():
-        runtime = prepare_fixture(model, x, _request())
+        graph = prepare_graph(
+            model,
+            x,
+            features=SplitFeatures(
+                retain_trace=None, training=False, live_param_sources=None, batch_axes=None
+            ),
+        )
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag,
+                frozenset(
+                    call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
+        )
+        runtime = graph.materialize(graph.analyze(partition))
         expected = model(x)
-        for node in runtime.trace_graph.compute_nodes:
-            for point in (
-                partial(select_node_prefix, node_id=str(node.canonical_id), include=False),
-                partial(select_node_prefix, node_id=str(node.canonical_id)),
-            ):
-                torch.testing.assert_close(repartition_fixture(runtime, point).replay(x), expected)
+        for partition in smallest_transfer_partitions(runtime):
+            torch.testing.assert_close(runtime.repartition(partition).replay(x), expected)
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda:0"])
@@ -312,7 +469,23 @@ def test_compact_placement_preserves_live_parameter_identity_and_model_device(de
     model = torch.nn.Sequential(torch.nn.Linear(4, 5), torch.nn.ReLU(), torch.nn.Linear(5, 3))
     x = torch.randn(3, 4)
     with torch.no_grad():
-        runtime = prepare_fixture(model, x, _request(live_param_sources=True))
+        graph = prepare_graph(
+            model,
+            x,
+            features=SplitFeatures(
+                retain_trace=None, training=False, live_param_sources=True, batch_axes=None
+            ),
+        )
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag,
+                frozenset(
+                    call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
+        )
+        runtime = graph.materialize(graph.analyze(partition))
         parameters = [
             reference.handle for node in runtime.trace_graph.nodes for reference in node.param_refs
         ]
@@ -334,9 +507,23 @@ def test_live_buffer_replacement_updates_replay_without_growing_state(retain_tra
     model = torch.nn.Sequential(torch.nn.BatchNorm1d(4), torch.nn.ReLU()).eval()
     inputs = torch.arange(12, dtype=torch.float32).reshape(3, 4)
     with torch.no_grad():
-        runtime = prepare_fixture(
-            model, inputs, _request(retain_trace=retain_trace, live_param_sources=True)
+        graph = prepare_graph(
+            model,
+            inputs,
+            features=SplitFeatures(
+                retain_trace=retain_trace, training=False, live_param_sources=True, batch_axes=None
+            ),
         )
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag,
+                frozenset(
+                    call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
+        )
+        runtime = graph.materialize(graph.analyze(partition))
         runtime.replay(inputs)
         entry_counts = [
             len(segment._state.entries())
@@ -366,14 +553,30 @@ def test_compact_buffer_lookup_keeps_last_value_without_retaining_owner() -> Non
     model = torch.nn.Sequential(torch.nn.BatchNorm1d(4), torch.nn.ReLU()).eval()
     inputs = torch.ones(3, 4)
     with torch.no_grad():
-        runtime = prepare_fixture(model, inputs, _request(live_param_sources=True))
+        graph = prepare_graph(
+            model,
+            inputs,
+            features=SplitFeatures(
+                retain_trace=None, training=False, live_param_sources=True, batch_axes=None
+            ),
+        )
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag,
+                frozenset(
+                    call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
+        )
+        runtime = graph.materialize(graph.analyze(partition))
         references = [buffer for node in runtime.trace_graph.nodes for buffer in node.buffer_refs]
         assert references
         owner = weakref.ref(model[0])
         model._apply(lambda value: value.clone())
         model[0].running_mean.fill_(2)
         values = [buffer.handle for buffer in references]
-        del runtime, model
+        del runtime, graph, model
         gc.collect()
         assert owner() is None
         assert all(buffer.handle is value for buffer, value in zip(references, values))
@@ -391,21 +594,49 @@ def test_owned_buffer_replacement_preserves_effective_state_and_recut(
     monkeypatch.setattr(SegmentState, "_already_placed", lambda self, value: False)
     model = torch.nn.Sequential(torch.nn.BatchNorm1d(4), torch.nn.ReLU()).eval()
     inputs = torch.arange(12, dtype=torch.float32).reshape(3, 4)
-    request = _request(retain_trace=retain_trace, live_param_sources=True)
     with torch.no_grad():
-        runtime = prepare_fixture(model, inputs, request).with_placement(PlacementPlan.on("cpu"))
+        graph = prepare_graph(
+            model,
+            inputs,
+            features=SplitFeatures(
+                retain_trace=retain_trace, training=False, live_param_sources=True, batch_axes=None
+            ),
+        )
+        dag = graph.compute_dag()
+        partition = dag.to_partition(
+            close_call_ids(
+                dag,
+                frozenset(
+                    call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]
+                ),
+            )
+        )
+        runtime = graph.materialize(graph.analyze(partition)).with_placement(
+            PlacementPlan.on("cpu")
+        )
         expected = runtime.replay(inputs)
         model._apply(lambda value: value.clone())
         model[0].running_mean.fill_(20)
         assert not torch.equal(expected, model(inputs))
         torch.testing.assert_close(runtime.replay(inputs), expected)
-        recut = repartition_fixture(
-            runtime,
-            partial(
-                select_node_prefix,
-                node_id=str(runtime.trace_graph.compute_nodes[0].canonical_id),
-                include=False,
-            ),
+        recut = runtime.repartition(
+            runtime.compute_dag().to_partition(
+                close_call_ids(
+                    runtime.compute_dag(),
+                    frozenset(
+                        source
+                        for source, target, _ in runtime.compute_dag().data_edges
+                        if target
+                        in frozenset(
+                            {
+                                runtime.trace_graph.replay_call_by_output_id[
+                                    str(runtime.trace_graph.compute_nodes[0].canonical_id)
+                                ].call_id
+                            }
+                        )
+                    ),
+                )
+            )
         )
         torch.testing.assert_close(recut.replay(inputs), expected)
         if retain_trace:
@@ -423,7 +654,21 @@ def test_training_automatically_retains_trace_and_preserves_input_and_parameter_
     expected = model(x)
     targets = (x, *model.parameters())
     expected_gradients = torch.autograd.grad(expected.sum(), targets)
-    runtime = prepare_fixture(model, x, _request(training=True, retain_trace=retain_trace))
+    graph = prepare_graph(
+        model,
+        x,
+        features=SplitFeatures(
+            retain_trace=retain_trace, training=True, live_param_sources=None, batch_axes=None
+        ),
+    )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            frozenset(call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]),
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     assert runtime.retains_trace
     assert runtime.trace is not None
     boundary = runtime.run_training_prefix(x)
@@ -439,7 +684,21 @@ def test_training_with_explicit_compact_retention_preserves_gradients() -> None:
 
     model = AllocationChain()
     inputs = torch.randn(3, 4, requires_grad=True)
-    runtime = prepare_fixture(model, inputs, _request(training=True, retain_trace=False))
+    graph = prepare_graph(
+        model,
+        inputs,
+        features=SplitFeatures(
+            retain_trace=False, training=True, live_param_sources=None, batch_axes=None
+        ),
+    )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag,
+            frozenset(call.call_id for call in dag.nodes[: (len(dag.nodes) - 1) * 50 // 100 + 1]),
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     assert not runtime.retains_trace
     for _ in range(2):
         expected = model(inputs)
