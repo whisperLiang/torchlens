@@ -2685,19 +2685,21 @@ def _paddle_output_container_spec(value: Any, is_tensor: Callable[[Any], bool]) 
     if is_tensor(value):
         return None
     if type(value) in (list, tuple):
-        children = tuple(
+        sequence_children = tuple(
             (TupleIndex(index), child)
             for index, item in enumerate(value)
             if (child := _paddle_output_container_spec(item, is_tensor)) is not None
         )
         return ContainerSpec(
-            "list" if isinstance(value, list) else "tuple", length=len(value), child_specs=children
+            "list" if isinstance(value, list) else "tuple",
+            length=len(value),
+            child_specs=sequence_children,
         )
     if type(value) is dict:
-        children = tuple(
+        dict_children = tuple(
             (DictKey(key), child)
             for key, item in value.items()
             if (child := _paddle_output_container_spec(item, is_tensor)) is not None
         )
-        return ContainerSpec("dict", keys=tuple(value), child_specs=children)
+        return ContainerSpec("dict", keys=tuple(value), child_specs=dict_children)
     return ContainerSpec("literal", literal_value=value)
