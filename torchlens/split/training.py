@@ -267,7 +267,9 @@ def _execute_torch_suffix(
         elif _is_diff_tensor(torch, value) and _allows_boundary_gradient(runtime, key):
             root = value.detach().clone().requires_grad_(True)
             root_tensors[key] = root
-            replay_tensors[key] = root
+            # Keep a differentiable root for its VJP, but replay an isolated
+            # nonleaf so certified inplace suffix operators obey autograd.
+            replay_tensors[key] = root.clone()
         else:
             # Integer/index roots can also be mutated by a suffix operation.
             # Keep the caller's public boundary isolated, as microbatch replay

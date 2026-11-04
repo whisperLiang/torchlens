@@ -133,6 +133,29 @@ def test_transported_prefix_owned_source_buffer_is_preserved() -> None:
     torch.testing.assert_close(runtime.run_suffix(bound), model(inputs))
 
 
+def test_certified_inplace_suffix_differentiates_an_isolated_nonleaf_root() -> None:
+    """A legal cut before Hardswish keeps native inplace forward/backward semantics."""
+    import copy
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.Hardswish(inplace=True), nn.Linear(4, 2))
+    oracle = copy.deepcopy(model)
+    inputs = torch.randn(2, 4)
+    targets = torch.randn(2, 2)
+    graph = prepare_graph(model, inputs, features=SplitFeatures(training=True, retain_trace=False))
+    runtime = graph.materialize(graph.analyze(graph.partition_candidates()[1]))
+    expected = nn.functional.mse_loss(oracle(inputs), targets)
+    expected.backward()
+    boundary = runtime.run_training_prefix(inputs)
+    original = {key: value.detach().clone() for key, value in boundary.tensors.items()}
+    loss, gradients = runtime.train_suffix(boundary, targets, loss_fn=nn.functional.mse_loss)
+    runtime.backward_prefix(boundary, gradients)
+    torch.testing.assert_close(loss, expected)
+    for actual, reference in zip(model.parameters(), oracle.parameters(), strict=True):
+        torch.testing.assert_close(actual.grad, reference.grad)
+    for key, value in boundary.tensors.items():
+        torch.testing.assert_close(value, original[key])
+
+
 def test_paddle_nested_outputs_keep_paths_and_reused_producers() -> None:
     """Native Paddle output containers survive a split through a returned intermediate."""
     paddle = pytest.importorskip("paddle")
