@@ -9,10 +9,12 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from dag_helpers import count_dag_partitions, iter_dag_partitions, smallest_transfer_partitions
 from torch import nn
 
 from torchlens.split import GraphPartition, SplitFeatures, SplitGraph, prepare_graph
 from torchlens.split.errors import SplitUnsupportedError
+from torchlens.split.graph_profile import partition_metrics
 
 
 class Branches(nn.Module):
@@ -229,6 +231,7 @@ def test_small_dag_subsets_agree_with_native_analysis(branch_graph: SplitGraph) 
     """An independent downward-closure oracle checks every subset of a small DAG."""
     dag = branch_graph.compute_dag()
     ids = tuple(c.call_id for c in dag.nodes)
+    expected_partitions = set()
     for size in range(len(ids) + 1):
         for selected in combinations(ids, size):
             prefix = set(selected)
@@ -239,12 +242,117 @@ def test_small_dag_subsets_agree_with_native_analysis(branch_graph: SplitGraph) 
                     branch_graph.analyze(partition)
                 assert caught.value.context.reason == "partition_reverse_dependency"
             else:
+                expected_partitions.add(partition)
                 analysis = branch_graph.analyze(partition)
                 assert analysis.request.partition == partition
                 torch.testing.assert_close(
                     branch_graph.materialize(analysis).replay(torch.ones(2, 4)),
                     Branches()(torch.ones(2, 4)),
                 )
+    candidates = list(iter_dag_partitions(dag))
+    assert len(candidates) == len(set(candidates)) == count_dag_partitions(dag)
+    assert set(candidates) == expected_partitions
+
+
+def test_dag_partition_count_handles_independent_calls_without_materializing() -> None:
+    """Independent native calls have exponentially many distinct assignments."""
+
+    class Independent(nn.Module):
+        def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, ...]:
+            """Return eighty independent computations without a join."""
+            return tuple(x + index for index in range(80))
+
+    graph = prepare_graph(Independent(), torch.ones(2, 4), features=SplitFeatures(batch_axes={}))
+    assert count_dag_partitions(graph.compute_dag()) == 2**80
+
+
+@pytest.mark.parametrize("limit", [1, 3, 100])
+def test_smallest_transfer_partitions_match_exhaustive_native_costs(
+    branch_graph: SplitGraph, limit: int
+) -> None:
+    """Rank actual unique boundary bytes, including fan-out and fixed source/sink sides."""
+    profile = branch_graph.graph_profile()
+    all_partitions = list(iter_dag_partitions(branch_graph.compute_dag()))
+    costs = {
+        partition: partition_metrics(
+            profile, branch_graph.analyze(partition).plan, training=False
+        ).forward_boundary_bytes
+        for partition in all_partitions
+    }
+    selected = smallest_transfer_partitions(branch_graph, limit=limit)
+    assert len(set(selected)) == len(selected) == min(limit, len(all_partitions))
+    assert [costs[partition] for partition in selected] == sorted(costs.values())[:limit]
+
+
+@pytest.mark.parametrize("limit", [1, 5, 100])
+def test_transfer_ranking_keeps_native_mutation_refusals(limit: int) -> None:
+    """Native conditional alias checks filter the ranked stream without hiding errors."""
+
+    class LocalMutation(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Leave an independent call after the local write in capture order."""
+            fresh = x + 1
+            activated = fresh.relu_()
+            independent = x.cos()
+            return activated + independent
+
+    inputs = torch.randn(2, 4)
+    graph = prepare_graph(LocalMutation(), inputs, features=SplitFeatures(batch_axes={}))
+    costs = {}
+    refused = 0
+    for partition in iter_dag_partitions(graph.compute_dag()):
+        try:
+            analysis = graph.analyze(partition)
+        except SplitUnsupportedError as exc:
+            assert exc.context.reason == "partition_effect_order_unproven"
+            refused += 1
+        else:
+            costs[partition] = partition_metrics(
+                graph.graph_profile(), analysis.plan, training=False
+            ).forward_boundary_bytes
+    assert refused > 0
+    selected = smallest_transfer_partitions(graph, limit=limit)
+    assert len(set(selected)) == min(limit, len(costs))
+    assert [costs[partition] for partition in selected] == sorted(costs.values())[:limit]
+    for partition in selected:
+        torch.testing.assert_close(
+            graph.materialize(graph.analyze(partition)).replay(inputs), LocalMutation()(inputs)
+        )
+
+
+def test_transfer_ranking_stops_without_solving_all_equal_cost_regions() -> None:
+    """A bounded matrix can stop at ten tied minima on a larger native DAG."""
+    import networkx as nx
+
+    graph = prepare_graph(nn.Sequential(*(nn.ReLU() for _ in range(40))), torch.ones(2, 4))
+    with patch("dag_helpers.nx.minimum_cut", wraps=nx.minimum_cut) as minimum_cut:
+        selected = smallest_transfer_partitions(graph, limit=10)
+    assert len(set(selected)) == 10
+    assert minimum_cut.call_count <= 11
+    assert {
+        partition_metrics(
+            graph.graph_profile(), graph.analyze(partition).plan, training=False
+        ).forward_boundary_bytes
+        for partition in selected
+    } == {16}
+
+
+def test_dag_exposes_the_native_out_initialization_order_obligation() -> None:
+    """A certified out= write retains its native barrier around independent calls."""
+
+    class Anchors(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Interleave an independent branch with fresh anchor initialization."""
+            destination = x.new_full((4,), 0)
+            independent = x * 2
+            anchors = torch.arange(4, out=destination)
+            return independent + anchors
+
+    inputs = torch.randn(2, 4)
+    graph = prepare_graph(Anchors(), inputs)
+    for partition in iter_dag_partitions(graph.compute_dag()):
+        runtime = graph.materialize(graph.analyze(partition))
+        torch.testing.assert_close(runtime.replay(inputs), Anchors()(inputs))
 
 
 def test_projection_is_immutable_stable_acyclic_and_never_executes(

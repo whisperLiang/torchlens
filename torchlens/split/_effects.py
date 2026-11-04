@@ -180,7 +180,7 @@ def _source_provenance(
 
 
 def _build_effect_index(graph: SplitTraceGraph) -> _EffectIndex:
-    """Record RAW, WAR and WAW edges once, with no global mutation chain."""
+    """Record storage dependencies and the native out= initialization barriers."""
     from ._torch_rng_replay import stochastic_targets
     from .planner import _torch_mutation_targets
 
@@ -190,6 +190,8 @@ def _build_effect_index(graph: SplitTraceGraph) -> _EffectIndex:
     predecessors: dict[str, frozenset[str]] = {}
     last_writer: dict[str, str] = {}
     readers: dict[str, set[str]] = {}
+    preceding: set[str] = set()
+    initialization_barrier: str | None = None
     for call in graph.replay_calls:
         node = graph.node_by_id[call.output_node_ids[0]]
         access, output = _access_for_node(node, origins, targets, stochastic)
@@ -198,10 +200,19 @@ def _build_effect_index(graph: SplitTraceGraph) -> _EffectIndex:
         }
         for root in access.writes:
             dependencies.update(readers.get(root, ()))
+        if initialization_barrier is not None:
+            dependencies.add(initialization_barrier)
+        if node.target in targets.out_writes and access.kind == "inplace_write":
+            # The existing native certification requires this call to preserve
+            # capture order against every other call (_ordered_partition_nodes).
+            # Ordinary in-place and buffer writes retain only RAW/WAR/WAW edges.
+            dependencies.update(preceding)
+            initialization_barrier = node.canonical_id
         for member in call.output_node_ids:
             accesses[member] = access
             origins[member] = output
             predecessors[member] = frozenset(dependencies)
+        preceding.update(call.output_node_ids)
         for root in access.writes:
             last_writer[root] = node.canonical_id
             readers[root] = set()

@@ -125,6 +125,23 @@ def dtype_bytes(dtype: str | None) -> int | None:
 
     name = (dtype or "").removeprefix("torch.").removeprefix("paddle.").removeprefix("mlx.core.")
     name = name.removeprefix("<dtype: '").removesuffix("'>")
+    if name.startswith("dtypes."):
+        # tinygrad's scalar DType.__repr__ uses these exact native aliases.
+        # Pointer/vector spellings stay unknown rather than acquiring a guessed width.
+        name = name.removeprefix("dtypes.")
+        name = {
+            "char": "int8",
+            "uchar": "uint8",
+            "short": "int16",
+            "ushort": "uint16",
+            "int": "int32",
+            "uint": "uint32",
+            "long": "int64",
+            "ulong": "uint64",
+            "half": "float16",
+            "float": "float32",
+            "double": "float64",
+        }.get(name, name)
     widths = {
         "bool": 1,
         "uint8": 1,

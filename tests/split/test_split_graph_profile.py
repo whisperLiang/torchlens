@@ -3,20 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
-from functools import partial
 from unittest.mock import patch
 
 import pytest
 import torch
+from dag_helpers import call_ids, close_call_ids
 from torch import nn
-from v2_helpers import (
-    analyze_fixture,
-    prepare_fixture,
-    request_fixture,
-    select_node_prefix,
-)
 
-from torchlens.split import GraphPartition, SplitFeatures
+from torchlens.split import GraphPartition, SplitFeatures, prepare_graph
 from torchlens.split.graph_profile import build_graph_profile, partition_metrics
 
 
@@ -36,11 +30,14 @@ class SharedParameters(nn.Module):
 def test_static_profile_shapes_flops_state_aliases_and_no_execution() -> None:
     """Profiles never run the model and count tied state once with stable names."""
     model = SharedParameters()
-    runtime = prepare_fixture(
-        model,
-        torch.ones(2, 4),
-        request_fixture(partial(select_node_prefix, node_id="linear_1_1:1")),
+    graph = prepare_graph(model, torch.ones(2, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"linear_1_1:1"}), ops=frozenset({"linear"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     with patch.object(model, "forward", side_effect=AssertionError("must not execute")):
         profile = runtime.graph_profile(batch_size=8)
     assert profile.batch_size == 8
@@ -56,11 +53,15 @@ def test_static_profile_shapes_flops_state_aliases_and_no_execution() -> None:
     assert weight.state_id == "parameter:alias.weight"
     with pytest.raises(FrozenInstanceError):
         profile.batch_size = 4
-    other = prepare_fixture(
-        SharedParameters(),
-        torch.ones(2, 4),
-        request_fixture(partial(select_node_prefix, node_id="linear_1_1:1")),
+    other_graph = prepare_graph(SharedParameters(), torch.ones(2, 4))
+    other_dag = other_graph.compute_dag()
+    other_partition = other_dag.to_partition(
+        close_call_ids(
+            other_dag,
+            call_ids(other_graph, modules=frozenset({"linear_1_1:1"}), ops=frozenset({"linear"})),
+        )
     )
+    other = other_graph.materialize(other_graph.analyze(other_partition))
     assert [p.state_id for p in profile.parameters] == [
         p.state_id for p in other.graph_profile().parameters
     ]
@@ -68,17 +69,19 @@ def test_static_profile_shapes_flops_state_aliases_and_no_execution() -> None:
 
 def test_partition_metrics_count_unique_boundary_and_parameters() -> None:
     """Costs use the value frontier rather than the number of outgoing edges."""
-    runtime = prepare_fixture(
-        SharedParameters(),
-        torch.ones(2, 4),
-        request_fixture(
-            partial(select_node_prefix, node_id="linear_1_1:1"),
-            features=SplitFeatures(training=True),
-        ),
+    graph = prepare_graph(
+        SharedParameters(), torch.ones(2, 4), features=SplitFeatures(training=True)
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"linear_1_1:1"}), ops=frozenset({"linear"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     profile = runtime.graph_profile(batch_size=8)
     first = next(node for node in profile.nodes if node.op_type == "linear")
-    analysis = analyze_fixture(runtime, GraphPartition(frozenset({first.node_id})))
+    analysis = runtime.analyze(GraphPartition(frozenset({first.node_id})))
     metrics = partition_metrics(profile, analysis.plan, training=True)
     assert metrics.unique_boundary_tensors == 2  # first projection plus shared input
     assert metrics.forward_boundary_bytes == 2 * 8 * 4 * 4
@@ -92,11 +95,12 @@ def test_partition_metrics_count_unique_boundary_and_parameters() -> None:
 
 def test_unknown_dtype_shape_and_invalid_batch() -> None:
     """Unsupported static facts remain None; invalid batch inputs refuse."""
-    runtime = prepare_fixture(
-        nn.Sequential(nn.Linear(4, 4), nn.ReLU()),
-        torch.ones(2, 4),
-        request_fixture(partial(select_node_prefix, node_id="relu")),
+    graph = prepare_graph(nn.Sequential(nn.Linear(4, 4), nn.ReLU()), torch.ones(2, 4))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(dag, call_ids(graph, modules=frozenset({"relu"}), ops=frozenset({"relu"})))
     )
+    runtime = graph.materialize(graph.analyze(partition))
     graph = runtime.trace_graph
     graph = replace(
         graph, nodes=tuple(replace(n, dtype="unknown128") for n in graph.nodes), shape_program=None
@@ -119,14 +123,18 @@ def test_matmul_cost_and_multioutput_atomic_metadata() -> None:
             """Return two views of the matrix product."""
             return torch.chunk(a @ b, 2, dim=-1)
 
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         Matrix(),
         (torch.randn(2, 3, 4), torch.randn(4, 6)),
-        request_fixture(
-            partial(select_node_prefix, node_id="matmul"),
-            features=SplitFeatures(batch_axes={"/args/0": 0}),
-        ),
+        features=SplitFeatures(batch_axes={"/args/0": 0}),
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"matmul"}), ops=frozenset({"matmul"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     profile = runtime.graph_profile(batch_size=2)
     matmul = next(node for node in profile.nodes if node.op_type == "matmul")
     assert matmul.forward_flops == 2 * (2 * 3 * 6) * 4
@@ -134,3 +142,29 @@ def test_matmul_cost_and_multioutput_atomic_metadata() -> None:
     assert len(chunks) == 2
     assert all(set(node.output_node_ids) == {item.node_id for item in chunks} for node in chunks)
     assert chunks[0].forward_flops == chunks[1].forward_flops == 0
+
+
+def test_tinygrad_dtype_costs_match_native_scalar_widths() -> None:
+    """Native tinygrad scalar spellings retain exact dense-byte costs."""
+    tinygrad = pytest.importorskip("tinygrad")
+    from torchlens.split.graph_profile import dtype_bytes
+
+    for name in (
+        "bool",
+        "int8",
+        "uint8",
+        "int16",
+        "uint16",
+        "int32",
+        "uint32",
+        "int64",
+        "uint64",
+        "float16",
+        "bfloat16",
+        "float32",
+        "float64",
+    ):
+        native = getattr(tinygrad.dtypes, name)
+        assert dtype_bytes(str(native)) == native.itemsize
+    assert dtype_bytes("dtypes.future_scalar") is None
+    assert dtype_bytes("dtypes.float.ptr(16)") is None
