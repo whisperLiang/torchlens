@@ -52,10 +52,8 @@ def test_stochastic_training_preserves_masks_values_and_gradients_across_devices
     first = GraphPartition(frozenset({nodes[0].canonical_id}))
     full = GraphPartition(frozenset(node.canonical_id for node in nodes))
     runtime = graph.materialize(graph.analyze(first))
-    actual_opt = namespace["make_optimizer"](
-        "adam", namespace["effective_parameters"](runtime).values()
-    )
-    expected_opt = namespace["make_optimizer"]("adam", reference.parameters())
+    actual_opt = namespace["make_optimizer"](namespace["effective_parameters"](runtime).values())
+    expected_opt = namespace["make_optimizer"](reference.parameters())
     for batch, partition in zip((1, 2, 4, 8), (first, full, first, first), strict=True):
         runtime = runtime.repartition(partition)
         errors = namespace["training_step"](

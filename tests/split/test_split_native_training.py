@@ -33,9 +33,9 @@ def _run_tinygrad_subprocess(code: str) -> None:
     helper_path = str(Path(__file__).resolve().parent)
     env["PYTHONPATH"] = helper_path + os.pathsep + env.get("PYTHONPATH", "")
     source = (
-        "from v2_helpers import analyze_fixture, candidate_report, fixture_partition, plan_fixture, prepare_fixture, repartition_fixture, request_fixture, split_request\n",
-        select_node_prefix,
-        select_node_prefix + textwrap.dedent(code),
+        "from v2_helpers import (analyze_fixture, candidate_report, fixture_partition, "
+        "plan_fixture, prepare_fixture, repartition_fixture, request_fixture, "
+        "select_node_prefix, split_request)\n" + textwrap.dedent(code)
     )
     result = subprocess.run(
         [sys.executable, "-c", source],
