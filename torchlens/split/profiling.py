@@ -37,6 +37,7 @@ class SplitProfile:
     boundary_bytes: int
     peak_allocated_bytes: int | None
     diagnostics: tuple[str, ...]
+    suffix_loss: LatencyStats | None = None
 
 
 @dataclass(frozen=True)
@@ -95,7 +96,13 @@ class _ProfileSession:
     samples: dict[str, list[float]] = field(
         default_factory=lambda: {
             key: []
-            for key in ("prefix_forward", "suffix_forward", "prefix_backward", "suffix_backward")
+            for key in (
+                "prefix_forward",
+                "suffix_forward",
+                "suffix_loss",
+                "prefix_backward",
+                "suffix_backward",
+            )
         }
     )
     measured: bool = False
@@ -273,6 +280,7 @@ def profile_split(runtime: Any, inputs: Any, options: _ProfileOptions) -> SplitP
                     else ("backward:explicit_training_objective_not_provided",)
                 ),
             ),
+            suffix_loss=_stats(session.samples["suffix_loss"]) if options.training else None,
         )
     finally:
         set_rng_from_saved_states(rng)

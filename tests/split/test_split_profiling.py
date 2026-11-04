@@ -41,6 +41,10 @@ def test_profile_isolates_parameters_gradients_rng_and_pending_autograd(training
     assert len(profile.prefix_forward.samples_ms) == 2
     assert profile.boundary_bytes == 64
     assert (profile.suffix_backward is not None) == training
+    assert (profile.suffix_loss is not None) == training
+    if training:
+        assert profile.suffix_loss is not None
+        assert len(profile.suffix_loss.samples_ms) == 2
     assert (profile.prefix_backward is not None) == training
     assert profile.peak_allocated_bytes is None
     torch.testing.assert_close(torch.get_rng_state(), rng)

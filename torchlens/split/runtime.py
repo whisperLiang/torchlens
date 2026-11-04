@@ -206,13 +206,16 @@ class SplitRuntime(SplitGraph):
             This explicit opt-in keeps server-owned running statistics local.
         """
         self.validate_boundary(boundary)
-        bindings = self.state_bindings()
-        rows = self.parameter_ownership()
+        bindings = None
+        rows: tuple[ParameterOwnership, ...] = ()
         tensors = dict(boundary.tensors)
         for key, node_id in self.plan.boundary_bindings.items():
             node = self.trace_graph.node_by_id[node_id]
             if not node.is_buffer or node.parents:
                 continue
+            if bindings is None:
+                bindings = self.state_bindings()
+                rows = self.parameter_ownership()
             matches = [
                 row
                 for row in rows

@@ -24,5 +24,7 @@ BatchNorm statistics from resetting server state between batches.
 Torch single-batch suffix training also accepts `boundary_gradients_only=True`
 for calibration VJPs without parameter-gradient accumulation, and
 `phase_timer(name)` context-manager hooks for `suffix_forward`, `suffix_loss`
-and `suffix_backward`. A boundary-only VJP cannot step an optimizer. Other
+and `suffix_backward`. `profile_split()` reports loss construction separately
+as `suffix_loss`, so backward measurements do not silently absorb or discard
+the loss phase. A boundary-only VJP cannot step an optimizer. Other
 backends and suffix microbatches refuse these optional execution controls.
