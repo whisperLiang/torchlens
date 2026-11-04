@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .adapters._mlx_coordination import snapshot_mlx_values
+from .adapters._mlx_devices import mlx_execution_context
 from .errors import SplitErrorContext, SplitUnsupportedError
 
 
@@ -88,7 +89,7 @@ def mlx_runtime_state_dict(runtime: Any) -> dict[str, Any]:
     Returns
     -------
     dict[str, Any]
-        Evaluated independent arrays keyed by native flattened module paths.
+        Evaluated independent CPU arrays keyed by native flattened module paths.
     """
 
     import mlx.core as mx
@@ -101,9 +102,13 @@ def mlx_runtime_state_dict(runtime: Any) -> dict[str, Any]:
             if entry.source_id not in inventory.defaults:
                 continue
             previous = effective.setdefault(entry.source_id, entry.value)
-            if previous is not entry.value and not bool(
-                mx.array_equal(previous, entry.value, equal_nan=True)
-            ):
+            if previous is entry.value:
+                continue
+            # Replica validation belongs to the binding's stream, even when
+            # the caller's ambient device differs from both state arrays.
+            with mlx_execution_context(binding.state.placement.device):
+                matches = bool(mx.array_equal(previous, entry.value, equal_nan=True))
+            if not matches:
                 raise SplitUnsupportedError(
                     "Cannot export divergent replicas of a tied MLX state value; "
                     "load synchronized state before exporting.",
@@ -117,7 +122,10 @@ def mlx_runtime_state_dict(runtime: Any) -> dict[str, Any]:
         source_id: effective.get(source_id, coordinator.values.get(source_id, value))
         for source_id, value in inventory.defaults.items()
     }
-    saved = snapshot_mlx_values(values)
+    # Named snapshots use a fixed host stream rather than inheriting an
+    # unrelated ambient GPU stream from the caller.
+    with mlx_execution_context(mx.cpu):
+        saved = snapshot_mlx_values(values)
     return {name: saved[source_id] for name, source_id in inventory.names.items()}
 
 
@@ -161,8 +169,12 @@ def load_mlx_runtime_state_dict(runtime: Any, state_dict: Mapping[str, Any]) -> 
                 context=context,
             )
         previous = values.setdefault(source_id, value)
-        if previous is not value and not bool(mx.array_equal(previous, value, equal_nan=True)):
+        with mlx_execution_context(mx.cpu):
+            matches = previous is value or bool(mx.array_equal(previous, value, equal_nan=True))
+        if not matches:
             raise SplitUnsupportedError(
                 f"MLX split tied state {name!r} received conflicting values.", context=context
             )
-    coordinator.publish(snapshot_mlx_values(values), parameters=True, invalidate=True)
+    with mlx_execution_context(mx.cpu):
+        staged = snapshot_mlx_values(values)
+    coordinator.publish(staged, parameters=True, invalidate=True)

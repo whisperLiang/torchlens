@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-from functools import partial
 from typing import Any
 
 import pytest
-from v2_helpers import (
-    prepare_fixture,
-    repartition_fixture,
-    select_node_prefix,
-    split_request,
-)
+from dag_helpers import call_ids, close_call_ids
+
+from torchlens.split import SplitFeatures, prepare_graph
 
 mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 nn = pytest.importorskip("mlx.nn", exc_type=ImportError)
@@ -75,13 +71,14 @@ def test_export_trained_state_matches_native_and_is_independent() -> None:
 
     model, reference = _Model(), _Model()
     source = dict(tree_flatten(model.parameters()))
-    runtime = prepare_fixture(
-        model,
-        _inputs(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, _inputs(2), backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     optimizer, native_optimizer = optim.Adam(0.01), optim.Adam(0.01)
     native_grad = nn.value_and_grad(reference, lambda x, y: _loss(reference(x), y))
     targets = mx.ones((3, 2))
@@ -110,16 +107,20 @@ def test_load_aggregate_updates_existing_segments_and_migrates(
 
     model, reference = _Model(), _Model()
     source = dict(tree_flatten(model.parameters()))
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         model,
         _inputs(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"),
-            backend="mlx",
-            trainable=training,
-            placement=tl.split.PlacementPlan.on("cpu"),
-        ),
+        backend="mlx",
+        placement=tl.split.PlacementPlan.on("cpu"),
+        features=SplitFeatures(training=training),
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     if materialized:
         runtime.replay(_inputs())
     if materialized and training:
@@ -131,14 +132,28 @@ def test_load_aggregate_updates_existing_segments_and_migrates(
         reference.update(tree_unflatten(list(aggregate.items())))
         # Native MLX replaces arrays; an already captured runtime keeps its own identities.
         model.update(tree_unflatten(list(aggregate.items())))
+        ambient = mx.default_stream(mx.default_device())
         runtime.load_state_dict(dict(tree_flatten(model.parameters())))
         _assert_state(runtime.state_dict(), aggregate)
+        assert mx.default_stream(mx.default_device()) == ambient
         assert bool(mx.allclose(runtime.replay(_inputs()), reference(_inputs()), atol=3e-5))
         assert all(value is aggregate[name] for name, value in tree_flatten(model.parameters()))
         for updated in (
             runtime.with_placement(tl.split.PlacementPlan.on("cpu")),
-            repartition_fixture(
-                runtime, partial(select_node_prefix, node_id="maximum", include=False)
+            runtime.repartition(
+                runtime.compute_dag().to_partition(
+                    close_call_ids(
+                        runtime.compute_dag(),
+                        frozenset(
+                            source
+                            for source, target, _ in runtime.compute_dag().data_edges
+                            if target
+                            in call_ids(
+                                runtime, modules=frozenset({"maximum"}), ops=frozenset({"maximum"})
+                            )
+                        ),
+                    )
+                )
             ),
         ):
             _assert_state(updated.state_dict(), aggregate)
@@ -155,13 +170,14 @@ def test_training_after_aggregate_matches_native_across_rounds() -> None:
 
     model, reference = _Model(), _Model()
     source = dict(tree_flatten(model.parameters()))
-    runtime = prepare_fixture(
-        model,
-        _inputs(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, _inputs(2), backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     optimizer, native_optimizer = optim.Adam(0.01), optim.Adam(0.01)
     native_grad = nn.value_and_grad(reference, lambda x, y: _loss(reference(x), y))
     targets = mx.ones((3, 2))
@@ -191,11 +207,14 @@ def test_plain_callable_refuses_named_state_exchange() -> None:
 
         return mx.multiply(mx.maximum(inputs, 0), 2)
 
-    runtime = prepare_fixture(
-        model,
-        _inputs(2),
-        split_request(partial(select_node_prefix, node_id="maximum"), backend="mlx"),
+    graph = prepare_graph(model, _inputs(2), backend="mlx")
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     for method, args in ((runtime.state_dict, ()), (runtime.load_state_dict, ({},))):
         with pytest.raises(SplitUnsupportedError) as exc:
             method(*args)
@@ -222,13 +241,14 @@ def test_alias_names_round_trip_and_conflicts_refuse_transactionally() -> None:
     """Export retains every tied name; loading cannot silently untie conflicting values."""
 
     model = _Aliases()
-    runtime = prepare_fixture(
-        model,
-        _inputs(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, _inputs(2), backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     exported = runtime.state_dict()
     assert exported.keys() == {"left.weight", "right.weight"}
     assert exported["left.weight"] is exported["right.weight"]
@@ -252,13 +272,16 @@ def test_alias_names_round_trip_and_conflicts_refuse_transactionally() -> None:
 def test_invalid_state_keeps_values_and_training_boundary(invalid: str) -> None:
     """Reject the whole aggregate before any owned state or boundary version changes."""
 
-    runtime = prepare_fixture(
-        _Model(),
-        _inputs(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(
+        _Model(), _inputs(2), backend="mlx", features=SplitFeatures(training=True)
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     boundary = runtime.run_training_prefix(_inputs())
     suffix = runtime.train_suffix_result(boundary, mx.ones((3, 2)))
     original = runtime.state_dict()
@@ -284,13 +307,16 @@ def test_invalid_state_keeps_values_and_training_boundary(invalid: str) -> None:
 def test_placement_failure_does_not_partially_commit(monkeypatch: pytest.MonkeyPatch) -> None:
     """A failed suffix copy cannot leave the prefix on a different aggregate round."""
 
-    runtime = prepare_fixture(
-        _Model(),
-        _inputs(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(
+        _Model(), _inputs(2), backend="mlx", features=SplitFeatures(training=True)
     )
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
+    )
+    runtime = graph.materialize(graph.analyze(partition))
     original = runtime.state_dict()
     binding = runtime.segments.suffix._binding
     adapter = binding.adapter
@@ -333,13 +359,14 @@ def test_batchnorm_buffers_export_and_buffer_load_invalidates_old_boundary() -> 
             return mx.multiply(hidden, hidden)
 
     model, reference = Model(), Model()
-    runtime = prepare_fixture(
-        model,
-        _inputs(2),
-        split_request(
-            partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
-        ),
+    graph = prepare_graph(model, _inputs(2), backend="mlx", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    partition = dag.to_partition(
+        close_call_ids(
+            dag, call_ids(graph, modules=frozenset({"maximum"}), ops=frozenset({"maximum"}))
+        )
     )
+    runtime = graph.materialize(graph.analyze(partition))
     boundary = runtime.run_training_prefix(_inputs())
     suffix = runtime.train_suffix_result(boundary, mx.ones((3, 4)))
     reference(_inputs())

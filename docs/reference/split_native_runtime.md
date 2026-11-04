@@ -68,6 +68,11 @@ coordinator. These calls are certified for topological-prefix partitions that
 preserve every native call's order. Cuts that reorder such calls, custom module
 implementations and unknown writes retain the typed effect-order refusal.
 
+MLX named state export returns evaluated, independent CPU arrays. Replica comparisons
+run under their binding's native stream; exported and loaded snapshots use a fixed CPU
+stream and restore the caller's defaults. State exchange therefore remains valid when
+the ambient default is GPU and the runtime's replicas are on CPU.
+
 Paddle's native BatchNorm kernel uses `is_test` and global-statistics flags
 rather than Torch's positional training flag. Affirmative read-only global-stat
 calls may replay; unproved training writes still refuse. Every output of an
