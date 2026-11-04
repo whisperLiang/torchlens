@@ -190,6 +190,44 @@ class SplitRuntime(SplitGraph):
 
         return state_bindings(self)
 
+    def bind_boundary_state(self, boundary: ReplayBoundary) -> ReplayBoundary:
+        """Bind source buffers in a transported boundary to this suffix's state.
+
+        Parameters
+        ----------
+        boundary:
+            Structurally compatible boundary from an independent prefix executor.
+
+        Returns
+        -------
+        ReplayBoundary
+            Boundary with registered source-buffer operands bound to effective
+            suffix state. Computed values and buffer observations are unchanged.
+            This explicit opt-in keeps server-owned running statistics local.
+        """
+        self.validate_boundary(boundary)
+        bindings = self.state_bindings()
+        rows = self.parameter_ownership()
+        tensors = dict(boundary.tensors)
+        for key, node_id in self.plan.boundary_bindings.items():
+            node = self.trace_graph.node_by_id[node_id]
+            if not node.is_buffer or node.parents:
+                continue
+            matches = [
+                row
+                for row in rows
+                if row.kind == "buffer" and node_id in row.node_ids and "suffix" in row.owners
+            ]
+            if len(matches) != 1:
+                raise ValueError(f"Cannot bind boundary buffer {key!r} to unique suffix state")
+            tensors[key] = bindings[matches[0].state_id]["suffix"]
+        return ReplayBoundary(
+            backend=boundary.backend,
+            tensors=tensors,
+            spec=boundary.spec,
+            metadata=dict(boundary.metadata),
+        )
+
     def plan_state_migration(self, partition: GraphPartition) -> StateMigrationPlan:
         """Describe a recut and external optimizer reassociation without moving state."""
 
@@ -736,6 +774,8 @@ class SplitRuntime(SplitGraph):
         microbatch_size: int | None = None,
         microbatch_reduction: str = "mean",
         target_slicer: Callable[[Any, int, int, int], Any] | None = None,
+        boundary_gradients_only: bool = False,
+        phase_timer: Callable[[str], Any] | None = None,
     ) -> tuple[Any, dict[str, Any]]:
         """Train the suffix and return logical-batch boundary gradients.
 
@@ -775,6 +815,8 @@ class SplitRuntime(SplitGraph):
             microbatch_size=microbatch_size,
             microbatch_reduction=microbatch_reduction,
             target_slicer=target_slicer,
+            boundary_gradients_only=boundary_gradients_only,
+            phase_timer=phase_timer,
         )
 
     def train_suffix_result(
@@ -787,6 +829,8 @@ class SplitRuntime(SplitGraph):
         microbatch_size: int | None = None,
         microbatch_reduction: str = "mean",
         target_slicer: Callable[[Any, int, int, int], Any] | None = None,
+        boundary_gradients_only: bool = False,
+        phase_timer: Callable[[str], Any] | None = None,
     ) -> Any:
         """Train the suffix and return a structured training result."""
 
@@ -801,6 +845,8 @@ class SplitRuntime(SplitGraph):
             microbatch_size=microbatch_size,
             microbatch_reduction=microbatch_reduction,
             target_slicer=target_slicer,
+            boundary_gradients_only=boundary_gradients_only,
+            phase_timer=phase_timer,
         )
 
     def backward_prefix(

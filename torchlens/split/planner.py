@@ -59,6 +59,7 @@ def _frontier_node_ids(
         # boundary ABI.
         if node.is_output and node.canonical_id in prefix_node_ids:
             frontier.add(node.canonical_id)
+            continue
         for parent in node.parents:
             parent_node = graph.node_for_label(parent)
             if parent_node is not None and parent_node.canonical_id in prefix_node_ids:

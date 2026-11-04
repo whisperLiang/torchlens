@@ -387,6 +387,23 @@ class PaddleGeneratedSuffix(_PaddleGeneratedSegmentBase):
             if not overlay:
                 return None
             return overlay[next(reversed(overlay))]
+        spec = next(
+            (
+                node.output_container_spec
+                for node in output_nodes
+                if node.output_container_spec is not None
+            ),
+            None,
+        )
+        if spec is not None:
+            from ...ir.container import rebuild_container_from_spec, reorder_container_leaves
+
+            addressed = [
+                (path, self._output_leaf(node, overlay))
+                for node in output_nodes
+                for path in (node.output_container_paths or (node.output_container_path,))
+            ]
+            return rebuild_container_from_spec(spec, reorder_container_leaves(spec, addressed))
         leaves = [self._output_leaf(node, overlay) for node in output_nodes]
         if len(leaves) == 1:
             return leaves[0]

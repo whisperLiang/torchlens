@@ -194,7 +194,12 @@ class SplitTraceGraph:
         return tuple(
             node
             for node in self.nodes
-            if not (node.is_input or node.is_output or node.is_buffer or node.is_buffer_only_source)
+            if not (
+                node.is_input
+                or node.is_buffer
+                or node.is_buffer_only_source
+                or (node.is_output and (node.target is None or node.op_type == "output"))
+            )
         )
 
     @cached_property
@@ -364,6 +369,8 @@ def _attach_paddle_capture_templates(
                 args_template=tuple(getattr(capture, "args_template", ()) or ()),
                 kwargs_template=dict(getattr(capture, "kwargs_template", {}) or {}),
                 param_refs=_paddle_capture_parameter_refs(capture, params_by_id),
+                output_container_paths=capture.final_output_paths,
+                output_container_spec=capture.final_output_spec or node.output_container_spec,
             )
         )
     return updated
@@ -953,12 +960,20 @@ def split_graph_from_trace(trace: Any) -> SplitTraceGraph:
         )
         for node in normalized_nodes
     )
+    graph_hash = getattr(trace, "graph_shape_hash", None)
+    if backend == PADDLE_BACKEND_NAME:
+        output_contract = tuple(
+            (node.canonical_id, node.output_container_paths, node.output_container_spec)
+            for node in fixed_nodes
+            if node.is_output
+        )
+        graph_hash = sha256(f"{graph_hash}:{output_contract!r}".encode()).hexdigest()
     return SplitTraceGraph(
         backend=backend,
         nodes=fixed_nodes,
         input_node_ids=tuple(node.canonical_id for node in fixed_nodes if node.is_input),
         output_node_ids=tuple(node.canonical_id for node in fixed_nodes if node.is_output),
-        graph_shape_hash=getattr(trace, "graph_shape_hash", None),
+        graph_shape_hash=graph_hash,
         traced_batch_size=traced_batch_size,
     )
 

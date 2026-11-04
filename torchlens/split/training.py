@@ -288,23 +288,26 @@ def _execute_torch_suffix(
     # validation here would add a full model fingerprint to every train step.
     with phase_timer("suffix_forward") if phase_timer is not None else nullcontext():
         output = runtime._run_suffix_unchecked(replay_boundary)
-    loss = (
-        loss_fn(output, targets) if loss_fn is not None else _default_loss(torch, output, targets)
-    )
+    with phase_timer("suffix_loss") if phase_timer is not None else nullcontext():
+        loss = (
+            loss_fn(output, targets)
+            if loss_fn is not None
+            else _default_loss(torch, output, targets)
+        )
     with phase_timer("suffix_backward") if phase_timer is not None else nullcontext():
         if parameter_inputs is None:
             loss.backward()
-        else:
+        elif root_tensors or parameter_inputs:
             # Profiling limits accumulation to isolated leaves even if a custom
             # objective closes over an unrelated caller-owned parameter.
             loss.backward(inputs=(*root_tensors.values(), *parameter_inputs))
+        if optimizer is not None:
+            optimizer.step()
     gradients: BoundaryGradients = {
         key: root.grad.detach().clone()
         for key, root in root_tensors.items()
         if root.grad is not None
     }
-    if optimizer is not None:
-        optimizer.step()
     return loss, gradients, optimizer is not None
 
 
@@ -891,9 +894,31 @@ def train_suffix_result(
     microbatch_size: int | None = None,
     microbatch_reduction: str = "mean",
     target_slicer: Callable[[Any, int, int, int], Any] | None = None,
+    boundary_gradients_only: bool = False,
+    phase_timer: Callable[[str], Any] | None = None,
 ) -> TrainingStepResult:
     """Train or differentiate a backend split suffix and return structured metadata."""
 
+    if boundary_gradients_only or phase_timer is not None:
+        if runtime.adapter.name != "torch" or microbatch_size is not None:
+            raise SplitUnsupportedError(
+                "Boundary-only VJPs and phase hooks require a single Torch suffix batch.",
+                context=_context(runtime, "unsupported suffix execution options"),
+            )
+        if boundary_gradients_only and optimizer is not None:
+            raise ValueError("Boundary-only gradients cannot update a suffix optimizer")
+        loss, gradients, applied = _execute_torch_suffix(
+            runtime,
+            boundary,
+            targets,
+            _TorchSuffixOptions(
+                loss_fn=loss_fn,
+                optimizer=optimizer,
+                phase_timer=phase_timer,
+                parameter_inputs=() if boundary_gradients_only else None,
+            ),
+        )
+        return TrainingStepResult(loss, gradients, optimizer_applied=applied)
     if microbatch_size is not None:
         if runtime.adapter.name != "torch":
             engine = training_engine_for(runtime.adapter.name)
@@ -944,6 +969,8 @@ def train_suffix(
     microbatch_size: int | None = None,
     microbatch_reduction: str = "mean",
     target_slicer: Callable[[Any, int, int, int], Any] | None = None,
+    boundary_gradients_only: bool = False,
+    phase_timer: Callable[[str], Any] | None = None,
 ) -> tuple[Any, BoundaryGradients]:
     """Train or differentiate a backend split suffix."""
 
@@ -956,6 +983,8 @@ def train_suffix(
         microbatch_size=microbatch_size,
         microbatch_reduction=microbatch_reduction,
         target_slicer=target_slicer,
+        boundary_gradients_only=boundary_gradients_only,
+        phase_timer=phase_timer,
     ).as_tuple()
 
 

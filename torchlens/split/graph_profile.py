@@ -124,6 +124,7 @@ def dtype_bytes(dtype: str | None) -> int | None:
     """Return widths only for explicitly recognized dense tensor dtypes."""
 
     name = (dtype or "").removeprefix("torch.").removeprefix("paddle.").removeprefix("mlx.core.")
+    name = name.removeprefix("<dtype: '").removesuffix("'>")
     widths = {
         "bool": 1,
         "uint8": 1,

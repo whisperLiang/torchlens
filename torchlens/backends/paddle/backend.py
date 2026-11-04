@@ -259,6 +259,8 @@ class PaddleOpCapture:
     alias_annotations: tuple[dict[str, Any], ...] = ()
     capture_gap_markers: tuple[str, ...] = ()
     intervention: PaddleInterventionCapture | None = None
+    final_output_paths: tuple[tuple[Any, ...], ...] = ()
+    final_output_spec: Any = None
 
 
 class PaddleBackend:
@@ -1607,11 +1609,24 @@ class PaddleBackend:
     def _mark_outputs(self, trace: Trace, output: object) -> None:
         """Mark final output-parent operations for a Paddle trace."""
 
-        for _path, value in self._iter_tensors_with_paths(output):
+        paths: dict[str, list[tuple[Any, ...]]] = {}
+        for path, value in self._iter_tensors_with_paths(output):
             label = self.tensor_store.get_label(value)
             if label is None:
                 continue
             mark_output_label(trace, label)
+            paths.setdefault(label, []).append(path)
+        specification = _paddle_output_container_spec(output, self.is_tensor)
+        trace._paddle_op_captures = [
+            replace(
+                capture,
+                final_output_paths=tuple(paths[capture.label_raw]),
+                final_output_spec=specification,
+            )
+            if capture.label_raw in paths
+            else capture
+            for capture in trace._paddle_op_captures
+        ]
 
     def _finish_trace(self, trace: Trace, module_tree: PaddleModuleTree | None = None) -> None:
         """Finalize a manually captured Paddle Trace."""
@@ -2661,3 +2676,28 @@ def _paddle_values_close(left: Any, right: Any) -> bool:
 
 
 __all__ = ["GradOptions", "PaddleBackend", "PaddleOpCapture", "TensorLeafCapture"]
+
+
+def _paddle_output_container_spec(value: Any, is_tensor: Callable[[Any], bool]) -> Any:
+    """Describe builtin final-output containers independently of native call outputs."""
+    from ...ir.container import ContainerSpec, DictKey, TupleIndex
+
+    if is_tensor(value):
+        return None
+    if type(value) in (list, tuple):
+        children = tuple(
+            (TupleIndex(index), child)
+            for index, item in enumerate(value)
+            if (child := _paddle_output_container_spec(item, is_tensor)) is not None
+        )
+        return ContainerSpec(
+            "list" if isinstance(value, list) else "tuple", length=len(value), child_specs=children
+        )
+    if type(value) is dict:
+        children = tuple(
+            (DictKey(key), child)
+            for key, item in value.items()
+            if (child := _paddle_output_container_spec(item, is_tensor)) is not None
+        )
+        return ContainerSpec("dict", keys=tuple(value), child_specs=children)
+    return ContainerSpec("literal", literal_value=value)
