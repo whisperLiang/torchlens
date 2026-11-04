@@ -1,36 +1,35 @@
 # Native split runtime
 
 `GraphPartition(prefix_node_ids=frozenset(...))` is the sole split description.
-Canonical compute-node IDs come from `graph.trace_graph.compute_nodes`; display
+Use `graph.compute_dag()` to expose native calls, then `dag.to_partition(call_ids)`
+to expand externally selected calls into canonical compute-value IDs. Display
 labels and module names are not partition IDs. Capture first, choose a set, analyze
 it, then materialize it. There is one planner and one backend replay engine.
 
 ```python
 import torch
 from torch import nn
-from torchlens.split import GraphPartition, SplitFeatures, prepare_graph
+from torchlens.split import SplitFeatures, prepare_graph
 
 model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 3))
 x = torch.randn(2, 4)
 graph = prepare_graph(model, x, features=SplitFeatures(training=True, retain_trace=False))
-partition = GraphPartition(frozenset(
-    node.canonical_id for node in graph.trace_graph.compute_nodes[:2]
-))
+dag = graph.compute_dag()
+profile = graph.graph_profile()
+# Fixed example selection; an external algorithm can use dag and profile instead.
+partition = dag.to_partition(call.call_id for call in dag.nodes[:2])
 analysis = graph.analyze(partition)  # no executable segments or state replicas
 runtime = graph.materialize(analysis)
 torch.testing.assert_close(runtime.replay(x), model(x))
-new_partition = GraphPartition(frozenset(
-    node.canonical_id for node in graph.trace_graph.compute_nodes[:1]
-))
+new_partition = dag.to_partition([dag.nodes[0].call_id])
 migration = runtime.plan_state_migration(new_partition)
 new_runtime = runtime.repartition(new_partition)
 torch.testing.assert_close(new_runtime.replay(x), model(x))
 ```
 
 `prepare(model, inputs, SplitRequest(partition, ...))` combines these same stages
-when canonical IDs are already known. `partition_candidates()` returns a bounded
-linear sequence of native-call-atomic topological prefixes, including empty/all
-compute selections. It neither enumerates nor limits all legal DAG partitions.
+when canonical IDs are already known. TorchLens supplies graph metadata and native
+execution; external systems choose prefix/suffix placement directly on the DAG.
 An analysis belongs to exactly one captured graph; another capture refuses it.
 Inputs belong to the prefix and output reconstruction belongs to the suffix.
 
@@ -105,16 +104,54 @@ Explicit Generator identities can be independently copied by argument capture,
 so their copied identities do not prove independence: their native order remains
 constrained. Cross-device explicit generators retain the existing refusal.
 
-The benchmark's bounded effect-closure search is an internal discovery aid. It
-combines call/data ancestors, storage-effect predecessors and local write
-groups, then samples subgraph unions. Every result still passes the same
-`analyze()` planner. `partition_candidates()` keeps its existing topological
-prefix contract. To compare with the old single-call ancestor search, use
-`--candidate-strategy ancestors`; `--candidate-census` analyzes the whole bounded
-set and reports accepted/refused counts rather than stopping after three cuts.
-Internal refusal evidence records the call/order, operands' possible storage
-origins, aliases, crossings and conflicting effect edges without changing the
-public error codes.
+## Compute DAG and external placement
+
+`ComputeDAG` is a frozen projection of the existing `SplitTraceGraph`, without
+recapture, forward execution, executable construction or another compute IR:
+
+| Field | Meaning |
+| --- | --- |
+| `graph_identity` | Same captured graph identity used by analysis and the cost profile. |
+| `nodes` | Existing `ReplayCall` records; one native invocation, including all its outputs. |
+| `data_edges` | `(source_call_id, target_call_id, tensor_value_id)`; canonical tensor values join `profile.tensors`. |
+| `effect_edges` | `(source_call_id, target_call_id)`; execution order only, with no implied communication payload. |
+| `must_colocate` | Minimal local-write obligations for the requested training/placement policy. |
+
+Inputs, parameters, buffers, constants and pure output markers are not compute
+vertices. Actual operations reading parameters or buffers remain compute calls.
+Source identities and shape/state facts remain available on the retained graph
+and `graph_profile()`. Observations with producers preserve their data dependence.
+Multi-output calls are never split or charged several times: join `profile.nodes`
+by `call_id`; FLOPs are on the owning output row, with zero on sibling rows.
+Unknown costs remain `None`.
+
+Torch effect edges reuse the existing storage-effect index. Other backends retain
+their native write and execution-order refusals at analysis; an empty effect-edge
+tuple does not certify arbitrary stateful reordering on those backends.
+
+`dag.to_partition(prefix_call_ids)` accepts any collection of existing call IDs,
+including empty/all selections, and expands every call's complete canonical output
+set. It rejects invalid/unknown IDs immediately. It does not infer missing ancestors,
+repair selections or certify training safety. Always call `graph.analyze(partition)`:
+mutable-source aliasing, full alias-chain proofs, shared trainable state,
+backend support and other native constraints remain authoritative there.
+Noncontiguous selections use the same native planner and runtime.
+
+The isolated driver accepts `--partitions workloads.json`, a JSON object mapping
+`"sequential"` and/or `"noncontiguous_dag"` to lists of prefix Call ID lists.
+`--dump-dag graph.json` exports the DAG and existing cost profile for an external
+algorithm. Without a manifest the driver measures three fixed sequential workloads;
+noncontiguous workloads require explicit selections. Native refusals are reported,
+with no search for another successful partition. Three distinct supplied workloads
+allow the training check to exercise A/B/C/A state migration and optimizer updates.
+
+```bash
+python benchmarks/split_graph_partition.py --model resnet18 --dump-dag graph.json --output sequential.json
+python benchmarks/split_graph_partition.py --model resnet18 --model-mode train --partition-kind noncontiguous_dag --partitions workloads.json --strict --output training.json
+```
+
+Internal refusal evidence records the call/order, possible storage origins,
+aliases, crossings and conflicting effect edges without changing public error codes.
 
 ## Functional precision policy
 
@@ -129,7 +166,7 @@ dtype matching its output. The scope is limited to criterion construction/calls
 and restores the ambient dtype; model forward and replay receive no dtype patch.
 An explicit lower-precision experiment does not become a required cross-device
 numerical equivalence matrix. Performance benchmarks keep deployment precision.
-The [acceptance report](split_training_dag_fp64.md) records plain-SGD functional
+The [archived pre-consolidation report](../archive/split_training_dag_fp64.md) records historical plain-SGD functional
 checks against an independent full-model reference, including gradients,
 buffers, parameter bindings and state after recuts.
 
@@ -200,7 +237,7 @@ A separate memory pass reports Python metadata peak/retained bytes; these are no
 tensor allocator totals. CUDA measurements require a CUDA-enabled installation.
 
 `python benchmarks/split_runtime_overhead.py --repeats 20` measures execution and
-candidate-analysis overhead. `benchmarks/split_training_compact.py` measures
+DAG projection and native-analysis overhead. `benchmarks/split_training_compact.py` measures
 retention modes in separate processes. `benchmarks/split_planner.py` isolates
 uncached synthetic planning. Each benchmark records its configuration and measurements
 when run; generated result files are not part of the source tree.

@@ -584,8 +584,10 @@ environments are listed in `tests/oracle_environments.md`.
   the captured batch stays allowed. `tl.split.prepare_graph()` captures before selection;
   `GraphPartition` is the sole canonical compute-node set. `.analyze(partition)` returns
   `PartitionAnalysis` without segments; `.materialize(analysis)` creates a runtime;
-  `.repartition(partition)` inherits current state on the same graph. Optional
-  `.partition_candidates()` returns atomic topological prefixes, never all DAG cuts.
+  `.repartition(partition)` inherits current state on the same graph.
+  `.compute_dag()` exposes existing native calls with tensor-value data edges,
+  effect order and minimal co-location obligations for external placement;
+  `dag.to_partition(call_ids)` expands complete native output sets for the same planner.
   `PlacementPlan.across(prefix, suffix)` / `SplitRuntime.with_placement()` bind
   segment state per device through `SegmentState` (`referenced` vs `owned`, one replica per
   source identity so tied params keep one identity; `prefix_parameters()` /

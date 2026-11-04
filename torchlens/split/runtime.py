@@ -803,6 +803,12 @@ class SplitRuntime(SplitGraph):
         target_slicer
             Optional ``(targets, start, end, logical_batch) -> chunk`` callback
             for target structures whose sample axis cannot be inferred.
+        boundary_gradients_only
+            Compute only boundary gradients on Torch, leaving suffix parameter
+            gradients untouched. Cannot be combined with an optimizer.
+        phase_timer
+            Optional callback returning a context manager for each named suffix
+            forward, loss and backward phase.
 
         Returns
         -------

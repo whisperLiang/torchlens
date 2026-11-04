@@ -850,8 +850,10 @@ print(tl.compat.report(model, x).to_markdown())
   `GraphPartition` is the sole split description. `.analyze(partition)` returns
   `PartitionAnalysis`; `.materialize(analysis)` builds segments, and
   `.repartition(partition)` reuses the SAME capture and current effective state.
-  `.partition_candidates()` offers atomic topological prefixes without restricting
-  manual noncontiguous DAG selections. Heterogeneous placement is first-class: `PlacementPlan.across(prefix, suffix)` on the request (or
+  `.compute_dag()` projects the existing native calls, tensor-value data edges,
+  effect order and minimal local-write co-location obligations. External algorithms
+  choose calls; `dag.to_partition(call_ids)` expands their complete canonical output
+  sets for the same native planner, including noncontiguous selections. Heterogeneous placement is first-class: `PlacementPlan.across(prefix, suffix)` on the request (or
   `SplitRuntime.with_placement()`), with `SegmentState` owning device-local replicas
   (`referenced` vs `owned`, one replica per source identity so tied/shared params keep
   one identity) exposed via `prefix_parameters()` / `suffix_parameters()`; boundary

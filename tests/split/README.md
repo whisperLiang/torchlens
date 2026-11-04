@@ -7,24 +7,27 @@ the prior default afterward. Explicit dtype contracts, optional backend
 compatibility tests and performance workloads retain their declared precision.
 `test_partition_effect_dependencies.py` covers native independent BatchNorm
 branches, inplace activations, A/B/C/A buffer and SGD parameter bindings, RAW/WAR/WAW
-refusals, later buffer alias replacement, explicit Generator ordering, bounded
-candidate unions and float16/bfloat16/float32/float64 passthrough.
+refusals, later buffer alias replacement, explicit Generator ordering and
+float16/bfloat16/float32/float64 passthrough. `test_split_compute_dag.py` covers
+call projection, multiple outputs, source filtering, data/effect dependencies,
+local-write obligations and conversion into the same native planner.
 
 The isolated model driver uses plain SGD (`lr=0.01`), defaults to FP64, and
 checks integer/boolean values exactly:
 
 ```bash
-python benchmarks/split_graph_partition.py --model resnet18 --model-mode train --candidate-census --strict --output resnet-training.json
-python benchmarks/split_graph_partition.py --model yolov8 --model-mode train --candidate-census --strict --output yolo-training.json
+python benchmarks/split_graph_partition.py --model resnet18 --dump-dag graph.json --output sequential.json
+python benchmarks/split_graph_partition.py --model resnet18 --model-mode train --partition-kind noncontiguous_dag --partitions workloads.json --strict --output training.json
 ```
 
-Use `--candidate-strategy ancestors` for the former data-only search. The default
-search closes both data and required storage effects and still calls the one
-production planner. A required suffix-before-prefix effect remains unsupported.
-Legal candidate counts are analysis coverage; only the cuts that actually run
-forward, backward and optimizer checks count as numerical validation. See the
-[training DAG and FP64 report](../../docs/reference/split_training_dag_fp64.md)
-for measured counts, device coverage, limits and performance.
+External algorithms supply `workloads.json`: map `"sequential"` and/or
+`"noncontiguous_dag"` to lists of prefix Call ID lists from the exported DAG.
+Three distinct workloads support the A/B/C/A training check. The default driver
+measures three fixed sequential workloads. It reports native analysis refusals
+without searching for another cut. DAG construction, analysis, materialization,
+forward/backward and repartition are measured independently; no candidate counts
+are used as correctness evidence. See the
+[native workflow](../../docs/reference/split_native_runtime.md).
 
 The comparison budget is fixed at `atol=1e-8`, `rtol=1e-7`. Tests reject
 out-of-budget floating values, dtype/shape mismatches, categorical differences,
@@ -36,7 +39,8 @@ storage (`test_split_partition_buffer_gradients.py`), and native stochastic repl
 across real CPU/CUDA devices (`test_split_rng_devices.py`). They compare values,
 gradients and effective state across recuts; hardware skips are not passes.
 
-Tests construct `GraphPartition` from canonical compute IDs. Shared fixture
+New workflow tests select native calls with `compute_dag().to_partition(call_ids)`.
+Planner/refusal tests also construct `GraphPartition` directly from canonical compute IDs. Shared fixture
 selectors accept a node count or an unambiguous node/module anchor and return a
 partition; there is no string-based point-interface emulator. True DAG tests keep
 their interleaved branch sets rather than replacing them with ordered prefixes.

@@ -57,9 +57,17 @@ removed spellings are listed separately in [Deprecations](deprecations.md).
   dependency closure, native-call atomicity, source/output ownership, effects and state.
   `SplitRequest(partition, ...)` adds backend, features, validation and placement policies
   when IDs are already known. `runtime.repartition(partition)` reuses the capture and
-  inherits current effective state. `partition_candidates()` offers topological prefixes;
-  it does not restrict manually supplied noncontiguous partitions. See
+  inherits current effective state. `graph.compute_dag()` exposes the existing native
+  calls for external placement; `dag.to_partition(call_ids)` expands them atomically. See
   [Native split runtime](split_native_runtime.md).
+
+**ComputeDAG**
+: Frozen projection of existing `ReplayCall` records, with directed tensor-value data
+  edges, separate ordering-only effect edges, and minimal local-write co-location
+  groups. Sources and output markers are excluded; real operations on state remain.
+  Construction does not execute or capture the model. External algorithms choose
+  prefix calls, `to_partition()` expands complete native outputs, and the original
+  `analyze()` planner remains the authority for legality, aliases and state safety.
 
 **GraphProfile / BoundaryLayout**
 : Immutable static metadata from the captured graph and ShapeProgram. `graph_profile()` exposes

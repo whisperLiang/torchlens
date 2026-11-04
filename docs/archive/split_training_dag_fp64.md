@@ -1,4 +1,9 @@
-# Training DAG partitions and SGD FP64 acceptance
+# Archived: training DAG partitions and SGD FP64 acceptance
+
+> Historical results from before Compute DAG consolidation. The candidate searches,
+> census options and candidate-count results below describe deleted implementations.
+> They are not acceptance evidence for the current API. Use the
+> [native Compute DAG workflow](../reference/split_native_runtime.md) and rerun current tests.
 
 GraphPartition remains the sole partition abstraction. The training repair extends
 storage-effect proofs inside the existing planner; capture, replay, placement and

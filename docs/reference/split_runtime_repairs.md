@@ -1,6 +1,9 @@
+> Current API: [Compute DAG and native runtime](split_native_runtime.md). Historical
+> measurements linked below predate candidate-search removal and do not validate the new API.
+
 # Split runtime repairs
 
-The [SGD FP64 acceptance report](split_training_dag_fp64.md) contains current
+The [SGD FP64 acceptance report](../archive/split_training_dag_fp64.md) contains historical
 validation and source provenance. This page describes the retained mechanisms;
 optimizer diagnostic sweeps are not part of the acceptance workflow.
 
@@ -62,5 +65,5 @@ parameters; it does not recapture the graph. The optional deterministic flag
 records the requested native algorithm policy; unsupported kernels remain
 failures. Runtime dtype and caller-owned optimizer support are unchanged.
 
-[Run the SGD matrix](split_training_dag_fp64.md) for model/device results and
+[Run the SGD matrix](../archive/split_training_dag_fp64.md) for model/device results and
 [read the runtime contract](split_native_runtime.md) for placement and ownership.

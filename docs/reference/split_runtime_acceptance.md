@@ -1,7 +1,10 @@
+> Current API: [Compute DAG and native runtime](split_native_runtime.md). Historical
+> measurements linked below predate candidate-search removal and do not validate the new API.
+
 # Split runtime acceptance
 
-The current [training DAG and SGD FP64 report](split_training_dag_fp64.md) is the
-single source for measured model/device results and repository checks.
+The historical [training DAG and SGD FP64 report](../archive/split_training_dag_fp64.md)
+records pre-consolidation model/device results and repository checks.
 
 ## Validation protocol
 
@@ -93,7 +96,7 @@ The compiler override applies only to that command. Native compilation and all
 numerical checks stay enabled; CPU MLX results do not attest GPU placement.
 
 See [runtime semantics](split_native_runtime.md), [repair mechanisms](split_runtime_repairs.md)
-and the [SGD report](split_training_dag_fp64.md) for details and measured coverage.
+and the [SGD report](../archive/split_training_dag_fp64.md) for details and measured coverage.
 
 ```bash
 python benchmarks/split_graph_partition.py --model yolov8 --model-mode train --dtype float64 --prefix-device cpu --suffix-device cuda --strict --output yolo-sgd.json
