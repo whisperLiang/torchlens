@@ -36,6 +36,19 @@ cannot establish two-GPU migration. Dynamic batch probes and captured paths are
 finite evidence; unknown aliases, unsupported effects, native call splitting and
 reverse dependencies retain their typed refusals.
 
+## Backend environments
+
+Keep CUDA 12 and CUDA 13 GPU extras in separate environments. In particular,
+`nvidia-cudnn-cu12` and `nvidia-cudnn-cu13` install into the same
+`nvidia/cudnn/lib` directory: both package metadata records can remain present
+while one set of binaries replaces the other. Record the library actually
+loaded by the backend, such as `torch.backends.cudnn.version()`, alongside its
+declared dependencies before attributing a native kernel failure to Split.
+
+The MLX 0.26 CPU JIT invokes the `g++` found on `PATH`. Use a compiler compatible
+with that wheel's generated preamble; compiler failures do not attest Split
+correctness. Keep native compilation enabled during its validation.
+
 See [runtime semantics](split_native_runtime.md), [repair mechanisms](split_runtime_repairs.md)
 and the [SGD report](split_training_dag_fp64.md) for details and measured coverage.
 
