@@ -74,6 +74,9 @@ TensorFlow tests unable to discover their GPU. When CUDA comes from Python wheel
 set `XLA_FLAGS=--xla_gpu_cuda_data_dir=.../site-packages/nvidia/cuda_nvcc` to the
 installed compiler directory. Keep backend CUDA package versions compatible;
 installing several framework GPU extras together can request conflicting versions.
+For native crashes, conflicting cuDNN binaries, or MLX CPU compiler errors, follow
+the [backend recovery recipes](../../docs/reference/split_runtime_acceptance.md#recovering-native-backend-environments)
+before rerunning the same numerical tests.
 
 For a reproducible model-package setup with Torch 2.10, install these versions
 alongside the required native backend runtimes:

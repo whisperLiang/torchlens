@@ -49,6 +49,49 @@ The MLX 0.26 CPU JIT invokes the `g++` found on `PATH`. Use a compiler compatibl
 with that wheel's generated preamble; compiler failures do not attest Split
 correctness. Keep native compilation enabled during its validation.
 
+### Recovering native backend environments
+
+First run the failing model directly, without TorchLens. A native forward that
+aborts cannot establish a Split replay failure. For example, a mixed Torch 2.10
+CUDA 12 / cuDNN CUDA 13 installation can abort a MobileNetV2 convolution with
+`Invalid handle. Cannot load symbol cublasLtCreate`. In the reproduced environment,
+Torch required cuDNN 9.10.2.21 but `torch.backends.cudnn.version()` returned 91300.
+Both cuDNN distributions owned the same `libcudnn*.so.9` paths. Installed package
+versions alone therefore did not describe the binaries being executed.
+
+Create a separate environment to keep each CUDA runtime's binaries together.
+This Torch 2.10 recovery recipe preserves the original environment:
+
+```bash
+uv venv .venvs/torch --python python3.12
+uv pip install --python .venvs/torch/bin/python -e '.[dev,test,tabular,detection]' \
+  'torch==2.10.0' 'torchvision==0.25.0' 'torchaudio==2.10.0'
+.venvs/torch/bin/python -c 'import torch; print(torch.__version__, torch.backends.cudnn.version())'
+.venvs/torch/bin/python -m pytest tests/split/test_split_real_models.py \
+  -k torchvision_extra -x --tb=short
+```
+
+Keep JAX, TensorFlow and Paddle GPU extras in their own environments. When the
+environment is for another backend, install CPU Torch first so its mandatory
+Torch dependency does not bring a competing CUDA runtime. Run that backend's
+tests with its own interpreter. Do not add all GPU extras to the Torch environment.
+
+For the Linux MLX 0.26 CPU wheel, use GCC 12 for native JIT compilation when
+GCC 13 rejects the generated `_Float*` typedefs:
+
+```bash
+uv pip install --python .venvs/torch/bin/python 'mlx==0.26.3'
+mkdir -p .venvs/torch/mlx-compiler
+ln -sf /usr/bin/g++-12 .venvs/torch/mlx-compiler/g++
+PATH="$PWD/.venvs/torch/mlx-compiler:$PATH" .venvs/torch/bin/python -m pytest \
+  tests/split/test_split_mlx_training.py tests/split/test_split_mlx_placement.py \
+  tests/split/test_split_mlx_microbatch.py tests/split/test_split_mlx_state_io.py \
+  tests/split/test_split_mlx_review_regressions.py -x --tb=short
+```
+
+The compiler override applies only to that command. Native compilation and all
+numerical checks stay enabled; CPU MLX results do not attest GPU placement.
+
 See [runtime semantics](split_native_runtime.md), [repair mechanisms](split_runtime_repairs.md)
 and the [SGD report](split_training_dag_fp64.md) for details and measured coverage.
 
