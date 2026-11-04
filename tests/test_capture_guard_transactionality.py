@@ -178,7 +178,7 @@ def test_distributed_arm_restores_its_wraps_when_the_second_install_fails(
 def test_escape_detector_teardown_frees_the_tool_id_and_clears_the_guard(
     monkeypatch,
 ) -> None:
-    """A raising uninstall step must still release the id and clear the guard."""
+    """A raising uninstall step must report failure after releasing the tool id."""
 
     import sys
 
@@ -226,7 +226,8 @@ def test_escape_detector_teardown_frees_the_tool_id_and_clears_the_guard(
         raise RuntimeError("injected set_events failure")
 
     monkeypatch.setattr(monitoring, "set_events", _raise)
-    escape_detection._uninstall_monitoring(guard)
+    with pytest.raises(RuntimeError, match="teardown failed: set_events:.*injected set_events"):
+        escape_detection._uninstall_monitoring(guard)
     assert guard.monitoring_tool_id is None
     # Proof the id really was released: re-acquiring it must succeed.
     monkeypatch.undo()
