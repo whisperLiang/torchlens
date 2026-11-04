@@ -31,6 +31,29 @@ byte-identical to snapshots from the unchanged TorchLens HEAD package
 Neither canonical payloads nor frozen `.tlspec` fixtures were overwritten.
 Legacy artifact tests explicitly assert the expected cross-minor loading warning.
 
+## Python 3.11 / Torch 2.11 verification environment
+
+Python 3.11.15 / Torch 2.11.0+cu130 is also enrolled, using graphviz 0.21 and
+pydot 4.0.1 for the visualization families. All 14 environment-specific payloads
+are inventoried by `test_reviewed_environment_golden_inventory`, including the
+legacy-artifact loaded surface and state keysets. They remain enforced with the
+ordinary resolver and no update/record flags.
+
+Eleven payloads are byte-identical to the canonical Python 3.10 / Torch 2.13
+goldens. In particular, the legacy analysis-artifact surface is independently
+identical to the canonical, reviewed Torch 2.8 and reviewed Torch 2.13 snapshots
+(SHA256 `bf14be1bc34360e93d3ad984bdd7b18df1e14752500d346d073e6dccfcf14817`).
+The frozen analysis and runnable `.tlspec` fixtures were not regenerated.
+
+Three live surface snapshots (`plain_cnn`, `train_batchnorm`, `tiny_transformer`)
+differ from canonical with the Torch runtime: floating tensor digests, native
+module docstrings and the native Transformer operation graph. All six surface
+payloads were independently reproduced byte-for-byte by the unchanged pre-split
+source `34fb9362cb9a509daec98ccf773bb54262d85aac` in the same Torch 2.11
+environment. The `plain_cnn` payload also matches the reviewed Torch 2.8
+baseline. No canonical expected result, loader behavior, comparison rule or
+missing-environment refusal was changed.
+
 ## Collapse-gallery render environment
 
 The checked-in smart-collapse SVG gallery additionally depends on the native

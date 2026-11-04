@@ -75,7 +75,7 @@ _CANONICAL_GOLDENS: dict[str, tuple[Path, ...]] = {
 # missing/ignored files cannot silently turn this environment back into SKIPs.
 _REVIEWED_ENV_GOLDENS = tuple(
     path.parent / f"env-py3.11-torch{torch_version}{extras}" / path.name
-    for torch_version in ("2.13.0", "2.8.0")
+    for torch_version in ("2.13.0", "2.11.0", "2.8.0")
     for family, extras in (
         ("surface_oracle", ""),
         ("godobject_viz", "-graphviz0.21"),

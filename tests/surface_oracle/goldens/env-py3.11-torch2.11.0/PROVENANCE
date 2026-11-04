@@ -1,0 +1,55 @@
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: Enroll Python 3.11 / Torch 2.11.0 for SplitFleet oracle verification; candidates must be reviewed against committed canonical and same-runtime unchanged-source snapshots before enrollment. Preserve every canonical golden and frozen tlspec input; keep missing-environment refusal and mutation guards unchanged.
+env: py3.11-torch2.11.0
+torch: 2.11.0+cu130
+source: d88f9a9abd3d437761bcf9507f97fe51c9f2d416 (clean)
+recorded: 2026-11-04T09:53:06.185568+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: Enroll Python 3.11 / Torch 2.11.0 for SplitFleet oracle verification; candidates must be reviewed against committed canonical and same-runtime unchanged-source snapshots before enrollment. Preserve every canonical golden and frozen tlspec input; keep missing-environment refusal and mutation guards unchanged.
+env: py3.11-torch2.11.0
+torch: 2.11.0+cu130
+source: d88f9a9abd3d437761bcf9507f97fe51c9f2d416 (clean)
+recorded: 2026-11-04T09:53:06.195869+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: Enroll Python 3.11 / Torch 2.11.0 for SplitFleet oracle verification; candidates must be reviewed against committed canonical and same-runtime unchanged-source snapshots before enrollment. Preserve every canonical golden and frozen tlspec input; keep missing-environment refusal and mutation guards unchanged.
+env: py3.11-torch2.11.0
+torch: 2.11.0+cu130
+source: d88f9a9abd3d437761bcf9507f97fe51c9f2d416 (clean)
+recorded: 2026-11-04T09:53:06.204411+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: Enroll Python 3.11 / Torch 2.11.0 for SplitFleet oracle verification; candidates must be reviewed against committed canonical and same-runtime unchanged-source snapshots before enrollment. Preserve every canonical golden and frozen tlspec input; keep missing-environment refusal and mutation guards unchanged.
+env: py3.11-torch2.11.0
+torch: 2.11.0+cu130
+source: d88f9a9abd3d437761bcf9507f97fe51c9f2d416 (clean)
+recorded: 2026-11-04T09:53:06.213900+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: Enroll Python 3.11 / Torch 2.11.0 for SplitFleet oracle verification; candidates must be reviewed against committed canonical and same-runtime unchanged-source snapshots before enrollment. Preserve every canonical golden and frozen tlspec input; keep missing-environment refusal and mutation guards unchanged.
+env: py3.11-torch2.11.0
+torch: 2.11.0+cu130
+source: d88f9a9abd3d437761bcf9507f97fe51c9f2d416 (clean)
+recorded: 2026-11-04T09:53:06.222444+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: Enroll Python 3.11 / Torch 2.11.0 for SplitFleet oracle verification; candidates must be reviewed against committed canonical and same-runtime unchanged-source snapshots before enrollment. Preserve every canonical golden and frozen tlspec input; keep missing-environment refusal and mutation guards unchanged.
+env: py3.11-torch2.11.0
+torch: 2.11.0+cu130
+source: d88f9a9abd3d437761bcf9507f97fe51c9f2d416 (clean)
+recorded: 2026-11-04T09:53:06.230712+00:00
+---
+review: Enrollment verified after generation, with mutation flags disabled. Eleven of fourteen payloads equal canonical bytes; all six surface payloads independently equal unchanged pre-split source on this same runtime.
+review_environment: Python 3.11.15 / Torch 2.11.0+cu130 / graphviz 0.21 / pydot 4.0.1
+review_source: d88f9a9abd3d437761bcf9507f97fe51c9f2d416
+review_reference_source: 34fb9362cb9a509daec98ccf773bb54262d85aac
+review_legacy_surface_sha256: bf14be1bc34360e93d3ad984bdd7b18df1e14752500d346d073e6dccfcf14817
+review_frozen_artifacts: all original file hashes unchanged
+review_enforcing_gate: 139 passed; no golden update or record flags

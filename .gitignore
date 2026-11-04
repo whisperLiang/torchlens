@@ -223,6 +223,13 @@ tests/golden/env-*/
 !tests/surface_oracle/goldens/env-py3.11-torch2.8.0/
 !tests/golden/env-py3.11-torch2.8.0-graphviz0.21-pydot4.0.1/
 
+# SplitFleet Python 3.11 / Torch 2.11 verification environment. Reviewed against
+# canonical snapshots and unchanged pre-split source; see oracle_environments.md.
+!tests/godobject_oracle/goldens/env-py3.11-torch2.11.0/
+!tests/godobject_oracle/goldens/env-py3.11-torch2.11.0-graphviz0.21/
+!tests/surface_oracle/goldens/env-py3.11-torch2.11.0/
+!tests/golden/env-py3.11-torch2.11.0-graphviz0.21-pydot4.0.1/
+
 # Sprint lane result reports are INTERNAL notes (repo is public); never track them.
 # (The repo no-internal-notes hook is bypassed when a global core.hooksPath is set.)
 results/
