@@ -539,7 +539,7 @@ def test_jax_complete_multiscale_detector_all_nodes_cross_batch() -> None:
         boundaries = [
             (kind, node.canonical_id)
             for node in seed_runtime.trace_graph.compute_nodes
-            for include in (False, True)
+            for kind in ("before", "after")
         ]
         assert boundaries
         for kind, node_id in boundaries:

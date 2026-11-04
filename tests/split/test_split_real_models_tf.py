@@ -273,7 +273,7 @@ def test_tf_keras_cv_yolov8_complete_model_all_nodes_cross_batch_and_device() ->
         boundaries = [
             (kind, node.canonical_id)
             for node in compact_runtime.trace_graph.compute_nodes
-            for include in (False, True)
+            for kind in ("before", "after")
         ]
         assert boundaries
 

@@ -391,7 +391,7 @@ def test_tinygrad_complete_multiscale_detector_all_nodes_cross_batch_and_device(
         boundaries = [
             (kind, node.canonical_id)
             for node in seed_runtime.trace_graph.compute_nodes
-            for include in (False, True)
+            for kind in ("before", "after")
         ]
         assert boundaries
         expected_trace = model(trace_x)
