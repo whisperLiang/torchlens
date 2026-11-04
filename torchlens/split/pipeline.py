@@ -489,6 +489,10 @@ def capture_model(
         capture_kwargs["output_transform"] = output_observer
     if random_seed is not None:
         capture_kwargs["random_seed"] = random_seed
+    common: dict[str, Any] = {
+        "input_kwargs": input_kwargs,
+        "backend": str(backend_spec.name),
+    }
     if str(backend_spec.name) == TORCH_BACKEND_NAME:
         capture_kwargs.update(
             layers_to_save="none" if shape_witness else "all",
@@ -499,11 +503,9 @@ def capture_model(
             detach_saved_activations=False,
             backward_ready=spec.trainable and not shape_witness,
         )
-    common: dict[str, Any] = {
-        "input_kwargs": input_kwargs,
-        "capture": CaptureOptions(**capture_kwargs),
-        "backend": str(backend_spec.name),
-    }
+        common["capture"] = CaptureOptions(**capture_kwargs)
+    else:
+        common.update(capture_kwargs)
     if str(backend_spec.name) == TINYGRAD_BACKEND_NAME:
         from ._tinygrad_state import tinygrad_capture_state
 
