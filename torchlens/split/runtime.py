@@ -218,7 +218,11 @@ class SplitRuntime(SplitGraph):
                 for row in rows
                 if row.kind == "buffer" and node_id in row.node_ids and "suffix" in row.owners
             ]
-            if len(matches) != 1:
+            if not matches:
+                # A prefix-owned or anonymous frozen source is a transmitted
+                # operand, not mutable server-owned state.
+                continue
+            if len(matches) > 1:
                 raise ValueError(f"Cannot bind boundary buffer {key!r} to unique suffix state")
             tensors[key] = bindings[matches[0].state_id]["suffix"]
         return ReplayBoundary(

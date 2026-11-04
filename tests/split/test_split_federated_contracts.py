@@ -103,6 +103,36 @@ def test_transported_source_buffers_bind_to_server_owned_state() -> None:
             torch.testing.assert_close(value, dict(oracle.named_buffers())[name])
 
 
+def test_transported_prefix_owned_source_buffer_is_preserved() -> None:
+    """A frozen buffer carried to the suffix remains a prefix-owned value."""
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.first = nn.Linear(4, 4)
+            self.last = nn.Linear(4, 2)
+            self.register_buffer("scale", torch.tensor(0.5), persistent=False)
+
+        def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+            return self.last(self.first(inputs).tanh() * self.scale)
+
+    model = Model()
+    inputs = torch.ones(2, 4)
+    graph = prepare_graph(model, inputs, features=SplitFeatures(training=True, retain_trace=False))
+    runtime = graph.materialize(graph.analyze(graph.partition_candidates()[1]))
+    boundary = runtime.run_training_prefix(inputs)
+    buffers = [
+        key
+        for key, node_id in runtime.plan.boundary_bindings.items()
+        if runtime.trace_graph.node_by_id[node_id].is_buffer
+    ]
+    assert buffers
+    bound = runtime.bind_boundary_state(boundary)
+    for key in buffers:
+        assert bound.tensors[key] is boundary.tensors[key]
+    torch.testing.assert_close(runtime.run_suffix(bound), model(inputs))
+
+
 def test_paddle_nested_outputs_keep_paths_and_reused_producers() -> None:
     """Native Paddle output containers survive a split through a returned intermediate."""
     paddle = pytest.importorskip("paddle")
