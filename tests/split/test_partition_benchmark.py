@@ -8,7 +8,6 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 import torch
@@ -76,7 +75,7 @@ def test_fixed_tolerance_keeps_non_numeric_contracts(case: str) -> None:
         namespace["finite_close"](*pairs[case])
 
 
-def test_state_only_candidate_is_refused_without_failing_the_search() -> None:
+def test_state_only_partition_cannot_attest_a_compute_frontier(tmp_path: Path) -> None:
     """A lone BN counter has no real compute frontier and cannot attest a DAG cut."""
     namespace = runpy.run_path(str(DRIVER), run_name="benchmark_test")
     model = nn.Sequential(nn.Conv2d(2, 2, 1), nn.BatchNorm2d(2), nn.ReLU(inplace=True)).train()
@@ -89,19 +88,34 @@ def test_state_only_candidate_is_refused_without_failing_the_search() -> None:
     partition = GraphPartition(frozenset({counter.canonical_id}))
     analyze = context.analyze(partition)
     assert not set(analyze.plan.boundary_node_ids) & partition.prefix_node_ids
+    manifest = tmp_path / "partitions.json"
+    manifest.write_text(json.dumps({"noncontiguous_dag": [[counter.canonical_id]]}))
     args = SimpleNamespace(
         prefix_device="cpu",
         suffix_device="cpu",
-        candidate_strategy="ancestors",
-        candidate_census=True,
+        partitions=manifest,
     )
-    validate = namespace["validate_kind"]
-    with patch.dict(validate.__globals__, candidates=lambda *a, **kw: [partition]):
-        row = validate(context, model, model.state_dict(), (2, 3, 3), "noncontiguous_dag", args)
+    row = namespace["validate_kind"](
+        context, model, model.state_dict(), (2, 3, 3), "noncontiguous_dag", args
+    )
     assert row["status"] == "unsupported"
-    assert row["attempts"][0]["reason"] == "candidate_compute_frontier_absent"
-    assert row["legal_candidate_count"] == 0
+    assert row["reason"] == "partition_compute_frontier_absent"
     assert row["checks"]["backward"] == "not_run"
+
+
+def test_external_dag_workloads_are_converted_without_search(tmp_path: Path) -> None:
+    """The driver uses caller-selected calls and does not manufacture a DAG placement."""
+    namespace = runpy.run_path(str(DRIVER), run_name="benchmark_test")
+    graph = prepare_graph(nn.Sequential(nn.Linear(4, 4), nn.ReLU()), torch.ones(2, 4))
+    dag = graph.compute_dag()
+    manifest = tmp_path / "partitions.json"
+    manifest.write_text(json.dumps({"sequential": [[dag.nodes[0].call_id]]}))
+    workloads = namespace["benchmark_partitions"](graph, "sequential", manifest)
+    assert workloads == [dag.to_partition([dag.nodes[0].call_id])]
+    assert namespace["benchmark_partitions"](graph, "noncontiguous_dag", None) == []
+    manifest.write_text(json.dumps({"sequential": [["unknown"]]}))
+    with pytest.raises(ValueError, match="Call ID"):
+        namespace["benchmark_partitions"](graph, "sequential", manifest)
 
 
 @pytest.mark.parametrize("model", ["rfdetr", "yolov8"])
@@ -412,6 +426,8 @@ with patch.dict(main.__globals__, load_model=load_model, validate_kind=validate)
         "resnet18",
         "--output",
         str(output),
+        "--partition-kind",
+        "both",
     ]
     if strict:
         command.extend(("--strict", "--deterministic"))

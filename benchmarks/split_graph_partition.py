@@ -188,46 +188,37 @@ def noncontiguous(graph: Any, selected: frozenset[str]) -> bool:
     )
 
 
-def candidates(graph: Any, kind: str, *, strategy: str = "effects") -> list[Any]:
-    """Generate atomic ancestor closures or topological prefixes without exponential search."""
-    from torchlens.split import GraphPartition
+def benchmark_partitions(context: Any, kind: str, manifest: Path | None) -> list[Any]:
+    """Read external call selections, or use three fixed sequential workloads.
 
-    if kind == "noncontiguous_dag" and strategy == "effects":
-        from torchlens.split.candidates import _effect_closed_partitions
-
-        return list(_effect_closed_partitions(graph))
-
-    compute = graph.compute_nodes
-    compute_ids = frozenset(n.canonical_id for n in compute)
-    call_by_id = graph.replay_call_by_output_id
-    indexes = sorted(range(len(compute)), key=lambda i: (abs(i - len(compute) // 2), i))
-    result, seen = [], set()
-    for index in indexes:
-        selected = set()
-        pending = (
-            [compute[index].canonical_id]
-            if kind == "noncontiguous_dag"
-            else [n.canonical_id for n in compute[: index + 1]]
-        )
-        while pending:
-            node_id = pending.pop()
-            if node_id in selected:
-                continue
-            selected.add(node_id)
-            pending.extend(
-                graph.node_id_by_alias.get(parent, parent)
-                for parent in graph.node_by_id[node_id].parents
+    No partition search or legality filtering occurs here. Native analysis owns
+    every refusal. Noncontiguous selections must be supplied by the caller.
+    """
+    dag = context.compute_dag()
+    if manifest is not None:
+        rows = json.loads(manifest.read_text(encoding="utf-8"))
+        return [dag.to_partition(ids) for ids in rows.get(kind, ())]
+    if kind != "sequential":
+        return []
+    # Round fixed quarter/half/three-quarter workloads to local-write groups.
+    # This is benchmark input setup, not a library placement algorithm.
+    order = {call.call_id: i for i, call in enumerate(dag.nodes)}
+    result = []
+    for numerator in (1, 2, 3):
+        count = max(1, len(dag.nodes) * numerator // 4)
+        while True:
+            end = max(
+                (
+                    max(order[c] for c in group) + 1
+                    for group in dag.must_colocate
+                    if any(order[c] < count for c in group)
+                ),
+                default=count,
             )
-            call = call_by_id.get(node_id)
-            if call is not None:
-                pending.extend(call.output_node_ids)
-        ids = frozenset(selected & compute_ids)
-        if not ids or len(ids) == len(compute) or ids in seen:
-            continue
-        seen.add(ids)
-        if noncontiguous(graph, ids) != (kind == "noncontiguous_dag"):
-            continue
-        result.append(GraphPartition(ids))
+            if end <= count:
+                break
+            count = end
+        result.append(dag.to_partition(c.call_id for c in dag.nodes[:count]))
     return result
 
 
@@ -652,7 +643,7 @@ def validate_kind(
     kind: str,
     args: Any,
 ) -> dict[str, Any]:
-    """Retain completed checks and candidate refusals even when a later step fails."""
+    """Retain completed checks and native refusals even when a later step fails."""
     from torchlens.split.errors import SplitError
 
     row: dict[str, Any] = {}
@@ -686,7 +677,7 @@ def _validate_kind(
     """Independently report one partition kind; never substitute sequential success for DAG success."""
     import torch
 
-    from torchlens.split.errors import SplitError, SplitErrorContext, SplitUnsupportedError
+    from torchlens.split.errors import SplitErrorContext, SplitUnsupportedError
 
     row.update(
         {
@@ -716,100 +707,48 @@ def _validate_kind(
                 ),
                 "not_run",
             ),
-            "attempts": [],
             "batches": [],
             "training_steps": [],
         }
     )
-    accepted = []
     heterogeneous = context.adapter.normalize_device(
         args.prefix_device
     ) != context.adapter.normalize_device(args.suffix_device)
     analysis_times, materialization_times = [], []
     start = time.perf_counter()
-    generated = candidates(context.trace_graph, kind, strategy=args.candidate_strategy)
-    row["candidate_generation_ms"] = 1000 * (time.perf_counter() - start)
-    row["generated_candidate_count"] = len(generated)
-    row["candidate_strategy"] = args.candidate_strategy
-    valid_count = 0
-    for partition in generated:
-        try:
-            synchronize()
-            start = time.perf_counter()
-            analysis = context.analyze(partition)
-            synchronize()
-            analysis_times.append(1000 * (time.perf_counter() - start))
-            if not any(n in partition.prefix_node_ids for n in analysis.plan.boundary_node_ids):
-                raise SplitUnsupportedError(
-                    "Candidate has no real compute dependency across its frontier.",
-                    context=SplitErrorContext(
-                        backend=context.trace_graph.backend,
-                        split_point=partition.as_boundary(),
-                        reason="candidate_compute_frontier_absent",
-                    ),
-                )
-            start = time.perf_counter()
-            if len(accepted) < 3:
-                context.materialize(analysis)
-            synchronize()
-            materialization_times.append(1000 * (time.perf_counter() - start))
-            valid_count += 1
-            if len(accepted) < 3:
-                accepted.append(analysis)
-            row["attempts"].append({"partition": partition.as_boundary(), "status": "accepted"})
-            if len(accepted) == 3 and not args.candidate_census:
-                break
-        except SplitError as error:
-            row["attempts"].append(
-                {
-                    "partition": partition.as_boundary(),
-                    "status": "unsupported",
-                    "reason": getattr(getattr(error, "context", None), "reason", error.code),
-                    "error": str(error),
-                    "diagnostic": getattr(error, "_partition_diagnostic", None),
-                }
+    dag = context.compute_dag()
+    row["compute_dag_ms"] = 1000 * (time.perf_counter() - start)
+    row["native_calls"] = len(dag.nodes)
+    partitions = benchmark_partitions(context, kind, args.partitions)
+    if not partitions:
+        return {**row, "status": "not_validated", "reason": "explicit_partition_required"}
+    if len(set(partitions)) != len(partitions):
+        raise ValueError("Benchmark workloads must use distinct partitions")
+    accepted = []
+    for partition in partitions:
+        if noncontiguous(context.trace_graph, partition.prefix_node_ids) != (
+            kind == "noncontiguous_dag"
+        ):
+            raise ValueError("Supplied partition does not match the requested partition kind")
+        synchronize()
+        start = time.perf_counter()
+        analysis = context.analyze(partition)
+        synchronize()
+        analysis_times.append(1000 * (time.perf_counter() - start))
+        if not set(analysis.plan.boundary_node_ids) & partition.prefix_node_ids:
+            raise SplitUnsupportedError(
+                "Partition has no real compute dependency across its frontier.",
+                context=SplitErrorContext(
+                    backend=context.trace_graph.backend,
+                    split_point=partition.as_boundary(),
+                    reason="partition_compute_frontier_absent",
+                ),
             )
-    row["analyzed_candidate_count"] = len(row["attempts"])
-    row["legal_candidate_count"] = valid_count
-    from collections import Counter
-
-    row["refusal_distribution"] = dict(
-        Counter(
-            (attempt.get("diagnostic") or {}).get("category", attempt.get("reason", "accepted"))
-            for attempt in row["attempts"]
-        )
-    )
-    reasons = Counter(attempt.get("reason", "accepted") for attempt in row["attempts"])
-    row["candidate_statistics"] = {
-        "generated": len(generated),
-        "analyzed": len(row["attempts"]),
-        "native_call_atomic": len(row["attempts"])
-        - reasons["partition_call_split"]
-        - reasons["partition_node_invalid"],
-        "data_dependency_valid": len(row["attempts"])
-        - sum(
-            reasons[code]
-            for code in (
-                "partition_call_split",
-                "partition_node_invalid",
-                "partition_reverse_dependency",
-                "partition_dependency_unresolved",
-                "partition_mutable_state_unsupported",
-            )
-        ),
-        "legal": valid_count,
-    }
-    if not accepted:
-        return {
-            **row,
-            "status": "unsupported",
-            "reason": "no legal partition of this kind",
-            "candidate_count": len(row["attempts"]),
-            "checks": {
-                key: "unsupported" if key in {"forward", "train_mode"} else value
-                for key, value in row["checks"].items()
-            },
-        }
+        start = time.perf_counter()
+        context.materialize(analysis)
+        synchronize()
+        materialization_times.append(1000 * (time.perf_counter() - start))
+        accepted.append(analysis)
     row.update(
         partition_valid=True,
         noncontiguous_verified=kind == "noncontiguous_dag",
@@ -1014,9 +953,15 @@ def main() -> None:
     parser.add_argument("--suffix-device", help="Suffix placement, e.g. cpu or cuda:1")
     parser.add_argument("--model-mode", choices=("eval", "train"), default="eval")
     parser.add_argument("--dtype", choices=("float32", "float64"), default="float64")
-    parser.add_argument("--candidate-strategy", choices=("effects", "ancestors"), default="effects")
     parser.add_argument(
-        "--candidate-census", action="store_true", help="Analyze every bounded candidate"
+        "--partitions",
+        type=Path,
+        help="JSON mapping partition kinds to lists of prefix Call ID lists",
+    )
+    parser.add_argument(
+        "--dump-dag",
+        type=Path,
+        help="Write captured Compute DAG and graph profile for external placement",
     )
     parser.add_argument("--source-root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--weights", type=Path)
@@ -1029,7 +974,9 @@ def main() -> None:
     )
     parser.add_argument("--batches", type=int, nargs="+", default=[1, 2, 4, 8])
     parser.add_argument(
-        "--partition-kind", choices=("both", "sequential", "noncontiguous_dag"), default="both"
+        "--partition-kind",
+        choices=("both", "sequential", "noncontiguous_dag"),
+        default="sequential",
     )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -1138,6 +1085,24 @@ def main() -> None:
             )
             synchronize()
             report["capture_ms"] = 1000 * (time.perf_counter() - started)
+            if args.dump_dag:
+                from dataclasses import asdict
+
+                dag = context.compute_dag()
+                args.dump_dag.parent.mkdir(parents=True, exist_ok=True)
+                args.dump_dag.write_text(
+                    json.dumps(
+                        {
+                            "dag": {
+                                **asdict(dag),
+                                "must_colocate": [sorted(group) for group in dag.must_colocate],
+                            },
+                            "profile": asdict(context.graph_profile()),
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
             captured_counts = dict(counts)
             for kind in (
                 ("sequential", "noncontiguous_dag")

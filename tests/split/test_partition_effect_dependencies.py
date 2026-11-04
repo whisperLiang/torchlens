@@ -200,29 +200,6 @@ def test_new_buffer_alias_invalidates_cached_effect_proof(when: str) -> None:
     assert diagnostic["source_alias_conflict"][2] == "overlap"
 
 
-def test_effect_candidate_unions_extend_single_ancestor_search() -> None:
-    """Bounded discovery includes genuine cuts missing from single-call ancestry."""
-    from torchlens.split.candidates import _effect_closed_partitions
-
-    class ThreeBranches(nn.Module):
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Leave multiple independent subgraphs to combine in the prefix."""
-            left, middle, right = x + 1, x + 2, x + 3
-            return left.sin() + middle.cos() + right.tanh()
-
-    context = prepare_graph(ThreeBranches(), torch.ones(1, 4, dtype=torch.float64))
-    driver = runpy.run_path(str(DRIVER), run_name="benchmark_test")
-    ancestors = driver["candidates"](context.trace_graph, "noncontiguous_dag", strategy="ancestors")
-    effects = _effect_closed_partitions(context.trace_graph)
-    assert set(effects) - set(ancestors)
-    assert len(_effect_closed_partitions(context.trace_graph, limit=4)) <= 4
-    assert _effect_closed_partitions(context.trace_graph, limit=0) == ()
-    for partition in effects:
-        assert driver["noncontiguous"](context.trace_graph, partition.prefix_node_ids)
-        analysis = context.analyze(partition)
-        assert set(analysis.plan.boundary_node_ids) & partition.prefix_node_ids
-
-
 def test_unknown_runtime_storage_relation_is_not_reported_as_proven_overlap() -> None:
     """A meta input has no addressable storage; the guard must disclose uncertainty."""
     model = NormBranches().double().train()
@@ -412,3 +389,22 @@ def test_explicit_generator_calls_keep_their_native_order() -> None:
     with pytest.raises(SplitUnsupportedError) as caught:
         context.analyze(GraphPartition(frozenset({calls[1].canonical_id})))
     assert caught.value.context.reason == "partition_effect_order_unproven"
+
+
+def test_input_write_cannot_cross_a_device_boundary() -> None:
+    """Transported storage cannot reproduce an observable write to the caller's input."""
+
+    class InputWrite(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x.add_(1) * 2
+
+    from torchlens.split.planner import plan_partition
+
+    graph = prepare_graph(InputWrite(), torch.ones(2, 4))
+    request = replace(graph.request, placement=PlacementPlan.across("cpu", "cuda:0"))
+    with pytest.raises(SplitUnsupportedError) as caught:
+        plan_partition(graph.trace_graph, request)
+    assert caught.value.context.reason == "partition_effect_order_unproven"
+    node = graph.trace_graph.compute_nodes[0]
+    prefix_write = replace(request, partition=GraphPartition(frozenset({node.canonical_id})))
+    assert plan_partition(graph.trace_graph, prefix_write).ordered_mutation_node_ids

@@ -8,7 +8,6 @@ from typing import Any
 
 import pytest
 from v2_helpers import (
-    candidate_report,
     prepare_fixture,
     repartition_fixture,
     select_node_prefix,
@@ -132,10 +131,9 @@ def test_mlx_gradients_match_at_every_cut_and_changed_batch() -> None:
             partial(select_node_prefix, node_id="maximum"), backend="mlx", trainable=True
         ),
     )
-    for candidate in candidate_report(
-        seed,
-    ).supported:
-        runtime = repartition_fixture(seed, candidate.partition)
+    dag = seed.compute_dag()
+    for count in range(len(dag.nodes) + 1):
+        runtime = seed.repartition(dag.to_partition(c.call_id for c in dag.nodes[:count]))
         x = _input(5)
         targets = mx.ones((5, 2))
         expected = mx.grad(lambda a, targets=targets: _loss(model(a), targets))(x)

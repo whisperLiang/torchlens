@@ -3,20 +3,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from functools import partial
 from unittest.mock import patch
 
 import pytest
 import torch
 from torch import nn
-from v2_helpers import (
-    analyze_fixture,
-    prepare_fixture,
-    request_fixture,
-    select_node_prefix,
-)
 
-from torchlens.split import GraphPartition, SplitFeatures
+from torchlens.split import SplitFeatures, prepare_graph
 
 pytestmark = pytest.mark.usefixtures("fp64_functional")
 
@@ -45,27 +38,28 @@ def test_noncontiguous_partition_training_and_recut(optimizer_kind: str) -> None
     reference = Branches()
     model = deepcopy(reference)
     sample = torch.randn(2, 4)
-    runtime = prepare_fixture(
+    graph = prepare_graph(
         model,
         sample,
-        request_fixture(
-            partial(select_node_prefix, node_id="left_end"), features=SplitFeatures(training=True)
-        ),
+        features=SplitFeatures(training=True, retain_trace=False),
     )
-    partition = GraphPartition(
-        frozenset(
-            node.canonical_id
-            for node in runtime.trace_graph.compute_nodes
-            if node.module_path in {"left", "left_end"}
+    dag = graph.compute_dag()
+    partitions = [
+        dag.to_partition(
+            call.call_id
+            for call in dag.nodes
+            if graph.trace_graph.node_by_id[call.output_node_ids[0]].module_path in modules
         )
+        for modules in ({"left", "left_end"}, {"right"}, set())
+    ]
+    assert len(set(partitions)) == 3
+    assert partitions[0].prefix_node_ids != frozenset(
+        n.canonical_id for n in graph.trace_graph.compute_nodes[:2]
     )
-    assert partition.prefix_node_ids
-    with patch.object(
-        runtime.adapter, "build_segments", wraps=runtime.adapter.build_segments
-    ) as build:
-        analysis = analyze_fixture(runtime, partition)
+    with patch.object(graph.adapter, "build_segments", wraps=graph.adapter.build_segments) as build:
+        analysis = graph.analyze(partitions[0])
         assert build.call_count == 0
-        runtime = runtime.materialize(analysis)
+        runtime = graph.materialize(analysis)
         assert build.call_count == 1
 
     def optimizer(parameters: object) -> torch.optim.Optimizer:
@@ -78,7 +72,12 @@ def test_noncontiguous_partition_training_and_recut(optimizer_kind: str) -> None
 
     expected_opt = optimizer(reference.parameters())
     actual_opt = optimizer(model.parameters())
-    for batch in (1, 2, 4, 8):
+    for batch, partition in zip((1, 2, 4, 8), (*partitions, partitions[0]), strict=True):
+        runtime = runtime.repartition(partition)
+        assert runtime.trace_graph is graph.trace_graph
+        assert {
+            id(v) for owners in runtime.parameter_bindings().values() for v in owners.values()
+        } == set(map(id, model.parameters()))
         x = torch.randn(batch, 4, requires_grad=True)
         split_x = x.detach().clone().requires_grad_(True)
         target = torch.randn(batch, 2)
@@ -98,19 +97,5 @@ def test_noncontiguous_partition_training_and_recut(optimizer_kind: str) -> None
         actual_opt.step()
         for actual, expected in zip(model.parameters(), reference.parameters(), strict=True):
             torch.testing.assert_close(actual, expected)
-        runtime = runtime.repartition(partition)
+            torch.testing.assert_close(actual_opt.state[actual], expected_opt.state[expected])
         torch.testing.assert_close(runtime.replay(split_x.detach()), reference(x.detach()))
-
-
-def test_partition_analysis_rejects_foreign_capture() -> None:
-    """Equivalent graph shapes do not authorize cross-client state sharing."""
-    x = torch.ones(2, 4)
-    first = prepare_fixture(
-        Branches(), x, request_fixture(partial(select_node_prefix, node_id="left_end"))
-    )
-    second = prepare_fixture(
-        Branches(), x, request_fixture(partial(select_node_prefix, node_id="left_end"))
-    )
-    analysis = analyze_fixture(first, GraphPartition(frozenset()))
-    with pytest.raises(ValueError, match="another captured graph"):
-        second.materialize(analysis)

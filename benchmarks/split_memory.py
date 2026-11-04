@@ -215,7 +215,8 @@ def main() -> None:
             else tl.split.SplitFeatures()
         )
         graph = tl.split.prepare_graph(model, inputs, backend="torch", features=features)
-        partition = graph.partition_candidates()[len(graph.partition_candidates()) // 2]
+        dag = graph.compute_dag()
+        partition = dag.to_partition(c.call_id for c in dag.nodes[: len(dag.nodes) // 2])
         runtime = graph.materialize(graph.analyze(partition))
     gc.collect()
     retained_trace = runtime.retains_trace
@@ -234,8 +235,10 @@ def main() -> None:
     replay_input = torch.zeros(3, 3, 384, 384, device=args.device)
     with torch.inference_mode():
         expected = model(replay_input)
-        candidates = runtime.partition_candidates()
-        partitions = (candidates[0], candidates[len(candidates) // 2], candidates[-1])
+        partitions = tuple(
+            dag.to_partition(c.call_id for c in dag.nodes[:count])
+            for count in (0, len(dag.nodes) // 2, len(dag.nodes))
+        )
         for partition in partitions:
             replay = runtime.repartition(partition)
             if cuda:

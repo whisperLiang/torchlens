@@ -10,7 +10,6 @@ import torch
 from torch import nn
 from v2_helpers import (
     analyze_fixture,
-    candidate_report,
     prepare_fixture,
     repartition_fixture,
     select_node_prefix,
@@ -22,6 +21,7 @@ from torchlens.split import (
     PlacementPlan,
     context as runtime_module,
     pipeline as pipeline_module,
+    prepare_graph,
 )
 from torchlens.split.state import SegmentState
 
@@ -43,31 +43,27 @@ class PartitionModel(nn.Module):
         return self.last(self.relu(self.first(x)))
 
 
-def test_candidate_diagnosis_never_builds_segments() -> None:
-    """Only the selected point is materialized after candidate analysis."""
+def test_analysis_never_builds_segments_or_recaptures() -> None:
+    """DAG inspection and analysis defer all executable work to materialization."""
 
     x = torch.ones(2, 4)
-    runtime = prepare_fixture(
-        PartitionModel().eval(), x, split_request(partial(select_node_prefix, node_id="relu"))
-    )
+    graph = prepare_graph(PartitionModel().eval(), x)
     with (
-        patch.object(
-            runtime.adapter, "build_segments", wraps=runtime.adapter.build_segments
-        ) as build,
+        patch.object(graph.adapter, "build_segments", wraps=graph.adapter.build_segments) as build,
         patch.object(
             runtime_module, "execute_split_runtime", wraps=runtime_module.execute_split_runtime
         ) as execute,
         patch.object(
             pipeline_module,
             "capture_canonical_model",
-            side_effect=AssertionError("candidate analysis must reuse the capture"),
+            side_effect=AssertionError("analysis must reuse the capture"),
         ),
     ):
-        report = candidate_report(runtime, diagnose=True)
-        assert report.total == len(runtime.trace_graph.replay_calls) + 1
+        dag = graph.compute_dag()
+        selected = dag.to_partition(c.call_id for c in dag.nodes[:2])
+        analysis = graph.analyze(selected)
         assert build.call_count == execute.call_count == 0
-        selected = report.supported[0].partition
-        repartition_fixture(runtime, selected)
+        graph.materialize(analysis)
         assert build.call_count == execute.call_count == 1
 
 
@@ -100,7 +96,6 @@ def test_partition_analysis_does_not_bind_lazy_owned_state(
         for state in states
         if state._replica_pool is not None
     }
-    candidate_report(runtime, diagnose=True)
     analyze_fixture(runtime, partial(select_node_prefix, node_id="last", include=False))
     assert tuple(state._entries for state in states) == entries_before
     for state in states:

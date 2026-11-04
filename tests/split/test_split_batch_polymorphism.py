@@ -13,7 +13,6 @@ import pytest
 import torch
 from torch import nn
 from v2_helpers import (
-    candidate_report,
     prepare_fixture,
     repartition_fixture,
     select_node_prefix,
@@ -149,44 +148,17 @@ def test_untested_batch_is_not_range_rejected() -> None:
         torch.testing.assert_close(runtime.replay(x), model(x), atol=1e-5, rtol=1e-4)
 
 
-def test_partition_candidates_enumerate_atomic_topological_prefixes() -> None:
-    """Every before/after compute cut is discoverable with an explicit reason."""
-
-    model = TinyMlp().eval()
-    runtime = prepare_fixture(
-        model, torch.randn(2, 4), split_request(partial(select_node_prefix, node_id="relu"))
-    )
-    report = candidate_report(
-        runtime,
-    )
-
-    assert report.total == len(runtime.trace_graph.replay_calls) + 1
-    assert report.total > 0
-    assert len(report.supported) + len(report.unsupported) == report.total
-    for candidate in report.unsupported:
-        assert candidate.unsupported_reason is not None
-    reused = repartition_fixture(runtime, report.supported[0].partition)
-    assert not reused.retains_trace and not runtime.retains_trace
-    assert reused.trace_graph is runtime.trace_graph
-    assert reused.graph_identity == runtime.graph_identity
-
-
 def test_every_valid_boundary_replays_across_batches_from_one_capture() -> None:
-    """Exhaustive: every enumerated boundary replays, or names its refusal."""
+    """Every native call boundary in a small model reuses one captured graph."""
 
     torch.manual_seed(0)
     model = TinyMlp().eval()
     seed = prepare_fixture(
         model, torch.randn(2, 4), split_request(partial(select_node_prefix, node_id="relu"))
     )
-    report = candidate_report(
-        seed,
-    )
-    assert report.total > 0
-    assert report.supported, report.reasons()
-
-    for candidate in report.supported:
-        runtime = repartition_fixture(seed, candidate.partition)
+    dag = seed.compute_dag()
+    for count in range(len(dag.nodes) + 1):
+        runtime = seed.repartition(dag.to_partition(c.call_id for c in dag.nodes[:count]))
         assert not runtime.retains_trace and not seed.retains_trace
         assert runtime.trace_graph is seed.trace_graph
         for batch in (1, 3, 8):
@@ -198,10 +170,6 @@ def test_every_valid_boundary_replays_across_batches_from_one_capture() -> None:
                     atol=1e-5,
                     rtol=1e-4,
                 )
-
-    # Nothing is silently skipped: refusals are enumerated with reasons.
-    for candidate in report.unsupported:
-        assert candidate.unsupported_reasons
 
 
 def test_residual_and_multi_output_frontiers_cross_every_live_tensor() -> None:
@@ -223,17 +191,12 @@ def test_residual_and_multi_output_frontiers_cross_every_live_tensor() -> None:
         torch.randn(2, 4),
         split_request(lambda g: select_prefix(g, (len(g.compute_nodes) - 1) * 50 // 100 + 1)),
     )
-    report = candidate_report(
-        seed,
-    )
-    multi = [candidate for candidate in report.supported if len(candidate.boundary_value_ids) > 1]
-    assert multi, "a residual graph must expose a multi-tensor live frontier"
-    for candidate in multi[:3]:
-        runtime = repartition_fixture(seed, candidate.partition)
-        for batch in (1, 3):
-            x = torch.randn(batch, 4)
-            with torch.no_grad():
-                torch.testing.assert_close(runtime.replay(x), model(x), atol=1e-5, rtol=1e-4)
+    runtime = repartition_fixture(seed, partial(select_node_prefix, node_id="fc2"))
+    assert len(runtime.plan.boundary_node_ids) == 2
+    for batch in (1, 3):
+        x = torch.randn(batch, 4)
+        with torch.no_grad():
+            torch.testing.assert_close(runtime.replay(x), model(x), atol=1e-5, rtol=1e-4)
 
 
 def test_boundary_schema_is_batch_neutral() -> None:

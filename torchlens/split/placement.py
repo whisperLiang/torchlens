@@ -116,16 +116,6 @@ def require_placement_support(
     )
 
 
-def move_value(adapter: Any, value: Any, placement: DevicePlacement) -> Any:
-    """Move one tensor-like value to a placement, leaving others untouched."""
-
-    if not placement.is_explicit:
-        return value
-    if not adapter.is_tensor(value):
-        return value
-    return adapter.to_device(value, placement.device)
-
-
 def move_tree(
     adapter: Any,
     value: Any,
@@ -160,6 +150,5 @@ __all__ = [
     "PlacementPlan",
     "SegmentName",
     "move_tree",
-    "move_value",
     "require_placement_support",
 ]

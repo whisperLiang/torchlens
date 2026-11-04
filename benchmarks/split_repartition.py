@@ -24,7 +24,7 @@ from typing import Any
 from unittest.mock import patch
 
 from split_graph_partition import (
-    candidates,
+    benchmark_partitions,
     effective_parameters,
     load_model,
     make_optimizer,
@@ -73,17 +73,13 @@ def main() -> None:
 
     import torchlens.split as split
     from torchlens.split import (
-        GraphPartition,
         PlacementPlan,
         SplitFeatures,
         api,
         planner,
-        runtime as runtime_module,
     )
 
-    # The comparison path uses only GraphPartition on both revisions. All
-    # reference-version handling is confined to this measurement driver.
-    context = getattr(split, "context", runtime_module)
+    context = split.context
     from torchlens.split.adapters.torch import TorchSplitAdapter, _GeneratedSegmentBase
     from torchlens.split.runtime import SplitRuntime
     from torchlens.split.state import SegmentState
@@ -146,49 +142,26 @@ def main() -> None:
                 capture_timer("normalization_and_batch_probe", api.normalize_to_split_ir),
             ),
         ):
-            if hasattr(split, "prepare_graph"):
-                graph = split.prepare_graph(
-                    model,
-                    x.to(args.device),
-                    features=features,
-                    placement=PlacementPlan.across(args.prefix_device, args.suffix_device),
-                )
-            else:
-                graph = split.prepare(
-                    model, x, split.SplitRequest(GraphPartition(frozenset()), features=features)
-                )
+            graph = split.prepare_graph(
+                model,
+                x.to(args.device),
+                features=features,
+                placement=PlacementPlan.across(args.prefix_device, args.suffix_device),
+            )
         capture_ms = 1000 * (time.perf_counter() - started)
-        nodes = graph.trace_graph.compute_nodes
-        if args.model == "resnet18" or args.prefix_counts:
-            args.prefix_counts = args.prefix_counts or [18, 34, 51]
-            partitions = [
-                GraphPartition(frozenset(n.canonical_id for n in nodes[:count]))
-                for count in args.prefix_counts
-            ]
-            for partition in partitions:
-                graph.analyze(partition)
-        else:
-            partitions = []
-            for partition in candidates(graph.trace_graph, "sequential"):
-                try:
-                    graph.analyze(partition)
-                    partitions.append(partition)
-                except split.errors.SplitError:
-                    continue
-                if len(partitions) == 3:
-                    break
+        dag = graph.compute_dag()
+        partitions = (
+            [dag.to_partition(c.call_id for c in dag.nodes[:count]) for count in args.prefix_counts]
+            if args.prefix_counts
+            else benchmark_partitions(graph, "sequential", None)
+        )
         if len(set(partitions)) != 3:
             raise AssertionError("benchmark requires three distinct partitions")
         runtime = graph.materialize(graph.analyze(partitions[0]))
 
         def recut(partition: Any) -> Any:
             nonlocal runtime
-            method = getattr(runtime, "repartition", None)
-            runtime = (
-                method(partition)
-                if method is not None
-                else runtime.materialize(runtime.analyze(partition))
-            )
+            runtime = runtime.repartition(partition)
             return runtime
 
         def rotate() -> Any:
@@ -373,9 +346,7 @@ def main() -> None:
             "threads": 1,
             "capture_ms": capture_ms,
             "capture_phases_ms": capture_phases,
-            "capture_scope": "capture_and_normalization"
-            if hasattr(split, "prepare_graph")
-            else "capture_normalization_and_empty_partition_runtime",
+            "capture_scope": "capture_and_normalization",
             "source": split.__file__,
             "timings": timings,
             "phases_separate_instrumented_run": phase_report,

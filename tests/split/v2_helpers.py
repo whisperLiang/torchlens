@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from types import SimpleNamespace
 from typing import Any
 
 from torchlens.split import (
@@ -14,7 +13,7 @@ from torchlens.split import (
     SplitRequest,
     prepare_graph,
 )
-from torchlens.split.errors import SplitRequestError, SplitUnsupportedError
+from torchlens.split.errors import SplitRequestError
 from torchlens.split.planner import plan_partition
 
 
@@ -205,38 +204,4 @@ def plan_fixture(graph: Any, request: FixtureRequest | SplitRequest) -> Any:
             validation=request.validation,
             **({} if request.placement is None else {"placement": request.placement}),
         ),
-    )
-
-
-def candidate_report(runtime: Any, *, diagnose: bool = True) -> Any:
-    """Collect diagnostics over bounded native-call-atomic partition candidates."""
-    rows = []
-    for partition in runtime.partition_candidates():
-        try:
-            analysis = runtime.analyze(partition) if diagnose else None
-            report = None if analysis is None else analysis.capability_report
-            reasons = () if report is None else report.unsupported_reasons
-        except (SplitUnsupportedError, SplitRequestError) as exc:
-            analysis, report, reasons = None, None, (str(exc),)
-        rows.append(
-            SimpleNamespace(
-                partition=partition,
-                replay_supported=not reasons,
-                supported=not reasons,
-                training_supported=bool(report and report.training.supported),
-                unsupported_reasons=reasons,
-                unsupported_reason="; ".join(reasons) or None,
-                boundary_value_ids=() if analysis is None else analysis.plan.boundary_node_ids,
-                boundary_schema=() if analysis is None else analysis.graph_ir.boundary_schema,
-            )
-        )
-    supported = tuple(r for r in rows if r.replay_supported)
-    unsupported = tuple(r for r in rows if not r.replay_supported)
-    return SimpleNamespace(
-        candidates=tuple(rows),
-        total=len(rows),
-        supported=supported,
-        unsupported=unsupported,
-        trainable=tuple(r for r in rows if r.training_supported),
-        reasons=lambda: {r.partition.as_boundary(): r.unsupported_reasons for r in unsupported},
     )

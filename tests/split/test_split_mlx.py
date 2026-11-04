@@ -8,9 +8,7 @@ from typing import Any
 
 import pytest
 from v2_helpers import (
-    candidate_report,
     prepare_fixture,
-    repartition_fixture,
     select_node_prefix,
     split_request,
 )
@@ -46,12 +44,9 @@ def test_mlx_replays_every_supported_cut_at_changed_batches() -> None:
     )
     graph = seed.trace_graph
     assert graph.shape_program.batch_probe.status == "passed"
-    report = candidate_report(
-        seed,
-    )
-    assert report.supported
-    for candidate in report.supported:
-        runtime = repartition_fixture(seed, candidate.partition)
+    dag = seed.compute_dag()
+    for count in range(len(dag.nodes) + 1):
+        runtime = seed.repartition(dag.to_partition(c.call_id for c in dag.nodes[:count]))
         assert runtime.trace_graph is graph
         for batch in (1, 3, 7):
             x = _input(batch)

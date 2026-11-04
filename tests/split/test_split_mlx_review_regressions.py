@@ -8,9 +8,7 @@ from typing import Any
 
 import pytest
 from v2_helpers import (
-    candidate_report,
     prepare_fixture,
-    repartition_fixture,
     select_node_prefix,
     split_request,
 )
@@ -67,12 +65,9 @@ def test_mlx_repeated_outputs_replay_and_cache_at_every_cut(container: str, tmp_
         ),
     )
     assert seed.batch_validation["status"] == "passed"
-    for index, candidate in enumerate(
-        candidate_report(
-            seed,
-        ).supported
-    ):
-        runtime = repartition_fixture(seed, candidate.partition)
+    dag = seed.compute_dag()
+    for index in range(len(dag.nodes) + 1):
+        runtime = seed.repartition(dag.to_partition(c.call_id for c in dag.nodes[:index]))
         for batch in (1, 2, 5):
             x = _input(batch)
             expected = iter_arrays_with_paths(model(x), runtime.adapter.is_tensor)

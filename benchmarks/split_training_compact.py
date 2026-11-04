@@ -172,7 +172,8 @@ def main() -> None:
             ),
         ):
             graph = tl.split.prepare_graph(model, inputs, features=features)
-            partition = graph.partition_candidates()[len(graph.partition_candidates()) // 2]
+            dag = graph.compute_dag()
+            partition = dag.to_partition(c.call_id for c in dag.nodes[: len(dag.nodes) // 2])
             runtime = graph.materialize(graph.analyze(partition))
     except SplitUnsupportedError as error:
         report.update(status="unsupported", error=str(error))
@@ -245,11 +246,9 @@ def main() -> None:
     recut_samples = []
     recut_refs = []
     recut_snapshots = []
-    nodes = runtime.trace_graph.compute_nodes
+    dag = runtime.compute_dag()
     for index in range(args.recuts):
-        partition = tl.split.GraphPartition(
-            frozenset(node.canonical_id for node in nodes[: index % len(nodes) + 1])
-        )
+        partition = dag.to_partition(c.call_id for c in dag.nodes[: index % len(dag.nodes) + 1])
         sync()
         started = time.perf_counter()
         recut = runtime.repartition(partition)

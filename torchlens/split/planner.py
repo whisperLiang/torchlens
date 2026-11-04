@@ -603,6 +603,55 @@ def _local_storage_origin(
     return producer
 
 
+def _partition_colocations(
+    graph: SplitTraceGraph,
+    owners: dict[str, str],
+    *,
+    training: bool,
+    heterogeneous: bool,
+) -> tuple[frozenset[str], ...]:
+    """Expose local-write obligations from the planner's native target census.
+
+    Autograd leaf isolation and transport cannot preserve arbitrary activation
+    storage aliases. Keep a local write with its producer/permutation chain in
+    those modes. Source-state ordering, unknown alias provenance, ordered
+    integer writes and backend capabilities still require ``plan_partition``.
+    """
+    from ._effects import _write_operands
+
+    targets = _torch_mutation_targets()
+    index = graph._partition_effect_index
+    groups: set[frozenset[str]] = set()
+    for call in graph.replay_calls:
+        node = graph.node_by_id[call.output_node_ids[0]]
+        if index.accesses[node.canonical_id].kind != "inplace_write":
+            continue
+        args, kwargs = _partition_call_arguments(node)
+        has_out = kwargs.get("out") is not None
+        if node.target not in targets.writes | targets.out_writes or not (
+            training or heterogeneous or has_out
+        ):
+            continue
+        for argument in _write_operands(node, args, kwargs):
+            if not isinstance(argument, ReplayValueRef) or argument.value_id not in owners:
+                continue
+            producer = graph.node_by_id[argument.value_id]
+            if not has_out and producer.dtype and any(t in producer.dtype for t in ("int", "bool")):
+                continue
+            members = {
+                owners[node.canonical_id],
+                owners[producer.canonical_id],
+                *(
+                    owners[origin]
+                    for root in index.origins[producer.canonical_id]
+                    if (origin := root.removeprefix("fresh:")) in owners
+                ),
+            }
+            if len(members) > 1:
+                groups.add(frozenset(members))
+    return tuple(sorted(groups, key=lambda group: tuple(sorted(group))))
+
+
 def _ordered_partition_nodes(graph: SplitTraceGraph, prefix: frozenset[str]) -> frozenset[str]:
     """Find calls whose order relative to every other call survives the partition.
 

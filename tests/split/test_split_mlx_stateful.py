@@ -8,7 +8,6 @@ from typing import Any
 
 import pytest
 from v2_helpers import (
-    candidate_report,
     prepare_fixture,
     repartition_fixture,
     select_node_prefix,
@@ -186,12 +185,7 @@ def test_mlx_tied_parameter_steps_match_native(optimizer_cls: Any, shared_optimi
         migrated, partial(select_node_prefix, node_id="maximum", include=False)
     )
     _close(recut.replay(_input()), reference(_input()))
-    assert all(
-        candidate.training_supported
-        for candidate in candidate_report(
-            runtime,
-        ).supported
-    )
+    assert recut.capability_report.training.supported
 
 
 @pytest.mark.parametrize(
@@ -300,11 +294,10 @@ def test_mlx_stateful_gradients_at_every_valid_cut() -> None:
         ),
     )
     targets = mx.cos(_input())
-    for candidate in candidate_report(
-        runtime,
-    ).supported:
+    dag = runtime.compute_dag()
+    for count in range(len(dag.nodes) + 1):
         reference = deepcopy(model)
-        split = repartition_fixture(runtime, candidate.partition)
+        split = runtime.repartition(dag.to_partition(c.call_id for c in dag.nodes[:count]))
         mx.random.seed(82)
         expected_value, gradients = _native_gradients(reference, _input(), targets)
         mx.random.seed(82)

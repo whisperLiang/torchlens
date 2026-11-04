@@ -11,7 +11,7 @@ from time import perf_counter
 from typing import Any
 
 from ..backends.registry import TORCH_BACKEND_NAME
-from .candidates import PartitionAnalysis
+from .context import PartitionAnalysis
 from .errors import SplitErrorContext, SplitUnsupportedError
 from .planner import _validate_partition_effects
 

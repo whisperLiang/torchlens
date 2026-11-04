@@ -46,7 +46,7 @@ def test_paddle_native_batchnorm_eval_is_readonly_and_training_refuses() -> None
             graph = prepare_graph(
                 model, x, backend="paddle", features=SplitFeatures(batch_axes={})
             )
-            partition = graph.partition_candidates()[1]
+            partition = graph.compute_dag().to_partition([graph.compute_dag().nodes[0].call_id])
             if training:
                 with pytest.raises(SplitUnsupportedError, match="partition_effect_order_unproven"):
                     graph.analyze(partition)

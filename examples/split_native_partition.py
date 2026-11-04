@@ -11,7 +11,7 @@ from copy import deepcopy
 import torch
 from torch import nn
 
-from torchlens.split import GraphPartition, GraphProfile, SplitFeatures, prepare_graph
+from torchlens.split import SplitFeatures, prepare_graph
 
 
 class BranchModel(nn.Module):
@@ -32,42 +32,6 @@ class BranchModel(nn.Module):
         return self.head(torch.cat((self.left_relu(left), self.right_relu(right)), dim=1))
 
 
-def choose_small_ready_calls(profile: GraphProfile, max_calls: int = 2) -> GraphPartition:
-    """Choose dependency-ready calls with the smallest logical output sizes.
-
-    This is an illustrative external policy, not a placement optimizer. It keeps
-    native multi-output calls atomic and never infers latency from tensor bytes.
-    Unknown sizes sort last. Sources are available on the client implicitly.
-    """
-
-    nodes = {node.node_id: node for node in profile.nodes}
-    sources = {tensor.value_id for tensor in profile.tensors} - nodes.keys()
-    remaining = {node.call_id: node.output_node_ids for node in profile.nodes}
-    selected: set[str] = set()
-    for _ in range(max_calls):
-        ready = [
-            call_id
-            for call_id, outputs in remaining.items()
-            if all(set(nodes[node_id].input_node_ids) <= selected | sources for node_id in outputs)
-        ]
-        if not ready:
-            break
-
-        def cost(call_id: str) -> tuple[float, str]:
-            """Order eligible calls by known logical bytes, with deterministic ties."""
-            sizes = [nodes[node_id].activation_bytes for node_id in remaining[call_id]]
-            return (
-                float("inf")
-                if any(size is None for size in sizes)
-                else float(sum(size for size in sizes if size is not None)),
-                call_id,
-            )
-
-        chosen = min(ready, key=cost)
-        selected.update(remaining.pop(chosen))
-    return GraphPartition(frozenset(selected))
-
-
 def main() -> None:
     """Check a full-model Adam update against compact split training and recut."""
     torch.manual_seed(41)
@@ -76,23 +40,32 @@ def main() -> None:
     inputs = torch.randn(4, 4)
     targets = torch.randn(4, 2)
     graph = prepare_graph(model, inputs, features=SplitFeatures(training=True, retain_trace=False))
+    dag = graph.compute_dag()
     profile = graph.graph_profile(batch_size=4)
-    partition = choose_small_ready_calls(profile)
+    # An external algorithm can consume dag and profile. For this known model,
+    # use the left branch as a fixed noncontiguous workload.
+    prefix_call_ids = [
+        call.call_id
+        for call in dag.nodes
+        if graph.trace_graph.node_by_id[call.output_node_ids[0]].module_path
+        in {"left", "left_relu"}
+    ]
+    partition = dag.to_partition(prefix_call_ids)
     analysis = graph.analyze(partition)
     runtime = graph.materialize(analysis)
     ordered = [node.canonical_id for node in graph.trace_graph.compute_nodes]
     assert partition.prefix_node_ids != frozenset(ordered[: len(partition.prefix_node_ids)])
-    alternate = GraphPartition(
-        frozenset(
-            node.canonical_id
-            for node in graph.trace_graph.compute_nodes
-            if node.module_path in {"right", "right_relu"}
-        )
+    alternate = dag.to_partition(
+        call.call_id
+        for call in dag.nodes
+        if graph.trace_graph.node_by_id[call.output_node_ids[0]].module_path
+        in {"right", "right_relu"}
     )
     migration = runtime.plan_state_migration(partition)
     print("Selected prefix nodes:", sorted(partition.prefix_node_ids))
     print("Preflight:", analysis.capability_report.preflight_ok)
     print("Static costs:", analysis.metrics)
+    print("Forward FLOPs:", profile.forward_flops)
     print("State migration:", migration)
     print("Boundary layout:", runtime.boundary_layout(batch_size=4, training=True))
     torch.testing.assert_close(runtime.replay(inputs), reference(inputs))

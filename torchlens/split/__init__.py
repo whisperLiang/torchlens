@@ -5,8 +5,8 @@ from __future__ import annotations
 from .api import prepare, prepare_graph
 from .boundary import ReplayBoundary
 from .boundary_layout import BoundaryLayout, BoundaryTensorLayout
-from .candidates import PartitionAnalysis
-from .context import SplitGraph
+from .context import PartitionAnalysis, SplitGraph
+from .graph import ComputeDAG
 from .graph_profile import (
     GraphProfile,
     NodeCostFeatures,
@@ -61,6 +61,7 @@ from .runtime import SplitRuntime
 from .shape_program import DimExpr, ShapeBinding, ShapeProgram, ShapeRecipe, TensorShapeIR
 
 __all__ = [
+    "ComputeDAG",
     "BoundarySchema",
     "BoundaryLayout",
     "BoundaryTensorLayout",

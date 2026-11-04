@@ -5,24 +5,37 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from ..capture import flops as capture_flops
 from .adapters.base import SegmentBundle, SplitBackendAdapter
 from .batching import BatchSpec
-from .candidates import PartitionAnalysis, topological_partitions
 from .errors import SplitErrorContext, SplitUnsupportedError
-from .graph import SplitTraceGraph
+from .graph import ComputeDAG, SplitTraceGraph
 from .ir import GraphPartition, SplitGraphIR, SplitModelProfile, SplitRequest
 from .pipeline import analyze_split_capabilities, execute_split_runtime, lower_split_program
 from .placement import PlacementPlan
 from .planner import SplitPlan, plan_partition
-from .program import ensure_capability_report_supported
+from .program import ReplayProgram, SplitCapabilityReport, ensure_capability_report_supported
 
 if TYPE_CHECKING:
-    from .graph_profile import GraphProfile
+    from .graph_profile import GraphProfile, PartitionMetrics
     from .runtime import SplitRuntime
+
+
+@dataclass(frozen=True)
+class PartitionAnalysis:
+    """Validated native partition and programs, without backend executables."""
+
+    source_graph: SplitTraceGraph = field(repr=False, compare=False)
+    request: SplitRequest
+    plan: SplitPlan
+    graph_ir: SplitGraphIR
+    prefix_program: ReplayProgram
+    suffix_program: ReplayProgram
+    capability_report: SplitCapabilityReport
+    metrics: PartitionMetrics | None = None
 
 
 class SplitGraph:
@@ -60,9 +73,20 @@ class SplitGraph:
         self._cache_graph = trace_graph
         self._cache_counts = {"hits": 0, "misses": 0}
 
-    def partition_candidates(self) -> tuple[GraphPartition, ...]:
-        """Return optional topological prefixes without analyzing or executing them."""
-        return topological_partitions(self.trace_graph)
+    def compute_dag(self) -> ComputeDAG:
+        """Expose native calls and data/effect dependencies for external partitioning.
+
+        Returns
+        -------
+        ComputeDAG
+            Immutable projection of the retained capture. No forward, profiling,
+            partition search, segment construction or state allocation occurs.
+            Use ``dag.to_partition(call_ids)`` then ``analyze()`` to validate a cut.
+        """
+        return self.trace_graph._compute_dag(
+            training=self.request.trainable,
+            heterogeneous=self.request.placement.is_heterogeneous,
+        )
 
     @contextmanager
     def _temporary_segment_state_snapshots(self) -> Iterator[dict[str, dict[str, Any]]]:

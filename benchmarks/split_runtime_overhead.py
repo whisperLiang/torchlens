@@ -1,4 +1,4 @@
-"""Measure explicit split replay and analysis-only candidate overhead.
+"""Measure Compute DAG projection, native analysis and explicit split replay.
 
 Run with ``python -W ignore benchmarks/split_runtime_overhead.py`` from this checkout.
 To compare with an older revision, copy this script outside the repository and run
@@ -83,7 +83,7 @@ class _WidthModel(nn.Module):
 
 
 class _DeepModel(nn.Module):
-    """A small model with 32 topological partition candidates."""
+    """A small model with 32 native compute calls."""
 
     def __init__(self) -> None:
         """Build repeated affine and activation operations."""
@@ -100,7 +100,7 @@ class _DeepModel(nn.Module):
 
 
 def main() -> None:
-    """Print comparable replay, candidate, and selected-cut measurements."""
+    """Print comparable DAG projection, native analysis and replay measurements."""
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, default=Path(__file__).resolve().parents[1])
@@ -123,7 +123,8 @@ def main() -> None:
         model = _WidthModel(width).eval()
         x = torch.randn(1, width)
         graph = prepare_graph(model, x, features=SplitFeatures(retain_trace=False))
-        partition = graph.partition_candidates()[2]
+        dag = graph.compute_dag()
+        partition = dag.to_partition(c.call_id for c in dag.nodes[:2])
         runtime = graph.materialize(graph.analyze(partition))
         boundary = runtime.run_prefix(x)
         runtime.run_suffix(boundary)
@@ -145,14 +146,14 @@ def main() -> None:
     model = _DeepModel().eval()
     x = torch.randn(1, 8)
     graph = prepare_graph(model, x, features=SplitFeatures(retain_trace=False))
-    runtime = graph.materialize(graph.analyze(graph.partition_candidates()[8]))
+    dag = graph.compute_dag()
+    selected = dag.to_partition(c.call_id for c in dag.nodes[:8])
+    runtime = graph.materialize(graph.analyze(selected))
     with patch.object(
         runtime.adapter, "build_segments", wraps=runtime.adapter.build_segments
     ) as build:
-        candidate_ms = measure(lambda: [runtime.analyze(p) for p in runtime.partition_candidates()])
-        builds_during_candidates = build.call_count
-    report = [runtime.analyze(p) for p in runtime.partition_candidates()]
-    selected = report[0].request.partition
+        dag_ms = measure(runtime.compute_dag)
+        builds_during_projection = build.call_count
     analysis_ms = measure(lambda: runtime.analyze(selected))
     analysis = runtime.analyze(selected)
     materialize_ms = measure(lambda: runtime.materialize(analysis))
@@ -169,10 +170,9 @@ def main() -> None:
             "model": "deep_8",
             "analysis_cache_miss": cold_analysis,
             "analysis_cache_hit": cached_analysis,
-            "candidate": candidate_ms,
-            "candidate_count": len(report),
-            "supported_count": sum(not a.capability_report.unsupported_reasons for a in report),
-            "builds_during_candidates": builds_during_candidates,
+            "compute_dag": dag_ms,
+            "native_calls": len(dag.nodes),
+            "builds_during_projection": builds_during_projection,
             "selected_analyze": analysis_ms,
             "selected_materialize": materialize_ms,
             "selected_repartition": selected_repartition_ms,

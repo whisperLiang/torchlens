@@ -47,7 +47,7 @@ def test_native_boundary_only_gradients_and_phase_hooks() -> None:
     graph = prepare_graph(
         model, torch.ones(2, 4), features=SplitFeatures(training=True, retain_trace=False)
     )
-    partition = graph.partition_candidates()[1]
+    partition = graph.compute_dag().to_partition([graph.compute_dag().nodes[0].call_id])
     runtime = graph.materialize(graph.analyze(partition))
     boundary = runtime.run_training_prefix(torch.randn(2, 4))
     phases = []
@@ -84,7 +84,7 @@ def test_transported_source_buffers_bind_to_server_owned_state() -> None:
     features = SplitFeatures(training=True, retain_trace=False)
     graph = prepare_graph(model, torch.ones(2, 4), features=features)
     other = prepare_graph(client, torch.ones(2, 4), features=features)
-    partition = graph.partition_candidates()[1]
+    partition = graph.compute_dag().to_partition([graph.compute_dag().nodes[0].call_id])
     server = graph.materialize(graph.analyze(partition))
     prefix = other.materialize(other.analyze(partition))
     for _ in range(2):
@@ -119,7 +119,9 @@ def test_transported_prefix_owned_source_buffer_is_preserved() -> None:
     model = Model()
     inputs = torch.ones(2, 4)
     graph = prepare_graph(model, inputs, features=SplitFeatures(training=True, retain_trace=False))
-    runtime = graph.materialize(graph.analyze(graph.partition_candidates()[1]))
+    runtime = graph.materialize(
+        graph.analyze(graph.compute_dag().to_partition([graph.compute_dag().nodes[0].call_id]))
+    )
     boundary = runtime.run_training_prefix(inputs)
     buffers = [
         key
@@ -142,7 +144,9 @@ def test_certified_inplace_suffix_differentiates_an_isolated_nonleaf_root() -> N
     inputs = torch.randn(2, 4)
     targets = torch.randn(2, 2)
     graph = prepare_graph(model, inputs, features=SplitFeatures(training=True, retain_trace=False))
-    runtime = graph.materialize(graph.analyze(graph.partition_candidates()[1]))
+    runtime = graph.materialize(
+        graph.analyze(graph.compute_dag().to_partition([graph.compute_dag().nodes[0].call_id]))
+    )
     expected = nn.functional.mse_loss(oracle(inputs), targets)
     expected.backward()
     boundary = runtime.run_training_prefix(inputs)
@@ -171,7 +175,7 @@ def test_paddle_nested_outputs_keep_paths_and_reused_producers() -> None:
     model = Model()
     inputs = paddle.ones([2, 4], dtype="float64")
     graph = prepare_graph(model, inputs, backend="paddle", features=SplitFeatures(batch_axes={}))
-    partition = graph.partition_candidates()[1]
+    partition = graph.compute_dag().to_partition([graph.compute_dag().nodes[0].call_id])
     runtime = graph.materialize(graph.analyze(partition))
     actual = runtime.replay(inputs)
     expected = model(inputs)

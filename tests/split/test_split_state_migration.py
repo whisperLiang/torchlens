@@ -10,7 +10,6 @@ import torch
 from torch import nn
 from v2_helpers import (
     analyze_fixture,
-    candidate_report,
     prepare_fixture,
     repartition_fixture,
     select_node_prefix,
@@ -297,16 +296,11 @@ def test_recut_preserves_tied_identity_or_refuses_divergent_replicas(
     if divergent:
         with torch.no_grad():
             runtime.prefix_parameters()[0].add_(1)
-    candidate = next(
-        candidate
-        for candidate in candidate_report(runtime, diagnose=True).candidates
-        if candidate.partition == target_partition
-    )
-    assert candidate.replay_supported is not divergent
     if divergent:
-        assert "divergent replicas" in candidate.unsupported_reason
         with pytest.raises(SplitUnsupportedError, match="divergent replicas"):
-            analyze_fixture(runtime, partial(select_node_prefix, node_id="tail"))
+            runtime.analyze(target_partition)
+    else:
+        assert runtime.analyze(target_partition).capability_report.replay.supported
     expected = runtime.replay(inputs)
     same_cut = repartition_fixture(runtime, runtime.request.partition)
     torch.testing.assert_close(same_cut.replay(inputs), expected)

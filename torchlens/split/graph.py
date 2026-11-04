@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from functools import cached_property
 from hashlib import sha256
@@ -14,9 +14,11 @@ from ..backends.registry import (
     MLX_BACKEND_NAME,
     PADDLE_BACKEND_NAME,
     TINYGRAD_BACKEND_NAME,
+    TORCH_BACKEND_NAME,
 )
 from ..intervention.types import CapturedArgTemplate, LiteralTensor, LiteralValue, ParentRef
 from ..utils.tensor_utils import safe_copy
+from .ir import GraphPartition
 from .shape import SymbolicShape, infer_traced_batch_size, symbolic_shape_from_tensor_ref
 
 ReplaySourcePolicy = Literal[
@@ -84,6 +86,52 @@ class ReplayCall:
 
 
 @dataclass(frozen=True)
+class ComputeDAG:
+    """Read-only native-call projection for external partition algorithms.
+
+    Data edges carry canonical tensor value IDs; effect edges carry ordering
+    only. Source provenance and costs remain in ``SplitTraceGraph`` and
+    ``graph_profile()``. Co-location groups are necessary local-write constraints
+    for the requested training/placement policy, not a complete legality proof.
+    Every converted partition still needs native ``analyze()`` validation.
+    """
+
+    graph_identity: str | None
+    nodes: tuple[ReplayCall, ...]
+    data_edges: tuple[tuple[str, str, str], ...]
+    effect_edges: tuple[tuple[str, str], ...]
+    must_colocate: tuple[frozenset[str], ...]
+
+    def to_partition(self, prefix_call_ids: Iterable[str]) -> GraphPartition:
+        """Expand selected native calls into a canonical, call-atomic partition.
+
+        Parameters
+        ----------
+        prefix_call_ids:
+            Native call IDs from ``nodes`` assigned to the prefix. Empty and
+            complete selections are accepted; unknown IDs refuse immediately.
+
+        Returns
+        -------
+        GraphPartition
+            Canonical compute-value IDs for the existing native planner.
+        """
+        if isinstance(prefix_call_ids, (str, bytes)):
+            raise TypeError("prefix_call_ids must be a collection of Call ID strings")
+        selected = frozenset(prefix_call_ids)
+        if any(not isinstance(call_id, str) or not call_id for call_id in selected):
+            raise TypeError("prefix_call_ids must contain non-empty Call ID strings")
+        unknown = selected - {call.call_id for call in self.nodes}
+        if unknown:
+            raise ValueError(f"Unknown Compute DAG Call IDs: {tuple(sorted(unknown))!r}")
+        return GraphPartition(
+            frozenset(
+                v for call in self.nodes if call.call_id in selected for v in call.output_node_ids
+            )
+        )
+
+
+@dataclass(frozen=True)
 class SplitTraceGraph:
     """Ordered split graph projected from a TorchLens trace."""
 
@@ -106,30 +154,6 @@ class SplitTraceGraph:
     def _segment_blueprints(self) -> OrderedDict[tuple[Any, ...], Any]:
         """Bound graph-local immutable scheduling metadata; never store client state."""
         return OrderedDict()
-
-    @cached_property
-    def _ancestor_cache(self) -> OrderedDict[str, frozenset[str]]:
-        """Bound reachability metadata instead of retaining an all-pairs closure."""
-        return OrderedDict()
-
-    def ancestors(self, node_id: str) -> frozenset[str]:
-        """Return dependency ancestry for one value with a bounded graph-local cache."""
-        cache = self._ancestor_cache
-        if node_id not in cache:
-            seen: set[str] = set()
-            pending = list(self.node_by_id[node_id].parents)
-            while pending:
-                parent_id = self.node_id_by_alias.get(parent := pending.pop(), parent)
-                if parent_id not in seen:
-                    seen.add(parent_id)
-                    parent_node = self.node_by_id.get(parent_id)
-                    if parent_node is not None:
-                        pending.extend(parent_node.parents)
-            cache[node_id] = frozenset(seen)
-            if len(cache) > 64:
-                cache.popitem(last=False)
-        cache.move_to_end(node_id)
-        return cache[node_id]
 
     @cached_property
     def node_by_id(self) -> dict[str, SplitTraceNode]:
@@ -232,6 +256,61 @@ class SplitTraceGraph:
         """Return normalized calls keyed by each canonical output value ID."""
 
         return {node_id: call for call in self.replay_calls for node_id in call.output_node_ids}
+
+    def _compute_dag(self, *, training: bool, heterogeneous: bool) -> ComputeDAG:
+        """Project existing native calls and dependencies without capture or replay."""
+        calls = tuple(
+            call
+            for call in self.replay_calls
+            if self.node_by_id[call.output_node_ids[0]].target is not None
+        )
+        owners = {value: call.call_id for call in calls for value in call.output_node_ids}
+        effects: set[tuple[str, str]] = set()
+        colocations: tuple[frozenset[str], ...] = ()
+        if self.backend == TORCH_BACKEND_NAME:
+            from .planner import _partition_colocations
+
+            effects = {
+                (owners[parent], owners[child])
+                for child, parents in self._partition_effect_index.predecessors.items()
+                if child in owners
+                for parent in parents
+                if parent in owners and owners[parent] != owners[child]
+            }
+            colocations = _partition_colocations(
+                self, owners, training=training, heterogeneous=heterogeneous
+            )
+        return ComputeDAG(
+            self.graph_shape_hash,
+            calls,
+            _compute_data_edges(self, owners),
+            tuple(sorted(effects)),
+            colocations,
+        )
+
+
+def _compute_data_edges(
+    graph: SplitTraceGraph, owners: dict[str, str]
+) -> tuple[tuple[str, str, str], ...]:
+    """Contract source/observation rows while retaining each consumed tensor value."""
+    producers: dict[str, tuple[str, ...]] = {}
+    edges: set[tuple[str, str, str]] = set()
+    for node in graph.nodes:
+        parents = tuple(graph.node_id_by_alias.get(p, p) for p in node.parents)
+        owner = owners.get(node.canonical_id)
+        if owner is None:
+            producers[node.canonical_id] = tuple(
+                dict.fromkeys(source for parent in parents for source in producers.get(parent, ()))
+            )
+            continue
+        producers[node.canonical_id] = (owner,)
+        edges.update(
+            (source, owner, parent)
+            for parent in parents
+            for source in producers.get(parent, ())
+            if source != owner
+        )
+    return tuple(sorted(edges))
 
 
 def _module_path_for_op(op: Any) -> str | None:

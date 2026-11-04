@@ -14,6 +14,7 @@ from v2_helpers import (
     split_request,
 )
 
+from torchlens.split import prepare_graph
 from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
 
 
@@ -35,11 +36,9 @@ def test_jax_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
         return hidden * 2.0 + 1.0
 
     x = jnp.array([[-1.0, 2.0, 3.0], [4.0, -5.0, 6.0]])
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(partial(select_node_prefix, node_id="max"), backend="jax"),
-    )
+    graph = prepare_graph(model, x, backend="jax")
+    dag = graph.compute_dag()
+    runtime = graph.materialize(graph.analyze(dag.to_partition([dag.nodes[0].call_id])))
 
     replay_x = jnp.ones((3, 3))
     boundary = runtime.run_prefix(replay_x)
@@ -62,11 +61,9 @@ def test_tinygrad_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
         return hidden * 2.0 + 1.0
 
     x = tinygrad.Tensor([[-1.0, 2.0, 3.0], [4.0, -5.0, 6.0]]).realize()
-    runtime = prepare_fixture(
-        model,
-        x,
-        split_request(partial(select_node_prefix, node_id="where"), backend="tinygrad"),
-    )
+    graph = prepare_graph(model, x, backend="tinygrad")
+    dag = graph.compute_dag()
+    runtime = graph.materialize(graph.analyze(dag.to_partition([dag.nodes[0].call_id])))
 
     replay_x = tinygrad.Tensor([[-1.0, 2.0, 3.0], [4.0, -5.0, 6.0], [7.0, -8.0, 9.0]]).realize()
     boundary = runtime.run_prefix(replay_x)
@@ -127,9 +124,9 @@ def test_tf_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
         return hidden * 2.0 + 1.0
 
     x = tf.constant([[-1.0, 2.0, 3.0], [4.0, -5.0, 6.0]], dtype=tf.float32)
-    runtime = prepare_fixture(
-        model, x, split_request(partial(select_node_prefix, node_id="relu"), backend="tf")
-    )
+    graph = prepare_graph(model, x, backend="tf")
+    dag = graph.compute_dag()
+    runtime = graph.materialize(graph.analyze(dag.to_partition([dag.nodes[0].call_id])))
 
     boundary = runtime.run_prefix(x)
     runtime.validate_boundary(boundary)
