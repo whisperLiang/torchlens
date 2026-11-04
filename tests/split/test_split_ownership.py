@@ -91,6 +91,21 @@ def test_parameter_bindings_exposes_referenced_and_owned_effective_parameters() 
         bindings["parameter:left.weight"]["prefix"] = torch.zeros(4, 4)  # type: ignore[index]
 
 
+def test_state_bindings_includes_effective_buffers_and_retains_readonly_mapping() -> None:
+    """Federated callers can inspect live buffers without depending on segment internals."""
+    model = SharedState()
+    runtime = _runtime(model)
+    bindings = runtime.state_bindings()
+    rows = {row.state_id: row for row in runtime.parameter_ownership()}
+    assert set(bindings) == set(rows)
+    assert "buffer:offset" in bindings
+    owner = rows["buffer:offset"].owners[0]
+    assert bindings["buffer:offset"][owner] is model.offset
+    with pytest.raises(TypeError):
+        bindings["buffer:offset"][owner] = torch.zeros(4)  # type: ignore[index]
+    assert set(runtime.parameter_bindings()) < set(bindings)
+
+
 def test_migration_describes_directions_without_building_segments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -228,6 +228,28 @@ def parameter_ownership(runtime: Any) -> tuple[ParameterOwnership, ...]:
         return rows
 
 
+def state_bindings(runtime: Any) -> Mapping[str, Mapping[str, Any]]:
+    """Bind stable state IDs to effective parameter, buffer and literal tensors.
+
+    Parameters
+    ----------
+    runtime:
+        Torch runtime whose lazy segment state is settled before inspection.
+
+    Returns
+    -------
+    Mapping[str, Mapping[str, Any]]
+        Read-only stable state ID to owner to effective tensor mappings. Unlike
+        ``parameter_bindings``, this includes non-trainable buffers and literals.
+        No gradient, optimizer or source-model value is changed.
+    """
+    _require_torch(runtime)
+    _rows, bindings = _inventory(runtime, runtime._segment_state_snapshots())
+    return MappingProxyType(
+        {state_id: MappingProxyType(values) for state_id, values in bindings.items()}
+    )
+
+
 def parameter_bindings(runtime: Any) -> Mapping[str, Mapping[str, Any]]:
     """Bind current parameters and expose stable IDs for caller-owned optimizers.
 

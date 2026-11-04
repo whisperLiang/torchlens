@@ -177,6 +177,19 @@ class SplitRuntime(SplitGraph):
 
         return parameter_bindings(self)
 
+    def state_bindings(self) -> Mapping[str, Mapping[str, Any]]:
+        """Bind stable state IDs to effective tensors, including running buffers.
+
+        Returns
+        -------
+        Mapping[str, Mapping[str, Any]]
+            Read-only owner bindings for the complete executed state inventory.
+            Torch only; settles lazy state without changing source-model values.
+        """
+        from .ownership import state_bindings
+
+        return state_bindings(self)
+
     def plan_state_migration(self, partition: GraphPartition) -> StateMigrationPlan:
         """Describe a recut and external optimizer reassociation without moving state."""
 
