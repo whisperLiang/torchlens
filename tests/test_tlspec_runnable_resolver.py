@@ -229,6 +229,26 @@ def test_cross_version_alias_fixture_and_bounds() -> None:
     assert resolve_runnable_torch_alias("Tensor.add", "2.13.0") is None
 
 
+@pytest.mark.parametrize("version", ["2.8.0", "2.13.0", "2.14.0", "2.15.0"])
+@pytest.mark.parametrize(
+    ("source", "namespace", "qualname"),
+    [
+        ("torch._C._nn.linear", "torch.nn.functional", "linear"),
+        ("torch._C._linalg.linalg_cholesky", "torch.linalg", "cholesky"),
+    ],
+)
+def test_reviewed_stock_aliases_preserve_public_identity_through_torch215(
+    version: str, source: str, namespace: str, qualname: str
+) -> None:
+    """The audited linear and linalg builtins normalize only within reviewed bounds."""
+
+    alias = resolve_runnable_torch_alias(source, version)
+    assert alias is not None
+    assert alias[:2] == (namespace, qualname)
+    assert resolve_runnable_torch_alias(source, "2.16.0") is None
+    assert resolve_runnable_torch_alias(source, "2.0.0") is None
+
+
 def test_variable_functions_aliases_cover_running_torch_minor() -> None:
     """Lock VariableFunctionsClass aliases open across the running torch minor."""
 

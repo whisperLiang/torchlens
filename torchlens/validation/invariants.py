@@ -459,9 +459,6 @@ _dtype_values_match = _rebind_function(_invariants_conditional_base._dtype_value
 _check_recurrence_invariants = _rebind_function(
     _invariants_conditional_base._check_recurrence_invariants, globals()
 )
-_check_branching_invariants = _rebind_function(
-    _invariants_conditional_base._check_branching_invariants, globals()
-)
 _fail_conditional_invariant = _rebind_function(
     _invariants_conditional_base._fail_conditional_invariant, globals()
 )
@@ -760,7 +757,6 @@ METADATA_INVARIANT_CONTRACTS: tuple[MetadataInvariantContract, ...] = (
         "torch",
     ),
     MetadataInvariantContract("recurrence_invariants", _check_recurrence_invariants, "torch"),
-    MetadataInvariantContract("branching_invariants", _check_branching_invariants, "torch"),
     MetadataInvariantContract("conditional_invariants", _check_conditional_invariants, "torch"),
     MetadataInvariantContract(
         "layer_pass_layer_log_xrefs",

@@ -916,8 +916,20 @@ def _tracker_dataframe(log: Any) -> Any:
         Pandas dataframe suitable for strict tracker table types.
     """
 
+    import pandas as pd
+
     dataframe = log.to_pandas()
-    return dataframe.apply(lambda column: column.map(_tracker_cell))
+    # Explicit object storage prevents pandas from inferring nullable dtypes
+    # again after the cells have been converted to Python primitives.
+    return pd.DataFrame(
+        [
+            [_tracker_cell(cell) for cell in row]
+            for row in dataframe.itertuples(index=False, name=None)
+        ],
+        index=dataframe.index,
+        columns=dataframe.columns,
+        dtype=object,
+    )
 
 
 def _parquet_safe_dataframe(dataframe: Any) -> Any:
@@ -959,8 +971,8 @@ def _scalarize_cell(value: Any) -> Any:
         Primitive value or string representation.
     """
 
-    if value is None or isinstance(value, str | int | float | bool):
-        return value
+    if value is None:
+        return None
     try:
         import numpy as np
         import pandas as pd
@@ -968,8 +980,12 @@ def _scalarize_cell(value: Any) -> Any:
         missing = pd.isna(value)
         if isinstance(missing, bool | np.bool_) and bool(missing):
             return None
+        if isinstance(value, np.generic):
+            value = value.item()
     except Exception:
         pass
+    if isinstance(value, str | int | float | bool):
+        return value
     return repr(value)
 
 

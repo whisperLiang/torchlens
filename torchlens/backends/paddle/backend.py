@@ -62,6 +62,7 @@ from .._options import (
 )
 from .._selective_save import apply_static_label_save_policy, pop_static_label_save_predicate
 from ._cuda import paddle_cuda_scope
+from ._output import _paddle_output_container_spec
 from .interventions import PaddleInterventionCapture, PaddleInterventionRuntime
 from .model_prep import (
     PaddleModuleTree,
@@ -2676,30 +2677,3 @@ def _paddle_values_close(left: Any, right: Any) -> bool:
 
 
 __all__ = ["GradOptions", "PaddleBackend", "PaddleOpCapture", "TensorLeafCapture"]
-
-
-def _paddle_output_container_spec(value: Any, is_tensor: Callable[[Any], bool]) -> Any:
-    """Describe builtin final-output containers independently of native call outputs."""
-    from ...ir.container import ContainerSpec, DictKey, TupleIndex
-
-    if is_tensor(value):
-        return None
-    if type(value) in (list, tuple):
-        sequence_children = tuple(
-            (TupleIndex(index), child)
-            for index, item in enumerate(value)
-            if (child := _paddle_output_container_spec(item, is_tensor)) is not None
-        )
-        return ContainerSpec(
-            "list" if isinstance(value, list) else "tuple",
-            length=len(value),
-            child_specs=sequence_children,
-        )
-    if type(value) is dict:
-        dict_children = tuple(
-            (DictKey(key), child)
-            for key, item in value.items()
-            if (child := _paddle_output_container_spec(item, is_tensor)) is not None
-        )
-        return ContainerSpec("dict", keys=tuple(value), child_specs=dict_children)
-    return ContainerSpec("literal", literal_value=value)

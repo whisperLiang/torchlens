@@ -48,6 +48,7 @@ jobs:
             "torch==2.8.0+cpu" "torchvision==0.23.0+cpu" "torchaudio==2.8.0+cpu" \
             "opencv-python-headless>=4.8,<5"
           uv pip check --system
+          python scripts/check_torch_environment.py 2.8.0+cpu 0.23.0+cpu
       - name: Verify RFDETR imports in the same Transformers 5 environment
         if: matrix.major == '5'
         run: python -c "from rfdetr import RFDETRNano; import transformers; assert transformers.__version__.split('.')[0] == '5'"
@@ -180,7 +181,9 @@ jobs:
 
   fast-tier:
     name: Full fast tier
-    runs-on: ubuntu-latest
+    # The byte-reference renderer uses Graphviz 2.43; Ubuntu 26.04's
+    # split Graphviz 14 packages also omit the neato layout plugin by default.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -195,7 +198,9 @@ jobs:
       - name: Install graphviz
         run: |
           sudo apt-get update
-          sudo apt-get install -y graphviz
+          sudo apt-get install -y graphviz fonts-dejavu-core
+          sudo dot -c
+          python scripts/check_graphviz.py
 
       - name: Install canonical CPU test environment
         run: |
@@ -209,7 +214,7 @@ jobs:
             "torch==2.8.0+cpu" "torchvision==0.23.0+cpu" "torchaudio==2.8.0+cpu" \
             "opencv-python-headless>=4.8,<5"
           uv pip check
-          python -c 'import torch, torchvision; assert torch.__version__ == "2.8.0+cpu", torch.__version__; assert torchvision.__version__ == "0.23.0+cpu", torchvision.__version__'
+          python scripts/check_torch_environment.py 2.8.0+cpu 0.23.0+cpu
 
       - name: Run fast tests
         run: |
@@ -281,7 +286,7 @@ jobs:
 
   coverage:
     name: Coverage floor (smoke tier)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # First measured coverage gate (grind r3, SF-19: four consecutive review
     # passes found NO coverage job anywhere). The smoke tier under
     # branch-coverage instrumentation measured 64% total on 2026-08-15; the
@@ -303,7 +308,9 @@ jobs:
       - name: Install graphviz
         run: |
           sudo apt-get update
-          sudo apt-get install -y graphviz
+          sudo apt-get install -y graphviz fonts-dejavu-core
+          sudo dot -c
+          python scripts/check_graphviz.py
 
       - name: Install canonical CPU test environment
         run: |
@@ -318,6 +325,7 @@ jobs:
             "torchaudio==2.8.0+cpu" \
             "opencv-python-headless>=4.8,<5"
           uv pip check
+          python scripts/check_torch_environment.py 2.8.0+cpu 0.23.0+cpu
 
       - name: Run the smoke tier under coverage with a floor
         run: |
@@ -391,7 +399,7 @@ jobs:
 
   preview-backends:
     name: Preview backend tests (${{ matrix.backend }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # One framework per job: the frameworks carry conflicting pins and native
     # runtimes that segfault when co-imported in one process (test collection
     # imports every framework-marked module), so a combined env cannot be
@@ -455,7 +463,9 @@ jobs:
       - name: Install Graphviz for backend rendering tests
         run: |
           sudo apt-get update
-          sudo apt-get install -y graphviz
+          sudo apt-get install -y graphviz fonts-dejavu-core
+          sudo dot -c
+          python scripts/check_graphviz.py
 
       - name: Install TorchLens and the ${{ matrix.backend }} preview backend
         run: |
@@ -506,7 +516,9 @@ jobs:
       - name: Install Graphviz for the dependency-floor draw check
         run: |
           sudo apt-get update
-          sudo apt-get install -y graphviz
+          sudo apt-get install -y graphviz fonts-dejavu-core
+          sudo dot -c
+          python scripts/check_graphviz.py
 
       - name: Every declared extra resolves on every advertised interpreter
         # First leg that resolves ANY extra beyond dev/test/tabular (grind r4,
@@ -858,7 +870,9 @@ jobs:
       - name: Install Graphviz
         run: |
           sudo apt-get update
-          sudo apt-get install -y graphviz
+          sudo apt-get install -y graphviz fonts-dejavu-core
+          sudo dot -c
+          python scripts/check_graphviz.py
 
       - name: Install canonical CPU test environment
         run: |
@@ -872,6 +886,7 @@ jobs:
             "torchaudio==2.8.0+cpu" \
             "opencv-python-headless>=4.8,<5"
           uv pip check
+          python scripts/check_torch_environment.py 2.8.0+cpu 0.23.0+cpu
 
       - name: Smoke tier under three fresh shuffle seeds
         run: |

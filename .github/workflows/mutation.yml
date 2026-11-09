@@ -54,7 +54,9 @@ jobs:
       - name: Install Graphviz
         run: |
           sudo apt-get update
-          sudo apt-get install -y graphviz
+          sudo apt-get install -y graphviz fonts-dejavu-core
+          sudo dot -c
+          python scripts/check_graphviz.py
 
       - name: Install canonical CPU test environment
         # r7 R82 (opus MED): this leg formerly installed BARE `torch` (newest
@@ -76,8 +78,11 @@ jobs:
             -e ".[dev,test,tabular]" \
             "torch==2.8.0+cpu" \
             "torchvision==0.23.0+cpu" \
+            "torchaudio==2.8.0+cpu" \
             "pydot==4.0.1" \
             "graphviz==0.21"
+          uv pip check
+          python scripts/check_torch_environment.py 2.8.0+cpu 0.23.0+cpu
 
       - name: Select rotation slot
         id: slot

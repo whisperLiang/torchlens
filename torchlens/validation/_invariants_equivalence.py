@@ -97,17 +97,6 @@ def _check_equivalence_symmetry(ml: Trace) -> None:
                     f"op_equivalence_classes['{eq_type}'] contains '{label}' not in op_labels",
                 )
 
-    # Each Op that appears in any equivalence group should exist.
-    all_equiv_labels = set()
-    for equiv_set in ml.op_equivalence_classes.values():
-        all_equiv_labels.update(equiv_set)
-    extra = all_equiv_labels - label_set
-    if extra:
-        raise MetadataInvariantError(
-            name,
-            f"op_equivalence_classes contains labels not in op_labels: {extra}",
-        )
-
     # Per-Op verdict is a pure function of the (canonical `equivalent_ops` object,
     # expected-group object) PAIR plus the loop-invariant `label_set`. Ops of one
     # equivalence class all share a single canonical object, so re-running the body

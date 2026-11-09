@@ -554,7 +554,7 @@ def _install_flex_gemm_shim(records: list[tuple[Any, str, Any]]) -> None:
     Only inspect loaded modules so ordinary capture never imports a compiler.
     """
 
-    module = sys.modules.get("torch._higher_order_ops.flex_gemm")
+    module: Any = sys.modules.get("torch._higher_order_ops.flex_gemm")
     if module is None:
         return
     cls = getattr(module, "FlexGemm", None)
@@ -584,6 +584,23 @@ def _install_flex_gemm_shim(records: list[tuple[Any, str, Any]]) -> None:
     _register_shim(flex_gemm_shim)
     cls.__call__ = flex_gemm_shim
     records.append((cls, "__call__", original))
+
+    frontend = getattr(module, "flex_gemm", None)
+    if not callable(frontend) or not callable(getattr(module, "flex_gemm_scaled_mm", None)):
+        return
+
+    @functools.wraps(frontend)
+    def flex_gemm_frontend_shim(gemm_op: Any, *args: Any, **kwargs: Any) -> Any:
+        """Normalize the scaled-mm operand to the frontend's live comparison basis."""
+
+        scaled_mm = getattr(torch.nn.functional, "scaled_mm", None)
+        if scaled_mm is not None and _resolve(gemm_op) is _resolve(scaled_mm):
+            gemm_op = scaled_mm
+        return frontend(gemm_op, *args, **kwargs)
+
+    _register_shim(flex_gemm_frontend_shim)
+    module.flex_gemm = flex_gemm_frontend_shim
+    records.append((module, "flex_gemm", frontend))
 
 
 # ---------------------------------------------------------------------------

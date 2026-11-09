@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import pytest
 import torch
 from torch import nn
@@ -170,6 +171,68 @@ def test_wandb_names_extra_when_dependency_missing(
 
     with pytest.raises(ImportError, match="torchlens\\[wandb\\]"):
         tl.export.wandb(log)
+
+
+def _nullable_tracker_frame() -> Any:
+    """Return nullable and object columns with valid values and missing sentinels."""
+
+    return pd.DataFrame(
+        {
+            "text": pd.Series(["kept", pd.NA, ""], dtype="string"),
+            "count": pd.Series([7, pd.NA, 0], dtype="Int64"),
+            "flag": pd.Series([True, pd.NA, False], dtype="boolean"),
+            "number": [1.5, float("nan"), -2.0],
+            "object": pd.Series([np.int64(9), np.bool_(False), [1, 2]], dtype=object),
+            "time": [pd.Timestamp("2026-01-01"), pd.NaT, pd.NaT],
+        },
+    ).set_axis(["first", "missing", "last"])
+
+
+def test_wandb_receives_native_scalars_without_dtype_reinference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Table boundary preserves numbers and booleans and replaces missing cells."""
+
+    source = _nullable_tracker_frame()
+    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(Table=lambda dataframe: dataframe))
+    log = SimpleNamespace(to_pandas=lambda: source)
+
+    dataframe = tl.export.wandb(log)["table"]
+
+    assert dataframe.columns.equals(source.columns)
+    assert dataframe.index.equals(source.index)
+    assert dataframe.shape == source.shape
+    assert dataframe.loc["missing"].tolist() == [None, None, None, None, False, None]
+    assert dataframe.loc["first"].tolist() == [
+        "kept",
+        7,
+        True,
+        1.5,
+        9,
+        repr(pd.Timestamp("2026-01-01")),
+    ]
+    assert dataframe.loc["last"].tolist() == ["", 0, False, -2.0, "[1, 2]", None]
+    assert all(
+        cell is None or type(cell) in (str, int, float, bool)
+        for row in dataframe.itertuples(index=False, name=None)
+        for cell in row
+    )
+    assert source.loc["missing", "text"] is pd.NA
+
+
+@pytest.mark.optional
+def test_wandb_sdk_table_accepts_nullable_cells() -> None:
+    """The real optional SDK accepts the same sanitized data without a W&B run."""
+
+    wandb = pytest.importorskip("wandb")
+    source = _nullable_tracker_frame()
+    # W&B infers one type per column; complex object cells share the repr type.
+    source["object"] = pd.Series([[1, 2], None, {}], index=source.index, dtype=object)
+    result = tl.export.wandb(SimpleNamespace(to_pandas=lambda: source))
+
+    assert isinstance(result["table"], wandb.Table)
+    assert result["table"].columns == list(source.columns)
+    assert result["table"].data[1] == [None, None, None, None, None, None]
 
 
 def _stub_xarray(monkeypatch: pytest.MonkeyPatch) -> list[Any]:

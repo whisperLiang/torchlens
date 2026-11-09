@@ -22,6 +22,10 @@ capability truth.
   `.._finalize.finalize_single_pass_trace` neutral grouper
   (`recurrence_detection` default True).
 
+## _output.py
+- Describes final builtin output containers without importing Paddle;
+  `backend.py` retains its internal helper import for existing callers.
+
 ## wrappers.py
 - `wrap_paddle()` / `unwrap_paddle()` / `is_paddle_wrapped()`;
   `_PaddleWrapperRegistry` owns the wrapped surface and

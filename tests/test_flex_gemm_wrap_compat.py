@@ -88,3 +88,26 @@ def test_flex_module_loaded_while_wrapped_survives_teardown(flex_module: ModuleT
     torch.testing.assert_close(frontend(torch.mm, (x, x), torch.relu), expected)
     wrap_torch()
     torch.testing.assert_close(frontend(torch.mm, (x, x), torch.relu), expected)
+
+
+def test_scaled_mm_uses_native_validation_for_both_callable_epochs(flex_module: ModuleType) -> None:
+    """The public scaled-mm identity branch stays reachable after wrapping."""
+
+    held_op = getattr(torch.nn.functional, "scaled_mm", None)
+    if held_op is None:
+        pytest.skip("This torch build does not expose public scaled_mm")
+    original_frontend = flex_module.flex_gemm
+    # 2.14 exposes F.scaled_mm before FlexGEMM supports its special argument
+    # convention; both its rejection and 2.15's native validation stay intact.
+    error = NotImplementedError if hasattr(flex_module, "flex_gemm_scaled_mm") else RuntimeError
+    message = "backend='QUACK'" if error is NotImplementedError else "unsupported GEMM op"
+    with pytest.raises(error, match=message):
+        original_frontend(held_op, (), torch.relu)
+    wrap_torch()
+    for op in (held_op, torch.nn.functional.scaled_mm):
+        with pytest.raises(error, match=message):
+            flex_module.flex_gemm(op, (), torch.relu)
+    unwrap_torch()
+    assert flex_module.flex_gemm is original_frontend
+    with pytest.raises(error, match=message):
+        original_frontend(held_op, (), torch.relu)

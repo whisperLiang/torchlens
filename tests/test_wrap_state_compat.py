@@ -23,6 +23,7 @@ Regression batteries for the wrap-state identity class (R55/R56/R78 family):
 
 from __future__ import annotations
 
+import importlib
 import io
 import pickle
 import re
@@ -202,6 +203,14 @@ def test_installed_torch_tree_identity_checks_are_reviewed():
             if target is None or not callable(target):
                 continue
             wrapped_wrapper = getattr(target, "__wrapped__", None)
+            if (rel_path, attr) == ("_higher_order_ops/flex_gemm.py", "scaled_mm"):
+                from torchlens.backends.torch.identity_shims import _is_our_live_shim
+
+                frontend = importlib.import_module("torch._higher_order_ops.flex_gemm").flex_gemm
+                # This supported identity branch requires the actual installed
+                # shim; it must never become an unconditional allowlist entry.
+                assert _is_our_live_shim(frontend), "FlexGEMM scaled_mm identity shim is absent"
+                continue
             if (
                 id(target) in wrapper_ids
                 or id(target) in orig_ids

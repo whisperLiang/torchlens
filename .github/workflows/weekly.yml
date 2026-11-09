@@ -17,7 +17,7 @@ concurrency:
 jobs:
   extended-tests:
     name: Slow and rare tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -34,18 +34,24 @@ jobs:
         # of the SVG golden families import-fail (r7 R79).
         run: |
           sudo apt-get update
-          sudo apt-get install -y graphviz libcairo2
+          sudo apt-get install -y graphviz libcairo2 fonts-dejavu-core
+          sudo dot -c
+          python scripts/check_graphviz.py
 
       - name: Install torch and TorchLens
         run: |
           cat > "${{ runner.temp }}/torch-2.7-constraints.txt" <<'EOF'
-          torch==2.7.*
+          torch==2.7.1+cpu
+          torchvision==0.22.1+cpu
+          torchaudio==2.7.1+cpu
           EOF
-          uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt" "torch==2.7.*" \
-            --index-url https://download.pytorch.org/whl/cpu
-          uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt" -e ".[dev,test,tabular]"
+          uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt" \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e ".[dev,test,tabular]"
           uv pip check
-          python -c 'import torch; assert torch.__version__.startswith("2.7."), torch.__version__; print(torch.__version__)'
+          python scripts/check_torch_environment.py 2.7.1+cpu 0.22.1+cpu
 
       - name: Install bridge adapters and cairosvg
         # r7 R79 (fable MED, wave-introduced): this gate's comment claimed
@@ -56,8 +62,12 @@ jobs:
         # families it names.
         run: |
           uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt" \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
             captum sae-lens rsatoolbox cairosvg
           uv pip check
+          python scripts/check_torch_environment.py 2.7.1+cpu 0.22.1+cpu
 
       - name: Bridge adapters and cairosvg collision gate (executed floor)
         # The whole point is that these STOP skipping here. Floors are
@@ -103,7 +113,7 @@ jobs:
     # its zero-survivor log is a required convergence artifact, not a weekly
     # gate here.
     name: mutation margin (${{ matrix.family }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 350
     strategy:
       fail-fast: false
@@ -123,7 +133,9 @@ jobs:
       - name: Install graphviz
         run: |
           sudo apt-get update
-          sudo apt-get install -y graphviz
+          sudo apt-get install -y graphviz fonts-dejavu-core
+          sudo dot -c
+          python scripts/check_graphviz.py
 
       - name: Install canonical CPU test environment
         run: |
@@ -133,8 +145,10 @@ jobs:
             --index-strategy unsafe-best-match \
             -e ".[dev,test,tabular]" \
             "torch==2.8.0+cpu" \
-            "torchvision==0.23.0+cpu"
+            "torchvision==0.23.0+cpu" \
+            "torchaudio==2.8.0+cpu"
           uv pip check
+          python scripts/check_torch_environment.py 2.8.0+cpu 0.23.0+cpu
 
       - name: Score the ${{ matrix.family }} mutant family
         run: |
@@ -220,7 +234,9 @@ jobs:
       - name: Install graphviz
         run: |
           sudo apt-get update
-          sudo apt-get install -y graphviz
+          sudo apt-get install -y graphviz fonts-dejavu-core
+          sudo dot -c
+          python scripts/check_graphviz.py
 
       - name: Install canonical CPU test environment
         run: |
@@ -230,8 +246,10 @@ jobs:
             --index-strategy unsafe-best-match \
             -e ".[dev,test,tabular]" \
             "torch==2.8.0+cpu" \
-            "torchvision==0.23.0+cpu"
+            "torchvision==0.23.0+cpu" \
+            "torchaudio==2.8.0+cpu"
           uv pip check
+          python scripts/check_torch_environment.py 2.8.0+cpu 0.23.0+cpu
 
       - name: Verdict identity under python -O
         # requires_assertions-marked tests self-skip under -O (their whole

@@ -255,7 +255,7 @@ _RUNNABLE_TORCH_ALIASES: tuple[RunnableTorchAlias, ...] = (
         "linear",
         "private_to_public:_C._nn.linear->torch.nn.functional.linear",
         (2, 1),
-        (2, 14),
+        (2, 15),
     ),
     RunnableTorchAlias(
         "_C._nn.linear",
@@ -263,7 +263,7 @@ _RUNNABLE_TORCH_ALIASES: tuple[RunnableTorchAlias, ...] = (
         "linear",
         "private_to_public:_C._nn.linear->torch.nn.functional.linear",
         (2, 1),
-        (2, 14),
+        (2, 15),
     ),
     RunnableTorchAlias(
         "torch._VF.linear",
@@ -329,7 +329,7 @@ _RUNNABLE_TORCH_ALIASES: tuple[RunnableTorchAlias, ...] = (
         None,
         "private_to_public:_C._linalg.linalg_*->torch.linalg.*",
         (2, 1),
-        (2, 14),
+        (2, 15),
         "linalg_",
     ),
     RunnableTorchAlias(
@@ -2301,8 +2301,13 @@ def probe_funcol_wait_interposition() -> bool:
     return HAS_FUNCOL_WAIT_INTERPOSITION
 
 
-def get_funcol_wait_redispatch() -> tuple[Any, Callable[[], Any]] | None:
+def get_funcol_wait_redispatch(*, batched: bool = False) -> tuple[Any, Callable[[], Any]] | None:
     """Return the wait-interposition redispatch surfaces, or ``None``.
+
+    Parameters
+    ----------
+    batched:
+        Request Torch 2.15's list-valued ``wait_tensors`` instead of ``wait_tensor``.
 
     Returns
     -------
@@ -2317,6 +2322,14 @@ def get_funcol_wait_redispatch() -> tuple[Any, Callable[[], Any]] | None:
 
     if not probe_funcol_wait_interposition():
         return None
+    if batched:
+        try:
+            wait_op = torch.ops._c10d_functional.wait_tensors.default
+        except (AttributeError, RuntimeError):
+            return None
+        if _FUNCOL_WAIT_REDISPATCH is None:
+            return None
+        return wait_op, _FUNCOL_WAIT_REDISPATCH[1]
     return _FUNCOL_WAIT_REDISPATCH
 
 

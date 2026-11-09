@@ -179,6 +179,22 @@ VETTED_NAMESPACE_SNAPSHOTS += (
     ),
 )
 
+# Torch 2.15 adds only the list-valued wait_tensors(Tensor[]) -> Tensor[]
+# completion op to the audited 2.14 surface. It launches no collective and
+# returns the same destination tensors after waiting. The existing scoped
+# dispatcher interposition now observes each destination after the native wait;
+# tests/test_distributed_torch214.py covers batch/single/no-wait execution,
+# output values, parent edges, and per-destination completion evidence.
+VETTED_NAMESPACE_SNAPSHOTS += (
+    (
+        "torch-2.15",
+        {
+            namespace: ops | {"wait_tensors"} if namespace == "_c10d_functional" else ops
+            for namespace, ops in VETTED_NAMESPACE_SNAPSHOTS[2][1].items()
+        },
+    ),
+)
+
 
 class UncapturedCollectiveOpError(CompatibilityError, RuntimeError):
     """Raised when the collective recognizer cannot vouch for this runtime.

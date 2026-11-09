@@ -61,6 +61,14 @@ AND a `chore(release):` head-commit condition.
 
 ## Conventions
 
+- Reference rendering jobs use Ubuntu 24.04's Graphviz 2.43 and DejaVu fonts.
+  Run `scripts/check_graphviz.py` after system installation/plugin registration;
+  it exercises dot, both neato entry points, and pinned-coordinate rank rendering.
+- Canonical 2.8 and weekly 2.7 CPU verdict lanes pin torch, torchvision, and
+  torchaudio together. Weekly bridge extras retain all three constraints and
+  the official CPU index. `scripts/check_torch_environment.py` checks exact
+  versions, imports all three binaries, and executes native NMS after installation.
+
 - Conventional commits required: `fix(scope):`, `feat(scope):`, `chore(scope):`
 - `fix:` → patch bump, `feat:` → minor bump; major-bump markers (`feat!:`,
   `BREAKING CHANGE:`) are BLOCKED by the three defense layers above

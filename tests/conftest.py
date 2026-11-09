@@ -81,6 +81,22 @@ _WARN_ONCE_SENTINELS: tuple[tuple[str, str, object], ...] = (
 # ---------------------------------------------------------------------------
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register test-only controls for capture initialization.
+
+    Parameters
+    ----------
+    parser:
+        Pytest command-line option parser.
+    """
+
+    parser.addoption(
+        "--no-capture-prewarm",
+        action="store_true",
+        help="Let tests initialize capture; mutation campaigns need named failures, not setup crashes.",
+    )
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_configure(config: pytest.Config) -> None:
     """Initialize session-private outputs with shipped usage stats disabled.
@@ -141,7 +157,13 @@ def pytest_configure(config: pytest.Config) -> None:
     golden_update_armed = any(
         key.startswith(GOLDEN_FLAG_PREFIXES) and value == "1" for key, value in os.environ.items()
     )
-    if not config.option.collectonly and not golden_update_armed:
+    # A mutated postprocess step must fail inside a named test, where the
+    # campaign can attribute its killer, rather than crash pytest_configure.
+    if (
+        not config.option.collectonly
+        and not golden_update_armed
+        and not config.getoption("--no-capture-prewarm")
+    ):
         import warnings as _warnings
 
         import torchlens as _tl

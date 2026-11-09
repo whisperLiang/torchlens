@@ -207,11 +207,11 @@ def test_ci_workflows_pin_torch_and_scope_lint_to_owned_paths() -> None:
     weekly_text = project_root.joinpath(".github", "workflows", "weekly.yml").read_text()
     lint_text = project_root.joinpath(".github", "workflows", "lint.yml").read_text()
 
-    assert "torch==2.7.*" in weekly_text
+    assert "torch==2.7.1+cpu" in weekly_text
     assert (
         'uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt"' in weekly_text
     )
-    assert 'assert torch.__version__.startswith("2.7.")' in weekly_text
+    assert "python scripts/check_torch_environment.py 2.7.1+cpu 0.22.1+cpu" in weekly_text
     assert "uv pip check" in weekly_text
 
     fast_tier = yaml.safe_load(nightly_text)["jobs"]["fast-tier"]

@@ -29,7 +29,6 @@ if TYPE_CHECKING:
 __all__ = (
     "_dtype_values_match",
     "_check_recurrence_invariants",
-    "_check_branching_invariants",
     "_fail_conditional_invariant",
     "_strip_pass_suffix",
     "_append_unique",
@@ -71,28 +70,14 @@ def _check_recurrence_invariants(ml: Trace) -> None:
     """Check E: recurrence / loop invariants.
 
     Validates:
-    - is_recurrent == True iff any layer has >1 pass.
-    - max_layer_op_count matches the maximum pass count.
     - layer_num_calls keys are valid no-pass labels.
     - Layer.ops dict keys are contiguous {1..N}.
     """
     name = "recurrence_invariants"
 
-    any_recurrent = any(v > 1 for v in ml.layer_num_calls.values())
-    if ml.is_recurrent != any_recurrent:
-        raise MetadataInvariantError(
-            name,
-            f"is_recurrent={ml.is_recurrent} but any layer has >1 pass = {any_recurrent}",
-        )
-
-    if ml.is_recurrent:
-        expected_max = max(ml.layer_num_calls.values())
-        if ml.max_layer_op_count != expected_max:
-            raise MetadataInvariantError(
-                name,
-                f"max_layer_op_count={ml.max_layer_op_count} != "
-                f"max(layer_num_calls)={expected_max}",
-            )
+    # is_recurrent and max_layer_op_count are read-only computations over
+    # layer_num_calls. Compare that independent inventory to the Layer rows,
+    # rather than comparing either property to its own definition.
 
     # Per-layer pass consistency: layer_num_calls is keyed by no-pass labels.
     # Validate that each key exists in layer_labels, and that the
@@ -121,17 +106,6 @@ def _check_recurrence_invariants(ml: Trace) -> None:
                 name,
                 f"Layer '{no_call_label}' ops keys={actual_keys} != expected {expected_keys}",
             )
-
-
-def _check_branching_invariants(ml: Trace) -> None:
-    """Check F: is_branching matches whether any layer has >1 child."""
-    name = "branching_invariants"
-    any_branching = any(len(lpl.children) > 1 for lpl in ml.layer_list)
-    if ml.is_branching != any_branching:
-        raise MetadataInvariantError(
-            name,
-            f"is_branching={ml.is_branching} but any layer has >1 child = {any_branching}",
-        )
 
 
 def _fail_conditional_invariant(check_name: str, number: int, message: str) -> None:

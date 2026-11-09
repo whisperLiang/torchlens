@@ -324,6 +324,9 @@ def test_run_suite_deadline_yields_timeout_sentinel(
 
     def _hang(*args: object, **kwargs: object):
         assert kwargs.get("timeout") == 5.0
+        assert "--no-capture-prewarm" in args[0], (
+            "mutated capture initialization must fail inside named tests, not pytest_configure"
+        )
         raise driver.subprocess.TimeoutExpired(cmd="pytest", timeout=5.0)
 
     monkeypatch.setattr(driver.subprocess, "run", _hang)

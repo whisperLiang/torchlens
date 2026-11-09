@@ -7,6 +7,8 @@
 | `bench_log_forward_pass.py` | Local benchmark harness for capture overhead |
 | `build_torchlens_theme_gallery.py` | Generate visualization theme gallery artifacts (dagua renderer) |
 | `check_ci_executed_tests.py` | Executed-floor attestation over a junit XML (wired into CI legs) |
+| `check_graphviz.py` | Graphviz binary/layout-plugin and pinned-coordinate rank-render preflight |
+| `check_torch_environment.py` | Exact CPU torch/vision/audio versions, native imports, and NMS preflight |
 | `check_flops_coverage.py` | Report FLOPs handler coverage (`torchlens/capture/flops.py`) against decorated torch functions |
 | `check_no_breaking_markers.py` | Reject semantic-release major-bump markers (commit-msg / pre-push hooks + the lint release-defenses CI scan) |
 | `check_package_coverage_floors.py` | Per-package coverage-floor gate over a coverage JSON (live nightly gate, `nightly.yml`; floors pinned by `tests/test_coverage_floor_governance.py`) |

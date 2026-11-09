@@ -228,6 +228,19 @@ EXEMPT_MUTANTS: dict[str, tuple[str, str]] = {
 #: Bounded arming suite: the files whose job is to kill the mutants above.
 SUITE = [
     "tests/test_validation.py",
+    # Confirmed campaign survivors already have behavioral killers outside
+    # the historical arming suite. Score those tests instead of duplicating
+    # them or weakening the zero-survivor criterion.
+    "tests/validation_goldens/test_validation_exemption_hardening.py",
+    "tests/test_validation_exemption_ledger.py",
+    "tests/test_backend_registry.py",
+    "tests/test_var_names.py",
+    "tests/test_capture_unification_p3b.py",
+    "tests/test_gc.py::TestTraceGC::test_transient_data_cleared",
+    "tests/test_aten_profile.py::test_live_fk_tamper_names_primitive_invariant",
+    "tests/test_io_streaming.py",
+    "tests/test_container_registry_p4.py::test_flag_on_container_structure_round_trips",
+    "tests/test_metadata_mutation_arming.py",
     # Step-18 (streamed-bundle finalization) killers: the executor family's
     # first sample campaign proved _should_run_step_18 forced-False survived
     # every file below (r7 R74; no suite file streamed to disk). Removing
@@ -733,7 +746,18 @@ def run_suite(
 
     cache = sandbox / f".cache-{tag}"
     cache.mkdir(exist_ok=True)
-    cmd = [python, "-m", "pytest", *SUITE, "-p", "no:randomly", "-q", "--tb=no", "-rf"]
+    cmd = [
+        python,
+        "-m",
+        "pytest",
+        *SUITE,
+        "--no-capture-prewarm",
+        "-p",
+        "no:randomly",
+        "-q",
+        "--tb=no",
+        "-rf",
+    ]
     cmd += ["--basetemp", str(sandbox / f".bt-{tag}")]
     for node in DESELECT:
         cmd += ["--deselect", node]

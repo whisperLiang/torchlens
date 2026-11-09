@@ -6020,7 +6020,7 @@
   "field": "kind",
   "file": "torchlens/split/_effects.py",
   "has_default": false,
-  "sites": 2,
+  "sites": 3,
   "via_getattr": false
  },
  {

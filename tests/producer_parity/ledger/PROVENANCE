@@ -467,3 +467,11 @@ env: py3.11-torch2.8.0
 torch: 2.8.0+cpu
 source: b75a6a2d9e262358a02b93b53fb954ab541c1e04 (clean)
 recorded: 2026-11-04T15:03:35.066028+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: Review new Split output-initialization effect dependency kind read in _effects.py introduced by 022178a50; existing generic kind census includes three legitimate effect-kind reads, not a new op producer or mutation channel.
+env: py3.11-torch2.8.0
+torch: 2.8.0+cpu
+source: 4bec7c0f61cafe23ea336d83f71cb6cef728ddd0 (dirty)
+recorded: 2026-11-09T12:03:14.916395+00:00

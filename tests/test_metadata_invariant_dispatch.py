@@ -19,6 +19,9 @@ from torchlens.validation import invariants
 # precondition) and before graph_topology; non-torch: after
 # backend_neutral_module_mode_invariants -- again without dropping or
 # reordering any pre-refactor check.
+# The former branching check compared the read-only is_branching property to
+# its own definition. The CI mutation repair removes that tautology; the
+# remaining independent-record checks retain their relative order.
 PRE_REFACTOR_TORCH_SEQUENCE = (
     "backend_identity_invariants",
     "trace_self_consistency",
@@ -38,7 +41,6 @@ PRE_REFACTOR_TORCH_SEQUENCE = (
     "op_log_fields",
     "payload_metadata_invariants",
     "recurrence_invariants",
-    "branching_invariants",
     "conditional_invariants",
     "layer_pass_layer_log_xrefs",
     "module_layer_containment",

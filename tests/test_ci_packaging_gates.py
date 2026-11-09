@@ -31,6 +31,55 @@ def _smoke_job() -> dict:
     return _load_yaml(_WORKFLOWS / "tests.yml")["jobs"]["smoke"]
 
 
+@pytest.mark.parametrize(
+    ("workflow", "job"),
+    [
+        ("weekly.yml", "mutation-margin"),
+        ("weekly.yml", "optimized-verdict-identity"),
+        ("mutation.yml", "mutation"),
+    ],
+)
+def test_canonical_verdict_jobs_pin_and_validate_all_torch_binaries(
+    workflow: str, job: str
+) -> None:
+    """A verdict lane must not resolve a newer audio ABI beside pinned CPU torch."""
+
+    config = _load_yaml(_WORKFLOWS / workflow)["jobs"][job]
+    assert config["runs-on"] == "ubuntu-24.04"
+    steps = config["steps"]
+    install = next(step["run"] for step in steps if "uv pip install" in step.get("run", ""))
+    for pin in ("torch==2.8.0+cpu", "torchvision==0.23.0+cpu", "torchaudio==2.8.0+cpu"):
+        assert pin in install
+    commands = "\n".join(step.get("run", "") for step in steps)
+    assert "uv pip check" in commands
+    assert "python scripts/check_torch_environment.py 2.8.0+cpu 0.23.0+cpu" in commands
+
+
+def test_weekly_bridge_install_constrains_the_entire_cpu_binary_family() -> None:
+    """Bridge extras retain exact CPU builds across both installation steps."""
+
+    steps = _load_yaml(_WORKFLOWS / "weekly.yml")["jobs"]["extended-tests"]["steps"]
+    installs = [step["run"] for step in steps if "uv pip install" in step.get("run", "")]
+    for pin in ("torch==2.7.1+cpu", "torchvision==0.22.1+cpu", "torchaudio==2.7.1+cpu"):
+        assert pin in installs[0]
+    assert len(installs) == 2
+    for install in installs:
+        assert '-c "${{ runner.temp }}/torch-2.7-constraints.txt"' in install
+        assert "https://download.pytorch.org/whl/cpu" in install
+        assert "python scripts/check_torch_environment.py 2.7.1+cpu 0.22.1+cpu" in install
+
+
+@pytest.mark.parametrize("job", ["fast-tier", "coverage", "preview-backends"])
+def test_nightly_render_jobs_keep_the_reference_graphviz_environment(job: str) -> None:
+    """Moving ubuntu-latest must not remove neato or silently move byte goldens."""
+
+    config = _load_yaml(_WORKFLOWS / "nightly.yml")["jobs"][job]
+    assert config["runs-on"] == "ubuntu-24.04"
+    commands = "\n".join(step.get("run", "") for step in config["steps"])
+    assert "fonts-dejavu-core" in commands
+    assert "python scripts/check_graphviz.py" in commands
+
+
 def test_exactly_one_smoke_row_enforces_the_byte_oracle_goldens() -> None:
     """One smoke row declares oracle enforcement and matches the ENV markers.
 

@@ -112,3 +112,54 @@ def test_single_tensor_gather_refuses_before_destination_mutation(
     assert excinfo.value.fields["reason"] == "single_tensor_gather_unsupported"
     assert excinfo.value.fields["func"] == f"torch.distributed.{attr}"
     assert torch.equal(destination, torch.full((4,), -37.0))
+
+
+@pytest.mark.parametrize("wait", ["batch", "single", "none"])
+def test_coalesced_waits_preserve_values_edges_and_completion_evidence(
+    gloo_world: Any, wait: str
+) -> None:
+    """Torch 2.15's batch wait settles every destination, without inventing a wait."""
+
+    import torch.distributed._functional_collectives as funcol
+
+    if not hasattr(funcol, "wait_tensors"):
+        pytest.skip("This torch build does not expose the batched collective wait")
+
+    class Coalesced(nn.Module):
+        """Issue one two-output collective and optionally wait for both outputs."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Return completed outputs or an independent output for the unawaited case."""
+
+            pending = funcol.all_reduce_coalesced([x * 2, x + 1], "sum", gloo_world.group.WORLD)
+            raw = [value.elem for value in pending]
+            self.pending = raw
+            if wait == "none":
+                return x + 1
+            if wait == "batch":
+                complete = funcol.wait_tensors(raw)
+            else:
+                complete = [funcol.wait_tensor(value) for value in raw]
+            return complete[0] + complete[1]
+
+    x = torch.arange(4, dtype=torch.float32)
+    model = Coalesced()
+    expected = model(x)
+    funcol.wait_tensors(model.pending)
+    lifecycle.arm()
+    log = tl.trace(model, x)
+    # A wait outside the capture must not retroactively claim an observed wait.
+    funcol.wait_tensors(model.pending)
+    assert torch.equal(log.output_ops[0].out, expected)
+    entries = log.annotations["distributed"]["boundaries"]
+    assert len(entries) == 1
+    events = entries[0]["events"]
+    assert events["destination_completions"] == [wait != "none"] * 2
+    assert events["completion_binding"] == ("unobserved" if wait == "none" else "observed_wait")
+    boundaries = [op for op in log.ops if op.type == "funcolallreducecoalesced"]
+    assert len(boundaries) == 2
+    for op in boundaries:
+        assert op.annotations["collective"]["events"] == events
+    if wait != "none":
+        consumer = [op for op in log.ops if op.type == "add"][-1]
+        assert {op.layer_label for op in boundaries} <= set(consumer.parents)

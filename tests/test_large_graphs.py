@@ -14,6 +14,7 @@ from example_models import RandomGraphModel
 from torch import nn
 
 from torchlens import trace as trace_fn
+from torchlens.errors import TorchLensWarning
 from torchlens.user_funcs import validate_forward_pass
 from torchlens.visualization._rank_layout_internal import layout as rank_layout
 from torchlens.visualization._rank_layout_internal.layout import (
@@ -50,7 +51,16 @@ def _ensure_output_dir() -> Iterator[None]:
 def _count_nodes(model: nn.Module, x: torch.Tensor) -> int:
     """Log a forward pass and return the number of captured layers."""
 
-    trace = trace_fn(model, x)
+    # These fixtures deliberately cross the journal's scale advisory. Keep it
+    # visible while allowing the node-count assertions to run; all other
+    # TorchLens warnings retain the suite's error policy.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "default",
+            message=r"^TorchLens has recorded \d+ ops in this forward",
+            category=TorchLensWarning,
+        )
+        trace = trace_fn(model, x)
     count = len(trace.layer_list)
     trace.cleanup()
     return count

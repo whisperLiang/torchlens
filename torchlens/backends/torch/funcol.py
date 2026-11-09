@@ -336,7 +336,7 @@ def _make_observed_wait_tensor(
     session_ref: weakref.ref[_FuncolCaptureSession],
     wait_op: Any,
     exclude_cpu_guard: Callable[[], Any],
-) -> Callable[[torch.Tensor], torch.Tensor]:
+) -> Callable[[torch.Tensor | list[torch.Tensor]], Any]:
     """Build the dispatcher-level ``wait_tensor`` kernel for one session.
 
     The kernel holds its session through ``weakref`` ONLY. On current torch
@@ -373,14 +373,15 @@ def _make_observed_wait_tensor(
         The kernel to register at the CPU dispatch key.
     """
 
-    def observed_wait_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    def observed_wait_tensor(tensor: torch.Tensor | list[torch.Tensor]) -> Any:
         """Redispatch ``wait_tensor`` below this key, then bind completion."""
 
         with exclude_cpu_guard():
             result = wait_op(tensor)
         session = session_ref()
         if session is not None:
-            session.record_completion(tensor)
+            for value in tensor if isinstance(tensor, list) else [tensor]:
+                session.record_completion(value)
         return result
 
     return observed_wait_tensor
@@ -439,6 +440,11 @@ class _FuncolCaptureSession:
             # (the latest Trace + activations) for the life of the process.
             kernel = _make_observed_wait_tensor(weakref.ref(self), wait_op, exclude_cpu_guard)
             library.impl("wait_tensor", kernel, "CPU")
+            batch_redispatch = get_funcol_wait_redispatch(batched=True)
+            if batch_redispatch is not None:
+                batch_op, batch_guard = batch_redispatch
+                batch_kernel = _make_observed_wait_tensor(weakref.ref(self), batch_op, batch_guard)
+                library.impl("wait_tensors", batch_kernel, "CPU")
         except Exception as exc:
             self.interposition_status = f"unavailable: {type(exc).__name__}: {exc}"
             return
