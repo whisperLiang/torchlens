@@ -762,91 +762,10 @@ def _count_container_ids(
 def _pool_container_cells(
     stores: list[tuple[Any, Any]], container_pool: dict[Any, PooledCell]
 ) -> None:
-    """Pool duplicate/empty immutable-content container cells across stores.
+    """Pool container cells with bounded candidate storage and exact alias guards."""
+    from ._container_pooling import pool_container_cells
 
-    Parameters
-    ----------
-    stores:
-        ``(store, fids)`` pairs; ``fids`` is an iterable of sanctioned field
-        ids or ``None`` for every field (kind tables). Only building-phase
-        row stores participate (``rows_building()`` returning ``None`` skips
-        the store) -- pooling always precedes the physical freeze.
-    container_pool:
-        Pass-local ``content key -> PooledCell`` table shared across stores,
-        so equal content pools trace-wide.
-    """
-
-    # ONE scan over every cell: the alias census recurses only into cells
-    # whose class can hold a container (everything else is skipped by an
-    # inline class test — the vast majority of cells are scalars/None), and
-    # the same scan collects the pool candidates (container-classed cells at
-    # sanctioned fids) and the singleton-compaction sites (kind-table list
-    # cells), so neither later pass re-walks rows x fields.
-    id_counts: dict[int, int] = {}
-    expanded_ids: set[int] = set()
-    cell_sites: list[tuple[Any, int, Any]] = []
-    singleton_sites: list[tuple[Any, int, int, Any, Any]] = []
-    any_swept = False
-    for store, fids in stores:
-        rows = store.rows_building()
-        if rows is None:
-            continue
-        any_swept = True
-        fid_set = None if fids is None else frozenset(fids)
-        for row_idx, row_cells in enumerate(rows):
-            for fid, value in enumerate(row_cells):
-                cls = value.__class__
-                if cls is tuple:
-                    _count_container_ids(value, id_counts, expanded_ids, 0)
-                    continue
-                if not (cls is dict or cls is list or cls is set or cls is defaultdict):
-                    continue
-                _count_container_ids(value, id_counts, expanded_ids, 0)
-                if fid_set is None or fid in fid_set:
-                    cell_sites.append((row_cells, fid, value))
-                if fid_set is None and cls is list:
-                    singleton_sites.append((store, row_idx, fid, row_cells, value))
-    if not any_swept:
-        return
-    candidates: list[tuple[Any, int, Any, Any]] = []
-    key_counts: dict[Any, int] = {}
-    for row_cells, fid, value in cell_sites:
-        visited_ids: list[int] = []
-        key = _container_pool_key(value, 0, visited_ids)
-        if key is None:
-            continue
-        if any(id_counts[oid] > 1 for oid in visited_ids):
-            continue
-        candidates.append((row_cells, fid, value, key))
-        key_counts[key] = key_counts.get(key, 0) + 1
-    for row_cells, fid, value, key in candidates:
-        # Empty containers always pool (all empties of a class share ONE
-        # cell+prototype). Non-empty content needs >= 3 occurrences: a pooled
-        # key retains 2 objects (cell + detached prototype), so pooling a
-        # pair is object-neutral before any read and negative after.
-        if value and key_counts[key] < 3:
-            continue
-        cell = container_pool.get(key)
-        if cell is None:
-            cell = container_pool[key] = PooledCell.from_value(value)
-        row_cells[fid] = cell
-    # Singleton-label compaction (M14 slice 2, kind tables only): a
-    # one-element list holding exactly one str (per-record label/address
-    # lists — distinct content per row, so PooledCell's >= 3 threshold never
-    # reaches them) stores the bare element, registered on the store so
-    # decode fires only for the exact registered object. Same alias census
-    # as pooling: a list reachable from more than one swept cell never
-    # compacts (breaking its mutation coupling is not sanctioned).
-    for store, row_idx, fid, row_cells, value in singleton_sites:
-        if (
-            row_cells[fid] is value  # not already pooled above
-            and len(value) == 1
-            and value[0].__class__ is str
-            and id_counts[id(value)] == 1
-        ):
-            element = value[0]
-            row_cells[fid] = element
-            store.register_compacted_singleton(row_idx, fid, element)
+    pool_container_cells(stores, container_pool)
 
 
 def _pool_key(value: Any) -> Any:

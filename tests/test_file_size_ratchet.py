@@ -112,7 +112,7 @@ _NEW_FILE_LINE_CAP = 2000
 #: at 75439a67); the debloat pass keeps all three as targets.
 _GOD_FILE_CEILINGS: dict[str, int] = {
     "torchlens/validation/core.py": 5350,
-    "torchlens/data_classes/op.py": 5250,
+    "torchlens/data_classes/op.py": 5150,
     "torchlens/_io/runnable.py": 5000,
     "torchlens/utils/rng.py": 4950,
     "torchlens/visualization/collapse_optimizer.py": 4600,

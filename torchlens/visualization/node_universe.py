@@ -249,6 +249,11 @@ def build_node_universe(
         _render_node_label(node, request.vis_mode): str(node.layer_label)
         for node in source_graph.entries_to_plot.values()
     }
+    # Visibility can suppress an otherwise renderable op (e.g. a hidden
+    # BatchNorm counter update). Its raw emission is not a visible endpoint.
+    endpoint_projection = {
+        label: unit_id for label, unit_id in endpoint_projection.items() if unit_id in seen
+    }
     projected_edges = _project_edges(
         source_graph.edge_map,
         endpoint_projection,

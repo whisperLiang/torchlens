@@ -766,8 +766,7 @@ def render_rank_layout(
     # remove the user's rendered artifact.
     source_suffix = ".source.dot" if vis_fileformat == "dot" else ".dot"
     source_path = f"{vis_outpath}{source_suffix}"
-    with open(source_path, "w", encoding="utf-8") as f:
-        f.write(dot_source)
+    atomic_write_text(source_path, dot_source)
 
     rendered_path = f"{vis_outpath}.{vis_fileformat}"
     num_nodes = len(node_data)

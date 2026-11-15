@@ -10,6 +10,7 @@ refuse to pool, and the empty/duplicate thresholds hold.
 from __future__ import annotations
 
 import pickle
+import tracemalloc
 from collections import defaultdict
 from collections.abc import Iterator
 
@@ -165,6 +166,48 @@ def test_alias_guard_refuses_shared_containers() -> None:
     pooled_b = {id(row_cells[1]) for row_cells in rows}
     assert len(pooled_b) == 1 and rows[0][1].__class__ is PooledCell
     assert rows[0][2].__class__ is PooledCell
+
+
+def test_unique_container_compaction_has_bounded_scratch_memory() -> None:
+    """Unique labels must not allocate a second graph of candidate/key tuples."""
+    from torchlens._trace_core.op_store import OpRowStore, OpStoreLayout
+
+    n_rows, n_fields = 2000, 12
+    store = OpRowStore(OpStoreLayout(tuple(f"field_{i}" for i in range(n_fields))))
+    for row_index in range(n_rows):
+        row = store.new_row()
+        for fid in range(n_fields):
+            store.cell_set(row, fid, [f"unique_{row_index}_{fid}"])
+
+    tracemalloc.start()
+    try:
+        _pool_container_cells([(store, None)], {})
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # At 1M ops the former ~795 bytes/cell scratch table alone used GiB.
+    # Leave room for the alias census and compacted-singleton index, while
+    # requiring the candidate graph and full keys of unique values to go away.
+    assert peak < n_rows * n_fields * 256, peak
+    assert store.cell_get(0, 0) == "unique_0_0"
+    assert store.cell_get(n_rows - 1, n_fields - 1) == f"unique_{n_rows - 1}_{n_fields - 1}"
+
+
+def test_fingerprint_collisions_preserve_the_exact_pooling_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fingerprint collisions cannot turn unrelated values into pooled duplicates."""
+    from torchlens._trace_core.op_store import OpRowStore, OpStoreLayout
+    from torchlens.data_classes import _container_pooling
+
+    monkeypatch.setattr(_container_pooling, "hash", lambda _key: 0, raising=False)
+    monkeypatch.setattr(_container_pooling, "_STREAM_POOL_MIN_ROWS", 0)
+    store = OpRowStore(OpStoreLayout(("values",)))
+    originals = [[index] for index in range(10)]
+    for value in originals:
+        store.cell_set(store.new_row(), 0, value)
+    _pool_container_cells([(store, (fid for fid in [0]))], {})
+    assert all(store.cell_get(row, 0) is value for row, value in enumerate(originals))
 
 
 def test_duplicate_threshold_and_unpoolable_content() -> None:

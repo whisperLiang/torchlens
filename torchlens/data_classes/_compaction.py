@@ -21,6 +21,20 @@ if TYPE_CHECKING:
 # pickle state, or a portable artifact.
 _COMPACTED_TRACES: weakref.WeakSet[Trace] = weakref.WeakSet()
 
+# Interning is optional value-preserving deduplication. Its scratch index must
+# not retain a second copy of every distinct label/key in a million-op graph.
+_MAX_METADATA_POOL_KEYS = 100_000
+
+
+class _MetadataPool(dict[Any, Any]):
+    """Bound temporary interning keys; stored immutable values survive eviction."""
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        """Start a fresh interning window when the temporary index is full."""
+        if len(self) >= _MAX_METADATA_POOL_KEYS:
+            self.clear()
+        super().__setitem__(key, value)
+
 
 def compact_op_metadata(trace: Trace) -> None:
     """Collapse repeated immutable Op metadata onto shared instances.
@@ -42,7 +56,7 @@ def compact_op_metadata(trace: Trace) -> None:
     if not ops:
         return
     _COMPACTED_TRACES.add(trace)
-    pool: dict[Any, Any] = {}
+    pool: dict[Any, Any] = _MetadataPool() if len(ops) >= 512 else {}
     core = trace.__dict__.get("_trace_core")
     store = core.ops if core is not None else None
     if store is not None:

@@ -5347,6 +5347,8 @@ class RandomGraphModel(nn.Module):
         seed: RNG seed for deterministic structure.
         branch_probability: Fraction of blocks that use branch/attention types.
         hidden_dim: Hidden dimension for all layers.
+        share_blocks: Reuse physical blocks while retaining the full random call plan.
+        functional_blocks: Execute shared blocks as the same functional tensor DAG.
     """
 
     def __init__(
@@ -5356,10 +5358,15 @@ class RandomGraphModel(nn.Module):
         seed: int = 42,
         branch_probability: float = 0.3,
         hidden_dim: int = 64,
+        share_blocks: bool = False,
+        functional_blocks: bool = False,
     ):
         super().__init__()
         import random as _random
 
+        if functional_blocks and not share_blocks:
+            raise ValueError("functional_blocks requires share_blocks=True")
+        self._functional_blocks = functional_blocks
         rng = _random.Random(seed)
         self.input_proj = nn.Linear(hidden_dim, hidden_dim)
 
@@ -5376,12 +5383,20 @@ class RandomGraphModel(nn.Module):
 
         # Choose block types.
         blocks = []
+        block_indices = {}
+        block_order = []
         for _ in range(num_blocks):
             if rng.random() < branch_probability:
                 block_cls = rng.choice([_BranchMergeBlock, _AttentionBlock])
             else:
                 block_cls = rng.choice([_SequentialBlock, _ResidualBlock])
-            blocks.append(block_cls(hidden_dim))
+            if not share_blocks:
+                blocks.append(block_cls(hidden_dim))
+            else:
+                if block_cls not in block_indices:
+                    block_indices[block_cls] = len(blocks)
+                    blocks.append(block_cls(hidden_dim))
+                block_order.append(block_indices[block_cls])
 
         # Distribute across nesting depth using ModuleList wrappers.
         call_depth = max(1, min(call_depth, 5))
@@ -5397,9 +5412,24 @@ class RandomGraphModel(nn.Module):
             self.layers = nested
 
         self.call_depth = call_depth
+        self._block_order = tuple(block_order) if share_blocks else None
+        self._group_size = max(1, len(blocks) // call_depth)
 
     def forward(self, x):
         x = self.input_proj(x)
+        if self._block_order is not None:
+            from _functional_random_block import run_block
+
+            for block_index in self._block_order:
+                block = (
+                    self.layers[block_index]
+                    if self.call_depth == 1
+                    else self.layers[block_index // self._group_size][
+                        block_index % self._group_size
+                    ]
+                )
+                x = run_block(block, x) if self._functional_blocks else block(x)
+            return x
         if self.call_depth == 1:
             for layer in self.layers:
                 x = layer(x)

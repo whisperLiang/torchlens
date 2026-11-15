@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import os
 import re
 import warnings
@@ -15,7 +16,9 @@ from torch import nn
 
 from torchlens import trace as trace_fn
 from torchlens.errors import TorchLensWarning
+from torchlens.options import CaptureOptions
 from torchlens.user_funcs import validate_forward_pass
+from torchlens.validation.invariants import check_metadata_invariants
 from torchlens.visualization._rank_layout_internal import layout as rank_layout
 from torchlens.visualization._rank_layout_internal.layout import (
     RANK_LAYOUT_COST_THRESHOLD,
@@ -42,27 +45,29 @@ VIS_OUTPUT_DIR = os.path.join(
 
 @pytest.fixture(autouse=True)
 def _ensure_output_dir() -> Iterator[None]:
-    """Create the visualization output directory for tests that render files."""
+    """Create render storage and avoid unused autograd graphs in scale tests."""
 
     os.makedirs(VIS_OUTPUT_DIR, exist_ok=True)
-    yield
-
-
-def _count_nodes(model: nn.Module, x: torch.Tensor) -> int:
-    """Log a forward pass and return the number of captured layers."""
-
-    # These fixtures deliberately cross the journal's scale advisory. Keep it
-    # visible while allowing the node-count assertions to run; all other
-    # TorchLens warnings retain the suite's error policy.
-    with warnings.catch_warnings():
+    with torch.no_grad(), warnings.catch_warnings():
+        # Both counting and validation deliberately cross the journal advisory.
+        # Keep that exact warning visible; unrelated warnings remain errors.
         warnings.filterwarnings(
             "default",
             message=r"^TorchLens has recorded \d+ ops in this forward",
             category=TorchLensWarning,
         )
-        trace = trace_fn(model, x)
+        yield
+
+
+def _count_nodes(model: nn.Module, x: torch.Tensor, *, recurrence_detection: bool = True) -> int:
+    """Log a forward pass and return the number of captured layers."""
+
+    trace = trace_fn(model, x, capture=CaptureOptions(recurrence_detection=recurrence_detection))
     count = len(trace.layer_list)
-    trace.cleanup()
+    # No record escapes this helper. Dropping the whole trace avoids cleanup's
+    # readable snapshots of every Layer, which would immediately be discarded.
+    del trace
+    gc.collect()
     return count
 
 
@@ -177,8 +182,8 @@ class TestRandomGraphModel:
     def test_250k_nodes(self) -> None:
         """A 250k-node target lands near the requested scale."""
 
-        model = RandomGraphModel(target_nodes=250000, seed=42)
-        count = _count_nodes(model, torch.randn(2, 64))
+        model = RandomGraphModel(target_nodes=250000, seed=42, share_blocks=True)
+        count = _count_nodes(model, torch.randn(2, 64), recurrence_detection=False)
         assert 225000 < count < 275000, f"Expected ~250000 nodes, got {count}"
 
     @pytest.mark.slow
@@ -186,8 +191,10 @@ class TestRandomGraphModel:
     def test_1m_nodes(self) -> None:
         """A 1M-node target lands near the requested scale."""
 
-        model = RandomGraphModel(target_nodes=1000000, seed=42)
-        count = _count_nodes(model, torch.randn(2, 64))
+        model = RandomGraphModel(
+            target_nodes=1000000, seed=42, share_blocks=True, functional_blocks=True
+        )
+        count = _count_nodes(model, torch.randn(2, 64), recurrence_detection=False)
         assert 900000 < count < 1100000, f"Expected ~1000000 nodes, got {count}"
 
     def test_deterministic(self) -> None:
@@ -203,6 +210,53 @@ class TestRandomGraphModel:
         m1 = RandomGraphModel(target_nodes=1000, seed=1)
         m2 = RandomGraphModel(target_nodes=1000, seed=2)
         assert sum(p.numel() for p in m1.parameters()) != sum(p.numel() for p in m2.parameters())
+
+    def test_shared_blocks_preserve_the_complete_operation_dag(self) -> None:
+        """Bound physical model state while keeping every planned call and graph edge."""
+        graphs = []
+        outputs = []
+        parameter_counts = []
+        for shared, recurrence, functional in (
+            (False, True, False),
+            (True, True, False),
+            (True, False, False),
+            (True, False, True),
+        ):
+            torch.manual_seed(0)
+            model = RandomGraphModel(
+                target_nodes=500, seed=42, share_blocks=shared, functional_blocks=functional
+            )
+            trace = trace_fn(
+                model, torch.randn(2, 64), capture=CaptureOptions(recurrence_detection=recurrence)
+            )
+            assert check_metadata_invariants(trace)
+            assert all(op.site_key for op in trace.layer_list)
+            assert len({op.label for op in trace.layer_list}) == len(trace.layer_list)
+            indices = {op.label: index for index, op in enumerate(trace.layer_list)}
+            indices.update(
+                {
+                    op.layer_label: index
+                    for index, op in enumerate(trace.layer_list)
+                    if op.num_passes == 1
+                }
+            )
+            indices.update(
+                {op._layer_label_raw: index for index, op in enumerate(trace.layer_list)}
+            )
+            graphs.append(
+                [
+                    (op.func_name, tuple(op.shape), tuple(indices[parent] for parent in op.parents))
+                    for op in trace.layer_list
+                ]
+            )
+            outputs.append(trace[trace.output_layers[0]].out.clone())
+            parameter_counts.append(len(tuple(model.parameters())))
+            trace.cleanup()
+        assert graphs[0] == graphs[1] == graphs[2] == graphs[3]
+        torch.testing.assert_close(outputs[1], outputs[2], rtol=0, atol=0)
+        torch.testing.assert_close(outputs[2], outputs[3], rtol=0, atol=0)
+        assert len(graphs[0]) > 400
+        assert parameter_counts[1] < parameter_counts[0]
 
     def test_call_depth(self) -> None:
         """Module nesting creates expected hierarchy."""
@@ -380,6 +434,19 @@ class TestRankLayoutScale:
 class TestRankEngineRendering:
     """Test renderer integration for dot, rank, auto, and legacy values."""
 
+    def test_rank_renders_training_batch_norm_with_hidden_counters(self, tmp_path: Any) -> None:
+        """Hidden BatchNorm counter writes must not create unpositioned ghost nodes."""
+        source = _draw_model(
+            nn.Sequential(nn.BatchNorm1d(4), nn.ReLU()).train(),
+            torch.randn(2, 4),
+            vis_node_placement="rank",
+            vis_save_only=True,
+            vis_fileformat="svg",
+            vis_outpath=str(tmp_path / "training_norm"),
+        )
+        assert "digraph" in source
+        assert "<svg" in (tmp_path / "training_norm.svg").read_text()
+
     def test_auto_local_topology_renders_with_dot(self, tmp_path: Any) -> None:
         """A local small graph renders through dot without the rank notice."""
 
@@ -536,10 +603,10 @@ class TestRankEngineRendering:
                 )
 
     def test_rank_svg_contains_labels_and_module_boxes(self, tmp_path: Any) -> None:
-        """The rank renderer writes an SVG with node labels and module boxes."""
+        """Rank rendering creates output parents and preserves labels/module boxes."""
 
         model = RandomGraphModel(target_nodes=80, call_depth=2, seed=42)
-        outpath = tmp_path / "rank_svg"
+        outpath = tmp_path / "new" / "nested" / "rank_svg"
         source = _draw_model(
             model,
             torch.randn(2, 64),
