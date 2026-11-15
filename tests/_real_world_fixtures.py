@@ -1,5 +1,6 @@
 """Forward-only execution, input, and render fixtures for the real-model suite."""
 
+import gc
 import os
 from collections.abc import Iterator
 from os.path import join as opj
@@ -124,6 +125,7 @@ def _forward_only_reference_kernels(monkeypatch: pytest.MonkeyPatch) -> Iterator
     monkeypatch.setattr(torch.jit._state._enabled, "enabled", False)
     from torchvision.models.detection.image_list import ImageList
 
+    from torchlens.data_classes.cleanup import _trim_host_allocator
     from torchlens.ir.container import _CONTAINER_REGISTRY, RegisteredContainer
 
     # Detection transforms return this custom tensor holder. Declare its exact
@@ -146,6 +148,10 @@ def _forward_only_reference_kernels(monkeypatch: pytest.MonkeyPatch) -> Iterator
             yield
     finally:
         torch.set_float32_matmul_precision(prior_precision)
+        # Model-bound method cycles survive refcounting after the test returns.
+        # Reclaim them before the next full-payload model spends its budget.
+        gc.collect()
+        _trim_host_allocator()
 
 
 def _clear_render_pdf(*path_parts: str) -> None:
