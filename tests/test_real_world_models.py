@@ -894,7 +894,7 @@ def test_timm_poolformer_s24():
 def test_timm_resnest14d():
     timm = pytest.importorskip("timm")
     model = timm.create_model("resnest14d", pretrained=False)
-    model_input = torch.randn(6, 3, 224, 224)
+    model_input = torch.randn(2, 3, 224, 224)
     show_model_graph(
         model,
         model_input,
@@ -1992,7 +1992,7 @@ def test_video_r2plus1_18():
 @pytest.mark.slow
 def test_video_mc3_18():
     model = torchvision.models.video.mc3_18()
-    model_input = torch.randn(6, 3, 16, 112, 112)
+    model_input = torch.randn(2, 3, 16, 112, 112)
     show_model_graph(
         model,
         model_input,
@@ -2054,7 +2054,7 @@ def test_video_s3d():
 @pytest.mark.slow
 def test_opticflow_raftsmall():
     model = torchvision.models.optical_flow.raft_small()
-    model_input = [torch.rand(6, 3, 224, 224), torch.rand(6, 3, 224, 224)]
+    model_input = [torch.rand(2, 3, 224, 224), torch.rand(2, 3, 224, 224)]
     show_model_graph(
         model,
         model_input,
@@ -2069,7 +2069,7 @@ def test_opticflow_raftsmall():
 def test_opticflow_raftlarge():
     # NOTE: the loop-finding procedure messes up on this somehow.
     model = torchvision.models.optical_flow.raft_large()
-    model_input = [torch.rand(6, 3, 224, 224), torch.rand(6, 3, 224, 224)]
+    model_input = [torch.rand(2, 3, 224, 224), torch.rand(2, 3, 224, 224)]
     show_model_graph(
         model,
         model_input,

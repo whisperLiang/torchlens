@@ -38,7 +38,7 @@ from torchvision.transforms import v2
 
 MENAGERIE_ZOO = "vendored-pytorch"
 
-torch.set_float32_matmul_precision("medium")
+# Numeric precision belongs to the caller, including during catalog imports.
 os.environ["TORCH_CUDNN_V8_API_DISABLED"] = "1"
 
 

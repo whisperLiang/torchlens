@@ -137,8 +137,15 @@ def _forward_only_reference_kernels(monkeypatch: pytest.MonkeyPatch) -> Iterator
             state_complete=True,
         ),
     )
-    with torch.no_grad(), torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
-        yield
+    # Reduced-precision matmul can choose BF16 for a strided batched input
+    # but FP32 for its contiguous replay clone. Use one numeric reference.
+    prior_precision = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision("highest")
+    try:
+        with torch.no_grad(), torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
+            yield
+    finally:
+        torch.set_float32_matmul_precision(prior_precision)
 
 
 def _clear_render_pdf(*path_parts: str) -> None:
