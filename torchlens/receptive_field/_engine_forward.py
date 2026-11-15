@@ -27,6 +27,7 @@ from ._engine_geometry import (
     _compose,
     _Dissolved,
     _Full,
+    _geometry_notes,
     _identity_map,
     _InputState,
     _Mapped,
@@ -60,7 +61,9 @@ class _ProjectiveFieldSolution:
     states: Mapping[tuple[str, str], _InputState]
 
 
-def solve_projective(trace: Trace, target_ops: Iterable[Op | str]) -> _ProjectiveFieldSolution:
+def solve_projective(
+    trace: Trace, target_ops: Iterable[Op | str], *, metadata_only: bool = False
+) -> _ProjectiveFieldSolution:
     """Solve projective descriptors from every target ancestor into target space.
 
     Parameters
@@ -69,6 +72,9 @@ def solve_projective(trace: Trace, target_ops: Iterable[Op | str]) -> _Projectiv
         Captured TorchLens trace.
     target_ops:
         Non-empty iterable of target operations or exact pass-qualified labels.
+    metadata_only:
+        Reuse a valid public cache, or compute transient geometry without explanatory
+        histories. Transient results never populate the public query cache.
 
     Returns
     -------
@@ -103,12 +109,13 @@ def solve_projective(trace: Trace, target_ops: Iterable[Op | str]) -> _Projectiv
             cache.move_to_end(target_labels)
             return cached_solution
 
-    with _geometry_memo():
+    with _geometry_memo(), _geometry_notes(not metadata_only):
         solution = _solve_projective_uncached(trace, targets, epoch, revision)
-    cache[target_labels] = (epoch, revision, solution)
-    cache.move_to_end(target_labels)
-    while len(cache) > _TARGET_SOLUTION_CACHE_SIZE:
-        cache.popitem(last=False)
+    if not metadata_only:
+        cache[target_labels] = (epoch, revision, solution)
+        cache.move_to_end(target_labels)
+        while len(cache) > _TARGET_SOLUTION_CACHE_SIZE:
+            cache.popitem(last=False)
     return solution
 
 

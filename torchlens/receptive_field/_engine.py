@@ -33,6 +33,7 @@ from ._engine_geometry import (
     _Dissolved,
     _endpoint_chord,
     _Full,
+    _geometry_notes,
     _identity_map,
     _InputState,
     _join_axis_kinds,
@@ -126,13 +127,16 @@ def _is_input_seed(op: Op) -> bool:
     return op.is_input
 
 
-def solve(trace: Trace) -> _ReceptiveFieldSolution:
+def solve(trace: Trace, *, metadata_only: bool = False) -> _ReceptiveFieldSolution:
     """Solve geometric receptive fields for every operation and reachable model input.
 
     Parameters
     ----------
     trace:
         Captured TorchLens trace.
+    metadata_only:
+        Reuse a valid public cache, or compute transient geometry without explanatory
+        histories. Transient results never populate the public query cache.
 
     Returns
     -------
@@ -151,9 +155,10 @@ def solve(trace: Trace) -> _ReceptiveFieldSolution:
     ):
         return cached
 
-    with _geometry_memo():
+    with _geometry_memo(), _geometry_notes(not metadata_only):
         solution = _solve_uncached(trace, epoch, graph_revision, _is_input_seed)
-    trace.__dict__["_receptive_field_solution"] = solution
+    if not metadata_only:
+        trace.__dict__["_receptive_field_solution"] = solution
     return solution
 
 
@@ -201,7 +206,7 @@ def solve_from(trace: Trace, source: Op) -> _ReceptiveFieldSolution:
             cache.move_to_end(source.label)
             return cached_solution
 
-    with _geometry_memo():
+    with _geometry_memo(), _geometry_notes(True):
         solution = _solve_uncached(
             trace, epoch, graph_revision, lambda op: op.label == source.label
         )

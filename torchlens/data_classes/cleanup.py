@@ -136,6 +136,7 @@ def cleanup(self: "Trace") -> None:
         # trace) lives outside MODEL_LOG_FIELD_ORDER, so it survived the
         # husking above with no eviction path at all.
         "_receptive_field_solution",
+        "_rf_directional_solutions",
         # r8 R50 (sol): the save-budget accountant lives outside
         # MODEL_LOG_FIELD_ORDER too (session-time FieldPolicy.DROP), so it
         # survived cleanup with its per-device ledgers and weak payload

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from fractions import Fraction
 from math import ceil, floor
@@ -14,6 +16,30 @@ from ._types import ReceptiveFieldStatus
 if TYPE_CHECKING:
     from ..data_classes.op import Op
     from ._rules import _RuleResult
+
+
+_GEOMETRY_NOTES_ENABLED: ContextVar[bool] = ContextVar("torchlens_rf_geometry_notes", default=True)
+
+
+@contextmanager
+def _geometry_notes(enabled: bool) -> Iterator[None]:
+    """Scope explanatory history collection independently of geometric evidence.
+
+    Parameters
+    ----------
+    enabled:
+        Whether internal states retain the explanatory notes that public queries expose.
+
+    Yields
+    ------
+    None
+        Geometry computation with caller-local diagnostic retention.
+    """
+    token = _GEOMETRY_NOTES_ENABLED.set(enabled)
+    try:
+        yield
+    finally:
+        _GEOMETRY_NOTES_ENABLED.reset(token)
 
 
 @dataclass(frozen=True)
@@ -96,6 +122,11 @@ class _InputState:
     rule: str
     batch_axis: int | None = None
     merge_seen: bool = False
+
+    def __post_init__(self) -> None:
+        """Avoid retaining unused diagnostic prefixes in transient metadata checks."""
+        if self.notes and not _GEOMETRY_NOTES_ENABLED.get():
+            object.__setattr__(self, "notes", ())
 
 
 def _compose(parent: _Mapped, local: _Mapped) -> _Mapped:

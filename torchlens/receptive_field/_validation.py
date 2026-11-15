@@ -1213,13 +1213,19 @@ def _check_solution_metadata(
 
 def check_geometric_metadata_invariants(trace: Trace) -> bool:
     """Run always-on, autograd-free receptive-field metadata invariants."""
+    from ._engine_geometry import _geometry_notes
 
-    receptive_solution = _engine.solve(trace)
-    _check_solution_metadata(trace, receptive_solution, ReceptiveFieldDirection.RECEPTIVE)
-    output_ops = tuple(trace.output_ops)
-    if output_ops:
-        projective_solution = solve_projective(trace, output_ops)
-        _check_solution_metadata(trace, projective_solution, ReceptiveFieldDirection.PROJECTIVE)
+    # Notes are explanatory output, not inputs to any check below. Retaining
+    # every path prefix for every op made this gate quadratic in graph depth.
+    # Existing public caches still pass through the same corruption checks.
+    with _geometry_notes(False):
+        receptive_solution = _engine.solve(trace, metadata_only=True)
+        _check_solution_metadata(trace, receptive_solution, ReceptiveFieldDirection.RECEPTIVE)
+        del receptive_solution
+        output_ops = tuple(trace.output_ops)
+        if output_ops:
+            projective_solution = solve_projective(trace, output_ops, metadata_only=True)
+            _check_solution_metadata(trace, projective_solution, ReceptiveFieldDirection.PROJECTIVE)
     return True
 
 
