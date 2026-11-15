@@ -121,7 +121,13 @@ def _canonical_targets(trace: Trace, target_ops: Iterable[Op | str]) -> tuple[Op
             "Projective descriptor solving requires at least one target operation."
         )
     targets = tuple(
-        op for op in trace.layer_list if op.label in resolved and _operation_is_live(op)
+        op
+        for op in trace.layer_list
+        if op.label in resolved
+        and _operation_is_live(op)
+        # Empty auxiliary tensors (e.g. Reformer's unused attention outputs)
+        # have no target units. They cannot seed a positive-extent grid.
+        and (op.shape is None or all(extent > 0 for extent in op.shape))
     )
     keys = [target.io_role or target.label for target in targets]
     if len(keys) != len(set(keys)):
@@ -150,7 +156,7 @@ def _solve_projective_uncached(
     states_by_op: dict[str, dict[str, _InputState]] = {}
 
     for op in reversed(_topological_operations(operations, by_reference)):
-        if op.label not in active_labels:
+        if op.label not in active_labels or (op.shape is not None and 0 in op.shape):
             continue
         branches: dict[str, list[_InputState]] = defaultdict(list)
         target = target_by_label.get(op.label)
@@ -184,7 +190,7 @@ def _solve_projective_uncached(
     for op in operations:
         # Non-tensor boundary states must carry uncertainty through the graph,
         # but have no source grid on which a public descriptor could be queried.
-        if op.shape is None:
+        if op.shape is None or 0 in op.shape:
             continue
         op_descriptors: dict[str, ReceptiveField] = {}
         for role, state in states_by_op.get(op.label, {}).items():

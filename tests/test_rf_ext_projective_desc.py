@@ -24,6 +24,7 @@ from torchlens.receptive_field._types import (
     ReceptiveFieldDirection,
     ReceptiveFieldStatus,
 )
+from torchlens.validation.invariants import check_metadata_invariants
 
 
 @pytest.fixture(autouse=True)
@@ -32,6 +33,43 @@ def isolated_rule_registry() -> Iterator[None]:
 
     with preserved_rf_registry(bump_epoch=True):
         yield
+
+
+def test_empty_output_has_no_projective_grid() -> None:
+    """An empty auxiliary output cannot invalidate another output's geometry."""
+
+    class EmptyAuxiliary(nn.Module):
+        """Return one populated and one empty output, as Reformer does."""
+
+        def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            """Return both tensor shapes without discarding the empty branch."""
+            return x * 2, x[:, :0]
+
+    trace = tl.trace(EmptyAuxiliary(), torch.randn(2, 3))
+    assert len(trace.output_ops) == 2
+    assert check_metadata_invariants(trace)
+    empty = next(op for op in trace.output_ops if 0 in op.shape)
+    solution = solve_projective(trace, trace.output_ops)
+    assert solution.descriptors
+    assert empty.label not in solution.target_labels
+    assert not solve_projective(trace, [empty]).descriptors
+
+
+def test_empty_intermediate_has_no_projective_units() -> None:
+    """A zero-width slice feeding cat has no element-wise influence to transpose."""
+
+    class EmptyBranch(nn.Module):
+        """Keep a real empty intermediate in the captured graph."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Concatenate an empty view and the populated input."""
+            return torch.cat((x[:, :0], x), dim=1)
+
+    trace = tl.trace(EmptyBranch(), torch.randn(2, 3))
+    assert any(op.shape is not None and 0 in op.shape for op in trace.layer_list)
+    assert check_metadata_invariants(trace)
+    solution = solve_projective(trace, trace.output_ops)
+    assert solution.per_op[trace.input_ops[0].label]
 
 
 def _register_exact_rules() -> None:
