@@ -89,9 +89,13 @@ estimate, the same quantity the gate's escalation converges to):
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import statistics
+import subprocess
+import sys
+import tarfile
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -366,6 +370,55 @@ def _load_baseline() -> dict[str, Any]:
     return json.loads(BASELINE_PATH.read_text())
 
 
+def _measure_reference_baseline(baseline: dict[str, Any], destination: Path) -> dict[str, Any]:
+    """Measure the committed reference with this harness on the current box.
+
+    Parameters
+    ----------
+    baseline:
+        Committed baseline, including its immutable reference commit.
+    destination:
+        Private temporary directory for the reference package sources.
+
+    Returns
+    -------
+    dict[str, Any]
+        The same baseline identity and statistic, measured with the current
+        interpreter, torch build, hardware and workload. No baseline is rewritten.
+    """
+    reference = baseline["sha"]
+    assert len(reference) == 40 and all(c in "0123456789abcdef" for c in reference)
+    archive = subprocess.run(
+        ["git", "archive", reference, "torchlens"],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+    ).stdout
+    with tarfile.open(fileobj=io.BytesIO(archive)) as source:
+        source.extractall(destination, filter="data")
+    script = """
+import json, pathlib, runpy, sys
+import torchlens
+assert pathlib.Path(torchlens.__file__).resolve().is_relative_to(pathlib.Path.cwd())
+harness = runpy.run_path(sys.argv[1])
+print(json.dumps({
+    "context": harness["load_context"](),
+    "statistic": harness["SMALL_CAPTURE_STATISTIC"],
+    "small_capture": harness["pooled_capture_overhead_rows"](repeats=3),
+}))
+"""
+    measured = subprocess.run(
+        [sys.executable, "-c", script, str(Path(__file__).resolve())],
+        cwd=destination,
+        env={**os.environ, "PYTHONPATH": str(destination)},
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    return {**baseline, **json.loads(measured.stdout)}
+
+
 def _require_quiet_box(when: str) -> None:
     """Skip (never pass, never fail) when the box is provably loaded."""
 
@@ -384,7 +437,7 @@ def _require_quiet_box(when: str) -> None:
 
 
 @pytest.mark.serial
-def test_small_capture_overhead_within_gate() -> None:
+def test_small_capture_overhead_within_gate(tmp_path: Path) -> None:
     """D15 gate: trace floor within 10% of the merge-base baseline floor.
 
     ``serial`` (the repo's remedy for load-sensitive perf gates, precedent
@@ -396,8 +449,8 @@ def test_small_capture_overhead_within_gate() -> None:
     true floor, so escalation absorbs interference and cold-process
     inflation but a genuine regression stays red. The gate ceiling itself
     is never widened. Raw milliseconds are same-box quantities, so the
-    context guard turns a torch/box change into an explicit re-baselining
-    point instead of a silently meaningless comparison.
+    context guard measures the immutable reference commit on a new torch/box
+    instead of comparing raw milliseconds from incompatible environments.
     """
 
     baseline = _load_baseline()
@@ -408,6 +461,9 @@ def test_small_capture_overhead_within_gate() -> None:
         f"cross-statistic comparison is meaningless"
     )
     context = load_context()
+    _require_quiet_box("at measurement entry")
+    if any(baseline["context"][key] != context[key] for key in ("torch_version", "nproc")):
+        baseline = _measure_reference_baseline(baseline, tmp_path)
     for key in ("torch_version", "nproc"):
         assert baseline["context"][key] == context[key], (
             f"baseline {key}={baseline['context'][key]!r} but this box has "
@@ -415,7 +471,6 @@ def test_small_capture_overhead_within_gate() -> None:
             f"Re-baseline on this box at a declared point with "
             f"`python {Path(__file__).name} --write-baseline --reason ...`"
         )
-    _require_quiet_box("at measurement entry")
     rows = capture_overhead_rows()
 
     def over_ceiling() -> dict[str, float]:

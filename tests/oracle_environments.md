@@ -5,6 +5,26 @@ Python 3.11 / torch 2.13.0 is also enrolled for the non-slow, environment-govern
 oracles. Visualization goldens additionally require graphviz 0.21 and, where
 declared by the family, pydot 4.0.1.
 
+The GPT-2 Site Key/Site Join structural census has a separate upstream reference:
+Transformers 5.22.2, pinned once in
+`.github/constraints/transformers-golden.txt` and consumed by the scheduled
+canonical verdict jobs. On CPU Torch 2.8.0 its four-layer fixture has 199 retained
+ops and 199 distinct site keys; the length-16/length-8 join contains 189
+corroborated and 10 positional sites. These exact counts apply only to that
+Transformers reference. Every installed supported version still executes the
+same tests for unique keys, metadata consistency, four residual-add recurrent
+groups, and complete cross-length alignment. The floating Transformers 4/5
+Nightly lanes execute these tests independently of the reference constraint.
+
+Transformers 5.23.0 adds one shape-preserving reshape after SDPA per GPT-2
+attention block (`integrations/sdpa_attention.py`, undoing its GQA packing).
+This is a real upstream operation: a native forward without TorchLens observes
+the same four additional calls, with byte-identical seeded logits in the
+2.8.0 CPU comparison. The fixture consequently has 203 distinct sites and
+193 corroborated / 10 positional cross-length joins. Inserting a same-type
+operation also shifts later reshape ordinals; site keys are structural
+positions, not a promise of semantic identity across upstream program changes.
+
 The 14 Python 3.11 golden files were independently compared against the canonical
 files before enrollment. Every payload was byte-identical, including tensor
 digests, public surfaces, state keysets, DOT text, and rank-render semantics.

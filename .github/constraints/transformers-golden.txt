@@ -1,0 +1,6 @@
+# Reference for GPT-2 structural goldens. Floating 4.x/5.x compatibility
+# remains independently exercised by nightly.yml's transformers-compat job.
+transformers==5.22.2
+# Weekly's HookedTransformer integration predates its removal in Lens 4.
+# This reference-only pin does not constrain TorchLens's user dependencies.
+transformer-lens==3.9.0

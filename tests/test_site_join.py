@@ -24,6 +24,7 @@ from collections import Counter
 import pytest
 import torch
 import torch.nn as nn
+from _gpt2_site_golden import is_reference_transformers
 
 import torchlens as tl
 from torchlens._errors import InvalidArgumentError
@@ -253,9 +254,8 @@ def test_site_profile_refuses_typed_on_keyless_trace() -> None:
 def test_gpt2_cross_length_alignment_pins() -> None:
     # Cross-capture alignment machinery (the cross-stamp exit-gate shape):
     # two captures of one program at DIFFERENT sequence lengths align 100%
-    # on sites with exact pinned tier counts -- while their label spaces
-    # would disagree wherever step counts differ. Exact counts, not
-    # thresholds; drift = investigation.
+    # on sites. Exact tier counts apply to the reference upstream version;
+    # total, corroborated alignment is required on every supported version.
     transformers = pytest.importorskip("transformers")
     config = transformers.GPT2Config(n_layer=4, n_head=4, n_embd=128, vocab_size=512)
     model = transformers.GPT2LMHeadModel(config)
@@ -264,14 +264,20 @@ def test_gpt2_cross_length_alignment_pins() -> None:
         long_log = tl.trace(model, torch.randint(0, 512, (1, 16)))
         short_log = tl.trace(model, torch.randint(0, 512, (1, 8)))
     rows = join_site_profiles(site_profile(long_log), site_profile(short_log))
-    assert len(rows) == 199
+    assert set(rows) == {long_log.ops[label].site_key for label in long_log.op_labels}
+    assert set(rows) == {short_log.ops[label].site_key for label in short_log.op_labels}
+    assert all(row.joined and row.strong_guard_ok and row.weak_guard_ok for row in rows.values())
     tiers = Counter(row.verdict for row in rows.values())
-    assert tiers == Counter(
-        {
-            _SiteJoinVerdict.CORROBORATED: 189,
-            _SiteJoinVerdict.POSITIONAL: 10,
-        }
-    )
+    assert tiers[_SiteJoinVerdict.CORROBORATED] > 0
+    assert set(tiers) == {_SiteJoinVerdict.CORROBORATED, _SiteJoinVerdict.POSITIONAL}
+    if is_reference_transformers():
+        assert len(rows) == 199
+        assert tiers == Counter(
+            {
+                _SiteJoinVerdict.CORROBORATED: 189,
+                _SiteJoinVerdict.POSITIONAL: 10,
+            }
+        )
 
 
 # ---------------------------------------------------------------------------

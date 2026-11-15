@@ -1096,8 +1096,9 @@ pytest tests/ -m "not rare and not slow and not heavy" -x --tb=short  # mid back
 pytest tests/ -m "not rare and not slow" -x --tb=short  # phase-boundary backstop; public API/boundaries
 ```
 
-Tiers by cost: `smoke` selects ~4.9k tests (4,920/12,840 collect-only, measured 2026-08-16).
-The census tip was adb3d450 (the fixwave-5 settle; tri-lab b2 probe).
+Tiers by cost: `smoke` selects ~6.0k tests (5,984/16,975 collect-only, measured 2026-11-16).
+The census uses Python 3.11 / CPU Torch 2.8.0 with the dev/test/tabular extras and
+the reference Transformers constraint; optional backend installations can enlarge collection.
 The last instrumented `--durations=0` smoke wall measurement (measured 2026-08-13, 4-core
 devbox under parallel sprint load) took 1194s (~20 min) against the then-selected ~3.2k tests
 (~500s on a quieter box earlier the same sprint); budget at least that at today's ~40%

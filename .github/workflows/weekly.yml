@@ -17,6 +17,8 @@ concurrency:
 jobs:
   extended-tests:
     name: Slow and rare tests
+    env:
+      UV_CONSTRAINT: .github/constraints/transformers-golden.txt
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -28,6 +30,20 @@ jobs:
           python-version: "3.11"
 
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Reserve backing storage for full-graph scale tests
+        # The standard runner stays at 16 GB RAM. The complete million-op
+        # Trace also retains cold metadata; page that to local SSD instead
+        # of dropping nodes or weakening its full-Trace gate. Android is
+        # unused by this Python job and occupies the needed image space.
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo fallocate -l 16G "${{ runner.temp }}/torchlens-scale.swap"
+          sudo chmod 600 "${{ runner.temp }}/torchlens-scale.swap"
+          sudo mkswap "${{ runner.temp }}/torchlens-scale.swap"
+          sudo swapon "${{ runner.temp }}/torchlens-scale.swap"
+          free -h
+          df -h "${{ runner.temp }}"
 
       - name: Install graphviz and cairo
         # libcairo2 is cairosvg's native half; without it the pixel layers
@@ -44,6 +60,8 @@ jobs:
           torch==2.7.1+cpu
           torchvision==0.22.1+cpu
           torchaudio==2.7.1+cpu
+          # PyG 2.8's DimeNet needs pyg-lib>=0.6, which has no torch 2.7 wheel.
+          torch-geometric==2.7.0
           EOF
           uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt" \
             --index-url https://download.pytorch.org/whl/cpu \
@@ -53,7 +71,7 @@ jobs:
           uv pip check
           python scripts/check_torch_environment.py 2.7.1+cpu 0.22.1+cpu
 
-      - name: Install bridge adapters and cairosvg
+      - name: Install bridge adapters, model extensions, and diagnostics
         # r7 R79 (fable MED, wave-introduced): this gate's comment claimed
         # the dark families "STOP skipping here" while the job installed
         # NONE of their dependencies -- captum, sae-lens (x2), rsatoolbox,
@@ -65,7 +83,10 @@ jobs:
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \
             --index-strategy unsafe-best-match \
-            captum sae-lens rsatoolbox cairosvg
+            captum sae-lens rsatoolbox cairosvg detect-secrets
+          uv pip install --system \
+            --find-links https://data.pyg.org/whl/torch-2.7.0+cpu.html \
+            torch-cluster torch-sparse torch-scatter
           uv pip check
           python scripts/check_torch_environment.py 2.7.1+cpu 0.22.1+cpu
 
@@ -84,13 +105,28 @@ jobs:
 
       - name: Run slow tests
         run: |
-          pytest tests/ -m slow --tb=short \
-            --junitxml="${{ runner.temp }}/weekly-slow.junit.xml"
+          set -o pipefail
+          # Markers are additive: rare scale ladders also carry slow. Run
+          # them once in the rare stage, preserving both stages' floors.
+          pytest tests/ -m "slow and not rare" --tb=short -vv --durations=20 \
+            -o faulthandler_timeout=300 \
+            --junitxml="${{ runner.temp }}/weekly-slow.junit.xml" \
+            2>&1 | tee "${{ runner.temp }}/weekly-slow.log"
+
+      - name: Fetch the immutable performance reference
+        # The millisecond gate needs a same-runner measurement when its
+        # committed reference was recorded on different hardware/torch.
+        run: |
+          reference=$(python -c 'import json; print(json.load(open("tests/perf_baselines/capture_ab_baseline.json"))["sha"])')
+          git fetch --no-tags --depth=1 origin "$reference"
 
       - name: Run rare tests
         run: |
-          pytest tests/ -m rare --tb=short \
-            --junitxml="${{ runner.temp }}/weekly-rare.junit.xml"
+          set -o pipefail
+          pytest tests/ -m rare --tb=short -vv --durations=20 \
+            -o faulthandler_timeout=300 \
+            --junitxml="${{ runner.temp }}/weekly-rare.junit.xml" \
+            2>&1 | tee "${{ runner.temp }}/weekly-rare.log"
 
       - name: Fail on an under-executed slow or rare tier
         # Executed-floor attestation for the ONLY leg that ever runs these
@@ -101,7 +137,19 @@ jobs:
           python scripts/check_ci_executed_tests.py "${{ runner.temp }}/weekly-slow.junit.xml" 145
           python scripts/check_ci_executed_tests.py "${{ runner.temp }}/weekly-rare.junit.xml" 8
 
+      - name: Upload extended-test diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: weekly-extended-tests-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/weekly-*.junit.xml
+            ${{ runner.temp }}/weekly-*.log
+          retention-days: 30
+
   mutation-margin:
+    env:
+      UV_CONSTRAINT: .github/constraints/transformers-golden.txt
     # The mutation driver's zero-survivor criterion is R74's grind-level
     # convergence condition, but the driver was "wired into no CI leg — the
     # margin is measured only when invoked" (b9 round 5, S HIGH + F MED):
@@ -210,6 +258,8 @@ jobs:
           git checkout -- .pre-commit-config.yaml
 
   optimized-verdict-identity:
+    env:
+      UV_CONSTRAINT: .github/constraints/transformers-golden.txt
     # r7 R24 (sol MED, 4th pass): 97 shipped asserts remain behind the
     # shrink-only S101 ceiling, validation strips assertion checks under
     # python -O (validation/backward.py), and NO leg proved the verdict

@@ -10,7 +10,6 @@ Tests that take >5 minutes are marked @pytest.mark.slow. To skip them:
     pytest tests/test_real_world_models.py -m "not slow"
 """
 
-import os
 from os.path import join as opj
 from typing import Any
 
@@ -24,39 +23,18 @@ import torch
 torchvision = pytest.importorskip("torchvision")
 
 import example_models  # noqa: E402
+from _real_world_fixtures import (  # noqa: E402
+    VIS_OUTPUT_DIR,
+    _assert_native_graph_preprocessing_refused,
+    _assert_render_pdf,
+    _clear_render_pdf,
+    _forward_only_reference_kernels as _forward_only_reference_kernels,
+    _reference_input1 as _reference_input1,
+    _reference_input2 as _reference_input2,
+)
 
 from torchlens.validation import validate_forward_pass  # noqa: E402
 from torchlens.visualization import show_model_graph  # noqa: E402
-
-VIS_OUTPUT_DIR = opj(os.environ["TORCHLENS_TEST_OUTPUTS_DIR"], "visualizations")
-
-
-def _clear_render_pdf(*path_parts: str) -> None:
-    """Remove any stale PDF artifact before a render so it cannot mask a no-op."""
-    import os
-
-    path = opj(VIS_OUTPUT_DIR, *path_parts) + ".pdf"
-    if os.path.exists(path):
-        os.remove(path)
-
-
-def _assert_render_pdf(*path_parts: str) -> None:
-    """Assert a ``show_model_graph`` run wrote a fresh non-empty PDF artifact.
-
-    Cheap render-output check for tests that render but otherwise assert nothing
-    (or skip forward-pass validation). A no-op renderer leaves no file (or an
-    empty one), which this catches. ``path_parts`` are the ``vis_outpath`` parts
-    (without extension); the default ``vis_fileformat`` is ``pdf``. Pair with
-    :func:`_clear_render_pdf` before the render so a stale file cannot mask a no-op.
-    """
-    import os
-
-    path = opj(VIS_OUTPUT_DIR, *path_parts) + ".pdf"
-    assert os.path.exists(path), f"expected visualization artifact at {path}"
-    with open(path, "rb") as fh:
-        head = fh.read(4)
-    assert head == b"%PDF", f"expected {path} to be a non-empty PDF artifact"
-
 
 # =============================================================================
 # TorchVision Classification Models
@@ -1828,7 +1806,7 @@ def test_fasterrcnn_mobilenet_eval(default_input1, default_input2):
 
 @pytest.mark.slow
 def test_fcos_resnet50_train(default_input1, default_input2):
-    model = torchvision.models.detection.fcos_resnet50_fpn()
+    model = torchvision.models.detection.fcos_resnet50_fpn(min_size=224, max_size=224)
     input_tensors = [default_input1[0], default_input2[0]]
     targets = [
         {
@@ -1858,7 +1836,7 @@ def test_fcos_resnet50_train(default_input1, default_input2):
 
 @pytest.mark.slow
 def test_fcos_resnet50_eval(default_input1, default_input2):
-    model = torchvision.models.detection.fcos_resnet50_fpn()
+    model = torchvision.models.detection.fcos_resnet50_fpn(min_size=224, max_size=224)
     input_tensors = [default_input1[0], default_input2[0]]
     model = model.eval()
     show_model_graph(
@@ -1877,7 +1855,7 @@ def test_fcos_resnet50_eval(default_input1, default_input2):
 
 @pytest.mark.slow
 def test_retinanet_resnet50_train(default_input1, default_input2):
-    model = torchvision.models.detection.retinanet_resnet50_fpn()
+    model = torchvision.models.detection.retinanet_resnet50_fpn(min_size=224, max_size=224)
     input_tensors = [default_input1[0], default_input2[0]]
     targets = [
         {
@@ -1906,7 +1884,7 @@ def test_retinanet_resnet50_train(default_input1, default_input2):
 
 @pytest.mark.slow
 def test_retinanet_resnet50_eval(default_input1, default_input2):
-    model = torchvision.models.detection.retinanet_resnet50_fpn()
+    model = torchvision.models.detection.retinanet_resnet50_fpn(min_size=224, max_size=224)
     input_tensors = [default_input1[0], default_input2[0]]
     model = model.eval()
     show_model_graph(
@@ -1926,6 +1904,8 @@ def test_retinanet_resnet50_eval(default_input1, default_input2):
 @pytest.mark.slow
 def test_ssd300_vgg16_train(default_input1, default_input2):
     model = torchvision.models.detection.ssd300_vgg16()
+    for index, pairs in enumerate(model.anchor_generator._wh_pairs):
+        model.anchor_generator.register_buffer(f"wh_pairs_{index}", pairs, persistent=False)
     input_tensors = [default_input1[0], default_input2[0]]
     targets = [
         {
@@ -1955,6 +1935,10 @@ def test_ssd300_vgg16_train(default_input1, default_input2):
 @pytest.mark.slow
 def test_ssd300_vgg16_eval(default_input1, default_input2):
     model = torchvision.models.detection.ssd300_vgg16()
+    # TorchVision stores these model constants in a private Python list.
+    # Declare the existing tensors as state so capture can attest their source.
+    for index, pairs in enumerate(model.anchor_generator._wh_pairs):
+        model.anchor_generator.register_buffer(f"wh_pairs_{index}", pairs, persistent=False)
     input_tensors = [default_input1[0], default_input2[0]]
     model = model.eval()
     show_model_graph(
@@ -1975,14 +1959,15 @@ def test_ssd300_vgg16_eval(default_input1, default_input2):
 @pytest.mark.slow
 def test_quantize_resnet50(default_input1):
     model = torchvision.models.quantization.resnet50()
-    show_model_graph(
-        model,
-        default_input1,
-        vis_save_only=True,
-        vis_mode="unrolled",
-        vis_outpath=opj(VIS_OUTPUT_DIR, "torchvision-quantize", "quantize_resnet50"),
-    )
-    assert validate_forward_pass(model, default_input1)
+    with pytest.warns(UserWarning, match="TorchLens detected quantized submodules"):
+        show_model_graph(
+            model,
+            default_input1,
+            vis_save_only=True,
+            vis_mode="unrolled",
+            vis_outpath=opj(VIS_OUTPUT_DIR, "torchvision-quantize", "quantize_resnet50"),
+        )
+        assert validate_forward_pass(model, default_input1)
 
 
 # =============================================================================
@@ -2137,14 +2122,19 @@ def test_dimenet():
     )
     batch = None
     model_inputs = (z, pose, batch)
-    show_model_graph(
-        model,
-        model_inputs,
-        vis_save_only=True,
-        vis_mode="unrolled",
-        vis_outpath=opj(VIS_OUTPUT_DIR, "graph-neural-networks", "dimenet"),
-    )
-    assert validate_forward_pass(model, model_inputs)
+    # Native radius/sparse kernels are outside the eager wrapper inventory.
+    # Keep rendering and exact values, and require the completeness guard to refuse.
+    with pytest.warns(
+        UserWarning, match="TorchLens found tensor arguments with no graph/source provenance"
+    ):
+        show_model_graph(
+            model,
+            model_inputs,
+            vis_save_only=True,
+            vis_mode="unrolled",
+            vis_outpath=opj(VIS_OUTPUT_DIR, "graph-neural-networks", "dimenet"),
+        )
+    _assert_native_graph_preprocessing_refused(model, model_inputs)
 
 
 # =============================================================================
@@ -2473,7 +2463,9 @@ def test_pegasus():
 
 @pytest.mark.slow
 def test_led():
-    """LED: Longformer Encoder-Decoder for long documents (small config)."""
+    """LED replays numerically and discloses constrained shape perturbations."""
+    from torchlens._user_public_impls import _validate_forward_pass_torch
+
     transformers = pytest.importorskip("transformers")
     config = transformers.LEDConfig(
         d_model=64,
@@ -2501,7 +2493,29 @@ def test_led():
         vis_mode="unrolled",
         vis_outpath=opj(VIS_OUTPUT_DIR, "encoder-decoder", "led"),
     )
-    assert validate_forward_pass(model, [], model_kwargs)
+    observed = []
+
+    def observe(trace: Any) -> None:
+        """Require honest uncertainty only on shape controls, with data edges tested."""
+        status = trace.validation_replay_status
+        assert status.state == "unverified"
+        assert status.failed_node_count == 0
+        assert status.pure_unverified_node_count == 0
+        assert status.unverified_reason_counts.keys() == {"perturbation_execution_exception"}
+        unverified = [row for row in status.decisions if row["decision"] == "unverified"]
+        assert unverified
+        for row in unverified:
+            assert trace[row["op_label"]].func_name in {"view", "reshape", "as_strided"}
+            assert any(
+                item["op_label"] == row["op_label"]
+                and item["phase"] == "perturbation"
+                and item["decision"] == "validated"
+                for item in status.decisions
+            )
+        observed.append(status.state)
+
+    assert not _validate_forward_pass_torch(model, [], model_kwargs, _trace_observer=observe)
+    assert observed == ["unverified"]
 
 
 # =============================================================================
@@ -2880,6 +2894,8 @@ def test_timm_levit_128():
         vis_mode="unrolled",
         vis_outpath=opj(VIS_OUTPUT_DIR, "timm", "levit_128"),
     )
+    # Clear the attention-bias cache created by the render capture.
+    model.eval()
     assert validate_forward_pass(model, model_input)
 
 
@@ -3690,7 +3706,7 @@ def test_autoformer():
 def test_keypointrcnn_resnet50_train():
     """Keypoint R-CNN: train mode with keypoint targets."""
     model = torchvision.models.detection.keypointrcnn_resnet50_fpn(
-        weights=None, num_classes=2, num_keypoints=5
+        weights=None, num_classes=2, num_keypoints=5, min_size=224, max_size=224
     )
     img = [torch.rand(3, 128, 128)]
     targets = [
@@ -3724,7 +3740,7 @@ def test_keypointrcnn_resnet50_eval():
     """Keypoint R-CNN: eval mode."""
     torch.manual_seed(0)
     model = torchvision.models.detection.keypointrcnn_resnet50_fpn(
-        weights=None, num_classes=2, num_keypoints=5
+        weights=None, num_classes=2, num_keypoints=5, min_size=224, max_size=224
     ).eval()
     img = [torch.rand(3, 128, 128)]
     model_input = (img,)
@@ -4002,7 +4018,7 @@ def test_mobilebert():
         num_attention_heads=4,
         intermediate_size=128,
         embedding_size=32,
-        true_hidden_size=64,
+        intra_bottleneck_size=64,
     )
     model = MobileBertModel(config).eval()
     input_ids = torch.randint(0, 100, (2, 16))
@@ -4348,6 +4364,9 @@ def test_timm_efficientformer():
         vis_mode="unrolled",
         vis_outpath=opj(VIS_OUTPUT_DIR, "timm", "efficientformer_l1"),
     )
+    # eval() clears timm's per-device attention-bias cache populated by rendering.
+    # Validation starts from the same cold-cache state as the independent oracle.
+    model.eval()
     assert validate_forward_pass(model, x)
 
 
@@ -4473,6 +4492,9 @@ def test_blip2():
         "intermediate_size": 128,
         "image_size": 64,
         "patch_size": 16,
+        # The pretrained-model default 1e-10 makes randomly initialized Q/K
+        # numerically flat; exercise attention with ordinary toy-model weights.
+        "initializer_range": 0.02,
     }
     qformer_config = {
         "hidden_size": 64,

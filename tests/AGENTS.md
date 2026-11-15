@@ -50,7 +50,7 @@ Run memory-heavy real-world tests sequentially. Optional dependency tests should
 | `heavy` | Higher-cost tests, excluded from smoke and the mid backstop. |
 | `slow` | Long-running real-world tests. |
 | `serial` | Load-sensitive tests that should run away from parallel worker load. |
-| (none) | Unmarked tests — the majority (7,396/12,840, 58%, measured 2026-08-16 at adb3d450) — run in the backstops, never the commit gate. |
+| (none) | Tests without a cost-tier marker — the majority (9,335/16,975, 55%, measured 2026-11-16 with dev/test/tabular, CPU Torch 2.8 and reference Transformers) — run in the backstops, never the commit gate. |
 | `rare` | Always excluded by default unless explicitly selected. |
 | `optional` | Requires an optional dependency or runtime. |
 | `requires_assertions` | Needs Python `assert`; skipped under `python -O`. |

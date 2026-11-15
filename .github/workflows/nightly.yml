@@ -67,6 +67,10 @@ jobs:
           pytest tests/test_collapse_optimizer.py -k small_config \
             --junitxml=transformers-collapse.xml --tb=short
           python scripts/check_ci_executed_tests.py transformers-collapse.xml 2 0
+          pytest tests/test_site_key.py::test_gpt2_4l_structural_facts \
+            tests/test_site_join.py::test_gpt2_cross_length_alignment_pins \
+            --junitxml=transformers-sites.xml --tb=short
+          python scripts/check_ci_executed_tests.py transformers-sites.xml 2 0
 
   perf-gate:
     name: Same-run performance regression gate
@@ -181,6 +185,8 @@ jobs:
 
   fast-tier:
     name: Full fast tier
+    env:
+      UV_CONSTRAINT: .github/constraints/transformers-golden.txt
     # The byte-reference renderer uses Graphviz 2.43; Ubuntu 26.04's
     # split Graphviz 14 packages also omit the neato layout plugin by default.
     runs-on: ubuntu-24.04
@@ -285,6 +291,8 @@ jobs:
           done
 
   coverage:
+    env:
+      UV_CONSTRAINT: .github/constraints/transformers-golden.txt
     name: Coverage floor (smoke tier)
     runs-on: ubuntu-24.04
     # First measured coverage gate (grind r3, SF-19: four consecutive review
@@ -848,6 +856,8 @@ jobs:
           PY
 
   shuffle-stress:
+    env:
+      UV_CONSTRAINT: .github/constraints/transformers-golden.txt
     # r7 R76 (sol b2 MED): the release-gating random-order row covers ONE
     # time-derived seed per PR, but the isolation evidence bar is >=3 shuffle
     # seeds -- a failure-triggering ordering could need many PR runs to

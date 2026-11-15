@@ -15,6 +15,7 @@ from collections import Counter
 import pytest
 import torch
 import torch.nn as nn
+from _gpt2_site_golden import is_reference_transformers
 
 import torchlens as tl
 from torchlens.postprocess._site_key import (
@@ -29,6 +30,7 @@ from torchlens.postprocess._site_key import (
     site_axis,
     unescape_site_component,
 )
+from torchlens.validation.invariants import check_metadata_invariants
 
 
 class _Tied(nn.Module):
@@ -286,19 +288,22 @@ def test_tied_loop_structural_facts() -> None:
 
 @pytest.mark.heavy
 def test_gpt2_4l_structural_facts() -> None:
-    # Pinned census facts on the gpt2_4l fixture: 199 retained ops, all four
-    # recurrent groups are within-call residual-add pairs SPANNING sites, and
-    # P1 holds (199 distinct keys, no per-instance collision).
+    # The exact census belongs to the reference Transformers environment.
+    # 5.23 adds a real shape-preserving reshape after SDPA in each block;
+    # every supported version must still preserve structural semantics.
     transformers = pytest.importorskip("transformers")
     config = transformers.GPT2Config(n_layer=4, n_head=4, n_embd=128, vocab_size=512)
     model = transformers.GPT2LMHeadModel(config)
     model.eval()
     with torch.no_grad():
         log = tl.trace(model, torch.randint(0, 512, (1, 16)))
-    assert len(log.op_labels) == 199
     assert _site_spanning_recurrent_groups(log) == (4, 4)
     keys = [log.ops[label].site_key for label in log.op_labels]
-    assert len(set(keys)) == 199
+    assert all(isinstance(key, str) and key.startswith(SITE_KEY_PREFIX + "|") for key in keys)
+    assert len(set(keys)) == len(log.op_labels)
+    assert check_metadata_invariants(log) is True
+    if is_reference_transformers():
+        assert len(log.op_labels) == 199
 
 
 # ---------------------------------------------------------------------------

@@ -106,7 +106,7 @@ class TwoLayerGptBlock(nn.Module):
             nhead=heads,
             dim_feedforward=dim * 4,
             batch_first=True,
-            activation="gelu",
+            activation=nn.GELU(),
         )
         self.blocks = nn.TransformerEncoder(layer, num_layers=2)
 
@@ -321,7 +321,8 @@ def _run_capture_cells(
             workload.model,
             list(workload.args),
             workload.kwargs or None,
-            layers_to_save=["relu"],
+            # Every matrix workload has Linear; BERT/GPT use GELU, not ReLU.
+            layers_to_save=["linear"],
         )
 
     try:
