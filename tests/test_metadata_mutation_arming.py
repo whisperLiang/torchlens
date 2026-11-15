@@ -103,6 +103,12 @@ def test_special_layer_lists_require_known_labels(small_trace: tl.Trace) -> None
     ("contract", "field", "value", "message"),
     [
         ("non_torch_backward_inert", "grad_fn_order", ["forged"], "grad_fn_order"),
+        (
+            "non_torch_backward_inert",
+            "backward_root_grad_fn_object_ids",
+            {1},
+            "backward_root_grad_fn_object_ids",
+        ),
         ("non_torch_primitive_op_inert", "_primitive_op_profile", object(), "primitive profile"),
     ],
 )
@@ -118,15 +124,30 @@ def test_neutral_backend_cannot_claim_torch_execution_state(
         _check(contract, trace)
 
 
-def test_neutral_graph_dangling_parent_is_a_named_metadata_error() -> None:
+@pytest.mark.parametrize("edge", ["parents", "children"])
+def test_neutral_graph_dangling_endpoint_is_a_named_metadata_error(edge: str) -> None:
     """Missing graph endpoints refuse before any fuzzy or foreign lookup runs."""
 
     op = SimpleNamespace(layer_label="op", parents=(), children=())
     trace = SimpleNamespace(layer_list=[op])
     _check("backend_neutral_graph_topology", trace)
-    op.parents = ("missing",)
-    with pytest.raises(MetadataInvariantError, match="outside trace labels"):
+    setattr(op, edge, ("missing",))
+    direction = "parent" if edge == "parents" else "child"
+    with pytest.raises(MetadataInvariantError, match=f"{direction} 'missing' outside trace labels"):
         _check("backend_neutral_graph_topology", trace)
+
+
+def test_neutral_backward_epoch_cannot_carry_primitive_ops() -> None:
+    """An inert forward core cannot hide torch primitive stores in backward epochs."""
+
+    epoch = SimpleNamespace(stores={})
+    trace = SimpleNamespace(
+        backend="mlx", _trace_core=SimpleNamespace(kind_rows={}, backward_epochs=[epoch])
+    )
+    _check("non_torch_primitive_op_inert", trace)
+    epoch.stores["primitive_op"] = object()
+    with pytest.raises(MetadataInvariantError, match="backward primitive_op store"):
+        _check("non_torch_primitive_op_inert", trace)
 
 
 def test_parent_argument_metadata_must_be_a_mapping(small_trace: tl.Trace) -> None:
@@ -155,6 +176,17 @@ def test_edge_use_argument_kind_must_be_known(small_trace: tl.Trace) -> None:
     assert op._edge_uses
     op._edge_uses = (replace(op._edge_uses[0], arg_kind="invalid"), *op._edge_uses[1:])
     with pytest.raises(MetadataInvariantError, match="invalid edge arg_kind"):
+        _check("edge_use_parent_arg_consistency", small_trace)
+
+
+def test_edge_use_child_must_resolve(small_trace: tl.Trace) -> None:
+    """A valid parent and argument kind cannot license a missing consumer endpoint."""
+
+    _check("edge_use_parent_arg_consistency", small_trace)
+    op = small_trace.compute_ops[0]
+    record, *rest = op._edge_uses
+    op._edge_uses = (replace(record, child_label="nonexistent-child"), *rest)
+    with pytest.raises(MetadataInvariantError, match="unresolved child 'nonexistent-child'"):
         _check("edge_use_parent_arg_consistency", small_trace)
 
 
@@ -220,6 +252,29 @@ def test_output_distance_claims_require_consistent_evidence(
     assert op.output_descendants
     setattr(op, field, value)
     with pytest.raises(MetadataInvariantError, match=message):
+        _check("distance_invariants", small_trace)
+
+
+def test_output_boundary_distance_must_be_zero(small_trace: tl.Trace) -> None:
+    """An ordered pair of positive distances is still invalid at the output boundary."""
+
+    _check("distance_invariants", small_trace)
+    output = next(op for op in small_trace.ops if op.is_output)
+    output.min_distance_to_output = output.max_distance_to_output = 1
+    with pytest.raises(
+        MetadataInvariantError, match="Output layer .*distance_from_output should be 0"
+    ):
+        _check("distance_invariants", small_trace)
+
+
+def test_output_descendants_must_belong_to_output_inventory(small_trace: tl.Trace) -> None:
+    """Nonempty reachability evidence must name actual model outputs."""
+
+    _check("distance_invariants", small_trace)
+    op = small_trace.compute_ops[0]
+    op.output_descendants = {"nonexistent-output"}
+    assert op.has_output_descendant
+    with pytest.raises(MetadataInvariantError, match="output_descendants contains labels not in"):
         _check("distance_invariants", small_trace)
 
 
@@ -302,11 +357,74 @@ def test_layer_equivalence_view_requires_a_set(small_trace: tl.Trace) -> None:
     )
     small_trace.layer_logs = {op.layer_label: layer}
     _check("equivalence_symmetry", small_trace)
-    layer.equivalent_ops = ["malformed-view"]
-    with pytest.raises(
-        MetadataInvariantError, match="Layer .* equivalent_ops|Layer .*equivalent_ops"
-    ):
+    # A dict-keys view compares equal to the expected set. Only the type
+    # contract rejects it; neither label membership nor value equality can.
+    layer.equivalent_ops = dict.fromkeys(layer.equivalent_ops).keys()
+    with pytest.raises(MetadataInvariantError, match="Layer .*equivalent_ops is not a set"):
         _check("equivalence_symmetry", small_trace)
+
+
+def test_equivalence_group_cannot_name_an_absent_op(small_trace: tl.Trace) -> None:
+    """A group not referenced by any live Op still obeys the declared label namespace."""
+
+    small_trace.op_equivalence_classes["unused-group"] = set()
+    _check("equivalence_symmetry", small_trace)
+    small_trace.op_equivalence_classes["unused-group"].add("nonexistent-op")
+    with pytest.raises(MetadataInvariantError, match="op_equivalence_classes.*not in op_labels"):
+        _check("equivalence_symmetry", small_trace)
+
+
+def test_operator_pass_cannot_exceed_declared_count(recurrent_trace: tl.Trace) -> None:
+    """A positive, pass-qualified second occurrence requires at least two declared passes."""
+
+    _check("op_log_fields", recurrent_trace)
+    op = next(op for op in recurrent_trace.compute_ops if op.pass_index == 2)
+    op.num_passes = 1
+    with pytest.raises(MetadataInvariantError, match="num_passes=1 < pass_index=2"):
+        _check("op_log_fields", recurrent_trace)
+
+
+def test_parameter_use_must_belong_to_op_inventory(small_trace: tl.Trace) -> None:
+    """A resolvable consumer must also be declared in the trace's Op inventory."""
+
+    _check("param_xrefs", small_trace)
+    param = next(iter(small_trace.param_logs))
+    small_trace.op_labels.remove(param.used_by_ops[0])
+    with pytest.raises(MetadataInvariantError, match="used_by_ops contains .*not in op_labels"):
+        _check("param_xrefs", small_trace)
+
+
+def test_parameter_group_requires_a_declared_layer(small_trace: tl.Trace) -> None:
+    """A dangling parameter-group layer refuses with a named invariant, before lookup."""
+
+    _check("param_xrefs", small_trace)
+    group = next(iter(small_trace.layers_with_params))
+    small_trace.layers_with_params[group].append("nonexistent-layer")
+    with pytest.raises(MetadataInvariantError, match="layers_with_params.*not in layer_labels"):
+        _check("param_xrefs", small_trace)
+
+
+def test_module_call_ops_must_belong_to_trace(small_trace: tl.Trace) -> None:
+    """A module call cannot claim an unknown Op beyond its valid input/output boundary."""
+
+    _check("module_layer_containment", small_trace)
+    module = next(iter(small_trace.modules))
+    call = next(iter(module.ops.values()))
+    call.ops = [*call.ops, "nonexistent-op"]
+    with pytest.raises(
+        MetadataInvariantError, match="ModuleCall .*ops contains .*not in op_labels"
+    ):
+        _check("module_layer_containment", small_trace)
+
+
+def test_layer_call_count_must_agree_with_pass_map(recurrent_trace: tl.Trace) -> None:
+    """An intact pass map still refuses a contradictory trace-level invocation count."""
+
+    _check("pass_count_consistency", recurrent_trace)
+    layer = next(layer for layer in recurrent_trace.layer_logs.values() if layer.num_passes == 2)
+    recurrent_trace.layer_num_calls[layer.layer_label] = 3
+    with pytest.raises(MetadataInvariantError, match="layer_num_calls.*!= Layer.num_passes=2"):
+        _check("pass_count_consistency", recurrent_trace)
 
 
 def test_ungrouped_equivalence_view_cannot_name_an_absent_op() -> None:
