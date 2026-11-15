@@ -64,9 +64,8 @@ jobs:
           # PyG 2.8's DimeNet needs pyg-lib>=0.6, which has no torch 2.7 wheel.
           torch-geometric==2.7.0
           EOF
-          uv pip install --system \
+          uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt" \
             -c .github/constraints/transformers-golden.txt \
-            -c "${{ runner.temp }}/torch-2.7-constraints.txt" \
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \
             --index-strategy unsafe-best-match \
@@ -82,9 +81,8 @@ jobs:
         # aggregate floor of 5. The gate now installs exactly the deps whose
         # families it names.
         run: |
-          uv pip install --system \
+          uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt" \
             -c .github/constraints/transformers-golden.txt \
-            -c "${{ runner.temp }}/torch-2.7-constraints.txt" \
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \
             --index-strategy unsafe-best-match \

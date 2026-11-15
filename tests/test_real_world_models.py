@@ -101,12 +101,11 @@ def test_vgg16(default_input1):
 
 @pytest.mark.slow
 def test_vit(default_input1):
-    default_input1 = default_input1[:1]
     model = torchvision.models.vit_l_16()
-    assert validate_forward_pass(model, default_input1)
+    assert validate_forward_pass(model, default_input1[:1])
     show_model_graph(
         model,
-        default_input1,
+        default_input1[:1],
         vis_save_only=True,
         vis_mode="unrolled",
         vis_outpath=opj(VIS_OUTPUT_DIR, "torchvision-main", "vit_l_16"),
@@ -392,12 +391,11 @@ def test_regnet(default_input1):
 
 @pytest.mark.slow
 def test_swin_v2b(default_input1):
-    default_input1 = default_input1[:1]
     model = torchvision.models.swin_v2_b()
-    assert validate_forward_pass(model, default_input1)
+    assert validate_forward_pass(model, default_input1[:1])
     show_model_graph(
         model,
-        default_input1,
+        default_input1[:1],
         vis_save_only=True,
         vis_mode="unrolled",
         vis_outpath=opj(VIS_OUTPUT_DIR, "torchvision-main", "swin_v2b"),
