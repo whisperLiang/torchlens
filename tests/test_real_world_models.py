@@ -27,10 +27,12 @@ from _real_world_fixtures import (  # noqa: E402
     VIS_OUTPUT_DIR,
     _assert_native_graph_preprocessing_refused,
     _assert_render_pdf,
+    _blip_reference_inputs,
     _clear_render_pdf,
     _forward_only_reference_kernels as _forward_only_reference_kernels,
     _reference_input1 as _reference_input1,
     _reference_input2 as _reference_input2,
+    _vit_reference_input as _vit_reference_input,
 )
 
 from torchlens.validation import validate_forward_pass  # noqa: E402
@@ -100,12 +102,12 @@ def test_vgg16(default_input1):
 
 
 @pytest.mark.slow
-def test_vit(default_input1):
-    model = torchvision.models.vit_l_16()
-    assert validate_forward_pass(model, default_input1[:1])
+def test_vit(vit_reference_input):
+    model = torchvision.models.vit_l_16(image_size=112)
+    assert validate_forward_pass(model, vit_reference_input)
     show_model_graph(
         model,
-        default_input1[:1],
+        vit_reference_input,
         vis_save_only=True,
         vis_mode="unrolled",
         vis_outpath=opj(VIS_OUTPUT_DIR, "torchvision-main", "vit_l_16"),
@@ -1429,12 +1431,10 @@ def test_clip():
 @pytest.mark.slow
 def test_blip_base():
     transformers = pytest.importorskip("transformers")
-    from PIL import Image
 
     model = transformers.BlipModel.from_pretrained("Salesforce/blip-image-captioning-base")
     processor = transformers.BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-    image = Image.fromarray(np.random.random((224, 224, 3)).astype(np.uint8))
-    model_inputs = processor(images=image, text="a photo", return_tensors="pt")
+    model_inputs = _blip_reference_inputs(processor)
     show_model_graph(
         model,
         [],

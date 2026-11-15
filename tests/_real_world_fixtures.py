@@ -6,11 +6,34 @@ from collections.abc import Iterator
 from os.path import join as opj
 from typing import Any
 
+import numpy as np
 import pytest
 import torch
 
 VIS_OUTPUT_DIR = opj(os.environ["TORCHLENS_TEST_OUTPUTS_DIR"], "visualizations")
 _REAL_MODEL_BATCH_SIZE = 2
+
+
+def _blip_reference_inputs(processor: Any) -> Any:
+    """Prepare BLIP's source image without inflating its attention grid.
+
+    Parameters
+    ----------
+    processor:
+        The pretrained BLIP processor.
+
+    Returns
+    -------
+    Any
+        Processor outputs with the source 224px grid and native positional interpolation.
+    """
+    from PIL import Image
+
+    image = Image.fromarray(np.random.random((224, 224, 3)).astype(np.uint8))
+    model_inputs = processor(images=image, text="a photo", return_tensors="pt", do_resize=False)
+    assert model_inputs["pixel_values"].shape[-2:] == (224, 224)
+    model_inputs["interpolate_pos_encoding"] = True
+    return model_inputs
 
 
 def _assert_native_graph_preprocessing_refused(
@@ -83,6 +106,23 @@ def _reference_input1(default_input1: torch.Tensor) -> torch.Tensor:
         The same images and resolution with the reference batch size.
     """
     return default_input1[:_REAL_MODEL_BATCH_SIZE]
+
+
+@pytest.fixture(name="vit_reference_input")
+def _vit_reference_input(default_input1: torch.Tensor) -> torch.Tensor:
+    """Use a 112px patch grid for the complete CPU ViT-L validation.
+
+    Parameters
+    ----------
+    default_input1:
+        Reference images from the parent fixture.
+
+    Returns
+    -------
+    torch.Tensor
+        One contiguous image, preserving the model's layers and hidden width.
+    """
+    return default_input1[:1, :, ::2, ::2].contiguous()
 
 
 @pytest.fixture(name="default_input2")
