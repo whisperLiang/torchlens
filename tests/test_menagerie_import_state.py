@@ -13,7 +13,6 @@ import pytest
 def test_classic_import_preserves_matmul_precision() -> None:
     """Importing Clay cannot change linear replay or benchmark precision globally."""
     pytest.importorskip("timm")
-    pytest.importorskip("einops")
     script = """
 import torch
 

@@ -237,6 +237,9 @@ test = [
     "requests",
     "soxr",
     "timm~=1.0",
+    # Clay's cold-import numeric-policy regression must execute in the full
+    # test environment, rather than skip its direct model dependency.
+    "einops>=0.8,<1",
     "torchaudio",
     # The menagerie classics include a CPU-importable OpenCV preprocessing
     # path. Keep the headless wheel in the full test extra so catalog tests
