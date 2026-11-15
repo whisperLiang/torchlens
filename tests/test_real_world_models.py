@@ -101,6 +101,7 @@ def test_vgg16(default_input1):
 
 @pytest.mark.slow
 def test_vit(default_input1):
+    default_input1 = default_input1[:1]
     model = torchvision.models.vit_l_16()
     assert validate_forward_pass(model, default_input1)
     show_model_graph(
@@ -391,6 +392,7 @@ def test_regnet(default_input1):
 
 @pytest.mark.slow
 def test_swin_v2b(default_input1):
+    default_input1 = default_input1[:1]
     model = torchvision.models.swin_v2_b()
     assert validate_forward_pass(model, default_input1)
     show_model_graph(
@@ -1050,7 +1052,7 @@ def test_audio_wav2vec2_base():
 def test_deepspeech():
     torchaudio = pytest.importorskip("torchaudio")
     model = torchaudio.models.DeepSpeech(3)
-    model_input = torch.randn(12, 2000, 3)
+    model_input = torch.randn(2, 2000, 3)
     show_model_graph(
         model,
         model_input,
@@ -2006,7 +2008,7 @@ def test_video_mc3_18():
 @pytest.mark.slow
 def test_video_mvit_v2_s():
     model = torchvision.models.video.mvit_v2_s()
-    model_input = torch.randn(16, 3, 448, 896)
+    model_input = torch.randn(2, 3, 448, 896)
     _clear_render_pdf("torchvision-video", "video_mvit_v2_s")
     show_model_graph(
         model,
@@ -2021,7 +2023,7 @@ def test_video_mvit_v2_s():
 @pytest.mark.slow
 def test_video_r3d_18():
     model = torchvision.models.video.r3d_18()
-    model_input = torch.randn(16, 3, 16, 112, 112)
+    model_input = torch.randn(2, 3, 16, 112, 112)
     show_model_graph(
         model,
         model_input,
@@ -2801,7 +2803,9 @@ def test_maskrcnn_resnet50_train():
 
     torch.use_deterministic_algorithms(False)
     try:
-        model = maskrcnn_resnet50_fpn_v2(weights=None, num_classes=10).train()
+        model = maskrcnn_resnet50_fpn_v2(
+            weights=None, num_classes=10, min_size=224, max_size=224
+        ).train()
         img = [torch.rand(3, 128, 128)]
         targets = [
             {
@@ -2830,7 +2834,9 @@ def test_maskrcnn_resnet50_eval():
     torch.manual_seed(0)
     torch.use_deterministic_algorithms(False)
     try:
-        model = maskrcnn_resnet50_fpn_v2(weights=None, num_classes=10).eval()
+        model = maskrcnn_resnet50_fpn_v2(
+            weights=None, num_classes=10, min_size=224, max_size=224
+        ).eval()
         img = [torch.rand(3, 128, 128)]
         show_model_graph(
             model,
