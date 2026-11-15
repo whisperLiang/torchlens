@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import gc
 import os
 import random
 import warnings
@@ -1470,6 +1471,20 @@ def _validate_forward_pass_torch(
         model.load_state_dict(state_dict)
         if plain_attr_snapshot is not None:
             plain_attr_snapshot.restore_changed_attrs()
+
+        # Only detached output snapshots are needed beyond the pristine phase.
+        # The loop's final entry also owns the oracle's autograd graph, so drop
+        # it along with the model before allocating the validation model copy.
+        if ground_truth_output_all:
+            del entry
+        del ground_truth_output_all, ground_truth_output, ground_truth_model
+        del input_args_copy, input_kwargs_copy
+        # Copied bound callbacks can form cycles. Reclaim those and unused
+        # native arenas before the next phase computes its memory headroom.
+        from .data_classes.cleanup import _trim_host_allocator
+
+        gc.collect()
+        _trim_host_allocator()
 
         validation_model, validation_plain_attr_snapshot, validation_model_copied = (
             _model_for_validation_replay(model)
