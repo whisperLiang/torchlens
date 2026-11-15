@@ -109,7 +109,6 @@ jobs:
           # Markers are additive: rare scale ladders also carry slow. Run
           # them once in the rare stage, preserving both stages' floors.
           pytest tests/ -m "slow and not rare" --tb=short -vv --durations=20 \
-            -o faulthandler_timeout=300 \
             --junitxml="${{ runner.temp }}/weekly-slow.junit.xml" \
             2>&1 | tee "${{ runner.temp }}/weekly-slow.log"
 
@@ -124,7 +123,6 @@ jobs:
         run: |
           set -o pipefail
           pytest tests/ -m rare --tb=short -vv --durations=20 \
-            -o faulthandler_timeout=300 \
             --junitxml="${{ runner.temp }}/weekly-rare.junit.xml" \
             2>&1 | tee "${{ runner.temp }}/weekly-rare.log"
 
