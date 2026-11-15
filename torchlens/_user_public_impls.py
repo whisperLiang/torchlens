@@ -1092,7 +1092,8 @@ def _warn_if_validation_trace_not_reproducible(
                 mark_layer_depths=False,
                 detach_saved_activations=False,
                 save_grads=False,
-                save_arg_values=False,
+                # Argument capture selects the storage-alias provenance policy too.
+                save_arg_values=first_trace.save_arg_values,
                 random_seed=random_seed,
                 save_rng_states=False,
             )
