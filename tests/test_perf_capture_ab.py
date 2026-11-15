@@ -370,8 +370,54 @@ def _load_baseline() -> dict[str, Any]:
     return json.loads(BASELINE_PATH.read_text())
 
 
+def _measure_clean_capture_rows(
+    package_root: Path, *, pooled: bool = False, **kwargs: Any
+) -> dict[str, Any]:
+    """Measure either package in a fresh process with the same import footprint.
+
+    Parameters
+    ----------
+    package_root:
+        Directory containing the package to measure.
+    pooled:
+        Whether to pool independent baseline repetitions.
+    **kwargs:
+        Sample counts and optional cases for the existing measurement functions.
+
+    Returns
+    -------
+    dict[str, Any]
+        Measured rows, context and statistic, without collection-time state.
+    """
+    script = """
+import json, pathlib, runpy, sys
+import torchlens
+assert pathlib.Path(torchlens.__file__).resolve().is_relative_to(pathlib.Path.cwd())
+harness = runpy.run_path(sys.argv[1])
+options = json.loads(sys.argv[3])
+if options.get("cases") is not None:
+    options["cases"] = tuple(options["cases"])
+print(json.dumps({
+    "context": harness["load_context"](),
+    "statistic": harness["SMALL_CAPTURE_STATISTIC"],
+    "small_capture": harness[sys.argv[2]](**options),
+}))
+"""
+    function = "pooled_capture_overhead_rows" if pooled else "capture_overhead_rows"
+    measured = subprocess.run(
+        [sys.executable, "-c", script, str(Path(__file__).resolve()), function, json.dumps(kwargs)],
+        cwd=package_root,
+        env={**os.environ, "PYTHONPATH": str(package_root)},
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    return json.loads(measured.stdout)
+
+
 def _measure_reference_baseline(baseline: dict[str, Any], destination: Path) -> dict[str, Any]:
-    """Measure the committed reference with this harness on the current box.
+    """Measure the immutable reference with the current harness and environment.
 
     Parameters
     ----------
@@ -383,8 +429,7 @@ def _measure_reference_baseline(baseline: dict[str, Any], destination: Path) -> 
     Returns
     -------
     dict[str, Any]
-        The same baseline identity and statistic, measured with the current
-        interpreter, torch build, hardware and workload. No baseline is rewritten.
+        The same identity and statistic, measured on this box. No baseline is rewritten.
     """
     reference = baseline["sha"]
     assert len(reference) == 40 and all(c in "0123456789abcdef" for c in reference)
@@ -396,27 +441,7 @@ def _measure_reference_baseline(baseline: dict[str, Any], destination: Path) -> 
     ).stdout
     with tarfile.open(fileobj=io.BytesIO(archive)) as source:
         source.extractall(destination, filter="data")
-    script = """
-import json, pathlib, runpy, sys
-import torchlens
-assert pathlib.Path(torchlens.__file__).resolve().is_relative_to(pathlib.Path.cwd())
-harness = runpy.run_path(sys.argv[1])
-print(json.dumps({
-    "context": harness["load_context"](),
-    "statistic": harness["SMALL_CAPTURE_STATISTIC"],
-    "small_capture": harness["pooled_capture_overhead_rows"](repeats=3),
-}))
-"""
-    measured = subprocess.run(
-        [sys.executable, "-c", script, str(Path(__file__).resolve())],
-        cwd=destination,
-        env={**os.environ, "PYTHONPATH": str(destination)},
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-    return {**baseline, **json.loads(measured.stdout)}
+    return {**baseline, **_measure_clean_capture_rows(destination, pooled=True, repeats=3)}
 
 
 def _require_quiet_box(when: str) -> None:
@@ -471,7 +496,10 @@ def test_small_capture_overhead_within_gate(tmp_path: Path) -> None:
             f"Re-baseline on this box at a declared point with "
             f"`python {Path(__file__).name} --write-baseline --reason ...`"
         )
-    rows = capture_overhead_rows()
+    # Module preparation depends on loaded imports. Both revisions must see
+    # the same clean process, including when pytest collects the entire suite.
+    package_root = Path(__file__).resolve().parents[1]
+    rows = _measure_clean_capture_rows(package_root)["small_capture"]
 
     def over_ceiling() -> dict[str, float]:
         out: dict[str, float] = {}
@@ -485,11 +513,12 @@ def test_small_capture_overhead_within_gate(tmp_path: Path) -> None:
     escalations = 0
     while over_ceiling() and escalations < ESCALATION_ROUNDS:
         escalations += 1
-        retry = capture_overhead_rows(
+        retry = _measure_clean_capture_rows(
+            package_root,
             trace_n=ESCALATION_TRACE_SAMPLES,
             native_n=ESCALATION_NATIVE_SAMPLES,
             cases=tuple(over_ceiling()),
-        )
+        )["small_capture"]
         for name, row in retry.items():
             pooled = rows[name]
             pooled["native_ms"] = min(pooled["native_ms"], row["native_ms"])
