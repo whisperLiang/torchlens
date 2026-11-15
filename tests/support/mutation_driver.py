@@ -232,6 +232,7 @@ SUITE = [
     # the historical arming suite. Score those tests instead of duplicating
     # them or weakening the zero-survivor criterion.
     "tests/validation_goldens/test_validation_exemption_hardening.py",
+    "tests/validation_goldens/test_validation_value_proofs.py",
     "tests/test_validation_exemption_ledger.py",
     "tests/test_backend_registry.py",
     "tests/test_var_names.py",

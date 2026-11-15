@@ -303,12 +303,17 @@ class CaptureSession:
         if not profile.spillable:
             return
         while self.activation_escrow_ram_bytes > profile.activation_ram_budget_bytes:
-            candidate = next(
-                (entry for entry in self.activation_escrow.values() if entry.tensor is not None),
+            pending = next(
+                (
+                    (entry, tensor)
+                    for entry in self.activation_escrow.values()
+                    if (tensor := entry.tensor) is not None
+                ),
                 None,
             )
-            if candidate is None:
+            if pending is None:
                 return
+            candidate, tensor = pending
             if self._activation_spill_dir is None:
                 self._activation_spill_dir = tempfile.TemporaryDirectory(
                     prefix="torchlens-activation-escrow-"
@@ -320,7 +325,12 @@ class CaptureSession:
             import torch
 
             with _state.pause_logging():
-                torch.save(candidate.tensor, spill_path)
+                # Persist values only. The live _tl storage pin is provenance,
+                # and serializing it beside the typed tensor aliases one storage
+                # with incompatible dtypes (or requires unsafe metadata unpickling).
+                # detach-ok: activation escrow already holds detached copies;
+                # the separate gradient-reference escrow never passes here.
+                torch.save(tensor.detach(), spill_path)
             candidate.tensor = None
             candidate.spill_path = spill_path
             self.activation_escrow_ram_bytes -= candidate.nbytes

@@ -38,6 +38,15 @@ import torch
 
 from ..data_classes.op import Op
 from ..utils.tensor_utils import tensor_all_nan
+from ._operand_proofs import (
+    _check_scatter_reduce_exempt,
+    _conv_zero_operand_decision,
+    _einsum_zero_annihilator_decision,
+    _linear_zero_weight_input_decision,
+    _posthoc_absorbing_operand_decision,
+    _setitem_index_has_single_valid_position,
+    _singleton_softmax_decision,
+)
 
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
@@ -618,6 +627,8 @@ def _check_setitem_exempt(self: "Trace", layer: Op, layers_to_perturb: list[str]
     """Exempt ``__setitem__`` for structural masks or proven full overwrites."""
     perturbed_tensor = self[layers_to_perturb[0]].out
     args = layer.saved_args
+    if _setitem_index_has_single_valid_position(layer, layers_to_perturb):
+        return True
 
     # Case 1: saved_args[1] is a bool tensor and perturbed layer matches it (mask arg)
     if (
@@ -630,9 +641,10 @@ def _check_setitem_exempt(self: "Trace", layer: Op, layers_to_perturb: list[str]
 
     # Case 2: saved_args[1] is a tuple whose first element is a bool tensor
     if (
-        _perturbed_parent_is_arg_position(layer, layers_to_perturb, 1)
+        _perturbed_parent_arg_positions(layer, layers_to_perturb) == {(1, 0)}
         and len(args) > 1
         and isinstance(args[1], tuple)
+        and args[1]
         and isinstance(args[1][0], torch.Tensor)
         and args[1][0].dtype == torch.bool
     ):
@@ -715,52 +727,12 @@ def _setitem_destination_coverage_is_total(
         selected = destination[index]
     except (IndexError, TypeError, RuntimeError):
         return False
-    if not _setitem_index_targets_are_unique(index):
-        return False
     if selected.numel() != destination.numel():
         return False
     if not _index_positions_cover_destination_exactly(destination, index):
         return False
     if isinstance(replacement, torch.Tensor):
         return tuple(selected.shape) == tuple(replacement.shape)
-    return True
-
-
-def _setitem_index_targets_are_unique(index: Any) -> bool:
-    """Return whether a ``__setitem__`` index cannot duplicate write targets.
-
-    Parameters
-    ----------
-    index:
-        Index argument supplied to ``Tensor.__setitem__``.
-
-    Returns
-    -------
-    bool
-        True for basic indexing and for verified unique tensor/list advanced
-        indices. Duplicate advanced indices can make ``selected.numel()`` equal
-        the destination size while leaving some destination elements live.
-    """
-
-    components = index if isinstance(index, tuple) else (index,)
-    for component in components:
-        if isinstance(component, list):
-            try:
-                component = torch.as_tensor(component)
-            except (TypeError, ValueError):
-                return False
-        if isinstance(component, torch.Tensor):
-            if component.dtype == torch.bool:
-                continue
-            if not _tensor_is_integer_index(component):
-                return False
-            flattened = component.reshape(-1)
-            if int(flattened.numel()) != int(torch.unique(flattened).numel()):
-                return False
-            continue
-        if component is None or component is Ellipsis or isinstance(component, (slice, int)):
-            continue
-        return False
     return True
 
 
@@ -868,7 +840,7 @@ def _perturbed_parent_is_arg_position(
     return arg_positions.get(position) == layers_to_perturb[0]
 
 
-def _perturbed_parent_arg_positions(layer: Op, layers_to_perturb: list[str]) -> set[int]:
+def _perturbed_parent_arg_positions(layer: Op, layers_to_perturb: list[str]) -> set[Any]:
     """Return positional arg slots occupied by the perturbed parent.
 
     Parameters
@@ -880,8 +852,8 @@ def _perturbed_parent_arg_positions(layer: Op, layers_to_perturb: list[str]) -> 
 
     Returns
     -------
-    set[int]
-        Positional arg indices whose parent label is the perturbed layer. Missing
+    set
+        Argument addresses (including nested tuple paths) for the perturbed layer. Missing
         or ambiguous metadata returns an empty set so callers fail closed.
     """
 
@@ -1557,6 +1529,8 @@ CUSTOM_EXEMPTION_CHECKS: dict[str, Callable[["Trace", Op, list[str]], bool]] = {
     "interpolate": _check_interpolate_exempt,
     "scatter": _check_scatter_or_index_domain_exempt,
     "scatter_": _check_scatter_or_index_domain_exempt,
+    "scatter_reduce": _check_scatter_reduce_exempt,
+    "scatter_reduce_": _check_scatter_reduce_exempt,
     "scatter_add": _check_index_domain_degenerate,
     "scatter_add_": _check_index_domain_degenerate,
     "scatteradd": _check_index_domain_degenerate,
@@ -1909,14 +1883,23 @@ def _bool_predicate_influence_probe(layer: Op, layers_to_perturb: list[str]) -> 
     if kwargs or not args:
         return None
     positions = _perturbed_parent_arg_positions(layer, layers_to_perturb)
-    if len(positions) != 1:
+    if not positions or any(
+        not isinstance(index, int) or not (0 <= index < len(args)) for index in positions
+    ):
         return None
-    parent_index = next(iter(positions))
-    if not (0 <= parent_index < len(args)):
-        return None
+    parent_index = min(positions)
     parent_saved = args[parent_index]
     saved_output = layer.out
-    if not isinstance(parent_saved, torch.Tensor) or not isinstance(saved_output, torch.Tensor):
+    if (
+        not isinstance(parent_saved, torch.Tensor)
+        or not isinstance(saved_output, torch.Tensor)
+        or any(
+            not isinstance(args[index], torch.Tensor)
+            or args[index].shape != parent_saved.shape
+            or args[index].dtype != parent_saved.dtype
+            for index in positions
+        )
+    ):
         return None
     try:
         with torch.no_grad():
@@ -1935,7 +1918,10 @@ def _bool_predicate_influence_probe(layer: Op, layers_to_perturb: list[str]) -> 
                 probe_args = [
                     item.clone() if isinstance(item, torch.Tensor) else item for item in args
                 ]
-                probe_args[parent_index] = substitute
+                # One parent can occupy both slots (x & x). Substitute all
+                # occurrences together; neither is an independent cooperand.
+                for parent_index in positions:
+                    probe_args[parent_index] = substitute.clone()
                 probe_output = func(*probe_args)
                 if not isinstance(probe_output, torch.Tensor):
                     return None
@@ -2095,6 +2081,12 @@ def _posthoc_structural_output_decision(
         Exempt decision for structural cases, otherwise a non-exempt result.
     """
 
+    if layer.func_name in {"reshape_as", "reshapeas", "view_as", "viewas"} and (
+        _perturbed_parents_only_occupy_template_slot(
+            layer, layers_to_perturb, template_arg_roots=(1,), template_kwarg_names=("other",)
+        )
+    ):
+        return PosthocPerturbDecision(True, "structural_output_template")
     if (
         layer.func_name == "to"
         and len(args) > 1
@@ -2184,6 +2176,30 @@ def _posthoc_structural_output_decision(
             True,
             "structural_output_template",
             "getitem output is empty, so no selected data values can change",
+        )
+    if (
+        layer.func_name in _MULTIPLICATIVE_ANNIHILATOR_FUNC_NAMES
+        and isinstance(layer.out, torch.Tensor)
+        and layer.out.numel() == 0
+        and any(isinstance(arg, torch.Tensor) and arg.numel() == 0 for arg in args[:2])
+    ):
+        return PosthocPerturbDecision(
+            True,
+            "structural_output_template",
+            "multiplication broadcasts an empty operand; no output values exist to perturb",
+        )
+    if (
+        layer.func_name in {"roi_align", "roi_pool", "ps_roi_align", "ps_roi_pool"}
+        and isinstance(layer.out, torch.Tensor)
+        and layer.out.numel() == 0
+        and len(args) > 1
+        and isinstance(args[1], torch.Tensor)
+        and tuple(args[1].shape) == (0, 5)
+    ):
+        return PosthocPerturbDecision(
+            True,
+            "structural_output_template",
+            "an empty ROI list selects no feature values",
         )
     return PosthocPerturbDecision(False, "not_structural_output")
 
@@ -2387,6 +2403,23 @@ def _posthoc_value_proof_decision(
         Exempt decision for narrow proved cases, otherwise non-exempt.
     """
 
+    if layer.func_name in {"softmax", "log_softmax"}:
+        decision = _singleton_softmax_decision(layer, layers_to_perturb, args)
+        if decision.exempt:
+            return decision
+    if layer.func_name in {
+        "scaled_dot_product_attention",
+        "masked_scatter",
+        "masked_scatter_",
+        "__or__",
+        "__ior__",
+        "logical_or",
+        "logical_or_",
+        "bitwise_or",
+    }:
+        decision = _posthoc_absorbing_operand_decision(layer, layers_to_perturb, args)
+        if decision.exempt:
+            return decision
     if layer.func_name in _INDEX_DOMAIN_ARG_SPECS:
         decision = _index_domain_value_irrelevance_decision(layer, layers_to_perturb, args)
         if decision.exempt:
@@ -2402,18 +2435,65 @@ def _posthoc_value_proof_decision(
         decision = _matmul_zero_annihilator_decision(layer, layers_to_perturb, args)
         if decision.exempt:
             return decision
+    if layer.func_name == "einsum":
+        decision = _einsum_zero_annihilator_decision(layer, layers_to_perturb, args)
+        if decision.exempt:
+            return decision
+    if layer.func_name == "addcmul" and len(args) >= 3:
+        positions = _perturbed_parent_arg_positions(layer, layers_to_perturb)
+        other = 2 if positions == {1} else 1 if positions == {2} else None
+        if other is not None and _is_all_zero_value(args[other]):
+            return PosthocPerturbDecision(
+                True,
+                "multiplicative_zero_annihilator",
+                "addcmul multiplicand is annihilated by the other all-zero saved multiplicand",
+            )
     if layer.func_name == "linear" and len(args) > 1:
         decision = _linear_zero_weight_input_decision(layer, layers_to_perturb, args)
         if decision.exempt:
             return decision
     if layer.func_name in {"conv1d", "conv2d", "conv3d"} and len(args) > 1:
-        decision = _conv_zero_weight_input_decision(layer, layers_to_perturb, args)
+        decision = _conv_zero_operand_decision(layer, layers_to_perturb, args)
         if decision.exempt:
             return decision
+    if layer.func_name in {"batch_norm", "instance_norm"} and len(args) > 5:
+        positions = _perturbed_parent_arg_positions(layer, layers_to_perturb)
+        # torch.batch_norm/instance_norm order: input, weight, bias, mean, var.
+        # A zero affine weight annihilates the normalized input and statistics,
+        # never the weight or bias themselves. Nonfinite outputs cannot prove it.
+        if (
+            positions
+            and positions.issubset({0, 3, 4})
+            and isinstance(args[1], torch.Tensor)
+            and _is_all_zero_value(args[1])
+            and isinstance(layer.out, torch.Tensor)
+            and bool(torch.isfinite(layer.out).all())
+        ):
+            return PosthocPerturbDecision(
+                True,
+                "multiplicative_zero_annihilator",
+                "normalization input/statistics are annihilated by an all-zero affine weight",
+            )
     if layer.func_name in {"__add__", "add", "__radd__", "__sub__", "sub", "__rsub__"}:
         decision = _locally_constant_nonfinite_addition_decision(layer, layers_to_perturb, args)
         if decision.exempt:
             return decision
+    if layer.func_name in {"clamp", "clip", "clamp_", "clip_"} and args:
+        lower = layer.saved_kwargs.get("min", args[1] if len(args) > 1 else None)
+        upper = layer.saved_kwargs.get("max", args[2] if len(args) > 2 else None)
+        if (
+            _perturbed_parent_arg_positions(layer, layers_to_perturb) == {0}
+            and isinstance(lower, (int, float))
+            and isinstance(upper, (int, float))
+            and lower == upper
+            and isinstance(layer.out, torch.Tensor)
+            and bool(torch.isfinite(layer.out).all())
+        ):
+            return PosthocPerturbDecision(
+                True,
+                "locally_constant_by_construction",
+                "equal clamp bounds map every finite input value to the same bound",
+            )
     if layer.func_name in ("max", "min", "maximum", "minimum") and len(args) > 1:
         if _binary_extrema_nonperturbed_arg_dominates(
             layer.func_name, args, layer, layers_to_perturb
@@ -2617,6 +2697,13 @@ _MULTIPLICATIVE_ANNIHILATOR_FUNC_NAMES = frozenset(
         "mul_",
         "multiply",
         "multiply_",
+        # Conjunction has the same zero annihilator over bool/integer tensors.
+        "__and__",
+        "__iand__",
+        "bitwise_and",
+        "bitwise_and_",
+        "logical_and",
+        "logical_and_",
     }
 )
 
@@ -2653,6 +2740,8 @@ def _multiplicative_zero_annihilator_decision(
     elif arg_positions.get(1) == perturbed_label:
         other_position = 0
     else:
+        return PosthocPerturbDecision(False, "not_multiplicative_zero_annihilator")
+    if arg_positions.get(other_position) == perturbed_label:
         return PosthocPerturbDecision(False, "not_multiplicative_zero_annihilator")
     if len(args) <= other_position:
         return PosthocPerturbDecision(False, "not_multiplicative_zero_annihilator")
@@ -2756,82 +2845,6 @@ def _matmul_zero_annihilator_decision(
             f"non-perturbed matmul operand at args[{other_position}] is all zero",
         )
     return PosthocPerturbDecision(False, "not_matmul_zero_annihilator")
-
-
-def _linear_zero_weight_input_decision(
-    layer: Op,
-    layers_to_perturb: list[str],
-    args: tuple[Any, ...],
-) -> PosthocPerturbDecision:
-    """Return a proof decision for a linear input under all-zero weights.
-
-    Parameters
-    ----------
-    layer:
-        Linear op whose unchanged perturbed replay is being classified.
-    layers_to_perturb:
-        Parent labels selected for perturbation.
-    args:
-        Saved positional arguments for ``layer``.
-
-    Returns
-    -------
-    PosthocPerturbDecision
-        Exempt decision when the perturbed parent is the input and the saved
-        weight matrix is all zero.
-    """
-
-    if len(layers_to_perturb) != 1:
-        return PosthocPerturbDecision(False, "not_linear_zero_weight_input")
-    arg_positions = layer.parent_arg_positions.get("args", {})
-    perturbed_label = layers_to_perturb[0]
-    if arg_positions.get(0) != perturbed_label:
-        return PosthocPerturbDecision(False, "not_linear_zero_weight_input")
-    if _is_all_zero_value(args[1]):
-        return PosthocPerturbDecision(
-            True,
-            "multiplicative_zero_annihilator",
-            "linear input is annihilated by an all-zero saved weight matrix",
-        )
-    return PosthocPerturbDecision(False, "not_linear_zero_weight_input")
-
-
-def _conv_zero_weight_input_decision(
-    layer: Op,
-    layers_to_perturb: list[str],
-    args: tuple[Any, ...],
-) -> PosthocPerturbDecision:
-    """Return a proof decision for convolution input under all-zero kernels.
-
-    Parameters
-    ----------
-    layer:
-        Convolution op whose unchanged perturbed replay is being classified.
-    layers_to_perturb:
-        Parent labels selected for perturbation.
-    args:
-        Saved positional arguments for ``layer``.
-
-    Returns
-    -------
-    PosthocPerturbDecision
-        Exempt decision when the perturbed parent is the input and the saved
-        convolution kernel is all zero.
-    """
-
-    if len(layers_to_perturb) != 1:
-        return PosthocPerturbDecision(False, "not_conv_zero_weight_input")
-    arg_positions = layer.parent_arg_positions.get("args", {})
-    perturbed_label = layers_to_perturb[0]
-    if arg_positions.get(0) != perturbed_label:
-        return PosthocPerturbDecision(False, "not_conv_zero_weight_input")
-    if _is_all_zero_value(args[1]):
-        return PosthocPerturbDecision(
-            True,
-            "multiplicative_zero_annihilator",
-            "convolution input is annihilated by an all-zero saved kernel",
-        )
-    return PosthocPerturbDecision(False, "not_conv_zero_weight_input")
 
 
 def _locally_constant_nonfinite_addition_decision(

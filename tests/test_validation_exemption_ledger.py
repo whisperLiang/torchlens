@@ -347,6 +347,33 @@ EXEMPTION_LEDGER: tuple[Exemption, ...] = (
         ),
     ),
     Exemption(
+        code="attention_value_absorption",
+        tier="posthoc",
+        contract="C2 perturbation sensitivity",
+        proof="torchlens.validation._operand_proofs:_attention_values_absorb_scores",
+        refuses=(
+            "the V operand, or Q/K without either an independent zero score cooperand "
+            "or a V-absorption proof; nonzero constant V refuses masks/dropout"
+        ),
+    ),
+    Exemption(
+        code="boolean_true_annihilator",
+        tier="posthoc",
+        contract="C2 perturbation sensitivity",
+        proof="torchlens.validation._operand_proofs:_posthoc_absorbing_operand_decision",
+        refuses=(
+            "a non-bool or non-all-true cooperand, and a reused parent occupying both "
+            "OR slots; the absorbing operand must remain independent"
+        ),
+    ),
+    Exemption(
+        code="singleton_normalization",
+        tier="posthoc",
+        contract="C2 perturbation sensitivity",
+        proof="torchlens.validation._operand_proofs:_singleton_softmax_decision",
+        refuses="a normalization axis of extent other than one or nonfinite input/output values",
+    ),
+    Exemption(
         code="mod_divisor_irrelevant",
         tier="posthoc",
         contract="C2 perturbation sensitivity",
@@ -1248,6 +1275,23 @@ _ZIPPED_SIBLING_REFUSES = (
 )
 
 CUSTOM_CHECK_LEDGER: tuple[CustomCheckExemption, ...] = (
+    *(
+        CustomCheckExemption(
+            func_name=name,
+            check="_check_scatter_reduce_exempt",
+            contract=_C2,
+            proof_kind="value_irrelevance_proved",
+            justification=(
+                "include_self=False excludes prior destination values only where the "
+                "saved index covers every destination element along the reduction axis"
+            ),
+            refuses=(
+                "include_self=True, partial index coverage, and every source/index "
+                "parent outside the destination slot"
+            ),
+        )
+        for name in ("scatter_reduce", "scatter_reduce_")
+    ),
     CustomCheckExemption(
         func_name="meshgrid",
         check="_check_zipped_sibling_exempt",

@@ -1434,12 +1434,16 @@ def _propagate_mutation_label_to_storage_aliases(
     from ._tl import session_storage_alias_candidates
     from .ops import _record_label_version_snapshot
 
-    # SCOPE (r26 reconcile): descriptor/grad-bound captures keep the HISTORICAL
+    # SCOPE (r26 reconcile): argument/descriptor/grad-bound captures keep the HISTORICAL
     # topology. The runnable recipe + numeric attestation key payloads PER
     # LABEL, and advancing a base tensor's label to a view-mutation op makes
     # one label denote two different values (the op's view-shaped output AND
     # the full post-mutation base as the consumer's parent) -- byte-exact
     # attestation then fails on a genuinely-verifiable run (r29 suite).
+    # An augmented slice assignment consumes BOTH the base and updated view
+    # in one __setitem__: a per-(label, child) snapshot cannot represent both
+    # shapes under one label. Argument-bound captures must retain the distinct
+    # producers too, so each argument can use its own version snapshot.
     # Those modes stay honest without the edge: the r29 view-lineage gate
     # fail-closes view-mediated input mutation, and validation's
     # version-snapshot replay is green with EITHER topology. Default captures
@@ -1447,7 +1451,8 @@ def _propagate_mutation_label_to_storage_aliases(
     # surface) get the mutation edge. Follow-up: teach the runnable reader
     # per-(label, consumer) payload keying, then lift this scope.
     if (
-        getattr(trace, "intervention_ready", False)
+        getattr(trace, "save_arg_values", False)
+        or getattr(trace, "intervention_ready", False)
         or getattr(trace, "backward_ready", False)
         or getattr(trace, "save_grads", None) not in (None, False)
     ):
@@ -1617,7 +1622,9 @@ def torch_func_decorator(
     if func_name != "data" or property_accessor == "del":
         canonical_capture_callable = (func, func_name)
     # See the barcode-transparency note inside ``wrapped_func`` (R16-5).
-    is_barcode_transparent = func_name == "as_subclass"
+    # Tensor slice bounds call __index__ from inside __setitem__. It returns
+    # host metadata, not a tensor op that could own the enclosing write.
+    is_barcode_transparent = func_name in {"as_subclass", "__index__"}
 
     @wraps(func)
     def wrapped_func(*args: Any, **kwargs: Any) -> Any:

@@ -23,6 +23,42 @@ def _assert_layer_present(trace: tl.Trace, layer_label: str) -> None:
     assert layer_label in [layer.layer_label for layer in trace.layer_list]
 
 
+def test_augmented_view_assignment_keeps_distinct_argument_snapshots() -> None:
+    """Whole-tensor destinations and updated slices must replay at their own shapes."""
+
+    class UpdateColumns(nn.Module):
+        """Use the augmented slice assignment found in VITS and keypoint heads."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Update two columns and consume the complete tensor."""
+            y = x.clone()
+            y[..., 1] += 3
+            y[..., 2] *= 2
+            return y * 2
+
+    model = UpdateColumns()
+    x = torch.randn(2, 3, 4)
+    trace = tl.trace(model, x, capture=CaptureOptions(save_arg_values=True))
+    assert trace.validate_forward_pass([model(x)])
+
+
+def test_tensor_slice_bounds_keep_assignment_dispatch_owned() -> None:
+    """Scalar tensor slice bounds must not steal the enclosing write's witness."""
+
+    class Paste(nn.Module):
+        """Paste a mask using the tensor bounds used by TorchVision detection."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Assign a patch into a fresh image with tensor-valued slice bounds."""
+            result = torch.zeros(8, 8)
+            start = torch.tensor(1)
+            end = torch.tensor(4)
+            result[start:end, start:end] = x
+            return result
+
+    assert tl.validate_forward_pass(Paste(), torch.randn(3, 3))
+
+
 @pytest.mark.smoke
 def test_two_pass_succeeds_with_inplace_relu_module() -> None:
     """Two-pass logging should handle modules with in-place ReLU.

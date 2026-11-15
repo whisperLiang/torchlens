@@ -256,7 +256,8 @@ def _retention_session(profile: RetentionProfile) -> CaptureSession:
     )
 
 
-def test_activation_escrow_spills_to_temp_and_materializes_exact_value() -> None:
+@pytest.mark.parametrize("labeled", [False, True])
+def test_activation_escrow_spills_to_temp_and_materializes_exact_value(labeled: bool) -> None:
     """Detached activation escrow crosses its RAM budget via measured temp spill."""
 
     session = _retention_session(
@@ -267,7 +268,11 @@ def test_activation_escrow_spills_to_temp_and_materializes_exact_value() -> None
             activation_ram_budget_bytes=1,
         )
     )
-    tensor = torch.arange(8, dtype=torch.float32)
+    tensor = torch.arange(8, dtype=torch.float32, requires_grad=True)
+    if labeled:
+        from torchlens.backends.torch._tl import set_tensor_label
+
+        set_tensor_label(tensor, "add_1_1_raw")
     session.escrow_candidate(1, tensor)
 
     payload = session.activation_escrow[1]
@@ -275,7 +280,12 @@ def test_activation_escrow_spills_to_temp_and_materializes_exact_value() -> None
     assert payload.spill_path is not None and payload.spill_path.exists()
     assert session.activation_escrow_ram_bytes == 0
     assert session.activation_escrow_spilled_bytes == tensor.nelement() * tensor.element_size()
-    assert torch.equal(payload.materialize(), tensor)
+    restored = payload.materialize()
+    assert torch.equal(restored, tensor)
+    assert not hasattr(restored, "_tl")
+    assert not restored.requires_grad
+    (tensor * 3).sum().backward()
+    assert torch.equal(tensor.grad, torch.full_like(tensor, 3))
 
     spill_path = payload.spill_path
     session.release()
