@@ -528,10 +528,9 @@ def _merge_layer_log_conditional_fields(
         layer_log.conditional_role_stacks.append(list(pass_log.conditional_branch_stack))
         layer_log.conditional_branch_stack_ops[stack_signature] = []
 
-    signature_ops = layer_log.conditional_branch_stack_ops[stack_signature]
-    if pass_log.pass_index not in signature_ops:
-        signature_ops.append(pass_log.pass_index)
-        signature_ops.sort()
+    # The builder settles ordering/deduplication once per complete signature.
+    # Rechecking and sorting every prefix is quadratic on long shared groups.
+    layer_log.conditional_branch_stack_ops[stack_signature].append(pass_log.pass_index)
 
     for conditional_id, branch_children in pass_log.conditional_arm_children.items():
         merged_branch_children = layer_log.conditional_arm_children.setdefault(
@@ -1204,9 +1203,12 @@ def _build_layer_logs(self: "Trace") -> None:
     """
     from collections import OrderedDict
 
-    from ..data_classes.layer import Layer
+    from ..data_classes.layer import Layer, OpAccessor
 
     layer_logs = OrderedDict()
+    layer_passes: dict[str, dict[int, Op]] = defaultdict(dict)
+    for pass_log in self.layer_list:
+        layer_passes[pass_log.layer_label][pass_log.pass_index] = pass_log
 
     for pass_log in self.layer_list:
         no_call_label = pass_log.layer_label
@@ -1214,6 +1216,9 @@ def _build_layer_logs(self: "Trace") -> None:
         if no_call_label not in layer_logs:
             # First pass: create Layer from this pass's data.
             layer_log = Layer(pass_log)
+            # Bind the complete pass group once; incremental insertion sorts
+            # every earlier prefix and makes shared-parameter groups quadratic.
+            layer_log.ops = OpAccessor(layer_passes.pop(no_call_label))
             layer_logs[no_call_label] = layer_log
         else:
             # Subsequent pass: merge only the 3 aggregate fields.
@@ -1240,13 +1245,14 @@ def _build_layer_logs(self: "Trace") -> None:
             if pass_log.is_atomic_module:
                 layer_log.is_atomic_module = True
 
-        layer_log.ops[pass_log.pass_index] = pass_log
         layer_log.call_labels.append(pass_log.label)
         _merge_layer_log_conditional_fields(layer_log, pass_log)
 
     autograd_memory = 0
     has_autograd_saved_value = False
     for layer_log in layer_logs.values():
+        for signature_ops in layer_log.conditional_branch_stack_ops.values():
+            signature_ops[:] = sorted(set(signature_ops))
         for pass_log in layer_log.ops.values():
             linked_labels = []
             for param_log in getattr(pass_log, "_param_logs", []):

@@ -483,3 +483,11 @@ env: py3.11-torch2.8.0
 torch: 2.8.0+cpu
 source: 051a01315e64f1a8577afb1d2e1c4ab43d283a8e (dirty)
 recorded: 2026-11-15T19:37:17.267688+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: Review bulk pass binding: the conditional branch accumulator now reads pass_index once and sorts each completed group once; field and persisted semantics are unchanged.
+env: py3.11-torch2.8.0
+torch: 2.8.0+cpu
+source: 91cc93f187ba4e174589b25814a34f013349b4f6 (dirty)
+recorded: 2026-11-15T19:54:41.957357+00:00

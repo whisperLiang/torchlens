@@ -5228,7 +5228,7 @@
   "field": "pass_index",
   "file": "torchlens/postprocess/finalization.py",
   "has_default": false,
-  "sites": 3,
+  "sites": 2,
   "via_getattr": false
  },
  {
