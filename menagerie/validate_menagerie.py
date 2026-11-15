@@ -18,16 +18,34 @@ import threading
 import time
 import traceback
 from collections import Counter, defaultdict
+from collections.abc import Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from contextlib import nullcontext
+from contextlib import AbstractContextManager as ContextManager, nullcontext
 from dataclasses import asdict, dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any, ContextManager, Mapping, Sequence, cast
+from typing import Any, cast
 
-from menagerie import cluster_runner
+from menagerie import cluster_runner, envs
 from menagerie.catalog import CatalogRow, catalog_row_from_payload, load_rows
-from menagerie import envs
+from menagerie.ledger import (
+    ENV_VERIFICATION_DB,
+    Scope,
+    Status,
+    VerificationRun,
+    VerificationTarget,
+    _resolve_verification_db,
+    append_verification_run,
+    base_env_hash,
+    base_lock_hash,
+    connect as connect_ledger,
+    incremental_skip_stable_ids,
+    python_version,
+    runner_host,
+    torchlens_source_hash,
+    utc_now,
+    with_machine_metadata,
+)
 from menagerie.recipe import (
     build_input_for_row,
     instantiate_model,
@@ -37,8 +55,8 @@ from menagerie.runtime import (
     CACHE_ROOTS,
     DependencyPlan,
     assert_min_free,
-    combine_notes,
     cleanup_runtime,
+    combine_notes,
     cuda_is_available,
     dependency_plan,
     device_note,
@@ -55,26 +73,7 @@ from menagerie.runtime import (
     snapshot_cache,
     unrenderable_reason,
 )
-from menagerie.ledger import (
-    ENV_VERIFICATION_DB,
-    Scope,
-    Status,
-    VerificationRun,
-    VerificationTarget,
-    _resolve_verification_db,
-    append_verification_run,
-    base_lock_hash,
-    base_env_hash,
-    connect as connect_ledger,
-    incremental_skip_stable_ids,
-    python_version,
-    runner_host,
-    torchlens_source_hash,
-    utc_now,
-    with_machine_metadata,
-)
 from menagerie.worker_subprocess import run_worker_subprocess
-
 
 DEFAULT_OUT_DIR = Path("/tmp/torchlens_menagerie_validation")
 MB_PER_GB = 1024
@@ -3535,8 +3534,16 @@ def _peak_rss_mb() -> int:
         Peak resident set size rounded up to whole MB.
     """
 
-    # Linux reports ru_maxrss in KiB. The validator runs on Linux workers.
-    peak_kib = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    if sys.platform == "linux":
+        # ru_maxrss inherits the spawning process's pre-exec high-water mark.
+        # VmHWM belongs to this executable's address space, so a large parent
+        # cannot inflate the fresh worker's reported peak.
+        status = Path("/proc/self/status").read_text()
+        peak_kib = int(
+            next(row.split()[1] for row in status.splitlines() if row.startswith("VmHWM:"))
+        )
+    else:
+        peak_kib = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
     return max(0, (peak_kib + 1023) // 1024)
 
 

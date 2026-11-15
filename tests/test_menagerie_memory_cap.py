@@ -5,25 +5,26 @@ from __future__ import annotations
 import json
 import signal
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from menagerie.catalog import CatalogRow, load_rows
+from menagerie.ledger import connect
 from menagerie.validate_menagerie import (
     WORKER_MEMORY_CAP_STATUS,
     WORKER_MEMORY_TEST_ALLOC_ENV,
     ValidationResult,
     _ledger_status,
     _resolve_scheduler_memory_budget_gb,
-    append_validation_ledger,
     append_manifest,
+    append_validation_ledger,
     build_parser,
     manifest_records,
     validate_with_timeout,
 )
-from menagerie.ledger import connect
 
 
 class _FakeStream:
@@ -400,3 +401,30 @@ def test_worker_memory_cap_default_is_off() -> None:
 
     args = build_parser().parse_args([])
     assert args.worker_memory_cap_gb is None
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux exec high-water accounting")
+def test_worker_peak_rss_excludes_parent_memory_before_exec() -> None:
+    """A fresh worker reports its own peak, even when spawned by a large parent."""
+    worker = """
+import json
+from pathlib import Path
+from menagerie.validate_menagerie import _peak_rss_mb
+
+retained = bytearray(16 * 1024 * 1024)
+reported = _peak_rss_mb()
+status = Path('/proc/self/status').read_text()
+peak_kib = int(next(line.split()[1] for line in status.splitlines() if line.startswith('VmHWM:')))
+print(json.dumps({'reported': reported, 'own_peak_mb': (peak_kib + 1023) // 1024}))
+"""
+    parent = """
+import subprocess, sys
+retained = bytearray(256 * 1024 * 1024)
+subprocess.run([sys.executable, '-c', sys.argv[1]], check=True, start_new_session=True)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", parent, worker], capture_output=True, text=True, check=True
+    )
+    observed = json.loads(completed.stdout)
+    assert abs(observed["reported"] - observed["own_peak_mb"]) <= 2, observed
+    assert observed["reported"] >= 16
