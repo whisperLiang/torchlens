@@ -55,6 +55,7 @@ jobs:
           python scripts/check_graphviz.py
 
       - name: Install torch and TorchLens
+        # CLI -c replaces UV_CONSTRAINT; combine both constraint files explicitly.
         run: |
           cat > "${{ runner.temp }}/torch-2.7-constraints.txt" <<'EOF'
           torch==2.7.1+cpu
@@ -63,7 +64,9 @@ jobs:
           # PyG 2.8's DimeNet needs pyg-lib>=0.6, which has no torch 2.7 wheel.
           torch-geometric==2.7.0
           EOF
-          uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt" \
+          uv pip install --system \
+            -c .github/constraints/transformers-golden.txt \
+            -c "${{ runner.temp }}/torch-2.7-constraints.txt" \
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \
             --index-strategy unsafe-best-match \
@@ -79,7 +82,9 @@ jobs:
         # aggregate floor of 5. The gate now installs exactly the deps whose
         # families it names.
         run: |
-          uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt" \
+          uv pip install --system \
+            -c .github/constraints/transformers-golden.txt \
+            -c "${{ runner.temp }}/torch-2.7-constraints.txt" \
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \
             --index-strategy unsafe-best-match \
