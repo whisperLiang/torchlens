@@ -22,7 +22,8 @@ Step 20 (release_param_refs): Drops live parameter references after finalization
 """
 
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
+from collections.abc import Sequence
 from dataclasses import replace
 from itertools import zip_longest
 from pathlib import Path
@@ -556,6 +557,8 @@ def _rebuild_layer_log_conditional_views(layer_log: "Layer") -> None:
     layer_log:
         Aggregate layer entry whose derived conditional fields are refreshed.
     """
+    for signature_ops in layer_log.conditional_branch_stack_ops.values():
+        signature_ops[:] = sorted(set(signature_ops))
     layer_log.is_in_conditional_body = any(
         len(branch_stack) > 0 for branch_stack in layer_log.conditional_role_stacks
     )
@@ -1173,6 +1176,25 @@ def _reconcile_multipass_layer_fields(layer_log: "Layer") -> None:
         layer_log.annotations["varying_across_passes"] = varying
 
 
+def _group_layer_passes(ops: Sequence["Op"]) -> dict[str, dict[int, "Op"]]:
+    """Collect each complete pass group before constructing its ordered accessor.
+
+    Parameters
+    ----------
+    ops:
+        Retained operations in capture order.
+
+    Returns
+    -------
+    dict
+        Layer labels mapped to their pass-indexed operations.
+    """
+    groups: dict[str, dict[int, Op]] = defaultdict(dict)
+    for op in ops:
+        groups[op.layer_label][op.pass_index] = op
+    return groups
+
+
 def _build_layer_logs(self: "Trace") -> None:
     """Step 15.5: Build aggregate Layer objects from per-pass Op entries.
 
@@ -1201,14 +1223,10 @@ def _build_layer_logs(self: "Trace") -> None:
     Note: output_of_modules/output_of_module_calls are NOT updated during merge
     (same structural position implies same modules).
     """
-    from collections import OrderedDict
-
     from ..data_classes.layer import Layer, OpAccessor
 
     layer_logs = OrderedDict()
-    layer_passes: dict[str, dict[int, Op]] = defaultdict(dict)
-    for pass_log in self.layer_list:
-        layer_passes[pass_log.layer_label][pass_log.pass_index] = pass_log
+    layer_passes = _group_layer_passes(self.layer_list)
 
     for pass_log in self.layer_list:
         no_call_label = pass_log.layer_label
@@ -1251,8 +1269,6 @@ def _build_layer_logs(self: "Trace") -> None:
     autograd_memory = 0
     has_autograd_saved_value = False
     for layer_log in layer_logs.values():
-        for signature_ops in layer_log.conditional_branch_stack_ops.values():
-            signature_ops[:] = sorted(set(signature_ops))
         for pass_log in layer_log.ops.values():
             linked_labels = []
             for param_log in getattr(pass_log, "_param_logs", []):
