@@ -394,7 +394,12 @@ def test_legit_many_output_and_decomposing_ops_run_verified(
 
     bundle = _build(tmp_path, f"{name}.tlspec", factory(), x)
     result = tl.load(str(bundle)).run(inputs=x.clone())
-    assert result.report.path_faithfulness.value == "verified"
+    assert result.report.path_faithfulness.value == "verified", (
+        result.report.readiness.witness_completeness,
+        result.report.readiness.diagnostics[:3],
+        result.report.first_mismatch,
+        result.report.truncation,
+    )
 
 
 @pytest.mark.smoke

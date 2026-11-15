@@ -132,6 +132,12 @@ def pytest_configure(config: pytest.Config) -> None:
     # TorchLens suite opts in through the torchlens-owned knob explicitly.
     config._tl_prior_collapse_strict = os.environ.get("TORCHLENS_COLLAPSE_STRICT")
     os.environ.setdefault("TORCHLENS_COLLAPSE_STRICT", "1")
+    # HF's optional remote conversion thread can outlive model loading and
+    # trip capture's owner-thread guard in the next test. Keep CI read-only
+    # and retain the original weights; Transformers provides this switch.
+    conversion_env = pytest.MonkeyPatch()
+    conversion_env.setenv("DISABLE_SAFETENSORS_CONVERSION", "1")
+    config.add_cleanup(conversion_env.undo)
     config._tl_warn_once_sentinel_specs = _WARN_ONCE_SENTINELS
     # Pay PyTorch's one-time RNG and deterministic-mode initialization during
     # session setup, not against whichever smoke test happens to run first.
