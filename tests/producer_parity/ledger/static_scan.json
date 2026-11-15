@@ -7056,6 +7056,14 @@
   "via_getattr": true
  },
  {
+  "ambiguous": false,
+  "field": "parent_arg_positions",
+  "file": "torchlens/validation/_operand_proofs.py",
+  "has_default": false,
+  "sites": 2,
+  "via_getattr": false
+ },
+ {
   "ambiguous": true,
   "field": "modules",
   "file": "torchlens/validation/_stock_layer_grads.py",
@@ -7156,7 +7164,7 @@
   "field": "parent_arg_positions",
   "file": "torchlens/validation/exemptions.py",
   "has_default": false,
-  "sites": 7,
+  "sites": 5,
   "via_getattr": false
  },
  {

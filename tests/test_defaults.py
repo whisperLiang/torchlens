@@ -19,6 +19,7 @@ class _DummyLog:
     def __init__(self) -> None:
         """Initialize a capture object with the attributes the wrappers expect."""
         self.cleanup_calls = 0
+        self.save_arg_values = False
         self.layer_logs: dict[str, Any] = {}
         self.num_saved_ops = 0
         self.render_calls: list[dict[str, Any]] = []
@@ -142,6 +143,7 @@ def stubbed_runner(
 
         captured_calls.append(kwargs)
         dummy_log = _DummyLog()
+        dummy_log.save_arg_values = kwargs.get("save_arg_values", False)
         dummy_logs.append(dummy_log)
         return dummy_log
 
@@ -321,7 +323,7 @@ def test_validate_forward_pass_uses_validation_overrides(
     assert replay_call["save_grads"] is False
     assert replay_call["save_arg_values"] is True
     assert replay_call["save_rng_states"] is True
-    assert reproducibility_call["save_arg_values"] is False
+    assert reproducibility_call["save_arg_values"] is True
     assert reproducibility_call["save_rng_states"] is False
     assert dummy_logs[-2].validate_calls[-1]["validate_metadata"] is False
     assert dummy_logs[-2].cleanup_calls == 1

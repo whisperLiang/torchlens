@@ -475,3 +475,11 @@ env: py3.11-torch2.8.0
 torch: 2.8.0+cpu
 source: 4bec7c0f61cafe23ea336d83f71cb6cef728ddd0 (dirty)
 recorded: 2026-11-09T12:03:14.916395+00:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: Review relocated parent_arg_positions consumers in operand proofs and matched validation argument-capture policy; no schema field or consumer semantics removed.
+env: py3.11-torch2.8.0
+torch: 2.8.0+cpu
+source: 051a01315e64f1a8577afb1d2e1c4ab43d283a8e (dirty)
+recorded: 2026-11-15T19:37:17.267688+00:00
