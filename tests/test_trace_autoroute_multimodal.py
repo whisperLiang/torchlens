@@ -43,7 +43,11 @@ def test_clip_style_dict_routes_via_auto_processor() -> None:
     transformers = pytest.importorskip("transformers")
     import PIL.Image  # noqa: F401
 
-    model = transformers.CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+    model_id = "openai/clip-vit-base-patch32"
+    model = transformers.CLIPModel.from_pretrained(model_id)
+    # Autorouting probes only local assets. Fetch the processor explicitly so
+    # this test does not rely on another model test warming the Hub cache.
+    transformers.AutoProcessor.from_pretrained(model_id)
 
     log = tl.trace(
         model,
