@@ -38,7 +38,7 @@ jobs:
         # unused by this Python job and occupies the needed image space.
         run: |
           sudo rm -rf /usr/local/lib/android
-          sudo fallocate -l 16G "${{ runner.temp }}/torchlens-scale.swap"
+          sudo fallocate -l 32G "${{ runner.temp }}/torchlens-scale.swap"
           sudo chmod 600 "${{ runner.temp }}/torchlens-scale.swap"
           sudo mkswap "${{ runner.temp }}/torchlens-scale.swap"
           sudo swapon "${{ runner.temp }}/torchlens-scale.swap"
@@ -115,6 +115,17 @@ jobs:
             --junitxml="${{ runner.temp }}/weekly-slow.junit.xml" \
             2>&1 | tee "${{ runner.temp }}/weekly-slow.log"
 
+      - name: Preserve slow results before scale tests
+        # An always() step cannot upload after the runner itself is lost.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: weekly-slow-tests-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/weekly-slow.junit.xml
+            ${{ runner.temp }}/weekly-slow.log
+          retention-days: 30
+
       - name: Fetch the immutable performance reference
         # The millisecond gate needs a same-runner measurement when its
         # committed reference was recorded on different hardware/torch.
@@ -125,7 +136,17 @@ jobs:
       - name: Run rare tests
         run: |
           set -o pipefail
-          pytest tests/ -m rare --tb=short -vv --durations=20 \
+          # Keep the Actions worker outside the memory-pressure domain.
+          # Cold full-Trace metadata may page to SSD; the test process gets
+          # 13 GiB RAM / 28 GiB swap, leaving room for the OS and worker.
+          # The synchronous scope propagates pytest's failure status.
+          tl_python=$(command -v python)
+          /usr/bin/time -v sudo --preserve-env systemd-run --scope --collect \
+            --unit=torchlens-weekly-rare \
+            --property=MemoryMax=13G --property=MemorySwapMax=28G \
+            sudo --preserve-env --set-home --user="$(id -un)" \
+            env PATH="$PATH" OMP_NUM_THREADS=2 \
+            "$tl_python" -m pytest tests/ -m rare --tb=short -vv --durations=20 \
             --junitxml="${{ runner.temp }}/weekly-rare.junit.xml" \
             2>&1 | tee "${{ runner.temp }}/weekly-rare.log"
 

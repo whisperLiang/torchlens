@@ -71,9 +71,11 @@ AND a `chore(release):` head-commit condition.
 - Scheduled canonical verdict jobs share `constraints/transformers-golden.txt` for
   version-sensitive GPT-2 structure counts. The floating Transformers 4/5 jobs also
   run Site Key/Site Join semantic invariants without requiring reference counts.
-- Weekly uses the standard 16 GB runner with 16 GiB temporary SSD-backed swap for
-  full-Trace scale gates; the unused Android SDK is removed to make room. It also
-  installs the matching PyG 2.7 native CPU extensions and the slow secret scanner.
+- Weekly uses the standard 16 GB runner with 32 GiB temporary SSD-backed swap for
+  full-Trace scale gates; the unused Android SDK is removed to make room. Rare runs
+  in a synchronous scope capped at 13 GiB RAM / 28 GiB swap so the Actions worker
+  retains headroom. Slow logs/JUnit upload before rare as well as at job exit. It
+  also installs the matching PyG 2.7 native CPU extensions and the slow secret scanner.
 
 - Conventional commits required: `fix(scope):`, `feat(scope):`, `chore(scope):`
 - `fix:` → patch bump, `feat:` → minor bump; major-bump markers (`feat!:`,
