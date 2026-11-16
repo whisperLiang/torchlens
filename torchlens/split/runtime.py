@@ -26,10 +26,9 @@ from .ir import (
     SplitModelProfile,
     SplitRequest,
 )
-from .pipeline import analyze_split_capabilities, execute_split_runtime
 from .placement import PlacementPlan, move_tree, require_placement_support
 from .planner import SplitPlan, plan_partition
-from .program import ReplayProgram, SplitCapabilityReport
+from .program import ReplayProgram, SplitCapabilityReport, build_capability_report
 from .state import SegmentState, StateEntry, _StateReplicaPool
 from .validation import nested_allclose
 
@@ -126,7 +125,7 @@ class SplitRuntime(SplitGraph):
 
     @property
     def boundary_schema(self) -> tuple[BoundarySchema, ...]:
-        """Return the backend-neutral v2 boundary ABI schema."""
+        """Return the backend-neutral boundary ABI schema."""
 
         if self.graph_ir is None:
             return ()
@@ -283,7 +282,7 @@ class SplitRuntime(SplitGraph):
         plan_partition(self.trace_graph, request)
         capability_report = self.capability_report
         if self.prefix_program is not None and self.suffix_program is not None:
-            capability_report = analyze_split_capabilities(
+            capability_report = build_capability_report(
                 self.adapter,
                 self.trace_graph,
                 self.plan,
@@ -294,7 +293,7 @@ class SplitRuntime(SplitGraph):
                 model_profile=self.model_profile,
                 features=request.features.as_dict(),
             )
-        segments = execute_split_runtime(self.adapter, self.trace_graph, self.plan, request)
+        segments = self.adapter.build_segments(self.trace_graph, self.plan, request)
         self._inherit_segment_state(segments, recut=False)
         return SplitRuntime(
             model=self.model,

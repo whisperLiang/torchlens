@@ -18,7 +18,7 @@ from ._shape_operands import _TORCH_SHAPE_SEMANTICS, ShapeSemantic
 from ._shape_witnesses import _witness_axis_diagnostics, _witness_scaled_axes
 from .batch_probe import BatchProbeResult
 from .errors import SplitBoundaryError, SplitErrorContext, SplitUnsupportedError
-from .graph import iter_replay_value_refs
+from .graph import _canonical_replay_value_refs
 
 if TYPE_CHECKING:
     from .adapters.base import SplitBackendAdapter
@@ -898,12 +898,6 @@ def _literal_component(value: Any) -> Any:
     return value
 
 
-def _template_value_refs(component: Any) -> tuple[str, ...]:
-    """Return canonical replay value references while preserving multiplicity."""
-
-    return tuple(ref.value_id for ref in iter_replay_value_refs(component))
-
-
 def _captured_int_argument(
     node: SplitTraceNode,
     position: int,
@@ -965,7 +959,7 @@ def _concat_shape_candidate(
         return None
     input_shapes = [
         value_shapes[value_id]
-        for value_id in _template_value_refs(args[0])
+        for value_id in _canonical_replay_value_refs(args[0])
         if value_id in value_shapes
     ]
     if not input_shapes:
@@ -991,7 +985,7 @@ def _stack_shape_candidate(
     args, _kwargs = _captured_call_parts(node)
     if not args:
         return None
-    refs = _template_value_refs(args[0])
+    refs = _canonical_replay_value_refs(args[0])
     input_shape = next(
         (value_shapes[value_id] for value_id in refs if value_id in value_shapes),
         None,
@@ -1019,7 +1013,7 @@ def _slice_shape_candidate(
     args, _kwargs = _captured_call_parts(node)
     if len(args) < 2:
         return None
-    receiver_refs = _template_value_refs(args[0])
+    receiver_refs = _canonical_replay_value_refs(args[0])
     parent_shape = next(
         (value_shapes[value_id] for value_id in receiver_refs if value_id in value_shapes),
         None,
@@ -1133,7 +1127,7 @@ def _repeat_receiver_shape(
 ) -> tuple[TensorShapeIR | None, str | None]:
     """Resolve a repeat receiver from graph metadata or fixed parameter state."""
 
-    refs = _template_value_refs(component)
+    refs = _canonical_replay_value_refs(component)
     if len(refs) == 1:
         return value_shapes.get(refs[0]), refs[0]
     if isinstance(component, LiteralTensor) and component.param_barcode is not None:

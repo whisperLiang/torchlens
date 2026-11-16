@@ -1,10 +1,10 @@
 # Native split runtime
 
-The integrated `3.0.3+split.1` release uses the upstream 3.x capture, records,
-validation and backend registry. Split preparation projects those records into
+The Native Split Runtime uses TorchLens capture, records,
+validation and the backend registry. Split preparation projects those records into
 the existing native execution graph. Public capture remains `tl.trace`; its
 settings use `tl.options.CaptureOptions`. See the
-[3.x Split migration guide](../migration/split_3_x.md) for the capture boundary
+[Split migration guide](../migration/split_3_x.md) for the capture boundary
 and backend contracts.
 
 `GraphPartition(prefix_node_ids=frozenset(...))` is the sole split description.
@@ -178,7 +178,7 @@ dtype matching its output. The scope is limited to criterion construction/calls
 and restores the ambient dtype; model forward and replay receive no dtype patch.
 An explicit lower-precision experiment does not become a required cross-device
 numerical equivalence matrix. Performance benchmarks keep deployment precision.
-The [archived pre-consolidation report](../archive/split_training_dag_fp64.md) records historical plain-SGD functional
+The [acceptance protocol](split_runtime_acceptance.md) runs plain-SGD functional
 checks against an independent full-model reference, including gradients,
 buffers, parameter bindings and state after recuts.
 

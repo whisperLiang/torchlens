@@ -1,4 +1,4 @@
-"""Exercise the upstream 3 capture boundary through public Split execution."""
+"""Exercise the capture projection through public Split execution."""
 
 from __future__ import annotations
 

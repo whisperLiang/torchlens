@@ -1,4 +1,4 @@
-"""Public v2 split runtime construction API."""
+"""Native Split Runtime construction API."""
 
 from __future__ import annotations
 
@@ -19,14 +19,6 @@ from .runtime import SplitRuntime
 
 _DEFAULT_FEATURES = SplitFeatures()
 _DEFAULT_PLACEMENT = PlacementPlan()
-
-
-def _normalize_inputs(inputs: Any) -> tuple[Any, ...]:
-    """Normalize public positional inputs into a tuple."""
-
-    if isinstance(inputs, tuple):
-        return inputs
-    return (inputs,)
 
 
 def _prepare_graph(
@@ -68,7 +60,7 @@ def _prepare_graph(
             f"backend {profile.backend!r}"
         )
 
-    input_tuple = _normalize_inputs(inputs)
+    input_tuple = inputs if isinstance(inputs, tuple) else (inputs,)
     backend_spec = resolve_backend_spec(backend_name, model, input_tuple, input_kwargs)
     adapter = resolve_split_adapter(backend_spec)
     if not request.features.replay or not adapter.supports_replay:

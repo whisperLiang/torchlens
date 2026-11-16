@@ -72,7 +72,8 @@ def main() -> None:
     from torch import nn
 
     import torchlens as tl
-    from torchlens.split import api, context
+    from torchlens.split import api
+    from torchlens.split.adapters.torch import TorchSplitAdapter
     from torchlens.split.errors import SplitUnsupportedError
 
     torch.set_num_threads(1)
@@ -166,9 +167,9 @@ def main() -> None:
                 api, "normalize_to_split_ir", instrument("normalize", api.normalize_to_split_ir)
             ),
             patch.object(
-                context,
-                "execute_split_runtime",
-                instrument("materialize", context.execute_split_runtime),
+                TorchSplitAdapter,
+                "build_segments",
+                instrument("materialize", TorchSplitAdapter.build_segments),
             ),
         ):
             graph = tl.split.prepare_graph(model, inputs, features=features)

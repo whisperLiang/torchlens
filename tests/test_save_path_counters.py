@@ -3,9 +3,8 @@
 ``benchmarks/save_path_counters.py`` counts the work one saved-format-3 save of the ``tinynet``
 capture does: record-table write passes and encoder calls, verifying re-reads, ``fsync`` calls,
 Python-level opens (direct, and routed through ``pathlib``, counted apart so the split is the
-same on every Python), files and bytes. The pinned values live beside the ``aux_save`` row of
-``benchmarks/perf_baselines/linux-cpu-provisional.json`` under
-``metadata.save_path_counters``. Counters gate by exact equality; the recorded wall clock is
+same on every Python), files and bytes. The pinned values live in
+``tests/perf_baselines/save_path_counters.json``. Counters gate by exact equality; the recorded wall clock is
 information only and is never read here.
 
 Counters that depend only on the save path's structure gate everywhere. The encoder call
@@ -32,12 +31,7 @@ import torch
 
 from benchmarks import save_path_counters as spc
 
-_BASELINE = (
-    Path(__file__).resolve().parents[1]
-    / "benchmarks"
-    / "perf_baselines"
-    / "linux-cpu-provisional.json"
-)
+_BASELINE = Path(__file__).resolve().parent / "perf_baselines" / "save_path_counters.json"
 
 # Structure of the save path: the same on every torch build.
 STRUCTURAL_COUNTERS = (
@@ -55,16 +49,9 @@ BUILD_KEYED_COUNTERS = ("encoder_calls", "bytes_written")
 
 
 def _pinned() -> dict[str, Any]:
-    """Return the pinned ``save_path_counters`` record beside the ``aux_save`` row."""
+    """Read the exact save-path counters independently of performance timings."""
 
-    document = json.loads(_BASELINE.read_text(encoding="utf-8"))
-    rows = [
-        row
-        for row in document["rows"]
-        if row.get("operation") == "aux_save" and row.get("model") == "tinynet"
-    ]
-    assert len(rows) == 1, f"expected one tinynet aux_save row, found {len(rows)}"
-    return rows[0]["metadata"]["save_path_counters"]
+    return json.loads(_BASELINE.read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="module")

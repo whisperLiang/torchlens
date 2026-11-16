@@ -1,14 +1,15 @@
 # TorchLens Benchmarks
 
-This directory contains standalone benchmark scripts and generated benchmark
-artifacts.
+This directory contains reproducible benchmark scripts and regression baselines.
+Generated reports stay local and are ignored by Git.
 
 ## Performance benchmark suite
 
-`perf_suite.py` drives the 2026-05-14 performance benchmark matrix described in
-a private benchmark plan. It launches `perf_runner.py` in a fresh
-subprocess for each operation/model/device/pass cell, writes
-`perf_results_2026-05-14.json`, and renders `perf_results_2026-05-14.md`.
+`perf_suite.py` launches `perf_runner.py` in a fresh subprocess for each
+operation/model/device/pass cell. Its default outputs are `perf_results.json`
+and `perf_results.md`; use `--out-json` and `--out-md` to choose other paths.
+`perf_baselines/linux-cpu.json` is the canonical comparison baseline consumed by
+the performance documentation and `perf_gate.py`.
 
 Typical commands:
 
@@ -37,9 +38,9 @@ format. See `capture/README.md`.
 
 ## Intervention overhead
 
-`intervention_overhead.py` is the earlier focused benchmark for TorchLens
-intervention primitives. Its committed output lives in
-`intervention_overhead_results.md`.
+`intervention_overhead.py` measures TorchLens intervention primitives. Run
+`python benchmarks/intervention_overhead.py` to generate a local
+`intervention_overhead_results.md`; no historical result is shipped.
 
 ## Pre-hook provenance overhead
 
@@ -73,8 +74,8 @@ split is the same on every Python), and the files and bytes written (split into 
 Byte counts hold each wall-clock timing float (`TIMING_FLOAT_PATHS`) at a fixed
 width, since format 3 writes floats by exact repr; every other byte counts as
 written, and the raw size is information only. The pinned values
-sit beside the `aux_save` row of `perf_baselines/linux-cpu-provisional.json`
-(`metadata.save_path_counters`) and `tests/test_save_path_counters.py` holds them.
+live in `tests/perf_baselines/save_path_counters.json`, independently of host timing
+reports, and `tests/test_save_path_counters.py` holds them.
 Counters gate; wall time and the profiled call count are context only:
 
 ```bash

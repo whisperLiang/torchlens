@@ -66,11 +66,11 @@ CPU, CPU→CUDA, CUDA→CPU, same-GPU and two-GPU cases are separate; missing ph
 devices skip. BatchNorm state regressions cover compact/diagnostic products,
 connected training, sequential microbatches and state preservation after recuts.
 
-Duration-budget enforcement has been removed. Test markers
-still select suites; elapsed time does not change a correctness verdict.
+Test markers select suites; repository checks audit the recorded duration metadata.
+Elapsed time does not change a functional correctness verdict.
 
 Run the repository quality gates with the versions declared in `[project.optional-dependencies.dev]`:
-in particular Ruff 0.15.4 and mypy 2.1.0. The full-suite oracle tests also require
+in particular Ruff 0.16.3 and mypy 2.1.0. The full-suite oracle tests also require
 a committed environment fingerprint; see [oracle environments](../oracle_environments.md).
 Run with `TORCHLENS_ORACLE_ENFORCE=1` in a supported environment. When copying
 a Windows checkout to Linux, preserve Git's original LF

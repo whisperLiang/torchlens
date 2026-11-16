@@ -75,13 +75,13 @@ and how many lack a runnable `Examples` section. Regenerate with
 | recording | 21 | 0 |
 | repgeom | 20 | 0 |
 | report | 45 | 0 |
-| split | 57 | 0 |
+| split | 51 | 0 |
 | stats | 27 | 0 |
 | trackers | 42 | 0 |
 | transformer | 39 | 0 |
 | transforms | 37 | 0 |
 | validation | 10 | 0 |
 | viz | 11 | 0 |
-| **total** | **1138** | **0** |
+| **total** | **1132** | **0** |
 
 Public callable members of those classes (methods and properties): 1769.

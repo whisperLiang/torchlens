@@ -376,6 +376,10 @@ of tens of steps (cost grows faster than the step count). All episode names may 
   without building segments; `graph.materialize(analysis)` binds an executable runtime.
   The context and runtime share the same IR, ShapeProgram and bounded metadata caches.
 
+Construction uses `tl.split.prepare_graph` or `tl.split.prepare`. Capture, normalization,
+lowering and segment-construction helpers belong to their implementation modules and
+are not exported by `torchlens.split`.
+
 **SplitRequest / GraphPartition**
 : `GraphPartition(prefix_node_ids=frozenset(...))` is the sole split description. IDs are
   canonical compute-value IDs from `graph.trace_graph.compute_nodes`. The planner checks
@@ -457,7 +461,7 @@ of tens of steps (cost grows faster than the step count). All episode names may 
   `TypeError` catches. `torchlens.split.adapters.torch.AutocastRestore(state)`
   is the native autocast context manager used by Torch split calls and advanced
   schedulers; `state` is the captured autocast-state mapping.
-  In `3.0.3+split.1`, the capture is the upstream 3.x `Trace`; its operations
+  The capture uses the TorchLens `Trace`; its operations
   retain the upstream grouped `op.call`, `op.graph`, `op.params` and `op.cost`
   views. Split projection reads these records once and keeps its native replay
   recipes and live state bindings. It does not add old fields to `Trace` or `Op`.

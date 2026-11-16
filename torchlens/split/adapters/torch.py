@@ -28,7 +28,7 @@ from .._torch_liveness import release_schedule
 from ..boundary import ReplayBoundary
 from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
-from ..graph import ReplayValueRef, SplitTraceGraph, SplitTraceNode
+from ..graph import ReplayValueRef, SplitTraceGraph, SplitTraceNode, _is_template_dict_component
 from ..ir import SplitRequest
 from ..placement import DevicePlacement, SegmentName
 from ..planner import SplitPlan
@@ -45,18 +45,12 @@ def _torch() -> Any:
     return torch
 
 
-def _component_key(component: Any) -> Any:
-    """Return an index/key value for a TorchLens container path component."""
-
-    return _path_component_key(component)
-
-
 def _slice_output_by_path(output: Any, path: tuple[Any, ...]) -> Any:
     """Return the output leaf addressed by a captured container path."""
 
     current = output
     for component in path:
-        key = _component_key(component)
+        key = _path_component_key(component)
         if isinstance(current, dict):
             current = current[key]
         elif isinstance(key, str) and hasattr(current, key):
@@ -64,12 +58,6 @@ def _slice_output_by_path(output: Any, path: tuple[Any, ...]) -> Any:
         else:
             current = current[key]
     return current
-
-
-def _is_template_dict(component: tuple[Any, ...]) -> bool:
-    """Return whether a tuple template component encodes a dictionary."""
-
-    return bool(component) and all(isinstance(item, tuple) and len(item) == 2 for item in component)
 
 
 def _flatten_tensor_leaves(value: Any, torch: Any) -> list[Any]:
@@ -139,7 +127,7 @@ def _plain_replay_template(component: Any, torch: Any) -> bool:
     elif isinstance(component, Unsupported):
         result = False
     elif isinstance(component, tuple):
-        if _is_template_dict(component):
+        if _is_template_dict_component(component):
             result = all(
                 _plain_torch_arguments(key, torch) and _plain_replay_template(value, torch)
                 for key, value in component
@@ -417,7 +405,9 @@ def _state_literals(component: Any) -> tuple[LiteralTensor, ...]:
         return (component,)
     if isinstance(component, tuple):
         values = (
-            (item for _key, item in component) if _is_template_dict(component) else iter(component)
+            (item for _key, item in component)
+            if _is_template_dict_component(component)
+            else iter(component)
         )
         return tuple(literal for item in values for literal in _state_literals(item))
     return ()
@@ -822,7 +812,7 @@ class _GeneratedSegmentBase:
                 code=SplitUnsupportedError.code,
             )
         if isinstance(component, tuple):
-            if _is_template_dict(component):
+            if _is_template_dict_component(component):
                 return {
                     key: self._resolve_component(
                         value,

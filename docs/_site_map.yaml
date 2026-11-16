@@ -47,9 +47,6 @@ pages:
   - path: _perf_numbers.md
     section: internal
     note: included fragment; replaced by generated benchmark tables
-  - path: _perf_numbers_provisional.md
-    section: internal
-    note: included fragment; replaced by generated benchmark tables
   - path: _watch_perf_numbers.md
     section: internal
     note: included fragment; replaced by generated benchmark tables
@@ -775,11 +772,6 @@ pages:
   - path: visibility.md
     section: concepts
     publish: true
-  - path: archive/split_training_dag_fp64.md
-    section: project
-    group: Historical reports
-    publish: true
-    note: historical fork training reference
   - path: migration/split_3_x.md
     section: reference
     publish: true

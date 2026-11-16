@@ -14,7 +14,7 @@ examples/split_upstream3.py	torch.testing.assert_close(runtime.replay(inputs), m
 tests/split/test_partition_benchmark.py	runtime.replay(torch.ones(2, 4))	SplitRuntime.replay
 tests/split/test_partition_effect_dependencies.py	actual = runtime.replay(x)	SplitRuntime.replay
 tests/split/test_split_analysis_cache.py	torch.testing.assert_close(runtime.replay(x), model(x))	SplitRuntime.replay
-tests/split/test_split_api_surface.py	torch.testing.assert_close(runtime.replay(inputs), model(inputs))	SplitRuntime.replay
+tests/split/test_split_api_surface.py	replayed = runtime.replay(replay_x)	SplitRuntime.replay
 tests/split/test_split_batch_polymorphism.py	replayed = placed.replay(x)	SplitRuntime.replay
 tests/split/test_split_batch_polymorphism.py	replayed = runtime.replay(torch.randn(32, 4))	SplitRuntime.replay
 tests/split/test_split_batch_polymorphism.py	replayed = runtime.replay(x)	SplitRuntime.replay
@@ -202,7 +202,6 @@ tests/split/test_split_unbatched.py	assert runtime.replay(value).shape == (3,)	S
 tests/split/test_split_unbatched.py	torch.testing.assert_close(runtime.replay(example), model(example))	SplitRuntime.replay
 tests/split/test_split_unbatched.py	torch.testing.assert_close(runtime.replay(torch.tensor(4.0)), model(torch.tensor(4.0)))	SplitRuntime.replay
 tests/split/test_split_unbatched.py	torch.testing.assert_close(runtime.replay(value), model(value))	SplitRuntime.replay
-tests/split/test_split_v2_contract.py	replayed = runtime.replay(torch.randn(4, 4))	SplitRuntime.replay
 torchlens/split/_mlx_validation.py	"actual = runtime.replay(*inputs, input_kwargs=options[""input_kwargs""])"	SplitRuntime.replay
 torchlens/split/adapters/paddle.py	replay_output = runtime.replay(*inputs, input_kwargs=input_kwargs)	SplitRuntime.replay
 torchlens/split/api.py	>>> runtime.replay(torch.ones(2, 3)).shape	SplitRuntime.replay

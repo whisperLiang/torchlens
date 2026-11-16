@@ -848,13 +848,6 @@ GENERATED_ARTIFACTS: tuple[GeneratedArtifact, ...] = (
         "benchmarks/perf_baselines/linux-cpu.json --out docs/_perf_numbers.md",
     ),
     GeneratedArtifact(
-        "docs/_perf_numbers_provisional.md",
-        lambda: _render_perf_numbers_doc("linux-cpu-provisional.json"),
-        "python -m benchmarks.generate_perf_numbers "
-        "benchmarks/perf_baselines/linux-cpu-provisional.json "
-        "--out docs/_perf_numbers_provisional.md",
-    ),
-    GeneratedArtifact(
         "docs/method_x_model_compatibility.md",
         _render_method_x_model_compat,
         _COMPAT_DOC_REGENERATE_COMMAND,
@@ -1334,7 +1327,6 @@ def check_generated_doc_registry_covers_the_known_docs() -> None:
     registered = {artifact.path for artifact in GENERATED_ARTIFACTS}
     assert {
         "docs/_perf_numbers.md",
-        "docs/_perf_numbers_provisional.md",
         "docs/method_x_model_compatibility.md",
     } <= registered
 

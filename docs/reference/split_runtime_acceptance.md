@@ -1,10 +1,8 @@
-> Current API: [Compute DAG and native runtime](split_native_runtime.md). Historical
-> measurements linked below predate candidate-search removal and do not validate the new API.
-
 # Split runtime acceptance
 
-The historical [training DAG and SGD FP64 report](../archive/split_training_dag_fp64.md)
-records pre-consolidation model/device results and repository checks.
+Use the [native runtime contract](split_native_runtime.md) and the isolated
+`benchmarks/split_graph_partition.py` driver to produce a fresh model/device report.
+Only results from the implementation and environment under test establish acceptance.
 
 ## Validation protocol
 
@@ -95,8 +93,9 @@ PATH="$PWD/.venvs/torch/mlx-compiler:$PATH" .venvs/torch/bin/python -m pytest \
 The compiler override applies only to that command. Native compilation and all
 numerical checks stay enabled; CPU MLX results do not attest GPU placement.
 
-See [runtime semantics](split_native_runtime.md), [repair mechanisms](split_runtime_repairs.md)
-and the [SGD report](../archive/split_training_dag_fp64.md) for details and measured coverage.
+See [runtime semantics](split_native_runtime.md) and
+[repair mechanisms](split_runtime_repairs.md) for the execution contracts.
+The commands below write new SGD acceptance reports for the requested placement.
 
 ```bash
 python benchmarks/split_graph_partition.py --model yolov8 --model-mode train --dtype float64 --prefix-device cpu --suffix-device cuda --strict --output yolo-sgd.json

@@ -167,21 +167,28 @@ def test_paddle_nested_outputs_keep_paths_and_reused_producers() -> None:
     class Model(paddle.nn.Layer):
         def forward(self, inputs):
             hidden = inputs * 2
+            left, right = paddle.split(hidden, 2, axis=-1)
             return {
                 "logits": paddle.nn.functional.relu(hidden),
                 "statistics": {"mean": hidden.mean()},
+                "reused": (hidden, hidden),
+                "halves": {"right": right, "left": left},
             }
 
     model = Model()
-    inputs = paddle.ones([2, 4], dtype="float64")
+    inputs = paddle.to_tensor([[-2, -1, 1, 3], [4, -3, 2, -4]], dtype="float64")
     graph = prepare_graph(model, inputs, backend="paddle", features=SplitFeatures(batch_axes={}))
     partition = graph.compute_dag().to_partition([graph.compute_dag().nodes[0].call_id])
     runtime = graph.materialize(graph.analyze(partition))
     actual = runtime.replay(inputs)
     expected = model(inputs)
     assert set(actual) == set(expected)
+    assert actual["reused"][0] is actual["reused"][1]
     for left, right in (
         (actual["logits"], expected["logits"]),
         (actual["statistics"]["mean"], expected["statistics"]["mean"]),
+        (actual["reused"][0], expected["reused"][0]),
+        (actual["halves"]["left"], expected["halves"]["left"]),
+        (actual["halves"]["right"], expected["halves"]["right"]),
     ):
         assert bool(paddle.allclose(left, right).item())

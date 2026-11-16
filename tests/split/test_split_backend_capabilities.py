@@ -55,7 +55,7 @@ def test_tinygrad_adapter_advertises_replay_capabilities() -> None:
     assert adapter.supports_state_placement is False
 
 
-def test_torch_adapter_advertises_v2_capabilities() -> None:
+def test_torch_adapter_advertises_capabilities() -> None:
     """Torch keeps replay/training/cache and adds segment state placement."""
 
     adapter = resolve_split_adapter("torch")

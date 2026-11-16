@@ -98,7 +98,6 @@ exclude_docs: |
   /internal/
   /README.md
   /_perf_numbers.md
-  /_perf_numbers_provisional.md
   /_watch_perf_numbers.md
   /internal/agent-reference/architecture.md
   /internal/agent-reference/brainpipe-f20-spellings-documented-unstable.md
@@ -350,6 +349,4 @@ nav:
       - migration/v2.0_api_changes.md
       - reference/deprecations.md
       - reference/limitations.md
-      - Historical reports:
-          - archive/split_training_dag_fp64.md
   # </generated:nav>

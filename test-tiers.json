@@ -6338,8 +6338,8 @@
       "torchlens/_utils/collections.py": [
         "tests/split/test_split_canonical_batch.py",
         "tests/split/test_split_factory_placement.py",
-        "tests/split/test_split_torch_replay.py",
         "tests/test_autograd_grad_view_write_replay.py",
+        "tests/test_capture_unification_p3a.py",
         "tests/test_livecheck_module_exit_only.py",
         "tests/test_w051_episode_binding.py",
         "tests/test_w051_episode_chain_positions.py",
@@ -8548,10 +8548,10 @@
       ],
       "torchlens/backends/_backend_names.py": [
         "tests/backend_conformance/test_capability_truth.py",
+        "tests/split/test_split_compact_graph.py",
         "tests/split/test_split_compact_runtime.py",
         "tests/split/test_split_compact_training.py",
         "tests/split/test_split_graph_partition.py",
-        "tests/split/test_split_memory_lifetime.py",
         "tests/split/test_split_native_backends_replay.py",
         "tests/split/test_split_torch_replay.py",
         "tests/test_backend_protocol.py"
@@ -8827,9 +8827,9 @@
         "tests/test_weightsfree_persistence.py"
       ],
       "torchlens/backends/jax/_source_path_components.py": [
-        "tests/split/test_split_v2_contract.py",
         "tests/test_jax_backend_derived_grads.py",
         "tests/test_jax_backend_validation.py",
+        "tests/test_jax_custom_jvp_capture.py",
         "tests/test_jax_finalize_contract.py"
       ],
       "torchlens/backends/jax/_trace_graph_helpers.py": [
@@ -8869,7 +8869,7 @@
         "tests/backend_conformance/test_deviceref_vocabulary.py",
         "tests/split/test_split_canonical_batch.py",
         "tests/split/test_split_jax_output_contract.py",
-        "tests/split/test_split_v2_contract.py",
+        "tests/test_jax_backend_validation.py",
         "tests/test_jax_finalize_contract.py",
         "tests/test_jax_zero_annihilator.py",
         "tests/test_preview_grad_tolerance_tripwires.py",
@@ -8877,10 +8877,10 @@
       ],
       "torchlens/backends/jax/modules.py": [
         "tests/backend_conformance/test_deviceref_vocabulary.py",
-        "tests/split/test_split_v2_contract.py",
         "tests/test_jax_backend_derived_grads.py",
         "tests/test_jax_backend_modules.py",
         "tests/test_jax_backend_validation.py",
+        "tests/test_jax_custom_jvp_capture.py",
         "tests/test_preview_grad_tolerance_tripwires.py",
         "tests/test_preview_teardown_contract.py",
         "tests/test_validation_reasons_structural.py"
@@ -14608,7 +14608,7 @@
         "tests/split/test_split_compact_runtime.py",
         "tests/split/test_split_compact_training.py",
         "tests/split/test_split_memory_lifetime.py",
-        "tests/split/test_split_partition_analysis.py",
+        "tests/split/test_split_probe_rng.py",
         "tests/split/test_split_state_snapshot.py"
       ],
       "torchlens/split/_capture_projection.py": [
@@ -14628,7 +14628,7 @@
         "tests/split/test_split_compute_dag.py",
         "tests/split/test_split_empty_boundary.py",
         "tests/split/test_split_graph_partition.py",
-        "tests/split/test_split_partition_analysis.py",
+        "tests/split/test_split_partition_cross_device.py",
         "tests/split/test_split_torch_replay.py"
       ],
       "torchlens/split/_jax_capture.py": [
@@ -14638,8 +14638,8 @@
         "tests/split/test_split_compact_training.py",
         "tests/split/test_split_jax_matmul.py",
         "tests/split/test_split_memory_lifetime.py",
-        "tests/split/test_split_partition_analysis.py",
-        "tests/split/test_split_probe_rng.py"
+        "tests/split/test_split_probe_rng.py",
+        "tests/split/test_split_unbatched.py"
       ],
       "torchlens/split/_microbatch.py": [
         "tests/split/test_split_microbatch.py",
@@ -14648,11 +14648,11 @@
       ],
       "torchlens/split/_mlx_capture.py": [
         "tests/split/test_split_batch_probe.py",
+        "tests/split/test_split_callable_state.py",
         "tests/split/test_split_canonical_batch.py",
         "tests/split/test_split_compact_runtime.py",
         "tests/split/test_split_compact_training.py",
         "tests/split/test_split_memory_lifetime.py",
-        "tests/split/test_split_partition_analysis.py",
         "tests/split/test_split_probe_rng.py",
         "tests/split/test_split_unbatched.py"
       ],
@@ -14711,9 +14711,9 @@
         "tests/split/test_split_compact_runtime.py",
         "tests/split/test_split_compact_training.py",
         "tests/split/test_split_memory_lifetime.py",
-        "tests/split/test_split_partition_analysis.py",
         "tests/split/test_split_probe_rng.py",
-        "tests/split/test_split_tf_residual.py"
+        "tests/split/test_split_tf_residual.py",
+        "tests/split/test_split_unbatched.py"
       ],
       "torchlens/split/_tinygrad_state.py": [
         "tests/split/test_split_batch_probe.py",
@@ -14721,7 +14721,7 @@
         "tests/split/test_split_compact_runtime.py",
         "tests/split/test_split_compact_training.py",
         "tests/split/test_split_memory_lifetime.py",
-        "tests/split/test_split_partition_analysis.py",
+        "tests/split/test_split_probe_rng.py",
         "tests/split/test_split_state_snapshot.py",
         "tests/split/test_split_tinygrad_state.py"
       ],
@@ -14742,10 +14742,10 @@
         "tests/split/test_split_ownership.py"
       ],
       "torchlens/split/_torch_liveness.py": [
-        "tests/split/test_split_batch_probe.py",
         "tests/split/test_split_canonical_batch.py",
         "tests/split/test_split_factory_placement.py",
         "tests/split/test_split_input_aliases.py",
+        "tests/split/test_split_memory_lifetime.py",
         "tests/split/test_split_state_dedup.py",
         "tests/split/test_split_torch_liveness.py",
         "tests/split/test_split_torch_replay.py",
@@ -14753,10 +14753,10 @@
       ],
       "torchlens/split/_torch_rng_replay.py": [
         "tests/split/test_partition_effect_dependencies.py",
-        "tests/split/test_split_batch_probe.py",
         "tests/split/test_split_canonical_batch.py",
         "tests/split/test_split_factory_placement.py",
         "tests/split/test_split_input_aliases.py",
+        "tests/split/test_split_memory_lifetime.py",
         "tests/split/test_split_state_dedup.py",
         "tests/split/test_split_torch_replay.py",
         "tests/split/test_split_torch_state.py"
@@ -14808,9 +14808,9 @@
         "tests/split/test_split_batch_polymorphism.py"
       ],
       "torchlens/split/adapters/base.py": [
-        "tests/split/test_split_batch_probe.py",
         "tests/split/test_split_cache_security.py",
         "tests/split/test_split_canonical_batch.py",
+        "tests/split/test_split_compute_dag.py",
         "tests/split/test_split_empty_boundary.py",
         "tests/split/test_split_input_aliases.py",
         "tests/split/test_split_phase1_lifetime.py",
@@ -14847,9 +14847,9 @@
       "torchlens/split/adapters/torch.py": [
         "tests/split/test_split_batch_probe.py",
         "tests/split/test_split_canonical_batch.py",
-        "tests/split/test_split_compact_graph.py",
         "tests/split/test_split_factory_placement.py",
         "tests/split/test_split_input_aliases.py",
+        "tests/split/test_split_memory_lifetime.py",
         "tests/split/test_split_state_dedup.py",
         "tests/split/test_split_torch_replay.py",
         "tests/split/test_split_torch_state.py"
@@ -14876,12 +14876,12 @@
       ],
       "torchlens/split/batching.py": [
         "tests/split/test_split_batch_probe.py",
+        "tests/split/test_split_compact_training.py",
         "tests/split/test_split_compute_dag.py",
         "tests/split/test_split_dataclass_inputs.py",
         "tests/split/test_split_empty_boundary.py",
         "tests/split/test_split_input_aliases.py",
         "tests/split/test_split_memory_lifetime.py",
-        "tests/split/test_split_partition_analysis.py",
         "tests/split/test_split_tf_shape_literals.py"
       ],
       "torchlens/split/boundary.py": [
@@ -14926,12 +14926,12 @@
       ],
       "torchlens/split/errors.py": [
         "tests/split/test_partition_effect_dependencies.py",
+        "tests/split/test_split_api_surface.py",
         "tests/split/test_split_batch_probe.py",
         "tests/split/test_split_graph_partition.py",
         "tests/split/test_split_mlx_state_io.py",
         "tests/split/test_split_mlx_training.py",
         "tests/split/test_split_partition_mutations.py",
-        "tests/split/test_split_shape_program.py",
         "tests/split/test_split_state_migration.py"
       ],
       "torchlens/split/flops.py": [
@@ -14989,11 +14989,11 @@
       ],
       "torchlens/split/pipeline.py": [
         "tests/split/test_split_batch_probe.py",
+        "tests/split/test_split_callable_state.py",
         "tests/split/test_split_canonical_batch.py",
         "tests/split/test_split_compact_runtime.py",
         "tests/split/test_split_compact_training.py",
         "tests/split/test_split_memory_lifetime.py",
-        "tests/split/test_split_partition_analysis.py",
         "tests/split/test_split_probe_rng.py",
         "tests/split/test_split_unbatched.py"
       ],
@@ -15019,11 +15019,11 @@
       ],
       "torchlens/split/profiles.py": [
         "tests/split/test_graph_profile_flops_engine.py",
+        "tests/split/test_split_api_surface.py",
         "tests/split/test_split_compact_runtime.py",
         "tests/split/test_split_graph_profile.py",
         "tests/split/test_split_native_backends_replay.py",
         "tests/split/test_split_profile_runtime.py",
-        "tests/split/test_split_v2_contract.py",
         "tests/test_aten_profile.py",
         "tests/test_model_profile_b3a.py"
       ],
@@ -15038,12 +15038,12 @@
         "tests/split/test_split_profiling.py"
       ],
       "torchlens/split/program.py": [
-        "tests/split/test_split_batch_probe.py",
+        "tests/split/test_split_analysis_cache.py",
+        "tests/split/test_split_api_surface.py",
         "tests/split/test_split_capability_evidence.py",
-        "tests/split/test_split_compact_training.py",
         "tests/split/test_split_compute_dag.py",
-        "tests/split/test_split_memory_lifetime.py",
-        "tests/split/test_split_partition_analysis.py",
+        "tests/split/test_split_graph_partition.py",
+        "tests/split/test_split_partition_cross_device.py",
         "tests/split/test_split_program.py",
         "tests/split/test_split_shape_program.py"
       ],

@@ -164,10 +164,8 @@ def _markdown_table(rows: list[tuple[str, float, str, str]]) -> str:
         "",
         "Model: `TinyMLP` with dimensions 8 -> 16 -> 16 -> 8, batch size 32.",
         "",
-        "Budget reference: PLAN.md v5.2 section 13.12 is qualitative. It requires "
-        "inactive overhead to stay behind existing cheap gates, push to scale with "
-        "cone size, run to use pre-normalized hook dispatch, fork to stay shallow, "
-        "and Bundle supergraph construction to remain lazy.",
+        "These diagnostic timings compare inactive dispatch, push, run, shallow fork "
+        "and lazy Bundle construction on the same model and host.",
         "",
         "| Benchmark | Mean seconds | Ratio | Notes |",
         "|---|---:|---:|---|",
@@ -177,8 +175,7 @@ def _markdown_table(rows: list[tuple[str, float, str, str]]) -> str:
     lines.extend(
         [
             "",
-            "Budget misses: none automatically enforced; review ratios against the "
-            "qualitative v5.2 budget.",
+            "Timing ratios are diagnostic; this benchmark enforces no wall-clock budget.",
             "",
         ]
     )

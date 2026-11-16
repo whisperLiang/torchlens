@@ -10,6 +10,7 @@ import torch
 from dag_helpers import close_call_ids, smallest_transfer_partitions
 
 from torchlens.split import SplitFeatures, pipeline, prepare_graph
+from torchlens.split.adapters.torch import TorchSplitAdapter
 from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
 
 
@@ -200,7 +201,7 @@ def test_probe_releases_witness_capture_before_generated_replay(
     """The lean B=2 capture is disposed before replay while its evidence survives."""
 
     capture = pipeline.capture_model
-    build_segments = pipeline.execute_split_runtime
+    build_segments = TorchSplitAdapter.build_segments
     witnesses: list[weakref.ReferenceType[Any]] = []
     checked = False
 
@@ -223,7 +224,7 @@ def test_probe_releases_witness_capture_before_generated_replay(
         return build_segments(*args, **kwargs)
 
     monkeypatch.setattr(pipeline, "capture_model", observe_capture)
-    monkeypatch.setattr(pipeline, "execute_split_runtime", observe_segments)
+    monkeypatch.setattr(TorchSplitAdapter, "build_segments", observe_segments)
     with torch.no_grad():
         graph = prepare_graph(Chain(), torch.ones(4, 8), features=SplitFeatures(retain_trace=True))
         dag = graph.compute_dag()

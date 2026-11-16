@@ -694,7 +694,7 @@ class GraphPartition:
 
 @dataclass(frozen=True)
 class SplitRequest:
-    """Public v2 request for preparing a split runtime.
+    """Typed request for preparing a Split Runtime.
 
     Examples
     --------

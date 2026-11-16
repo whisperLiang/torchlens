@@ -511,16 +511,16 @@ numbers were measured), where halting at 25% depth drops below the raw-forward c
 # Full suite on the canonical bench host (quiet machine):
 python -m benchmarks.perf_suite --rerun --baseline-status canonical \
   --out-json benchmarks/perf_baselines/<host>-<device>.json \
-  --out-md benchmarks/perf_results_<date>.md
+  --out-md benchmarks/perf_results.md
 # Sanity self-compare:
 python -m benchmarks.perf_gate --baseline benchmarks/perf_baselines/<host>-<device>.json \
   --current benchmarks/perf_baselines/<host>-<device>.json   # expect "passed": true
 # Regenerate the docs table:
 python -m benchmarks.generate_perf_numbers benchmarks/perf_baselines/<host>-<device>.json \
-  --out docs/_perf_numbers_provisional.md
+  --out docs/_perf_numbers.md
 ```
 
-On the canonical host, drop the `-provisional` filename suffix; `--baseline-status canonical`
+On the canonical host, use `--baseline-status canonical`
 requires a full non-smoke, non-addendum run and emits generated speed headlines.
 
 The gate judges TorchLens-owned rows on process-CPU statistics (`cpu_median_ms`/`cpu_iqr_ms`);

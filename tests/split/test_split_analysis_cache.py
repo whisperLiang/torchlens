@@ -21,7 +21,7 @@ def test_cache_reuses_lowering_but_rechecks_state_and_isolates_reports() -> None
     partition = dag.to_partition(call.call_id for call in dag.nodes[:2])
     with (
         patch.object(
-            runtime_module, "lower_split_program", wraps=runtime_module.lower_split_program
+            runtime_module, "lower_replay_program", wraps=runtime_module.lower_replay_program
         ) as lower,
         patch.object(
             graph, "_validate_recut_state_for_plan", wraps=graph._validate_recut_state_for_plan

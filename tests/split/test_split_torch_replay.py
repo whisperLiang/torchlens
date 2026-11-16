@@ -18,10 +18,10 @@ from torchlens.split import (
     prepare_graph,
 )
 from torchlens.split.adapters import torch as torch_adapter
-from torchlens.split.adapters.torch import GeneratedSuffix, _is_template_dict
+from torchlens.split.adapters.torch import GeneratedSuffix
 from torchlens.split.boundary import ReplayBoundary
 from torchlens.split.errors import SplitUnsupportedError
-from torchlens.split.graph import SplitTraceGraph, SplitTraceNode
+from torchlens.split.graph import SplitTraceGraph, SplitTraceNode, _is_template_dict_component
 from torchlens.split.planner import SplitPlan
 from torchlens.split.shape import SymbolicShape
 
@@ -447,7 +447,7 @@ def test_multi_output_dict_reconstruction() -> None:
 def test_empty_tuple_template_is_not_dict_template() -> None:
     """Empty tuple args must round-trip as tuples, not dicts."""
 
-    assert not _is_template_dict(())
+    assert not _is_template_dict_component(())
 
 
 def test_targetless_suffix_compute_node_raises() -> None:

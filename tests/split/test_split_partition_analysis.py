@@ -13,7 +13,6 @@ from torchlens.split import (
     PartitionAnalysis,
     PlacementPlan,
     SplitFeatures,
-    context as runtime_module,
     pipeline as pipeline_module,
     prepare_graph,
 )
@@ -45,9 +44,6 @@ def test_analysis_never_builds_segments_or_recaptures() -> None:
     with (
         patch.object(graph.adapter, "build_segments", wraps=graph.adapter.build_segments) as build,
         patch.object(
-            runtime_module, "execute_split_runtime", wraps=runtime_module.execute_split_runtime
-        ) as execute,
-        patch.object(
             pipeline_module,
             "capture_canonical_model",
             side_effect=AssertionError("analysis must reuse the capture"),
@@ -56,9 +52,9 @@ def test_analysis_never_builds_segments_or_recaptures() -> None:
         dag = graph.compute_dag()
         selected = dag.to_partition(c.call_id for c in dag.nodes[:2])
         analysis = graph.analyze(selected)
-        assert build.call_count == execute.call_count == 0
+        assert build.call_count == 0
         graph.materialize(analysis)
-        assert build.call_count == execute.call_count == 1
+        assert build.call_count == 1
 
 
 @pytest.mark.parametrize("frozen", [False, True])

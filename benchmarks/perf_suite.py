@@ -32,8 +32,8 @@ from benchmarks.perf_gate import (  # noqa: E402
 from benchmarks.perf_models import available_devices  # noqa: E402
 from benchmarks.perf_runner import _stats  # noqa: E402
 
-RESULT_JSON = REPO_ROOT / "benchmarks" / "perf_results_2026-05-14.json"
-RESULT_MD = REPO_ROOT / "benchmarks" / "perf_results_2026-05-14.md"
+RESULT_JSON = REPO_ROOT / "benchmarks" / "perf_results.json"
+RESULT_MD = REPO_ROOT / "benchmarks" / "perf_results.md"
 CELL_DIR = REPO_ROOT / "benchmarks" / ".perf_cells"
 STARTUP_OPS = frozenset({"global_wrap_dummy", "first_capture_target"})
 STARTUP_TRIALS = 5

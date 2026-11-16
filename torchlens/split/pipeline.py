@@ -21,7 +21,6 @@ from ..backends.registry import (
     resolve_backend_spec,
 )
 from ..options import CaptureOptions
-from .adapters.base import SegmentBundle
 from .batch_probe import BatchProbeResult
 from .batching import (
     FALLBACK_TRACE_BATCH,
@@ -37,13 +36,6 @@ from .graph import SplitTraceGraph, project_symbolic_shapes, split_graph_from_tr
 from .ir import SplitGraphIR, SplitModelProfile, SplitRequest
 from .placement import PlacementPlan
 from .planner import SplitPlan, plan_partition
-from .program import (
-    ReplayProgram,
-    ReplaySegment,
-    SplitCapabilityReport,
-    build_capability_report,
-    lower_replay_program,
-)
 from .shape_program import ShapeProgram, compile_shape_program
 
 
@@ -312,7 +304,7 @@ def _execute_batch_probe(
         features=replace(request.features, training=False, live_param_sources=False),
     )
     probe_plan = plan_partition(graph, probe_request)
-    segments = execute_split_runtime(adapter, graph, probe_plan, probe_request)
+    segments = adapter.build_segments(graph, probe_plan, probe_request)
     scope = getattr(adapter, "batch_probe_scope", None)
     with scope(segments) if callable(scope) else nullcontext():
         boundary = segments.prefix(*inputs, input_kwargs=input_kwargs, detach_boundary=True)
@@ -495,13 +487,6 @@ def capture_model(
     shape/dtype, per-call RNG and the independent output observer are needed.
     It never changes the forward's grad mode or the public B=1 Trace.
 
-    Examples
-    --------
-    >>> request = tl.SplitRequest(tl.split.GraphPartition(frozenset()))
-    >>> capture = tl.split.capture_model(torch.nn.Linear(3, 2).eval(), (torch.ones(1, 3),), request)
-    >>> capture.provenance.backend
-    'torch'
-    >>> capture.cleanup()
     """
 
     backend_spec = resolve_backend_spec(spec.backend, model, inputs, input_kwargs)
@@ -682,24 +667,14 @@ def capture_canonical_model(
 ) -> tuple[Any, tuple[Any, ...], dict[str, Any], BatchSpec]:
     """Capture the model, normalizing only declared or inferred batch axes.
 
-    The canonical batch is ``B=1``; ``B=2`` is used only when a ``B=1``
-    capture genuinely fails.  A large example batch is never used just
-    because the caller supplied one. With no batch axes, inputs retain their
-    original shapes and no canonical rebatching is attempted.
+    The canonical batch is ``B=1``; ``B=2`` is used only if that capture fails.
+    With no batch axes, inputs keep their original shapes. The caller's larger
+    example batch never becomes the canonical batch.
 
     Returns
     -------
     tuple
         ``(capture, canonical_inputs, canonical_kwargs, batch_spec)``.
-
-    Examples
-    --------
-    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
-    >>> capture, inputs, kwargs, batch = tl.split.capture_canonical_model(
-    ...     graph.model, (torch.ones(4, 3),), graph.request, adapter=graph.adapter)
-    >>> inputs[0].shape, batch.canonical_batch_size
-    (torch.Size([1, 3]), 1)
-    >>> capture.cleanup()
     """
 
     batch_spec = resolve_batch_spec(
@@ -772,18 +747,7 @@ def normalize_to_split_ir(
 ) -> tuple[SplitTraceGraph, SplitGraphIR]:
     """Normalize a backend capture into the runtime graph and portable Split IR.
 
-    The retained B=1 graph is reused after one empirical B=2 replay check.
-    A failed or unavailable check keeps the graph runnable at its capture batch.
-
-    Examples
-    --------
-    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
-    >>> capture = tl.split.capture_model(graph.model, (torch.ones(1, 3),), graph.request)
-    >>> projected, ir = tl.split.normalize_to_split_ir(capture, graph.request,
-    ...     inputs=(torch.ones(1, 3),), adapter=graph.adapter, model=graph.model)
-    >>> projected.backend, ir.backend
-    ('torch', 'torch')
-    >>> capture.cleanup()
+    Retain the B=1 graph, enabling dynamic batches only if B=2 replay succeeds.
     """
 
     graph = capture if isinstance(capture, SplitTraceGraph) else split_graph_from_trace(capture)
@@ -854,97 +818,3 @@ def normalize_to_split_ir(
         plan=plan,
         profile_hash=None if model_profile is None else model_profile.profile_hash,
     )
-
-
-def analyze_split_capabilities(
-    adapter: Any,
-    graph: SplitTraceGraph,
-    plan: SplitPlan,
-    spec: SplitRequest,
-    *,
-    prefix_program: ReplayProgram,
-    suffix_program: ReplayProgram,
-    graph_ir: SplitGraphIR | None = None,
-    model_profile: SplitModelProfile | None = None,
-    features: dict[str, Any] | None = None,
-) -> SplitCapabilityReport:
-    """Analyze replay, dynamic-shape, training, and cache capabilities.
-
-    Examples
-    --------
-    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
-    >>> partition = graph.compute_dag().to_partition(())
-    >>> analysis = graph.analyze(partition)
-    >>> report = tl.split.analyze_split_capabilities(graph.adapter, graph.trace_graph,
-    ...     analysis.plan, analysis.request, prefix_program=analysis.prefix_program,
-    ...     suffix_program=analysis.suffix_program, graph_ir=analysis.graph_ir)
-    >>> report.preflight_ok
-    True
-    """
-
-    return build_capability_report(
-        adapter,
-        graph,
-        plan,
-        spec,
-        prefix_program=prefix_program,
-        suffix_program=suffix_program,
-        graph_ir=graph_ir,
-        model_profile=model_profile,
-        features=features,
-    )
-
-
-def lower_split_program(
-    graph: SplitTraceGraph,
-    plan: SplitPlan,
-    spec: SplitRequest,
-    *,
-    adapter: Any,
-    segment: ReplaySegment,
-) -> ReplayProgram:
-    """Lower one IR segment through the selected backend adapter.
-
-    Examples
-    --------
-    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
-    >>> partition = graph.compute_dag().to_partition(())
-    >>> analysis = graph.analyze(partition)
-    >>> program = tl.split.lower_split_program(graph.trace_graph, analysis.plan,
-    ...     analysis.request, adapter=graph.adapter, segment='suffix')
-    >>> program.backend, bool(program.ops)
-    ('torch', True)
-    """
-
-    return lower_replay_program(graph, plan, spec, segment=segment, adapter=adapter)
-
-
-def execute_split_runtime(
-    adapter: Any,
-    graph: SplitTraceGraph,
-    plan: SplitPlan,
-    spec: SplitRequest,
-) -> SegmentBundle:
-    """Build executable backend recipes from a lowered split plan.
-
-    Examples
-    --------
-    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
-    >>> partition = graph.compute_dag().to_partition(())
-    >>> analysis = graph.analyze(partition)
-    >>> segments = tl.split.execute_split_runtime(graph.adapter, graph.trace_graph, analysis.plan, analysis.request)
-    >>> callable(segments.prefix), callable(segments.suffix)
-    (True, True)
-    """
-
-    return adapter.build_segments(graph, plan, spec)
-
-
-__all__ = (
-    "analyze_split_capabilities",
-    "capture_canonical_model",
-    "capture_model",
-    "execute_split_runtime",
-    "lower_split_program",
-    "normalize_to_split_ir",
-)

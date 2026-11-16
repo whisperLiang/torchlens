@@ -17,10 +17,15 @@ from .batching import BatchSpec
 from .errors import SplitErrorContext, SplitUnsupportedError
 from .graph import ComputeDAG, SplitTraceGraph
 from .ir import GraphPartition, SplitGraphIR, SplitModelProfile, SplitRequest
-from .pipeline import analyze_split_capabilities, execute_split_runtime, lower_split_program
 from .placement import PlacementPlan
 from .planner import SplitPlan, plan_partition
-from .program import ReplayProgram, SplitCapabilityReport, ensure_capability_report_supported
+from .program import (
+    ReplayProgram,
+    SplitCapabilityReport,
+    build_capability_report,
+    ensure_capability_report_supported,
+    lower_replay_program,
+)
 
 if TYPE_CHECKING:
     from .graph_profile import GraphProfile, PartitionMetrics
@@ -303,21 +308,21 @@ class SplitGraph:
                 ),
             )
         )
-        prefix_program = lower_split_program(
+        prefix_program = lower_replay_program(
             self.trace_graph,
             plan,
             request,
             segment="prefix",
             adapter=self.adapter,
         )
-        suffix_program = lower_split_program(
+        suffix_program = lower_replay_program(
             self.trace_graph,
             plan,
             request,
             segment="suffix",
             adapter=self.adapter,
         )
-        capability_report = analyze_split_capabilities(
+        capability_report = build_capability_report(
             self.adapter,
             self.trace_graph,
             plan,
@@ -372,9 +377,7 @@ class SplitGraph:
 
         if analysis.source_graph is not self.trace_graph:
             raise ValueError("Partition analysis belongs to another captured graph.")
-        segments = execute_split_runtime(
-            self.adapter, self.trace_graph, analysis.plan, analysis.request
-        )
+        segments = self.adapter.build_segments(self.trace_graph, analysis.plan, analysis.request)
         self._inherit_segment_state(segments, recut=True, state_snapshots=state_snapshots)
         runtime = SplitRuntime(
             model=self.model,

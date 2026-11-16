@@ -76,7 +76,7 @@ def _capture_execution_state(op: Op) -> _CapturedOp:
 
 
 def project_op(op: Op, *, backend: str, traced_batch_size: int | None) -> SplitTraceNode:
-    """Normalize one upstream 3 Op, preserving native-call and state identities."""
+    """Normalize one captured Op, preserving native-call and state identities."""
 
     from .graph import SplitTraceNode
     from .shape import symbolic_shape_from_tensor_ref
@@ -177,8 +177,34 @@ def reorder_container_leaves(
     return [values[path] for path in expected]
 
 
-def paddle_call_templates(capture: Any) -> tuple[tuple[Any, ...], dict[str, Any]]:
-    """Bind only the exact native state operands attested by the Paddle capture.
+def _paddle_capture_parameter_refs(capture: Any, params_by_id: dict[int, Any]) -> tuple[Any, ...]:
+    """Return exactly the native parameters consumed by this captured Paddle call.
+
+    Parameters
+    ----------
+    capture
+        Session-only Paddle operation capture with live unlabeled tensor operands.
+    params_by_id
+        Native parameter records indexed by their live handle's identity.
+
+    Returns
+    -------
+    tuple[Any, ...]
+        Unique consumed parameter records in argument order.
+    """
+
+    consumed = {
+        id(value): params_by_id[id(value)]
+        for value in capture.param_inputs.values()
+        if id(value) in params_by_id
+    }
+    return tuple(consumed.values())
+
+
+def paddle_call_metadata(
+    capture: Any,
+) -> tuple[tuple[Any, ...], dict[str, Any], tuple[tuple[Any, ...], ...]]:
+    """Bind the Paddle call's attested state operands and native output paths.
 
     Parameters
     ----------
@@ -188,8 +214,10 @@ def paddle_call_templates(capture: Any) -> tuple[tuple[Any, ...], dict[str, Any]
     Returns
     -------
     tuple
-        Detached argument containers whose unlabeled parameter slots retain
-        their original live handles. Unattested slots stay unresolved.
+        Detached argument containers and the emitted native tensor-output paths.
+        Unlabeled parameter slots retain their attested live handles. Unattested
+        slots stay unresolved. Model-output occurrence paths are independent:
+        upstream output marking can rebind the producing Op's container path.
     """
 
     sources = {**capture.buffer_inputs, **capture.param_inputs}
@@ -210,4 +238,9 @@ def paddle_call_templates(capture: Any) -> tuple[tuple[Any, ...], dict[str, Any]
             return {key: bind(child, (*path, key)) for key, child in value.items()}
         return value
 
-    return bind(capture.args_template, ("args",)), bind(capture.kwargs_template, ("kwargs",))
+    aliases = {tuple(annotation["output_path"]) for annotation in capture.alias_annotations}
+    return (
+        bind(capture.args_template, ("args",)),
+        bind(capture.kwargs_template, ("kwargs",)),
+        tuple(tuple(path) for path in capture.output_leaf_paths if tuple(path) not in aliases),
+    )

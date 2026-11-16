@@ -1,4 +1,4 @@
-"""Split graph construction from current-main TorchLens traces."""
+"""Split graph construction from TorchLens traces."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from hashlib import sha256
 from typing import Any, Literal
 
 from torchlens.errors import ArgumentTypeError
-from torchlens.split.errors import SplitRequestError
+from torchlens.split.errors import SplitRequestError, SplitUnsupportedError
 
 from .._utils.tensor_utils import safe_copy
 from ..backends.registry import (
@@ -21,7 +21,12 @@ from ..backends.registry import (
     TORCH_BACKEND_NAME,
 )
 from ..intervention._types import CapturedArgTemplate, LiteralTensor, LiteralValue, ParentRef
-from ._capture_projection import capture_batch_size, paddle_call_templates, project_op
+from ._capture_projection import (
+    _paddle_capture_parameter_refs,
+    capture_batch_size,
+    paddle_call_metadata,
+    project_op,
+)
 from .ir import GraphPartition
 from .shape import SymbolicShape
 
@@ -398,7 +403,7 @@ def _attach_paddle_capture_templates(
     trace: Any,
     nodes: list[SplitTraceNode],
 ) -> list[SplitTraceNode]:
-    """Attach Paddle replay templates that live on backend capture records."""
+    """Attach native Paddle call metadata to every emitted value."""
 
     captures = {
         str(getattr(capture, "label_raw")): capture
@@ -415,48 +420,35 @@ def _attach_paddle_capture_templates(
         if handle is not None:
             params_by_id[id(handle)] = param
 
-    updated: list[SplitTraceNode] = []
+    projection = SplitTraceGraph(
+        backend=PADDLE_BACKEND_NAME,
+        nodes=tuple(nodes),
+        input_node_ids=(),
+        output_node_ids=(),
+        graph_shape_hash=None,
+        traced_batch_size=None,
+    )
+    calls = projection.replay_call_by_output_id
+    updated: dict[str, SplitTraceNode] = {}
     for node in nodes:
         capture = captures.get(str(getattr(node.op, "_label_raw", node.raw_label or "")))
         if capture is None:
-            updated.append(node)
             continue
-        args_template, kwargs_template = paddle_call_templates(capture)
-        updated.append(
-            replace(
-                node,
+        args_template, kwargs_template, output_paths = paddle_call_metadata(capture)
+        call = calls.get(node.canonical_id)
+        output_ids = (node.canonical_id,) if call is None else call.output_node_ids
+        param_refs = _paddle_capture_parameter_refs(capture, params_by_id)
+        for node_id, output_path in zip(output_ids, output_paths, strict=True):
+            updated[node_id] = replace(
+                projection.node_by_id[node_id],
                 op_type=capture.op_name,
                 target=getattr(capture, "func", node.target),
                 args_template=args_template,
                 kwargs_template=kwargs_template,
-                param_refs=_paddle_capture_parameter_refs(capture, params_by_id),
+                output_container_path=output_path,
+                param_refs=param_refs,
             )
-        )
-    return updated
-
-
-def _paddle_capture_parameter_refs(capture: Any, params_by_id: dict[int, Any]) -> tuple[Any, ...]:
-    """Return exactly the native parameters consumed by this captured Paddle call.
-
-    Parameters
-    ----------
-    capture
-        Session-only Paddle operation capture with live unlabeled tensor operands.
-    params_by_id
-        Native parameter records indexed by their live handle's identity.
-
-    Returns
-    -------
-    tuple[Any, ...]
-        Unique consumed parameter records in argument order.
-    """
-
-    consumed = {
-        id(value): params_by_id[id(value)]
-        for value in capture.param_inputs.values()
-        if id(value) in params_by_id
-    }
-    return tuple(consumed.values())
+    return [updated.get(node.canonical_id, node) for node in nodes]
 
 
 def _attach_jax_captures(trace: Any, nodes: list[SplitTraceNode]) -> list[SplitTraceNode]:
@@ -862,8 +854,6 @@ def _normalize_node_replay_refs(
         if refs:
             unresolved[node.canonical_id] = refs
     if unresolved:
-        from .errors import SplitUnsupportedError
-
         raise SplitUnsupportedError(
             f"Replay parent references do not resolve uniquely to canonical values: {unresolved!r}.",
             code=SplitUnsupportedError.code,
@@ -893,7 +883,7 @@ def _attach_live_buffer_handles(
 
 
 def split_graph_from_trace(trace: Any) -> SplitTraceGraph:
-    """Build a split graph from a current-main TorchLens ``Trace``.
+    """Build a split graph from a TorchLens ``Trace``.
 
     Node shapes are recorded concretely.  Batch symbols are projected later by
     :func:`project_symbolic_shapes` once a compiled shape program proves which

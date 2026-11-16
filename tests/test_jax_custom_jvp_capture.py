@@ -109,6 +109,20 @@ def test_user_custom_jvp_with_pure_primal_captures() -> None:
     assert "custom_jvp_call" in trace.provenance.jax_inlined_call_primitives
     hidden = x @ params["w"]
     assert jnp.array_equal(_final_payload(trace), hidden * hidden * hidden)
+    from torchlens.backends.jax.jaxpr import (
+        JaxEquationCapture,
+        derive_closed_jaxpr,
+        flatten_dynamic_args,
+        interpret_closed_jaxpr_with_inlining,
+    )
+
+    closed = derive_closed_jaxpr(cubed, (hidden,))
+    flat, _ = flatten_dynamic_args((hidden,))
+    result = interpret_closed_jaxpr_with_inlining(closed, flat)
+    equations = [capture for capture in result.captures if isinstance(capture, JaxEquationCapture)]
+    assert equations
+    assert "custom_jvp_call" in result.inlined_call_primitives
+    assert all(capture.inlined for capture in equations)
 
 
 def test_non_inlinable_nested_call_refuses_typed() -> None:

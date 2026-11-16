@@ -32,14 +32,6 @@ from .ir import (
     ValueIR,
 )
 from .ownership import ParameterOwnership, StateMigration, StateMigrationPlan
-from .pipeline import (
-    analyze_split_capabilities,
-    capture_canonical_model,
-    capture_model,
-    execute_split_runtime,
-    lower_split_program,
-    normalize_to_split_ir,
-)
 from .profiles import (
     checkpoint_cache_path,
     get_model_profile,
@@ -101,16 +93,10 @@ __all__ = (
     "SplitVerificationStatus",
     "StateIR",
     "ValueIR",
-    "analyze_split_capabilities",
-    "capture_canonical_model",
-    "capture_model",
     "checkpoint_cache_path",
     "get_model_profile",
     "iter_model_profiles",
     "model_cache_dir",
-    "execute_split_runtime",
-    "lower_split_program",
-    "normalize_to_split_ir",
     "prepare",
     "prepare_graph",
     "SplitGraph",
