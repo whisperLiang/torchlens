@@ -14,6 +14,36 @@ import torchlens as tl
 from torchlens.validation.diagnostics import get_validation_failure
 
 
+@pytest.mark.parametrize("n_boxes", [2, 48])
+@pytest.mark.parametrize("broken", [False, True])
+def test_nms_scores_change_the_winner_when_random_perturbation_keeps_order(
+    monkeypatch: pytest.MonkeyPatch, n_boxes: int, broken: bool
+) -> None:
+    """NMS score edges validate reliably and still reject a frozen score replay."""
+    torchvision = pytest.importorskip("torchvision")
+    from torchlens.validation import core
+
+    class Nms(nn.Module):
+        """Apply NMS to overlapping boxes and independently supplied scores."""
+
+        def forward(self, boxes: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
+            """Return the highest-scoring candidate after suppression."""
+            return torchvision.ops.nms(boxes, scores, 0.7)
+
+    boxes = torch.tensor([[0.0, 0.0, 224.0, 224.0]]).repeat(n_boxes, 1)
+    scores = torch.linspace(0.51, 0.49, n_boxes)
+    trace = tl.trace(Nms(), (boxes, scores), save_arg_values=True)
+    monkeypatch.setattr(core, "_perturb_layer_outs", lambda parent, output: parent + 1)
+    if broken:
+        _install_constant_replay(trace, "nms")
+
+    assert (
+        trace.validate_forward_pass([_first_output(trace)], validate_metadata=False) is not broken
+    )
+    if broken:
+        assert get_validation_failure(trace).check == "perturbation"
+
+
 @pytest.mark.parametrize("kind", ["shape_template", "singleton_softmax", "paired_mask"])
 @pytest.mark.parametrize("broken", [False, True])
 def test_shape_and_index_operands_preserve_value_tripwires(kind: str, broken: bool) -> None:

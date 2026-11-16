@@ -52,6 +52,7 @@ from ..utils.tensor_utils import (
     tensor_nanequal,
 )
 from ._edge_boundary import _check_edge_intervention_boundary
+from ._selection_perturbations import nms_score_order_values
 from .exemptions import (
     CUSTOM_EXEMPTION_CHECKS,
     SKIP_PERTURBATION_ENTIRELY,
@@ -4033,6 +4034,8 @@ def _perturb_selection_parent_values(
         Data-parent perturbation for selection ops, otherwise ``None``.
     """
 
+    if layer.func_name == "nms" and _parent_label_occupies_arg_position(layer, parent_label, 1):
+        return nms_score_order_values(parent_values, layer.out)
     if layer.func_name not in {"__getitem__", "unbind", "unique", "_unique2"}:
         return None
     if not _parent_label_occupies_arg_position(layer, parent_label, 0):
